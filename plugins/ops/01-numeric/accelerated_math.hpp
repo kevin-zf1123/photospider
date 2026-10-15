@@ -10,7 +10,7 @@
 
 #include "01-numeric/exp_simd.hpp"
 #include "01-numeric/trig_simd.hpp"
-#include "plugin/port_validation.hpp"
+#include "common/floating_environment.hpp"
 
 extern "C" void photospider_sleef_evaluate(unsigned kind, const double* a,
                                            const double* b, double* output,
@@ -153,7 +153,7 @@ inline FastInterval accelerated_math_enclosure(double result) {
 inline std::optional<std::uint64_t> accelerated_math(
     unsigned kind, std::uint64_t a, std::uint64_t b, bool narrow,
     bool normalized_environment = false) {
-  std::optional<input_internal::Float32Environment> environment;
+  std::optional<plugin_internal::FloatingEnvironment> environment;
   if (!normalized_environment)
     environment.emplace();
   if (!normalized_environment && !environment->active())

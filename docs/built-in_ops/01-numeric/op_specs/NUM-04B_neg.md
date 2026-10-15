@@ -27,7 +27,7 @@ registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
 Negate each observed numeric value. Inherit [NUM-04 common requirements](NUM-04_unary_contract.md)
-for input/output names, shape preservation, empty output facets, Whole and
+for input/output names, shape preservation, no attached domain description, Whole and
 typed-validation support, ownership, resources, NaN handling and validation.
 There are no static parameters. Input and output dtype are the same, restricted
 to Int64, Float32 or Float64. UInt8 is rejected with TypeMismatch and requires

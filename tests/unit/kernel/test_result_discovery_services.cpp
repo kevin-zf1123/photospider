@@ -272,7 +272,7 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
     tensor.descriptor.shape = {1, 1, 4};
     tensor.layout.spatial = true;
     tensor.layout.channel_axis = 2;
-    tensor.facets = {encode_semantic(rgba_semantics()).take_value()};
+    tensor.atomic_trailing_axes = 1;
   }
   if (mode == 25)
     input_schema.tensors[0].descriptor.shape = {1, UINT64_C(1) << 40};

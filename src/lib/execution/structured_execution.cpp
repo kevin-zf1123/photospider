@@ -20,11 +20,8 @@
 #include <variant>
 #include <vector>
 
-#include "core/checked_math.hpp"
-#include "core/numeric_diagnostics.hpp"
 #include "core/resource_observation.hpp"
 #include "core/stored_failure.hpp"
-#include "data/content_digest.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
 #include "data/whole_input_view.hpp"
@@ -45,11 +42,14 @@
 #include "execution/structured_need.hpp"
 #include "execution/structured_result_cache.hpp"
 #include "execution/tile_records.hpp"
+#include "photospider/core/checked_math.hpp"
+#include "photospider/core/content_digest.hpp"
 #include "plugin/dependency_identity.hpp"
 #include "plugin/failure_latch.hpp"
 #include "plugin/operation_identity.hpp"
 #include "plugin/port_validation.hpp"
 #include "plugin/result_need_validation.hpp"
+#include "plugin/validation_dispatch.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
 #include "execution/execution_test_hooks.hpp"
@@ -193,16 +193,6 @@ class StructuredExecution final {
       if (!admitted.ok())
         return Result<ExecutionResult>(admitted.status());
       bindings_resources_ = admitted.take_value();
-      for (const auto& binding : bindings_) {
-        const auto* supplied = &binding.result.resources();
-        auto reowned = supplied->reference(resources_);
-        if (!reowned.ok())
-          return Result<ExecutionResult>(reowned.status());
-        auto joined = bindings_resources_.unite(reowned.value());
-        if (!joined.ok())
-          return Result<ExecutionResult>(joined.status());
-        bindings_resources_ = joined.take_value();
-      }
       result = run_body(requested);
     } catch (const std::bad_alloc&) {
       result =
@@ -253,9 +243,9 @@ class StructuredExecution final {
     const auto key = identity.finish();
     ResultGrowthLimits empty_limits;
     empty_limits.maximum_rows = UINT64_MAX;
-    auto started = ResultBuilder::start(
-        resources_, *step.output_result_schema, key, empty_limits, {},
-        plan_.tile_extent(), bindings_resources_);
+    auto started =
+        ResultBuilder::start(resources_, *step.output_result_schema, key,
+                             empty_limits, {}, plan_.tile_extent());
     if (!started.ok())
       return Answer(started.status());
     auto builder = started.take_value();
@@ -671,9 +661,21 @@ class StructuredExecution final {
         diagnostics_.operation_timings.end(), [&](const auto& item) {
           return item.output == output && item.backend == actor.query.backend;
         });
-    if (found == diagnostics_.operation_timings.end())
+    if (found == diagnostics_.operation_timings.end()) {
       diagnostics_.operation_timings.push_back(
           {output, actor.query.backend, 0, ErrorCode::Ok, 0, 0});
+      if (actor.query.prepared &&
+          !actor.query.prepared->diagnostic_definitions().empty()) {
+        auto& timing = diagnostics_.operation_timings.back();
+        timing.reports.emplace(resources_);
+        auto status = timing.reports->initialize(
+            actor.query.prepared->diagnostic_definitions());
+        if (!status.ok()) {
+          diagnostics_.operation_timings.pop_back();
+          return status;
+        }
+      }
+    }
     return Status::success();
   }
   Status record_poll_diagnostics(const Actor& actor, const PollPhase& completed,
@@ -698,10 +700,13 @@ class StructuredExecution final {
                                 timing->native_dispatch_count))
       return Status{ErrorCode::ResourceExhausted,
                     "Result poll diagnostic counter overflow"};
-    auto merged =
-        merge_numeric_diagnostics(&timing->numeric, completed.numeric);
-    if (!merged.ok())
-      return merged;
+    if (completed.reports) {
+      if (!timing->reports)
+        return protocol_failure("missing admitted diagnostic accumulator");
+      auto reported = timing->reports->merge(*completed.reports);
+      if (!reported.ok())
+        return reported;
+    }
     timing->duration_us += elapsed;
     ++timing->invocation_count;
     timing->native_dispatch_count += completed.native_dispatches;
@@ -1721,11 +1726,17 @@ class StructuredExecution final {
           }
           return admission.ok();
         });
-    hash.text("photospider.result-shared-block-contract.v1");
+    hash.text("photospider.result-shared-block-contract.v2");
     hash.integer(static_cast<std::uint32_t>(plan_.execution_mode()));
     hash.integer(static_cast<std::uint32_t>(phase.query.backend));
     hash.text(plan_.steps()[index].operation);
     contract_internal::append_traits(&hash, phase.query.prepared->traits());
+    hash.integer(phase.query.prepared->resource_ids().size());
+    for (const auto& id : phase.query.prepared->resource_ids()) {
+      hash.integer(id.byte_length);
+      for (auto byte : id.sha256)
+        hash.integer(byte);
+    }
     hash.integer(phase.query.parameters.size());
     for (const auto& parameter : phase.query.parameters) {
       hash.text(parameter.first);
@@ -1770,8 +1781,7 @@ class StructuredExecution final {
     // content hashing never loads them or starts production inside a callback.
     if (!(blocks_ && checkpoint_shareable_[index] && !actor.fallback.taint &&
           plan_.steps()[index].traits.cacheable && cache_state_.remaining() &&
-          actor.results.empty() && actor.descriptors.empty() &&
-          incoming.resources().size() == 0))
+          actor.results.empty() && actor.descriptors.empty()))
       return Status::success();
     ResourceAllocationScope optional_scope(resources_);
     try {
@@ -1808,14 +1818,13 @@ class StructuredExecution final {
                    samples.boxes().size() * (1 + 2 * samples.shape().size()));
       };
       const auto schema_cost = [&](const SchemaTemplate& schema) {
-        status = checkpoint_cache_work(
-            1 + schema.fields.size() + schema.tensors.size() +
-            schema.domain.size() + schema.metadata.size());
+        status =
+            checkpoint_cache_work(1 + schema.fields.size() +
+                                  schema.tensors.size() + schema.domain.size());
         if (!status.ok())
           return false;
         for (const auto& tensor : schema.tensors) {
-          status = checkpoint_cache_work(tensor.layout.groups.size() +
-                                         tensor.facets.size());
+          status = checkpoint_cache_work(tensor.layout.groups.size());
           if (!status.ok())
             return false;
         }
@@ -1828,7 +1837,6 @@ class StructuredExecution final {
                       set_cost(incoming_facts.value().tensor_coverage(0));
       for (const auto& tensor : actor.tensors) {
         admitted = admitted && tensor.second.payload_authorized_ &&
-                   tensor.second.result_.resources().size() == 0 &&
                    schema_cost(tensor.second.result_.schema()) &&
                    set_cost(tensor.second.coverage());
       }
@@ -1906,7 +1914,7 @@ class StructuredExecution final {
                             const ResultRef& result,
                             const ResultProgramPhase& phase,
                             bool native_computed) {
-    if (probe.key.empty() || !native_computed || result.resources().size())
+    if (probe.key.empty() || !native_computed)
       return Status::success();
     ResourceAllocationScope optional_scope(resources_);
     try {
@@ -2123,7 +2131,6 @@ class StructuredExecution final {
     identity.text(templates_[index]);
     identity.text(snapshot_);
     identity.integer(request.whole);
-    ResourceBindings bindings;
     ResourceVector<std::uint64_t> association{
         ResourceAllocator<std::uint64_t>(resources_)};
     for (std::size_t i = 0; i < units.size(); ++i) {
@@ -2134,10 +2141,6 @@ class StructuredExecution final {
       if (!object.valid() ||
           !object.schema().same_schema(*step.output_result_schema))
         return Answer(protocol_failure("incompatible tile assembly schema"));
-      auto joined = bindings.unite(object.resources());
-      if (!joined.ok())
-        return Answer(joined.status());
-      bindings = joined.take_value();
       auto ids = object.association();
       association.insert(association.end(), ids.begin(), ids.end());
       identity.integer(unit_index(step, request, i));
@@ -2150,7 +2153,7 @@ class StructuredExecution final {
     auto made = ResultBuilder::start(
         resources_, *step.output_result_schema, identity.finish(), {},
         std::vector<std::uint64_t>(association.begin(), association.end()),
-        plan_.tile_extent(), bindings);
+        plan_.tile_extent());
     if (!made.ok())
       return Answer(made.status());
     auto builder = made.take_value();
@@ -2572,7 +2575,16 @@ class StructuredExecution final {
         if (static_facts)
           grants->static_descriptors.emplace_back(request.input, *static_facts);
       }
-      if ((!schema.fields.empty() || schema.tensors.empty()) && !static_facts) {
+      const bool complete_contract =
+          actor.query.prepared &&
+          actor.query.prepared->requires_complete_validation(false,
+                                                             request.input);
+      if (complete_contract && !normalized.descriptor_only && !normalized.whole)
+        return Answer(protocol_failure(
+            "complete validator requires Whole input authorization"));
+      if ((!schema.fields.empty() || schema.tensors.empty() ||
+           (complete_contract && normalized.whole)) &&
+          !static_facts) {
         grants->objects.push_back({request.input, normalized.descriptor_only});
       }
       for (std::uint32_t slot = 0; slot < schema.tensors.size(); ++slot) {
@@ -2691,6 +2703,18 @@ class StructuredExecution final {
       return fail(facts.status());
     const auto& constraint = step.traits.input_schema[input.input];
     const bool descriptor_only = input.descriptor_only;
+    if (!descriptor_only && actor.query.prepared) {
+      auto checked = plugin_internal::validate_result_contract(
+          *actor.query.prepared, false, input.input, ready.value(),
+          facts.value(), nullptr, resources_, active_token(),
+          [&](auto n) { return operation_work(n); },
+          options_.maximum_result_window_bytes,
+          std::holds_alternative<PlanWorkflowInput>(step.inputs[input.input])
+              ? ErrorCode::InvalidArgument
+              : ErrorCode::OperationFailed);
+      if (!checked.ok())
+        return fail(input_failure(step.inputs[input.input], checked));
+    }
     if (!descriptor_only && constraint.scalar_bounds) {
       auto checked = input_internal::validate_port_tensor(
           constraint, ready.value(), facts.value(),
@@ -2765,6 +2789,19 @@ class StructuredExecution final {
     auto selected = closed.intersect(granted, set_limits());
     if (!selected.ok())
       return selected.status();
+    if (!input.descriptor_only && actor.query.prepared &&
+        actor.results.find(input.input) == actor.results.end()) {
+      auto checked = plugin_internal::validate_tensor_contract(
+          *actor.query.prepared, input.input,
+          *actor.query.inputs[input.input].result_schema, input.slot,
+          capability, selected.value(), resources_, active_token(),
+          [&](auto n) { return operation_work(n); },
+          std::holds_alternative<PlanWorkflowInput>(step.inputs[input.input])
+              ? ErrorCode::InvalidArgument
+              : ErrorCode::OperationFailed);
+      if (!checked.ok())
+        return input_failure(step.inputs[input.input], checked);
+    }
     if (!input.descriptor_only && constraint.scalar_bounds &&
         !selected.value().empty()) {
       auto slot = input_internal::resolve_tensor_member(
@@ -2781,17 +2818,6 @@ class StructuredExecution final {
                                    ? ErrorCode::InvalidArgument
                                    : ErrorCode::OperationFailed,
                                active_token(), [&] { return active_stop(); });
-      if (!checked.ok())
-        return input_failure(step.inputs[input.input], checked);
-    }
-    if (!input.descriptor_only) {
-      auto checked = input_internal::validate_tensor_samples(
-          result, descriptor, input.slot, selected.value(), resources_,
-          std::holds_alternative<PlanWorkflowInput>(step.inputs[input.input])
-              ? ErrorCode::InvalidArgument
-              : ErrorCode::OperationFailed,
-          active_token(), [&] { return active_stop(); },
-          [&](uint64_t n) { return operation_work(n); });
       if (!checked.ok())
         return input_failure(step.inputs[input.input], checked);
     }
@@ -3074,7 +3100,6 @@ class StructuredExecution final {
     const PlanStep& step;
     PollPhase& stage;
     ErrorCode& sticky;
-    NumericDiagnostics& numeric;
     Result<ResultProgramPoll>& polled;
     const StructuredServices* services;
     bool optional;
@@ -3094,7 +3119,6 @@ class StructuredExecution final {
           step(execution.plan_.steps()[index]),
           stage(std::get<PollPhase>(actor.phase)),
           sticky(stage.sticky),
-          numeric(stage.numeric),
           polled(stage.result),
           services(supplied),
           optional(replay),
@@ -3182,10 +3206,12 @@ class StructuredExecution final {
         association.push_back(input.first.second);
       return Status::success();
     }
-    Status report_numeric(const NumericDiagnostics& report) {
+    Status report_diagnostic(std::uint32_t index, ByteView report) {
       auto status = work(1);
       if (status.ok())
-        status = merge_numeric_diagnostics(&numeric, report);
+        status = stage.reports ? stage.reports->report(index, report)
+                               : Status{ErrorCode::InvalidArgument,
+                                        "undeclared diagnostic"};
       if (!status.ok())
         observe_failure(status);
       return status;
@@ -3486,8 +3512,8 @@ class StructuredExecution final {
     auto facts_work = invocation.initialize_association();
     if (!facts_work.ok())
       return facts_work;
-    phase.report_numeric = [&](const NumericDiagnostics& report) {
-      return invocation.report_numeric(report);
+    phase.report_diagnostic = [&](std::uint32_t type, ByteView report) {
+      return invocation.report_diagnostic(type, report);
     };
     phase.failure_latch = actor.service_failure;
     phase.association = &invocation.association;
@@ -3659,6 +3685,15 @@ class StructuredExecution final {
           actor.failure->load(), "structured stage limit");
       if (!admitted.ok())
         return retire(actor, admitted);
+      if (actor.query.prepared &&
+          !actor.query.prepared->diagnostic_definitions().empty()) {
+        auto& reports = std::get<PollPhase>(actor.phase).reports;
+        reports.emplace(resources_);
+        auto status =
+            reports->initialize(actor.query.prepared->diagnostic_definitions());
+        if (!status.ok())
+          return retire(actor, status);
+      }
       status = submit_actor_poll(index, current);
     }
     if (status.ok() && actor.queued)
@@ -3765,7 +3800,7 @@ class StructuredExecution final {
   std::shared_ptr<OperationRegistry> operations_;
   ResourceBudget resources_;
   core_internal::PayloadCapture payload_capture_;
-  ResourceBindings bindings_resources_;
+  ResourceSet bindings_resources_;
   ExecutionOptions options_;
   const std::uint32_t maximum_parallelism_;
   ResultSubscription subscription_;

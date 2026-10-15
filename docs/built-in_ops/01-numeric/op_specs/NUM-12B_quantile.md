@@ -40,7 +40,7 @@ bounds preflight.
 The `values` output is a `Result` with schema `photospider.tensor` and tensor key
 `samples`. It has the selected output dtype and keeps the source rank and shape,
 with the selected axis extent set to 1. Batch axes become ordinary output axes;
-output batch topology and facets are empty. The full source rank is 1..8 and its
+output batch topology are empty. The full source rank is 1..8 and its
 logical element count is at most 2^40.
 
 ## Rank and interpolation
@@ -129,5 +129,5 @@ not an Atom-scoped sample result.
 ## Current behavior checks
 
  The checks do not claim x86 arithmetic execution, performance
-or a complete q semantic-facet/error/resource matrix. The specification
+or a complete q structural-contract/error/resource matrix. The specification
 remains Proposed.

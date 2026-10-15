@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Reader mirror: [Chinese](zh/0021-independent-node-results.zh.md)
+- Current boundary: per-output facet sets of the original decision are superseded; each output carries a resolved structural Result schema. See [Data Model](../kernel-architecture/Data-Model.md), [Structured Results and tensor slots](../kernel-architecture/Global-Results.md), and [Tensor descriptions](../kernel-architecture/Tensor-Semantic-Metadata.md).
 
 ## 1. Core summary (TL;DR)
 
@@ -9,7 +10,7 @@ One operation node can produce several named results, each with its own metadata
 
 ## 2. Mental model and intuition
 
-The compiler resolves all output descriptors and facets from static input metadata and parameters. Execution then follows only demanded result ports and their relevant input edges. Each demanded result owns its tasks, reads, dependency records, cache identity and outcome.
+The compiler resolves every output's Result schema from static input metadata and parameters. Execution then follows only demanded result ports and their relevant input edges. Each demanded result owns its tasks, reads, dependency records, cache identity and outcome.
 
 ```text
                        one operation node
@@ -32,8 +33,7 @@ The compiler resolves all output descriptors and facets from static input metada
 ```cpp
 struct SemanticOutput {
   std::string key;
-  ValueDescriptor descriptor;
-  std::vector<ValueFacet> facets;
+  std::shared_ptr<const SchemaTemplate> result_schema;
 };
 
 struct WorkflowNodeOutput {
@@ -72,7 +72,7 @@ class ExecutionContext {
 
 The class excerpts omit unrelated members.
 
-These C++ declarations show the routing fields; surrounding types and validation are omitted. `OperationTraits` contains a declaration-ordered output vector.  Every output has a unique key and a separately inferred descriptor and facet set. The C operation descriptor has the same ordered model, with at most 64 output records. Multiple outputs require deterministic, side-effect-free behavior. Singleton operations explicitly declare `value`.
+These C++ declarations show the routing fields; surrounding types and validation are omitted. `OperationTraits` contains a declaration-ordered output vector.  Every output has a unique key and a separately inferred Result schema. The C operation descriptor has the same ordered model, with at most 64 output records. Multiple outputs require deterministic, side-effect-free behavior.
 
 Workflow edges select an exact producer port by name. A caller-visible `WorkflowOutput` names a selected node and port, then assigns a unique result label. The compiler resolves output names to declaration-order indices and records each result as `ValueRef`. Static inference receives complete input metadata; an output's `input_indices` projection controls its executable input ancestry and callback view. Projected C callback inputs retain their original schema indices.
 
@@ -89,6 +89,6 @@ A failure of one result's task fails that result and its actual consumers. The p
 
 ## 5. Consequences
 
-Output metadata and result identity include the selected output contract, its resolved descriptor and facets, static parameters and its actual input dependencies. Changing an output role, shape or relevant-input projection changes its identity. Unrelated node ids and graph-wide identity do not substitute for the selected output's content dependencies.
+Output metadata and result identity include the selected output contract, its resolved Result schema, static parameters and its actual input dependencies. Changing an output role, shape or relevant-input projection changes its identity. Unrelated node ids and graph-wide identity do not substitute for the selected output's content dependencies.
 
 Each published result owns its bytes or references its backing owner. A cache hit receives the result's validated tile records. Cancellation stops the Run's own work. Retained views keep their storage owners alive and consume budget until the final reference retires.

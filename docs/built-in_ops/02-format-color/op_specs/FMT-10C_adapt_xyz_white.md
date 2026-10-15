@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_2
+implementation_status: implemented_cpu_result_abi_4
 clarification_status: complete
 registered_operation_keys:
   - color.adapt_xyz_white_strict
@@ -18,7 +18,7 @@ registered_operation_keys:
 # FMT-10C: adapt an XYZ reference white
 
 Inherit the complete [FMT-10 family](FMT-10_rgb_basis_contract.md) and
-[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 3
+[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 4
 operations under the strict, accelerated Apple Silicon and accelerated x86-64
 CPU profiles.
 
@@ -26,21 +26,20 @@ CPU profiles.
 
 One input Result with one Float32 or Float64 tensor and no fields produces one
 `values` output Result containing one tensor. The output preserves Result schema
-identity, tensor key, logical shape and batch axes; it updates applicable
-semantic facets and sets `atomic_trailing_axes` to zero. Complete sample rank,
+identity, tensor key, logical shape and batch axes; it carries no description and sets `atomic_trailing_axes` to zero. Complete sample rank,
 including batch and cell axes, is at most 8; sample count is at most 2^40.
 Semantic input selects
-one complete XYZ group and resolves source white from effective metadata;
+one complete XYZ group and resolves source white from explicit input_description;
 raw selects an ordered triple and explicit source white. Target white and method
 are always explicit. The method is xyz_scaling, bradford, cat02 or cat16 with
 full adaptation. It has no degree, surround, peak-luminance or user matrix input.
 
 Normalize source and target whites to Y=1. Construct the exact matrix
 K=inverse(H)*diag((H*Wt)/(H*Ws))*H. Require every response of both whites strictly
-positive in all modes before selecting identity or evaluating samples. Semantic
-input/output preserves reference and units; it changes the selected XYZ group's
-white only after the numerical transform. This does not ensure unchanged Y for
-arbitrary colored samples. Raw changes numbers without claiming adapted metadata.
+positive in all modes before selecting identity or evaluating samples. The numerical transform
+preserves the reference/unit scale and adapts to the target white. It does not
+ensure unchanged Y for arbitrary colored samples. Callers provide the target
+configuration downstream; no description is attached in either path.
 
 For nonidentity K, evaluate each requested row as one exact dot plus +0 before
 rounding, with all three source coordinates read. Do not evaluate and round an

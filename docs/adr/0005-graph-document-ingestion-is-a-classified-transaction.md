@@ -19,7 +19,7 @@ The context serializes snapshot capture and replacement. Compiler stages check t
 ## 3. Formal Contracts & APIs
 
 ```cpp
-struct WorkflowDocument { std::uint32_t schema_version = 3; /* inputs, nodes, outputs */ };
+struct WorkflowDocument { std::uint32_t schema_version = 6; /* inputs, nodes, outputs */ };
 class GraphContext {
  public:
   explicit GraphContext(WorkflowDocument);
@@ -28,7 +28,7 @@ class GraphContext {
 };
 class Compiler {
  public:
-  Result<SemanticGraphIR> analyze(const GraphSnapshot&, ResourceBindings = {}) const;
+  Result<SemanticGraphIR> analyze(const GraphSnapshot&, ResourceSet = {}) const;
   Result<OptimizedGraphIR> optimize(const SemanticGraphIR&) const;
   Result<ExecutionPlan> plan(const OptimizedGraphIR&, const PlanningOptions& = {}) const;
 };
@@ -36,7 +36,7 @@ class Compiler {
 
 The context copies caller data. `snapshot()` returns a coherent document/revision pair. `replace()` allocates the new immutable document before taking the mutex, then publishes the document and next revision together under the lock. Allocation failure leaves source and revision unchanged; revision overflow throws before publication. Context destruction sets the shared revision token to zero, invalidating outstanding snapshots.
 
-Analysis validates bounded document and text input, unique IDs, references, ports, operation and required typed-parameter contracts, acyclic topology, and inferred output type/shape/Region metadata. It checks snapshot currentness before publishing a complete `SemanticGraphIR`. Optimization and planning likewise return complete stages or typed failures; allocation failure may propagate as `std::bad_alloc`. See [Graph lifecycle](../kernel-architecture/Graph-Lifecycle.md) and [Compiler and execution](../kernel-architecture/Compiler-and-Execution.md) for current validation details.
+Analysis validates bounded document and text input, unique IDs, references, ports, operation and required typed-parameter contracts, acyclic topology, and inferred output Result schemas. Operation preparation names the immutable resources it needs by `ResourceIdentity`; analysis selects them from the supplied `ResourceSet`, fails when a requested identity is missing, and retains the selected owners in the compiled state. It checks snapshot currentness before publishing a complete `SemanticGraphIR`. Optimization and planning likewise return complete stages or typed failures; allocation failure may propagate as `std::bad_alloc`. See [Graph lifecycle](../kernel-architecture/Graph-Lifecycle.md) and [Compiler and execution](../kernel-architecture/Compiler-and-Execution.md) for current validation details.
 
 ## 4. Non-Goals & Explicit Boundaries
 - `WorkflowDocument` is compiler input. Parsing, filesystem access, storage, and daemon error mapping belong to consumers.

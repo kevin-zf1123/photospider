@@ -5,7 +5,6 @@
 #include <utility>
 
 #include "common/result_support.hpp"
-#include "photospider/data/semantic.hpp"
 
 namespace ps::plugin_internal::image_ops {
 inline SchemaTemplate image_schema() {
@@ -16,7 +15,7 @@ inline SchemaTemplate image_schema() {
   image.layout.spatial = true;
   image.key = "pixels";
   image.descriptor = {ElementType::Float32, {1, 1, 4}};
-  image.facets = {numeric_ops::math_take(encode_semantic(rgba_semantics()))};
+  image.atomic_trailing_axes = 1;
   schema.tensors.push_back(std::move(image));
   return schema;
 }
@@ -40,15 +39,6 @@ inline Status check_image(const OperationMetadata& metadata) {
     return {
         ErrorCode::TypeMismatch,
         "image operation requires frame/layer batches and Float32 HWC RGBA"};
-  }
-  const auto expected =
-      numeric_ops::math_take(encode_semantic(rgba_semantics()));
-  if (image.facets.size() != 1 || image.facets[0].key != expected.key ||
-      image.facets[0].version != expected.version ||
-      image.facets[0].payload != expected.payload) {
-    return {ErrorCode::TypeMismatch,
-            "image operation requires canonical linear premultiplied RGBA "
-            "semantics"};
   }
   return Status::success();
 }

@@ -10,8 +10,16 @@
 | `ExecutionPlan` | Dependency-ordered local operations, placement choices, and propagated demands. |
 | `ExecutionContext` | Owner of bounded workers, frozen operation definitions, caches, and resource accounting. |
 | `ExecutionRun` | Private state for one synchronous execution call. |
-| `ExecutionBindings` | Exact-name per-run input owners: `Value`, `RegionalSource`, `InputSnapshot`, or `PlanarImage`. |
-| `Value` | Immutable logical descriptor and Region, affine byte layout, facets, and shared storage owner. |
+| `ExecutionBindings` | Exact-name per-run input owners, each an owning `ResultRef` checked against its declaration schema. |
+| `ResultRef` | Owner of one Result's structural schema, descriptor facts, tensor/field backing, relations, and association. It carries no domain description. |
+| `Value` | Immutable logical descriptor (element type and shape) and Region, affine byte layout, and shared storage owner. |
+| operation metadata | `OperationMetadata`: the complete Result schema at an operation boundary. Specialization infers output structure from input structure and static parameters. |
+| `metadata_owner` | Resource lease that pays for a schema's managed nested containers; budget ownership, not interpretation. |
+| `ImmutableResource` / `ResourceSet` | Content-addressed immutable bytes (length and SHA-256) and an immutable set of them. Operations select resources by identity at preparation; plans retain them. |
+| validator | Registered `ValidationDefinition` bound explicitly to a port by key, version, and implementation. It checks host-authorized samples or fields. |
+| diagnostic report | Fixed-size opaque record type registered as `DiagnosticDefinition` and merged by `DiagnosticAccumulator`. |
+| `DomainErrorCode` | Opaque 64-bit failure code that the kernel stores in `FailureDetail::domain_code` without interpretation. |
+| operations SDK | `Photospider::ops_sdk`, headers under `include/photospider/ops/`: color descriptions, domain codecs and arithmetic, description editing, LUT bake contract, quality and numeric reports, Layer types. Not part of the kernel. |
 | `Region` | Logical subset in descriptor-axis coordinates; it does not describe bytes. |
 | `PlanarImage` | Structural image storage with explicit axes, component groups, and controlled sample access. |
 | operation traits | Frozen metadata that declares input/output contracts, resource bounds, and backend capabilities. |
@@ -20,6 +28,6 @@
 | cancellation | Cooperative request that prevents successful late result publication. |
 | CPU fallback | A new CPU attempt after an optional native callback reports backend unavailability before publishing output, when the operation traits permit it. |
 | canonical image | Target image representation in a Result tensor: straight color, optional alpha as a plane of the same tensor, planar storage. Defined by the FMT common contract and [ADR 0022](../adr/0022-freeze-operation-c-abi-v3.md) D9; some built-in RGBA image operations still use premultiplied Float32 HWC. |
-| boundary payload | Explicitly described premultiplied numeric tensor produced or consumed by FMT-04 adapters for export or external interfaces; ordinary image consumers reject it. |
+| boundary payload | Premultiplied numeric tensor produced or consumed by FMT-04 adapters for export or external interfaces. The association is stated by the adapter's explicit parameters; the tensor itself carries no label, so a consumer relies on its own explicit parameters or bound validator. |
 
 `SessionId`, `JobId`, daemon IPC, and process lifecycle belong to `photospider-daemon`; its Jobs are ephemeral. Persistent results and recovery are outside the current product boundary. Kernel results remain in-memory values whose backing lifetime follows their owners.

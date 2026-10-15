@@ -88,7 +88,7 @@ struct Computation {
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
             : std::vector<std::uint64_t>{},
-        phase.query.tile_extent, phase.query.resources));
+        phase.query.tile_extent));
     check(builder.publish_tensor(
         0, Region::whole({1}),
         ByteView(reinterpret_cast<const std::uint8_t*>(&value),

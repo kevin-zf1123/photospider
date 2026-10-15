@@ -27,7 +27,7 @@ registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
 Compute a^b for same-shape, same-dtype Float32/Float64 inputs `a` and `b`.
-Output `values` preserves shape/dtype and has empty facets. No static numeric
+Output `values` preserves shape/dtype and has no attached domain description. No static numeric
 parameters, integer output mode or implicit cast/broadcast is provided. Inherit
 [binary execution requirements](NUM-05_binary_contract.md).
 

@@ -40,7 +40,7 @@ struct ExactElementary final {
   Result<std::uint64_t> evaluate(
       ElementaryKind kind, ElementType dtype, std::uint64_t a, std::uint64_t b,
       const std::function<Status(std::uint64_t)>& consume,
-      const input_internal::Float32Environment* borrowed_environment =
+      const plugin_internal::FloatingEnvironment* borrowed_environment =
           nullptr) {
     using Answer = Result<std::uint64_t>;
     auto charged = consume(1024);
@@ -198,7 +198,7 @@ struct ExactElementary final {
     // A borrowed guard must live on this thread throughout the call; callers
     // must not alter fenv until its destruction restores the outer flags.
     // Standalone callers retain a local guard and restore their own flags.
-    std::optional<input_internal::Float32Environment> environment;
+    std::optional<plugin_internal::FloatingEnvironment> environment;
     if (!borrowed_environment)
       environment.emplace();
     if (borrowed_environment ? borrowed_environment->active()

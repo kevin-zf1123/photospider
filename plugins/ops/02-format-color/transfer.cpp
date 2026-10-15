@@ -18,8 +18,8 @@
 #include "02-format-color/transfer_runtime.hpp"
 #include "02-format-color/transfer_simd.hpp"
 #include "common/registry.hpp"
-#include "common/typed_need_validation.hpp"
 #include "photospider/data/region_runs.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal::transfer_ops {
@@ -427,7 +427,7 @@ ResultBuilder result_builder(const ResultProgramPhase& phase, bool /*empty*/) {
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_extent, phase.query.resources));
+      phase.query.tile_extent));
 
   return builder;
 }
@@ -503,9 +503,6 @@ struct Continuation final {
   Footprint output;
   explicit Continuation(const Preparation* s) : state(s) {}
   Poll poll(const ResultProgramPhase& phase) try {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     const auto& tensor = phase.query.output.result_schema->tensors[0];
     if (!requested) {
       requested = true;
@@ -522,7 +519,7 @@ struct Continuation final {
       }
       return Poll(std::move(need));
     }
-    input_internal::Float32Environment environment;
+    plugin_internal::FloatingEnvironment environment;
     if (!environment.active())
       return Poll(sample_error("floating environment unavailable"));
     const std::function<Status(std::uint64_t)> consume = [&](std::uint64_t n) {
@@ -577,10 +574,12 @@ struct Continuation final {
         return Poll(failure.status);
       }
     }();
-    if (phase.report_numeric) {
-      auto status = phase.report_numeric(runner.diagnostics);
-      if (!status.ok())
-        return Poll(status);
+    if (!result.ok())
+      phase.record_failure(result.status());
+    if (phase.report_diagnostic) {
+      auto reported = report_numeric(phase, runner.diagnostics);
+      if (result.ok() && !reported.ok())
+        return Poll(reported);
     }
     return result;
   } catch (const Status& status) {
@@ -593,6 +592,7 @@ OperationDefinition operation(bool encode, SequenceProfile profile,
   d.key =
       std::string("color.transfer_") + (encode ? "encode" : "decode") + suffix;
   auto& t = d.traits;
+  t.diagnostics = {numeric_diagnostic_identity()};
   t.input_count = 1;
   OperationPortConstraint port;
   port.kind = OperationPortKind::Result;
@@ -604,7 +604,6 @@ OperationDefinition operation(bool encode, SequenceProfile profile,
       sizeof(StrictMath) + sizeof(FastMath) +
       (PHOTOSPIDER_TRANSFER_COMPACT_MATH ? sizeof(CompactMath) : 0);
   t.parameter_schema = {
-      {"metadata_mode", OperationParameterType::String, false},
       {"group", OperationParameterType::String, false},
       {"components", OperationParameterType::String, false},
       {"axis", OperationParameterType::Int64, false},
@@ -613,7 +612,7 @@ OperationDefinition operation(bool encode, SequenceProfile profile,
       {"coefficient_variant", OperationParameterType::String, false},
       {"black_luminance", OperationParameterType::Float64, false},
       {"white_luminance", OperationParameterType::Float64, false},
-      {"metadata_override", OperationParameterType::String, false},
+      {"input_description", OperationParameterType::String, false},
       {"layout", OperationParameterType::String, false}};
   auto& out = t.outputs[0];
   out.key = "values";

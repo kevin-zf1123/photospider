@@ -173,7 +173,7 @@ Result<std::shared_ptr<const Constants>> prepare_constants(
     const MathConfig& config) {
   using Answer = Result<std::shared_ptr<const Constants>>;
   try {
-    input_internal::Float32Environment environment;
+    plugin_internal::FloatingEnvironment environment;
     const RationalMath::Work work = [](std::uint64_t) {
       return Status::success();
     };

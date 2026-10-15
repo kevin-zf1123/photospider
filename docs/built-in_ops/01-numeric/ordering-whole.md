@@ -4,7 +4,7 @@ The six formal `array.sort_*` and `numeric.quantile_*` keys consume tensor membe
 
 ## Tensor ports and demand
 
-Each input `Result` has exactly one tensor member at index zero; its `ResultTensorSpec::key` may be any key. `sample_shape()` includes all declared batch axes. Every source tensor has rank 1..8 and at most 2^40 logical elements. The operation uses that full sample shape, including batch axes, as an ordinary output cell shape; output batch topology and facets are empty.
+Each input `Result` has exactly one tensor member at index zero; its `ResultTensorSpec::key` may be any key. `sample_shape()` includes all declared batch axes. Every source tensor has rank 1..8 and at most 2^40 logical elements. The operation uses that full sample shape, including batch axes, as an ordinary output cell shape; output batch topology are empty.
 
 Sort takes one source tensor of UInt8, Int64, Float32 or Float64 and a required static Int64 `axis`. It offers two independently selected `Result` outputs: `values`, with the source type, and `indices`, with Int64 values naming original coordinates on the sorted axis. Both preserve the full logical shape. Each selected output callback makes one complete output allocation and sorts each line; selecting both outputs may execute two callbacks and build two permutations.
 
@@ -63,5 +63,5 @@ block-sharing contract with synthetic operations. Sort and quantile require
 their own temporary numerical and public-path acceptance.
 
 No x86 arithmetic execution or performance result is claimed. The current
-checks do not cover every q semantic-facet, error and resource combination.
+checks do not cover every q structural-contract, error and resource combination.
 These are evidence boundaries, not changes to the Proposed specifications.

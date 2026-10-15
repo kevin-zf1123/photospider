@@ -22,18 +22,18 @@ struct AlphaSource final {
 };
 /** @brief FMT-04A/FMT-04B authoring options.
  *
- * `metadata_mode` is `respect`, `override`, or `raw`; raw association requires
- * explicit `input_structure` and `components`. `axis` indexes a cell axis and
- * excludes the Result batch prefix. Semantic modes require `group`. `algorithm`
- * accepts `auto`, `scalar`, `simd`, or `reference`. These helpers append nodes
- * named
- * `alpha.associate_<profile>` or `alpha.unassociate_<profile>`. Both keys are
- * registered for the three CPU profiles in the default registry. Callers must
- * serialize mutations to the same `WorkflowDocument`.
+ * `input_description` supplies explicit interpretation; raw association
+ * requires explicit `input_structure` and `components`. `axis` indexes a cell
+ * axis and excludes the Result batch prefix. An explicit description requires
+ * `group`.
+ * `algorithm` accepts `auto`, `scalar`, `simd`, or `reference`. These helpers
+ * append nodes named `alpha.associate_<profile>` or
+ * `alpha.unassociate_<profile>`. Both keys are registered for the three CPU
+ * profiles in the default registry. Callers must serialize mutations to the
+ * same `WorkflowDocument`.
  */
 struct AlphaAssociationOptions final {
-  std::string metadata_mode = "respect";
-  std::optional<TensorDescription> metadata_override;
+  std::optional<TensorDescription> input_description;
   std::string group;
   std::optional<std::uint32_t> axis;
   std::string input_structure;
@@ -48,15 +48,15 @@ struct AlphaAssociationOptions final {
  * prefix. The complete sample rank, including batch and cell axes, is at most
  * 8 and the sample count is at most 2^40. Nonscalar source batch prefixes must
  * match exactly; scalar sources are unbatched shape `[1]`. `group` is required
- * in semantic modes. For a component Gray input, it selects the exact component
+ * to select from `input_description`. For a component Gray input, it selects
+ * the exact component
  * name. FMT-05A has a native Result key; FMT-05B/C are compile-time
  * compositions over registered Result operations.
  */
 struct AlphaEditOptions {
   std::string group;
-  /** `respect` or `override`; raw metadata mode is unsupported. */
-  std::string metadata_mode = "respect";
-  std::optional<TensorDescription> metadata_override;
+  /** Explicit source interpretation used by this authoring call. */
+  std::optional<TensorDescription> input_description;
   std::optional<std::uint32_t> axis;
   std::string layout = "auto";
   std::string profile = "strict";
@@ -130,8 +130,9 @@ PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> set_alpha(
 /** @brief FMT-05B/C compile-time compositions, not new registry keys.
  *
  * `source_metadata` must describe an input Result with exactly one tensor and
- * no fields. Its schema assertion includes semantic metadata and spatial axes;
- * a separate layout assertion covers physical storage order and row pitch.
+ * no fields. Its schema assertion covers the canonical structure, including
+ * schema identity, dtype, shape, batch axes, atomic axes and spatial axes.
+ * A separate layout assertion covers physical storage order and row pitch.
  * `axis` in the options is relative to cell axes and excludes the batch prefix.
  * Generated primitives verify assertions at compile time, including forward
  * producer references. No sample reads occur. Existing alpha/surviving
@@ -148,11 +149,12 @@ PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> extract_alpha(
  * `source_metadata` must describe an input Result with exactly one tensor and
  * no fields. `axis` in the options is relative to cell axes and excludes the
  * batch prefix. The helper preserves surviving sample bits. A channel-bearing
- * source lowers to registered mapped assembly. Component Gray metadata-only
- * identity lowers to `metadata.assign`, which still reads and republishes
- * same-coordinate Data. All connected edge descriptors are checked at compile
- * time. Expansion is transactional and the returned `values` edge is graph-
- * owned. Callers must serialize mutations to the same `WorkflowDocument`.
+ * source lowers to registered mapped assembly. An axis-free component uses
+ * `core.identity` to retain the same samples, without a source-schema
+ * assertion or layout conversion. Mapped assembly checks source assertions at
+ * compile time. Expansion is transactional. The graph-owned
+ * edge names `values` for mapped assembly and `value` for `core.identity`.
+ * Callers must serialize mutations to the same `WorkflowDocument`.
  */
 PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> remove_alpha(
     WorkflowDocument& document, WorkflowInput input,

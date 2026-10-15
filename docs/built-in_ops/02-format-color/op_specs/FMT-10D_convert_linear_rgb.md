@@ -23,7 +23,8 @@ The installed `format::convert_linear_rgb` helper receives a WorkflowDocument, a
 input edge, static `RgbBasisOptions`, and an optional OperationRegistry (built-ins
 are used by default). It appends registered A/B/C operations and returns B's
 `values` WorkflowNodeOutput. It creates no native D registry key or automatic
-converter. The helper resolves source metadata from the real input edge; raw mode
+converter. The helper resolves source structure from the real input edge. The color interpretation
+comes from options.input_description; raw calls
 requires explicit source geometry.
 
 The static white policy determines the expansion:
@@ -32,19 +33,18 @@ The static white policy determines the expansion:
 - preserve_xyz: A->B, with B's semantic preserve_xyz option.
 - adapt: A->C->B, method required, with C output white matching B's target.
 
-Each generated node uses the chosen profile and layout. Source override applies
-to A's effective input once; later semantic nodes consume the actual inferred
-intermediate descriptions in respect mode. Do not reapply the original RGB
-source override to intermediate XYZ. Raw expands all stages in raw mode with
-explicit frozen geometry, the same ordered slots and no source-color assertions;
-raw B receives no semantic white_handling field.
+Each generated node uses the chosen profile and layout. The helper derives
+intermediate XYZ configurations from the explicit source description and the
+selected geometry, and serializes each as the consuming node's
+`input_description`. It does not read an attached output description or maintain
+an edge-description map. Raw composition supplies frozen geometry and ordered
+slots to every stage; raw B receives no white_handling parameter.
 
 Reserve collision-free node IDs, preserve existing graph nodes/exports, stage
 the complete expansion and publish it only after static validation succeeds.
 An authoring error leaves the original graph unchanged. The final output handle
 names B's actual `values` port; no hidden reference-white relabel substitutes C.
-Each intermediate keeps dtype, shape and slots, changes only applicable model
-metadata, and retains bypass alpha/AOV data and ordinary owners.
+Each intermediate keeps dtype, shape and slots and retains bypass alpha/AOV data and ordinary owners.
 
 ## Observable computation and storage
 

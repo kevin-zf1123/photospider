@@ -3,7 +3,7 @@
 #include <cstring>
 
 #include "02-format-color/alpha_common.hpp"
-#include "data/exact_numeric.hpp"
+#include "common/domain/exact_numeric.hpp"
 
 namespace ps::plugin_internal::alpha_ops {
 inline data_internal::format_numeric::Rational exact_endpoint(

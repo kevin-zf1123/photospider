@@ -1094,7 +1094,6 @@ int main() {
   using ps::Result;
   using ps::StridedLayout;
   using ps::ValueDescriptor;
-  using ps::ValueFacet;
   using ps::WorkflowDocument;
   using ps::WorkflowNode;
   using ps::WorkflowNodeOutput;
@@ -1252,10 +1251,7 @@ int main() {
     PS_CHECK(output.ok());
     const auto& result = output.value().results.at("value");
     PS_CHECK(multi_result::number(result) == 6);
-    const auto& facets = result.schema().tensors[0].facets;
-    PS_CHECK(facets.size() == 1 && facets[0].key == "test.semantic" &&
-             facets[0].version == 2);
-    PS_CHECK(facets[0].payload == std::vector<std::uint8_t>({8, 9}));
+    PS_CHECK(result.schema().tensors[0].atomic_trailing_axes == 1);
     auto trailing_rejected =
         operation_result::execute(registry, "fixture.bad_bytes");
     PS_CHECK(!trailing_rejected.ok() &&
@@ -1293,9 +1289,10 @@ int main() {
       PS_CHECK(!rejected.ok() &&
                rejected.status().code == ErrorCode::InvalidArgument);
     }
-    auto bad_facet = operation_result::execute(registry, "fixture.bad_facet");
-    PS_CHECK(!bad_facet.ok() &&
-             bad_facet.status().code == ErrorCode::InvalidArgument);
+    auto bad_atomic_axis =
+        operation_result::execute(registry, "fixture.bad_atomic_axis");
+    PS_CHECK(!bad_atomic_axis.ok() &&
+             bad_atomic_axis.status().code == ErrorCode::TypeMismatch);
     PS_CHECK(verify_duplicate_sink_invocation(
                  registry, operation_observer, "fixture.duplicate_success",
                  kDuplicateValidThenSuccess, 2U) == 0);

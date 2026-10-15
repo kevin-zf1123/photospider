@@ -16,7 +16,6 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
 #include "data/affine_view.hpp"
 #include "data/footprint_index.hpp"
 #include "data/result_host_access.hpp"
@@ -24,10 +23,23 @@
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
 #include "data/value_validation.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/data/result.hpp"
-#include "photospider/data/tensor_description.hpp"
 
 namespace ps {
+Result<Value> ResultTensorReadWindow::affine_view() const {
+  return execution_internal::ResultWindowAccess::affine(*this);
+}
+Result<std::uint64_t> ResultTensorReadWindow::read_work() const {
+  return execution_internal::ResultWindowAccess::read_work(*this);
+}
+Result<bool> ResultTensorReadWindow::visit_backing_regions(
+    const ResourceBudget& budget,
+    const std::function<Status(const Region&)>& visitor) const {
+  return execution_internal::ResultWindowAccess::visit_backing_regions(
+      *this, budget, visitor);
+}
+
 Result<ResultTensorReadWindow> execution_internal::ResultWindowAccess::compose(
     const ResourceBudget& budget, const Region& region,
     ResourceVector<ResultTensorReadWindow> windows,

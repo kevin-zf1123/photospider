@@ -78,17 +78,16 @@ The four Proposed interfaces are implemented by twelve registered keys in
 input schema contains one tensor member under any schema id and member key;
 `sample_shape()` supplies x[K], y[K] or y[K,C], and query[N]. Each input can use
 Float32 or Float64 independently. The `values` output uses schema
-`photospider.tensor`, member `samples`, empty facets, and shape [N] or [N,C]; the
+`photospider.tensor`, member `samples`, no attached domain description, and shape [N] or [N,C]; the
 multi-function column is an ordinary sample axis.
 
 All four operations use Whole execution. For a nonempty request, the Result
 continuation requests Data, Validation and Descriptor (role 13) for all three
 inputs, then validates all x knots and query controls before ordinate arithmetic.
 It evaluates every query and output column and publishes the complete dense
-output, even when the request is sparse. Input `ResultTensorSpec.facets` carries
-typed semantics such as Mask validation; recognized typed validation and required
-upstream failures cover complete active inputs, including values outside the
-arithmetic stencil. A sparse request records its requested dependency region Q;
+output, even when the request is sparse. Result structure and any explicitly bound contracts are checked over their
+authorized inputs. No Mask/color label triggers an automatic sample scan.
+Required upstream failures retain their producer scope. A sparse request records its requested dependency region Q;
 the returned Result can still have full computed coverage and global sample
 coordinates. Empty requests read no payload, while static schema and metadata
 checks still apply.

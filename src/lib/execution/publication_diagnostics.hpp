@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "core/checked_math.hpp"
+#include "photospider/core/checked_math.hpp"
 
 namespace ps::execution_internal {
 // Logical publication cardinality can exceed uint64 even when a zero-stride

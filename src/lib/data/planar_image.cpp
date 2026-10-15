@@ -13,9 +13,9 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
-#include "core/status_helpers.hpp"
 #include "data/value_validation.hpp"
+#include "photospider/core/checked_math.hpp"
+#include "photospider/core/status_helpers.hpp"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -130,8 +130,6 @@ void release_address(void* address, std::size_t size) noexcept {
 struct PlanarImage::Impl final {
   std::shared_ptr<void> metadata_lease;
   ValueDescriptor descriptor;
-  std::vector<ValueFacet> facets;
-  ResourceBindings resources;
   PlanarImageConfig config;
   std::uint64_t height = 0, width = 0, channels = 0, scalar_width = 0;
   std::uint64_t page = 0, plane_step = 0, row_pitch = 0;
@@ -239,9 +237,7 @@ Status PlanarImage::validate_layout(const ValueDescriptor& descriptor,
 
 Result<PlanarImage> PlanarImage::create(
     const ValueDescriptor& source_descriptor,
-    const PlanarImageConfig& source_config,
-    const std::vector<ValueFacet>& source_facets,
-    const ResourceBindings& resources) {
+    const PlanarImageConfig& source_config) {
   auto aggregate = source_config.aggregate_budget;
   if (!aggregate)
     aggregate =
@@ -249,8 +245,6 @@ Result<PlanarImage> PlanarImage::create(
   uint64_t initial_metadata = 1024;
   for (const auto& group : source_config.groups)
     initial_metadata += 256 + group.role.size();
-  for (const auto& facet : source_facets)
-    initial_metadata += 256 + facet.key.size() + facet.payload.size();
   auto metadata = aggregate->charge(initial_metadata, true);
   if (!metadata.ok())
     return Result<PlanarImage>(metadata.status());
@@ -267,7 +261,6 @@ Result<PlanarImage> PlanarImage::create(
   out->base_metadata = initial_metadata;
   auto descriptor = source_descriptor;
   auto config = source_config;
-  auto facets = source_facets;
   config.aggregate_budget = std::move(aggregate);
   PlanarImageLayout layout;
   layout.order = config.order;
@@ -280,12 +273,6 @@ Result<PlanarImage> PlanarImage::create(
   if (!layout_status.ok())
     return Result<PlanarImage>(layout_status);
   config.groups = std::move(layout.groups);
-  auto facet_status = input_internal::canonicalize_facets(&facets);
-  if (!facet_status.ok())
-    return Result<PlanarImage>(facet_status);
-  auto selected = resources.select(facets);
-  if (!selected.ok())
-    return Result<PlanarImage>(selected.status());
   const auto rank = descriptor.shape.size();
   if ((rank != 2 && rank != 3) || config.height_axis >= rank ||
       config.width_axis >= rank || config.height_axis == config.width_axis ||
@@ -305,8 +292,6 @@ Result<PlanarImage> PlanarImage::create(
     config.aggregate_budget =
         std::make_shared<PlanarPageBudget>(config.maximum_backed_bytes);
   out->descriptor = std::move(descriptor);
-  out->facets = std::move(facets);
-  out->resources = selected.take_value();
   out->config = std::move(config);
   for (auto size = out->config.tile_extent; size > 1; size >>= 1)
     ++out->tile_extent_shift;
@@ -385,9 +370,8 @@ Result<PlanarImage> PlanarImage::assemble_view(
     const std::vector<std::uint64_t>& channels,
     const std::vector<std::uint64_t>& channel_counts,
     ValueDescriptor descriptor, PlanarImageLayout layout,
-    const Region& requested, std::vector<ValueFacet> facets,
-    std::shared_ptr<PlanarPageBudget> metadata_budget,
-    const CancellationToken& cancellation, const ResourceBindings& resources) {
+    const Region& requested, std::shared_ptr<PlanarPageBudget> metadata_budget,
+    const CancellationToken& cancellation) {
   using Answer = Result<PlanarImage>;
   const auto unavailable = [] {
     return Status{
@@ -417,7 +401,6 @@ Result<PlanarImage> PlanarImage::assemble_view(
   const auto base_channel = start - output_first;
   if (output_channels > root->channels - base_channel)
     return Answer(unavailable());
-  ResourceBindings owned = resources;
   std::uint64_t traversed = 0;
   for (std::size_t i = 0; i < sources.size(); ++i) {
     if (cancellation.cancelled())
@@ -447,25 +430,12 @@ Result<PlanarImage> PlanarImage::assemble_view(
       dims[*source.config.channel_axis] = {channels[i], channel_counts[i]};
     // ResultBuilder has already proved complete Need-authorized windows and
     // checks the physical mapping of every window piece before calling here.
-    auto united = owned.unite(source.resources);
-    if (!united.ok())
-      return Answer(united.status());
-    owned = united.take_value();
     traversed += channel_counts[i];
   }
   if (traversed != requested_channels.extent)
     return Answer(unavailable());
-  auto status = input_internal::canonicalize_facets(&facets);
-  if (!status.ok())
-    return Answer(status);
-  auto selected = owned.select(facets);
-  if (!selected.ok())
-    return Answer(selected.status());
   std::uint64_t metadata_bytes =
       sizeof(Impl) + descriptor.shape.size() * sizeof(std::uint64_t);
-  for (const auto& facet : facets)
-    metadata_bytes +=
-        sizeof(ValueFacet) + facet.key.size() + facet.payload.size();
   for (const auto& group : layout.groups)
     metadata_bytes += sizeof(ImageComponentGroup) + group.role.size();
   auto budget =
@@ -487,8 +457,6 @@ Result<PlanarImage> PlanarImage::assemble_view(
   alias->view_channel = base_channel;
   alias->view_region = requested;
   alias->descriptor = std::move(descriptor);
-  alias->facets = std::move(facets);
-  alias->resources = selected.take_value();
   alias->config = first->config;
   alias->config.height_axis = layout.height_axis;
   alias->config.width_axis = layout.width_axis;
@@ -514,16 +482,6 @@ const ValueDescriptor& PlanarImage::descriptor() const {
   if (!impl_)
     throw std::logic_error("invalid planar image");
   return impl_->descriptor;
-}
-const std::vector<ValueFacet>& PlanarImage::facets() const {
-  if (!impl_)
-    throw std::logic_error("invalid planar image");
-  return impl_->facets;
-}
-const ResourceBindings& PlanarImage::resources() const {
-  if (!impl_)
-    throw std::logic_error("invalid planar image");
-  return impl_->resources;
 }
 const PlanarImageConfig& PlanarImage::config() const {
   if (!impl_)
@@ -613,12 +571,6 @@ const PlanarImageConfig& PlanarImageReadWindow::config() const {
     throw std::logic_error("invalid image read window");
   return image_->config();
 }
-const std::vector<ValueFacet>& PlanarImageReadWindow::facets() const {
-  if (!image_)
-    throw std::logic_error("invalid image read window");
-  return image_->facets();
-}
-
 Result<PlanarRowRun> PlanarImageReadWindow::row_run(
     const std::vector<std::uint64_t>& coordinate) const {
   if (!image_ || coordinate.size() != region_.rank())

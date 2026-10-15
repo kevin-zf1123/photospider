@@ -93,7 +93,8 @@ class PHOTOSPIDER_API FragmentAtlasPlan final {
   /** @brief Copies current input samples into the admitted allocator.
    * @note Input dtype/domain/coverage must match the plan. Actual bits are read
    * now, preserving signed strides and fragment authorization. Input values and
-   * facets are not retained. Limits bound packing work; errors publish nothing.
+   * Batch topology is not retained. Limits bound packing work; errors publish
+   * nothing.
    */
   Result<FragmentAtlas> materialize(const ValueFragments& input,
                                     const BufferAllocator& allocator,

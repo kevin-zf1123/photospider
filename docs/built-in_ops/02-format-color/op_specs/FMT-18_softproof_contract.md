@@ -39,9 +39,8 @@ facts; this node produces profile coordinates, not a calibrated screen session.
 One `input` tensor Value, same public Float32/Float64 dtype throughout. Semantic
 mode selects one complete source color group; raw gives explicit ordered slots
 and source profile/units. Admit source Gray/RGB/CMYK/XYZ/Lab and ordinary classes
-under FMT-12's actual device-to-PCS direction checks. Resolve omitted source
-profile only from authoritative bound metadata; an analytic input needs an
-explicit compatible binding or source override. Decode integers and normalize
+under FMT-12's actual device-to-PCS direction checks. Supply source profile and endpoint configuration explicitly; an analytic input
+needs a declared compatible binding or explicit coordinate conversion. Decode integers and normalize
 absolute luminance explicitly before ICC processing.
 
 `proof_profile` is mandatory: ICC v2/v4 display/output class with Gray/RGB/CMYK
@@ -52,8 +51,8 @@ PCS->device direction. No system-monitor default. B requires no display profile;
 passing one is an invalid unused parameter rather than changing its classifier.
 
 All selectors, resources, bindings, intent/options, keepdims/output_axis and
-layout are static and part of identity. Both modes support respect (default),
-call-local override and finite-domain raw as in FMT-12. Static admission and full
+layout are static and part of identity. The proposed description-based and
+finite-only raw paths follow FMT-12's explicit parameter contract. Static admission and full
 required engine construction occur for empty/bypass-only queries. A semantic
 CMYK source requires [0,1]; raw permits finite extended values. All modes reject
 consumed NaN/Inf and unit-adapter/F32 formatter overflow. Profile parsing alone
@@ -62,16 +61,15 @@ does not prove the required directions, numerical validity or engine constructio
 A publishes `values`, retaining dtype and using FMT-12's same-count slot retention
 or changed-count group replacement at the lowest source slot. Source CMYK to RGB
 therefore removes one color slot while retaining/remapping alpha/AOVs. Axis-free
-Gray expansion requires output_axis explicitly. Publish display-profile-defined
-coordinates or its explicit compatible analytic binding, plus proof provenance;
-ICC absolute intent does not turn these values into nits. Raw retains only
-applicable unverified descriptions and no automatic target-space guarantee.
+Gray expansion requires output_axis explicitly. The numeric output uses display-profile-defined coordinates or the explicitly
+bound analytic convention; ICC absolute intent does not turn values into nits.
+Callers provide this configuration to subsequent consumers. No output carries
+a description or an unrelated profile owner.
 
 B publishes `mask` of the input dtype on the non-channel shape S; keepdims=false
 default, true preserves the channel axis at length one. Rank-zero removal is
-unsupported and requires true. Axis-free Gray keeps its shape. Output has spatial
-coordinates and binary gamut_alarm provenance (source/proof/algorithm/settings),
-not Gray, coverage alpha or a complete color group. Values are exactly +0 or 1.
+unsupported and requires true. Axis-free Gray keeps its shape. Output preserves the applicable spatial structure. Source/proof/algorithm
+settings remain explicit node parameters; the mask has no attached domain tag. Values are exactly +0 or 1.
 
 ## A: fixed softproof chain
 
@@ -206,8 +204,9 @@ intermediates must fail construction before unsafe integer conversion; do not
 silently treat malformed profiles as an all-zero mask. Required host safety
 instrumentation preserves successful finite numerical behavior and enters the
 integration identity. No detached work, unbudgeted engine cache or alternate
-algorithm is permitted. Owner-retained pipeline/window access survives context
-teardown until final release.
+algorithm is permitted. Prepared state, plans and active calls retain required pipeline resources.
+Result read windows retain their actual data storage until final release;
+computed values do not automatically retain profile or processor resources.
 
 Errors and observation scope inherit FMT-12: static invalid profile/parameters
 and unavailable required directions fail construction; type mismatch is explicit;
@@ -255,7 +254,7 @@ this documentation step.
 ## Primary source evidence and remaining implementation work
 
 These fixed source paths were inspected; they are not runtime test evidence.
-The source-dimension fix, resource/cancellation hooks, metadata migration and
+The source-dimension fix, resource/cancellation hooks, explicit endpoint configuration and
 actual profile corpus remain implementation gates. Spectral appearance models,
 ink-separation editing, physical viewing adaptation, arbitrary threshold tuning
 and monitor calibration are outside these two specified members.

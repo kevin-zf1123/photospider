@@ -79,10 +79,10 @@ Each operation has named inputs `a`, `b` and output `values`, except atan2/atan2
 use `y` and `x` in that order. Each bound input Result contains exactly one
 tensor member in slot 0 and may also contain fields. The Result schema IDs may
 differ. Input rank is 1..8, extents are positive, and the full sample shapes
-and dtypes match. Typed tensor facets and spatial metadata receive full-input
-validation. The `values` output is a Result using schema `photospider.tensor`,
+and dtypes match. Input structure and explicitly bound validators are checked under the
+operation contract; there is no implicit domain-label validation. The `values` output is a Result using schema `photospider.tensor`,
 tensor key `samples`, the complete input sample shape as ordinary axes, and
-empty facets. Output batch topology is dropped. No implicit broadcast, cast or
+no attached domain description. Output batch topology is dropped. No implicit broadcast, cast or
 unit inference occurs.
 
 Compile/preflight rejects unsupported dtype, mismatched shape or unknown static

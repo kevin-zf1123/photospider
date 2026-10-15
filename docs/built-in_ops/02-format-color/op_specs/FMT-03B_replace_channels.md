@@ -28,14 +28,14 @@ and any conforming scalar sources; there is no independent native key.
 
 Each replacement names exactly one destination in the original base by index,
 name or role and supplies one source expression. Name/role namespaces are
-separate, exact and uniquely resolved against original metadata; raw uses
+separate, exact and uniquely resolved against the original explicit input descriptions; raw uses
 indices. Reject duplicate destinations even if both rows would write equal
 bytes. An empty replacement list is a valid identity. No output slot is added,
 removed or moved: output shape, dtype and channel-axis position equal the base.
 
 Source expressions may select an original base channel, an external component
 tensor, a selected external channel or an explicit scalar constant. External
-spatial sources match the base nonchannel shape and coordinate description under
+spatial sources match the base nonchannel shape under
 the family rules; their own channel axes may differ. Scalars are same-dtype
 shape-[1] sources, with typed literal shortcuts. A/B's positive cell-rank, checked extent and no-implicit-broadcast rules
 apply; batch plus cell rank is at most 8.
@@ -46,28 +46,19 @@ For example, replacing R from G and G from R is a simultaneous swap, regardless
 of replacement-list order. There is no write-after-write interpretation and no
 mutation visible to another consumer of base.
 
-## Destination metadata and expansion
+## Output interpretation and expansion
 
-By default, replaced positions retain their destination names, roles, units and
-applicable group descriptions. The selected destination supplies explicit target
-semantics for the replacement: copying Gray into R yields an R output component
-without source override/raw. Unlisted component descriptions and values remain
-unchanged. Replaced slots may receive explicit new target fields; structurally
-incompatible groups must be removed or explicitly rebuilt coherently, as in the
-family. No output sample-validity certificate is created by retaining a label.
+Replacement copies source bits to destination indices. Unlisted destinations
+retain their sample bits. No source or destination description is attached to
+the result. A caller can supply an RGB/alpha description to a later consumer,
+independently of whether replacement values came from Gray, color or scalar data.
 
-Replacing alpha with a scalar preserves other color samples exactly. It does
-not multiply/divide RGB or enforce a coverage interval. A later consumer that
-uses coverage semantics checks its required values; canonical images remain
-straight and carry no external alpha binding. Specialized
-alpha editing/association is governed by FMT-04/05.
-
-Compile C identity mappings for all base slots, substitute the resolved sources
-at replaced destinations, and pass the computed destination metadata explicitly
-to FMT-02C. This explicit output description is essential: C's normal default
-source projection alone would give B the wrong semantics. Preserve Descriptor
-dependencies for all connected inputs, including unused replacement sources,
-and use the family's transactional graph expansion and selected CPU profile.
+Replacing alpha preserves other samples exactly and performs no association or
+coverage scan. FMT-04/05 provide the separate alpha-specific operations.
+Compile identity mappings for all base slots, substitute the resolved sources
+at replaced destinations, and preserve Descriptor dependencies for all connected
+inputs, including unused sources. Scalar source records and typed literals
+follow the family lowering; expansion is transactional.
 
 ## Regional dependencies and resources
 
@@ -97,12 +88,11 @@ Take Float32 base [1,2,4] with logical straight RGBA samples
 `[[[10,20,30,0.4],[11,21,31,0.6]]]` and channel axis 2.
 An external Gray component plane X has shape [1,2] and samples [[7,8]].
 Replace destination R from X and alpha from same-dtype scalar V=[0.5].
-Expected output is `[[[7,20,30,0.5],[8,21,31,0.5]]]`; descriptions remain
-R/G/B/alpha. Base R and base alpha are not read for these replaced outputs.
+Expected output is `[[[7,20,30,0.5],[8,21,31,0.5]]]`. A subsequent consumer may be explicitly configured as R/G/B/alpha. Base R and base alpha are not read for these replaced outputs.
 Requesting only (0,1,0) reads X[0,1]=8, no base pixels and no V.
 
 For the simultaneous swap R<-base G, G<-base R, the output is
-`[[[20,10,30,0.4],[21,11,31,0.6]]]`, still described as R/G/B/alpha by default.
+`[[[20,10,30,0.4],[21,11,31,0.6]]]`; no R/G/B/alpha description is attached.
 Reversing replacement-list order has the same result. A request only for output
 R depends on original G, so changing original R does not dirty that observation.
 
@@ -121,4 +111,4 @@ The oracle independently evaluates all source expressions against the original
 inputs and enumerates Data/dirty support, including overwritten-value nonreads.
 The conceptual public workflow is `base + external plane + scalar ->
 replace_channels expansion -> named values`. Implementation must supply actual
-public commands and checked partial-region output. Runtime and benchmark evidence is linked above.
+public commands and checked partial-region output.

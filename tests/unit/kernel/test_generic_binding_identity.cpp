@@ -6,6 +6,7 @@
 
 #include "photospider/photospider.hpp"
 #include "support/image_input_fixture.hpp"
+#include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
@@ -75,9 +76,9 @@ int static_constraint_identity() {
     auto unused = std::make_shared<SchemaTemplate>(schema);
     doc.inputs[1].result_schema = unused;
     if (mode == 1)
-      unused->tensors[0].facets = {{"semantic", 1, {1}}};
+      unused->tensors[0].atomic_trailing_axes = 1;
     if (mode == 2)
-      unused->tensors[0].facets = {{"semantic", 1, {2}}};
+      unused->tensors[0].key = "different";
     doc.nodes = {
         {1, "source", {WorkflowInputReference{mode == 3 ? 2U : 1U}}, {}}};
     doc.outputs = {{"result", 1, "value"}};
@@ -95,7 +96,64 @@ int static_constraint_identity() {
   return 0;
 }
 
+int extension_resource_identity() {
+  std::vector<std::string> semantic, physical, cache;
+  ResourceBudget root;
+  for (unsigned mode = 0; mode < 4; ++mode) {
+    auto registry = std::make_shared<OperationRegistry>();
+    std::uint8_t byte = mode == 1 ? 2 : 1;
+    auto resource =
+        s1_fixture::take(ImmutableResource::import({&byte, 1}, root));
+    auto resources = s1_fixture::take(ResourceSet::create({resource}, root));
+    ValidationDefinition validator;
+    validator.identity = {"fixture.identity", mode == 2 ? 2U : 1U,
+                          mode == 3 ? "impl/2" : "impl/1"};
+    validator.prepare = [](const auto&) {
+      return Result<std::shared_ptr<const void>>(std::shared_ptr<const void>{});
+    };
+    PS_REQUIRE_OK(registry->register_validator(validator));
+    OperationDefinition op;
+    op.key = "fixture.identity";
+    auto schema = s1_fixture::schema({1}, false);
+    op.traits.outputs = {multi_result::output("value", schema)};
+    op.traits.requires_metadata_specialization = true;
+    op.traits.outputs[0].output_schema.result_schema_id = schema.id;
+    op.traits.outputs[0].output_schema.result_schema_version = schema.version;
+    op.traits.outputs[0].output_schema.validators = {validator.identity};
+    op.prepare_static = [id = resource.identity(), schema](const auto&,
+                                                           const auto&) {
+      OperationPreparation p;
+      p.resources = {id};
+      p.outputs.resize(1);
+      p.outputs[0].metadata.result_schema =
+          std::make_shared<const SchemaTemplate>(schema);
+      return Result<OperationPreparation>(std::move(p));
+    };
+    op.start_result = [](const auto&, const auto& allocator) {
+      return ResultContinuation::make<Identity>(allocator);
+    };
+    PS_REQUIRE_OK(registry->register_operation(op));
+    PS_REQUIRE_OK(registry->freeze());
+    WorkflowDocument document;
+    document.nodes = {{1, op.key, {}, {}}};
+    document.outputs = {{"value", 1, "value"}};
+    GraphContext graph(document);
+    auto plan = Compiler(registry).compile(graph, {}, resources);
+    PS_REQUIRE_OK(plan);
+    semantic.push_back(plan.value().semantic.digest().value);
+    physical.push_back(plan.value().plan.digest().value);
+    cache.push_back(plan.value().plan.cache_key().value);
+  }
+  for (unsigned i = 0; i < 4; ++i)
+    for (unsigned j = i + 1; j < 4; ++j) {
+      PS_CHECK(semantic[i] != semantic[j]);
+      PS_CHECK(physical[i] != physical[j]);
+      PS_CHECK(cache[i] != cache[j]);
+    }
+  return 0;
+}
+
 }  // namespace
 int main() {
-  return static_constraint_identity();
+  return static_constraint_identity() || extension_resource_identity();
 }

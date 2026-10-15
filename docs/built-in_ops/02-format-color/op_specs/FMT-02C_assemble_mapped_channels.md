@@ -17,7 +17,7 @@ implemented_operation_keys:
 
 # FMT-02C: assemble explicitly mapped components
 
-Runtime contract: A/B/C are registered as twelve Result operation ABI 3 CPU
+Runtime contract: A/B/C are registered as twelve Result operation ABI 4 CPU
 keys: `assemble`, `concatenate`, `assemble_mapped`, and `scalar_literal`, each
 with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
 The public authoring helpers are installed in
@@ -26,10 +26,9 @@ specification decision remains Proposed; implementation status is recorded
 separately.
 
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md) for
-exact copying, same dtype, spatial agreement, metadata modes, planar storage,
+exact copying, same dtype, spatial agreement, explicit input descriptions, planar storage,
 auto/view/materialize, CPU support, resource accounting and failures. This
-member independently selects sources and destination slots, including deliberate
-output-component reinterpretation. Its default-registry keys are independent of the retired `channel.merge`.
+member independently selects sources and destination slots, without assigning output interpretation. Its default-registry keys are independent of the retired `channel.merge`.
 
 ## Inputs and static interface
 
@@ -43,12 +42,9 @@ Each input explicitly declares one of two source structures:
 
 - `component`: no effective channel axis. Its entire shape is the nonchannel
   shape S; its only selectable component has conceptual index 0.
-- `channels`: resolve a channel axis from effective metadata or an explicit
-  axis, as for B. Removing that axis from its shape yields S. In raw mode its
-  axis must be supplied explicitly.
+- `channels`: resolve a channel axis from an explicit input description or axis parameter, as for B. Removing that axis from its shape yields S. Without a description, its axis is required.
 
-Every S must match in rank, dimension order and extent; apply the family's
-coordinate-metadata checks as well. Do not infer source structure from rank,
+Every S must match in rank, dimension order and extent;  Do not infer source structure from rank,
 axis extent or a missing label, and do not squeeze, broadcast, transpose spatial
 axes or resample. An explicit output cell-axis a, excluding the Result batch prefix, is inserted
 into S. If S has cell rank r, output cell rank is r+1. Component inputs have
@@ -62,7 +58,7 @@ without reading sample payloads.
 
 | Parameter | Meaning / constraints |
 | --- | --- |
-| `metadata_mode`, `input_overrides`, `output_description`, `layout` | Family parameters and defaults. Complete color groups are explicit. |
+| `input_descriptions`, `layout` | Optional per-input explicit descriptions and the family layout policy. |
 | `input_structure` | Required ordered list of n component/channels declarations, each with its optional channel-axis assertion. No axis on component entries. |
 | `output_axis` | Required Int64 in [0,r]; no negative shorthand or default. |
 | `mapping` | Required nonempty list of M static source/destination records as below. M obeys checked output extent/count and metadata/resource limits. |
@@ -72,16 +68,16 @@ Each mapping record contains:
 | Field | Meaning / constraints |
 | --- | --- |
 | `input` | Int64 input ordinal in [0,n). |
-| `selector` | Exactly one index, name or role selector for that input; index is nonnegative and in range. |
+| `match` | `index`, `name` or `role`. |
+| `selector` | Canonical unsigned decimal index or exact name/role text. |
 | `destination` | Int64 in [0,M); every destination occurs exactly once. |
-| `destination_component` | Optional explicit target component fields using the shared metadata schema; may explicitly reference a group in output_description. |
 
 Names and roles use separate namespaces, case-sensitive exact matches and no
 alias/fuzzy lookup. Resolve them to unique indices at compile/direct preflight;
 missing or ambiguous matches fail as in FMT-01B. A component input permits index
 0, or a uniquely matching name/role in its single-component description. Raw
 permits index selectors only; it cannot silently use ignored semantic labels.
-Selector metadata belongs to Descriptor dependency and compiled identity.
+Explicit selector descriptions and mapping parameters enter compiled identity; input structure contributes Descriptor dependency.
 
 Reject destination holes, duplicates, negative or out-of-range slots. M is the
 mapping-entry count, not max(destination)+1 with implicit filling. Zero mappings
@@ -90,7 +86,7 @@ declaration order introduces no write ordering or last-writer behavior. There
 is no blending, accumulation or implicit constant. An explicit constant source
 must already have the required S and dtype; scalar broadcasting is not added.
 
-## Coordinate semantics and metadata
+## Coordinate mapping and explicit interpretation
 
 Let the validated record for destination k resolve to source input i and
 component s. For output coordinate j, let k=j[a] and u=erase(j,a). Then:
@@ -101,35 +97,13 @@ channel source:   Y[j] = Xi[insert(u, source_axis_i, s)]
 ```
 
 Both equations copy exactly one element's bytes. A source may supply several
-destinations with independent output descriptions. Values, signed-zero and
-NaN payloads do not change because a role, unit or model changes.
+output destinations. Values, signed zero and NaN payloads remain unchanged.
 
-The family's standard output_description channel/group assignment applies to C
-as well as A/B. `destination_component` is an additional per-record way to
-specify those target fields; it is not required when output_description already
-defines them. An explicit target definition authorizes reinterpretation of its
-specified fields. It does not modify the effective source description,
-change name/role selector resolution, affect another mapping row or require
-global raw mode. A target group reference explicitly adopts that group's model,
-coordinate interpretation and applicable white/profile fields for this entry.
-An arbitrary display-name change alone is not a model or unit override.
-
-Apply explicit target fields to the projected source component, then retain
-only still-applicable descriptions. Model-dependent source fields that cease
-to apply are removed; for example, RGB primaries/transfer do not remain active
-on a component explicitly defined as Lab b*. Unredefined applicable fields
-still undergo respect-mode consistency checks. The result must be structurally
-coherent with the explicit output group; incomplete Lab white/model information
-is not guessed. Conflicting definitions of the same destination field between
-the record and output_description fail rather than using an undocumented
-precedence. Referenced resources retain their owners.
-
-Destination-component reinterpretation does not authorize changing unrelated
-nonchannel coordinate grids or physical layout. Those remain governed by the
-family's consistency and raw/source-override rules. No reinterpretation grants
-sample validity. There is no color conversion, range scaling, premultiplication,
-zero-alpha cleanup or validation scan; later consumers validate the semantics
-they actually use.
+Mapping records contain only input, match, selector and destination. There is no
+`destination_component` or `output_description` parameter. Callers construct the
+configuration for each downstream consumer explicitly; the output has no domain
+description. This operation performs no color conversion, range scaling,
+premultiplication, zero-alpha cleanup or sample-domain validation.
 
 ## Exact demand and dirty mapping
 
@@ -165,7 +139,7 @@ Charge table and string-index capacities; no per-pixel name lookup is allowed.
 
 With n inputs, rank r, M mappings, Nq requested samples and F windows, post-
 resolution mapping/copy work is O(n*r+M+Nq*r+F*r), plus exact footprint unions,
-metadata propagation and page-set preparation. State is O(n+r+M) plus admitted
+structural schema and page-set preparation. State is O(n+r+M) plus admitted
 lookup/footprint/window capacity. A reverse source-to-destination index supports
 dirty fan-out and has O(M) entries. Report Nq*d copied bytes separately from
 deduplicated source bytes and retained/provided backing; repeated destinations
@@ -177,7 +151,7 @@ Inherit the 1024-entry/element cancellation polling bound, exact publication,
 rollback, source lifetime, optional-cache policy and page/metadata admission.
 
 Malformed mapping records, incomplete destinations, invalid selectors, name/role
-ambiguity and conflicting target fields fail compile/direct preflight with
+ambiguity and invalid explicit input descriptions fail compile/direct preflight with
 InvalidArgument / InvalidDomain, schema origin. Rank/dtype/shape mismatches use
 the family TypeMismatch rule; source/resource/cancellation/backend/view failures
 retain their inherited categories. Diagnostics include mapping row, source input
@@ -188,10 +162,9 @@ and destination slot. Out-of-domain pixel values do not fail this copy operation
 Use straight RGB+alpha source X0, shape [1,2,4], channel axis 2, logical samples
 `[[[0.25,0.5,0.75,0.8],[0.125,0.25,0.5,1.0]]]`. X1 is a component source of
 shape [1,2] with samples `[[0.2,0.6]]`, same Float32 dtype and nonchannel grid.
-Choose output_axis=2 and explicit Lab D50 group on slots 0..2 plus independent
-alpha on slot 3. Supply these records, each with its explicit target component:
+Choose output_axis=2. The next consumer may be configured with a Lab D50 group on slots 0..2 and independent alpha on slot 3. Supply these data mapping records:
 
-| Destination | Source | Target interpretation |
+| Destination | Source | Downstream interpretation supplied by caller |
 | --- | --- | --- |
 | 0 | X0 index 1 (G) | Lab group, normalized l=L*/100 coordinate |
 | 1 | X0 index 2 (B) | Lab group, a* coordinate |
@@ -214,8 +187,7 @@ version of this mapping before requesting any input payload.
 The independent oracle scatters each selected source coordinate into all of its
 destinations and compares exact bytes to a separate gather evaluation. Also
 cover identity mapping, input/mapping declaration ordering, selector equivalence
-and ambiguity, per-row interpretation isolation, incomplete/conflicting group
-descriptions, every legal source/output axis, mixed component/channel sources,
+and ambiguity, explicit selector descriptions and invalid description/shape combinations, every legal source/output axis, mixed component/channel sources,
 rank-one channel vectors, and source reuse across disjoint ROI/tile boundaries.
 Inherit all family memory, cancellation, failure and special-value cases.
 

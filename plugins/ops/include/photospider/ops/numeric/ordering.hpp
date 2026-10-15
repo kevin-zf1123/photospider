@@ -5,8 +5,8 @@
 #include <utility>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
 #include "photospider/data/value.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 namespace ordering_detail {
@@ -71,7 +71,7 @@ inline Result<WorkflowNode> sort_node(
  * rounding (default Float64); integers never convert prematurely. The first
  * source-line NaN in original order wins and is quieted with the reduction
  * payload mapping. Source lines are fully read even for endpoint q, including
- * unrequested lines. Values has empty facets. Ownership, helper errors,
+ * unrequested lines. Values has ordinary data. Ownership, helper errors,
  * resource and typed-validation rules follow sort_node.
  */
 inline Result<WorkflowNode> quantile_node(

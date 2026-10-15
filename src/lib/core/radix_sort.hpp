@@ -5,8 +5,8 @@
 #include <cstdint>
 #include <utility>
 
-#include "core/checked_math.hpp"
 #include "photospider/core/cancellation.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
 namespace ps::radix_internal {

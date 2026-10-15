@@ -47,7 +47,7 @@ named axis output; table connects to values. The exact sample-grid definition us
 start/end and table length L. The supplied step is checked for consistency, not
 repeatedly accumulated to create knots. Output `values` is a Result using schema
 `photospider.tensor` v1/member `samples`, preserving the complete input shape,
-selected dtype and empty facets. Detailed axis and dtype rules follow.
+selected dtype and no attached domain description. Detailed axis and dtype rules follow.
 
 ## Confirmed interpolation method
 
@@ -114,7 +114,7 @@ Require 1<=L<=1048576. Each Result has one tensor member under any schema
 id/version/key. Input `sample_shape()` has rank 1..8, positive extents and logical
 element count <=2^40; table shape is [L] and axis shape is Float64 [3]. Output
 port `values` uses `photospider.tensor` v1/member `samples`, preserves complete
-input shape, has the chosen floating dtype and empty facets. Batch dimensions are
+input shape, has the chosen floating dtype and no attached domain description. Batch dimensions are
 part of that shape. No input semantic
 facet, color role or unit is inferred or propagated to the generic output;
 complete collected recognized typed inputs retain their validation obligations.
@@ -170,7 +170,7 @@ Errors in otherwise-unrequested queries or evaluated channels can fail the Run.
 Any input/table/axis edit invalidates recorded output demand; dirty mapping
 follows that recorded demand. Cache identity retains all input versions, profile,
 metadata and parameters. There is no
-per-channel Atom success isolation. Output dtype, shape and empty facets remain
+per-channel Atom success isolation. Output dtype, shape and no attached domain description remain
 unchanged; arbitrary input offsets, unaligned and signed/zero strides remain
 legal. The complete immutable owner survives context destruction.
 

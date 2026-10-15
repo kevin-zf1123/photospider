@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <new>
 
-#include "data/exact_numeric.hpp"
+#include "common/domain/exact_numeric.hpp"
 
 namespace ps::plugin_internal::basis_ops {
 // Per-row bounded automatic scratch, not a cache or an unaccounted heap.

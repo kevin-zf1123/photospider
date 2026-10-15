@@ -40,7 +40,7 @@ implicit casts or implicit broadcasts. Clipping is a separate clamp operation.
 The output port is `values`, a `Result` with schema `photospider.tensor` and
 tensor key `samples`. It preserves the input element type and uses the complete
 input `sample_shape()` as the output cell shape. Batch axes become ordinary
-output axes, and output facets are empty. Input shape rank is 1..8 and its
+output axes, and output carries no domain description. Input shape rank is 1..8 and its
 complete logical element count is at most 2^40.
 
 The three formal remap profile keys use one Whole continuation. A nonempty

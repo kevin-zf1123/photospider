@@ -24,6 +24,8 @@ class StoredFailure final {
   void enrich(const Status& status) noexcept {
     if (code_ != status.code || reason_ != status.reason)
       return;
+    if (!detail_.domain_code)
+      detail_.domain_code = status.detail.domain_code;
     if (detail_.origin == FailureOrigin::Unspecified)
       detail_.origin = status.detail.origin;
     if (detail_.scope == FailureScope::Unspecified) {

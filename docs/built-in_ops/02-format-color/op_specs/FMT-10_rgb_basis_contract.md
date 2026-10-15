@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_2
+implementation_status: implemented_cpu_result_abi_4
 clarification_status: complete
 ---
 
@@ -18,7 +18,7 @@ The family contains registered [A RGB->XYZ](FMT-10A_rgb_to_xyz.md),
 [B XYZ->RGB](FMT-10B_xyz_to_rgb.md) and [C adapt XYZ white](FMT-10C_adapt_xyz_white.md)
 operations, plus the compile-time [D RGB->RGB](FMT-10D_convert_linear_rgb.md)
 helper. Each native member has strict, accelerated Apple Silicon and accelerated
-x86-64 CPU keys under Result ABI 3. [Exact matrix definitions](FMT-10_basis_math.md)
+x86-64 CPU keys under Result ABI 4. [Exact matrix definitions](FMT-10_basis_math.md)
 remain normative. The specifications remain Proposed; runtime implementation
 status is separate.
 
@@ -39,7 +39,7 @@ All selected XYZ/RGB descriptions must share the same observer convention;
 this family does not convert observers or spectral data.
 
 The installed `photospider/ops/format/rgb_basis.hpp` header exposes static parameter
-codecs and transactional authoring helpers. D resolves real upstream metadata,
+codecs and transactional authoring helpers. D resolves real upstream structure and uses caller-supplied color configuration,
 then stages A, optional C and B in a temporary workflow before publishing the
 expansion. Writes to a shared WorkflowDocument must be serialized; compiled plans
 and their immutable preparations can be executed concurrently.
@@ -49,10 +49,10 @@ and their immutable preparations can be executed concurrently.
 Each native member accepts one input Result containing one Float32 or Float64
 tensor and no fields, then publishes one `values` output Result containing one
 tensor. The output preserves Result schema identity, tensor key, logical shape
-and batch axes, updates semantic TensorDescription facets when applicable, and
+and batch axes, carries no description, and
 sets `atomic_trailing_axes` to zero. The dtype and complete sample shape remain
 unchanged. Full sample rank, including batch and cell axes, is at most 8; sample
-count is at most 2^40. Raw mode retains input facets unchanged. D accepts a graph
+count is at most 2^40. Raw calls also produce no description. D accepts a graph
 edge and returns the final B output edge; it creates no native D registry key.
 
 Semantic calls select one complete ordered three-component color group: RGB for
@@ -69,8 +69,7 @@ color removal or whole-pixel opacity validation is introduced. Complete images
 remain straight, same-size across planes. Both generic and spatial Result tensor
 storage are supported when the requested operation can represent them. Semantic
 calls reject a premultiplied boundary representation; explicitly unassociate
-through FMT-04B first, or use raw/override for an intentional numeric
-reinterpretation.
+through FMT-04B first, or supply a deliberate explicit interpretation or use raw numerical parameters.
 
 Raw selects exactly three distinct ordered component indices on an explicit or
 resolved structural axis. A rank-one [3] tensor can use axis=0. Do not infer RGB
@@ -110,19 +109,18 @@ with the source; any such normalization or rendering change is separate.
 
 | Static logical field | Rules |
 | --- | --- |
-| metadata_mode | respect default; explicit override or raw. |
+| input_description | Optional explicit source interpretation. Presence selects the described path; absence requires raw selectors and geometry. |
 | group | Required unique RGB/XYZ semantic group according to member. |
 | components / axis | Raw ordered triple and structural axis; not combined with semantic group. |
-| source_basis | A/D resolve from effective RGB metadata in semantic mode; explicit assertions must agree. Required explicit primary/white description in raw. |
+| source_basis | A/D resolve from explicit RGB description in semantic mode; explicit assertions must agree. Required explicit primary/white description in raw. |
 | target_basis | B/D require explicit target primary/white description or one named preset. Target is linear RGB on the preserved unit/reference scale. |
-| source_white | C resolves from effective XYZ metadata in semantic mode; raw C requires it explicitly. Source assertions must agree. B's semantic source white belongs to its XYZ description and is not used to build the target inverse matrix. |
+| source_white | C resolves from explicit XYZ description in semantic mode; raw C requires it explicitly. Source assertions must agree. B's semantic source white belongs to its XYZ description and is not used to build the target inverse matrix. |
 | target_white | C requires explicit xy/white shorthand. For B/D it is already part of target_basis; contradictory duplicate specification fails. |
 | method | Required for C and D adapt: xyz_scaling, bradford, cat02 or cat16; no default. Forbidden for A/B or D without adapt. |
 | white_handling | B: require_match default or preserve_xyz. D: require_match default, preserve_xyz or adapt. Only adapt inserts C. Raw B has no semantic white-match obligation and accepts no separate white_handling parameter. Raw D still needs its geometric composition policy. |
-| metadata_override | Complete effective source interpretation only in override mode; does not change actual dtype/shape/backing. |
 | layout | auto default, view or materialize; D applies this selection to its constituent nodes. |
 
-Modes, presets, method and layout are closed authoring choices; custom
+Presets, method and layout are closed authoring choices; custom
 coordinates are fixed arrays of Float64; selectors use static bounded integer
 indices/metadata identifiers. Fields not applicable to a member fail rather
 than being ignored. All matrix data are compile-time fixed; changing them
@@ -179,25 +177,24 @@ fusion/removal must prove equal sample bits, metadata, support and failures;
 mathematical equality of matrix products alone is insufficient. D is not a
 once-rounded RGB matrix primitive or an exact round-trip promise.
 
-## Metadata behavior
+## Explicit interpretation and composition
 
-Semantic A requires linear RGB on the declared native scale and publishes XYZ
-with the source white/reference/units. B requires coherent XYZ and publishes
-linear RGB with the target basis and preserved reference/units. C changes XYZ's
-white interpretation to the stated target after actual matrix adaptation;
-D publishes the target linear RGB description according to its chosen policy.
-Preserve channel positions, free-form names, coordinates, internal alpha and
-unaffected descriptions. Rebuild selected component roles and applicable group
-fields; RGB-only primaries/transfer records do not remain as XYZ model fields.
-Remove/update complete named-space labels incompatible with the output.
+With `input_description`, A/D select a complete linear RGB group and B/C select
+XYZ. The supplied group is required; raw axis/components are not accepted on
+this path. Extra source geometry is a consistency assertion. Without a
+description, callers provide the ordered triple, axis and required geometry.
+Neither path reads labels from a Result or writes labels to an output.
 
-Source metadata is authoritative in respect; extra source geometry is a checked
-assertion. Untagged semantic data needs explicit assignment or a complete call
-override. Raw requires the needed explicit geometry, uses the ordinary stored
-triple and preserves applicable source metadata without inherited validity or
-claiming a completed color-space change. It does not relax physical image
-storage, static geometry validity or parameter requirements. A semantic result
-only carries its actually checked sample guarantees, not a full-image scan.
+A computes XYZ on the source scale; B computes target-basis linear RGB; C applies
+the selected white adaptation. Callers supply the resulting interpretation to
+later operations. No observer, transfer, exposure or rendering conversion is
+implied. Static checks and requested-sample domain validation remain active.
+
+D computes intermediate descriptions from its explicit source configuration
+and the chosen transforms, then serializes them into the generated A/C/B node
+parameters. Those configuration values are private authoring state. Structural
+inference still follows the real graph edges, and no hidden edge-description
+map or runtime Result propagation is used.
 
 ## Exact requests, dirty mapping and identity
 
@@ -237,10 +234,10 @@ three source components and cannot use this identity exception.
 
 Output coordinates match the input and publication covers exactly the requested
 footprint. Missing/unproduced samples remain missing; padding or unsupplied
-channels are not implicit zeros. A shared view publishes a distinct output
-description and scoped validation, not blanket validity of its owner's bytes.
+channels are not implicit zeros. A shared view publishes distinct structural coverage and scoped validation;
+it carries no domain description or blanket validity of its owner's bytes.
 Materialized spatial Results use the declared Result layout and prepared coverage;
-generic Results use their admitted tensor storage. Raw metadata does not override
+generic Results use their admitted tensor storage. Raw configuration does not override
 the physical storage contract.
 
 Resolve/validate static descriptors and exact matrices first; map and acquire

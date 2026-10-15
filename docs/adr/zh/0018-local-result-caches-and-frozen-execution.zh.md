@@ -2,6 +2,7 @@
 
 - 状态：Accepted
 - 英文权威文档：[ADR 0018](../0018-local-result-caches-and-frozen-execution.md)
+- 当前边界：0.34.0 中，原决定里的快照 facets，以及 import 拒绝图像、color-array、`ImagePlane` 和 `Mask` Value 的规则已被取代。快照只校验结构；运行数据以 Result fields 和 tensors 绑定。
 
 ## 1. 核心摘要（TL;DR）
 
@@ -64,11 +65,11 @@ class ExecutionContext {
 
 以上摘录省略 `ExecutionContext` 的其他成员。
 
-快照保存受支持的 rank-1..8 `Value` 输入，并保留样本位和 facets。每个快照不可变；`patch` 接受相同 descriptor 和 facets，以及非空替换 Region，只复制相交块，所有旧版本继续可读。存储对保留版本的负载总字节数实施一个聚合上限。元数据和调用方持有的 `Value` 不计入该上限。Snapshot import 会拒绝带图像 facets、rank-3 或更高维 color arrays、`ImagePlane` 和类型化 `Mask` 的 Values，因为它们需要结构化图像存储。图像数据由 structured Result 中的 typed image slots 表示；Result image slot 持有其 `PlanarImage` backing。
+快照保存任意内置元素类型的完整 rank-1..8 `Value` 输入，并保留精确样本位。Import 要求 Value 的 region 覆盖其完整 shape，且只校验这些结构，因此保存图像、颜色或 mask 样本的 Value 与元素类型和 shape 相同的其他 tensor 一样导入。每个快照不可变；`patch` 接受元素类型和 shape 相同的替换 Value，以及包含于其中的非空 Region，只复制相交块，所有旧版本继续可读。存储对保留版本的负载总字节数实施一个聚合上限。元数据和调用方持有的 `Value` 不计入该上限。提供给 workflow 的运行数据（包括图像）以 Result 绑定，样本保存在其 fields 和 tensors 中；空间 tensor 可以使用 `PlanarImage` backing。
 
-`content_identity` 对规范元数据和请求区域中的精确样本位计算哈希。shape、dtype、坐标和 facets 参与身份；分配地址、布局和分块几何不参与。读取和身份计算支持样本上限及协作式取消。读取被取消时，调用方目标缓冲区可能只写入一部分，调用方应丢弃它。
+`content_identity` 对带版本的身份前缀、元素类型、shape、请求区域坐标和请求区域中的精确样本位计算哈希。分配地址、布局和分块几何不参与。读取和身份计算支持样本上限及协作式取消。读取被取消时，调用方目标缓冲区可能只写入一部分，调用方应丢弃它。
 
-`freeze` 捕获当前有效且匹配的计划、不可变绑定和 operation registry 所有者。自定义 `RegionalSource` 必须先导入内核快照。传给 freeze 的 workflow input bindings 可以是不可变 Values、内核 snapshots，或用于声明了 Result schema 的不可变 `ResultRef` owners。Preflight 会核验 Result binding 与声明的 schema 匹配且具有有效 final descriptor。context 使用 managed resources 时，execution admission 会核验 Result 的 root ownership；demand read 受声明 domain 和已发布 support 限制。捕获过程不调用 operation callback，并在返回前重新检查图的 currentness。图被替换或销毁后，冻结执行仍使用捕获的输入版本；普通执行仍执行其 currentness 检查。每次 execute 调用独立提供取消状态，所有者会保留到已准入 callback 退出。Result input binding 保留不可变的 `ResultRef` owner。调用方通过 `ResultRef::capture()` 捕获 Result，并使用捕获的 descriptor 调用 `ResultRef::read_image()` 读取图像样本。
+`freeze` 捕获当前有效且匹配的计划、不可变绑定和 operation registry 所有者。每个 workflow input binding 是一个 `ExecutionBinding`，指定一个声明名称并提供一个不可变 `ResultRef`。Preflight 会核验 Result binding 与声明的 schema 匹配且具有有效 final descriptor。context 使用 managed resources 时，execution admission 会核验 Result 的 root ownership；demand read 受声明 domain 和已发布 support 限制。捕获过程不调用 operation callback，并在返回前重新检查图的 currentness。图被替换或销毁后，冻结执行仍使用捕获的输入版本；普通执行仍执行其 currentness 检查。每次 execute 调用独立提供取消状态，所有者会保留到已准入 callback 退出。Result input binding 保留不可变的 `ResultRef` owner。调用方通过 `ResultRef::capture()` 捕获 Result，并使用捕获的 descriptor 调用 `ResultRef::read_tensor()` 或 `ResultRef::acquire_tensor()` 读取 tensor 样本。
 
 已完成结果的保留是可选的，其容量是 `maximum_live_bytes` 的子限额；设为零会关闭保留。复用单位是 Tiled 输出的一个 tile 或完整的 Whole 输出。其键由 step 的物理身份（operation 契约和实现、tile 边长、已解析的输出 schema、相关 backend 与资源身份）、单元编号和为其记录的生产者单元身份组成，见 [ADR 0023](0023-track-dependencies-between-fixed-tiles.zh.md)；workflow 输入的身份按逻辑内容计算。编译图 revision 和无关分支不进入局部结果键。dirty 提示可以缩小计算范围，但不能在缺少内容身份时证明结果可复用。参与计算的每个 operation 都必须确定、无副作用且声明可缓存，结果才可复用。
 
@@ -77,7 +78,7 @@ class ExecutionContext {
 ## 4. 负面清单与边界（Non-Goals & Explicit Boundaries）
 
 - 快照覆盖不可变输入 `Value` 及其内容，不序列化 execution plan 或 workflow document。
-- 冻结执行固定一份内存中的计划及输入，不会让后续图编辑自动成为普通执行的当前状态。Workflow input bindings 必须是不可变 Values、内核 snapshots 或 schema 匹配的不可变 Result owner。
+- 冻结执行固定一份内存中的计划及输入，不会让后续图编辑自动成为普通执行的当前状态。Workflow input bindings 必须是 schema 匹配的不可变 Result owner。
 - 结果缓存是可丢弃的加速数据，不提供事务恢复、持久提交、请求历史或权威 artifact。
 - 预览队列、编辑合并、面向用户的新鲜度策略和发布决策由内核之外负责。
 - 未证明的可变输入可以执行，但其依赖结果不能跨运行复用。

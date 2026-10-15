@@ -8,7 +8,7 @@ implementation_status: implemented_cpu
 
 # Tensor storage and region access
 
-This specification defines the storage and bounded access contract for tensors owned by `Result`. [The Chinese reader version](zh/Tensor-Storage-and-Region-Access.zh.md) follows this document. `ResultTensorSpec` defines logical shape, sample grouping and optional spatial topology; the backing may use private planar pages or affine CPU storage. Color and alpha meaning belongs to tensor facets, while byte layout and region access belong here.
+This specification defines the storage and bounded access contract for tensors owned by `Result`. [The Chinese reader version](zh/Tensor-Storage-and-Region-Access.zh.md) follows this document. `ResultTensorSpec` defines logical shape, sample grouping and optional spatial topology; the backing may use private planar pages or affine CPU storage. Color and alpha interpretation is explicit operation configuration; byte layout and region access belong here.
 
 ## Scope and ownership
 
@@ -42,7 +42,6 @@ struct ResultTensorSpec final {
   std::uint32_t atomic_trailing_axes = 0;
   ValueDescriptor descriptor;
   ResultTensorLayout layout;
-  std::vector<ValueFacet> facets;
 
   std::vector<std::uint64_t> sample_shape() const;
   std::vector<std::uint64_t> observation_shape() const;
@@ -58,13 +57,12 @@ struct SchemaTemplate final {
   ResourceVector<ResultFieldSpec> fields;
   ResourceVector<ResultTensorSpec> tensors;
   ResourceVector<ResultExtent> domain;
-  ResourceVector<ResultFacet> metadata;
 };
 ```
 
 The excerpt omits validation, managed-copy and canonical-identity methods. `ResultFieldSpec` remains for bounded primitive records; tensor samples use `SchemaTemplate::tensors`. Physical order and row pitch do not participate in semantic schema identity. Two slots with the same logical schema can therefore use different valid CPU backing strategies.
 
-`atomic_trailing_axes` makes the specified trailing cell axes one observation: `close_samples()` expands each non-empty request across those axes. Recognized semantic Image and ColorArray facets also close over their complete channel tuple. Tensor description metadata and physical `groups` alone do not create peer-channel demand. The operation's declared sample Need remains the authorization for reading samples.
+`atomic_trailing_axes` makes the specified trailing cell axes one observation: `close_samples()` expands each non-empty request across those axes. No domain label or channel-count inference adds tuple closure. Physical `groups` do not create peer-channel demand. The operation's declared sample Need remains the authorization for reading samples.
 
 The logical batch axes can represent any declared context, including frame/layer when the application schema uses those names. Non-spatial tensors have no frame/layer interpretation imposed by the storage layer. Spatial batch domains are represented by their logical extents; schema validation has no fixed 4096-product ceiling, and Result does not allocate a dense backing directory for the full product. Concrete reads and backing requests still use their checked arithmetic and resource limits.
 
@@ -206,7 +204,7 @@ The calculation is checked over the full unsigned coordinate range. Positive and
 
 With `reshape == true`, `source_axes` is empty. The transform flattens the complete source window in logical row-major order, then assigns that order to the complete output shape. This logical mapping is independent of the source's physical layout. Signed and zero strides affect whether the requested payload can be represented as a view.
 
-The C ABI 2 service [`ps_result_services_v2::publish_tensor_view`](../../include/photospider/plugin/result_operation_plugin_api.h) uses a nullable `ps_result_tensor_transform_v2`. `NULL` selects the ordered planar assembly and may provide several source window handles. A non-NULL transform selects the affine form and requires exactly one source window. With `reshape == 0`, `axes` contains one anchored point map per source axis. With `reshape == 1`, `source_rank` is zero and `axes` is NULL. The C transform object is borrowed for the service call; successful publication retains the source independently of its window handle.
+The C ABI 4 service [`ps_result_services_v4::publish_tensor_view`](../../include/photospider/plugin/result_operation_plugin_api.h) uses a nullable `ps_result_tensor_transform_v4`. `NULL` selects the ordered planar assembly and may provide several source window handles. A non-NULL transform selects the affine form and requires exactly one source window. With `reshape == 0`, `axes` contains one anchored point map per source axis. With `reshape == 1`, `source_rank` is zero and `axes` is NULL. The C transform object is borrowed for the service call; successful publication retains the source independently of its window handle.
 
 For the affine transform form, `ViewUnavailable` means the source backing cannot express the requested map, including page-backed or non-affine source windows and affine fragments with different owners. The ordered-window form separately supports compatible planar pieces. An affine `ViewUnavailable` leaves the builder usable for an explicit materializing copy; the numeric `auto` layout may take that path, while `view` reports the unavailable mapping. Resource admission or work-limit errors, cancellation, invalid transforms, source authorization, incomplete channel closure, target overlap, cycles remain errors and do not select a copy retry. A wrong `2`-to-`3` reshape is therefore an `InvalidArgument` even when the source would also be physically fragmented.
 
@@ -215,7 +213,7 @@ For the affine transform form, `ViewUnavailable` means the source backing cannot
 
 Track virtual reservation, provided page capacity, valid sample coverage and charged metadata separately. A small logical view can retain a larger set of backing pages. The resource root accounts for output storage, windows and metadata under their respective limits. `resident_bytes()` reports an accounting snapshot of backing and metadata; it is not measured process RSS or a guarantee that the operating system keeps every page resident.
 
-`ResultRef::association()` records the validated, ordered source object IDs, and its dependency bundle preserves source observations without retaining input payload. A materialized or scalar-copy output can therefore outlive its inputs while keeping its source identities and dependency facts. A published affine or planar view separately retains each source `ResultRef` whose bytes it uses, along with that source's schema, resources and backing. The last owning Result or retained window releases those view-source owners; closing a read window does not revoke published samples while the Result remains alive. Resources named by tensor facets remain retained with their Result owner. Cancellation or failure releases unpublished allocations normally while preserving already-published samples and observations.
+`ResultRef::association()` records the validated, ordered source object IDs, and its dependency bundle preserves source observations without retaining input payload. A materialized or scalar-copy output can therefore outlive its inputs while keeping its source identities and dependency facts. A published affine or planar view separately retains each source `ResultRef` whose bytes it uses, along with that source's schema and backing. The last owning Result or retained window releases those view-source owners; closing a read window does not revoke published samples while the Result remains alive. Operation resources are explicitly selected during preparation and retained by plans/execution state; Results retain only their storage owners. Cancellation or failure releases unpublished allocations normally while preserving already-published samples and observations.
 
 ## Limits and non-goals
 

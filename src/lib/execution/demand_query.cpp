@@ -3,8 +3,8 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
-#include "data/content_digest.hpp"
+#include "photospider/core/checked_math.hpp"
+#include "photospider/core/content_digest.hpp"
 namespace ps::execution_internal {
 Result<DemandKey> demand_key(const DemandQuery& query,
                              const ExecutionPlan& plan, std::uint64_t maximum,

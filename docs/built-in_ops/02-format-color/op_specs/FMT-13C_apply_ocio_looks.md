@@ -42,9 +42,8 @@ execution. Runtime filesystem changes cannot change it.
 
 ## Outputs and acceptance
 
-One input/output tensor retains dtype/shape/slots. Semantic output describes the
-effective destination, with Look provenance separately recorded. Raw retains
-only applicable original unverified metadata. Family alpha admission, F32
+One input/output tensor retains dtype/shape/slots. The effective destination and Look configuration remain explicit parameters;
+output data carries no description. Family alpha admission, F32
 boundary, request/materialization and accounting rules apply to the whole chain.
 
 - Two simple affine Looks distinguish authored order from reversed order and

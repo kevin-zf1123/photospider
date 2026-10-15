@@ -1,0 +1,271 @@
+#pragma once
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <utility>
+
+#include "photospider/core/status.hpp"
+#include "photospider/plugin/operation_registry.hpp"
+#include "photospider/plugin/result_program.hpp"
+
+namespace ps {
+/** @brief Actual CPU arithmetic path, separate from the CPU/GPU scheduler.
+ * Strict preserves each operator's specified reference and rounding boundaries.
+ * Accelerated floating outputs permit at most four FP32 representable steps.
+ * Float64 inputs/outputs retain their dtype; their direct absolute error is
+ * bounded by 4*2^(floor(log2(abs(reference)))-23) in the normal FP32 range.
+ * Zero, FP32-subnormal-range and out-of-FP32-range references use strict.
+ * Special values, signed zero, integer/discrete results, copies and selected
+ * endpoints preserve their exact operator rules. Monotonicity and other
+ * operator invariants remain additional requirements; a per-value bound alone
+ * does not establish them. Final expression output, not each isolated math
+ * call, owns the numeric error budget. Caller floating state is preserved.
+ */
+enum class CpuNumericProfile : std::uint32_t {
+  Unspecified = 0,
+  Strict = 1,
+  AppleSiliconNeon = 2,
+  X86Avx2 = 3
+};
+/** @brief Bounded numerical fallback categories; resource/upstream failures
+ * are never recoverable numerical fallbacks.
+ */
+enum class NumericFallbackReason : std::uint32_t {
+  RoundingUnresolved = 0,
+  FunctionUnsupported = 1,
+  SpecialValueProtection = 2,
+  PrecisionRefinement = 3
+};
+/** @brief Bounded function attribution for expression mathematical calls.
+ * Other retains reports from operations without expression-function
+ * attribution.
+ */
+enum class NumericMathFunction : std::uint32_t {
+  Other = 0,
+  Sqrt = 1,
+  Exp = 2,
+  Ln = 3,
+  Sin = 4,
+  Cos = 5,
+  Tan = 6,
+  Pow = 7
+};
+/** @brief Owning bounded diagnostics for actual arithmetic performed.
+ * implementation is a NUL-terminated identity containing library/revision,
+ * compiler, build options and OS/architecture. No borrowed string or callback
+ * survives a session. Counts exclude cache hits and undemanded observations.
+ * Per-reason counts sum to strict_fallbacks. None of these fields changes
+ * numerical semantic identity or proves an accuracy bound.
+ */
+struct NumericDiagnostics final {
+  CpuNumericProfile profile = CpuNumericProfile::Unspecified;
+  std::array<char, 256> implementation{};
+  /** @brief Admitted numeric evaluations, including later failed attempts.
+   */
+  std::uint64_t evaluated_values = 0;
+  std::uint64_t strict_fallbacks = 0;
+  /** @brief Actual logical elements formed for publication as views or packed
+   * copies. Unused for arithmetic-only operations; excludes collection outside
+   * the operator and cache hits. Counts survive a later attempt failure. A view
+   * count does not imply allocated payload.
+   */
+  std::uint64_t view_elements = 0;
+  std::uint64_t copied_elements = 0;
+  std::array<std::uint64_t, 4> fallback_reasons{};
+  /** @brief Reported strict mathematical-call attempts, including failed calls.
+   * Operators without call-level instrumentation leave this field zero.
+   */
+  std::uint64_t strict_math_calls = 0;
+  /** @brief Function/reason fallback counts, indexed by NumericMathFunction.
+   * Unattributed per-reason counts are assigned to Other during merge. Known
+   * attributions must not exceed their corresponding aggregate reason count.
+   */
+  std::array<std::array<std::uint64_t, 4>, 8> function_fallbacks{};
+};
+/** @brief Checks and accumulates a physical attempt in fixed inline storage.
+ * Identities must match, except that a canonical empty destination adopts its
+ * first report. Overflow/malformed input leaves the destination unchanged.
+ * Caller serializes mutations; independent records can be merged concurrently.
+ * Only construction of a failure diagnostic can allocate.
+ */
+inline Status merge_numeric_diagnostics(NumericDiagnostics* target,
+                                        const NumericDiagnostics& report) {
+  if (!target)
+    return Status{ErrorCode::InvalidArgument, "null numeric diagnostics"};
+  if (report.profile == CpuNumericProfile::Unspecified) {
+    if (report.implementation != std::array<char, 256>{} ||
+        report.evaluated_values || report.strict_fallbacks ||
+        report.view_elements || report.copied_elements ||
+        report.strict_math_calls ||
+        report.function_fallbacks !=
+            std::array<std::array<std::uint64_t, 4>, 8>{} ||
+        report.fallback_reasons != std::array<std::uint64_t, 4>{})
+      return Status{ErrorCode::InvalidArgument,
+                    "noncanonical empty numeric diagnostics"};
+    return Status::success();
+  }
+  if (static_cast<std::uint32_t>(report.profile) > 3 ||
+      !report.implementation[0] || report.implementation.back())
+    return Status{ErrorCode::InvalidArgument,
+                  "invalid numeric implementation identity"};
+  std::uint64_t sum = 0;
+  for (const auto count : report.fallback_reasons) {
+    if (count > UINT64_MAX - sum)
+      return Status{ErrorCode::InvalidArgument,
+                    "numeric fallback counter overflow"};
+    sum += count;
+  }
+  if (sum != report.strict_fallbacks)
+    return Status{ErrorCode::InvalidArgument,
+                  "inconsistent numeric fallback counts"};
+  auto attributed = report;
+  for (unsigned reason = 0; reason < 4; ++reason) {
+    std::uint64_t count = 0;
+    for (const auto& function : report.function_fallbacks) {
+      if (function[reason] > UINT64_MAX - count)
+        return Status{ErrorCode::InvalidArgument,
+                      "function fallback counter overflow"};
+      count += function[reason];
+    }
+    if (count > report.fallback_reasons[reason])
+      return Status{ErrorCode::InvalidArgument,
+                    "inconsistent function fallback counts"};
+    attributed.function_fallbacks[0][reason] +=
+        report.fallback_reasons[reason] - count;
+  }
+  auto merged = *target;
+  if (merged.profile == CpuNumericProfile::Unspecified) {
+    merged = attributed;
+  } else {
+    if (merged.profile != report.profile ||
+        merged.implementation != report.implementation)
+      return Status{ErrorCode::InvalidArgument,
+                    "numeric implementation changed within attempt"};
+    if (report.evaluated_values > UINT64_MAX - merged.evaluated_values ||
+        report.strict_fallbacks > UINT64_MAX - merged.strict_fallbacks ||
+        report.view_elements > UINT64_MAX - merged.view_elements ||
+        report.copied_elements > UINT64_MAX - merged.copied_elements ||
+        report.strict_math_calls > UINT64_MAX - merged.strict_math_calls)
+      return Status{ErrorCode::ResourceExhausted,
+                    "numeric diagnostic counter overflow",
+                    FailureReason::CapacityLimit};
+    for (unsigned function = 0; function < 8; ++function)
+      for (unsigned reason = 0; reason < 4; ++reason)
+        if (attributed.function_fallbacks[function][reason] >
+            UINT64_MAX - merged.function_fallbacks[function][reason])
+          return Status{ErrorCode::ResourceExhausted,
+                        "numeric function counter overflow",
+                        FailureReason::CapacityLimit};
+    merged.strict_math_calls += report.strict_math_calls;
+    for (unsigned function = 0; function < 8; ++function)
+      for (unsigned reason = 0; reason < 4; ++reason)
+        merged.function_fallbacks[function][reason] +=
+            attributed.function_fallbacks[function][reason];
+    merged.evaluated_values += report.evaluated_values;
+    merged.strict_fallbacks += report.strict_fallbacks;
+    merged.view_elements += report.view_elements;
+    merged.copied_elements += report.copied_elements;
+    for (unsigned i = 0; i < merged.fallback_reasons.size(); ++i)
+      merged.fallback_reasons[i] += report.fallback_reasons[i];
+  }
+  *target = merged;
+  return Status::success();
+}
+/** @brief Versioned codec identity for ops numerical work reports. */
+inline ExtensionIdentity numeric_diagnostic_identity() {
+  return {"photospider.ops.numeric", 1, "numeric-counters-le-v1"};
+}
+constexpr std::size_t numeric_report_bytes = 588;
+inline std::array<std::uint8_t, numeric_report_bytes> encode_numeric_report(
+    const NumericDiagnostics& value) {
+  std::array<std::uint8_t, numeric_report_bytes> bytes{};
+  std::size_t at = 0;
+  const auto put = [&](std::uint64_t n, unsigned width) {
+    for (unsigned i = 0; i < width; ++i)
+      bytes[at++] = n >> (8 * i);
+  };
+  put(static_cast<std::uint32_t>(value.profile), 4);
+  for (auto c : value.implementation)
+    bytes[at++] = static_cast<std::uint8_t>(c);
+  for (auto n :
+       {value.evaluated_values, value.strict_fallbacks, value.view_elements,
+        value.copied_elements, value.strict_math_calls})
+    put(n, 8);
+  for (auto n : value.fallback_reasons)
+    put(n, 8);
+  for (const auto& row : value.function_fallbacks)
+    for (auto n : row)
+      put(n, 8);
+  return bytes;
+}
+/** @brief Decode an owned report; malformed records return InvalidArgument. */
+inline Result<NumericDiagnostics> read_numeric_report(ByteView bytes) {
+  if (!bytes.data() || bytes.size() != numeric_report_bytes)
+    return Result<NumericDiagnostics>(
+        Status{ErrorCode::InvalidArgument, "numeric report size"});
+  std::size_t at = 0;
+  const auto get = [&](unsigned width) {
+    std::uint64_t n = 0;
+    for (unsigned i = 0; i < width; ++i)
+      n |= std::uint64_t{bytes[at++]} << (8 * i);
+    return n;
+  };
+  NumericDiagnostics report;
+  report.profile = static_cast<CpuNumericProfile>(get(4));
+  for (auto& c : report.implementation)
+    c = static_cast<char>(bytes[at++]);
+  report.evaluated_values = get(8);
+  report.strict_fallbacks = get(8);
+  report.view_elements = get(8);
+  report.copied_elements = get(8);
+  report.strict_math_calls = get(8);
+  for (auto& n : report.fallback_reasons)
+    n = get(8);
+  for (auto& row : report.function_fallbacks)
+    for (auto& n : row)
+      n = get(8);
+  NumericDiagnostics checked;
+  auto status = merge_numeric_diagnostics(&checked, report);
+  return status.ok() ? Result<NumericDiagnostics>(report)
+                     : Result<NumericDiagnostics>(status);
+}
+inline Status report_numeric(const ResultProgramPhase& phase,
+                             const NumericDiagnostics& report) {
+  if (!phase.report_diagnostic)
+    return Status::success();
+  if (!phase.query.prepared)
+    return {ErrorCode::InvalidArgument,
+            "numeric report requires prepared operation"};
+  const auto& types = phase.query.prepared->traits().diagnostics;
+  for (std::uint32_t i = 0; i < types.size(); ++i) {
+    if (types[i] == numeric_diagnostic_identity()) {
+      const auto bytes = encode_numeric_report(report);
+      return phase.report_diagnostic(i, {bytes.data(), bytes.size()});
+    }
+  }
+  return {ErrorCode::InvalidArgument, "numeric report was not declared"};
+}
+inline Status register_numeric_diagnostics(OperationRegistry& registry) {
+  DiagnosticDefinition definition;
+  definition.identity = numeric_diagnostic_identity();
+  definition.payload_bytes = numeric_report_bytes;
+  definition.validate = [](ByteView bytes) {
+    return read_numeric_report(bytes).status();
+  };
+  definition.merge = [](ByteView before, ByteView incoming,
+                        DiagnosticDestination target) {
+    auto a = read_numeric_report(before), b = read_numeric_report(incoming);
+    if (!a.ok() || !b.ok())
+      return !a.ok() ? a.status() : b.status();
+    auto value = a.take_value();
+    auto status = merge_numeric_diagnostics(&value, b.value());
+    if (!status.ok())
+      return status;
+    const auto encoded = encode_numeric_report(value);
+    std::copy(encoded.begin(), encoded.end(), target.data);
+    return Status::success();
+  };
+  return registry.register_diagnostic(std::move(definition));
+}
+}  // namespace ps

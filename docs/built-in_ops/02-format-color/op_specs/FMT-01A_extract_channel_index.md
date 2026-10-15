@@ -17,7 +17,7 @@ operation_keys:
 # FMT-01A: extract a cell axis by index
 
 Inherit [FMT-01](FMT-01_channel_extraction_contract.md) for the Result schema,
-cell-axis coordinates, layouts, metadata projection, demand, ownership and
+cell-axis coordinates, layouts, explicit interpretation, demand, ownership and
 errors. The FMT specification remains Proposed. This registered primitive
 copies one indexed cell-axis element to each requested output coordinate.
 
@@ -28,21 +28,19 @@ fields. The output preserves source dtype, schema id, tensor key, batch axes and
 publication policy. It removes the selected cell axis by default, or retains it
 with extent one when `keepdims=true`. The batch prefix is never changed.
 
-The direct node requires static `axis`, `index`, `keepdims`, `layout`, and
-`metadata_mode` parameters. `axis` is an index into the tensor descriptor, not
-the complete sample shape. `index` is zero-based and must be less than that
-cell-axis extent. `axis` may be omitted only when the effective
-`photospider.tensor-description` identifies exactly one `channel_axis`; raw mode
-always needs an explicit axis. A direct axis assertion that disagrees with
-respect-mode metadata fails.
+The direct node requires static `index`, `keepdims` and `layout` parameters and
+accepts optional `axis` and `input_description`. `axis` is an index into the
+tensor descriptor, not the complete sample shape. `index` is zero-based and must
+be less than that cell-axis extent. `axis` may be omitted only when the supplied
+`input_description` identifies a `channel_axis`; without a description an
+explicit axis is required. An axis that disagrees with the description fails.
 
-`metadata_mode` is `respect`, `raw` or `override`; `metadata_override` is
-required exactly in override mode. `layout` is `auto`, `view` or `materialize`.
-The public `ChannelExtractOptions` defaults to respect, keepdims false, auto
-layout and strict CPU profile. The three registry profiles use the same exact
-bit-copy mapping; there is no GPU implementation.
+`layout` is `auto`, `view` or `materialize`. The public `ChannelExtractOptions`
+has no description, keepdims false, auto layout and strict CPU profile by
+default. The three registry profiles use the same exact bit-copy mapping; there
+is no GPU implementation.
 
-## Mapping and metadata projection
+## Mapping
 
 For complete sample coordinates, preserve each batch coordinate and fix the
 cell coordinate on axis `batch_rank + axis` to `index`. Remove the cell axis
@@ -51,12 +49,9 @@ one. Copy every requested value exactly, without arithmetic or sample-domain
 validation. NaN payloads, infinities, signed zero and integer extrema are
 preserved.
 
-If the selected axis is the described channel axis, project the selected
-component's name, role, unit and applicable interpretation. A retained singleton
-axis receives a one-entry channel table. After squeezing it, carry a component
-description without claiming the result still has a channel axis. Other color
-groups that depend on the removed channel axis are not projected as complete
-groups. A/B do not promise to retain arbitrary opaque annotations.
+The output carries no description of the selected component. A later consumer
+that needs the component's name, role, unit or interpretation receives it as
+its own explicit parameter.
 
 ## Data demand and storage
 

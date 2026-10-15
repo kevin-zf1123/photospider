@@ -8,7 +8,6 @@
 #include <utility>
 #include <vector>
 
-#include "common/typed_need_validation.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "photospider/plugin/result_program.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
@@ -54,9 +53,6 @@ struct Identity final {
   Footprint output;
   explicit Identity(bool whole = false) : whole(whole) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     auto scratch =
         take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));
     const auto& schema = *phase.query.output.result_schema;
@@ -86,7 +82,7 @@ struct Identity final {
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
             : std::vector<std::uint64_t>{},
-        phase.query.tile_extent, phase.query.resources));
+        phase.query.tile_extent));
     std::vector<ResultViewAxis> axes(shape.size());
     for (std::size_t axis = 0; axis < axes.size(); ++axis)
       axes[axis].output_axis = static_cast<std::int32_t>(axis);
@@ -178,9 +174,6 @@ struct Identity final {
 };
 struct Constant final {
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     const auto& schema = *phase.query.output.result_schema;
     auto builder = take(ResultBuilder::start(phase.resources, schema,
                                              phase.query.semantic_key));

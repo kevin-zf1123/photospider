@@ -33,12 +33,11 @@ replace them or silently interpret a rounded 1/3 as exact one third.
 
 The ordered Result inputs provide numerator and denominator, each in a Result
 with exactly one tensor member in slot 0; the Result schema may also carry
-fields. Both tensors have Int64 dtype and identical sample shape. Recognized
-tensor facets and spatial metadata still undergo full-input typed validation.
+fields. Both tensors have Int64 dtype and identical sample shape. Structural checks and explicitly bound validators retain their declared scope; no data label triggers domain validation.
 The output is a Result on port
 `values`, with the same shape and a static Float32 or Float64 dtype; the
 constructors default to Float64. Its schema is `photospider.tensor`, with tensor
-key `samples` and empty facets. The denominator must be positive at every
+key `samples` and no attached domain description. The denominator must be positive at every
 logical position; unreduced fractions are valid. Exact ratio processing and
 denominator validation apply to every input position, so any invalid
 denominator fails a nonempty invocation.

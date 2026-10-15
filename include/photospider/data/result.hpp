@@ -79,7 +79,6 @@ struct PHOTOSPIDER_API ResultTensorSpec final {
   std::uint32_t atomic_trailing_axes = 0;
   ValueDescriptor descriptor;
   ResultTensorLayout layout;
-  std::vector<ValueFacet> facets;
 
   std::vector<std::uint64_t> sample_shape() const;
   std::vector<std::uint64_t> observation_shape() const;
@@ -87,19 +86,12 @@ struct PHOTOSPIDER_API ResultTensorSpec final {
   Result<Footprint> close_samples(const Footprint& samples,
                                   const FootprintLimits& limits = {}) const;
 };
-/** @brief Bounded semantic bytes with allocator-aware nested ownership. */
-struct ResultFacet final {
-  ResourceString key;
-  std::uint32_t version = 1;
-  ResourceVector<std::uint8_t> payload;
-};
-/** @brief Fixed compiler-visible fields, domain and numerical/semantic
- * metadata. At most 16 fields, rank-1..8 domain (or empty for a collection),
- * and bounded ValueFacet metadata. Schema interpretation is registered by
- * id/version. RuntimeCount and FieldRows constraints survive compilation;
- * input-axis expressions resolve without reading input samples. Physical page
- * geometry, object generations and descriptor revisions are excluded from this
- * schema.
+/** @brief Fixed compiler-visible fields, domain and structural layout. At most
+ * 16 fields, rank-1..8 domain (or empty for a collection), with explicit
+ * structural contracts identified by id/version. RuntimeCount and FieldRows
+ * constraints survive compilation; input-axis expressions resolve without
+ * reading input samples. Physical page geometry, object generations and
+ * descriptor revisions are excluded from this schema.
  */
 struct PHOTOSPIDER_API SchemaTemplate final {
   ResourceString id;
@@ -108,7 +100,6 @@ struct PHOTOSPIDER_API SchemaTemplate final {
   ResourceVector<ResultFieldSpec> fields;
   ResourceVector<ResultTensorSpec> tensors;
   ResourceVector<ResultExtent> domain;
-  ResourceVector<ResultFacet> metadata;
   /** @brief Checks the closed bounded structural vocabulary, with no I/O. */
   Status validate(bool resolved = false) const;
   /** @brief Resolves input-derived extents from immutable static domains. */
@@ -124,9 +115,6 @@ struct PHOTOSPIDER_API SchemaTemplate final {
   Result<SchemaTemplate> managed_copy(const ResourceBudget& budget) const;
   Result<ResourceString> managed_canonical(const ResourceBudget& budget) const;
   bool same_schema(const SchemaTemplate& other) const noexcept;
-  /** @brief Retains only resources named by schema/typed image facets. */
-  Result<ResourceBindings> select_resources(
-      const ResourceBindings& supplied) const;
   Result<std::uint64_t> row_bytes(std::uint32_t field) const;
 };
 /** @brief Bounded growth policy for one producer object, not semantic count. */
@@ -183,9 +171,6 @@ class PHOTOSPIDER_API ResultRef final {
   /** @brief Borrowed immutable schema/key; invalid objects throw logic_error.
    */
   const SchemaTemplate& schema() const;
-  /** @brief Immutable schema-declared ICC/OCIO owners, retained with the
-   * Result. */
-  const ResourceBindings& resources() const;
   /** @brief Captures certified coverage and descriptor facts at one revision.
    */
   Result<ResultRef> capture() const;
@@ -196,7 +181,7 @@ class PHOTOSPIDER_API ResultRef final {
    * Entries retain input-port/ObjectId order, including repeated ObjectIds
    * supplied at different ports. This history is Root-accounted identity
    * metadata, not an input payload owner or read grant. Physical views
-   * independently retain source Results, schemas, resources, and backing until
+   * independently retain source Results, schemas, and backing until
    * the last view releases.
    */
   ResourceVector<std::uint64_t> association() const;
@@ -223,7 +208,7 @@ class PHOTOSPIDER_API ResultRef final {
   /** @brief Acquire an owning zero-copy window for one authorized rectangle.
    * The captured descriptor must certify every requested sample. Runs stop at
    * requested, view-publication and physical tile boundaries. The window keeps
-   * source schema, association, profiles and backing alive across producer and
+   * source schema, association and backing alive across producer and
    * context retirement; no sample cache or payload copy is made. Empty regions
    * return InvalidArgument. Windows may span batch coordinates; paged pieces
    * retain their complete batch prefix and queries select the matching piece.
@@ -253,7 +238,7 @@ class PHOTOSPIDER_API ResultRef final {
   };
   Result<ResourceVector<CacheStorage>> cache_storage(
       const std::function<Status(std::uint64_t)>& work,
-      bool include_resources = true, bool require_complete = true) const;
+      bool require_complete = true) const;
   Result<ResultRef> rebind_cached(
       std::string_view scope, const ResourceVector<std::uint64_t>& association,
       const CancellationToken& cancellation,
@@ -355,6 +340,18 @@ class PHOTOSPIDER_API ResultTensorReadWindow final {
     return region_.rank() > 1 ? std::optional<std::uint32_t>{region_.rank() - 2}
                               : std::nullopt;
   }
+  /** @brief Bounded lookup cost for one read; no payload or upstream work. */
+  Result<std::uint64_t> read_work() const;
+  /** @brief Own the exact authorized affine backing, or NotFound if fragmented.
+   */
+  Result<Value> affine_view() const;
+  /** @brief Visits disjoint authorized backing regions without sample reads.
+   * False means no finer partition. Visitor borrows each Region synchronously;
+   * returned views retain their own storage. Work is charged to budget.
+   */
+  Result<bool> visit_backing_regions(
+      const ResourceBudget& budget,
+      const std::function<Status(const Region&)>& visitor) const;
   Result<ResultTensorRun> row_run(const std::vector<std::uint64_t>& at) const;
   Result<ResultTensorRectangle> rectangle_run(
       const std::vector<std::uint64_t>& at) const;
@@ -473,7 +470,7 @@ class PHOTOSPIDER_API ResultBuilder final {
       ResourceBudget budget, const SchemaTemplate& schema,
       std::string_view semantic_key, ResultGrowthLimits limits = {},
       std::vector<std::uint64_t> association = {},
-      std::uint64_t tile_extent = 128, ResourceBindings resources = {});
+      std::uint64_t tile_extent = 128);
   ResultRef reference() const noexcept;
   /** @brief Copies complete rows into immutable Root-budgeted memory chunks.
    * @note Publication remains explicit. A failed or cancelled append preserves
@@ -494,7 +491,7 @@ class PHOTOSPIDER_API ResultBuilder final {
   /** @brief Adopt an immutable affine tensor block without copying payload.
    * Only the supplied region is certified. Signed/zero strides are checked
    * against the actual retained storage span; cell and batch axes share this
-   * one layout. Result owns semantic facets independently of storage. Errors
+   * one layout. Errors
    * are sticky and all admission precedes publication. This low-level storage
    * entry does not create a second operation input/output contract.
    */

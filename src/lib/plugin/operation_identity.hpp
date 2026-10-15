@@ -6,37 +6,32 @@
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::contract_internal {
-/** @brief Canonical full facets shared by stage and derived-result identities.
- */
 template <class Digest>
-void append_facets(Digest* digest,
-                   const std::vector<ValueFacet>& facets) noexcept {
-  digest->integer(facets.size());
-  for (const auto& f : facets) {
-    digest->text(f.key);
-    digest->integer(f.version);
-    digest->integer(f.payload.size());
-    digest->bytes(f.payload.data(), f.payload.size());
+void append_extensions(Digest* digest,
+                       const std::vector<ExtensionIdentity>& references) {
+  digest->integer(references.size());
+  for (const auto& reference : references) {
+    digest->text(reference.key);
+    digest->integer(reference.version);
+    digest->text(reference.implementation);
   }
 }
 /** @brief Appends the exact binary32 port contract as uint64 fields. */
 template <class Digest>
 void append_port(Digest* digest, const OperationPortConstraint& port) noexcept {
+  append_extensions(digest, port.validators);
   digest->integer(static_cast<std::uint32_t>(port.kind));
   std::uint32_t minimum = 0, maximum = 0;
   std::memcpy(&minimum, &port.minimum, sizeof(minimum));
   std::memcpy(&maximum, &port.maximum, sizeof(maximum));
   digest->integer(minimum);
   digest->integer(maximum);
-  digest->integer(port.semantic_kind);
   digest->integer(port.element_type);
   digest->integer(port.rank);
   digest->integer(port.element_type_mask);
-  append_facets(digest, port.facets);
   digest->text(port.result_schema_id);
   digest->integer(port.result_schema_version);
   digest->text(port.tensor_key);
-  digest->integer(port.requires_semantics);
   digest->integer(port.scalar_bounds);
 }
 
@@ -49,6 +44,7 @@ void append_port(Digest* digest, const OperationPortConstraint& port) noexcept {
  */
 template <class Digest>
 void append_traits(Digest* digest, const OperationTraits& traits) {
+  append_extensions(digest, traits.diagnostics);
   digest->integer(traits.cpu_staged_tiles);
   digest->integer(traits.requires_metadata_specialization);
   digest->integer(traits.share_blocks_across_outputs);

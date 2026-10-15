@@ -842,8 +842,8 @@ void windows_and_views() {
   auto output_schema = original.schema();
   auto& output = output_schema.tensors[0];
   output.descriptor.shape = {3, 5};
+  output.atomic_trailing_axes = 0;
   output.layout.channel_axis.reset();
-  output.facets.clear();
   auto builder =
       take(ResultBuilder::start(destination_root, output_schema, "view.test"));
 

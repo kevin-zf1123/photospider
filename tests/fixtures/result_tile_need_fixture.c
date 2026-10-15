@@ -4,45 +4,45 @@
 
 #include "photospider/plugin/result_tile_helpers.h"
 
-static const ps_result_tensor_spec_v3 tensor = {
+static const ps_result_tensor_spec_v4 tensor = {
     .struct_size = sizeof(tensor),
     .key = "number",
     .key_size = 6,
-    .element_type = PS_RESULT_ELEMENT_FLOAT64_V3,
+    .element_type = PS_RESULT_ELEMENT_FLOAT64_V4,
     .rank = 1,
     .shape = {1},
-    .channel_axis = PS_RESULT_NO_CHANNEL_V3};
-static const ps_result_schema_v3 schema = {
+    .channel_axis = PS_RESULT_NO_CHANNEL_V4};
+static const ps_result_schema_v4 schema = {
     .struct_size = sizeof(schema),
     .id = "test.c_tile_need",
     .id_size = sizeof("test.c_tile_need") - 1,
     .version = 1,
-    .publication = PS_RESULT_COMPLETE_BUNDLE_V3,
+    .publication = PS_RESULT_COMPLETE_BUNDLE_V4,
     .tensors = &tensor,
     .tensor_count = 1};
-static const ps_result_port_v3 input = {.struct_size = sizeof(input),
-                                        .kind = PS_RESULT_OBJECT_V3,
+static const ps_result_port_v4 input = {.struct_size = sizeof(input),
+                                        .kind = PS_RESULT_OBJECT_V4,
                                         .tensor_key = "number",
                                         .tensor_key_size = 6};
-static const ps_result_output_v3 outputs[] = {
-    {.struct_size = sizeof(ps_result_output_v3),
+static const ps_result_output_v4 outputs[] = {
+    {.struct_size = sizeof(ps_result_output_v4),
      .key = "value",
      .key_size = 5,
-     .port = {.struct_size = sizeof(ps_result_port_v3),
-              .kind = PS_RESULT_OBJECT_V3,
+     .port = {.struct_size = sizeof(ps_result_port_v4),
+              .kind = PS_RESULT_OBJECT_V4,
               .schema = &schema},
      .input_count = UINT32_MAX,
-     .execution = PS_RESULT_WHOLE_V3},
-    {.struct_size = sizeof(ps_result_output_v3),
+     .execution = PS_RESULT_WHOLE_V4},
+    {.struct_size = sizeof(ps_result_output_v4),
      .key = "independent",
      .key_size = 11,
-     .port = {.struct_size = sizeof(ps_result_port_v3),
-              .kind = PS_RESULT_OBJECT_V3,
+     .port = {.struct_size = sizeof(ps_result_port_v4),
+              .kind = PS_RESULT_OBJECT_V4,
               .schema = &schema},
      .input_count = 0,
-     .execution = PS_RESULT_WHOLE_V3}};
-static const ps_result_parameter_descriptor_v3 mode = {
-    sizeof(mode), "mode", 4, PS_RESULT_PARAMETER_INT64_V3, 1, 1, 0, 28};
+     .execution = PS_RESULT_WHOLE_V4}};
+static const ps_result_parameter_descriptor_v4 mode = {
+    sizeof(mode), "mode", 4, PS_RESULT_PARAMETER_INT64_V4, 1, 1, 0, 28};
 struct State {
   uint32_t stage;
 };
@@ -58,15 +58,15 @@ static atomic_uint_fast64_t input_starts;
 PS_RESULT_EXPORT uint64_t ps_result_tile_need_starts(void) {
   return atomic_load(&input_starts);
 }
-static int start(void* user, void* raw, const ps_result_query_v3* query,
-                 const ps_result_services_v3* host) {
+static int start(void* user, void* raw, const ps_result_query_v4* query,
+                 const ps_result_services_v4* host) {
   atomic_fetch_add(&input_starts, 1);
   (void)user;
   (void)host;
   ((struct State*)raw)->stage = 0;
   if (query->input_count != 1 || !query->input_tile_grids)
     return 6;
-  const ps_result_tile_grid_v3* grid = query->input_tile_grids;
+  const ps_result_tile_grid_v4* grid = query->input_tile_grids;
   if (query->parameters[0].int64_value >= 25 &&
       query->parameters[0].int64_value <= 27) {
     if (grid->struct_size != sizeof(*grid) || grid->present || grid->rank ||
@@ -90,16 +90,16 @@ static int start(void* user, void* raw, const ps_result_query_v3* query,
              ? 0
              : 6;
 }
-static int poll(void* user, void* raw, const ps_result_query_v3* query,
-                const ps_result_services_v3* host) {
+static int poll(void* user, void* raw, const ps_result_query_v4* query,
+                const ps_result_services_v4* host) {
   (void)user;
   const int64_t selected = query->parameters[0].int64_value;
   if (!((struct State*)raw)->stage++) {
     uint64_t indices[8192] = {7, 6, 6};
-    ps_result_tile_need_v3 need = {sizeof(need), 0, 0, 0, indices, 3};
+    ps_result_tile_need_v4 need = {sizeof(need), 0, 0, 0, indices, 3};
     int status = 0;
     if (selected == 1 || selected == 20 || selected == 21 || selected == 22) {
-      ps_result_region_v3 region = {.struct_size = sizeof(region),
+      ps_result_region_v4 region = {.struct_size = sizeof(region),
                                     .rank = 5,
                                     .offset = {1, 0, 0, 1, 1},
                                     .extent = {1, 1, 1, 1, 1}};
@@ -113,17 +113,17 @@ static int poll(void* user, void* raw, const ps_result_query_v3* query,
         region.offset[3] = 3;
         region.extent[3] = 2;
       }
-      status = ps_result_need_regions_v3(host, query, 0, &region, 1);
+      status = ps_result_need_regions_v4(host, query, 0, &region, 1);
     } else if (selected == 2 || selected == 14 || selected == 26) {
-      status = ps_result_need_whole_v3(host, 0);
+      status = ps_result_need_whole_v4(host, 0);
     } else if (selected == 3 || selected == 13 || selected == 27) {
-      status = ps_result_need_descriptor_v3(host, 0);
+      status = ps_result_need_descriptor_v4(host, 0);
     } else if (selected == 18) {
       status = host->need_tiles(host->context, NULL);
     } else if (selected == 19) {
       status = host->need_tiles(
           host->context,
-          (const ps_result_tile_need_v3*)((const uint8_t*)&need + 1));
+          (const ps_result_tile_need_v4*)((const uint8_t*)&need + 1));
     } else {
       switch (selected) {
         case 4:
@@ -191,11 +191,11 @@ static int poll(void* user, void* raw, const ps_result_query_v3* query,
     }
     // Wire errors must remain sticky even if a callback ignores their status.
     return (selected == 20 || selected == 21) && status ? status
-                                                        : PS_RESULT_NEED_V3;
+                                                        : PS_RESULT_NEED_V4;
   }
   double value = 0;
   if (selected == 3 || selected == 27) {
-    ps_result_descriptor_v3 descriptor = {.struct_size = sizeof(descriptor)};
+    ps_result_descriptor_v4 descriptor = {.struct_size = sizeof(descriptor)};
     if (host->result_descriptor(host->context, 0, &descriptor))
       return 1;
     value = descriptor.tensor_count;
@@ -211,7 +211,7 @@ static int poll(void* user, void* raw, const ps_result_query_v3* query,
     if (host->read_tensor(host->context, 0, 0, at, 5, &value, sizeof(value)))
       return 1;
   }
-  const ps_result_region_v3 region = {.struct_size = sizeof(region),
+  const ps_result_region_v4 region = {.struct_size = sizeof(region),
                                       .rank = 1,
                                       .extent = {1}};
   if (host->begin_result(host->context) ||
@@ -219,7 +219,7 @@ static int poll(void* user, void* raw, const ps_result_query_v3* query,
                            sizeof(value)) ||
       host->publish_result(host->context, 1))
     return 1;
-  return PS_RESULT_PUBLISH_V3;
+  return PS_RESULT_PUBLISH_V4;
 }
 static void destroy(void* user, void* state) {
   (void)user;
@@ -228,11 +228,11 @@ static void destroy(void* user, void* state) {
 static void destroy_api(void* user) {
   (void)user;
 }
-static const ps_result_tensor_spec_v3 query_tensors[] = {
-    {.struct_size = sizeof(ps_result_tensor_spec_v3),
+static const ps_result_tensor_spec_v4 query_tensors[] = {
+    {.struct_size = sizeof(ps_result_tensor_spec_v4),
      .key = "image",
      .key_size = 5,
-     .element_type = PS_RESULT_ELEMENT_FLOAT64_V3,
+     .element_type = PS_RESULT_ELEMENT_FLOAT64_V4,
      .rank = 3,
      .shape = {2, 3, 5},
      .batch_rank = 2,
@@ -241,56 +241,56 @@ static const ps_result_tensor_spec_v3 query_tensors[] = {
      .height_axis = 1,
      .width_axis = 2,
      .channel_axis = 0},
-    {.struct_size = sizeof(ps_result_tensor_spec_v3),
+    {.struct_size = sizeof(ps_result_tensor_spec_v4),
      .key = "number",
      .key_size = 6,
-     .element_type = PS_RESULT_ELEMENT_FLOAT64_V3,
+     .element_type = PS_RESULT_ELEMENT_FLOAT64_V4,
      .rank = 1,
      .shape = {1},
-     .channel_axis = PS_RESULT_NO_CHANNEL_V3}};
-static const ps_result_schema_v3 query_schemas[] = {
-    {.struct_size = sizeof(ps_result_schema_v3),
+     .channel_axis = PS_RESULT_NO_CHANNEL_V4}};
+static const ps_result_schema_v4 query_schemas[] = {
+    {.struct_size = sizeof(ps_result_schema_v4),
      .id = "test.c_tile_query",
      .id_size = sizeof("test.c_tile_query") - 1,
      .version = 1,
-     .publication = PS_RESULT_COMPLETE_BUNDLE_V3,
+     .publication = PS_RESULT_COMPLETE_BUNDLE_V4,
      .tensors = query_tensors,
      .tensor_count = 1},
-    {.struct_size = sizeof(ps_result_schema_v3),
+    {.struct_size = sizeof(ps_result_schema_v4),
      .id = "test.c_tile_bundle",
      .id_size = sizeof("test.c_tile_bundle") - 1,
      .version = 1,
-     .publication = PS_RESULT_COMPLETE_BUNDLE_V3,
+     .publication = PS_RESULT_COMPLETE_BUNDLE_V4,
      .tensors = query_tensors,
      .tensor_count = 2}};
-static const ps_result_output_v3 query_outputs[] = {
-    {.struct_size = sizeof(ps_result_output_v3),
+static const ps_result_output_v4 query_outputs[] = {
+    {.struct_size = sizeof(ps_result_output_v4),
      .key = "tiled",
      .key_size = 5,
-     .port = {.struct_size = sizeof(ps_result_port_v3),
-              .kind = PS_RESULT_OBJECT_V3,
+     .port = {.struct_size = sizeof(ps_result_port_v4),
+              .kind = PS_RESULT_OBJECT_V4,
               .schema = query_schemas},
-     .execution = PS_RESULT_REGIONAL_V3},
-    {.struct_size = sizeof(ps_result_output_v3),
+     .execution = PS_RESULT_REGIONAL_V4},
+    {.struct_size = sizeof(ps_result_output_v4),
      .key = "whole",
      .key_size = 5,
-     .port = {.struct_size = sizeof(ps_result_port_v3),
-              .kind = PS_RESULT_OBJECT_V3,
+     .port = {.struct_size = sizeof(ps_result_port_v4),
+              .kind = PS_RESULT_OBJECT_V4,
               .schema = query_schemas},
-     .execution = PS_RESULT_WHOLE_V3},
-    {.struct_size = sizeof(ps_result_output_v3),
+     .execution = PS_RESULT_WHOLE_V4},
+    {.struct_size = sizeof(ps_result_output_v4),
      .key = "bundle",
      .key_size = 6,
-     .port = {.struct_size = sizeof(ps_result_port_v3),
-              .kind = PS_RESULT_OBJECT_V3,
+     .port = {.struct_size = sizeof(ps_result_port_v4),
+              .kind = PS_RESULT_OBJECT_V4,
               .schema = query_schemas + 1},
-     .execution = PS_RESULT_REGIONAL_V3}};
+     .execution = PS_RESULT_REGIONAL_V4}};
 static atomic_uint_fast64_t query_starts[3];
 PS_RESULT_EXPORT uint64_t ps_result_tile_query_starts(uint32_t output) {
   return output < 3 ? atomic_load(query_starts + output) : UINT64_MAX;
 }
-static int query_start(void* user, void* raw, const ps_result_query_v3* query,
-                       const ps_result_services_v3* host) {
+static int query_start(void* user, void* raw, const ps_result_query_v4* query,
+                       const ps_result_services_v4* host) {
   (void)user;
   (void)raw;
   (void)host;
@@ -314,18 +314,18 @@ static int query_start(void* user, void* raw, const ps_result_query_v3* query,
   }
   return 0;
 }
-static int query_poll(void* user, void* raw, const ps_result_query_v3* query,
-                      const ps_result_services_v3* host) {
+static int query_poll(void* user, void* raw, const ps_result_query_v4* query,
+                      const ps_result_services_v4* host) {
   (void)user;
   (void)raw;
   if (host->begin_result(host->context))
     return 1;
   for (uint32_t slot = 0; slot < query->output->port.schema->tensor_count;
        ++slot) {
-    ps_result_region_v3 region;
-    if (ps_result_output_region_v3(query, slot, &region))
+    ps_result_region_v4 region;
+    if (ps_result_output_region_v4(query, slot, &region))
       return 6;
-    const ps_result_tensor_spec_v3* spec =
+    const ps_result_tensor_spec_v4* spec =
         query->output->port.schema->tensors + slot;
     uint64_t count = 1;
     for (uint32_t axis = 0; axis < region.rank; ++axis)
@@ -352,14 +352,14 @@ static int query_poll(void* user, void* raw, const ps_result_query_v3* query,
                              (const uint8_t*)values, count * sizeof(double)))
       return 1;
   }
-  return host->publish_result(host->context, 1) ? 1 : PS_RESULT_PUBLISH_V3;
+  return host->publish_result(host->context, 1) ? 1 : PS_RESULT_PUBLISH_V4;
 }
-static const ps_result_operation_v3 operations[] = {
-    {.struct_size = sizeof(ps_result_operation_v3),
+static const ps_result_operation_v4 operations[] = {
+    {.struct_size = sizeof(ps_result_operation_v4),
      .key = "test.c_tile_need",
      .key_size = sizeof("test.c_tile_need") - 1,
-     .flags = PS_RESULT_FLAG_CPU_V3 | PS_RESULT_FLAG_DETERMINISTIC_V3 |
-              PS_RESULT_FLAG_SIDE_EFFECT_FREE_V3,
+     .flags = PS_RESULT_FLAG_CPU_V4 | PS_RESULT_FLAG_DETERMINISTIC_V4 |
+              PS_RESULT_FLAG_SIDE_EFFECT_FREE_V4,
      .inputs = &input,
      .input_count = 1,
      .outputs = outputs,
@@ -372,11 +372,11 @@ static const ps_result_operation_v3 operations[] = {
      .start = start,
      .poll = poll,
      .destroy = destroy},
-    {.struct_size = sizeof(ps_result_operation_v3),
+    {.struct_size = sizeof(ps_result_operation_v4),
      .key = "test.c_tile_query",
      .key_size = sizeof("test.c_tile_query") - 1,
-     .flags = PS_RESULT_FLAG_CPU_V3 | PS_RESULT_FLAG_DETERMINISTIC_V3 |
-              PS_RESULT_FLAG_SIDE_EFFECT_FREE_V3,
+     .flags = PS_RESULT_FLAG_CPU_V4 | PS_RESULT_FLAG_DETERMINISTIC_V4 |
+              PS_RESULT_FLAG_SIDE_EFFECT_FREE_V4,
      .outputs = query_outputs,
      .output_count = 3,
      .workspace_bytes = 65536,
@@ -384,13 +384,13 @@ static const ps_result_operation_v3 operations[] = {
      .start = query_start,
      .poll = query_poll,
      .destroy = destroy}};
-static const ps_result_operation_plugin_api_v3 api = {
+static const ps_result_operation_plugin_api_v4 api = {
     .struct_size = sizeof(api),
-    .abi_version = PS_RESULT_OPERATION_ABI_VERSION_3,
+    .abi_version = PS_RESULT_OPERATION_ABI_VERSION_4,
     .operations = operations,
     .operation_count = 2,
     .destroy = destroy_api};
-PS_RESULT_EXPORT const ps_result_operation_plugin_api_v3*
-ps_result_operation_plugin_get_api_v3(void) {
+PS_RESULT_EXPORT const ps_result_operation_plugin_api_v4*
+ps_result_operation_plugin_get_api_v4(void) {
   return &api;
 }

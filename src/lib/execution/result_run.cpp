@@ -7,7 +7,6 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
 #include "core/resource_observation.hpp"
 #include "data/memory_budget.hpp"
 #include "execution/callback_pool.hpp"
@@ -19,6 +18,7 @@
 #include "execution/result_native_upload.hpp"
 #include "execution/result_stage_submission.hpp"
 #include "execution/structured_execution.hpp"
+#include "photospider/core/checked_math.hpp"
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
 #include "execution/execution_test_hooks.hpp"
 #endif
@@ -369,7 +369,7 @@ Result<ExecutionResult> run_result_plan(
   };
   auto admitted_resources =
       budget->resources() ? plan.resources().reference(*budget->resources())
-                          : Result<ResourceBindings>(plan.resources());
+                          : Result<ResourceSet>(plan.resources());
   if (!admitted_resources.ok())
     return fail(admitted_resources.status());
   const auto resources = admitted_resources.take_value();

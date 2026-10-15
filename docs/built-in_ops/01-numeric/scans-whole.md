@@ -11,7 +11,7 @@ footprint scopes observed dependency roots. The returned Result retains its
 complete published coverage, and consumers can read any covered coordinate; the
 request does not turn it into a packed ROI. The output starts from the complete
 input `sample_shape()`; each selected scan axis grows by one, and those extents
-form ordinary output axes with facets and batch topology dropped. Empty demand
+form ordinary output axes with batch topology dropped. Empty demand
 schedules no input payload work and publishes empty tensor coverage.
 
 `numeric_tensor_program.hpp` supplies the Whole protocol and the operation's

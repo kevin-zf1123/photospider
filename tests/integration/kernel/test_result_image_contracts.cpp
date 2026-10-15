@@ -14,7 +14,6 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
-#include "support/icc_profile_fixture.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/unified_result_fixture.hpp"
 
@@ -31,10 +30,8 @@ void zero(const ResourceBudget& root) {
     require(!count, "last owner capacity");
 }
 ResultRef image(const ResourceBudget& root, const SchemaTemplate& schema,
-                float bias = 0, ResourceBindings resources = {},
-                uint32_t biased_slot = UINT32_MAX) {
-  auto made = ResultBuilder::start(root, schema, "source", {}, {}, 1,
-                                   std::move(resources));
+                float bias = 0, uint32_t biased_slot = UINT32_MAX) {
+  auto made = ResultBuilder::start(root, schema, "source", {}, {}, 1);
   require(made.ok(), made.status().message);
   auto builder = made.take_value();
 
@@ -124,36 +121,18 @@ void resource_admission() {
   }
   zero(roomy);
   auto schema = unified_result_fixture::image_schema();
-  schema.tensors[0].facets = {
-      {"test.large", 1, std::vector<uint8_t>(65536, 7)}};
-  limits.capacity[ResourceKind::Host] = 16384;
-  limits.capacity[ResourceKind::Metadata] = 16384;
+  schema.fields.resize(15);
+  for (unsigned i = 0; i < schema.fields.size(); ++i) {
+    schema.fields[i].key = std::string(120, 'x') + std::to_string(i);
+    schema.fields[i].element_type = ElementType::Int64;
+  }
+  limits.capacity[ResourceKind::Host] = 1024;
+  limits.capacity[ResourceKind::Metadata] = 1024;
   ResourceBudget low(limits);
   auto refused = ResultBuilder::start(low, schema, "large");
   require(refused.status().code == ErrorCode::ResourceExhausted,
           "large typed image metadata refused");
   zero(low);
-  TensorDescription tensor;
-  tensor.channel_axis = 0;
-  tensor.channels.resize(64);
-  auto facet = encode_tensor_description(tensor).take_value();
-  {
-    ResourceAllocationScope scope(low);
-    auto decoded = decode_tensor_description(facet);
-    require(decoded.status().code == ErrorCode::ResourceExhausted,
-            "decoder expansion admitted before allocation");
-  }
-  zero(low);
-  ValueFacet truncated{
-      "photospider.tensor-description",
-      4,
-      {'T', 'D', 'M', '4', 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 0}};
-  {
-    ResourceAllocationScope scope(roomy);
-    require(!decode_tensor_description(truncated).ok(),
-            "truncated group table rejected");
-  }
-  zero(roomy);
   // Two new frame pages cannot be partially committed when the second fails.
   limits = ResourceLimits{};
   limits.capacity[ResourceKind::Payload] = 32768;
@@ -240,10 +219,9 @@ struct Join {
                         phase.resources, phase.query, 1, 0, samples.value()))};
       return Result<ResultProgramPoll>(std::move(need));
     }
-    auto builder =
-        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key, {}, {},
-                             phase.query.tile_extent, phase.query.resources);
+    auto builder = ResultBuilder::start(
+        phase.resources, *phase.query.output.result_schema,
+        phase.query.semantic_key, {}, {}, phase.query.tile_extent);
     if (!builder.ok())
       return Result<ResultProgramPoll>(builder.status());
     auto output = builder.take_value();
@@ -508,7 +486,7 @@ void slots_whole_contract() {
       take(result.results.at("out").descriptor()), 0, {0}, &value, 4));
   require(value == 5, "second tensor member value");
   for (auto slot : {0u, 1u}) {
-    binding.result = image(root, schema, slot ? 100 : 50, {}, slot);
+    binding.result = image(root, schema, slot ? 100 : 50, slot);
     auto update = take(handle.replace_bindings({{binding}}));
     require(update.potential_dirty.at("out") ==
                 take(TileSet::from_indices(root, {0})),
@@ -789,8 +767,6 @@ struct BlockObserver {
   ResultRef foreign;
   WeakResultRef previous;
   ResultRef previous_owner;
-  ResourceBindings resources;
-  ColorProfileIdentity profile;
   CancellationSource cancellation;
 };
 struct BlockProgram {
@@ -808,20 +784,11 @@ struct BlockProgram {
     }
     const auto state = [&](double number) {
       auto schema = chunk_schema(1, ElementType::Float64, "test.block.state");
-      if (observer->mode == 10) {
+      if (observer->mode == 10)
         schema.tensors[0].descriptor.shape = {1, 4};
-        ColorArrayDescriptor description;
-        description.model = ColorModel::Cmyk;
-        description.reference = ColorReference::ProfileRelative;
-        description.white.reset();
-        description.profile = observer->profile;
-        schema.tensors[0].facets = {
-            encode_color_array(description).take_value()};
-      }
-      auto builder =
-          ResultBuilder::start(phase.resources, schema, "block.state", {}, {},
-                               128, observer->resources)
-              .take_value();
+      auto builder = ResultBuilder::start(phase.resources, schema,
+                                          "block.state", {}, {}, 128)
+                         .take_value();
 
       const double colors[] = {number / 10, 0, 0, 0};
       require(
@@ -938,14 +905,8 @@ void result_blocks() {
     auto observer = std::make_shared<BlockObserver>();
     observer->mode = mode;
     auto schema = chunk_schema(2, ElementType::Float64, "test.block.input");
-    if (mode == 12) {
-      for (unsigned i = 0; i < 32; ++i)
-        schema.tensors[0].facets.push_back(
-            {"vendor.proof" + std::to_string(i), 1, {42}});
-      std::sort(schema.tensors[0].facets.begin(),
-                schema.tensors[0].facets.end(),
-                [](const auto& a, const auto& b) { return a.key < b.key; });
-    }
+    if (mode == 12)
+      schema.id = std::string(128, 'x');
     auto registry = std::make_shared<OperationRegistry>();
     OperationDefinition operation;
     operation.key = "test.block";
@@ -969,15 +930,6 @@ void result_blocks() {
     auto context = std::make_unique<ExecutionContext>(registry, config);
     auto root = context->resource_budget().take_value();
     ResourceBudget foreign;
-    if (mode == 10) {
-      auto bytes = icc_profile_fixture::fixture();
-      auto profile =
-          IccProfile::import(ByteView(bytes.data(), bytes.size()), root)
-              .take_value();
-      observer->profile = profile.identity();
-      observer->resources =
-          ResourceBindings::create({profile}, root).take_value();
-    }
     {
       auto make_source = [&](const ResourceBudget& budget) {
         auto builder =
@@ -1038,22 +990,18 @@ void result_blocks() {
                       record->inputs[0].tiles == request({0}).tiles,
                   "block hit keeps current tile Need");
         } else if (mode == 12) {
-          require(observer->computations == 1 &&
-                      first.value().diagnostics.dependency_cache_work <= 16,
-                  "many input facets respect finite optional metadata fuel");
+          require(
+              observer->computations == 1 &&
+                  first.value().diagnostics.dependency_cache_work <= 16,
+              "large schema identity respect finite optional metadata fuel");
         } else if (mode == 11) {
           require(observer->computations == 1,
                   "optional metadata read refusals do not poison later "
                   "mandatory computation");
         } else if (mode == 10) {
           auto second = context->execute_fragments(frozen, {{"out", point(1)}});
-          require(second.ok() && observer->computations == 2,
-                  "resource-bearing block states compute without lossy cache "
-                  "reuse");
-          require(observer->previous_owner.resources()
-                      .icc_profile(observer->profile)
-                      .ok(),
-                  "block state retains required profile owner");
+          require(second.ok() && observer->computations == 1,
+                  "multi-element block states reuse completed data");
         } else {
           require(
               observer->computations == 1 &&
@@ -1071,7 +1019,6 @@ void result_blocks() {
       observer->previous_owner = {};
     }
     context.reset();
-    observer->resources = {};
     zero(root);
     zero(foreign);
   }
@@ -1615,89 +1562,45 @@ void result_checkpoints() {
     zero(root);
   }
 }
-void tuple_metadata() {
+void tuple_structure() {
   auto schema = unified_result_fixture::image_schema();
   auto& image = schema.tensors[0];
-  image.descriptor.shape = {2, 4, 4};
-  image.layout.channel_axis = 2;
-  image.facets = {encode_semantic(rgba_semantics()).take_value()};
-  require(schema.validate(true).ok(), "RGBA image slot");
-  auto q =
-      Footprint::from_regions(
-          {2, 2, 2, 4, 4}, {Region({{1, 1}, {0, 1}, {1, 1}, {2, 1}, {1, 1}})})
-          .take_value();
-  auto closed = image.close_samples(q).take_value();
-  require(closed.element_count().value() == 4 &&
-              closed.boxes()[0].dimensions()[4].offset == 0,
-          "RGBA full tuple closure");
-  image.descriptor = {ElementType::Float64, {2, 4, 3}};
-  image.layout.channel_axis = 2;
-  image.facets = {encode_color_array(ColorArrayDescriptor{}).take_value()};
-  require(schema.validate(true).ok(), "XYZ ColorArray image slot");
-  auto color =
-      Footprint::from_regions(
-          {2, 2, 2, 4, 3}, {Region({{1, 1}, {0, 1}, {1, 1}, {2, 1}, {1, 1}})})
-          .take_value();
-  require(image.close_samples(color).value().element_count().value() == 3,
-          "ColorArray tuple closure");
-  TensorDescription tensor;
-  tensor.channel_axis = 0;
-  tensor.channels.resize(6);
-  TensorColorGroup group;
-  group.name = "rgb";
-  group.indices = {0, 2, 4};
-  group.components = {{"R", "red", "relative"},
-                      {"G", "green", "relative"},
-                      {"B", "blue", "relative"}};
-  group.alpha = 5;
-  group.interpretation.model = "rgb";
-  group.interpretation.primaries = "srgb";
-  group.interpretation.transfer = "linear";
-  tensor.sampling = TensorSampling{"image-grid", {1, 1}, {0, 0}};
-  tensor.groups = {group};
-  tensor.channels[5].sampling = TensorSampling{"image-grid", {1, 1}, {0, 0}};
+  for (uint64_t channels : {1, 3, 4, 7}) {
+    image.descriptor = {ElementType::Float32, {2, 4, channels}};
+    image.layout.channel_axis = 2;
+    image.atomic_trailing_axes = 1;
+    require(schema.validate(true).ok(), "arbitrary channel count");
+    auto q = Footprint::from_regions(
+                 {2, 2, 2, 4, channels},
+                 {Region({{1, 1}, {0, 1}, {1, 1}, {2, 1}, {0, 1}})})
+                 .take_value();
+    require(image.close_samples(q).value().element_count().value() == channels,
+            "explicit atomic trailing axis closure");
+    image.atomic_trailing_axes = 0;
+    require(image.close_samples(q).value() == q, "independent channel reads");
+  }
   image.descriptor = {ElementType::Float32, {6, 2, 4}};
   image.layout.channel_axis = 0;
   image.layout.height_axis = 1;
   image.layout.width_axis = 2;
-  image.facets = {encode_tensor_description(tensor).take_value()};
-  require(schema.validate(true).ok(), "TDM CHW slot");
-  auto sparse =
+  require(schema.validate(true).ok(), "channel-first spatial slot");
+  auto q =
       Footprint::from_regions(
           {2, 2, 6, 2, 4}, {Region({{1, 1}, {0, 1}, {2, 1}, {1, 1}, {2, 1}})})
           .take_value();
-  require(image.close_samples(sparse).value() == sparse,
-          "TDM channel has no implicit peers or alpha");
-  tensor.channels[5].sampling->grid = "other-grid";
-  require(!encode_tensor_description(tensor).ok(),
-          "alpha distinct grid rejected");
+  require(image.close_samples(q).value() == q,
+          "channel-first independent read");
 }
-void profile_owner() {
+void storage_owner() {
   ResourceBudget root;
   ResultRef survivor;
-  ColorProfileIdentity identity;
   {
-    auto bytes = icc_profile_fixture::fixture();
-    auto profile =
-        IccProfile::import(ByteView(bytes.data(), bytes.size()), root)
-            .take_value();
-    identity = profile.identity();
-    auto resources = ResourceBindings::create({profile}, root).take_value();
     auto schema = unified_result_fixture::image_schema();
     schema.id = "test.profile";
     auto& slot = schema.tensors[0];
     slot.batch_axes[0] = slot.batch_axes[1] = 1;
     slot.descriptor.shape = {1, 1, 4};
     slot.layout.channel_axis = 2;
-    TensorDescription tensor;
-    tensor.channel_axis = 2;
-    tensor.model = "cmyk";
-    tensor.profile = identity;
-    tensor.channels = {{"C", "cyan", "relative"},
-                       {"M", "magenta", "relative"},
-                       {"Y", "yellow", "relative"},
-                       {"K", "black", "relative"}};
-    slot.facets = {encode_tensor_description(tensor).take_value()};
     auto registry = std::make_shared<OperationRegistry>();
     require(join(registry.get(), schema).ok(), "profile join");
     require(registry->freeze().ok(), "profile freeze");
@@ -1705,7 +1608,7 @@ void profile_owner() {
     config.managed_resources = ResourceLimits{};
     ExecutionContext context(registry, config);
     auto destination = context.resource_budget().take_value();
-    auto input = image(destination, schema, 0, resources);
+    auto input = image(destination, schema);
     WorkflowDocument doc;
     WorkflowInputDeclaration declaration;
     declaration.id = 1;
@@ -1718,7 +1621,7 @@ void profile_owner() {
                   {}}};
     doc.outputs = {{"out", 1, "value"}};
     GraphContext graph(doc);
-    auto plan = Compiler(registry).compile(graph, {}, resources);
+    auto plan = Compiler(registry).compile(graph);
     require(plan.ok(), plan.status().message);
     ExecutionBinding binding;
     binding.name = "source";
@@ -1726,11 +1629,7 @@ void profile_owner() {
     auto result = context.execute(plan.value().plan, {{binding}});
     require(result.ok(), result.status().message);
     survivor = result.value().results.at("out");
-    require(survivor.resources().icc_profile(identity).ok(),
-            "profile resource inherited through Result");
   }
-  require(survivor.resources().icc_profile(identity).ok(),
-          "profile outlives context and original owner");
   float read = 0;
   require(survivor.read_tensor(survivor.descriptor().value(), 0,
                                {0, 0, 0, 0, 3}, &read, 4)
@@ -1749,10 +1648,10 @@ int main() {
     result_blocks();
     result_checkpoints();
     impure_whole_results();
-    tuple_metadata();
+    tuple_structure();
     alias_diamond();
     slots_whole_contract();
-    profile_owner();
+    storage_owner();
     std::cout << "Result image contracts passed\n";
     return 0;
   } catch (const std::exception& error) {

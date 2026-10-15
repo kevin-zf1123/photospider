@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_2
+implementation_status: implemented_cpu_result_abi_4
 clarification_status: complete
 registered_operation_keys:
   - color.rgb_to_xyz_strict
@@ -18,7 +18,7 @@ registered_operation_keys:
 # FMT-10A: linear RGB to XYZ
 
 Inherit the complete [FMT-10 family](FMT-10_rgb_basis_contract.md) and
-[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 3
+[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 4
 operations under the strict, accelerated Apple Silicon and accelerated x86-64
 CPU profiles.
 
@@ -26,11 +26,10 @@ CPU profiles.
 
 One input Result with one Float32 or Float64 tensor and no fields produces one
 `values` output Result containing one tensor. The output preserves Result schema
-identity, tensor key, logical shape and batch axes; it updates applicable
-semantic facets and sets `atomic_trailing_axes` to zero. Complete sample rank,
+identity, tensor key, logical shape and batch axes; it carries no description and sets `atomic_trailing_axes` to zero. Complete sample rank,
 including batch and cell axes, is at most 8; sample count is at most 2^40. Semantic input
 selects one complete linear RGB group, resolves its primary/white geometry from
-effective metadata and checks any explicit assertions. Raw provides its source
+explicit input_description and checks any explicit assertions. Raw provides its source
 basis and ordered component triple explicitly. Source transfer decoding and
 non-native semantic code scaling must be done before A, never implicitly here.
 
@@ -40,10 +39,9 @@ at that spatial coordinate for every nonidentity transformed request, even if
 some coefficients are zero. Semantic mode requires those inputs and the
 requested rounded output finite. Unrequested matrix rows are not evaluated.
 
-Write X/Y/Z into the original R/G/B slots and publish XYZ with the source white,
-units, observer and reference. Drop inapplicable RGB-only fields from that group;
-free-form names, coordinates, internal alpha and unrelated groups survive.
-Raw preserves applicable original interpretation without claiming XYZ conversion.
+Write X/Y/Z into the original R/G/B slots on the source white/unit/reference
+scale. No description is attached; callers supply the resulting XYZ configuration
+to later consumers. Alpha and unrelated sample values are copied.
 A has no destination white, adaptation method or arbitrary matrix parameter.
 
 ## Mapping, storage and errors

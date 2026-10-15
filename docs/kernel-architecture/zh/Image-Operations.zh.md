@@ -1,63 +1,45 @@
-# 图像 operations
+# 图像算子
 
-## 范围与当前可用性
+## 范围与归属
 
-下列 built-in image operations 通过 typed Result image slots 执行。各 operation 声明支持的 schema、region rule、backend 与 publication 行为；注册本身不代表支持所有 structural image layout。
+图像使用 `layout.spatial = true` 的普通 Result tensor slot。内核负责 tensor 结构、授权覆盖、backing 与执行，不根据通道数推断 RGB、alpha、颜色模型或数值范围。每个消费算子显式接收所需的描述、几何、transfer 和采样参数。
 
-## Production 源码与 runtime 状态
+内置图像与格式算子编译进 `Photospider::ops`。该目标提供 authoring 头文件，并依赖 `Photospider::ops_sdk` 与 kernel。共享描述、codec、ICC/OCIO 资源封装和纯描述编辑属于 `Photospider::ops_sdk`；仅使用 SDK 的消费者不需要算子注册表。精确参数与公式见[通道与颜色算子](Channel-and-Color-Operations.zh.md)及其链接的族规格。[英文页面](../Image-Operations.md)为权威说明。
 
-| Family | 当前源码与可用性 | 当前 Result 图像状态 |
+## 生产算子族
+
+| 算子族 | 生产实现与公共接口 | 当前行为 |
 | --- | --- | --- |
-| FMT alpha | 构建 `alpha_operations.cpp`、`alpha_common.hpp` 与 `alpha_authoring.cpp`；安装 `photospider/ops/format/alpha.hpp`。 | 三个 CPU profiles 共注册 associate、unassociate、set 九个 native Result ABI 3 keys。`extract_alpha` 与 `remove_alpha` 仍是基于已注册 operations 的 helper 组合。 |
-| FMT channel extraction | `channel_extraction.cpp` 注册六个 `channel.extract_index_<profile>` 与 `channel.extract_named_<profile>` CPU Result operation；`format::split_channels` 展开 index nodes。Public header `photospider/ops/format/channel.hpp` 单独安装。 | 对 generic 和 spatial Result tensor 提供精确分量访问及 Dependency-v2 support。这是 tensor operation，不是像素转换。 |
-| FMT literal-like fill | `channel_literal_like.cpp` 注册三个 `channel.literal_like_<profile>` Result CPU key。 | 单输入 Result；仅请求 Descriptor role 8，不读来源 samples；按请求输出重复同 dtype raw bits。可用于 FMT-05B opaque lowering，但不实现 `extract_alpha`。 |
-| FMT scalar literal | `channel_assembly.cpp` 注册三个 `channel.scalar_literal_<profile>` Result CPU key。 | 无输入 Whole primitive；以 prepared native bits 发布一个 generic shape `[1]` tensor，供 FMT-03 scalar sources 使用。 |
-| FMT channel assembly/editing | `channel_assembly.cpp` 注册 A/B/C CPU Result keys；已安装 assembly/editing headers 提供 A/B/C 与 swizzle/replace helpers。 | Result operation ABI 3；单 tensor 输入输出、七种逐位 dtype、样本数量有界、所有输入均做 Descriptor 检查、Data 按映射请求。 |
-| FMT metadata assignment | `metadata_assignment.cpp` 注册 `metadata.assign_<profile>` keys；`format::remove_metadata` 是 lowering helper。Public header `photospider/ops/format/metadata.hpp` 单独安装。 | Result operation ABI 3；输入恰有一个 tensor member 且没有 fields。保留 schema、tensor key、batch axes、layout 和样本位。这是通用 Result tensor operation，不是专用图像 operation family。 |
-| FMT RGB basis conversion | `rgb_basis.cpp`、`rgb_basis_math.cpp` 注册 A/B/C CPU Result keys；`photospider/ops/format/rgb_basis.hpp` 已安装。 | 三个 CPU profiles 共注册九个 Result ABI 3 keys。`format::convert_linear_rgb` 事务式组合已注册 stages，不增加 D key。这是通用 tensor operation，不是 image-slot operation。 |
-| FMT model conversion | `model_conversion.cpp`、`model_math.cpp` 和 `model_simd.cpp` 注册 FMT-11 Result operations；`photospider/ops/format/model_conversion.hpp` 提供 graph helpers。 | A-R/T 在三个 CPU profiles 下共注册 57 个 keys；FMT-11S 降低为已注册的 MASK threshold operation。 |
-| FMT 数值格式转换与 transfer | `numeric_conversion.cpp` 注册 `numeric.convert_format_strict`；`transfer.cpp` 注册 `color.transfer_encode_<profile>` 与 `color.transfer_decode_<profile>`。`photospider/ops/format/transfer.hpp` 单独安装。 | 两者都是通用 Result tensor operation，不是图像专用 family。数值转换执行同坐标 dtype/range conversion；transfer 对选中的 semantic RGB/Gray group 或显式 raw components 执行标量曲线转换。 |
-| Numeric LUT and structured LUT Results | `lut3d_bake_geometry.cpp` 提供 Whole numeric Value geometry operations。`lut3d_bake_results.cpp` 中 Pack 与 Measure 发布 structured Results；Unpack 与 Gate 发布 Values。`lut1d_application.cpp`、`lut3d_application.cpp`、`lut_apply_1d.cpp` 和 `field_apply_lut_1d.cpp` 消费 numeric Value/table 契约。 | 这些 numeric 和非图像 structured operation 不是 Result 图像实现。 |
+| 通道提取 | `channel_extraction.cpp`；`photospider/ops/format/channel.hpp` | 六个按 profile 区分的 index/name Result 算子。显式描述可解析轴与选择器；样本精确复制。`split_channels` 展开为 index 节点。 |
+| 通道组合与编辑 | `channel_assembly.cpp`；`channel_assembly.hpp`、`channel_editing.hpp` | 组合、拼接和映射组合复制七种 dtype。Swizzle/replace 是基于这些 key 和 scalar literal 的事务性 authoring helper。 |
+| Literal-like fill | `channel_literal_like.cpp` | 仅请求 Descriptor support，重复已准备的同 dtype 位模式；支持 alpha 提取的不透明回退。 |
+| Scalar literal | `channel_assembly.cpp` | 无输入 Whole primitive，生成 shape `[1]`，用于显式 scalar/literal 通道来源。 |
+| Alpha | `alpha_operations.cpp`、`alpha_common.hpp`、`alpha_authoring.cpp`；`alpha.hpp` | 九个原生 key 覆盖三种 CPU profile 的 associate、unassociate 和 set。Extract/remove 为 authoring 组合。 |
+| 数值转换 | `numeric_conversion.cpp` | `numeric.convert_format_strict` 通过显式数值范围实现七种 dtype 间的 49 对转换。 |
+| Transfer | `transfer.cpp`；SDK `photospider/ops/format/transfer.hpp` | Encode/decode key 使用显式 transfer 定义及选定 RGB/Gray group 或 raw 分量。SDK 头提供定义 codec。 |
+| RGB basis 与白点 | `rgb_basis.cpp`；`rgb_basis.hpp`、SDK `rgb_geometry.hpp` | A/B/C key 执行 RGB/XYZ 与显式白点适应；D helper 组合这些节点。 |
+| 颜色模型 | `model_conversion.cpp`、`model_math.cpp`、`model_simd.cpp`；`model_conversion.hpp` | A–R/T 提供 57 个按 profile 区分的 CPU key；S 降低为 MASK threshold key。 |
+| 描述编辑 | SDK `common/domain/description_editor.cpp`；`photospider/ops/format/metadata.hpp` | `format::edit_description` 返回配置值，不创建图节点；`metadata.assign/remove` 未注册。 |
+| LUT bake 与应用 | `plugins/ops/01-numeric/`；`photospider/ops/numeric/lut3d_bake.hpp` | 使用普通数值 Result 和显式配置；报告/表 schema 与校验属于 SDK，不属于内核空间存储机制。 |
 
-## 原生 alpha Result operations
+当前 Result operation C ABI 为 4。CPU profile 为 `strict`、`accelerated_apple_silicon` 和 `accelerated_x86_64`；加速 profile 要求匹配的主机能力。注册不代表支持全部空间布局或 GPU 后端。
 
-已安装的 `photospider/ops/format/alpha.hpp` 可向普通 workflow 追加 FMT-04A/B 与
-FMT-05A nodes。九个 native keys 使用 Result ABI 3；FMT-05B/C 仍是基于已注册
-extraction、literal-like fill、mapped assembly 和 metadata assignment keys 的
-authoring compositions。这些是通用 single-tensor operations，不是专用的
-`photospider.image` slots。它们保留 batch prefix，按 cell-relative axes 处理，
-并限制 full sample rank 不超过 8、count 不超过 2^40。输入必须是无 fields 的单
-tensor；算术使用同 dtype Float32/Float64，提取和移除可逐位处理七种支持的 dtype。
+## Alpha 与模型算子
 
-对于 FMT-04 semantic operations，参与计算的 color 和被消费的 alpha samples
-具有 Data 与 Validation support；只透传的 samples 不增加额外 sample validation。
-Raw association 只按 arithmetic 请求 Data，不附带 semantic-domain Validation。
-FMT-05A Set 对选中的 source colors 请求 Data 与 Validation；为这些 color outputs
-读取新 alpha source 时只增加 Validation support；发布的新 alpha channel 则请求其
-source 的 Data 与 Validation。所有连接输入均请求 Descriptor，这些 operations 不用
-Control。
+原生 alpha 算子接收一个 tensor 且没有 fields，保留 batch prefix，轴参数相对于 cell axes。完整 sample rank 至多为 8，sample count 至多为 2^40。关联算术使用同 dtype 的 Float32/Float64；提取、移除和分量复制保留七种受支持 dtype 的原始位模式。
 
-FMT-04 associate/unassociate 始终 materialize，且没有 layout 参数。在原生 alpha operations 中，只有 FMT-05A Set
-接受 layout policy。Generic Set view 要求完整 declared map 可证明使用单个
-`CpuStorage` owner 和单一 affine relation；spatial Set view 仅支持 internal identity。
-Set 的 `auto` 只在物理 `ViewUnavailable` 时 materialize。Materialization 在 Root
-budgets 与 cancellation 约束下事务发布；空输出请求不保留本次执行的载荷状态。这些
-FMT operations 没有新增 GPU backend。
+FMT-04 associate/unassociate 总是物化，不提供 layout 参数。FMT-05A Set 接受 layout 策略。通用 Set view 必须证明单个 `CpuStorage` owner 与仿射映射；空间 Set view 仅支持 internal identity。Auto 只在 `ViewUnavailable` 时物化。发布受 Root 预算和取消控制并保持事务性；Empty observation 不保留运行 payload 状态。这些算子没有新增 GPU 后端。
 
-当前 `02-format-color` 中已有的 built-in FMT families 均提供 Result CPU operations，或提供可降低为已注册 operations 的 helper。FMT-01、FMT-02/03、FMT-04/05A alpha、FMT-06 numeric conversion、FMT-08、FMT-09 transfer、FMT-10 RGB basis、literal-like fill 与 scalar literal 使用 Result operation ABI 3。Public headers `photospider/ops/format/channel.hpp`、`channel_assembly.hpp`、`channel_editing.hpp`、`alpha.hpp`、`metadata.hpp`、`transfer.hpp` 和 `rgb_basis.hpp` 和 `model_conversion.hpp` 作为只含头文件的 `Photospider::ops_headers` target 的一部分分别安装；使用方将它与 `Photospider::kernel` 一起链接。FMT-05B/C 是现有 Result operations 的可执行组合；FMT-04/05A、FMT-09 和 FMT-10 已有 native keys。其他 production operations 可能仍注册，但其 structural-image Value 契约仍在 Result 图像路径之外。注册本身不能证明具备 Result 图像支持。
+`extract_alpha` 将已有通道降低为提取，不透明回退降低为 literal-like fill。`remove_alpha` 对带通道输入降低为 mapped assembly 并返回 `values`；其无轴 identity 分支使用 `core.identity` 并返回 `value`。两种组合都不向输出附着描述。调用方为后续消费者提供结果解释。
 
-## Result 图像契约
+FMT-11 输入包含一个 Float32/Float64 tensor 且没有 fields。完整 sample rank 至多为 8；sample count 服从 schema 可表示性与资源限制。选定的显式描述样本请求 Data 与 Validation。Raw T 验证二级选择器；raw S 和 bypass 样本请求 Data；常量 R 输出只需要 Descriptor。Empty 请求无状态。Q 可保留可表示的通用或空间 view；其余成员物化并拒绝 forced view，包括仅 bypass 的请求。输出保留结构 schema identity、tensor key 和 batch axes，并将 `atomic_trailing_axes` 设为零。预期输出解释由算子及显式参数定义，不附着到 Result。
 
-Typed image slot 带有描述单个 frame/layer 的 descriptor、planar 物理布局、语义 facets，以及有界的 frame/layer 数量。其逻辑坐标为 `{frame, layer, descriptor axes...}`；frame 和 layer 是独立轴，不是 color channels。一个 Result 可在同一 schema 中混合 typed image slots 和 primitive fields。不得把图像 bytes 编码为 `ResultFieldSpec` records。
+## 空间 Result 契约
 
-Compiler 解析选中的 named output 及其 input projection。Result continuation 只请求声明过的 inputs；callback 可先读取 Control samples，再请求这些值所选择的 Data image support。发布的 relation 同时记录两者。Dirty transpose 使用同一 relation，因此已消费的 control 可以切换到新的 support，而无关输入不会被误作 dependency。`Exact`、`Conservative` 和 `Unknown` 保持各自声明的证明语义。
+空间 tensor 具有 rank-two 或 rank-three cell descriptor，以及可选 batch prefix。样本坐标由 batch axes 后接 cell axes 构成；height、width 和 channel axes 相对于 cell axes。使用 frame/layer 时，它们是 batch 维度。Physical plane order 和 row pitch 描述存储。只有 `atomic_trailing_axes` 决定 tuple closure；layout groups 和通道数不增加样本授权。
 
-Result owner 保留 schema、已认证 descriptor facts、backing、relations 和已消费 input owners。Work、stages、I/O、relation/maps、payload 与 owners 共用 execution root 进行 admission。Publication 失败具有 sticky 语义。Cancellation 和 stale execution 会等待活动 callbacks 退出后再释放其 phase state。参见 [Structured Results and image slots](Global-Results.zh.md)、[Dependency Data](Dependency-Data.zh.md) 和 [Tensor Storage and Region Access](../../kernel-specs/zh/Tensor-Storage-and-Region-Access.zh.md)。
+Result 可混合 tensor 与 primitive fields。图像样本字节属于 tensor storage。Compiler 解析选定输出及 input projection。Continuation 可读取已授权 Control 样本，再请求它们决定的 Data support；发布 relation 同时记录两者。Dirty transpose 使用该 relation；`Exact`、`Conservative` 和 `Unknown` 保持各自的证明含义。
 
-普通 numeric Value 和非 image structured Result 仍可用。
+Result owner 保留 schema、已认证 descriptor facts、backing、relations 和 view 所需 source owners。算子资源配置由 preparation、plan 和执行状态持有。Root 准入覆盖 work、stage、I/O、relation/maps、payload 和 owners。发布失败是 sticky；取消或 stale execution 在释放借用 phase 状态之前等待已准入 callback 退出。
 
-## FMT-11 颜色模型转换
-
-FMT-11 A-R 和 T 在 strict、Apple Silicon 与 x86-64 profiles 下共注册 57 个 CPU keys。已安装的 authoring helpers 追加一个 key 并返回包含一个 tensor 的 `values` output；S 降低为 `mask.threshold_channel_<profile>`，不增加 color key。输入为无 fields 的单 Float32 或 Float64 tensor。完整 sample rank 不超过 8；sample count 受 Result schema 可表示范围和执行资源限制约束。Axis 相对 cell axes 编号，不包含 batch prefix。
-
-选中的语义 samples 请求 Data 与 Validation；raw T 验证 two-level selector；raw S 与 bypass samples 请求 Data；R 的常量输出仅需 Descriptor。Empty request 无运行状态。整个请求区域满足物理 view 约束时，Q 支持 generic 与 spatial view。其他成员物化输出，即使只请求 bypass 也拒绝 forced view。输出保留 schema id、tensor key 和 batches，更新选中的模型描述，并将 `atomic_trailing_axes` 设为零。这些是通用 tensor operations，不是 typed image-slot operations。
+另见[结构化 Result](Global-Results.zh.md)、[Dependency Data](Dependency-Data.zh.md)和[Tensor Storage and Region Access](../../kernel-specs/Tensor-Storage-and-Region-Access.md)。

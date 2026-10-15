@@ -20,7 +20,7 @@ struct SnapshotAccessOptions final {
 /** @brief Independent bounds for immutable rank-general input blocks. */
 struct InputSnapshotStoreConfig final {
   std::uint64_t maximum_bytes = 256U * 1024U * 1024U;
-  /** @brief Per-axis block extent; typed image C is kept complete. */
+  /** @brief Per-axis block extent. */
   std::uint32_t block_size = 128;
   /** @brief Maximum directory entries per version, checked before allocation.
    */
@@ -28,8 +28,7 @@ struct InputSnapshotStoreConfig final {
 };
 /**
  * @brief Immutable rank-1..8 Value of any built-in dtype in shared blocks.
- * @note Generic IEEE/integer bits and semantic facets are retained exactly.
- * Typed image-v2 validation always includes all channels of each pixel.
+ * @note IEEE/integer bits are retained exactly.
  * Copies/reads are concurrent-safe. Captured storage outlives its store.
  * Default snapshots are invalid; metadata access throws logic_error for them.
  */
@@ -38,16 +37,9 @@ class PHOTOSPIDER_API InputSnapshot final {
   InputSnapshot() noexcept = default;
   bool valid() const noexcept { return impl_ != nullptr; }
   const ValueDescriptor& descriptor() const;
-  const std::vector<ValueFacet>& facets() const;
-  /** @brief Owning resources retained by the snapshot's interpretation.
-   * @throws std::logic_error For an invalid snapshot; borrowed until
-   * retirement. Copy the set or a profile handle to extend ownership. No I/O or
-   * mutation.
-   */
-  const ResourceBindings& resources() const;
   /**
    * @brief Copies exact nonempty coverage into caller-owned packed bytes.
-   * @param region Contained logical region, with all image channels.
+   * @param region Contained logical region, of any contained shape.
    * @param destination Writable byte_size-byte range, borrowed until return.
    * @param byte_size Must equal the exact packed regional size.
    * @param options Sample bound and cooperative cancellation for this read.
@@ -60,11 +52,11 @@ class PHOTOSPIDER_API InputSnapshot final {
               std::uint64_t byte_size,
               const SnapshotAccessOptions& options = {}) const;
   /** @brief SHA-256 over canonical metadata and exact requested sample bits.
-   * @param region Nonempty contained coverage with complete image channels.
+   * @param region Nonempty contained coverage of any contained shape.
    * @param options Sample bound and cancellation checked during hashing.
    * @return Identity or InvalidArgument/ResourceExhausted/Cancelled; no partial
    * digest is returned.
-   * @note Identity domain v2 includes dtype, shape, coordinates, facets and
+   * @note Identity domain v3 includes dtype, shape, coordinates and
    * exact sample bits; allocation/layout/block geometry are not identity.
    */
   Result<std::string> content_identity(
@@ -89,11 +81,10 @@ class PHOTOSPIDER_API InputSnapshotStore final {
    */
   explicit InputSnapshotStore(InputSnapshotStoreConfig config = {});
   ~InputSnapshotStore();
-  /** @brief Imports a complete Value into owned blocks, validating typed
-   * samples.
+  /** @brief Imports a complete Value into owned blocks.
    * @param value Complete immutable Value; any valid origin/stride layout.
    * @param options Sample bound and cancellation for validation and copying.
-   * @return Immutable snapshot or typed validation/budget/cancellation error.
+   * @return Immutable snapshot or structure/budget/cancellation error.
    * @throws std::bad_alloc For metadata allocation; no partial publication.
    */
   Result<InputSnapshot> import_value(
@@ -101,8 +92,7 @@ class PHOTOSPIDER_API InputSnapshotStore final {
   /**
    * @brief Creates a new version by exact-region replacement in input order.
    * @param base Valid snapshot from this store.
-   * @param replacement Matching descriptor/facets and nonempty Region with all
-   * channels.
+   * @param replacement Matching descriptor and nonempty Region.
    * @param options Bounds validation and affected-block copy samples; observes
    * cancellation during scans and between bounded byte-copy chunks.
    * @return New snapshot or typed failure, leaving base unchanged.

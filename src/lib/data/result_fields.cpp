@@ -16,15 +16,14 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
 #include "data/affine_view.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
 #include "data/value_validation.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/data/result.hpp"
-#include "photospider/data/tensor_description.hpp"
 
 namespace ps {
 namespace data_internal {

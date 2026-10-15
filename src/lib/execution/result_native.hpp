@@ -8,9 +8,9 @@
 #include <mutex>
 #include <utility>
 
-#include "core/checked_math.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_window_access.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/plugin/result_program.hpp"
 #include "plugin/dependency_discovery.hpp"
 

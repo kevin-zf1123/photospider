@@ -30,7 +30,7 @@ members share one dtype (UInt8, Int64, Float32 or Float64), rank 1..8, and equal
 extents on every non-concatenation axis. Their `sample_shape()` includes any
 batch prefix. Each input and the output has at most 2^40 elements. The output
 port `values` is a Result with schema `photospider.tensor`, member `samples`,
-and the complete ordinary output shape. It has no facets or batch topology.
+and the complete ordinary output shape. It has no batch topology.
 
 `axis` is a required static Int64 in `[0, rank)`. `layout` is a required static
 String with values `view` and `dense`. There are no casts, broadcasting, or

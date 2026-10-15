@@ -13,8 +13,8 @@
 #include <vector>
 
 #include "cache_build_identity.hpp"  // NOLINT(build/include_subdir)
-#include "core/checked_math.hpp"
 #include "execution/native_gpu.hpp"
+#include "photospider/core/checked_math.hpp"
 #ifdef PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS
 #include "execution/execution_test_hooks.hpp"
 #endif

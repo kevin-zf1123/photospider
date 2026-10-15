@@ -58,7 +58,7 @@ struct Follow {
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
             : std::vector<std::uint64_t>{},
-        phase.query.tile_extent, phase.query.resources));
+        phase.query.tile_extent));
     auto storage = take(phase.resources.allocator().allocate(sizeof(sample)));
     std::memcpy(storage.data(), &sample, sizeof(sample));
     check(builder.publish_tensor(0, Region({{0, 1}, {atom, 1}}),

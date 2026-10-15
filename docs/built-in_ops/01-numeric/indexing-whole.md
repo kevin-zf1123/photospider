@@ -6,7 +6,7 @@ an arbitrary schema/member key. Its complete `sample_shape()` includes batch
 axes, has rank 1..8 and contains at most 2^40 elements. The operations support
 UInt8, Int64, Float32 and Float64 numeric tensors without requiring image facets
 or batch topology. Output Results use `photospider.tensor`/`samples`, publish
-the complete output shape as ordinary axes, and drop facets and batch metadata.
+the complete output shape as ordinary axes, and drop batch metadata.
 
 The compiler validates static schemas, shape relationships and parameters
 during specialization. For nonempty Whole demand, the program requests each

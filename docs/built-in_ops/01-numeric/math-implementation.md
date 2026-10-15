@@ -316,7 +316,7 @@ Both outputs use CPU Whole Result continuations. A nonempty `values` request col
 
 Mathematical selection remains local: exact anchor/clamp uses that anchor y; interior evaluation uses the selected segment's anchor y and relative y handles. Generic y outside every evaluated stencil is not additionally finite-checked. All output samples are evaluated, so an invalid otherwise-unrequested sample can fail the complete values Run. Failure publishes no partial successful values. Each output publishes through its own all-or-nothing Result transaction. Axis collects only start and end, with count=1 excluding end, computes its 24-byte tuple and does not read controls or validate per-coordinate separation. Static metadata for all four edges is checked for either output.
 
-The Result association records actual source ObjectIds. Input changes update recorded dependency dirtiness for the requested region; anchor and handle changes affect `values`, while start/end affect outputs that depend on them. The count=1 dependency omits `end`. Complete immutable input versions, profile, metadata and parameters remain in cache identity, while binding topology can reuse the static PreparedOperation. Both outputs retain independent identities, names, dtypes and empty facets. Result owners and authorized read windows remain valid past context and source-handle retirement; releasing the final window releases the Root allocation.
+The Result association records actual source ObjectIds. Input changes update recorded dependency dirtiness for the requested region; anchor and handle changes affect `values`, while start/end affect outputs that depend on them. The count=1 dependency omits `end`. Complete immutable input versions, profile, metadata and parameters remain in cache identity, while binding topology can reuse the static PreparedOperation. Both outputs retain independent identities, names, dtypes and no attached domain description. Result owners and authorized read windows remain valid past context and source-handle retirement; releasing the final window releases the Root allocation.
 
 Temporary acceptance should cover Result declarations/bindings/reads, count-one and axis dependency projection, sparse full-output coverage and source association, same-demand and fresh-source cache behavior, preparation reuse, error ordering, all-port layouts, caller/worker fenv, work/cancellation/output/scratch limits, typed validation, and Result/read-window lifetime. For a three-value Float64 case in an isolated Root, retire the context, source
 owners and output Result handles while retaining the values and axis windows.
@@ -332,7 +332,7 @@ public `evaluate_bezier_node` accepts four Result inputs and specializes the
 output schema from their descriptors and static degree/dtype parameters. For public-path acceptance, declare schema-backed inputs, bind source Results,
 execute through Compiler/ExecutionContext and read output Results through
 authorized tensor windows. Source Values can provide immutable storage, charged
-as Referenced when retained by source Results. Result tensor schemas carry descriptor and semantic facets.
+as Referenced when retained by source Results. Result tensor schemas carry structural descriptors, layout and atomic axes.
 
 The Whole Result continuation requests active inputs with Data, Validation and
 Descriptor (role 13), validates every segment/t row before component arithmetic,
@@ -452,7 +452,7 @@ The Result association retains the actual source ObjectIds. Dirty mapping follow
 the recorded query region, while an input/table/axis replacement invalidates that
 demand. Static preparation remains reusable across those bindings. Cache identity
 retains all input versions, profile, metadata and parameters. There is no
-per-channel Atom success isolation. Output dtype, shape and empty facets remain
+per-channel Atom success isolation. Output dtype, shape and no attached domain description remain
 unchanged; arbitrary input offsets, unaligned and signed/zero strides remain
 legal. The complete immutable owner survives context destruction.
 
@@ -498,9 +498,9 @@ scalar Float64 output adds 8 bytes. Check these resource cases through Results.
 
 The 15 independent primitives provide 45 CPU-profile Whole keys. Nonempty
 requests collect all input arrays, validate every stop and query, then apply the
-unchanged one/two-row mathematics to every position. A complete dense ColorArray
-Value retains its facet, trailing channel closure and ICC resources; sparse
-public fragments retain that complete owner. Numeric failures affect the run;
+unchanged one/two-row mathematics to every position. The complete dense Result retains sample backing and an atomic trailing
+component axis. Color interpretation comes from the explicit color_description
+parameter; ICC resources remain with the selected preparation/plan state. Numeric failures affect the run;
 any input edit dirties all recorded output demand. Unused generic color rows
 stay mathematically unused, while complete upstream/typed validation can fail.
 Fixed allocator-owned arithmetic state and O(K) stop keys replace per-output
@@ -563,16 +563,12 @@ retained; AVX2 remains registered for its platform. No Accelerate/SME floating
 backend or NUM-14 certificate is applied. Exact state and unpublished output
 retire under work, capacity or cancellation failure.
 
-ColorArray's canonical model/white/primary/transfer/hue/association metadata is
-independent of the Image semantic enum. Exact 8192-bit integer determinant tests
-validate the primary basis and positive white constraints. Explicit immutable
-ICC v2/v4 CMYK printing profiles carry SHA-256/length identity and owned bytes;
-`ResourceBindings` resolves and references the matching allocation at compiler,
-Value, snapshot, dependency, result-v2 and structured execution boundaries.
-Duplicate identities require equal original bytes and canonical owner selection.
-Empty color results retain required resources. Sample-only optional caches skip
-resource-bearing results. Package 0.16 requires C++ consumers to rebuild; C ABI 9
-and the existing semantic/digest version numbers remain unchanged.
+ColorArray model/white/primary/transfer/hue/association configuration belongs
+to the operations SDK. Exact bounded arithmetic validates its geometry. CMYK
+profile wrappers import immutable bytes with content identity; operations select
+required identities explicitly into their preparation/plan resources. Results
+do not retain a profile because of a color description. Generic ResourceSet
+checks duplicate identities for byte conflicts and retains admitted owners.
 
 Acceptance should cover strict numerical references, mixed dtype, model domains,
 RGB association, hue units, resources, arbitrary layouts, active cancellation,
@@ -609,7 +605,7 @@ zero results; other exact cancellations are +0 and nonzero underflow retains
 its sign. No floating local coordinate or intermediate blend is rounded.
 
 The six registered profiles use Whole Result continuations. Static preparation
-validates port schemas, dtypes, shapes, descriptions, and ColorArray facets,
+validates port schemas, dtypes, shapes and explicit input/output color parameters,
 then retains the immutable program state for reuse across source rebinding.
 Each nonempty execution validates all three axes and every original input
 color/query before clamp, then performs exact selected-vertex mathematics.
@@ -619,7 +615,7 @@ the formula; zero-weight generic samples remain mathematically unused.
 
 The continuation records the current input, table, and axis ObjectIds. Its
 published Result has full certified coverage in global coordinates, including
-for a sparse request, and retains the complete three-component ColorArray facet.
+for a sparse request, with one atomic trailing component axis and no attached description.
 Input or table replacement updates dirty mapping from the recorded source
 support; the prepared operation remains reusable across those bindings. Empty
 demand performs no numerical producer poll. Each invocation publishes through
@@ -715,7 +711,7 @@ existing declarations, Result schemas, nodes and exports; a failed builder
 leaves the document unchanged. It retains no builder or capture. A SHA-256
 recipe identity includes the expanded source, designated endpoints and compiler
 semantic identity. Both expansions execute under one frozen binding snapshot,
-including shared dynamic inputs and optional `ResourceBindings`. Pointwise
+including shared dynamic inputs and optional `ResourceSet`. Pointwise
 independence is the caller's assertion.
 
 For temporary bake validation, bind immutable source Results backed by local
@@ -731,9 +727,10 @@ actual neighboring Float64 endpoints and round once. Every grid color remains a
 global report dependency even when a constant source ignores its generated
 color input. The owned table is a `curve.bake_lut3d.table` v2 Result, and the
 exported table is an immutable `photospider.tensor` Result with `samples`, the
-chosen dtype, ColorArray v1 and `atomic_trailing_axes=1`. Unpack supplies the
+chosen dtype and `atomic_trailing_axes=1`. The color descriptions are explicit
+static operation parameters, not tensor attributes. Unpack supplies the
 actual table to CRV-07 with explicit `table_dtype` and reject policy. The
-CompleteBundle report stores eleven fixed fields and associates observed input
+CompleteBundle report stores twelve fixed fields (353 bytes) and associates observed input
 ObjectIds in port order; entry 2 identifies the owned table. Gate validates all
 report fields and the table with role 13, checks that association, then publishes
 the requested complete-color region in global coordinates. An association
@@ -748,11 +745,16 @@ if that rounded down; an unrepresentable error is diagnostic +Inf. Validate the 
 Fraction references for each admitted profile.
 
 Measurement visits row-major cell centers and then extra points. The continuation
-stores only counts, maxima and first-failure data, and seals all eleven fields
+stores only counts, maxima and first-failure data, and seals all twelve fields
 together after complete measurement. Its Result fields retain global support
 across axis, grid, owned table, validation points, source reference and applied
-colors. The specialized report schema validates its fields, domain and metadata.
-Its canonical resolved schema participates in graph, plan and cache identity.
+colors. An explicitly bound SDK validation contract checks the report fields and domain.
+The `configuration_id` field binds the report to the recipe, shape, interpolation,
+tolerances, dtypes, extra-point count and both color descriptions. The public
+`read_lut3d_bake_report` reader takes that `Lut3dBakeDescription` explicitly; it
+does not reconstruct configuration from a schema. Gate and reader reject a
+mismatched configuration. Structural schema, explicit parameters, resources and
+validation contract identities participate in graph, plan and cache identity.
 
 Pack, Unpack and Gate first request authorized Result tensor views. Legal mappings
 retain the existing common storage owner; a physical `ViewUnavailable` triggers
@@ -842,7 +844,7 @@ Whole output exceeds the configured Payload cap.
 ## CRV-11 resampling and certified lowpass
 
 The four resampling helpers append existing CRV-01 interpolation and independent
-`core.identity` nodes. Identity preserves new-position dtype, facets and raw
+`core.identity` nodes. Identity preserves new-position dtype and raw
 special bits; only sample demand adds curve validation. Exports remain caller
 controlled and IDs reserve declared/referenced nodes. No new interpolation
 primitive, implicit filtering or sample-rate inference is introduced.

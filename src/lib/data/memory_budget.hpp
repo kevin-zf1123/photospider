@@ -11,7 +11,7 @@
 #include <string>
 #include <utility>
 
-#include "core/checked_math.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/core/resources.hpp"
 #include "photospider/data/storage.hpp"
 

@@ -33,8 +33,8 @@ reference bridges obey the family; no source/destination color-space conversion
 is silently added merely from the declared endpoint labels.
 
 One `input` tensor yields same-dtype/shape `values` through the common triple and
-F32 boundary. Raw still supplies explicit endpoint declarations/resources but
-does not publish exit_space as a newly valid semantic target. All modes apply
+F32 boundary. Every path supplies explicit endpoint declarations/resources and publishes
+numeric data without an attached exit description. All modes apply
 finite checks, alpha admission, exact point/group support and materialization.
 
 ## Acceptance and conceptual workflow
@@ -42,8 +42,7 @@ finite checks, alpha admission, exact point/group support and materialization.
 - Select a named affine transform with independent expected values in both
   directions. Verify exact name/alias behavior and rejection through A's
   ColorSpace namespace.
-- Reject missing endpoints and source metadata conflicts; explicit override
-  affects only this call. Test resource retention and a config without the
+- Reject missing endpoints and contradictory explicit endpoint configuration. Test resource retention and a config without the
   selected NamedTransform capability/object.
 - An alpha-changing named matrix fails admission; ordinary RGB mixing remains
   allowed. Same-shape output preserves unrelated alpha/AOV bits.

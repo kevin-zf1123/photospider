@@ -16,15 +16,14 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
 #include "data/affine_view.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
 #include "data/value_validation.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/data/result.hpp"
-#include "photospider/data/tensor_description.hpp"
 
 namespace ps {
 Result<std::uint64_t> ResultViewAxis::source_coordinate(
@@ -446,8 +445,7 @@ Status ResultBuilder::publish_tensor_kernel(
               return Result<PlanarImage>(lease.status());
             auto config = target.config;
             config.groups = spec.layout.groups;
-            return PlanarImage::create(spec.descriptor, config, spec.facets,
-                                       owner->resources);
+            return PlanarImage::create(spec.descriptor, config);
           }();
           if (!created.ok())
             return reject(created.status());
@@ -1240,7 +1238,7 @@ Status ResultBuilder::publish_tensor_view(
   auto alias = PlanarImage::assemble_view(
       tensors, channels, counts, spec.descriptor,
       data_internal::planar_layout(spec.layout), Region(std::move(spatial)),
-      spec.facets, impl_->image_budget, cancellation, impl_->resources);
+      impl_->image_budget, cancellation);
   if (!alias.ok()) {
     if (alias.status().code == ErrorCode::InvalidArgument &&
         alias.status().reason == FailureReason::ViewUnavailable)

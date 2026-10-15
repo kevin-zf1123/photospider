@@ -12,9 +12,9 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
 #include "data/memory_budget.hpp"
 #include "execution/structured_cache.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/execution/execution.hpp"
 
 namespace ps::execution_internal {
@@ -322,9 +322,7 @@ class ResultCache final {
    */
   void put(const std::string& key, const Value& value, std::uint64_t epoch,
            bool native = false) noexcept {
-    // This optional LRU accounts sample allocations. Resource-bearing Values
-    // remain owned by Runs/results until resource-aware cache admission exists.
-    if (key.empty() || !value.valid() || value.resources().size())
+    if (key.empty() || !value.valid())
       return;
     try {
       std::optional<ResourceAllocationScope> optional;
@@ -335,10 +333,7 @@ class ResultCache final {
         bytes += value.descriptor().shape.size() * sizeof(std::uint64_t) +
                  value.region().rank() * sizeof(RegionDimension) +
                  value.layout().origin.size() * sizeof(std::uint64_t) +
-                 value.layout().byte_strides.size() * sizeof(std::int64_t) +
-                 value.facets().size() * sizeof(ValueFacet);
-        for (const auto& facet : value.facets())
-          bytes += facet.key.size() + 1 + facet.payload.size();
+                 value.layout().byte_strides.size() * sizeof(std::int64_t);
         auto admitted =
             budget_->resources()->reserve(ResourceCapacity::host(bytes, bytes));
         if (!admitted.ok())

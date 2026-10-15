@@ -19,7 +19,7 @@ Context 串行化 snapshot 捕获与文档替换。Compiler 阶段在发布结�
 ## 3. 契约规约与接口
 
 ```cpp
-struct WorkflowDocument { std::uint32_t schema_version = 3; /* inputs, nodes, outputs */ };
+struct WorkflowDocument { std::uint32_t schema_version = 6; /* inputs, nodes, outputs */ };
 class GraphContext {
  public:
   explicit GraphContext(WorkflowDocument);
@@ -28,7 +28,7 @@ class GraphContext {
 };
 class Compiler {
  public:
-  Result<SemanticGraphIR> analyze(const GraphSnapshot&, ResourceBindings = {}) const;
+  Result<SemanticGraphIR> analyze(const GraphSnapshot&, ResourceSet = {}) const;
   Result<OptimizedGraphIR> optimize(const SemanticGraphIR&) const;
   Result<ExecutionPlan> plan(const OptimizedGraphIR&, const PlanningOptions& = {}) const;
 };
@@ -36,7 +36,7 @@ class Compiler {
 
 Context 复制调用方数据。`snapshot()` 返回一致的文档与 revision。`replace()` 在加锁前分配新的不可变文档，再在锁内一起发布文档和下一个 revision。分配失败时源文档和 revision 保持不变；revision 溢出时在发布前抛出异常。Context 析构会把共享 revision token 设为零，使仍存在的 snapshot 失效。
 
-Analysis 校验有界文档和文本、唯一 ID、引用、端口、operation 与必需参数类型、无环拓扑，以及推导出的输出类型/形状/Region 元数据。它会在发布完整 `SemanticGraphIR` 前检查 snapshot 当前性。Optimization 和 planning 同样只返回完整阶段或类型化错误；分配失败可能传播为 `std::bad_alloc`。当前校验细节见 [Graph 生命周期](../../kernel-architecture/Graph-Lifecycle.md) 和 [Compiler 和执行](../../kernel-architecture/Compiler-and-Execution.md)。
+Analysis 校验有界文档和文本、唯一 ID、引用、端口、operation 与必需参数类型、无环拓扑，以及推导出的输出 Result schema。Operation preparation 用 `ResourceIdentity` 指明所需的不可变资源；analysis 从传入的 `ResourceSet` 中选取这些资源，请求的 identity 缺失时失败，并由编译状态持有所选 owner。它会在发布完整 `SemanticGraphIR` 前检查 snapshot 当前性。Optimization 和 planning 同样只返回完整阶段或类型化错误；分配失败可能传播为 `std::bad_alloc`。当前校验细节见 [Graph 生命周期](../../kernel-architecture/Graph-Lifecycle.md) 和 [Compiler 和执行](../../kernel-architecture/Compiler-and-Execution.md)。
 
 ## 4. 非目标与明确边界
 - `WorkflowDocument` 是 compiler 输入。解析、文件系统、存储和 daemon 错误映射属于调用方。

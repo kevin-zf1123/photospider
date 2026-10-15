@@ -17,11 +17,11 @@
 #include "02-format-color/result_mapping.hpp"
 #include "common/registry.hpp"
 #include "common/tensor_program.hpp"
-#include "common/typed_need_validation.hpp"
-#include "core/status_helpers.hpp"
 #include "photospider/core/resource_allocator.hpp"
-#include "photospider/data/tensor_description.hpp"
+#include "photospider/core/status_helpers.hpp"
 #include "photospider/ops/format/channel.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
+#include "photospider/ops/tensor_description.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal {
@@ -132,21 +132,6 @@ std::vector<std::uint64_t> indices(const std::string& value) {
     first = parsed.ptr + 1;
   }
   return result;
-}
-std::optional<TensorDescription> description_of(const ResultTensorSpec& input) {
-  for (const auto& f : input.facets) {
-    if (f.key != "photospider.tensor-description")
-      continue;
-    auto decoded = decode_tensor_description(f);
-    if (!decoded.ok())
-      throw decoded.status();
-    auto status =
-        validate_tensor_description(decoded.value(), input.descriptor);
-    if (!status.ok())
-      throw status;
-    return decoded.take_value();
-  }
-  return {};
 }
 TensorInterpretation top_interpretation(const TensorDescription& d) {
   return {d.model,       d.primaries,  d.transfer,         d.reference,
@@ -274,8 +259,7 @@ std::uint64_t typed_constant(const std::string& literal, bool narrow) {
   return bits;
 }
 void legal_parameters(Kind kind, const Params& p, bool raw) {
-  std::set<std::string> allowed{"metadata_mode",
-                                "metadata_override",
+  std::set<std::string> allowed{"input_description",
                                 "group",
                                 "axis",
                                 "components",
@@ -290,7 +274,8 @@ void legal_parameters(Kind kind, const Params& p, bool raw) {
     for (const auto* k : keys)
       allowed.insert(k);
   };
-  if (kind == Kind::XyzToLab || kind == Kind::LabToXyz)
+  if (kind == Kind::XyzToLab || kind == Kind::LabToXyz ||
+      kind == Kind::XyzToXyy)
     add({"white_x", "white_y"});
   if (kind == Kind::LabToLch || kind == Kind::OklabToOklch ||
       kind == Kind::RgbToHsl || kind == Kind::RgbToHsv)
@@ -471,18 +456,13 @@ Result<OperationPreparation> prepare(
     out.math.kind = kind;
     out.math.profile = profile;
     out.math.narrow = input.descriptor.element_type == ElementType::Float32;
-    const auto mode = text(p, "metadata_mode", "respect");
-    require(mode == "respect" || mode == "override" || mode == "raw",
-            "invalid metadata_mode");
-    const bool raw = mode == "raw";
+    const bool raw = !p.count("input_description");
     out.math.semantic = !raw;
     legal_parameters(kind, p, raw);
-    require((mode == "override") == (p.count("metadata_override") != 0),
-            "metadata_override must occur exactly in override mode");
-    auto description = description_of(input);
-    if (mode == "override") {
+    std::optional<TensorDescription> description;
+    if (!raw) {
       auto decoded =
-          tensor_description_from_parameter(text(p, "metadata_override"));
+          tensor_description_from_parameter(text(p, "input_description"));
       if (!decoded.ok())
         throw decoded.status();
       auto valid =
@@ -491,9 +471,6 @@ Result<OperationPreparation> prepare(
         throw valid;
       description = decoded.take_value();
     }
-    if (!raw)
-      require(description.has_value(),
-              "semantic FMT-11 requires an explicit description or override");
     const auto algorithm = text(p, "algorithm", "auto");
     require(algorithm == "auto" || algorithm == "scalar" ||
                 algorithm == "reference",
@@ -622,7 +599,8 @@ Result<OperationPreparation> prepare(
       }
       if (kind == Kind::ColorToGray || kind == Kind::GrayToColor)
         out.math.gray = gray_kind(text(p, "gray_kind"));
-      if (kind == Kind::XyzToLab || kind == Kind::LabToXyz) {
+      if (kind == Kind::XyzToLab || kind == Kind::LabToXyz ||
+          kind == Kind::XyzToXyy) {
         out.math.white = parameter_pair(p, "white_x", "white_y");
         valid_pair(out.math.white, "raw reference white");
       }
@@ -899,17 +877,6 @@ Result<OperationPreparation> prepare(
           validate_tensor_description(result, output_tensor.descriptor);
       if (!valid.ok())
         throw valid;
-      auto encoded = encode_tensor_description(result);
-      if (!encoded.ok())
-        throw encoded.status();
-      auto& facets = output_tensor.facets;
-      facets.erase(std::remove_if(facets.begin(), facets.end(),
-                                  [](const auto& f) {
-                                    return f.key ==
-                                           "photospider.tensor-description";
-                                  }),
-                   facets.end());
-      facets.push_back(encoded.take_value());
     }
     if (input.layout.spatial) {
       auto image = input.layout;
@@ -1025,7 +992,7 @@ ResultBuilder builder_for(const ResultProgramPhase& phase, bool /*empty*/) {
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_extent, phase.query.resources));
+      phase.query.tile_extent));
 
   return builder;
 }
@@ -1087,8 +1054,7 @@ Status run_region(const ResultProgramPhase& phase, const Preparation& p,
   std::array<double, 3> coefficients{};
   std::array<std::uint64_t, 3> read_work{};
   for (std::size_t i = 0; i < inputs.size(); ++i)
-    read_work[i] =
-        take(execution_internal::ResultWindowAccess::read_work(inputs[i]));
+    read_work[i] = take(inputs[i].read_work());
   if (candidate) {
     for (unsigned c = 0; c < 3; ++c) {
       const auto bound = p.constants->first_fast[component][c];
@@ -1254,9 +1220,6 @@ struct State final {
   Footprint output;
   explicit State(const Preparation* prepared) : p(prepared) {}
   Poll poll(const ResultProgramPhase& phase) try {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     const auto& spec = phase.query.output.result_schema->tensors[0];
     if (!requested) {
       requested = true;
@@ -1286,7 +1249,7 @@ struct State final {
       }
       return Poll(std::move(need));
     }
-    input_internal::Float32Environment environment;
+    plugin_internal::FloatingEnvironment environment;
     MathConfig config = p->math;
     if (!environment.active())
       config.algorithm = Algorithm::Reference;
@@ -1374,8 +1337,13 @@ struct State final {
         return Poll(status);
       }
     }();
-    if (phase.report_numeric)
-      check(phase.report_numeric(report));
+    if (!result.ok())
+      phase.record_failure(result.status());
+    if (phase.report_diagnostic) {
+      auto reported = report_numeric(phase, report);
+      if (result.ok() && !reported.ok())
+        return Poll(reported);
+    }
     return result;
   } catch (const Status& status) {
     return Poll(status);
@@ -1386,6 +1354,7 @@ OperationDefinition definition(Kind kind, SequenceProfile profile,
   OperationDefinition def;
   def.key = std::string(operation_name(kind)) + suffix;
   auto& traits = def.traits;
+  traits.diagnostics = {numeric_diagnostic_identity()};
   traits.input_count = 1;
   OperationPortConstraint port;
   port.kind = OperationPortKind::Result;
@@ -1402,8 +1371,8 @@ OperationDefinition definition(Kind kind, SequenceProfile profile,
   for (const auto* key :
        {"algorithm", "black_value", "components", "expected_source_layout",
         "expected_source_shape", "expected_source_tensor", "gray_kind", "group",
-        "input_hue_unit", "layout", "metadata_mode", "metadata_override",
-        "ncl_matrix", "output_hue_unit", "white_value"})
+        "input_hue_unit", "layout", "input_description", "ncl_matrix",
+        "output_hue_unit", "white_value"})
     add(key, OperationParameterType::String);
   for (const auto* key : {"axis", "expected_source_dtype", "output_axis"})
     add(key, OperationParameterType::Int64);

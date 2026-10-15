@@ -41,7 +41,7 @@ inline bool coverage(std::uint64_t bits, bool narrow) {
 inline MathFailure math_span_slow(
     const std::uint8_t* x, const std::uint8_t* a, std::uint8_t* y,
     std::uint64_t count, bool narrow, Action action, bool raw, bool reference,
-    const input_internal::Float32Environment& environment,
+    const plugin_internal::FloatingEnvironment& environment,
     const std::function<Status(std::uint64_t)>& consume) {
   const std::size_t width = narrow ? 4 : 8;
   const auto inf = narrow ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
@@ -142,7 +142,7 @@ inline MathFailure math_span_slow(
 inline MathFailure math_span(
     const std::uint8_t* x, const std::uint8_t* a, std::uint8_t* y,
     std::uint64_t count, bool narrow, Action action, bool raw, bool simd,
-    bool reference, const input_internal::Float32Environment& environment,
+    bool reference, const plugin_internal::FloatingEnvironment& environment,
     const std::function<Status(std::uint64_t)>& consume) {
   if (!count) {
     return {};

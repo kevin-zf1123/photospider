@@ -60,9 +60,9 @@ Coordinator 在提供 capability 前，会按 input schema 和已发布 coverage
 
 Structured Result execution 使用同一 root 管理图像页、不可变 sample coverage、relation witnesses、field storage 和 retained source owners。图像 publication 选择 PlanarImage materialization 时，每个 frame 和 layer 使用有界 backing；metadata 与 coverage maps 计入 Metadata，planar pixel capacity 计入 Payload。其他 tensor publication 路径可保留 affine 或 `CpuStorage` backing 及 source Result owners，而不复制 payload；这些 owner 继续持有原有 accounting leases。Image read capability 保留 Result 和授权其 sample Region 的 captured descriptor。复制 capability 也会保留 backing 和 accounting lease。`ResultRef::capture()` 固定一份不可变的 descriptor revision、coverage、relations 和 dependency evidence。
 
-Result relation rows 与已发布图像 payload 使用所选 resource root 计量。每次 publication 都必须符合配置的 payload、work、I/O 和 stage 限额。`Exact`、`Conservative` 与 `Unknown` 具有不同的 dirty-propagation 行为；未解析的 relation 不能证明输出为 clean。PlanarImage materialization 会将字节复制到 managed backing，并在公开 sample coverage 前计入 payload；affine 与 storage-view publication 则保留 source owners 及其 accounting，不复制 tensor bytes。Schema selection 只保留声明过的 typed image 与 Result metadata resources，包括 ICC 和 OCIO bindings。Compiler 将嵌套 Result schemas 及其 resource identities 带入 plan；runtime Result bindings 会在 execution root 下重新准入所需 owners。
+Result relation rows 与已发布图像 payload 使用所选 resource root 计量。每次 publication 都必须符合配置的 payload、work、I/O 和 stage 限额。`Exact`、`Conservative` 与 `Unknown` 具有不同的 dirty-propagation 行为；未解析的 relation 不能证明输出为 clean。PlanarImage materialization 会将字节复制到 managed backing，并在公开 sample coverage 前计入 payload；affine 与 storage-view publication 则保留 source owners 及其 accounting，不复制 tensor bytes。Result schema 不携带资源。算子资源是通用的 `ImmutableResource` handle：拥有不可变字节及 `ResourceIdentity`（字节长度与 SHA-256），在某个 root 下准入，不做任何格式解析。`ImmutableResource::import` 复制并哈希字节；`from_storage` 哈希已有存储而不复制；二者都在提供的预算中计入 work 并观察取消，失败时释放全部临时分配。`ResourceSet::create` 对 backing 去重并拒绝冲突；`select` 精确保留请求的 identity，缺失时返回 `NotFound`；`reference` 在另一个 root 下重新准入整个集合而不复制 payload。Compiler 从调用方集合中选择每个算子声明的 identity，plan 保留它们；执行 root 与 owning root 不同时，这些引用会在执行 root 下准入。Result 自身不会让资源保持存活。
 
-Typed tensor 样本校验按最多 256 个标量样本的额度批次计费。读取一个没有剩余额度的样本前，validator 为该区域计入 `min(256, remaining)` 个 work 单位，然后用相同的数值与语义检查逐个校验每个样本。通过校验的 `N` 样本区域恰好消耗 `N` 个单位。失败的样本可能留下最多 255 个已预付但未读取的样本，这部分 work 不退还。被拒绝的计费直接返回其状态，不以更小批次重试。Validator 在每次读取样本前和每次计费后检查取消，并在每个已校验区域之后检查取消和宿主 stop 状态，因此被取消、stale 或停止的 Run 最迟在下一个区域边界结束。失败校验记录的 work 因而可能超过实际读取的样本数。
+内核只对 scalar-bound 端口（一个 Float32 样本对照有限区间）和显式绑定的校验器检查样本值。校验器通过 `ValidationContext::consume` 计入读取工作，其声明的 `scratch_bytes` 在进入前准入；校验失败前已消耗的 work 不退还。颜色数组合法性等领域样本检查由算子 SDK 在这些校验器或算子回调中实现。
 
 GPU context 在创建 device 时使用 execution context 的资源 root 进行 native 分配；无论是否提供自定义 managed-resource limits，该 root 都存在。Invocation metadata 使用显式独立的计量域。native pipeline cache 最多保留 64 个 entry；单批最多保留 32 条命令，每条最多 31 个 storage binding；一次 invocation 最多 1024 个存活 view token。地址映射仅持有弱 `CpuStorage` 引用，不拥有 native buffer。
 
@@ -72,7 +72,7 @@ GPU context 在创建 device 时使用 execution context 的资源 root 进行 n
 
 ## 算法与数学实现 (Algorithms & Math)
 
-预算乘积、对齐和页取整在分配或发布前进行溢出检查。内核统一使用 `src/lib/core/checked_math.hpp` 中的一组无符号辅助函数：带可选上限的加法、乘法、乘加和对齐检查，以及饱和乘法。检查失败时不写输出，各调用点保留自己的处理方式：
+预算乘积、对齐和页取整在分配或发布前进行溢出检查。内核统一使用 `include/photospider/core/checked_math.hpp` 中的一组无符号辅助函数：带可选上限的加法、乘法、乘加和对齐检查，以及饱和乘法。检查失败时不写输出，各调用点保留自己的处理方式：
 
 | 数量 | 溢出时 |
 | --- | --- |
@@ -87,4 +87,4 @@ GPU context 在创建 device 时使用 execution context 的资源 root 进行 n
 - `WithinBudgetOrFail` 只覆盖已纳入计量的 allocation，不限制总 RSS、驱动私有存储和标准库外部存储。
 - 空容器及部分内部几何/重建 metadata 未被完整计量。重建的外层 `ValueFragments` metadata 可能独立于原 publication token 存活，但每个 `Value` 仍持有自身 storage owner。
 - 调用方从管理范围取出原始 `Value` 或 vector 并在 managed allocator 之外复制时，自行承担该副本的内存成本。
-- Result C ABI 3 在每次 bridge `poll` 结束时释放普通的 C callback scratch。已保留的 tensor handle 以及由 `create_block_state` 创建的不可变 block-state Result 可以跨 poll 存在。
+- Result C ABI 4 在每次 bridge `poll` 结束时释放普通的 C callback scratch。已保留的 tensor handle 以及由 `create_block_state` 创建的不可变 block-state Result 可以跨 poll 存在。

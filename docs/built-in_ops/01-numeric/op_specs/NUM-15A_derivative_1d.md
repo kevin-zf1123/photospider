@@ -31,7 +31,7 @@ with `sample_shape()` [N] and step with `sample_shape()` [1]. Each input may use
 any tensor member key. Both use Float32 or both Float64. Require 2<=N<=2^40 and
 finite nonzero step, allowing negative step. The output port key is `values`;
 its Result schema is `photospider.tensor` with tensor member `samples`, shape
-[N], input dtype, and no facets. The
+[N], input dtype, and no attached domain description. The
 starting coordinate does not affect this operation;
 callers preserve or connect sampling-axis information separately. There are no
 static numeric parameters or implicit casts/axis extraction.

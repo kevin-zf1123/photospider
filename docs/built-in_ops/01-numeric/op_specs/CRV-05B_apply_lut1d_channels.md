@@ -32,7 +32,7 @@ shapes use complete `sample_shape()` including batch axes. The final input axis 
 the channel axis and its length equals the table's second extent. Each input[...,c]
 uses only table[:,c]. Output port `values` is a Result using schema
 `photospider.tensor` v1/member `samples`, preserving the complete input shape,
-including C=1, with selected dtype and empty facets.
+including C=1, with selected dtype and no attached domain description.
 It does not map one scalar to C outputs; that is the separate color-ramp family.
 
 Inherit [single-table CRV-05A](CRV-05A_apply_lut1d.md) for floating dtype rules,
@@ -43,7 +43,7 @@ zero/selection rules and the shared accelerated final FP32 bound. Each input Res
 selected dtypes or axes. Input and table tensor shapes come from full
 `sample_shape()` including batch axes. Output port `values` uses
 `photospider.tensor` v1/member `samples`, with the complete input shape, selected
-Float32/Float64 dtype and empty facets.
+Float32/Float64 dtype and no attached domain description.
 Require C>=1, 1<=L<=1048576, positive input extents and input rank 1..8.
 A rank-1 input [C] is one vector. Input and table logical element counts must
 each be <=2^40, with products checked without overflow. There is no additional
@@ -73,7 +73,7 @@ Errors in otherwise-unrequested queries or evaluated channels can fail the Run.
 Any input/table/axis edit invalidates recorded output demand; dirty mapping
 follows that recorded demand. Cache identity retains all input versions, profile,
 metadata and parameters. There is no
-per-channel Atom success isolation. Output dtype, shape and empty facets remain
+per-channel Atom success isolation. Output dtype, shape and no attached domain description remain
 unchanged; arbitrary input offsets, unaligned and signed/zero strides remain
 legal. The complete immutable owner survives context destruction.
 

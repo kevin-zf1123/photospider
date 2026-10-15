@@ -6,9 +6,9 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
-#include "data/content_digest.hpp"
 #include "execution/execution_timing.hpp"
+#include "photospider/core/checked_math.hpp"
+#include "photospider/core/content_digest.hpp"
 #include "plugin/port_validation.hpp"
 namespace ps::execution_internal {
 /** @brief Computes packed bytes for demanded coverage without allocating
@@ -112,9 +112,9 @@ Result<Value> transfer_value(const Value& source,
     return Result<Value>(allocated.status());
   auto buffer = allocated.take_value();
   std::memcpy(buffer.data(), source.bytes().data(), source.bytes().size());
-  auto published = Value::from_storage(
-      source.descriptor(), source.region(), source.layout(),
-      std::move(buffer).freeze(), source.facets(), source.resources());
+  auto published =
+      Value::from_storage(source.descriptor(), source.region(), source.layout(),
+                          std::move(buffer).freeze());
   if (published.ok())
     timing.success(published.value().bytes().size());
   return published;
@@ -199,8 +199,7 @@ Result<Value> uploaded_view(const Value& source,
   for (const auto dim : source.region().dimensions())
     layout.origin.push_back(dim.offset);
   return Value::from_storage(source.descriptor(), source.region(),
-                             std::move(layout), std::move(backing),
-                             source.facets(), source.resources());
+                             std::move(layout), std::move(backing));
 }
 
 }  // namespace ps::execution_internal

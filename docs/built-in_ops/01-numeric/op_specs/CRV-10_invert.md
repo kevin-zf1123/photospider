@@ -22,7 +22,7 @@ registration status, CPU target identity, floating environment, diagnostic prove
 host observation isolation, resource accounting and public/performance acceptance.
 In particular, rounding is nearest/ties-to-even with gradual underflow and the
 caller floating environment is preserved. This is limited inheritance: the ports,
-output kinds/facets, observation units, mathematical rounding boundaries and
+output structures, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
 turn a composite template or structured Result into a generic NUM Value primitive.
 A stated four-ULP final bound uses the shared FP32-scaled contract for both
@@ -48,7 +48,7 @@ Static out_of_domain is reject/clamp, default reject. Compare query against the
 actual numeric range of y; clamp selects the corresponding x endpoint, accounting
 for y direction. No inverse of extrapolated linear/PCHIP tails is provided.
 
-x/y/query independently accept Float32/Float64 and may mix. Output port `values` is a Result with schema `photospider.tensor`, member `samples`, shape [N], empty facets and static Float32/Float64 dtype, default Float64. K is 2..65536; N is
+x/y/query independently accept Float32/Float64 and may mix. Output port `values` is a Result with schema `photospider.tensor`, member `samples`, shape [N], no attached domain description and static Float32/Float64 dtype, default Float64. K is 2..65536; N is
 1..2^40. Every nonempty request reads all three inputs and computes the complete output. Every query and final x must be finite; an invalid query or output
 overflow anywhere fails the run, including outside the delivered footprint.
 
@@ -71,7 +71,7 @@ endpoint narrowing to infinity does not independently reject a finite root.
 Input port order is x,y,query; output is named values. Required static String
 parameters are dtype and out_of_domain, with constructor defaults Float64/reject.
 The three independent CPU operation keys select profile; no runtime mode or
-method parameter is accepted. All arrays and outputs use generic numeric facets;
+method parameter is accepted. All arrays and outputs carry ordinary numeric samples without domain labels;
 no geometry, color or physical unit is inferred.
 
 Linear locates adjacent y indices bracketing query by the global y direction,

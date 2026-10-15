@@ -4,8 +4,8 @@
 #include <functional>
 #include <vector>
 
-#include "data/content_digest.hpp"
 #include "execution/tile_cache.hpp"
+#include "photospider/core/content_digest.hpp"
 #include "photospider/execution/execution.hpp"
 #include "photospider/plugin/result_program.hpp"
 

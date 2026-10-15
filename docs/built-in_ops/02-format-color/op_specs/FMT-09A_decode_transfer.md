@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_2
+implementation_status: implemented_cpu_result_abi_4
 clarification_status: complete
 registered_operation_keys:
   - color.transfer_decode_strict
@@ -19,7 +19,7 @@ registered_operation_keys:
 
 Inherit the complete [FMT-09 contract](FMT-09_transfer_contract.md) and
 [scalar definitions](FMT-09_transfer_math.md). This direction has strict,
-accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 3 keys. The
+accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 4 keys. The
 specification remains Proposed.
 
 ## Interface and observable behavior
@@ -27,13 +27,11 @@ specification remains Proposed.
 One input Result with one tensor member and no fields produces one `values`
 output Result containing one tensor. The member uses Float32 or Float64, retains
 its dtype, shape and axis positions, and preserves Result schema identity, tensor
-key and batch axes. Semantic output updates transfer facets; raw output retains
-the input facets. Both set `atomic_trailing_axes` to zero. Complete sample rank,
+key and batch axes. Neither path attaches a description to the output. Both set `atomic_trailing_axes` to zero. Complete sample rank,
 including batch and cell axes, is at most 8; sample count is at most 2^40. Axis
-indices refer to cell axes and exclude the Result batch prefix. Respect and
-override select one static RGB/Gray group; raw uses explicit component selection.
-A may resolve the complete curve and parameters from source metadata. Explicit
-assertions must match unless override is selected. Raw always specifies them.
+indices refer to cell axes and exclude the Result batch prefix. Explicit `input_description` and `group` select one RGB/Gray group; raw uses explicit component selection.
+A may resolve the complete curve and parameters from input_description. Explicit
+assertions must match that explicit description. Raw always specifies them.
 No source interpretation is inferred from primaries, channel count or dtype.
 
 For each requested participating coordinate q, read only input[q], perform the
@@ -42,11 +40,10 @@ Linear and gamma=1 obey the special bit-copy identity. Copy all requested
 nonparticipating coordinates exactly. Alpha=0 causes no hidden-color shortcut;
 alpha itself is not read when only a color component is requested.
 
-Semantic output describes the corresponding linear quantity, preserving basis,
-white, shape, channel positions and unaffected group/alpha descriptions. PQ/1886
-return absolute display-linear cd/m²; OETF and ACES paths return their declared
-scene-relative quantity. Raw retains applicable input metadata without asserting
-that transfer decoding has produced valid linear color.
+Decode produces the corresponding linear quantity: PQ/1886 return absolute
+display-linear cd/m²; OETF and ACES paths return their specified scene-relative
+quantity. No output description is attached. Configure subsequent operations
+explicitly with the resulting units, transfer, basis and white.
 
 ## Dependencies, errors and storage
 

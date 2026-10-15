@@ -28,7 +28,7 @@ and in the named family contract take precedence.
 
 Return the greater value of matching elements in inputs `a` and `b`.
 Support UInt8, Int64, Float32 and Float64; shapes and dtypes match exactly.
-Output `values` preserves shape and dtype with empty facets. There are no static
+Output `values` preserves shape and dtype with no attached domain description. There are no static
 numeric parameters. Inherit the [binary contract](NUM-05_binary_contract.md)
 for both-operand demand, typed validation, errors, resources and execution.
 

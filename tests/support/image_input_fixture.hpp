@@ -21,9 +21,6 @@ inline void check(ps::Status status) {
   if (!status.ok())
     throw std::runtime_error(status.message);
 }
-inline ps::ValueFacet profile() {
-  return take(ps::encode_semantic(ps::rgba_semantics()));
-}
 inline ps::SchemaTemplate schema(std::vector<std::uint64_t> shape = {2, 2, 4},
                                  bool image = true) {
   const bool spatial = image || shape.size() == 2;
@@ -37,9 +34,7 @@ inline ps::SchemaTemplate schema(std::vector<std::uint64_t> shape = {2, 2, 4},
     tensor.layout.spatial = true;
     if (!image)
       tensor.layout.channel_axis.reset();
-    tensor.facets = {image
-                         ? profile()
-                         : take(ps::encode_semantic(ps::coverage_semantics()))};
+    tensor.atomic_trailing_axes = image ? 1 : 0;
   }
   result.tensors.push_back(std::move(tensor));
   return result;

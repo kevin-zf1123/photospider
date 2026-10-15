@@ -1,6 +1,6 @@
 # NUM-11 Whole execution
 
-The 21 formal `numeric.reduce_*` keys accept one Result per input port, with exactly one tensor member under any member key. The complete `sample_shape()` includes batch axes; rank is 1..8, extents are positive, and the logical element count is at most 2^40. Each `values` output is a `photospider.tensor` / `samples` Result. It preserves rank, sets reduced extents to one, uses ordinary axes, and drops input facets and batch topology.
+The 21 formal `numeric.reduce_*` keys accept one Result per input port, with exactly one tensor member under any member key. The complete `sample_shape()` includes batch axes; rank is 1..8, extents are positive, and the logical element count is at most 2^40. Each `values` output is a `photospider.tensor` / `samples` Result. It preserves rank, sets reduced extents to one, uses ordinary axes, and drops input batch topology.
 
 The six numerical reducers validate static schema and parameters during specialization. For nonempty demand, Whole requests the input with Data, Validation and Descriptor roles (role 13), validates its typed payload, and reads authorized Result windows. It computes every keepdims group and publishes a complete dense output before consumer projection. The implementation does not first collect or pack the full input. A typed-validation failure or arithmetic overflow in an unrequested group still fails the selected output. Empty demand reads no payload and performs no group arithmetic. Any active source edit dirties the complete output.
 

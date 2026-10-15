@@ -12,42 +12,43 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
-#include "core/utf8_validation.hpp"
+#include "photospider/core/checked_math.hpp"
+#include "photospider/core/utf8_validation.hpp"
+#include "plugin/operation_exception.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::result_c {
 Status outcome(int code) {
   switch (code) {
-    case PS_RESULT_STATUS_OK_V3:
+    case PS_RESULT_STATUS_OK_V4:
       return Status::success();
-    case PS_RESULT_STATUS_CANCELLED_V3:
+    case PS_RESULT_STATUS_CANCELLED_V4:
       return {ErrorCode::Cancelled, {}};
-    case PS_RESULT_STATUS_BACKEND_UNAVAILABLE_V3:
+    case PS_RESULT_STATUS_BACKEND_UNAVAILABLE_V4:
       return {ErrorCode::BackendUnavailable, {}};
-    case PS_RESULT_STATUS_RESOURCE_EXHAUSTED_V3:
+    case PS_RESULT_STATUS_RESOURCE_EXHAUSTED_V4:
       return {ErrorCode::ResourceExhausted, {}};
-    case PS_RESULT_STATUS_TYPE_MISMATCH_V3:
+    case PS_RESULT_STATUS_TYPE_MISMATCH_V4:
       return {ErrorCode::TypeMismatch, {}};
-    case PS_RESULT_STATUS_INVALID_ARGUMENT_V3:
+    case PS_RESULT_STATUS_INVALID_ARGUMENT_V4:
       return {ErrorCode::InvalidArgument, {}};
     default:
       return {ErrorCode::OperationFailed, {}};
   }
 }
 int code(const Status& status) {
-  return status.ok()                           ? PS_RESULT_STATUS_OK_V3
-         : status.code == ErrorCode::Cancelled ? PS_RESULT_STATUS_CANCELLED_V3
+  return status.ok()                           ? PS_RESULT_STATUS_OK_V4
+         : status.code == ErrorCode::Cancelled ? PS_RESULT_STATUS_CANCELLED_V4
          : status.code == ErrorCode::BackendUnavailable
-             ? PS_RESULT_STATUS_BACKEND_UNAVAILABLE_V3
+             ? PS_RESULT_STATUS_BACKEND_UNAVAILABLE_V4
          : status.code == ErrorCode::ResourceExhausted
-             ? PS_RESULT_STATUS_RESOURCE_EXHAUSTED_V3
+             ? PS_RESULT_STATUS_RESOURCE_EXHAUSTED_V4
          : status.code == ErrorCode::TypeMismatch
-             ? PS_RESULT_STATUS_TYPE_MISMATCH_V3
+             ? PS_RESULT_STATUS_TYPE_MISMATCH_V4
          : status.code == ErrorCode::InvalidArgument ||
                  status.code == ErrorCode::Stale
-             ? PS_RESULT_STATUS_INVALID_ARGUMENT_V3
-             : PS_RESULT_STATUS_FAILURE_V3;
+             ? PS_RESULT_STATUS_INVALID_ARGUMENT_V4
+             : PS_RESULT_STATUS_FAILURE_V4;
 }
 Result<std::string> text(const char* pointer, std::uint32_t count,
                          std::uint32_t maximum) {
@@ -58,28 +59,7 @@ Result<std::string> text(const char* pointer, std::uint32_t count,
     return Result<std::string>(invalid("invalid Result plugin key"));
   return Result<std::string>(std::move(string));
 }
-Status facets(const ps_result_facet_view_v3* input, std::uint32_t count,
-              std::vector<ValueFacet>* output) {
-  if (!array(input, count, 64))
-    return invalid("invalid Result facets");
-  for (std::uint32_t i = 0; i < count; ++i) {
-    const auto& facet = input[i];
-    if (facet.struct_size != sizeof(facet) || !facet.version ||
-        !array(facet.payload, facet.payload_size, 65536))
-      return invalid("invalid Result facet record");
-    auto key = text(facet.key, facet.key_size, 256);
-    if (!key.ok())
-      return key.status();
-    ValueFacet target;
-    target.key = key.take_value();
-    target.version = facet.version;
-    if (facet.payload_size)
-      target.payload.assign(facet.payload, facet.payload + facet.payload_size);
-    output->push_back(std::move(target));
-  }
-  return input_internal::canonicalize_facets(output);
-}
-ResultExtent extent(const ps_result_extent_v3& source) {
+ResultExtent extent(const ps_result_extent_v4& source) {
   return {static_cast<ResultExtentKind>(source.kind),
           source.value,
           source.input,
@@ -88,9 +68,9 @@ ResultExtent extent(const ps_result_extent_v3& source) {
           source.divisor,
           source.offset};
 }
-Result<SchemaTemplate> schema(const ps_result_schema_v3* source) {
+Result<SchemaTemplate> schema(const ps_result_schema_v4* source) {
   if (!source ||
-      reinterpret_cast<std::uintptr_t>(source) % alignof(ps_result_schema_v3) ||
+      reinterpret_cast<std::uintptr_t>(source) % alignof(ps_result_schema_v4) ||
       source->struct_size != sizeof(*source) ||
       !array(source->fields, source->field_count, 16) ||
       !array(source->tensors, source->tensor_count, 16) ||
@@ -156,32 +136,20 @@ Result<SchemaTemplate> schema(const ps_result_schema_v3* source) {
       copied.layout.groups.push_back(
           {role.take_value(), group.first_channel, group.channel_count});
     }
-    auto status = facets(image.facets, image.facet_count, &copied.facets);
-    if (!status.ok())
-      return Result<SchemaTemplate>(status);
     target.tensors.push_back(std::move(copied));
   }
   for (std::uint32_t i = 0; i < source->domain_rank; ++i)
     target.domain.push_back(extent(source->domain[i]));
-  std::vector<ValueFacet> metadata;
-  auto checked = facets(source->metadata, source->metadata_count, &metadata);
-  if (!checked.ok())
-    return Result<SchemaTemplate>(checked);
-  for (const auto& facet : metadata)
-    target.metadata.push_back(
-        {ResourceString(facet.key.begin(), facet.key.end()), facet.version,
-         ResourceVector<std::uint8_t>(facet.payload.begin(),
-                                      facet.payload.end())});
-  checked = target.validate();
+  auto checked = target.validate();
   return checked.ok() ? Result<SchemaTemplate>(std::move(target))
                       : Result<SchemaTemplate>(checked);
 }
-Result<OperationPortConstraint> constraint(const ps_result_port_v3& p);
-Result<OperationMetadata> port(const ps_result_port_v3& input) {
+Result<OperationPortConstraint> constraint(const ps_result_port_v4& p);
+Result<OperationMetadata> port(const ps_result_port_v4& input) {
   if (input.struct_size != sizeof(input))
     return Result<OperationMetadata>(invalid("invalid Result port size"));
   OperationMetadata metadata;
-  if (input.kind != PS_RESULT_OBJECT_V3)
+  if (input.kind != PS_RESULT_OBJECT_V4)
     return Result<OperationMetadata>(invalid("invalid Result port kind"));
   auto copied = schema(input.schema);
   if (!copied.ok())
@@ -213,7 +181,7 @@ MetadataView::MetadataView(const OperationMetadata* source, size_t count) {
       status = invalid("C Result metadata requires a schema");
       return;
     }
-    p.kind = PS_RESULT_OBJECT_V3;
+    p.kind = PS_RESULT_OBJECT_V4;
     p.schema = &b.schema;
     const auto& schema = *m.result_schema;
     b.schema.struct_size = sizeof(b.schema);
@@ -223,7 +191,7 @@ MetadataView::MetadataView(const OperationMetadata* source, size_t count) {
     b.schema.publication = static_cast<uint32_t>(schema.publication);
     b.fields.reserve(schema.fields.size());
     for (const auto& f : schema.fields) {
-      ps_result_field_spec_v3 field{};
+      ps_result_field_spec_v4 field{};
       field.struct_size = sizeof(field);
       field.key = f.key.data();
       field.key_size = f.key.size();
@@ -238,7 +206,6 @@ MetadataView::MetadataView(const OperationMetadata* source, size_t count) {
     b.schema.field_count = b.fields.size();
     b.tensors.resize(schema.tensors.size());
     b.groups.resize(schema.tensors.size());
-    b.image_facets.resize(schema.tensors.size());
     for (size_t j = 0; j < schema.tensors.size(); ++j) {
       auto& image = b.tensors[j];
       const auto& f = schema.tensors[j];
@@ -259,15 +226,11 @@ MetadataView::MetadataView(const OperationMetadata* source, size_t count) {
       image.storage_order = static_cast<uint32_t>(f.layout.order);
       image.row_pitch_bytes = f.layout.row_pitch_bytes;
       for (const auto& g : f.layout.groups)
-        b.groups[j].push_back({sizeof(ps_result_group_v3), g.role.data(),
+        b.groups[j].push_back({sizeof(ps_result_group_v4), g.role.data(),
                                static_cast<uint32_t>(g.role.size()),
                                g.first_channel, g.channel_count});
       image.groups = b.groups[j].empty() ? nullptr : b.groups[j].data();
       image.group_count = b.groups[j].size();
-      encode_facets(f.facets, b.image_facets[j]);
-      image.facets =
-          b.image_facets[j].empty() ? nullptr : b.image_facets[j].data();
-      image.facet_count = b.image_facets[j].size();
     }
     b.schema.tensors = b.tensors.empty() ? nullptr : b.tensors.data();
     b.schema.tensor_count = b.tensors.size();
@@ -275,9 +238,6 @@ MetadataView::MetadataView(const OperationMetadata* source, size_t count) {
       b.domain.push_back(encode(d));
     b.schema.domain = b.domain.empty() ? nullptr : b.domain.data();
     b.schema.domain_rank = b.domain.size();
-    encode_facets(schema.metadata, b.metadata);
-    b.schema.metadata = b.metadata.empty() ? nullptr : b.metadata.data();
-    b.schema.metadata_count = b.metadata.size();
   }
 }
 void apply_constraint(MetadataView& view, size_t i,
@@ -286,22 +246,23 @@ void apply_constraint(MetadataView& view, size_t i,
   p.kind = static_cast<uint32_t>(prototype.kind);
   p.minimum = prototype.minimum;
   p.maximum = prototype.maximum;
-  p.semantic_kind = prototype.semantic_kind;
   p.tensor_key =
       prototype.tensor_key.empty() ? nullptr : prototype.tensor_key.data();
   p.tensor_key_size = prototype.tensor_key.size();
-  p.requires_semantics = prototype.requires_semantics;
   p.scalar_bounds = prototype.scalar_bounds;
-  if (p.kind == PS_RESULT_OBJECT_V3 &&
+  auto& validators = view.storage[i].validators;
+  for (const auto& id : prototype.validators)
+    validators.push_back({sizeof(ps_result_extension_identity_v4), id.version,
+                          id.key.data(), static_cast<uint32_t>(id.key.size()),
+                          id.implementation.data(),
+                          static_cast<uint32_t>(id.implementation.size())});
+  p.validators = validators.empty() ? nullptr : validators.data();
+  p.validator_count = validators.size();
+  if (p.kind == PS_RESULT_OBJECT_V4 &&
       input_internal::tensor_member_predicate(prototype)) {
     p.element_type = prototype.element_type;
     p.rank = prototype.rank;
     p.element_type_mask = prototype.element_type_mask;
-    auto& facets = view.storage[i].facets;
-    facets.clear();
-    MetadataView::encode_facets(prototype.facets, facets);
-    p.facets = facets.empty() ? nullptr : facets.data();
-    p.facet_count = facets.size();
   }
 }
 void apply_constraint_view(MetadataView& view, const OperationTraits& traits) {
@@ -319,27 +280,27 @@ uint32_t float_bits(float value) {
   std::memcpy(&bits, &value, sizeof(bits));
   return bits;
 }
-ResourceVector<ps_result_parameter_value_v3> parameters_view(
+ResourceVector<ps_result_parameter_value_v4> parameters_view(
     const std::map<std::string, ParameterValue>& source) {
-  ResourceVector<ps_result_parameter_value_v3> result;
+  ResourceVector<ps_result_parameter_value_v4> result;
   result.reserve(source.size());
   for (const auto& parameter : source) {
-    ps_result_parameter_value_v3 p{};
+    ps_result_parameter_value_v4 p{};
     p.struct_size = sizeof(p);
     p.key = parameter.first.data();
     p.key_size = parameter.first.size();
     if (const auto* integer = std::get_if<std::int64_t>(&parameter.second)) {
-      p.type = PS_RESULT_PARAMETER_INT64_V3;
+      p.type = PS_RESULT_PARAMETER_INT64_V4;
       p.int64_value = *integer;
     } else if (const auto* number = std::get_if<double>(&parameter.second)) {
-      p.type = PS_RESULT_PARAMETER_FLOAT64_V3;
+      p.type = PS_RESULT_PARAMETER_FLOAT64_V4;
       p.float64_value = *number;
     } else if (const auto* boolean = std::get_if<bool>(&parameter.second)) {
-      p.type = PS_RESULT_PARAMETER_BOOL_V3;
+      p.type = PS_RESULT_PARAMETER_BOOL_V4;
       p.bool_value = *boolean;
     } else {
       const auto& string = std::get<std::string>(parameter.second);
-      p.type = PS_RESULT_PARAMETER_STRING_V3;
+      p.type = PS_RESULT_PARAMETER_STRING_V4;
       p.string_value = string.data();
       p.string_size = string.size();
     }
@@ -347,22 +308,22 @@ ResourceVector<ps_result_parameter_value_v3> parameters_view(
   }
   return result;
 }
-Result<OperationPortConstraint> constraint(const ps_result_port_v3& p) {
-  if (p.struct_size != sizeof(p) || p.kind != PS_RESULT_OBJECT_V3)
+Result<OperationPortConstraint> constraint(const ps_result_port_v4& p) {
+  if (p.struct_size != sizeof(p) || p.kind != PS_RESULT_OBJECT_V4)
     return Result<OperationPortConstraint>(
         invalid("invalid Result port constraint size/kind"));
   OperationPortConstraint c;
   c.kind = OperationPortKind::Result;
+  auto ids = extension_ids(p.validators, p.validator_count);
+  if (!ids.ok())
+    return Result<OperationPortConstraint>(ids.status());
+  c.validators = ids.take_value();
   c.element_type = p.element_type;
   c.rank = p.rank;
   c.minimum = p.minimum;
   c.maximum = p.maximum;
   c.element_type_mask = p.element_type_mask;
-  c.semantic_kind = p.semantic_kind;
-  auto status = facets(p.facets, p.facet_count, &c.facets);
-  if (!status.ok())
-    return Result<OperationPortConstraint>(status);
-  if (p.requires_semantics > 1 || p.scalar_bounds > 1 ||
+  if (p.scalar_bounds > 1 ||
       (p.tensor_key == nullptr) != (p.tensor_key_size == 0))
     return Result<OperationPortConstraint>(
         invalid("invalid Result member predicate"));
@@ -372,7 +333,6 @@ Result<OperationPortConstraint> constraint(const ps_result_port_v3& p) {
       return Result<OperationPortConstraint>(key.status());
     c.tensor_key = key.take_value();
   }
-  c.requires_semantics = p.requires_semantics != 0;
   c.scalar_bounds = p.scalar_bounds != 0;
   if (p.schema) {
     auto copied = schema(p.schema);
@@ -389,15 +349,41 @@ struct MetadataSink {
   std::array<bool, 64> supplied{};
   Status failure;
   const std::thread::id owner = std::this_thread::get_id();
+  std::vector<ResourceIdentity> resource_ids = {};
+  bool resources_supplied = false;
+  static int set_resources(void* raw,
+                           const ps_result_resource_identity_v4* values,
+                           uint32_t count) noexcept {
+    auto& sink = *static_cast<MetadataSink*>(raw);
+    if (!sink.failure.ok())
+      return code(sink.failure);
+    try {
+      if (sink.owner != std::this_thread::get_id() || sink.resources_supplied ||
+          !array(values, count, 1024)) {
+        sink.failure = invalid("invalid resource identity declaration");
+      } else {
+        sink.resources_supplied = true;
+        for (uint32_t i = 0; i < count; ++i) {
+          ResourceIdentity id;
+          id.byte_length = values[i].byte_length;
+          std::copy(values[i].sha256, values[i].sha256 + 32, id.sha256.begin());
+          sink.resource_ids.push_back(id);
+        }
+      }
+    } catch (...) {
+      sink.failure = {ErrorCode::ResourceExhausted, {}};
+    }
+    return code(sink.failure);
+  }
   static int set(void* raw, uint32_t index,
-                 const ps_result_port_v3* source) noexcept {
+                 const ps_result_port_v4* source) noexcept {
     auto& sink = *static_cast<MetadataSink*>(raw);
     if (!sink.failure.ok())
       return code(sink.failure);
     try {
       if (sink.owner != std::this_thread::get_id() || !source ||
           reinterpret_cast<std::uintptr_t>(source) %
-              alignof(ps_result_port_v3) ||
+              alignof(ps_result_port_v4) ||
           source->struct_size != sizeof(*source) ||
           index >= sink.outputs.size() || sink.supplied[index] ||
           source->kind != static_cast<uint32_t>(
@@ -415,12 +401,11 @@ struct MetadataSink {
                (source->tensor_key &&
                 std::string_view(source->tensor_key, source->tensor_key_size) ==
                     prototype.tensor_key));
-          if (!key_equal ||
-              source->requires_semantics != prototype.requires_semantics ||
+          auto ids = extension_ids(source->validators, source->validator_count);
+          if (!ids.ok() || ids.value() != prototype.validators || !key_equal ||
               source->scalar_bounds != prototype.scalar_bounds ||
               float_bits(source->minimum) != float_bits(prototype.minimum) ||
               float_bits(source->maximum) != float_bits(prototype.maximum) ||
-              source->semantic_kind != prototype.semantic_kind ||
               source->element_type_mask != prototype.element_type_mask) {
             sink.failure =
                 invalid("metadata resolver changed output constraints");
@@ -454,8 +439,8 @@ bool same_grid(const std::optional<TileGrid>& first,
                     first->tile_columns() == second->tile_columns() &&
                     first->tile_count() == second->tile_count());
 }
-ps_result_tile_grid_v3 encode_grid(const std::optional<TileGrid>& grid) {
-  ps_result_tile_grid_v3 view{};
+ps_result_tile_grid_v4 encode_grid(const std::optional<TileGrid>& grid) {
+  ps_result_tile_grid_v4 view{};
   view.struct_size = sizeof(view);
   if (grid) {
     const auto& value = *grid;
@@ -478,7 +463,7 @@ QueryFrame::QueryFrame(const ResultProgramQuery& source,
                        const ResourceBudget& resources)
     : input_views(source.inputs),
       output_view(&source.output, 1),
-      input_tile_grids(ResourceAllocator<ps_result_tile_grid_v3>(resources)) {
+      input_tile_grids(ResourceAllocator<ps_result_tile_grid_v4>(resources)) {
   if (source.parameters.size() > 128 ||
       source.output_index >= definition.traits.outputs.size() ||
       !source.output.result_schema) {
@@ -512,18 +497,18 @@ QueryFrame::QueryFrame(const ResultProgramQuery& source,
           : nullptr;
   resolved_output.execution =
       output_trait.region_rule == OperationRegionRule::Whole
-          ? PS_RESULT_WHOLE_V3
-          : PS_RESULT_REGIONAL_V3;
+          ? PS_RESULT_WHOLE_V4
+          : PS_RESULT_REGIONAL_V4;
   resolved_output.failure_delivery =
       static_cast<std::uint32_t>(output_trait.failure_delivery);
   resolved_output.flags =
-      (output_trait.preserve_output_views ? PS_RESULT_OUTPUT_PRESERVE_VIEWS_V3
+      (output_trait.preserve_output_views ? PS_RESULT_OUTPUT_PRESERVE_VIEWS_V4
                                           : 0U) |
       (output_trait.requires_input_views
-           ? PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V3
+           ? PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V4
            : 0U) |
       (output_trait.maximum_output_payload_bytes
-           ? PS_RESULT_OUTPUT_PAYLOAD_BOUND_V3
+           ? PS_RESULT_OUTPUT_PAYLOAD_BOUND_V4
            : 0U);
   resolved_output.maximum_output_payload_bytes =
       output_trait.maximum_output_payload_bytes.value_or(0);
@@ -596,11 +581,14 @@ QueryFrame::QueryFrame(const ResultProgramQuery& source,
   }
   requested = copied.take_value();
   query.requested = {
-      sizeof(ps_result_tile_request_v3), selected.whole ? 1U : 0U,
+      sizeof(ps_result_tile_request_v4), selected.whole ? 1U : 0U,
       requested.empty() ? nullptr : requested.begin(), requested.size()};
   parameters = parameters_view(source.parameters);
   query.parameters = parameters.empty() ? nullptr : parameters.data();
   query.parameter_count = parameters.size();
+  this->resources = resource_views(source.resources);
+  query.resources = this->resources.empty() ? nullptr : this->resources.data();
+  query.resource_count = this->resources.size();
 }
 // The sink and its service table are one-call borrows and never escape.
 Result<OperationPreparation> prepare_metadata(
@@ -621,12 +609,18 @@ Result<OperationPreparation> prepare_metadata(
       std::vector<OperationOutputSpecialization>(owner.api.output_count),
       {},
       Status::success()};
-  ps_result_metadata_sink_v3 service{sizeof(service), &sink, MetadataSink::set};
-  auto status = outcome(owner.api.resolve_metadata(
-      owner.api.user_data, view.ports.empty() ? nullptr : view.ports.data(),
-      view.ports.size(), values.empty() ? nullptr : values.data(),
-      values.size(), prototypes.ports.data(), prototypes.ports.size(),
-      &service));
+  ps_result_metadata_sink_v4 service{sizeof(service), &sink, MetadataSink::set,
+                                     MetadataSink::set_resources};
+  Status status;
+  try {
+    status = outcome(owner.api.resolve_metadata(
+        owner.api.user_data, view.ports.empty() ? nullptr : view.ports.data(),
+        view.ports.size(), values.empty() ? nullptr : values.data(),
+        values.size(), prototypes.ports.data(), prototypes.ports.size(),
+        &service));
+  } catch (...) {
+    status = current_operation_exception();
+  }
   if (!sink.failure.ok())
     return Result<OperationPreparation>(sink.failure);
   if (!status.ok())
@@ -637,6 +631,7 @@ Result<OperationPreparation> prepare_metadata(
           invalid("metadata resolver omitted output"));
   OperationPreparation prepared;
   prepared.outputs = std::move(sink.outputs);
+  prepared.resources = std::move(sink.resource_ids);
   return Result<OperationPreparation>(std::move(prepared));
 }
 }  // namespace ps::plugin_internal::result_c

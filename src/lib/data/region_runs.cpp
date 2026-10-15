@@ -4,7 +4,7 @@
 #include <cstring>
 #include <limits>
 
-#include "core/checked_math.hpp"
+#include "photospider/core/checked_math.hpp"
 
 namespace ps {
 Status copy_value_region(

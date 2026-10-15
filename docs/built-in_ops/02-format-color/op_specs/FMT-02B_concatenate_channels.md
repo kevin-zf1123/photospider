@@ -17,7 +17,7 @@ implemented_operation_keys:
 
 # FMT-02B: concatenate existing channel axes
 
-Runtime contract: A/B/C are registered as twelve Result operation ABI 3 CPU
+Runtime contract: A/B/C are registered as twelve Result operation ABI 4 CPU
 keys: `assemble`, `concatenate`, `assemble_mapped`, and `scalar_literal`, each
 with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
 The public authoring helpers are installed in
@@ -28,11 +28,10 @@ separately.
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md).
 The implemented keys are separate default-registry primitives.
 This member concatenates ordered same-dtype channel blocks. Input axes may
-differ; resolve each from effective metadata or explicit parameters. After
+differ; resolve each from the corresponding explicit `input_descriptions` entry or axis parameter. After
 removing each channel axis, remaining dimensions must match in order and extent.
 Required static `output_axis` fixes the result's channel-axis position.
-Explicit target channel/group semantics authorize corresponding reinterpretation
-as a standard B capability, without a separate source override/raw.
+The output carries only structure and copied samples. A later consumer receives its own explicit description.
 
 Let ci be input i's channel count and pi its prefix offset, with p0=0 and
 p(i+1)=pi+ci. For output coordinate j, let k=j[output_axis]. Choose the unique i
@@ -46,12 +45,12 @@ Ordered inputs `inputs[0..n)` are single-tensor Results and produce one
 `values` tensor. The family allows 1..1024 inputs. All inputs and output have
 the same cell rank 1..8 and dtype; batch plus cell rank is at most 8. Parameters
 are static
-`metadata_mode`, conditional `input_overrides`, optional `output_description`,
-`layout`, optional per-input cell-axis `input_axes`, and required cell-axis
+optional `input_descriptions`, `layout`, optional per-input cell-axis
+`input_axes`, and required cell-axis
 `output_axis` in [0,r). These indices exclude the Result batch prefix; complete
 sample rank, including batch and cell axes, is at most 8.
 The family defines axis assertions, raw requirements, dtype/count/arity limits,
-metadata consistency and the complete support matrix.
+description/descriptor consistency and the complete support matrix.
 
 For requested Q and input i, intersect output channels with [pi,p(i+1)),
 subtract pi, and move the channel coordinate from output_axis to ai. That
@@ -64,7 +63,7 @@ Use the family's algorithm, resource/error rules and performance cases. Prefix
 construction is O(n); do not search all n inputs for each sample. Account source
 aliases once at backing identity, retaining each port's logical contribution.
 For one input with equal source/output axes, shape and samples are identical;
-explicit output metadata or materialization may change description or backing.
+materialization may change backing. No description is attached to the result.
 
 ## Independent analytic fixture
 
@@ -88,11 +87,10 @@ Input [1,1,1] cannot implicitly broadcast to X1's nonchannel shape. Input-list
 order and each input's internal order must both be checked.
 
 The conceptual workflow is `described color block + independent alpha block ->
-FMT-02B -> explicitly grouped result`. Joining alpha copies it; it does not
-associate the color values. Public executable commands and measured outcomes are linked above.
+FMT-02B -> result -> explicitly configured consumer`. Joining alpha copies it; it does not
+associate the color values.
 For rank-one inputs [7,9] and [11], axes are 0 and output is [7,9,11]. One input
 [7,9] gives exact identity. An empty nonchannel shape does not introduce a
 rank-zero output. Arbitrary source/destination mapping belongs to FMT-02C;
 B retains ordered block concatenation. Also test three explicitly singleton-
-channel Gray tensors concatenated with a target RGB group: bytes and order
-remain unchanged, and source Gray descriptions remain unchanged.
+channel Gray tensors concatenated and passed to a consumer configured with an RGB group: bytes and order remain unchanged. The source descriptions remain caller-owned configuration.

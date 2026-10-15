@@ -13,12 +13,11 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/array_profiles.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "common/typed_need_validation.hpp"
 #include "photospider/core/resource_allocator.hpp"
-#include "photospider/data/semantic.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
-#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -34,9 +33,6 @@ struct LayoutProgram final {
   LayoutProgram(LayoutKind kind, SequenceProfile profile)
       : kind(kind), profile(profile) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     using namespace numeric_ops;  // NOLINT(build/namespaces)
     auto scratch =
         math_take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));
@@ -215,7 +211,7 @@ struct LayoutProgram final {
           },
           phase.query.cancellation));
     }
-    if (phase.report_numeric) {
+    if (phase.report_diagnostic) {
       NumericDiagnostics report;
       report.profile =
           static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
@@ -229,7 +225,7 @@ struct LayoutProgram final {
         report.view_elements = count;
       else
         report.copied_elements = count;
-      math_require(phase.report_numeric(report));
+      math_require(report_numeric(phase, report));
     }
     return Result<ResultProgramPoll>(
         ResultPublication{math_take(builder.seal()), true});
@@ -250,6 +246,7 @@ OperationDefinition layout_operation(const std::string& key, LayoutKind kind,
   OperationDefinition operation;
   operation.key = key;
   auto& traits = operation.traits;
+  traits.diagnostics = {numeric_diagnostic_identity()};
   // Physical viewability depends on source owner/stride partitioning. Current
   // disposable content caches cannot witness that partition, so do not reuse
   // these results across executions. Pure active-Run sharing remains valid.

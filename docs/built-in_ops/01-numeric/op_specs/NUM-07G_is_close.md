@@ -31,7 +31,7 @@ Compare matching Float32/Float64 inputs `a` and `b` using the symmetric formula
 abs(a-b) <= atol + rtol * max(abs(a),abs(b))
 
 The two input arrays have identical dtype and shape. Output `values` is UInt8
-with unchanged shape and empty facets: 1 means close, 0 means not close. Static
+with unchanged shape and no attached domain description: 1 means close, 0 means not close. Static
 parameters `atol` and `rtol` are required Float64 values, finite and nonnegative,
 with no implicit default. Negative zero is numerically zero. Reject missing,
 nonfinite or negative tolerance at compile/preflight. No other static numeric

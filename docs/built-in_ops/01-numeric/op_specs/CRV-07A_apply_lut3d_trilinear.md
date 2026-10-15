@@ -47,7 +47,7 @@ and logical product <=2^40. Table is Float32/Float64 [N0,N1,N2,3], each Ni=2..25
 axis is Float64 [3,3], with rows [start,end,step]. Input/table dtypes may differ.
 Output port `values` is an immutable packed Result using `photospider.tensor`
 v1/member `samples`, with the complete input shape, selected Float32/Float64 dtype,
-ColorArray v1 facet and `atomic_trailing_axes=1`. Output retains the declared
+`atomic_trailing_axes=1`. Output retains the declared
 ColorArray description. The default output dtype follows the authoring `input_type`
 hint; the compiler independently validates bound input metadata.
 

@@ -18,7 +18,7 @@ registered_operation_keys:
 # FMT-04B: import premultiplied numeric samples as straight
 
 The default registry provides `alpha.unassociate_<profile>` for the three CPU
-profiles. The operation uses Result ABI 3 and preserves the declared tensor
+profiles. The operation uses Result ABI 4 and preserves the declared tensor
 shape, dtype and channel positions. The specification remains Proposed. Validate the public operation with temporary independent numerical and ownership checks when changing it.
 
 Inherit the complete [FMT-04 boundary contract](FMT-04_alpha_association_contract.md).
@@ -28,15 +28,15 @@ The operation accepts one single-tensor Result without fields, with optional sec
 
 Semantic `input` is an explicitly described premultiplied RGB/Gray boundary
 payload with its alpha in the same tensor. `values` retains shape, dtype, channel
-positions and alpha bits, and describes the converted group as straight.
-Already-straight selected input fails preflight. Override can supply an explicit
+positions and alpha bits, and computes straight samples for the selected group. No description is attached.
+Already-straight selected input fails preflight. `input_description` supplies the explicit
 call-local premultiplied source interpretation; it does not silently infer that
 interpretation from sample values or alter another consumer's input.
 
 When other complete groups remain premultiplied, the result remains a boundary
 payload until they are explicitly converted. Once all complete groups are
-straight, the tensor can be a canonical image. This is a metadata check without
-reading unrequested other groups. Float32/Float64 and strict/named CPU profiles
+straight, the tensor can be a canonical image. This downstream interpretation is explicit and does not
+require reading unrequested other groups. Float32/Float64 and strict/named CPU profiles
 inherit the family. No semantic external alpha source or retained binding exists.
 
 ## Mathematical specialization

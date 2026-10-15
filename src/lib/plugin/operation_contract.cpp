@@ -7,8 +7,8 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
-#include "core/status_helpers.hpp"
+#include "photospider/core/checked_math.hpp"
+#include "photospider/core/status_helpers.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "plugin/port_validation.hpp"
 
@@ -39,7 +39,7 @@ Result<OperationTraits> resolve_operation_traits(
                   [](const auto& input) {
                     return input.kind != OperationPortKind::Result;
                   }) ||
-      count > 1024 || traits.version != 25)
+      count > 1024 || traits.version != 26)
     return Result<OperationTraits>(core_internal::invalid_schema_domain(
         "invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
@@ -67,7 +67,7 @@ Result<OperationMetadata> infer_operation_output(
   if (t.requires_metadata_specialization)
     return Result<OperationMetadata>(core_internal::invalid_schema_domain(
         "operation template requires registry metadata specialization"));
-  if (t.version != 25 || t.outputs.size() != 1 || !t.outputs[0].result_schema)
+  if (t.version != 26 || t.outputs.size() != 1 || !t.outputs[0].result_schema)
     return Result<OperationMetadata>(core_internal::invalid_schema_domain(
         "select one output for singleton inference"));
   const auto mismatch = [](const char* message) {

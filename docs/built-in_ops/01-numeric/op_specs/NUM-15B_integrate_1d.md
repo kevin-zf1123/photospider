@@ -31,7 +31,7 @@ port order: samples with `sample_shape()` [N], step [1], and initial [1]. Each
 input may use any tensor member key; all share Float32 or Float64 dtype. Require
 1<=N<=2^40. The output port key is `values`; its Result schema is
 `photospider.tensor` with tensor member `samples`, shape [N], input dtype, and
-no facets. There are no static numeric parameters or
+no attached domain description. There are no static numeric parameters or
 implicit casts/axis extraction.
 
 values[0] = initial

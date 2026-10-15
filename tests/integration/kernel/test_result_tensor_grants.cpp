@@ -13,7 +13,6 @@
 
 #include "photospider/photospider.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
-#include "support/icc_profile_fixture.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
@@ -443,13 +442,13 @@ struct RichTensorSource {
       const auto& input = phase.tensors->at({0, 0});
       for (const auto& box : phase.query.tensor_outputs->boxes())
         windows.push_back(take(input.acquire(box)));
-      ResourceBindings resources;
+      ResourceSet resources;
       if (resource_owners) {
-        const auto bytes = icc_profile_fixture::fixture();
-        auto profile = take(
-            IccProfile::import({bytes.data(), bytes.size()}, phase.resources));
+        const auto bytes = std::vector<std::uint8_t>(256, 7);
+        auto profile = take(ImmutableResource::import(
+            {bytes.data(), bytes.size()}, phase.resources));
         resource_owners->profiles.push_back(profile.storage());
-        resources = take(ResourceBindings::create({profile}, phase.resources));
+        resources = take(ResourceSet::create({profile}, phase.resources));
       }
       if (exhaust_host) {
         const auto available =
@@ -460,8 +459,7 @@ struct RichTensorSource {
       auto started = ResultBuilder::start(
           phase.resources, *phase.query.output.result_schema,
           phase.query.semantic_key, {},
-          {phase.association->begin(), phase.association->end()}, 128,
-          std::move(resources));
+          {phase.association->begin(), phase.association->end()}, 128);
       if (!started.ok())
         return Answer(started.status());
       builder = started.take_value();
@@ -691,8 +689,7 @@ struct ResourceViewConsumer {
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
         phase.query.semantic_key, {},
-        {phase.association->begin(), phase.association->end()}, 128,
-        phase.query.resources));
+        {phase.association->begin(), phase.association->end()}, 128));
 
     ResultTensorViewTransform identity;
     identity.source_axes = {{0, 0, 1, 1}, {1, 0, 1, 1}};
@@ -709,27 +706,16 @@ int profile_owners(bool exhaust = false, bool work_exhaust = false) {
   std::optional<ResultTensorInput> retained_input;
   ResultTensorReadWindow retained_window;
   ResultRef output;
-  ColorProfileIdentity identity;
   std::size_t profile_bytes = 0;
   std::uintptr_t base_last_row = 0;
   {
-    const auto bytes = icc_profile_fixture::fixture();
-    auto profile =
-        take(IccProfile::import({bytes.data(), bytes.size()}, profile_root));
-    identity = profile.identity();
+    const auto bytes = std::vector<std::uint8_t>(256, 7);
+    auto profile = take(
+        ImmutableResource::import({bytes.data(), bytes.size()}, profile_root));
     profile_bytes = profile.bytes().size();
-    auto resources = take(ResourceBindings::create({profile}, profile_root));
+    auto resources = take(ResourceSet::create({profile}, profile_root));
     auto schema = multi_result::schema(ElementType::Float64, {65, 4});
     schema.tensors[0].atomic_trailing_axes = 1;
-    TensorDescription description;
-    description.channel_axis = 1;
-    description.model = "cmyk";
-    description.profile = identity;
-    description.channels = {{"C", "cyan", "relative"},
-                            {"M", "magenta", "relative"},
-                            {"Y", "yellow", "relative"},
-                            {"K", "black", "relative"}};
-    schema.tensors[0].facets = {take(encode_tensor_description(description))};
     auto rich = schema;
     rich.id = "test.resource_tensor";
     rich.fields.push_back(
@@ -788,8 +774,8 @@ int profile_owners(bool exhaust = false, bool work_exhaust = false) {
           2 * profile_bytes + 260 * 8 + 8192;
       ExecutionContext context(registry, config);
       root = take(context.resource_budget());
-      auto builder = take(
-          ResultBuilder::start(root, schema, "base", {}, {}, 128, resources));
+      auto builder =
+          take(ResultBuilder::start(root, schema, "base", {}, {}, 128));
 
       std::array<double, 260> values{};
       for (unsigned i = 0; i < values.size(); ++i)
@@ -840,21 +826,13 @@ int profile_owners(bool exhaust = false, bool work_exhaust = false) {
   }
   if (!exhaust && !work_exhaust) {
     PS_CHECK(owners.profiles.size() == 1 && observed.size() == 1);
-    std::set<const CpuStorage*> storage, retained_profiles;
-    for (const auto& weak : owners.profiles) {
-      auto owner = weak.lock();
-      PS_CHECK(owner && owner->bytes().size() == profile_bytes);
-      storage.insert(owner.get());
-    }
-    PS_CHECK(storage.size() == 1);
+    for (const auto& weak : owners.profiles)
+      PS_CHECK(weak.expired());
     retained_input.reset();
     retained_window = {};
     for (const auto& weak : observed) {
       auto source = weak.lock();
       PS_CHECK(source.valid());
-      auto retained_profile = take(source.resources().icc_profile(identity));
-      PS_CHECK(storage.count(retained_profile.storage().get()) == 1);
-      retained_profiles.insert(retained_profile.storage().get());
       auto facts = take(source.descriptor());
       auto field = take(take(source.prepare_read(facts, 0, 0, 1)).load(8));
       double number = 0;
@@ -863,13 +841,12 @@ int profile_owners(bool exhaust = false, bool work_exhaust = false) {
                1000 +
                    facts.tensor_coverage(0).boxes()[0].dimensions()[0].offset);
     }
-    PS_CHECK(retained_profiles.size() == 1);
     PS_CHECK(multi_result::number(output, {64, 3}) == 260);
     auto final_window = take(output.acquire_tensor(take(output.descriptor()), 0,
                                                    Region({{64, 1}, {0, 4}})));
     output = {};
     for (const auto& weak : owners.profiles)
-      PS_CHECK(!weak.expired());
+      PS_CHECK(weak.expired());
     auto row = take(final_window.row_run({64, 0}));
     PS_CHECK(reinterpret_cast<std::uintptr_t>(row.data) == base_last_row);
     double last = 0;

@@ -9,9 +9,10 @@
 
 #include "01-numeric/exact_bake_error.hpp"
 #include "01-numeric/lut3d_bake_common.hpp"
+#include "01-numeric/lut3d_bake_validation.hpp"
 #include "common/registry.hpp"
-#include "common/typed_need_validation.hpp"
-#include "data/lut3d_bake_validation.hpp"
+#include "photospider/ops/contracts.hpp"
+#include "photospider/ops/errors.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal {
@@ -45,12 +46,7 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
   const unsigned count = kind == Kind::Measure ? 6 : kind == Kind::Gate ? 2 : 1;
   if (inputs.size() != count)
     return Answer(mismatch("bake Result input count"));
-  auto decoded = (kind == Kind::Pack || kind == Kind::Measure)
-                     ? description(parameters)
-                     : (inputs[0].result_schema
-                            ? lut3d_bake_description(*inputs[0].result_schema)
-                            : Result<Lut3dBakeDescription>(
-                                  mismatch("owned bake table required")));
+  auto decoded = description(parameters);
   if (!decoded.ok())
     return Answer(decoded.status());
   const auto& spec = decoded.value();
@@ -61,9 +57,6 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
                                      : report_schema.status());
   const ValueDescriptor table{spec.table_dtype,
                               {spec.shape[0], spec.shape[1], spec.shape[2], 3}};
-  auto facet = encode_color_array(spec.output_description);
-  if (!facet.ok())
-    return Answer(facet.status());
   OperationOutputSpecialization output;
   if (kind == Kind::Pack) {
     if (!sole_tensor(inputs[0]) ||
@@ -117,7 +110,6 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
           "gated report must describe this exact bake recipe/dtype/method"));
     auto schema =
         numeric_ops::numeric_tensor_schema(table.element_type, table.shape);
-    schema.tensors[0].facets = {facet.take_value()};
     schema.tensors[0].atomic_trailing_axes = 1;
     output.metadata.result_schema =
         std::make_shared<const SchemaTemplate>(std::move(schema));
@@ -154,9 +146,6 @@ struct MeasureState {
     return Poll(std::move(need));
   }
   Poll poll(const ResultProgramPhase& phase) {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     auto scratch =
         phase.resources.reserve(ResourceCapacity::host(65536, 65536));
     if (!scratch.ok())
@@ -259,10 +248,22 @@ struct MeasureState {
       }
       auto made = ResultBuilder::start(
           phase.resources, *phase.query.output.result_schema,
-          phase.query.semantic_key, {3, 289}, {table.object_id()});
+          phase.query.semantic_key, {3, 353}, {table.object_id()});
       if (!made.ok())
         return Poll(made.status());
       builder = made.take_value();
+      auto description_value = description(phase.query.parameters);
+      if (!description_value.ok())
+        return Poll(description_value.status());
+      auto identity = lut3d_bake_configuration_id(description_value.value());
+      if (!identity.ok())
+        return Poll(identity.status());
+      auto identity_written = builder.append(
+          11, 1,
+          {reinterpret_cast<const std::uint8_t*>(identity.value().data()), 64},
+          phase.query.cancellation);
+      if (!identity_written.ok())
+        return Poll(identity_written);
       const std::uint8_t passed = report.passed;
       const std::array<const void*, 11> values{
           &passed,
@@ -291,7 +292,7 @@ struct MeasureState {
           return Poll(written);
       }
     }
-    for (unsigned field = 0; field < 11; ++field) {
+    for (unsigned field = 0; field < 12; ++field) {
       const auto count = (field == 1 || field == 5) ? 3 : 1;
       auto published = builder.publish(field, count);
       if (!published.ok())
@@ -342,7 +343,7 @@ struct TensorViewState {
                    report.association()[2] != input.object_id()))
         return Poll(Status{ErrorCode::OperationFailed,
                            "bake report/table object mismatch",
-                           FailureReason::InvalidAssociation});
+                           ops_error::InvalidAssociation});
       auto window =
           math_take(input.acquire(Region::whole(input.spec().sample_shape()),
                                   phase.query.cancellation));
@@ -390,9 +391,6 @@ struct TensorViewState {
     return Poll(ResultPublication{math_take(builder.seal()), true});
   }
   Poll poll(const ResultProgramPhase& phase) try {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     using namespace numeric_ops;  // NOLINT(build/namespaces)
     auto scratch = math_take(
         phase.resources.reserve(ResourceCapacity::host(65536, 65536)));
@@ -443,7 +441,7 @@ struct TensorViewState {
           return Poll(domain("invalid bake report read window"));
         std::memcpy(targets[f], bytes.data(), sizes[f]);
       }
-      auto spec = math_take(lut3d_bake_description(report.schema()));
+      auto spec = math_take(description(phase.query.parameters));
       auto checked = input_internal::validate_lut3d_bake_report_values(
           spec, &fields, passed, phase.consume_work);
       if (!checked.ok())
@@ -530,7 +528,8 @@ OperationDefinition operation(Kind kind) {
   if (kind == Kind::Gate)
     object(1, "curve.bake_lut3d.report");
   traits.requires_metadata_specialization = true;
-  traits.workspace_bytes = kind == Kind::Measure ? 289 : 0;
+  traits.parameter_schema = report_parameters();
+  traits.workspace_bytes = kind == Kind::Measure ? 353 : 0;
   auto& out = traits.outputs[0];
   out.key = kind == Kind::Measure ? "report"
             : kind == Kind::Pack  ? "table"
@@ -556,15 +555,23 @@ OperationDefinition operation(Kind kind) {
     out.region_rule = OperationRegionRule::Tiled;
     out.maximum_dependency_stages = kind == Kind::Gate ? 3 : 2;
   }
+  if (kind == Kind::Pack)
+    out.output_schema.validators = {bake_table_contract()};
+  if (kind == Kind::Measure) {
+    out.output_schema.validators = {bake_report_contract()};
+    traits.input_schema[2].validators = {bake_table_contract()};
+  }
+  if (kind == Kind::Gate)
+    traits.input_schema[1].validators = {bake_report_contract()};
+  if (kind == Kind::Gate || kind == Kind::Unpack)
+    traits.input_schema[0].validators = {bake_table_contract()};
   result.prepare_static =
       [kind](const auto& inputs,
              const auto& params) -> Result<OperationPreparation> {
     auto output = specialize(kind, inputs, params);
     if (!output.ok())
       return Result<OperationPreparation>(output.status());
-    auto decoded = (kind == Kind::Pack || kind == Kind::Measure)
-                       ? description(params)
-                       : lut3d_bake_description(*inputs[0].result_schema);
+    auto decoded = description(params);
     if (!decoded.ok())
       return Result<OperationPreparation>(decoded.status());
     const auto& spec = decoded.value();

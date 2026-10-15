@@ -52,7 +52,7 @@ nonempty work, the Whole program requests the complete input with a Tensor Need
 using Data, Validation and Descriptor roles (role 13), which triggers
 typed-payload validation. It publishes a complete
 `photospider.tensor`/`samples` Result
-with ordinary axes and empty facets/batch metadata. Publication uses global
+with ordinary axes and no attached domain description/batch metadata. Publication uses global
 output coordinates. A query `Q` limits observed dependencies and downstream
 reads rather than packing the output to an ROI. Empty output has empty coverage
 and support. Source, typed and domain failures remain visible to the Run.

@@ -28,7 +28,7 @@ and in the named family contract take precedence.
 
 For each full logical coordinate of a nonempty request, return UInt8 1 when `a > b` is true, otherwise
 UInt8 0. Inputs `a` and `b` have identical shape and dtype (UInt8, Int64, Float32
-or Float64). Output `values` has that shape and empty facets. No static numeric
+or Float64). Output `values` has that shape and no attached domain description. No static numeric
 parameters or implicit cast/broadcast is provided.
 
 Inherit the [exact comparison contract](NUM-07_comparison_contract.md) in full:

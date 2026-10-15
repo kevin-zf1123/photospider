@@ -16,9 +16,8 @@
 
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "common/basic_common.hpp"
-#include "common/typed_need_validation.hpp"
+#include "common/floating_environment.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
-#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::basic_result {
 using namespace numeric_ops;  // NOLINT(build/namespaces)
@@ -54,17 +53,6 @@ inline void field(const ResultTensorSpec& spec) {
                 spec.batch_axes[1] == 1)),
           ErrorCode::TypeMismatch,
           "field requires rank two with no batches or one frame/layer");
-  if (spec.facets.empty()) {
-    return;
-  }
-  require(spec.facets.size() == 1, ErrorCode::TypeMismatch,
-          "field requires scalar or coverage semantics");
-  auto meaning = math_take(decode_semantic(spec.facets[0]));
-  require(meaning.kind == SemanticKind::ScalarField ||
-              spec.facets[0].payload ==
-                  math_take(encode_semantic(coverage_semantics())).payload,
-          ErrorCode::TypeMismatch,
-          "field requires scalar or coverage semantics");
 }
 class Reader final {
  public:
@@ -349,9 +337,6 @@ struct Program final {
     return phase.consume_work(0);
   }
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     auto scratch =
         math_take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));
     const auto& schema = *phase.query.output.result_schema;
@@ -405,9 +390,9 @@ struct Program final {
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
             : std::vector<std::uint64_t>{},
-        phase.query.tile_extent, phase.query.resources));
+        phase.query.tile_extent));
     if (!output.empty()) {
-      input_internal::Float32Environment environment;
+      plugin_internal::FloatingEnvironment environment;
       require(environment.active(), ErrorCode::OperationFailed,
               "numeric environment unavailable");
       for (const auto& box : output.boxes()) {
@@ -467,7 +452,6 @@ inline OperationDefinition operation(const char* key, Kind kind) {
     image.key = "pixels";
     image.descriptor = {ElementType::Float32, {1, 1}};
     image.batch_axes = {1, 1};
-    image.facets = {math_take(encode_semantic(coverage_semantics()))};
     image.layout.spatial = true;
     image.layout.channel_axis.reset();
   }
@@ -507,8 +491,8 @@ inline OperationDefinition operation(const char* key, Kind kind) {
       std::vector<std::uint64_t> output_shape = shape;
       ElementType type = input.descriptor.element_type;
       if (kind == Kind::Linear || kind == Kind::Monotone) {
-        require(input.facets.empty() && input.batch_axes.empty() &&
-                    shape.size() == 2 && shape[0] >= 2 && shape[1] == 2,
+        require(input.batch_axes.empty() && shape.size() == 2 &&
+                    shape[0] >= 2 && shape[1] == 2,
                 ErrorCode::TypeMismatch,
                 "curve requires generic Kx2 controls, K>=2");
         output_shape = {static_cast<std::uint64_t>(
@@ -517,7 +501,7 @@ inline OperationDefinition operation(const char* key, Kind kind) {
         field(input);
         if (kind == Kind::Lut) {
           const auto& table = inputs[1].result_schema->tensors[0];
-          require(table.batch_axes.empty() && table.facets.empty() &&
+          require(table.batch_axes.empty() &&
                       table.descriptor.shape.size() == 1 &&
                       table.descriptor.shape[0] >= 2 &&
                       table.descriptor.shape[0] <= (std::uint64_t{1} << 53),
@@ -538,7 +522,6 @@ inline OperationDefinition operation(const char* key, Kind kind) {
         auto& tensor = schema.tensors[0];
         tensor.key = "pixels";
         tensor.batch_axes = {1, 1};
-        tensor.facets = {math_take(encode_semantic(coverage_semantics()))};
         tensor.layout.spatial = true;
         tensor.layout.channel_axis.reset();
         tensor.layout.height_axis = 0;

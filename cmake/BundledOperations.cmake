@@ -68,11 +68,9 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/02-format-color/rgb_basis.cpp
   plugins/ops/02-format-color/rgb_basis_math.cpp
   plugins/ops/02-format-color/transfer.cpp
-  plugins/ops/02-format-color/transfer_definition.cpp
   plugins/ops/02-format-color/channel_assembly.cpp
   plugins/ops/02-format-color/channel_literal_like.cpp
   plugins/ops/02-format-color/channel_extraction.cpp
-  plugins/ops/02-format-color/metadata_assignment.cpp
   plugins/ops/01-numeric/core_constant.cpp
   plugins/ops/01-numeric/core_identity.cpp
   plugins/ops/01-numeric/curve_sample_linear.cpp
@@ -207,9 +205,9 @@ endforeach()
 if(NOT BUILD_SHARED_LIBS)
   target_compile_definitions(photospider_ops PUBLIC PHOTOSPIDER_OPS_STATIC)
 endif()
-target_link_libraries(photospider_ops PUBLIC Photospider::kernel Photospider::ops_headers)
+target_link_libraries(photospider_ops PUBLIC Photospider::ops_sdk Photospider::ops_headers)
 target_include_directories(photospider_ops PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops" "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
+  "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops")
 if(APPLE AND PHOTOSPIDER_ENABLE_ACCELERATE)
   target_link_libraries(photospider_ops PRIVATE "-framework Accelerate")
 endif()

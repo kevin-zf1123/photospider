@@ -18,7 +18,7 @@ registered_operation_keys:
 # FMT-04A: export one group as premultiplied numeric samples
 
 The default registry provides `alpha.associate_<profile>` for the three CPU
-profiles. The operation uses Result ABI 3 and preserves the declared tensor
+profiles. The operation uses Result ABI 4 and preserves the declared tensor
 shape, dtype and channel positions. The specification remains Proposed. Validate the public operation with temporary independent numerical and ownership checks when changing it.
 
 Inherit the complete [FMT-04 boundary contract](FMT-04_alpha_association_contract.md).
@@ -28,14 +28,14 @@ The operation accepts one single-tensor Result without fields, with optional sec
 
 Semantic `input` contains one selected straight RGB/Gray group and its distinct
 internal alpha plane. Output `values` has identical shape, dtype and channel
-positions, with the selected group described as premultiplied boundary samples.
+positions, with premultiplied samples for the selected group. No description is attached.
 It is not a canonical complete image. Use FMT-02/05 first when alpha starts as a
 separate plane/scalar or the original image has no alpha. No semantic external
 alpha port or persistent alpha relation is accepted. Unselected groups/AOVs pass
-through, retaining their applicable interpretation.
+through as exact sample copies.
 
-Float32/Float64 and strict/named CPU profiles inherit the family. Override is a
-call-local source reinterpretation; it does not turn the adapter output into
+Float32/Float64 and strict/named CPU profiles inherit the family. `input_description` is an explicit
+call-local source interpretation; it does not turn the adapter output into
 straight or bypass the internal-alpha requirement. Repeated association of an
 already premultiplied selected group fails preflight.
 
@@ -52,8 +52,7 @@ A binary Gray stored-value guarantee cannot generally survive multiplication.
 Raw instead uses NUM-05C multiply(x,a), permits explicit internal/plane/scalar
 weights and follows NUM NaN/Inf/signed-zero/overflow behavior. It does not apply
 semantic zero clearing or declare successful premultiplied boundary conversion.
-Preserve applicable descriptions without sample-validity guarantees, following
-the family and FMT-common raw policy.
+Raw output carries no description or sample-validity guarantee.
 
 ## Dependencies, resources and failures
 
@@ -64,7 +63,7 @@ scalar alpha affects all observed selected samples. All group/state/shape checks
 remain static. The family's materialized storage, bounded algorithm, NUM error
 attribution, cancellation and cache policy apply without additional exceptions.
 
-Result metadata references the output alpha slot only. R-only production does
+A downstream description must refer to the output alpha slot. R-only production does
 not publish alpha, and it does not retain an external alpha reference. Downstream
 work must explicitly demand the result alpha channel. Missing detached coverage
 remains missing. Normal owned samples/read windows survive context retirement.
@@ -82,7 +81,7 @@ finite samples including -0 preserve bits after validation. These products can
 underflow and later unassociation need not recover their original colors.
 
 For a Gray+alpha tensor with samples [8,0.25] and [2,1], output samples are
-[2,0.25] and [2,1]. Keep the internal alpha channel in both shape and metadata;
+[2,0.25] and [2,1]. Keep the internal alpha channel in the shape;
 external alpha must first be explicitly assembled. Check a deliberately
 noncanonical axis/channel map and R-only, alpha-only and AOV-only requests.
 Alpha-only copy may preserve a NaN bit pattern without color-domain validation.

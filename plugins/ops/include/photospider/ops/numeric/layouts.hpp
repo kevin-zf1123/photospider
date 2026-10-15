@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 /** @brief Complete-output immutable view or packed-copy policy. */
@@ -70,7 +70,7 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
  * Int64, Float32 and Float64 are supported; the target keeps the source dtype
  * and preserves every element bit, including signaling-NaN payloads.
  * The published photospider.tensor/samples Result has the complete target shape
- * as ordinary axes, with facets and batch-axis metadata dropped.
+ * as ordinary axes, with batch axes represented as ordinary axes.
  *
  * This pure, concurrent-safe helper only authors node metadata and reads no
  * payload. Static schema and parameter checks run before the CPU Whole program

@@ -30,7 +30,7 @@ The `numeric.prefix_sum_*` operations accept one `Result` tensor member under
 any member key. The output port key is `values`; its Result schema is
 `photospider.tensor` with tensor member `samples`. The source
 `sample_shape()` includes batch axes; the output uses that complete shape as
-ordinary axes and has no facets or batch topology. The operation computes
+ordinary axes and has no batch topology. The operation computes
 boundary prefix sums along the required static Int64 axis. For an input
 axis length N, output axis length is N+1; output[k] sums input axis positions
 [0,k). The first boundary k=0 is zero, and k=N includes the whole line. Other

@@ -1,3 +1,4 @@
+#include "photospider/ops/numeric/diagnostics.hpp"
 #pragma once
 
 #include <array>
@@ -159,8 +160,8 @@ inline Result<WorkflowNode> logarithmic(std::uint64_t id, bool inverse,
  * Failure/exception leaves the graph unchanged. Different graphs are safe to
  * author concurrently. No payload, registry or runtime resource is accessed.
  * @note Runtime returns `values` as an immutable Result with
- * `photospider.tensor` v1/member `samples`, preserving shape/dtype with empty
- * facets. The complete remap formula rounds once, extends without clipping and
+ * `photospider.tensor` v1/member `samples`, preserving shape/dtype and raw
+ * data. The complete remap formula rounds once, extends without clipping and
  * preserves its IEEE special values/zero rules. Every nonempty Whole request
  * validates both finite ordered bounds, including for NaN inputs and endpoint
  * requests, and reads all inputs with Data, Validation and Descriptor (role
@@ -200,7 +201,7 @@ inline Result<WorkflowNodeOutput> linear_shaper_inverse(
  * [1]. Bounds require
  * 0<lower<upper before any input special-value handling. Output `values` is a
  * `photospider.tensor` v1/member `samples` Result with input shape/dtype and
- * empty facets.
+ * ordinary data.
  * No static mode or clipping parameter. Construction is pure/thread-safe and
  * may throw bad_alloc; invalid id/profile fails
  * InvalidArgument/InvalidDomain/Schema. Endpoints return +0/1 exactly; input

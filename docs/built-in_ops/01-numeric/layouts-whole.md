@@ -4,7 +4,7 @@ The nine formal reshape, transpose and slice profile keys execute CPU Whole
 Result programs. Each active input is a single-tensor Result, and its complete
 sample_shape() includes any batch axes. The output is a
 `photospider.tensor`/`samples` Result with the complete transformed shape as
-ordinary axes; output facets and batch-axis metadata are empty. The program
+ordinary axes; output batch-axis metadata is empty. The program
 publishes the complete output in global coordinates. A requested query `Q`
 limits dependency observation and downstream reads, not the shape or coverage
 of the published Result.

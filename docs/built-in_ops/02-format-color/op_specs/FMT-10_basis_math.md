@@ -5,7 +5,7 @@ kind: mathematical_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_2
+implementation_status: implemented_cpu_result_abi_4
 clarification_status: complete
 ---
 
@@ -50,7 +50,7 @@ ratio, exposure gain or gamut clipping is hidden in A/B.
 ## Fixed primary/white presets
 
 These literal coordinates match the inspected preset table in
-[color_array.cpp](../../../../src/lib/data/color_array.cpp). Preset selection
+[color_array.cpp](../../../../plugins/ops/common/domain/color_array.cpp). Preset selection
 sets geometry, not transfer or implicit adaptation. A separately named RGB space
 must also satisfy its reference/transfer definition.
 

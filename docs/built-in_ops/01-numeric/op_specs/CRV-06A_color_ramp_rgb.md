@@ -29,7 +29,7 @@ values remain exact.
 Inherit the [NUM baseline](NUM_common_contract.md) for registry/platform identity,
 floating environment, bounded execution and public acceptance. The new color-array
 descriptor, complete-color observation, alpha and precision rules below override
-the baseline's generic empty-facet/per-component conventions. Clarification of
+the baseline's generic numeric per-component conventions. Clarification of
 this primitive is complete; its shared color-management representation remains
 an explicit Proposed contract implemented by the current runtime.
 
@@ -237,8 +237,7 @@ unused, while their typed/upstream validation still applies. Empty reads no samp
 payload after static preparation.
 
 The `values` port publishes an immutable `photospider.tensor` v1 Result with
-`samples` shape `sample_shape(input)+[C]`, the ColorArray v1 facet and
-`atomic_trailing_axes=1`. Whole writes publish the full output transactionally;
+`samples` shape `sample_shape(input)+[C]`, `atomic_trailing_axes=1`. Whole writes publish the full output transactionally;
 the Result retains full certified coverage and global coordinates. Fragments expose
 requested regions while retaining the full output owner. Arbitrary immutable source
 strides, offsets and unaligned storage are supported. Result association records
@@ -303,7 +302,7 @@ K=1, irregular stops and description mismatch.
 Test strict bits and accelerated final ULP separately from exact selections, complete
 color classification. Whole fallback counters are unavailable. Public implementation fixtures
 must bind all inputs, construct the explicit descriptions/parameters, execute
-through Compiler/ExecutionContext and inspect the color facet and numerical
+through Compiler/ExecutionContext and inspect the explicit color parameters and numerical
 results using actual supplied build/run commands. Validate full-color expansion,
 mathematically unused generic colors and full typed validation, exact stop/input dirty effects, typed
 closures, strides, low budgets, cancellation, cache-off and post-context lifetime.

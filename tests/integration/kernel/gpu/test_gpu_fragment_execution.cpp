@@ -156,10 +156,10 @@ struct SparseState {
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
     if (mode >= 8 && mode <= 11) {
       if (phase.gpu->buffer(nullptr, nullptr, 1, 0, nullptr) !=
-              PS_RESULT_STATUS_FAILURE_V3 ||
+              PS_RESULT_STATUS_FAILURE_V4 ||
           phase.gpu->execute(nullptr, nullptr, 0) !=
-              PS_RESULT_STATUS_FAILURE_V3 ||
-          phase.gpu->release(nullptr, 0) != PS_RESULT_STATUS_FAILURE_V3)
+              PS_RESULT_STATUS_FAILURE_V4 ||
+          phase.gpu->release(nullptr, 0) != PS_RESULT_STATUS_FAILURE_V4)
         throw std::runtime_error("null native service context accepted");
       if (mode == 9)
         static_cast<void>(phase.consume_work(UINT64_MAX));

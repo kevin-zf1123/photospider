@@ -73,7 +73,7 @@ ROI without reading remote samples, source mutations, cache-off, and common
 ownership/cancellation/budget tests.
 
 Conceptual public fixture: input `[-1,-0,0,4,+Inf]` produces
-`[canonical_NaN,-0,+0,2,+Inf]` with the same dtype and no facets. The maintained public executable and run command are documented below. NUM-01's
+`[canonical_NaN,-0,+0,2,+Inf]` with the same dtype and no attached domain description. The maintained public executable and run command are documented below. NUM-01's
 expression sqrt has a different input/output/error contract.
 
 ## Maintained implementation and validation

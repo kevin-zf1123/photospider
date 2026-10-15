@@ -6,8 +6,8 @@
 
 #include "data/value_validation.hpp"
 #include "execution/result_protocol.hpp"
-#include "photospider/data/representation.hpp"
 #include "plugin/port_validation.hpp"
+#include "plugin/validation_dispatch.hpp"
 
 namespace ps::execution_internal {
 Status ResultPublicationValidator::validate(
@@ -67,6 +67,23 @@ Status ResultPublicationValidator::validate(
       association, [&](auto n) { return view.services.consume(n); });
   if (!retained.ok())
     return retained;
+  if (view.query.prepared) {
+    std::optional<ResultDescriptor> previous;
+    if (view.previous.valid()) {
+      auto captured = view.previous.descriptor(false);
+      if (!captured.ok())
+        return captured.status();
+      previous = captured.take_value();
+    }
+    auto checked = plugin_internal::validate_result_contract(
+        *view.query.prepared, true, view.query.output_index, published.result,
+        descriptor.value(), previous ? &*previous : nullptr, view.resources,
+        view.services.cancellation(),
+        [&](auto n) { return view.services.operation_work(n); },
+        view.maximum_window, ErrorCode::OperationFailed);
+    if (!checked.ok())
+      return checked;
+  }
   if (step.traits.outputs[0].output_schema.scalar_bounds) {
     auto checked = input_internal::validate_port_tensor(
         step.traits.outputs[0].output_schema, published.result,
@@ -74,44 +91,6 @@ Status ResultPublicationValidator::validate(
         view.services.cancellation(), [&] { return view.services.stop(); });
     if (!checked.ok())
       return checked;
-  }
-  for (uint32_t slot = 0; slot < published.result.schema().tensors.size();
-       ++slot) {
-    auto checked = input_internal::validate_tensor_samples(
-        published.result, descriptor.value(), slot,
-        descriptor.value().tensor_coverage(slot), view.resources,
-        ErrorCode::OperationFailed, view.services.cancellation(),
-        [&] { return view.services.stop(); },
-        [&](uint64_t n) { return view.services.operation_work(n); });
-    if (!checked.ok()) {
-      if (checked.detail.origin == FailureOrigin::Unspecified &&
-          checked.code == ErrorCode::OperationFailed)
-        checked.detail.origin = FailureOrigin::Domain;
-      checked.detail.node_id = view.node_id;
-      return checked;
-    }
-  }
-  auto validated = validate_representation(
-      published.result, view.resources, view.maximum_window,
-      view.services.cancellation(), [&](std::uint64_t count) {
-        const auto stopped = view.services.stop();
-        if (stopped != ErrorCode::Ok)
-          return Status{stopped, {}};
-        return view.services.run_work(count);
-      });
-  if (!validated.ok()) {
-    if ((validated.detail.origin == FailureOrigin::Unspecified ||
-         validated.detail.origin == FailureOrigin::Domain ||
-         validated.detail.origin == FailureOrigin::Schema) &&
-        validated.code != ErrorCode::ResourceExhausted &&
-        validated.code != ErrorCode::Cancelled &&
-        validated.code != ErrorCode::Stale) {
-      if (validated.detail.origin == FailureOrigin::Unspecified)
-        validated.detail.origin = FailureOrigin::Schema;
-      validated.detail.scope = FailureScope::Association;
-      validated.detail.association = published.result.object_id();
-    }
-    return validated;
   }
   if (published.complete && view.query.tensor_outputs) {
     auto outside = view.query.tensor_outputs->subtract(

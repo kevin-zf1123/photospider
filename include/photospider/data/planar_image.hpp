@@ -17,7 +17,7 @@ namespace ps {
 /** @brief Physical storage policy for a rank-two or rank-three image tensor. */
 enum class ImagePlaneOrder : std::uint8_t { Continuous, Tiled };
 
-/** @brief Structural component group; alpha is independent of color. */
+/** @brief Named channel range used for structural storage grouping. */
 struct PHOTOSPIDER_API ImageComponentGroup final {
   std::string role;
   std::uint64_t first_channel = 0;
@@ -146,7 +146,6 @@ class PHOTOSPIDER_API PlanarImageReadWindow final {
   const Region& region() const noexcept { return region_; }
   const ValueDescriptor& descriptor() const;
   const PlanarImageConfig& config() const;
-  const std::vector<ValueFacet>& facets() const;
   /** @brief Return the longest authorized X run from a full coordinate.
    * @return Borrowed pointer and sample count, ending at the ROI or tile edge.
    * @note Owner retention and immutable publication guarantee stable backing.
@@ -242,15 +241,11 @@ class PHOTOSPIDER_API PlanarImage final {
    * the last owner retires. Safe for concurrent read and disjoint publication.
    */
   static Result<PlanarImage> create(const ValueDescriptor& descriptor,
-                                    const PlanarImageConfig& config,
-                                    const std::vector<ValueFacet>& facets = {},
-                                    const ResourceBindings& resources = {});
+                                    const PlanarImageConfig& config);
 
  public:
   bool valid() const noexcept { return impl_ != nullptr; }
   const ValueDescriptor& descriptor() const;
-  const std::vector<ValueFacet>& facets() const;
-  const ResourceBindings& resources() const;
   const PlanarImageConfig& config() const;
   std::uint64_t page_size() const;
   std::uint64_t reserved_bytes() const;
@@ -276,9 +271,9 @@ class PHOTOSPIDER_API PlanarImage final {
       const std::vector<std::uint64_t>& channels,
       const std::vector<std::uint64_t>& channel_counts,
       ValueDescriptor descriptor, PlanarImageLayout layout,
-      const Region& requested, std::vector<ValueFacet> facets,
+      const Region& requested,
       std::shared_ptr<PlanarPageBudget> metadata_budget,
-      const CancellationToken& cancellation, const ResourceBindings& resources);
+      const CancellationToken& cancellation);
 
   /** @brief Result has already certified the complete immutable rectangle.
    * Does not re-read mutable coverage containers or wait on a writer lock.

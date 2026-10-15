@@ -31,7 +31,7 @@ normative for every interface, error, numerical and execution requirement.
 
 Ordered Result ports x[K],y[K],query[N] each contain one tensor member under any schema id/key and independently accept Float32/Float64; extents come from `sample_shape()`.
 x is finite strictly increasing; y is finite strictly increasing or decreasing,
-without plateaus. K=2..65536,N=1..2^40. Output port `values` is a Result with schema `photospider.tensor`, member `samples`, shape [N], empty facets and Float32/Float64 dtype selected by static `dtype`, default Float64. The other required static String
+without plateaus. K=2..65536,N=1..2^40. Output port `values` is a Result with schema `photospider.tensor`, member `samples`, shape [N], no attached domain description and Float32/Float64 dtype selected by static `dtype`, default Float64. The other required static String
 parameter out_of_domain is reject/clamp, default reject. No extrapolated tail
 is inverted. Endpoints correctly convert corresponding x, preserving zero sign.
 

@@ -6,8 +6,8 @@
 #include <thread>
 #include <utility>
 
-#include "core/checked_math.hpp"
 #include "execution/cpu_range.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/plugin/cpu_tiles_api.h"
 
 namespace ps::execution_internal {

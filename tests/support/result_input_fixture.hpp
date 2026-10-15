@@ -27,10 +27,6 @@ inline ps::SchemaTemplate source_schema(const ps::Value& value) {
   ps::ResultTensorSpec member;
   member.key = "data";
   member.descriptor = value.descriptor();
-  member.facets = value.facets();
-  for (const auto& facet : member.facets)
-    if (facet.key == "photospider.color-array")
-      member.atomic_trailing_axes = 1;
   schema.tensors.push_back(std::move(member));
   return schema;
 }
@@ -40,8 +36,8 @@ inline ps::ResultRef source(
   auto schema = override_schema ? *override_schema : source_schema(value);
   auto bytes = take(root.allocator().allocate(value.bytes().size()));
   std::memcpy(bytes.data(), value.bytes().data(), value.bytes().size());
-  auto builder = take(ps::ResultBuilder::start(
-      root, schema, "test.result.input", {}, {}, 128, value.resources()));
+  auto builder = take(
+      ps::ResultBuilder::start(root, schema, "test.result.input", {}, {}, 128));
   require(builder
               .publish_tensor(0, value.region(), value.layout(),
                               std::move(bytes).freeze())

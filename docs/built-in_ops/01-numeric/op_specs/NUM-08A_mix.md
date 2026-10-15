@@ -20,7 +20,7 @@ The strict profile defines the exact reference result below. Accelerated profile
 
 Inherit the [NUM baseline](NUM_common_contract.md) for registration and acceptance conventions. The operation has three dynamic Result inputs in order: `a`, `b`, and `t`. Each Result contains one tensor member, whose key may be any valid member key. The three members must have identical `sample_shape()` and Float32 or Float64 dtype. `sample_shape()` includes batch axes; accepted rank is 1 through 8, every extent is positive, and the sample count is at most 2^40.
 
-The output port is `values`, a Result with schema `photospider.tensor` and tensor member key `samples`. Its dtype and complete shape match the input members. Every output axis is an ordinary axis; output facets and batch axes are empty. The operation does not apply implicit broadcasting, casts, color-space conversion, alpha association, or image compositing. Connect a common scalar factor through an explicit broadcast operation.
+The output port is `values`, a Result with schema `photospider.tensor` and tensor member key `samples`. Its dtype and complete shape match the input members. Every output axis is an ordinary axis; output batch axes are empty. The operation does not apply implicit broadcasting, casts, color-space conversion, alpha association, or image compositing. Connect a common scalar factor through an explicit broadcast operation.
 
 ## Numeric contract
 

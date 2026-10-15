@@ -23,7 +23,6 @@
 #include "data/result_window_access.hpp"
 #include "data/value_validation.hpp"
 #include "photospider/data/result.hpp"
-#include "photospider/data/tensor_description.hpp"
 
 namespace ps {
 Result<ResultRef> ResultRef::capture() const {

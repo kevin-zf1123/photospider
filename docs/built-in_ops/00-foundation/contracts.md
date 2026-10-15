@@ -1,6 +1,6 @@
 # 公共数据与执行约定
 
-本页保留研究期数据、空间、颜色与数值设计约定。涉及当前运行行为时，以 0.33.0 package 的公开头文件和[kernel 架构指南](../../kernel-architecture/README.md)为准，尤其是[数据模型](../../kernel-architecture/Data-Model.md)、[依赖采样](../../kernel-architecture/Dependency-Sampling.md)、[资源](../../kernel-architecture/Managed-Resources.md)和[全局结果](../../kernel-architecture/Global-Results.md)。本文中的 Proposed 设计不是当前实现承诺；分类页参数仍须与已实现节点的具体规格区分。
+本页保留研究期数据、空间、颜色与数值设计约定。涉及当前运行行为时，以 0.34.0 package 的公开头文件和[kernel 架构指南](../../kernel-architecture/README.md)为准，尤其是[数据模型](../../kernel-architecture/Data-Model.md)、[依赖采样](../../kernel-architecture/Dependency-Sampling.md)、[资源](../../kernel-architecture/Managed-Resources.md)和[全局结果](../../kernel-architecture/Global-Results.md)。本文中的 Proposed 设计不是当前实现承诺；分类页参数仍须与已实现节点的具体规格区分。
 
 ## 数据对象与输出
 
@@ -12,7 +12,7 @@
 | ComplexField | typed Float32/Float64 Value `[H,W,2]`，Real/Imag 角色 | 已有通道提取/合并；这类 dense field 不自动具有 FFT 的原尺寸、packing 和变换 basis |
 | Spectrum | Result 的 Float64 complex-pair records | 原 shape、axes/order、packing、sign/norm、shift、sampling、real policy；没有新增 complex dtype |
 | Bands / PathSet / DynamicPoints / Components | 有版本 schema 的多字段 Result | 成员身份、拓扑、有效 count、ID basis、关联与 descriptor；空字段允许零 rows |
-| Layer / Response / WeightedSum | 独立的结构化 Result family | CoverageRGBA 与 emission、Q/T response、mass 与 weight 分开；不能只凭 shape 互换 |
+| Layer / Response / WeightedSum | composite SDK 的值类型 | CoverageRGBA 与 emission、Q/T response、mass 与 weight 分开；不能只凭 shape 互换 |
 | independent 1D LUT / coupled RGB 3D LUT | `[N,C]` / `[Nr,Ng,Nb,3]` 的逻辑设计 | 同轴逐通道与三轴耦合不同；已有 1D 子集，通用 3D LUT 仍 Proposed |
 | sequence / deep samples | 帧索引集合 / offsets+samples 的后续设计 | timestamp/timebase、缺帧、sample depth/opacity；专用 schema/算子仍 Proposed |
 
@@ -34,22 +34,23 @@ Result 的 `CompleteBundle` 在 seal 前不可见；`StablePrefix` 和 `Independ
 
 颜色模型、通道顺序、primaries/white、transfer、scene/display reference、亮度单位、
 alpha association、dtype 与量化范围分别定义。YCbCr 还需 matrix/range/subsampling/siting。
-已有 `color.assign`、RGB/XYZ/Lab 和 alpha 转换仅覆盖其明确输入域；ICC/OCIO、
-任意 transfer、tone/gamut mapping 和外部 profile 转换仍需专用实现。
+颜色描述作为算子的显式静态参数传入；Result/Value 不附着或传播描述。
+描述编辑由 SDK 纯函数完成。RGB/XYZ/Lab、transfer 与 alpha 转换各自限定输入域；
+ICC/OCIO 资源封装不代表已实现完整 CMM、tone/gamut mapping 或任意外部 profile 转换。
 
 CoverageRGBA 保存 premultiplied P 和 A，finite signed/HDR P 合法，A∈[0,1]，A=0⇒P=0。
-Layer 另外保存 finite signed emission E，允许 A=0、E≠0。当前 Layer space 1 固定为
-linear-sRGB、D65、scene-relative；不会隐式转换颜色空间。
+Layer 另外保存 finite signed emission E，允许 A=0、E≠0。这些类型和纯函数由 `Photospider::ops_sdk` 提供；调用者选择一致的线性颜色空间，
+SDK 不定义固定 space id，也不隐式转换颜色空间。
 颜色非线性处理一般使用 unassociate→transform→associate；emission 有独立含义，
 不能除以 coverage alpha。任意旧 image 算子不自动成为 Layer 算子。
 
 已实现 Layer over 分别计算 `(Ps+Ts*Pb, As+Ts*Ab, Es+Ts*Eb)`，Ts=1−As，
 各指定 primitive 按 binary32 nearest ties-to-even、gradual underflow 和无 FMA contraction 舍入。
 Coverage opacity 缩放 P/A 并保留 E；front/behind emission 使用各自明确遮挡公式。
-Flatten 在显式 opaque 背景 B 上计算 `(P+E)+(1-A)*B`，输出 A=1 的 Whole RGBA。
+Flatten 在显式 opaque 背景 B 上计算 `(P+E)+(1-A)*B`，返回 A=1 的 `CoveragePixel`。
 Response 只保存 Q=P+E、T=1−A，不能恢复原 P/A/E；两种代数的数值成功域不同，
-编译器不隐式互换。RawSum 的 alpha mass 与加权平均的 W 分开；weighted reduce
-使用固定 ordinal midpoint tree，W=0 finalization 返回 OptionalLayer 的 valid=false。
+编译器不隐式互换。RawSum 的 alpha mass 与加权平均的 W 分开；weighted leaf/add 不选择归约树，调用者决定合并顺序；W=0 finalization
+返回 `OptionalLayerPixel` 的 valid=false。
 关联下溢不通过清零 P、改写 emission 或 epsilon 修补。
 见[Layer runtime](../../kernel-architecture/Layer-Runtime.md)。
 
@@ -62,7 +63,7 @@ Response 只保存 Q=P+E、T=1−A，不能恢复原 P/A/E；两种代数的数�
 
 | 简记 | 数学依赖 | 当前落地约束 |
 | --- | --- | --- |
-| E | 同像素/样本 | Elementwise 仍服从 shape/facet 规则；多输出按各端口定义 observation |
+| E | 同像素/样本 | Elementwise 仍服从 shape 规则；多输出按各端口定义 observation |
 | H(r) | 有限邻域 | 静态 Halo 或 staged 精确邻域；radius 不自动等于全算法 halo |
 | W | 全局计算 | 旧 Whole Value 必须容纳完整物化；structured recipe 可借 mandatory disk backing 分页，所有预算仍生效 |
 | R | 任意源采样 | 已有 STMap、radius gather/scatter 和按端口 staged reads；其他 sampler/warp 需自己的 data/control/validation 关系 |
@@ -72,7 +73,7 @@ Response 只保存 Q=P+E、T=1−A，不能恢复原 P/A/E；两种代数的数�
 protocol 1 的 `DependencyCertificate` 为 Exact-only。protocol 2 的 `ResultRelation`
 可表示 Exact、Conservative、Unknown；Conservative 经组合保持 Conservative，Unknown
 在 dirty 查询中为 Unresolved。它们不可伪装成旧 Exact 证书。统计、FFT、分页连通域
-和 Layer 当前各有明确 Conservative support，不能据“已分页”宣称精确局部重算。
+当前各有明确 Conservative support，不能据“已分页”宣称精确局部重算。
 
 每个输出分别声明每个输入的 data/control/validation/descriptor demand、坐标映射、
 返回 Region/布局/owner 和 dirty 正向传播。LUT/kernel 可全表读取、图像可局部读取；
@@ -110,7 +111,7 @@ Atom、ValidationDomain、Association 为语义失败范围；Group、Run、Wait
 普通 `execute` 保持 fail-fast。普通 structured Result 同样使用 context Root；默认构造 context 时无需显式提供 `managed_resources`。
 已认证前缀可在之后运行失败时保留，不能称作完整成功结果。
 
-`QualityReport` 区分 Measured 与 CertifiedBound。有限 residual 包括零 residual 都不自动
+ops SDK 的 `QualityReport` 区分 Measured 与 CertifiedBound。有限 residual 包括零 residual 都不自动
 成为误差证明；当前 CertifiedBound factory 仅覆盖受限整数对角系统及匹配的 Float64 estimate。
 依赖 Exact、数值误差界、受管理容量是不同保证。见
 [Atom errors and quality](../../kernel-architecture/Atom-Errors-and-Quality.md)。

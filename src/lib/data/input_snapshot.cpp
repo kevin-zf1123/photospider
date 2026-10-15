@@ -8,11 +8,11 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
-#include "core/status_helpers.hpp"
-#include "data/content_digest.hpp"
 #include "data/memory_budget.hpp"
 #include "data/value_validation.hpp"
+#include "photospider/core/checked_math.hpp"
+#include "photospider/core/content_digest.hpp"
+#include "photospider/core/status_helpers.hpp"
 
 namespace ps {
 namespace {
@@ -20,14 +20,12 @@ Status stopped(const SnapshotAccessOptions& options) {
   return core_internal::cancellation_status(options.cancellation,
                                             "snapshot access cancelled");
 }
-Status coverage(const ValueDescriptor& descriptor,
-                const std::vector<ValueFacet>& facets, const Region& region,
+Status coverage(const ValueDescriptor& descriptor, const Region& region,
                 const SnapshotAccessOptions& options) {
   auto status = stopped(options);
   if (!status.ok())
     return status;
-  if (region.empty() || !region.validate(descriptor.shape).ok() ||
-      !input_internal::complete_tuple_channels(descriptor, facets, region))
+  if (region.empty() || !region.validate(descriptor.shape).ok())
     return Status::failure(ErrorCode::InvalidArgument,
                            "invalid snapshot coverage");
   auto count = region.element_count();
@@ -87,34 +85,7 @@ Status validate_value(const Value& value,
   if (!value.valid())
     return Status::failure(ErrorCode::InvalidArgument,
                            "invalid snapshot Value");
-  for (const auto& facet : value.facets()) {
-    bool image = facet.key == "photospider.image" ||
-                 (facet.key == "photospider.color-array" &&
-                  value.descriptor().shape.size() >= 3);
-    if (facet.key == "photospider.semantic") {
-      auto semantic = decode_semantic(facet);
-      image =
-          semantic.ok() && (semantic.value().kind == SemanticKind::ImagePlane ||
-                            semantic.value().kind == SemanticKind::Mask);
-    }
-    if (image)
-      return Status::failure(
-          ErrorCode::TypeMismatch,
-          "image snapshots require structural planar storage");
-  }
-  auto status =
-      coverage(value.descriptor(), value.facets(), value.region(), options);
-  if (!status.ok())
-    return status;
-  status = input_internal::validate_value_metadata(value.descriptor(),
-                                                   value.facets());
-  if (!status.ok())
-    return status;
-  status = input_internal::validate_value_samples(
-      value, ErrorCode::InvalidArgument, [&] {
-        return options.cancellation.cancelled() ? ErrorCode::Cancelled
-                                                : ErrorCode::Ok;
-      });
+  auto status = coverage(value.descriptor(), value.region(), options);
   if (!status.ok())
     return status;
   return stopped(options);
@@ -125,9 +96,7 @@ struct InputSnapshotStore::Impl {
   std::shared_ptr<data_internal::MemoryBudget> budget;
 };
 struct InputSnapshot::Impl {
-  ResourceBindings resources;
   ValueDescriptor descriptor;
-  std::vector<ValueFacet> facets;
   std::vector<std::uint64_t> block_extents, grid;
   std::vector<Value> blocks;
   std::shared_ptr<const void> store;
@@ -147,22 +116,12 @@ const ValueDescriptor& InputSnapshot::descriptor() const {
     throw std::logic_error("invalid snapshot");
   return impl_->descriptor;
 }
-const std::vector<ValueFacet>& InputSnapshot::facets() const {
-  if (!impl_)
-    throw std::logic_error("invalid snapshot");
-  return impl_->facets;
-}
-const ResourceBindings& InputSnapshot::resources() const {
-  if (!impl_)
-    throw std::logic_error("invalid snapshot");
-  return impl_->resources;
-}
 Status InputSnapshot::read(const Region& region, std::uint8_t* destination,
                            std::uint64_t size,
                            const SnapshotAccessOptions& options) const {
   if (!impl_ || !destination)
     return Status::failure(ErrorCode::InvalidArgument, "invalid snapshot read");
-  auto status = coverage(impl_->descriptor, impl_->facets, region, options);
+  auto status = coverage(impl_->descriptor, region, options);
   if (!status.ok())
     return status;
   auto count = byte_count(impl_->descriptor, region);
@@ -183,11 +142,11 @@ Result<std::string> InputSnapshot::content_identity(
   if (!impl_)
     return Result<std::string>(
         Status::failure(ErrorCode::InvalidArgument, "invalid snapshot"));
-  auto status = coverage(impl_->descriptor, impl_->facets, region, options);
+  auto status = coverage(impl_->descriptor, region, options);
   if (!status.ok())
     return Result<std::string>(status);
   content_internal::Sha256 hash;
-  hash.text("photospider.input-region.v2");
+  hash.text("photospider.input-region.v3");
   hash.integer(static_cast<std::uint32_t>(impl_->descriptor.element_type));
   hash.integer(impl_->descriptor.shape.size());
   for (auto n : impl_->descriptor.shape)
@@ -195,13 +154,6 @@ Result<std::string> InputSnapshot::content_identity(
   for (auto d : region.dimensions()) {
     hash.integer(d.offset);
     hash.integer(d.extent);
-  }
-  hash.integer(impl_->facets.size());
-  for (const auto& f : impl_->facets) {
-    hash.text(f.key);
-    hash.integer(f.version);
-    hash.integer(f.payload.size());
-    hash.bytes(f.payload.data(), f.payload.size());
   }
   const auto width = Value::element_size(impl_->descriptor.element_type);
   status = visit(region, options, [&](const auto& coordinate) {
@@ -211,6 +163,10 @@ Result<std::string> InputSnapshot::content_identity(
     std::uint64_t bits = 0;
     if (width == 1) {
       bits = *sample;
+    } else if (width == 2) {
+      std::uint16_t word;
+      std::memcpy(&word, sample, 2);
+      bits = word;
     } else if (width == 4) {
       std::uint32_t word;
       std::memcpy(&word, sample, 4);
@@ -251,18 +207,11 @@ Result<InputSnapshot> InputSnapshotStore::import_value(
     return Result<InputSnapshot>(count.status());
   auto out = std::make_shared<InputSnapshot::Impl>();
   out->descriptor = value.descriptor();
-  out->resources = value.resources();
-  out->facets = value.facets();
   out->store = impl_;
-  const auto channels =
-      input_internal::tuple_channel_axis(value.descriptor(), value.facets());
   std::uint64_t blocks = 1;
   for (std::size_t axis = 0; axis < out->descriptor.shape.size(); ++axis) {
     const auto n = out->descriptor.shape[axis];
-    const auto extent =
-        channels && axis == *channels
-            ? n
-            : std::min<std::uint64_t>(n, impl_->config.block_size);
+    const auto extent = std::min<std::uint64_t>(n, impl_->config.block_size);
     const auto grid = n / extent + (n % extent != 0);
     if (!core_internal::can_multiply(grid, blocks,
                                      impl_->config.maximum_blocks))
@@ -305,7 +254,7 @@ Result<InputSnapshot> InputSnapshotStore::import_value(
     });
     if (!status.ok())
       return Result<InputSnapshot>(status);
-    auto frozen = std::move(block).publish(value.facets(), value.resources());
+    auto frozen = std::move(block).publish();
     if (!frozen.ok())
       return Result<InputSnapshot>(frozen.status());
     out->blocks.push_back(frozen.take_value());
@@ -326,8 +275,7 @@ Result<InputSnapshot> InputSnapshotStore::patch(
   if (!status.ok())
     return Result<InputSnapshot>(status);
   if (replacement.descriptor().shape != base.descriptor().shape ||
-      replacement.descriptor().element_type != base.descriptor().element_type ||
-      !input_internal::same_facets(replacement.facets(), base.facets()))
+      replacement.descriptor().element_type != base.descriptor().element_type)
     return Result<InputSnapshot>(
         Status::failure(ErrorCode::TypeMismatch, "patch metadata mismatch"));
   auto out = std::make_shared<InputSnapshot::Impl>(*base.impl_);
@@ -391,7 +339,7 @@ Result<InputSnapshot> InputSnapshotStore::patch(
           });
       if (!status.ok())
         return Result<InputSnapshot>(status);
-      auto frozen = std::move(block).publish(value.facets(), value.resources());
+      auto frozen = std::move(block).publish();
       if (!frozen.ok())
         return Result<InputSnapshot>(frozen.status());
       value = frozen.take_value();

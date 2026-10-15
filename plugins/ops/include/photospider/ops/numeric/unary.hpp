@@ -6,8 +6,8 @@
 #include <vector>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
 #include "photospider/data/value.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 namespace unary_detail {
@@ -58,13 +58,12 @@ inline Result<WorkflowNode> rational(std::uint64_t id, const char* name,
  * output dtypes return InvalidArgument/InvalidDomain/Schema, and allocation may
  * throw std::bad_alloc. Each input Result must have exactly one tensor member,
  * a supported numeric tensor in slot 0; its schema may also contain fields.
- * No fixed input schema ID or image facet is required. Recognized tensor
- * facets and spatial metadata still undergo full-input validation. Allowing a
- * numeric NaN does not bypass an invalid typed value such as an alpha sample.
+ * No fixed input schema ID is required. Numeric values are validated by the
+ * operation's explicitly declared contracts.
  * Metadata specialization requires all input sample shapes and dtypes to
  * match, with rank 1..8, positive extents and at most 2^40 samples.
  * Unary output schema is `photospider.tensor` with a `samples` tensor of the
- * same shape and empty facets. Ordinary unary operations preserve dtype;
+ * same shape and ordinary data. Ordinary unary operations preserve dtype;
  * support is stated by each helper. Rational helpers take matching Int64 input
  * tensors and use an explicit Float32/Float64 output dtype.
  *

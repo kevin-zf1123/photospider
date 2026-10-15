@@ -18,18 +18,17 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
 #include "data/affine_view.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
 #include "data/value_validation.hpp"
-#include "photospider/data/tensor_description.hpp"
+#include "photospider/core/checked_math.hpp"
 
 namespace ps {
 Result<ResourceVector<ResultRef::CacheStorage>> ResultRef::cache_storage(
-    const std::function<Status(std::uint64_t)>& work, bool include_resources,
+    const std::function<Status(std::uint64_t)>& work,
     bool require_complete) const try {
   using Answer = Result<ResourceVector<CacheStorage>>;
   if (!impl_ || !work)
@@ -106,26 +105,6 @@ Result<ResourceVector<ResultRef::CacheStorage>> ResultRef::cache_storage(
       pending.insert(pending.end(), tensor.affine_owners.begin(),
                      tensor.affine_owners.end());
     }
-    if (!include_resources)
-      continue;
-    for (std::size_t i = 0; i < source.resources.profile_count(); ++i) {
-      auto profile = source.resources.profile_at(i);
-      if (!profile.ok())
-        return Answer(profile.status());
-      const auto& storage = profile.value().storage();
-      auto status = add(storage.get(), storage->capacity());
-      if (!status.ok())
-        return Answer(status);
-    }
-    for (std::size_t i = 0; i < source.resources.config_count(); ++i) {
-      auto config = source.resources.config_at(i);
-      if (!config.ok())
-        return Answer(config.status());
-      const auto& storage = config.value().storage();
-      auto status = add(storage.get(), storage->capacity());
-      if (!status.ok())
-        return Answer(status);
-    }
   }
   return Answer(std::move(answer));
 } catch (const std::bad_alloc&) {
@@ -169,8 +148,7 @@ Result<ResultRef> ResultRef::rebind_cached(
     return Result<ResultRef>(admitted.status());
   auto started = ResultBuilder::start(
       impl_->budget, impl_->schema, scope, impl_->limits,
-      std::vector<std::uint64_t>(association.begin(), association.end()), 128,
-      impl_->resources);
+      std::vector<std::uint64_t>(association.begin(), association.end()), 128);
   if (!started.ok())
     return Result<ResultRef>(started.status());
   auto builder = started.take_value();
@@ -204,11 +182,6 @@ const SchemaTemplate& ResultRef::schema() const {
   if (!impl_)
     throw std::logic_error("invalid ResultRef");
   return impl_->schema;
-}
-const ResourceBindings& ResultRef::resources() const {
-  if (!impl_)
-    throw std::logic_error("invalid ResultRef");
-  return impl_->resources;
 }
 bool ResultRef::matches_scope(std::string_view scope) const noexcept {
   if (!impl_ || scope.size() > 4096 || impl_->key.size() < scope.size() + 8)

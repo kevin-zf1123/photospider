@@ -10,9 +10,9 @@
 #include "01-numeric/exact_predicate.hpp"
 #include "01-numeric/exact_sampling.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/data/lut3d_bake.hpp"
+#include "common/floating_environment.hpp"
+#include "photospider/ops/numeric/lut3d_bake.hpp"
 #include "photospider/plugin/operation_registry.hpp"
-#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::bake_ops {
 using Parameters = std::map<std::string, ParameterValue>;
@@ -80,37 +80,7 @@ inline std::vector<std::uint64_t> coordinate(
   return result;
 }
 inline Result<Lut3dBakeDescription> description(const Parameters& parameters) {
-  using Answer = Result<Lut3dBakeDescription>;
-  Lut3dBakeDescription spec;
-  spec.shape = shape(parameters);
-  const auto& method = std::get<std::string>(parameters.at("interpolation"));
-  if (method != "trilinear" && method != "tetrahedral")
-    return Answer(invalid("bake interpolation"));
-  spec.interpolation = method == "trilinear" ? Lut3dInterpolation::Trilinear
-                                             : Lut3dInterpolation::Tetrahedral;
-  spec.atol = std::get<double>(parameters.at("atol"));
-  spec.rtol = std::get<double>(parameters.at("rtol"));
-  const auto& dtype = std::get<std::string>(parameters.at("dtype"));
-  const auto& source = std::get<std::string>(parameters.at("source_dtype"));
-  if ((dtype != "float32" && dtype != "float64") ||
-      (source != "float32" && source != "float64"))
-    return Answer(invalid("bake dtype"));
-  spec.table_dtype =
-      dtype == "float32" ? ElementType::Float32 : ElementType::Float64;
-  spec.source_dtype =
-      source == "float32" ? ElementType::Float32 : ElementType::Float64;
-  spec.extra_points = std::get<std::int64_t>(parameters.at("extra_count"));
-  auto a = color_array_from_parameter(
-           std::get<std::string>(parameters.at("input_color_description"))),
-       b = color_array_from_parameter(
-           std::get<std::string>(parameters.at("output_color_description")));
-  if (!a.ok() || !b.ok())
-    return Answer(!a.ok() ? a.status() : b.status());
-  spec.input_description = a.take_value();
-  spec.output_description = b.take_value();
-  spec.recipe_identity = std::get<std::string>(parameters.at("source_recipe"));
-  auto schema = lut3d_bake_schema(spec);
-  return schema.ok() ? Answer(std::move(spec)) : Answer(schema.status());
+  return lut3d_bake_from_parameters(parameters);
 }
 inline std::vector<OperationParameterSpec> geometry_parameters() {
   return {{"n0", OperationParameterType::Int64, true, true, 2, 256},
@@ -144,14 +114,6 @@ inline Status color_metadata(const OperationMetadata& input,
   auto valid = validate_color_array_descriptor(color, tensor_descriptor(input));
   if (!valid.ok())
     return valid;
-  auto expected = encode_color_array(color);
-  if (!expected.ok())
-    return expected.status();
-  for (const auto& facet : input.result_schema->tensors[0].facets)
-    if (facet.key == "photospider.color-array" &&
-        (facet.version != expected.value().version ||
-         facet.payload != expected.value().payload))
-      return mismatch("bake attached color description mismatch");
   return Status::success();
 }
 inline bool model_valid(ColorModel model,

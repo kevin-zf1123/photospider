@@ -1290,18 +1290,55 @@ int typed_tile_grants() {
   using multi_result::take;
   auto schema = multi_result::schema(ElementType::Float32, {1, 4});
   schema.id = "test.mask_grant";
-  schema.tensors[0].facets = {take(encode_semantic(coverage_semantics()))};
   schema.tensors[0].layout.spatial = true;
   schema.tensors[0].layout.channel_axis.reset();
   for (bool descriptor_only : {false, true}) {
     auto registry = std::make_shared<OperationRegistry>();
     OperationDefinition definition;
+    ValidationDefinition validator;
+    validator.identity = {"test.finite", 1, "float32/1"};
+    validator.prepare = [](const ValidationPreparation&) {
+      return Result<std::shared_ptr<const void>>(std::shared_ptr<const void>{});
+    };
+    validator.validate = [](const void*, const ValidationContext& context) {
+      const auto* coverage = context.tensor_coverage(0);
+      if (!coverage)
+        return Status::success();
+      for (const auto& box : coverage->boxes()) {
+        auto window = context.acquire_tensor(0, box);
+        if (!window.ok())
+          return window.status();
+        auto status =
+            take(Footprint::from_regions(coverage->shape(), {box}))
+                .visit(
+                    [&](const auto& at) {
+                      auto charged = context.consume(1);
+                      if (!charged.ok())
+                        return charged;
+                      auto run = window.value().row_run(at);
+                      if (!run.ok())
+                        return run.status();
+                      float sample;
+                      std::memcpy(&sample, run.value().data, sizeof(sample));
+                      return std::isfinite(sample)
+                                 ? Status::success()
+                                 : Status{ErrorCode::OperationFailed,
+                                          "nonfinite sample"};
+                    },
+                    UINT64_MAX, context.cancellation);
+        if (!status.ok())
+          return status;
+      }
+      return Status::success();
+    };
+    check(registry->register_validator(validator));
     definition.key = "test.mask_grant";
     definition.traits.input_count = 1;
     OperationPortConstraint port;
     port.kind = OperationPortKind::Result;
     port.result_schema_id = schema.id;
     port.result_schema_version = schema.version;
+    port.validators = {validator.identity};
     definition.traits.input_schema = {port};
     definition.traits.outputs = {multi_result::output("value")};
     definition.traits.outputs[0].region_rule = OperationRegionRule::Whole;

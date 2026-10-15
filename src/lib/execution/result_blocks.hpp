@@ -6,8 +6,8 @@
 #include <utility>
 #include <vector>
 
-#include "data/content_digest.hpp"
 #include "execution/result_native.hpp"
+#include "photospider/core/content_digest.hpp"
 #include "photospider/plugin/result_program.hpp"
 
 namespace ps::execution_internal {

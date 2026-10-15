@@ -34,7 +34,7 @@ bias [Cout], Cout in {2,3,4}. Matrix and bias are dynamic inputs shared by all
 vector instances. A zero bias uses an explicit constant. There are no implicit
 dtype casts, per-vector matrices, broadcasting or optional bias input. Output
 port key is `values`; its `photospider.tensor` Result schema contains tensor
-member `samples`, with shape [...,Cout], the same dtype, and no facets or batch
+member `samples`, with shape [...,Cout], the same dtype, and no batch
 topology. Input/output vector ranks are 1..8 and logical counts at most 2^40.
 
 Components follow y[r]=sum_c matrix[r,c]*vectors[c]+bias[r], defining matrix

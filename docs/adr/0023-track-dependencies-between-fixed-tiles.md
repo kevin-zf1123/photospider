@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Reader mirror: [Chinese](zh/0023-track-dependencies-between-fixed-tiles.zh.md)
+- Current boundary: in 0.34.0 the facets and resource identities that the original §3.5 placed in a producer's semantic descriptor are superseded; the descriptor is the resolved Result schema plus fixed global facts.
 - Related: [ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md), [ADR 0017](0017-cpu-regional-execution-and-storage.md), [ADR 0018](0018-local-result-caches-and-frozen-execution.md), [ADR 0021](0021-independent-node-results.md), [ADR 0022](0022-freeze-operation-c-abi-v3.md)
 
 ## 1. Core summary (TL;DR)
@@ -146,7 +147,7 @@ A tile becomes visible only when its payload, its coverage and its dependency re
 
 ### 3.5 Semantic descriptors and production progress
 
-A producer's semantic descriptor consists of its schema, shape, element type, the facets and resource identities that change interpretation, and global result facts that are fixed once determined. Object identity, publication revision, current coverage and the sealed flag record production progress. Publishing another tile changes progress only and dirties nothing. A change to the semantic descriptor dirties every record that names the producer. A shape or layout change that no longer fits the plan requires preparation and planning again; tile indices from the old plan are not reused.
+A producer's semantic descriptor consists of its resolved Result schema, which fixes the schema id and version, fields, tensor element types, shapes, spatial layout topology and domain, together with global result facts that are fixed once determined, such as field row counts. The descriptor describes structure; Results carry no attached domain label. Resources that operation preparation selects by explicit identity enter the consuming step's physical identity (§3.8), and configuration stays with the step that uses it rather than traveling with a numeric Result. Object identity, publication revision, current coverage and the sealed flag record production progress. Publishing another tile changes progress only and dirties nothing. A change to the semantic descriptor dirties every record that names the producer. A shape or layout change that no longer fits the plan requires preparation and planning again; tile indices from the old plan are not reused.
 
 ### 3.6 Record lifecycle
 

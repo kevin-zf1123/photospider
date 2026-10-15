@@ -5,7 +5,7 @@
 #include <functional>
 
 #include "01-numeric/exact_product.hpp"
-#include "core/work_consumer.hpp"
+#include "photospider/core/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Direct RN(sqrt(A/B * 2^scale)); no rounded variance is formed. Scratch lives

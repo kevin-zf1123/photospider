@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/cancellation_poll.hpp"
+#include "photospider/core/cancellation_poll.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
 namespace ps {

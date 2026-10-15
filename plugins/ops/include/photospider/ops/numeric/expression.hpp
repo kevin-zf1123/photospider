@@ -5,9 +5,9 @@
 #include <string>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/ops/export.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 /** @brief Authors a Whole Result sampler for a bounded expression.
@@ -31,7 +31,7 @@ namespace ps::numeric {
  * `photospider.tensor` v1 / `samples`, shape [count], in the selected dtype;
  * `axis` is the same schema/member, Float64 shape [3], with one atomic trailing
  * tuple [start,end,step] (or [start,start,+0] for count=1). Output tensors use
- * ordinary sample axes and inherit neither input batch axes nor facets. Invalid
+ * ordinary sample axes and inherit no input batch axes. Invalid
  * source,
  * names, id, count, dtype or profile returns
  * InvalidArgument/InvalidDomain/Schema. Allocation can throw std::bad_alloc.

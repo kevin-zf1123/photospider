@@ -12,11 +12,11 @@
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
 #include "common/registry.hpp"
-#include "core/status_helpers.hpp"
-#include "core/utf8_validation.hpp"
-#include "data/content_digest.hpp"
-#include "photospider/data/tensor_description.hpp"
+#include "photospider/core/content_digest.hpp"
+#include "photospider/core/status_helpers.hpp"
+#include "photospider/core/utf8_validation.hpp"
 #include "photospider/ops/format/channel.hpp"
+#include "photospider/ops/tensor_description.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::format::detail {
@@ -57,64 +57,6 @@ bool supported(ElementType type) {
   }
   return false;
 }
-std::optional<TensorDescription> attached_description(
-    const ResultTensorSpec& input, Status* failure) {
-  for (const auto& facet : input.facets) {
-    if (facet.key != "photospider.tensor-description")
-      continue;
-    auto decoded = decode_tensor_description(facet);
-    if (!decoded.ok()) {
-      *failure = decoded.status();
-      return {};
-    }
-    *failure = validate_tensor_description(decoded.value(), input.descriptor);
-    if (!failure->ok())
-      return {};
-    return decoded.take_value();
-  }
-  return {};
-}
-TensorDescription project_description(TensorDescription description,
-                                      const Selection& selected) {
-  const auto axis = selected.axis;
-  const bool own_channel =
-      description.channel_axis && *description.channel_axis == axis;
-  if (own_channel) {
-    if (!description.channels.empty()) {
-      description.component = description.channels[selected.index];
-      description.channels = {description.channels[selected.index]};
-    }
-    for (const auto& group : description.groups)
-      for (std::size_t i = 0; i < group.indices.size(); ++i)
-        if (group.indices[i] == selected.index) {
-          if (!description.component)
-            description.component = group.components[i];
-          description.component->interpretation = group.interpretation;
-          if (group.components[i].encoding)
-            description.component->encoding = group.components[i].encoding;
-          if (group.components[i].sampling)
-            description.component->sampling = group.components[i].sampling;
-          description.channels = {*description.component};
-        }
-    description.groups.clear();
-    if (!selected.keepdims) {
-      description.channel_axis.reset();
-      description.channels.clear();
-    }
-  } else if (description.channel_axis && !selected.keepdims &&
-             *description.channel_axis > axis) {
-    --*description.channel_axis;
-  }
-  if (!description.axes.empty()) {
-    if (selected.keepdims)
-      description.axes[axis].origin +=
-          selected.index * description.axes[axis].step;
-    else
-      description.axes.erase(description.axes.begin() + axis);
-  }
-  return description;
-}
-
 Result<OperationPreparation> prepare_extraction(
     const std::vector<OperationMetadata>& inputs,
     const std::map<std::string, ParameterValue>& parameters, bool named,
@@ -146,38 +88,20 @@ Result<OperationPreparation> prepare_extraction(
            format::detail::layout_assertion(input.layout)))
     return Prepared(core_internal::invalid_schema_domain(
         "source schema assertion disagrees with input"));
-  const auto& mode = std::get<std::string>(parameters.at("metadata_mode"));
-  if (mode != "respect" && mode != "raw" && mode != "override")
-    return Prepared(core_internal::invalid_schema_domain(
-        "metadata_mode must be respect, raw or override"));
-  if (named && mode == "raw")
-    return Prepared(core_internal::invalid_schema_domain(
-        "named extraction requires interpreted metadata"));
-  const auto override_it = parameters.find("metadata_override");
-  if ((mode == "override") != (override_it != parameters.end()))
-    return Prepared(core_internal::invalid_schema_domain(
-        "metadata_override must occur exactly in override mode"));
-  Status metadata_status = Status::success();
   std::optional<TensorDescription> description;
-  if (mode == "override") {
-    auto replacement = tensor_description_from_parameter(
-        std::get<std::string>(override_it->second));
-    if (!replacement.ok())
-      return Prepared(replacement.status());
-    metadata_status =
-        validate_tensor_description(replacement.value(), input.descriptor);
-    if (!metadata_status.ok())
-      return Prepared(metadata_status);
-    description = replacement.take_value();
-  } else if (mode != "raw") {
-    description = attached_description(input, &metadata_status);
-    if (!metadata_status.ok())
-      return Prepared(metadata_status);
-  } else {
-    description = attached_description(input, &metadata_status);
-    if (!metadata_status.ok())
-      description.reset();
+  if (parameters.count("input_description")) {
+    auto parsed = tensor_description_from_parameter(
+        std::get<std::string>(parameters.at("input_description")));
+    if (!parsed.ok())
+      return Prepared(parsed.status());
+    auto valid = validate_tensor_description(parsed.value(), input.descriptor);
+    if (!valid.ok())
+      return Prepared(valid);
+    description = parsed.take_value();
   }
+  if (named && !description)
+    return Prepared(core_internal::invalid_schema_domain(
+        "named extraction requires input_description"));
   Selection selected;
   const auto axis_it = parameters.find("axis");
   if (axis_it != parameters.end()) {
@@ -186,11 +110,11 @@ Result<OperationPreparation> prepare_extraction(
       return Prepared(core_internal::invalid_schema_domain(
           "channel axis is outside tensor rank"));
     selected.axis = static_cast<std::uint32_t>(axis);
-    if (mode != "raw" && description && description->channel_axis &&
+    if (description && description->channel_axis &&
         selected.axis != *description->channel_axis)
       return Prepared(core_internal::invalid_schema_domain(
           "axis assertion disagrees with metadata"));
-  } else if (mode != "raw" && description && description->channel_axis) {
+  } else if (description && description->channel_axis) {
     selected.axis = *description->channel_axis;
   } else {
     return Prepared(core_internal::invalid_schema_domain(
@@ -260,15 +184,9 @@ Result<OperationPreparation> prepare_extraction(
           format_result::source_assertion(inputs))
     return Prepared(core_internal::invalid_schema_domain(
         "FMT-05B source metadata disagrees with inference"));
-  if (parameters.count("output_description") &&
-      (format_result::text(parameters, "authoring_member") != "FMT-05B" ||
-       !parameters.count("expected_inputs")))
-    return Prepared(core_internal::invalid_schema_domain(
-        "complete extraction metadata requires FMT-05B source assertions"));
   OperationOutputSpecialization output;
   auto schema = input_schema;
   auto& output_tensor = schema.tensors[0];
-  output_tensor.facets.clear();
   output_tensor.layout = {};
   if (!selected.keepdims &&
       selected.axis >= shape.size() - input.atomic_trailing_axes)
@@ -278,13 +196,6 @@ Result<OperationPreparation> prepare_extraction(
   else
     output_tensor.descriptor.shape.erase(
         output_tensor.descriptor.shape.begin() + selected.axis);
-  if (description) {
-    auto projected = project_description(*description, selected);
-    auto encoded = encode_tensor_description(projected);
-    if (!encoded.ok())
-      return Prepared(encoded.status());
-    output_tensor.facets.push_back(encoded.take_value());
-  }
   if (input.layout.spatial) {
     const auto& original = input.layout;
     const bool structural =
@@ -309,34 +220,6 @@ Result<OperationPreparation> prepare_extraction(
       output_tensor.layout = std::move(layout);
     }
   }
-  if (parameters.count("output_description")) {
-    auto parsed = tensor_description_from_parameter(
-        format_result::text(parameters, "output_description"));
-    if (!parsed.ok())
-      return Prepared(parsed.status());
-    auto checked =
-        validate_tensor_description(parsed.value(), output_tensor.descriptor);
-    if (!checked.ok())
-      return Prepared(checked);
-    output_tensor.facets = input.facets;
-    output_tensor.facets.erase(
-        std::remove_if(output_tensor.facets.begin(), output_tensor.facets.end(),
-                       [](const auto& f) {
-                         return f.key == "photospider.tensor-description" ||
-                                f.key == "photospider.semantic" ||
-                                f.key == "photospider.image" ||
-                                f.key == "photospider.color-array";
-                       }),
-        output_tensor.facets.end());
-    auto encoded = encode_tensor_description(parsed.value());
-    if (!encoded.ok())
-      return Prepared(encoded.status());
-    output_tensor.facets.push_back(encoded.take_value());
-    std::sort(output_tensor.facets.begin(), output_tensor.facets.end(),
-              [](const auto& a, const auto& b) { return a.key < b.key; });
-    if (output_tensor.layout.spatial)
-      output_tensor.layout.groups.clear();
-  }
   output.metadata.result_schema =
       std::make_shared<const SchemaTemplate>(std::move(schema));
   OperationPreparation prepared;
@@ -355,7 +238,7 @@ ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_extent, phase.query.resources));
+      phase.query.tile_extent));
 
   return result;
 }
@@ -436,10 +319,8 @@ OperationDefinition extraction(const std::string& key, bool named,
       {"expected_source_schema", OperationParameterType::String, false},
       {"keepdims", OperationParameterType::Bool},
       {"layout", OperationParameterType::String},
-      {"metadata_mode", OperationParameterType::String},
-      {"metadata_override", OperationParameterType::String, false},
+      {"input_description", OperationParameterType::String, false},
       {"expected_inputs", OperationParameterType::String, false},
-      {"output_description", OperationParameterType::String, false},
       {"authoring_member", OperationParameterType::String, false}};
   if (named) {
     traits.parameter_schema.push_back(

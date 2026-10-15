@@ -28,7 +28,7 @@ values remain exact.
 ## Interface and mathematical definition
 
 Inherit the complete [nonuniform contract](CRV-11_nonuniform_lowpass_contract.md).
-Ordered dynamic ports are `positions` and `values` Results. `positions` has full `sample_shape()` [K], rank 1, finite strictly increasing Float32/64 values, K=2..1048576. `values` has full `sample_shape()` rank 1..8, positive shape and logical count <=2^40; static axis selects extent K. The output `samples` is a `photospider.tensor` v1 Result member preserving values shape/dtype with generic facets, evaluated at the original positions.
+Ordered dynamic ports are `positions` and `values` Results. `positions` has full `sample_shape()` [K], rank 1, finite strictly increasing Float32/64 values, K=2..1048576. `values` has full `sample_shape()` rank 1..8, positive shape and logical count <=2^40; static axis selects extent K. The output `samples` is a `photospider.tensor` v1 Result member preserving values shape/dtype with no attached domain description, evaluated at the original positions.
 
 Required static parameters are axis, support_radius and cutoff; boundary is
 reflect/replicate/zero/wrap, default reflect. All applicable numeric kernel

@@ -4,6 +4,7 @@
 #include <memory>
 #include <utility>
 
+#include "support/diagnostic_counter_fixture.hpp"
 #include "support/result_diagnostics_fixture.hpp"
 
 namespace {
@@ -22,13 +23,7 @@ struct ReportProgram {
     std::array<double, 5> samples{};
     for (std::uint64_t i = 0; i < samples.size(); ++i)
       check(phase.read_tensor(0, 0, {i}, &samples[i], sizeof(double)));
-    NumericDiagnostics report;
-    report.profile = CpuNumericProfile::Strict;
-    const char implementation[] = "test.numeric-report/1";
-    std::memcpy(report.implementation.data(), implementation,
-                sizeof(implementation));
-    report.evaluated_values = samples.size();
-    check(phase.report_numeric(report));
+    check(diagnostic_fixture::report(phase, samples.size()));
     auto builder = take(ResultBuilder::start(phase.resources,
                                              *phase.query.output.result_schema,
                                              phase.query.semantic_key));
@@ -43,11 +38,7 @@ struct ReportProgram {
 struct FailingReportProgram {
   ResourceLease fill;
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    NumericDiagnostics report;
-    report.profile = CpuNumericProfile::Strict;
-    report.implementation[0] = 'x';
-    report.evaluated_values = 1;
-    check(phase.report_numeric(report));
+    check(diagnostic_fixture::report(phase, 1));
     const auto available =
         phase.resources.available_capacity()[ResourceKind::Host];
     fill = take(phase.resources.reserve(ResourceCapacity::host(
@@ -64,9 +55,11 @@ struct FailingReportProgram {
 };
 int poll_reports() {
   auto registry = std::make_shared<OperationRegistry>();
+  check(registry->register_diagnostic(diagnostic_fixture::definition()));
   const auto schema = multi_result::schema(ElementType::Float64, {5});
   OperationDefinition operation;
   operation.key = "test.numeric_report";
+  operation.traits.diagnostics = {diagnostic_fixture::identity()};
   operation.traits.input_count = 1;
   operation.traits.input_schema.resize(1);
   operation.traits.input_schema[0].result_schema_id = schema.id;
@@ -80,6 +73,7 @@ int poll_reports() {
   check(registry->register_operation(std::move(operation)));
   OperationDefinition failed;
   failed.key = "test.failed_report";
+  failed.traits.diagnostics = {diagnostic_fixture::identity()};
   failed.traits.outputs = {multi_result::output("value", schema)};
   failed.traits.outputs[0].continuation_bytes = sizeof(FailingReportProgram);
   failed.start_result = [](const auto&, const auto& allocator) {
@@ -111,7 +105,7 @@ int poll_reports() {
     PS_CHECK(result.diagnostics.operation_timings.size() == 1);
     const auto& timing = result.diagnostics.operation_timings[0];
     PS_CHECK(timing.invocation_count == 2 && timing.computed_elements == 5 &&
-             timing.numeric.evaluated_values == 5);
+             diagnostic_fixture::count(*timing.reports) == 5);
   }
   // Numeric-report accounting must not replace an upstream failure when the
   // producer uses all remaining Root Host capacity before returning failure.

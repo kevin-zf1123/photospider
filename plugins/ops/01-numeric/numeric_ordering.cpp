@@ -16,9 +16,8 @@
 #include "01-numeric/exact_quantile.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/stable_order.hpp"
-#include "photospider/data/semantic.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal {
 namespace {

@@ -14,12 +14,10 @@
 #include <vector>
 
 #include "core/dense_layout_validation.hpp"
-#include "data/typed_sample_validation.hpp"
-#include "photospider/data/tensor_description.hpp"
 
 namespace ps::input_internal {
 namespace {
-enum class TensorPolicy { Generic, Semantic, Scalar };
+enum class TensorPolicy { Generic, Scalar };
 Status failure(ErrorCode code, const char* message) {
   return Status::failure(code, message);
 }
@@ -32,7 +30,6 @@ std::uint32_t float_bits(float value) noexcept {
 }
 Status validate_member_descriptor(const OperationPortConstraint& port,
                                   const ValueDescriptor& descriptor,
-                                  const std::vector<ValueFacet>& facets,
                                   TensorPolicy policy);
 bool valid_constraint(const OperationPortConstraint& port) {
   if (port.kind == OperationPortKind::Result) {
@@ -44,16 +41,12 @@ bool valid_constraint(const OperationPortConstraint& port) {
       return false;
     if (!tensor_member_predicate(port))
       return !port.rank && !port.element_type && !port.element_type_mask &&
-             !port.semantic_kind && port.facets.empty() &&
-             !port.requires_semantics && !port.scalar_bounds &&
-             float_bits(port.minimum) == 0 && float_bits(port.maximum) == 0;
+             !port.scalar_bounds && float_bits(port.minimum) == 0 &&
+             float_bits(port.maximum) == 0;
     if ((!port.tensor_key.empty() && !valid_input_name(port.tensor_key)) ||
-        port.rank > 8 || port.element_type > 7 || port.semantic_kind > 10 ||
+        port.rank > 8 || port.element_type > 7 ||
         (port.element_type_mask & ~UINT32_C(127)) ||
         (port.element_type && port.element_type_mask))
-      return false;
-    auto facets = port.facets;
-    if (!canonicalize_facets(&facets).ok() || !same_facets(facets, port.facets))
       return false;
     if (!port.scalar_bounds)
       return float_bits(port.minimum) == 0 && float_bits(port.maximum) == 0;
@@ -99,8 +92,7 @@ Status validate_port_schema(const OperationTraits& traits) {
 
 bool tensor_member_predicate(const OperationPortConstraint& port) noexcept {
   return !port.tensor_key.empty() || port.element_type ||
-         port.element_type_mask || port.rank || port.semantic_kind ||
-         !port.facets.empty() || port.requires_semantics || port.scalar_bounds;
+         port.element_type_mask || port.rank || port.scalar_bounds;
 }
 Result<std::uint32_t> resolve_tensor_member(const OperationPortConstraint& port,
                                             const OperationMetadata& metadata) {
@@ -124,24 +116,15 @@ Result<std::uint32_t> resolve_tensor_member(const OperationPortConstraint& port,
   }
   const auto& tensor = schema.tensors[slot];
   auto valid = validate_member_descriptor(port, tensor.descriptor,
-                                          tensor.facets, TensorPolicy::Generic);
+                                          TensorPolicy::Generic);
   if (!valid.ok())
     return Answer(valid);
-  if (!port.facets.empty() && !same_facets(port.facets, tensor.facets))
-    return Answer(
-        failure(ErrorCode::TypeMismatch, "tensor member facets mismatch"));
-  if (port.requires_semantics || port.semantic_kind) {
-    valid = validate_member_descriptor(port, tensor.descriptor, tensor.facets,
-                                       TensorPolicy::Semantic);
-    if (!valid.ok())
-      return Answer(valid);
-  }
   if (port.scalar_bounds) {
     if (!tensor.batch_axes.empty() ||
         tensor.descriptor.shape != std::vector<std::uint64_t>{1})
       return Answer(failure(ErrorCode::TypeMismatch,
                             "scalar tensor requires full sample shape one"));
-    valid = validate_member_descriptor(port, tensor.descriptor, tensor.facets,
+    valid = validate_member_descriptor(port, tensor.descriptor,
                                        TensorPolicy::Scalar);
     if (!valid.ok())
       return Answer(valid);
@@ -170,9 +153,8 @@ Status validate_port_metadata(const OperationPortConstraint& port,
 namespace {
 Status validate_member_descriptor(const OperationPortConstraint& port,
                                   const ValueDescriptor& descriptor,
-                                  const std::vector<ValueFacet>& facets,
                                   TensorPolicy policy) {
-  auto canonical_status = validate_value_structure(descriptor, facets);
+  auto canonical_status = validate_value_structure(descriptor);
   if (!canonical_status.ok())
     return canonical_status;
   const auto element = static_cast<std::uint32_t>(descriptor.element_type);
@@ -183,53 +165,14 @@ Status validate_member_descriptor(const OperationPortConstraint& port,
       (port.element_type_mask &&
        !(port.element_type_mask & (1U << (element - 1)))))
     return failure(ErrorCode::TypeMismatch, "port dtype/rank mismatch");
-  auto semantic_status = validate_value_semantics(descriptor, facets);
-  if (!semantic_status.ok())
-    return semantic_status;
   if (policy == TensorPolicy::Generic)
     return Status::success();
-  if (policy == TensorPolicy::Semantic) {
-    const auto found =
-        std::find_if(facets.begin(), facets.end(),
-                     [](const auto& f) { return typed_facet(f.key); });
-    if (found == facets.end())
-      return failure(ErrorCode::TypeMismatch, "typed port requires semantics");
-    if (found->key == "photospider.color-array") {
-      if (port.semantic_kind ||
-          (!port.facets.empty() && !same_facets(port.facets, facets)))
-        return failure(ErrorCode::TypeMismatch, "typed port color mismatch");
-      return Status::success();
-    }
-    auto semantic = decode_semantic(*found);
-    if (!semantic.ok())
-      return semantic.status();
-    if ((port.semantic_kind &&
-         port.semantic_kind !=
-             static_cast<std::uint32_t>(semantic.value().kind)) ||
-        (!port.facets.empty() && !same_facets(port.facets, facets)))
-      return failure(ErrorCode::TypeMismatch, "typed port semantic mismatch");
-    return Status::success();
-  }
   if (descriptor.element_type != ElementType::Float32) {
     return failure(ErrorCode::TypeMismatch, "port requires Float32");
   }
   if (policy == TensorPolicy::Scalar) {
     if (descriptor.shape != std::vector<std::uint64_t>{1})
       return failure(ErrorCode::TypeMismatch, "scalar requires shape one");
-    if (!facets.empty()) {
-      if (facets.size() != 1 || facets[0].key != "photospider.semantic")
-        return failure(ErrorCode::TypeMismatch,
-                       "scalar facets are not compatible");
-      auto semantic = decode_semantic(facets[0]);
-      if (!semantic.ok())
-        return semantic.status();
-      if ((semantic.value().kind != SemanticKind::Scalar &&
-           semantic.value().kind != SemanticKind::SampledSignal) ||
-          semantic.value().unit != "dimensionless")
-        return failure(
-            ErrorCode::TypeMismatch,
-            "scalar requires dimensionless scalar or single-sample signal");
-    }
   }
   return Status::success();
 }

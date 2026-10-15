@@ -46,7 +46,7 @@ domain policy, precision and zero handling as CRV-01B at query[i] using the
 column y[:,c]. The static dtype and out_of_domain choices apply to the entire
 node. Each port has one dtype, so y columns share that array's dtype; x, y and
 query may independently use Float32/Float64. Outputs select Float32/Float64,
-default Float64, with empty facets.
+default Float64, with no attached domain description.
 
 For every nonempty request, the Whole Result program requests complete x, y and query inputs with Data, Validation and Descriptor (role 13), including typed validation and upstream failures. It validates all x knots and query controls before y arithmetic, evaluates every query and output column, and publishes a complete dense Result of shape [N] or [N,C]. The Result association records the actual source ObjectIds. Empty reads no payload; static metadata validation still applies. A nonempty local request still computes and stores the complete output. The returned Result may retain complete certified coverage, and sample coordinates remain global rather than being rebased to the request.
 
@@ -85,7 +85,7 @@ runs once per complete query row and is shared across all C columns. Per-column
 formulas and numeric selection are unchanged. Every output column is computed;
 any input edit invalidates recorded output demand. Arbitrary legal immutable
 strides on either y axis remain supported. Output retains the rank-2 shape and
-empty facets, including C=1.
+no attached domain description, including C=1.
 
 ## Algorithm and resources
 

@@ -79,15 +79,14 @@ all profiles; native platform NaN propagation is not the specification.
 
 Each node consumes numeric tensor data from a Result input and publishes a
 Result on output port `values`. Each input Result contains exactly one tensor
-member in slot 0 and may also contain fields. Its schema ID and facets may vary.
-Recognized tensor facets and spatial metadata still undergo full-input typed
-validation; numeric NaN acceptance does not bypass typed constraints such as
-alpha validity. The tensor sample shape has rank 1..8, positive extents, and at
+member in slot 0 and may also contain fields. Its schema ID may vary.
+Input structure and explicitly bound validators retain their declared scope;
+there is no label-triggered alpha or color scan. The tensor sample shape has rank 1..8, positive extents, and at
 most 2^40 elements. The
 individual operation declares its accepted dtypes and output mapping. No
 implicit integer/float conversion, shape change, physical units or color/alpha
 inference is introduced. The output schema is `photospider.tensor`, with tensor
-key `samples`, the preserved shape, and empty facets.
+key `samples`, the preserved shape, and no attached domain description.
 
 Metadata specialization checks the input tensor dtype and shape. A nonempty
 request uses Whole execution and requires Data, Validation and Descriptor
@@ -177,14 +176,13 @@ The 66 maintained unary keys are registered in `plugins/ops/01-numeric/numeric_u
 and exposed through `photospider/ops/numeric/unary.hpp`. The helpers author Result
 workflows. Each input port accepts a Result with a supported numeric tensor in
 slot 0; metadata specialization requires matching input dtype and complete
-sample shape. It does not require a particular input schema ID or image facet.
+sample shape. It does not require a particular input schema ID.
 Every nonempty request uses a Whole continuation, requests the complete input
 with Data, Validation and Descriptor roles, and reads through authorized tensor
 windows. Compatible signed and zero strides remain readable without requiring
 input packing. The operation validates all samples and writes one complete
 packed Result output; the executor applies the requested projection afterward.
-The output schema is `photospider.tensor` with tensor key `samples` and empty
-facets. Ordinary unary operations preserve dtype; rational pi helpers use their
+The output schema is `photospider.tensor` with tensor key `samples` and no attached domain description. Ordinary unary operations preserve dtype; rational pi helpers use their
 explicit Float32/Float64 output selection.
 
 Metadata specialization requires rank 1..8, positive extents, matching sample

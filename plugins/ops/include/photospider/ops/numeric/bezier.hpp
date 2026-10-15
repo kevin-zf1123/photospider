@@ -5,8 +5,8 @@
 #include <utility>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
 #include "photospider/data/value.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 /** @brief Finite sampling outside the anchor interval rejects or clamps x. */
@@ -33,8 +33,8 @@ enum class BezierDomain { Reject, Clamp };
  * InvalidArgument/InvalidDomain/Schema. Allocation can throw bad_alloc.
  * @note Helpers are pure/concurrent-safe. Compiler validates all static edges.
  * Output `values` is `photospider.tensor` v1/member `samples`, [count],
- * selected dtype, empty facets. Output `axis` uses the same schema/member,
- * Float64 [3], atomic_trailing_axes=1, empty facets. The Result associations
+ * selected dtype, ordinary data. Output `axis` uses the same schema/member,
+ * Float64 [3], atomic_trailing_axes=1, ordinary data. The Result associations
  * record active source ObjectIds. Whole execution requests active inputs with
  * Data, Validation and Descriptor (role 13). Values validates global x topology
  * and all generated coordinates, computes every value and returns full
@@ -103,7 +103,7 @@ inline Result<WorkflowNode> sample_bezier_function_node(
  * input shapes/types and all logical products <=2^40 without reading payload.
  * @note Pure/concurrent-safe authoring. Output `values` is a Result using
  * schema photospider.tensor v1/member samples, shape [N,D], selected dtype and
- * empty facets. Whole execution requests all inputs with Data, Validation and
+ * ordinary data. Whole execution requests all inputs with Data, Validation and
  * Descriptor (role 13), validates all query rows before arithmetic, and
  * evaluates every row/component even for a local request. Nonempty output
  * returns full certified coverage in global coordinates; the association

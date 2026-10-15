@@ -11,7 +11,7 @@
 #include <type_traits>
 #include <utility>
 
-#include "core/checked_math.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
 namespace ps::gpu_internal {

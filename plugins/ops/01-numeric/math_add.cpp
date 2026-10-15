@@ -6,7 +6,6 @@
 
 #include "common/registry.hpp"
 #include "common/tensor_program.hpp"
-#include "common/typed_need_validation.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal {
@@ -14,9 +13,6 @@ namespace {
 struct Add final {
   bool started = false;
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     using namespace tensor_ops;  // NOLINT(build/namespaces)
     auto scratch =
         take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));

@@ -5,8 +5,8 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
 #include "execution/result_blocks.hpp"
+#include "photospider/core/checked_math.hpp"
 
 namespace ps::execution_internal {
 struct ResultCacheProof::SourceRange {

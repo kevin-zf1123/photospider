@@ -9,7 +9,7 @@
 
 #include "01-numeric/exact_product.hpp"
 #include "01-numeric/math_constants.hpp"
-#include "core/work_consumer.hpp"
+#include "photospider/core/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Fixed-capacity signed dyadic enclosures. The full pool is owned/admitted as

@@ -83,7 +83,7 @@ batch axes. The Whole Result program requests every input with Data, Validation
 and Descriptor (role 13), then validates every segment_indices/t row before any
 component arithmetic. It evaluates all N*D output cells and publishes an
 immutable dense Result using schema `photospider.tensor` v1 / member `samples`,
-shape [N,D], selected dtype and empty facets. Output association records current
+shape [N,D], selected dtype and no attached domain description. Output association records current
 source ObjectIds. A nonempty local request returns full certified coverage in
 global sample coordinates; coordinates are not rebased to the request. Empty
 produces empty coverage and does not poll a failing handle producer; static
@@ -110,7 +110,7 @@ input versions, profile, metadata and parameters. Replacing segment/t sources
 retains the compiled static preparation. Repeating a completed demand returns
 the same Result object; an equivalent fresh four-source binding can reuse the
 content cache and refresh all four source associations. Output name, dtype,
-rank-2 shape (including D=1) and empty facets are unchanged. Input
+rank-2 shape (including D=1) and no attached domain description are unchanged. Input
 zero/negative strides, offsets and unaligned storage remain legal. Output
 storage survives its context; the output owns its published payload, so source
 backings can retire. An authorized read window shares the output owner and can
@@ -161,8 +161,7 @@ request partition, neighboring queries, thread order or cache state.
 
 All ports are required Result inputs with one tensor member under any schema
 id/version/key. Output port `values` is a Result using schema
-`photospider.tensor` v1 / member `samples`, shape [N,D], selected dtype and empty
-facets. Batch axes are included in the complete `sample_shape()`. Static degree is required Int64 2 or 3; static dtype is
+`photospider.tensor` v1 / member `samples`, shape [N,D], selected dtype and no attached domain description. Batch axes are included in the complete `sample_shape()`. Static degree is required Int64 2 or 3; static dtype is
 required String float32/float64, with constructor default float64. Direct nodes
 supply both. No output axis, extrapolation, automatic segment selection, squeeze
 or implicit dtype conversion from integers is provided. Shape/dtype inference

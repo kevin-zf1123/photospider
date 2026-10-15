@@ -6,7 +6,7 @@
 #include <utility>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 /** @brief Explicit discrete/continuous boundary extension. */
@@ -59,7 +59,7 @@ inline Result<WorkflowNode> uniform(std::uint64_t id, const char* kernel,
 }  // namespace lowpass_detail
 /** @brief Filters a sampled signal with a centered Hann-windowed sinc.
  * A single-tensor Result is the input; output values retains its full shape and
- * dtype with generic facets. axis selects independent signals. Required
+ * dtype with ordinary data. axis selects independent signals. Required
  * radius=1..4096 and cutoff in (0,.5) cycles/sample define the exact full
  * kernel. boundary defaults Reflect, period 2*(N-1) without repeated endpoints
  * (N=1 maps to zero); Replicate clamps, Wrap uses Euclidean modulo, Zero adds
@@ -90,8 +90,7 @@ inline Result<WorkflowNode> uniform(std::uint64_t id, const char* kernel,
  * `sample_shape()`, including batch axes: Float32/64, rank 1..8, positive
  * extents and logical count <=2^40. Output port `values` is an immutable
  * `photospider.tensor` v1/member `samples` Result with the same shape/dtype and
- * generic facets. The output schema selects its own resources instead of
- * copying source-only facets/resources.
+ * ordinary data. Results retain their sample storage owners.
  *
  * All formal profiles use Whole. A nonempty request declares Data, Validation
  * and Descriptor (role 13) for the complete input tensor. Typed/upstream
@@ -205,8 +204,8 @@ inline Result<WorkflowNode> nonuniform(std::uint64_t id, const char* kernel,
  * Float32/64, rank 1..8/count<=2^40, with the selected axis of length K; other
  * dimensions are independent signals. Output `samples` is a
  * `photospider.tensor` v1/member `samples` Result preserving full values
- * shape/dtype with generic facets at the original positions. The output schema
- * selects its own resources instead of copying source-only facets/resources.
+ * shape/dtype with ordinary data at the original positions. Results
+ * retain their sample storage owners.
  * support_radius>0 uses coordinate units; cutoff>0 is in
  * cycles per coordinate unit, with no 0.5 upper bound. Gaussian uses sigma>0
  * in coordinate units instead; Kaiser additionally requires beta>=0.

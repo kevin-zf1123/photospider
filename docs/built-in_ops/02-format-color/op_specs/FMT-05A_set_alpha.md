@@ -18,7 +18,7 @@ registered_operation_keys:
 # FMT-05A: set or add an internal alpha plane
 
 The default registry provides `alpha.set_<profile>` for the three CPU profiles.
-The operation uses Result ABI 3; the specification remains Proposed. It preserves
+The operation uses Result ABI 4; the specification remains Proposed. It preserves
 straight color samples while assigning or inserting the selected group's alpha
 channel.
 
@@ -37,7 +37,7 @@ explicit external plane/scalar source. One `values` output preserves dtype.
 Both input and supplied alpha use the same Float32/Float64 dtype. Alpha means
 normalized [0,1]; no cast, normalization, resampling or premultiplication occurs.
 
-Inherit group, metadata_mode, conditional metadata_override, axis and layout.
+Inherit group, required input_description, axis and layout.
 Additional parameters are:
 
 | Parameter | Definition |
@@ -47,13 +47,10 @@ Additional parameters are:
 | channel_index | Required only for placement=channel; nonnegative Int64 final output slot. Preserve forbids this field rather than silently ignoring it. |
 | output_axis | Required only to insert a channel axis into a component Gray input; Int64 in [0,input_rank]. A channel-bearing input retains its axis and forbids insertion. |
 
-An external plane has exactly S and compatible declared coordinates. A scalar
-has exactly [1] and is explicitly expanded over S for this Run. No implicit
-squeeze or ordinary plane broadcasting occurs. Source component semantics may
-be assigned to the target alpha role without a separate raw flag, following
-FMT-02 target assignment. This does not authorize spatial-grid conflicts or
-non-normalized alpha samples. Use an explicit source metadata adaptation for
-conflicting external coordinates before connecting that source.
+An external plane has exactly S and the same batch prefix/dtype. A scalar is
+unbatched shape `[1]` and explicitly expanded over S. External/scalar sources
+are ordinary Results without domain labels; their requested values must satisfy
+the alpha rule. No implicit squeeze, resampling or plane broadcasting occurs.
 
 ## Output inference and mathematical reference
 
@@ -80,12 +77,10 @@ follow the family. Preserve is the corresponding identity map with its alpha
 slot replaced. Reads always use the original immutable source, including when
 an original channel supplies new alpha and channel indices shift in the result.
 
-Retain straight group interpretation and remap every surviving reference. The
-selected group references j. A moved/replaced alpha retains applicable old alpha
-component meaning; a new alpha receives its declared alpha meaning without a
-guessed unique name. Do not propagate a conflicting source Gray/RGB role as the
-output alpha role. Other groups retain their original samples and references
-through remapping; no external persistent relation remains.
+The output contains the mapped samples and structural schema only. It has no
+alpha-role or group metadata. Callers construct the resulting straight-image
+configuration for downstream operations, with the new alpha at slot j and any
+surviving indices remapped. Other groups' sample bits remain unchanged.
 
 ## Demand, layout and validation
 

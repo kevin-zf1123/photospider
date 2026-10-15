@@ -7,39 +7,39 @@ namespace {
 std::atomic<std::uint32_t> destroy_count{0};
 std::atomic<std::uint32_t> callback_count{0};
 int context_marker;
-int never(void*, void*, const ps_result_query_v3*,
-          const ps_result_services_v3*) {
+int never(void*, void*, const ps_result_query_v4*,
+          const ps_result_services_v4*) {
   ++callback_count;
   return 1;
 }
-ps_result_field_spec_v3 make_field() {
-  ps_result_field_spec_v3 field{};
+ps_result_field_spec_v4 make_field() {
+  ps_result_field_spec_v4 field{};
   field.struct_size = sizeof(field);
   field.key = "record";
   field.key_size = 6;
-  field.element_type = PS_RESULT_ELEMENT_FLOAT64_V3;
+  field.element_type = PS_RESULT_ELEMENT_FLOAT64_V4;
   field.record_rank = 1;
   field.record_shape[0] = UINT64_MAX;
-  field.rows.kind = PS_RESULT_EXTENT_FIXED_V3;
+  field.rows.kind = PS_RESULT_EXTENT_FIXED_V4;
   field.rows.value = 1;
   field.rows.divisor = 1;
   return field;
 }
 const auto field = make_field();
-ps_result_schema_v3 make_schema() {
-  ps_result_schema_v3 schema{};
+ps_result_schema_v4 make_schema() {
+  ps_result_schema_v4 schema{};
   schema.struct_size = sizeof(schema);
   schema.id = "fixture.record";
   schema.id_size = 14;
   schema.version = 1;
-  schema.publication = PS_RESULT_COMPLETE_BUNDLE_V3;
+  schema.publication = PS_RESULT_COMPLETE_BUNDLE_V4;
   schema.fields = &field;
   schema.field_count = 1;
   return schema;
 }
 const auto schema = make_schema();
 const auto output = result_registry_fixture::make_output(&schema);
-ps_result_operation_v3 make_operation() {
+ps_result_operation_v4 make_operation() {
   auto operation = result_registry_fixture::make_operation(
       "fixture.dense_overflow", 22, nullptr, 0, &output);
   operation.start = never;
@@ -52,15 +52,15 @@ void destroy_fixture(void* context) {
     ++destroy_count;
 }
 // NOLINTBEGIN(whitespace/indent_namespace)
-const ps_result_operation_plugin_api_v3 api = {
-    sizeof(api),     PS_RESULT_OPERATION_ABI_VERSION_3,
+const ps_result_operation_plugin_api_v4 api = {
+    sizeof(api),     PS_RESULT_OPERATION_ABI_VERSION_4,
     &operation,      1,
     &context_marker, destroy_fixture};
 // NOLINTEND
 }  // namespace
 
-extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v3*
-ps_result_operation_plugin_get_api_v3(void) {
+extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v4*
+ps_result_operation_plugin_get_api_v4(void) {
   return &api;
 }
 extern "C" PS_RESULT_EXPORT std::uint32_t

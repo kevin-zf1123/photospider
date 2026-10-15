@@ -17,7 +17,7 @@ implementation prerequisites, not evidence supplied by this specification.
 
 ## Inherited contracts
 
-Use the unified tensor/metadata, planar storage, straight internal color,
+Use the structural tensors and explicit configuration, planar storage, straight internal color,
 call-local interpretation and consumed-semantic validation rules from
 [FMT-common](FMT_common_contract.md). External-engine conformance is separately
 specified; NUM strict rounding or accelerated four-ULP guarantees do not follow
@@ -44,11 +44,13 @@ requires native CIELAB lightness l=L*/100. Engine boundary units are specified b
 
 ## Current implementation boundary
 
-[IccProfile](../../../../include/photospider/data/icc_profile.hpp) currently
-admits immutable ICC v2/v4 CMYK output-device resources. It validates and owns
-bytes; it does not execute a CMM. Its current admission surface does not imply
-support for all profile classes or models listed above. Broader admission and
-the transform adapter remain implementation dependencies.
+[IccProfile](../../../../include/photospider/ops/icc_profile.hpp) currently
+provides structural admission and owned immutable bytes for supported ICC v2/v4
+RGB/Gray/CMYK/XYZ/Lab profiles. CMYK is restricted to output-device profiles;
+DeviceLink and abstract profiles required by later members are not admitted by
+this helper. Structural admission does not execute a CMM, prove transform
+direction availability or establish numerical conformance. Those adapters and
+the additional profile-class support remain implementation dependencies.
 
 ## Confirmed engine boundary
 
@@ -122,9 +124,10 @@ native endpoint coordinate units define its meaning. Arbitrary LUT-based RGB
 or Gray profiles need not decompose into analytic primaries/transfer or one of
 FMT-11's four Gray kinds. Do not invent those fields. Use an explicit conversion
 to an identified analytic endpoint before consumers that require those fields.
-An ordinary source-profile assertion must match the input's bound identity;
-source reinterpretation requires explicit override. Adding this descriptor is
-a generic metadata migration, not support already present in ColorArray v1.
+Each operation receives its source profile and interpretation explicitly.
+Profile-defined endpoint configuration is supported by the SDK
+`TensorDescription` codec. It does not attach a descriptor to data or extend
+ColorArray v1 implicitly; LCMS execution remains unimplemented.
 
 An explicit endpoint binding may associate a frozen profile identity with a
 complete analytic space. This is a caller assertion, not inferred from profile
@@ -132,12 +135,12 @@ names, textual tags or a set of matching samples. Check model, units, component
 order and declared reference/white convention. A binding does not transform
 samples or prove equivalence of an arbitrary LUT with an analytic formula.
 If conventions differ, require explicit conversion or reinterpretation. Retain
-the binding's identity/provenance with the output.
+the binding in preparation and pass it explicitly to later consumers.
 
 ICC PCS D50 is not automatically the analytic D50 xy preset. Keep the pinned
 engine's PCS convention, its D50 XYZ constants and profile encoding precision
 distinct from an analytic xy declaration. Native XYZ/Lab consumers require an
-explicitly compatible analytic binding or conversion/override. Engine-internal
+explicitly compatible analytic binding or conversion or explicit reinterpretation. Engine-internal
 PCS conversion/media-white processing creates no hidden FMT-09/10/11 nodes.
 The pinned engine's native D50 constants are RN64(0.9642), 1 and RN64(0.8249);
 serialized profile header illuminants retain their actual fixed-point bytes.
@@ -150,14 +153,13 @@ B fixes engine LUT selection to the DeviceLink header intent; do not expose
 additional BPC or adaptation controls. Require explicit complete entry and exit
 space descriptions matching the link's endpoint model signatures and channel
 counts. Their association with this mapping is a caller declaration, not a
-fact proved by optional profile-sequence tags. Respect checks the entry against
-the input interpretation; override explicitly changes that interpretation.
-The output publishes the declared complete exit space and owns its required
-resources. A bare link-exit label is not the chosen complete-image interface.
+fact proved by optional profile-sequence tags. Static preparation checks the
+explicit entry and exit configuration against endpoint structure. The plan
+owns required resources; output data does not carry an exit description.
 
 Names and optional sequence tags do not establish byte identity or validate
 the caller's colorimetric assertion. Resource ownership and endpoint structural
-consistency remain mandatory even when interpretation is explicitly overridden.
+consistency remain mandatory for every explicitly supplied interpretation.
 
 ## Confirmed chain declaration
 
@@ -180,12 +182,12 @@ floating endpoint types. Consumed inputs and requested outputs must be finite;
 requested CMYK outputs must also lie in [0,1]. Reject nonfinite source samples
 before calling the engine.
 
-Raw uses explicit profiles and the same unit adapter, while skipping semantic
-metadata consistency and CMYK nominal-range checks. All modes reject nonfinite
+The proposed finite-only raw path uses explicit profiles and the same unit
+adapter, while skipping the described CMYK nominal-range check. All modes reject nonfinite
 consumed inputs/requested results and overflow during unit adaptation or entry
 into the engine's Float32 pipeline. Raw does not inherit NUM NaN-payload
-propagation through this engine. Retain only applicable unverified metadata;
-raw does not automatically publish a valid destination color-space declaration.
+propagation through this engine. Neither path attaches a color description to
+its output.
 
 ## Confirmed output group placement
 
@@ -193,7 +195,8 @@ When source and target color counts match, assign target roles in model order
 to the source group's ordered slots, preserving positions. When they differ,
 replace the group at its smallest physical slot with consecutive target-model
 components and delete its other original slots. Preserve the relative order
-of all unrelated components and remap metadata, including internal alpha.
+of all unrelated components and remap data slots, including same-tensor alpha. Callers update the explicit
+configuration supplied to downstream operations.
 Axis-free Gray that expands to multiple channels requires explicit output_axis.
 No resampling or change to non-channel dimensions occurs.
 
@@ -254,11 +257,11 @@ No GPU or platform-specific accelerated alias is specified.
 Selectors, profile identities, stage order/directions, descriptions, execution,
 intent/BPC, output_axis and layout are static. Changes require re-inference and
 transform reconstruction. Pixel values may change under the same input schema.
-A may resolve an omitted source_profile from a complete attached profile-defined
-description; explicit source assertions must agree in respect mode. Destination
-profile is always explicit. Raw requires explicit source profile/endpoint data.
+Source and destination profile/endpoint data are explicit static parameters.
+Preparation returns their resource identities for host resolution. No profile
+is selected from a Result or Value.
 
-Semantic modes select one complete group; raw specifies ordered distinct source
+The description path selects one complete configured group; raw specifies ordered distinct source
 slots and explicit profile/endpoint parameters. Resolve axes using FMT common
 rules, never inferred HWC/CHW. Channel counts are Gray=1, RGB/XYZ/Lab=3, CMYK=4.
 Only native Float32/Float64 coordinates are admitted; non-native numeric code
@@ -287,15 +290,13 @@ Axis-free Gray-to-Gray remains axis-free; expansion uses explicit output_axis.
 Reject overlapping group/reference structures that cannot remain consistent
 after replacement, rather than silently changing unrelated groups.
 
-## Published interpretation and request behavior
+## Output interpretation and request behavior
 
-Respect/override publish the actual target model/space, native units and
-straight alpha structure. Remove source-only fields, rebuild selected-group
-roles and remap surviving references. Other groups, applicable names/coordinates
-and opaque annotations follow common propagation rules. Names are not roles or
-profile identity. Retain output profile/binding owners after context destruction.
-Raw does not publish the target declaration as a semantic guarantee; remove
-structurally incompatible descriptions and retain applicable ones unverified.
+The target profile and endpoint configuration define how callers interpret the
+computed coordinates. Operations publish structure and numeric data only.
+Callers supply destination configuration to later consumers and adjust explicit
+channel mappings when component counts change. Resources are retained by
+preparation, plans and active execution, independently of Result storage owners.
 
 Validate the full static interface and construct the transform even for empty
 spatial or bypass-only requests. This reads resources, not image samples.
@@ -445,7 +446,7 @@ These are future implementation gates, not results of this documentation turn.
    Exercise negative/HDR finite coordinates, engine clipping, underflow/signed
    zeros and invalid unrequested target values without introducing global sample
    scans. Alpha-only output preserves arbitrary alpha bits.
-6. Exercise source/profile conflicts, explicit override/raw, missing or malformed
+6. Exercise explicit endpoint/profile conflicts, finite-only raw, missing or malformed
    endpoint binding, named-space/profile identity distinction, incompatible
    topology and unsupported versions/classes/directions. A valid header without
    a usable transform fails admission. Equal profiles do not justify view.
@@ -463,7 +464,7 @@ These are future implementation gates, not results of this documentation turn.
    and platform/build identity, without extrapolating unmeasured GPU/OS support.
 
 Required implementation work includes broadening ICC resource admission,
-generic profile-defined/analytic endpoint metadata, canonical planar bindings,
+explicit profile-defined/analytic endpoint configuration, canonical planar bindings,
 all host accounting/cancellation hooks and actual-path diagnostics. The existing
 CMYK ramp importer and legacy ColorArray v1 do not satisfy those requirements.
 The engine can impose internal losses even with normalized public coordinates.

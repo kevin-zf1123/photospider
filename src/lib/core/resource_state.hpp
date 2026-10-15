@@ -8,8 +8,8 @@
 #include <mutex>
 #include <utility>
 
-#include "core/checked_math.hpp"
 #include "core/resource_observation.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/core/resources.hpp"
 
 namespace ps {

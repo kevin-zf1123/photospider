@@ -21,7 +21,7 @@ inline int native_atlas_budget(
   auto value = std::move(writer).publish().take_value();
   auto coverage = Footprint::from_regions({8}, {region}).take_value();
   auto input =
-      ValueFragments::create(descriptor, {}, coverage, {value}).take_value();
+      ValueFragments::create(descriptor, coverage, {value}).take_value();
   auto plan = FragmentAtlasPlan::prepare(input, {4}).take_value();
   const auto payload =
       device->allocation_capacity(plan.payload_allocation_bytes()).take_value();

@@ -36,7 +36,7 @@ or angle-unit parameter.
 ## Interface and numerical quality
 
 One input `input` and output `values` have identical shape and dtype, Float32 or
-Float64. Integer inputs require explicit cast. Output facets are empty. Inherit
+Float64. Integer inputs require explicit cast. Output carries no domain description. Inherit
 all [unary contract](NUM-04_unary_contract.md) requirements for Whole
 demand, typed validation, ownership, invalidation, errors, cache, resources and
 cancellation. Both platform accelerated keys reject incompatible platforms.

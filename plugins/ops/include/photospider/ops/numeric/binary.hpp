@@ -5,7 +5,7 @@
 #include <utility>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 namespace binary_detail {
@@ -33,13 +33,12 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* name,
 }  // namespace binary_detail
 /** @brief Shared Result-backed contract for the binary node helpers.
  * Each input Result contains exactly one tensor member in slot 0 and may also
- * contain fields. Its schema ID and facets may vary. Recognized tensor facets
- * and spatial metadata still receive full-input typed validation. Numeric NaN
- * acceptance does not bypass typed constraints such as alpha validity.
+ * contain fields. Schema IDs may vary. Inputs are checked against the explicit
+ * structure and dtype requirements of this operation.
  * Metadata specialization requires matching input dtypes and complete sample
  * shapes, rank 1..8, positive extents, and at most 2^40 samples. The output is
  * a Result on port `values`, using schema `photospider.tensor`, tensor key
- * `samples`, the full logical sample shape, and empty facets. There is no
+ * `samples`, the full logical sample shape, and ordinary data. There is no
  * implicit cast or broadcast.
  *
  * A nonempty Whole request needs complete input support with Data, Validation

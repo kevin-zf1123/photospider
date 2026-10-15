@@ -26,7 +26,7 @@ strict/Apple Silicon CPU accelerated/x86-64 CPU accelerated keys. Inherit the
 with each trigonometric function's own formula and special-value table.
 
 Input/output are same-dtype Float32/Float64, with unchanged shape and generic
-output facets. Integer inputs require explicit cast. There are no static numeric
+output structure. Integer inputs require explicit cast. There are no static numeric
 parameters. The operation name determines argument interpretation; no angle_unit
 parameter or unit-dispatch alias is retained.
 

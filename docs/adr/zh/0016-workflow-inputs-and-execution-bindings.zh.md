@@ -50,9 +50,9 @@ struct ExecutionResult final {
 };
 ```
 
-这些片段展示 binding 与 publication 相关的公开字段。当前 `WorkflowDocument` schema 为 5，保存 declarations、operation nodes 和具名 outputs。Declaration id 唯一且非零；name 为唯一、精确、区分大小写的可打印 ASCII 字符串，长度为 1 至 128 字节且不含空格。每份 document 最多包含 4096 个 declarations，每个 declaration 恰好绑定一次，包括未被图消费的声明。
+这些片段展示 binding 与 publication 相关的公开字段。当前 `WorkflowDocument` schema 为 6，保存 declarations、operation nodes 和具名 outputs。Declaration id 唯一且非零；name 为唯一、精确、区分大小写的可打印 ASCII 字符串，长度为 1 至 128 字节且不含空格。每份 document 最多包含 4096 个 declarations，每个 declaration 恰好绑定一次，包括未被图消费的声明。
 
-`result_schema` 提供 typed tensor slots、fields、domain 和 semantic metadata。Compiler input metadata 携带该 schema；Value descriptor 和 facets 保持为空。Tensor shape、batch axes、facets 和 physical layout 取自各自的 `ResultTensorSpec`。Value 可以在内部支撑 typed tensor，但不构成 operation input 或 output contract。Static schema 变化需要重新编译。Input payload bytes、pointers 和 allocation addresses 不参与 semantic 与 physical-plan identity；schema、traits、规范化 output demand 和其他编译期事实决定这些 identity。
+`result_schema` 提供 typed tensor slots、fields 和 domain。Compiler input metadata 携带该 schema。Tensor shape、batch axes 和 physical layout 取自各自的 `ResultTensorSpec`。Value 可以在内部支撑 typed tensor，但不构成 operation input 或 output contract。Static schema 变化需要重新编译。Input payload bytes、pointers 和 allocation addresses 不参与 semantic 与 physical-plan identity；schema、traits、规范化 output demand 和其他编译期事实决定这些 identity。
 
 `ExecutionBinding` 按名称匹配一个 declaration，并持有 Result reference。Executor 按多重集合验证名称，因此重复 binding 会被保留并在校验时失败，不会被静默覆盖。Executor 在调度 operation work 前验证 Result schema 兼容性。Run 会将 binding snapshot 和已准入 input owners 保留到 callbacks 退出。`ExecutionContext::execute` 在 callbacks 退出，且 cancellation 与 graph-currentness checks 允许完成后，将具名 Results 放在 `ExecutionResult::results` 中返回。
 
@@ -65,7 +65,7 @@ struct ExecutionResult final {
 - Runtime input data 不会成为 compile-time parameters 或 literal nodes。
 - Workflow output 选择 operation-node output；输入直接透传不是 workflow output 形式。
 - Result tensor backing layout 不改变逻辑 sample authorization。Planar storage 不等同于 interleaved storage。
-- Result C operation table 保持 ABI 2。本 ADR 描述 C++ workflow binding contract，不描述独立 C++ Value operation protocol。
+- Result C operation table 保持 ABI 4。本 ADR 描述 C++ workflow binding contract，不描述独立 C++ Value operation protocol。
 
 ## 5. 后果与代价 (Consequences)
 

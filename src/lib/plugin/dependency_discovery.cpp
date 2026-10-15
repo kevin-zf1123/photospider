@@ -7,8 +7,8 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
-#include "core/status_helpers.hpp"
+#include "photospider/core/checked_math.hpp"
+#include "photospider/core/status_helpers.hpp"
 
 namespace ps::plugin_internal {
 namespace {

@@ -15,10 +15,10 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_moments.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
-#include "photospider/data/semantic.hpp"
-#include "plugin/port_validation.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -158,8 +158,8 @@ struct ReductionKernel final {
       // services may reject this final report; their original status survives.
       if (!result.ok())
         numeric_ops::math_record_failure(phase, result);
-      if (phase.report_numeric) {
-        auto reported = phase.report_numeric(report);
+      if (phase.report_diagnostic) {
+        auto reported = report_numeric(phase, report);
         if (result.ok())
           return reported;
       }
@@ -265,7 +265,7 @@ struct ReductionKernel final {
     auto description = numeric_ops::math_take(
         metadata(kind, phase.query.inputs[0].result_schema->tensors[0],
                  phase.query.parameters));
-    if (phase.report_numeric) {
+    if (phase.report_diagnostic) {
       NumericDiagnostics report;
       report.profile =
           static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
@@ -277,7 +277,7 @@ struct ReductionKernel final {
           static_cast<std::size_t>(identity) >= report.implementation.size())
         return {ErrorCode::OperationFailed,
                 "reduction count diagnostic identity overflow"};
-      numeric_ops::math_require(phase.report_numeric(report));
+      numeric_ops::math_require(report_numeric(phase, report));
     }
     numeric_ops::math_require(
         phase.consume_work(description.output.shape.size() + 16));
@@ -301,6 +301,7 @@ OperationDefinition reduction_operation(const std::string& key,
   OperationDefinition operation;
   operation.key = key;
   auto& traits = operation.traits;
+  traits.diagnostics = {numeric_diagnostic_identity()};
   traits.input_count = 1;
   traits.input_schema.resize(1);
   traits.input_schema[0].kind = OperationPortKind::Result;

@@ -19,7 +19,7 @@ struct StructuredStartPhase {
 struct StructuredPollPhase {
   std::chrono::steady_clock::time_point started =
       std::chrono::steady_clock::now();
-  NumericDiagnostics numeric;
+  std::optional<DiagnosticAccumulator> reports;
   std::uint64_t native_dispatches = 0;
   bool invoked = false;
   Result<ResultProgramPoll> result{Status{ErrorCode::Internal, {}}};

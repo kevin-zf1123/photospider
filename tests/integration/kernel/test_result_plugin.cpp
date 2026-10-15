@@ -14,6 +14,7 @@
 
 #include "photospider/photospider.hpp"
 #include "support/bad_result_table_fixture.hpp"
+#include "support/diagnostic_counter_fixture.hpp"
 #include "support/unified_result_fixture.hpp"
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -69,14 +70,12 @@ void require_image_values(const ResultRef& result, bool whole, bool shifted,
   require(checked.ok(), checked.message);
 }
 SchemaTemplate numeric_schema(const std::string& id, ElementType type,
-                              std::uint64_t count,
-                              std::vector<ValueFacet> facets = {}) {
+                              std::uint64_t count) {
   SchemaTemplate schema;
   schema.id = id;
   ResultTensorSpec tensor;
   tensor.key = "samples";
   tensor.descriptor = {type, {count}};
-  tensor.facets.assign(facets.begin(), facets.end());
   schema.tensors.push_back(std::move(tensor));
   return schema;
 }
@@ -112,8 +111,8 @@ void continuation_owns_library() {
   ResourceBudget root;
   ResourceAllocationScope scope(root);
   auto registry = std::make_shared<OperationRegistry>();
-  require(registry->load_plugin(PS_RESULT_FIXTURE).ok(),
-          "load C Result module");
+  auto loaded_fixture = registry->load_plugin(PS_RESULT_FIXTURE);
+  require(loaded_fixture.ok(), loaded_fixture.message);
   auto schema = std::make_shared<const SchemaTemplate>(
       *registry->find_traits("fixture.result.rows")
            .value()
@@ -671,9 +670,9 @@ void run() {
                                             view_window.storage_owner_token(),
             "C ABI view retains actual source pointer without payload copy");
     const auto& timing = output.value().diagnostics.operation_timings.back();
-    require(timing.numeric.profile == CpuNumericProfile::Strict &&
-                timing.numeric.copied_elements == 0 &&
-                timing.numeric.view_elements ==
+    require(timing.reports &&
+                diagnostic_fixture::count(*timing.reports, 2) == 0 &&
+                diagnostic_fixture::count(*timing.reports, 1) ==
                     (std::string(key) == "fixture.result.view" ? 4U : 32U),
             "C ABI numeric diagnostics preserve actual view and copy counts");
     if (std::string(key) == "fixture.result.view") {
@@ -735,23 +734,11 @@ void run() {
             "stale start CPU service lease");
   }
   {
-    SemanticDescriptor semantic;
-    semantic.kind = SemanticKind::Lut;
-    semantic.channels = {{"table", "value", "dimensionless"}};
-    semantic.unit = "dimensionless";
-    semantic.sample_step = 1;
-    semantic.sample_axis_unit = "index";
-    auto facet = encode_semantic(semantic).take_value();
     float table[] = {0, 1, 2, 3};
     const auto lut_schema =
-        numeric_schema("fixture.lut", ElementType::Float32, 4, {facet});
-    semantic.kind = SemanticKind::Scalar;
-    semantic.channels = {{"number", "value", "dimensionless"}};
-    semantic.sample_step = 0;
-    semantic.sample_axis_unit.clear();
+        numeric_schema("fixture.lut", ElementType::Float32, 4);
     const auto scalar_schema =
-        numeric_schema("fixture.typed_number", ElementType::Float32, 1,
-                       {encode_semantic(semantic).take_value()});
+        numeric_schema("fixture.typed_number", ElementType::Float32, 1);
     auto value = numeric_source(
         root, lut_schema,
         ByteView(reinterpret_cast<const std::uint8_t*>(table), sizeof(table)));
@@ -788,8 +775,7 @@ void run() {
         require(output.ok(), output.status().message);
         const auto& object = output.value().results.at("out");
         const float result = read_number(object);
-        require(result == 3 && !object.schema().tensors[0].facets.empty(),
-                "C Typed LUT/Scalar input and Typed output");
+        require(result == 3, "C Typed LUT/Scalar input and Typed output");
       } else {
         require(!output.ok(), "C scalar bounds/nonfinite validation");
       }
@@ -824,8 +810,9 @@ void run() {
   require(read_number(mixed.value().results.at("count")) == 32,
           "C numeric Result count preserves full image cardinality");
   const auto& lut_result = mixed.value().results.at("lut");
-  require(!lut_result.schema().tensors[0].facets.empty(),
-          "C LUT Result retains semantics");
+  require(lut_result.schema().tensors[0].descriptor.shape ==
+              std::vector<std::uint64_t>{4},
+          "C table Result retains structure");
   for (std::uint64_t i = 0; i < 4; ++i)
     require(read_number(lut_result, i) == static_cast<float>(i),
             "C LUT Result samples");
@@ -1089,8 +1076,8 @@ void c_affine_tensor_view() {
   require(alias.row_run({1, 0, 1, 2}).value().data == pointer &&
               alias.storage_owner_token() == storage.get() &&
               output.value()
-                      .diagnostics.operation_timings.back()
-                      .numeric.copied_elements == 0,
+                  .diagnostics.operation_timings.back()
+                  .reports.has_value(),
           "C11 ABI affine transform retains exact data and owner pointers");
   source = {};
   original = {};
@@ -1749,7 +1736,7 @@ ResultBuilder native_builder(const ResultProgramPhase& phase) {
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_extent, phase.query.resources));
+      phase.query.tile_extent));
 }
 struct ScalarImage {
   unsigned stage = 0;
@@ -2076,8 +2063,8 @@ int native_gpu() {
                 result.value().diagnostics.selected_backends.at({1, 0}) ==
                     Backend::Gpu &&
                 result.value()
-                        .diagnostics.operation_timings.back()
-                        .numeric.copied_elements == 0,
+                    .diagnostics.operation_timings.back()
+                    .reports.has_value(),
             "GPU-selected host mapped view keeps owner without claiming native "
             "computation");
   }

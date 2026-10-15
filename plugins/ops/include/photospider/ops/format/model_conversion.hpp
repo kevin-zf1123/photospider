@@ -10,8 +10,8 @@
 #include <variant>
 #include <vector>
 
-#include "photospider/data/tensor_description.hpp"
 #include "photospider/ops/numeric/workflow_authoring.hpp"
+#include "photospider/ops/tensor_description.hpp"
 
 namespace ps::format {
 /** @brief Same-dtype finite constants for two-level Gray selection. The bit
@@ -23,18 +23,18 @@ using ModelConstant = std::variant<float, double>;
  * Each helper appends a registered CPU Result operation with one input Result
  * containing one Float32 or Float64 tensor and returns its `values` output.
  * `axis` and `output_axis` index cell axes; the Result batch prefix is
- * excluded. Defaults are respect/auto/auto/strict; hue units, raw
- * selectors/whites, the forward NCL matrix, threshold and two-level constants
- * are never inferred. Explicit unit strings are radian or pi_multiple. NCL
- * presets are bt601, bt709 and bt2020_ncl, independent of the underlying RGB
- * basis/transfer. Reference bypasses numerical fast filters; scalar suppresses
- * batch SIMD; auto enables profile-admitted SIMD and independently certified
- * fast filters.
+ * excluded. `layout` and `algorithm` default to `auto`; `profile` defaults to
+ * `strict`. Optional `input_description` supplies explicit source
+ * interpretation. Hue units, raw selectors/whites, the forward NCL matrix,
+ * threshold and two-level constants are never inferred. Explicit unit strings
+ * are radian or pi_multiple. NCL presets are bt601, bt709 and bt2020_ncl,
+ * independent of the underlying RGB basis/transfer. Reference bypasses
+ * numerical fast filters; scalar suppresses batch SIMD; auto enables
+ * profile-admitted SIMD and independently certified fast filters.
  */
 struct ModelConversionOptions final {
-  std::string metadata_mode = "respect", layout = "auto", algorithm = "auto",
-              profile = "strict";
-  std::optional<TensorDescription> metadata_override;
+  std::string layout = "auto", algorithm = "auto", profile = "strict";
+  std::optional<TensorDescription> input_description;
   std::optional<std::uint32_t> axis, output_axis;
   std::vector<std::uint64_t> components;
   bool axis_free = false;
@@ -74,14 +74,13 @@ inline Result<WorkflowNodeOutput> append(
                          FailureReason::InvalidDomain,
                          {FailureOrigin::Schema, FailureScope::Unspecified}});
   std::map<std::string, ParameterValue> params{
-      {"metadata_mode", options.metadata_mode},
       {"layout", options.layout},
       {"algorithm", options.algorithm}};
-  if (options.metadata_override) {
-    auto encoded = tensor_description_parameter(*options.metadata_override);
+  if (options.input_description) {
+    auto encoded = tensor_description_parameter(*options.input_description);
     if (!encoded.ok())
       return Answer(encoded.status());
-    params["metadata_override"] = encoded.take_value();
+    params["input_description"] = encoded.take_value();
   }
   if (options.axis)
     params["axis"] = static_cast<std::int64_t>(*options.axis);

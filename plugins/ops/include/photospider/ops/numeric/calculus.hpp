@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 namespace calculus_detail {
@@ -34,20 +34,20 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
 }  // namespace calculus_detail
 /** @brief Authors exact discrete differences with one RN-even conversion.
  * samples [N], 2<=N<=2^40, and step [1] share Float32/64 dtype. Output values
- * [N] has empty facets. Endpoints use adjacent one-sided differences; interiors
- * use (samples[i+1]-samples[i-1])/(2*step). Whole reads/validates full samples
- * and step for nonempty demand, then computes complete dense output. Only the
- * two stencil values enter each numerical result. Source failure may precede
- * callback step validation. Zero/nonfinite step fails Domain/Run
- * InvalidArgument/InvalidDomain with InvalidSampleStep. Negative finite step is
- * valid. Source NaN priority is ascending source index; exact zero is +0.
- * Finite underflow/overflow and exceptional values follow the stated exact
- * formula. Any active input edit invalidates all recorded observations. Full
- * input collection, full output and fixed exact workspace are required even
- * for sparse demand. Empty requests read nothing. Shape/dtype errors are
- * TypeMismatch/Schema; upstream, typed, cancellation and resource failures
- * retain their categories. Helpers are pure/concurrent-safe, return owned
- * metadata, may throw bad_alloc, and reject invalid id/profile with
+ * [N] has ordinary data. Endpoints use adjacent one-sided differences;
+ * interiors use (samples[i+1]-samples[i-1])/(2*step). Whole reads/validates
+ * full samples and step for nonempty demand, then computes complete dense
+ * output. Only the two stencil values enter each numerical result. Source
+ * failure may precede callback step validation. Zero/nonfinite step fails
+ * Domain/Run InvalidArgument/InvalidDomain with InvalidSampleStep. Negative
+ * finite step is valid. Source NaN priority is ascending source index; exact
+ * zero is +0. Finite underflow/overflow and exceptional values follow the
+ * stated exact formula. Any active input edit invalidates all recorded
+ * observations. Full input collection, full output and fixed exact workspace
+ * are required even for sparse demand. Empty requests read nothing. Shape/dtype
+ * errors are TypeMismatch/Schema; upstream, typed, cancellation and resource
+ * failures retain their categories. Helpers are pure/concurrent-safe, return
+ * owned metadata, may throw bad_alloc, and reject invalid id/profile with
  * InvalidArgument/Schema. Published storage survives context retirement. This
  * discrete rule approximates a continuous derivative; it does not infer one
  * from an unknown underlying function.
@@ -60,7 +60,7 @@ inline Result<WorkflowNode> derivative_1d_node(
 }
 /** @brief Authors initial + step/2 times an exact weighted sample prefix.
  * samples [N], 1<=N<=2^40, step [1] and initial [1] share Float32/64 dtype.
- * values [N] retains empty facets. Output zero copies initial bits, including
+ * values [N] contains ordinary data. Output zero copies initial bits, including
  * sNaN and signed zero. Only N=1 excludes samples/step via static projection;
  * for N>1 all inputs are read/validated even for output0 projection. At
  * positive i, weights on samples[0..i] are 1,2,...,2,1 and the whole expression

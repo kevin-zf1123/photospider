@@ -28,7 +28,7 @@ values remain exact.
 ## Interface and kernel
 
 The [uniform low-pass contract](CRV-11_uniform_lowpass_contract.md) is normative.
-Dynamic `input` is a single-tensor Result; use its full `sample_shape()` (rank 1..8, positive extents/count <=2^40) and Float32/Float64 dtype. Output port `values` is a `photospider.tensor` v1/member `samples` Result preserving shape/dtype with generic facets. Static axis selects the
+Dynamic `input` is a single-tensor Result; use its full `sample_shape()` (rank 1..8, positive extents/count <=2^40) and Float32/Float64 dtype. Output port `values` is a `photospider.tensor` v1/member `samples` Result preserving shape/dtype with no attached domain description. Static axis selects the
 filtered dimension; integer radius=1..4096 sets symmetric support -R..R.
 boundary is reflect/replicate/zero/wrap, default non-endpoint-repeating reflect.
 Required kernel-specific static Float64 parameters are sigma.

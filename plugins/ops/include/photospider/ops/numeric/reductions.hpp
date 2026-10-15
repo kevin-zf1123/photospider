@@ -8,8 +8,8 @@
 #include <vector>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
 #include "photospider/data/value.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 namespace reduction_detail {
@@ -68,7 +68,7 @@ inline Result<WorkflowNode> with_dtype(Result<WorkflowNode> result,
 }  // namespace reduction_detail
 /** @brief Authors exact sum over nonempty axes with fixed keepdims=true.
  * Source rank is 1..8 and logical count <=2^40. Reduced extents become one;
- * output values has empty facets. input_type is an authoring hint for the
+ * output values has ordinary data. input_type is an authoring hint for the
  * default destination (Int64 for integers, Float64 for floats), not a runtime
  * parameter. The compiler validates actual source/destination domains. Explicit
  * output_type may select UInt8/Int64 for integer inputs or Float32/64 for

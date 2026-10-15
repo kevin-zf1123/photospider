@@ -24,14 +24,14 @@
 #if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
 #include <sys/sysctl.h>
 
-#include "core/cancellation_poll.hpp"
+#include "photospider/core/cancellation_poll.hpp"
 #endif
 
 #include "02-format-color/result_mapping.hpp"
+#include "common/domain/exact_numeric.hpp"
 #include "common/registry.hpp"
-#include "data/exact_numeric.hpp"
 #include "photospider/data/region_runs.hpp"
-#include "photospider/data/tensor_description.hpp"
+#include "photospider/ops/tensor_description.hpp"
 
 namespace ps::plugin_internal {
 #if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
@@ -379,116 +379,6 @@ Result<std::optional<TensorEncoding>> effective_channel_encoding(
     effective = description.encoding;
   return Result<std::optional<TensorEncoding>>(std::move(effective));
 }
-Result<TensorDescription> convert_description(
-    TensorDescription description, const Preparation& state,
-    const std::vector<std::uint64_t>& shape, bool respect) {
-  using Output = Result<TensorDescription>;
-  if (!state.rescale)
-    return Output(std::move(description));
-  if (state.axis) {
-    if (!description.channel_axis)
-      description.channel_axis = state.axis;
-    if (description.channels.empty())
-      description.channels.resize(shape[*state.axis]);
-    for (std::size_t i = 0; i < description.channels.size(); ++i) {
-      auto& channel = description.channels[i];
-      const auto& bounds = state.bounds[i];
-      auto resolved = effective_channel_encoding(description, i);
-      if (!resolved.ok())
-        return Output(resolved.status());
-      const auto effective = resolved.take_value();
-      if (respect) {
-        auto check = check_encoding(effective, bounds);
-        if (!check.ok())
-          return Output(check);
-      }
-      auto mapping = mapped_encoding(effective, bounds, true);
-      if (!mapping.ok())
-        return Output(mapping.status());
-      channel.encoding = mapping.take_value();
-    }
-    description.encoding.reset();
-    for (auto& group : description.groups)
-      for (std::size_t i = 0; i < group.indices.size(); ++i)
-        group.components[i].encoding =
-            description.channels[group.indices[i]].encoding;
-  } else {
-    const auto& bounds = state.bounds[0];
-    if (description.channel_axis && description.channels.empty() &&
-        !description.groups.empty())
-      description.channels.resize(shape[*description.channel_axis]);
-    if (description.component) {
-      const auto effective = description.component->encoding
-                                 ? description.component->encoding
-                                 : description.encoding;
-      if (respect) {
-        auto check = check_encoding(effective, bounds);
-        if (!check.ok())
-          return Output(check);
-      }
-      auto mapping = mapped_encoding(effective, bounds, true);
-      if (!mapping.ok())
-        return Output(mapping.status());
-      description.component->encoding = mapping.take_value();
-    }
-    if (description.channel_axis && !description.channels.empty()) {
-      for (std::size_t i = 0; i < description.channels.size(); ++i) {
-        auto& channel = description.channels[i];
-        auto resolved = effective_channel_encoding(description, i);
-        if (!resolved.ok())
-          return Output(resolved.status());
-        const auto effective = resolved.take_value();
-        if (respect) {
-          auto check = check_encoding(effective, bounds);
-          if (!check.ok())
-            return Output(check);
-        }
-        auto mapping = mapped_encoding(effective, bounds, true);
-        if (!mapping.ok())
-          return Output(mapping.status());
-        channel.encoding = mapping.take_value();
-      }
-      for (auto& group : description.groups)
-        for (std::size_t i = 0; i < group.indices.size(); ++i)
-          group.components[i].encoding =
-              description.channels[group.indices[i]].encoding;
-    }
-    if (respect) {
-      auto check = check_encoding(description.encoding, bounds);
-      if (!check.ok())
-        return Output(check);
-    }
-    auto mapping = mapped_encoding(description.encoding, bounds, true);
-    if (!mapping.ok())
-      return Output(mapping.status());
-    description.encoding = mapping.take_value();
-  }
-  return Output(std::move(description));
-}
-TensorDescription raw_description(TensorDescription description,
-                                  const std::vector<std::uint64_t>& shape) {
-  if (description.channel_axis && description.channels.empty() &&
-      !description.groups.empty())
-    description.channels.resize(shape[*description.channel_axis]);
-  for (const auto& group : description.groups)
-    for (std::size_t i = 0; i < group.indices.size(); ++i) {
-      auto& channel = description.channels[group.indices[i]];
-      const auto& component = group.components[i];
-      if (channel.name.empty())
-        channel.name = component.name;
-      if (channel.role.empty())
-        channel.role = component.role;
-      if (channel.unit.empty())
-        channel.unit = component.unit;
-    }
-  description.encoding.reset();
-  if (description.component)
-    description.component->encoding.reset();
-  for (auto& channel : description.channels)
-    channel.encoding.reset();
-  description.groups.clear();
-  return description;
-}
 Result<OperationPreparation> prepare(
     const std::vector<OperationMetadata>& inputs, const Parameters& params) {
   using Output = Result<OperationPreparation>;
@@ -622,74 +512,11 @@ Result<OperationPreparation> prepare(
   if (layout == "view" && !state->identity)
     return Output(invalid("ViewUnavailable: mapping is not an identity"));
 
-  const auto metadata_mode =
-      params.count("metadata_mode")
-          ? std::get<std::string>(params.at("metadata_mode"))
-          : "respect";
-  if (metadata_mode != "respect" && metadata_mode != "raw" &&
-      metadata_mode != "override")
-    return Output(invalid("invalid metadata_mode"));
-  if ((metadata_mode == "override") !=
-      static_cast<bool>(params.count("metadata_override")))
-    return Output(
-        invalid("metadata_override must occur exactly in override mode"));
-  std::optional<TensorDescription> description;
-  if (metadata_mode == "override") {
-    auto decoded = tensor_description_from_parameter(
-        std::get<std::string>(params.at("metadata_override")));
-    if (!decoded.ok())
-      return Output(decoded.status());
-    description = decoded.take_value();
-  } else {
-    for (const auto& facet : input.facets)
-      if (facet.key == "photospider.tensor-description") {
-        auto decoded = decode_tensor_description(facet);
-        if (!decoded.ok() && metadata_mode != "raw")
-          return Output(decoded.status());
-        if (decoded.ok())
-          description = decoded.take_value();
-      }
-  }
-  if (description) {
-    auto valid = validate_tensor_description(*description, input.descriptor);
-    if (!valid.ok() && metadata_mode != "raw")
-      return Output(valid);
-    if (!valid.ok())
-      description.reset();
-  }
-  if (state->axis && metadata_mode != "raw" && description &&
-      description->channel_axis && *state->axis != *description->channel_axis)
-    return Output(invalid("range axis conflicts with tensor description"));
   OperationOutputSpecialization output;
   auto schema = *inputs[0].result_schema;
   auto& output_tensor = schema.tensors[0];
   output_tensor.descriptor.element_type = state->target;
   output_tensor.atomic_trailing_axes = 0;
-  output_tensor.facets.clear();
-  // Facet propagation is filled by the metadata pass below. Opaque annotations
-  // remain byte identical and retain their resource bindings.
-  for (const auto& facet : input.facets)
-    if (facet.key != "photospider.tensor-description")
-      output_tensor.facets.push_back(facet);
-  if (metadata_mode != "raw" && state->rescale && !description)
-    description.emplace();
-  if (description) {
-    auto converted =
-        metadata_mode == "raw"
-            ? Result<TensorDescription>(raw_description(*description, shape))
-            : convert_description(*description, *state, shape,
-                                  metadata_mode == "respect");
-    if (!converted.ok())
-      return Output(converted.status());
-    auto valid = validate_tensor_description(converted.value(),
-                                             output_tensor.descriptor);
-    if (!valid.ok())
-      return Output(valid);
-    auto encoded = encode_tensor_description(converted.value());
-    if (!encoded.ok())
-      return Output(encoded.status());
-    output_tensor.facets.push_back(encoded.take_value());
-  }
   if (output_tensor.layout.spatial && (!state->identity || state->materialize))
     output_tensor.layout.row_pitch_bytes = 0;
   output.metadata.result_schema =
@@ -1176,7 +1003,7 @@ ResultBuilder result_builder(const ResultProgramPhase& phase, bool /*empty*/) {
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_extent, phase.query.resources));
+      phase.query.tile_extent));
 
   return builder;
 }
@@ -1407,8 +1234,6 @@ OperationDefinition conversion() {
       {"axis", OperationParameterType::Int64, false},
       {"rounding", OperationParameterType::String, false},
       {"overflow", OperationParameterType::String, false},
-      {"metadata_mode", OperationParameterType::String, false},
-      {"metadata_override", OperationParameterType::String, false},
       {"layout", OperationParameterType::String, false}};
   auto& output = traits.outputs[0];
   output.key = "values";

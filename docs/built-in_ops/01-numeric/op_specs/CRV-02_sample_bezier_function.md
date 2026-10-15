@@ -79,7 +79,7 @@ layouts, including signed/zero strides, offsets and unaligned storage; do not
 reinterpret physical row order as anchor order. Result metadata validates the
 single tensor member and its dtype/shape; complete recognized typed data is
 validated for each active input. Outputs use `photospider.tensor` v1, member
-`samples`, and empty facets. No unit conversion is performed.
+`samples`, and no attached domain description. No unit conversion is performed.
 
 | Static parameter | Type/domain | Authoring default |
 | --- | --- | --- |
@@ -99,9 +99,8 @@ The maintainer selected NUM-01's sampling/output contract unchanged: dynamic
 Float32/Float64 `[1]` start/end inputs, static count in `[1,1048576]`, increasing
 or decreasing endpoint-inclusive grids, and N=1 at start with no end read.
 Output port `values` is a Result using schema `photospider.tensor` v1 and member
-`samples`, shape [N], selected Float32/Float64 dtype (default Float64), and empty
-facets. Output port `axis` is a Result using the same schema/member, Float64
-shape [3], `atomic_trailing_axes=1`, and empty facets; its samples are
+`samples`, shape [N], selected Float32/Float64 dtype (default Float64), and no attached domain description. Output port `axis` is a Result using the same schema/member, Float64
+shape [3], `atomic_trailing_axes=1`, and no attached domain description; its samples are
 `[start,end,step]` or `[start,start,0]` for N=1. The output association records
 the actual active source ObjectIds. Units are interpreted by downstream users.
 Coordinate rounding and local duplicate-coordinate checks follow NUM-01.
@@ -141,7 +140,7 @@ values it requests anchors, handles and start, while axis requests only start.
 Any collected anchor/handle edit invalidates the recorded values demand; controls
 never dirty axis. Start/end affect both outputs, except that count=1 ignores end.
 Complete immutable input versions, profile, metadata and parameters remain in
-cache identity. Both outputs retain their existing names, dtypes, empty facets
+cache identity. Both outputs retain their existing names, dtypes, no attached domain description
 and independent identity; there is no new pairing object. Returned owners survive
 context destruction. A nonempty local request computes the complete dense
 output and the returned Result certifies full coverage in global sample
@@ -326,7 +325,7 @@ values it requests anchors, handles and start, while axis requests only start.
 Any collected anchor/handle edit invalidates the recorded values demand; controls
 never dirty axis. Start/end affect both outputs, except that count=1 ignores end.
 Complete immutable input versions, profile, metadata and parameters remain in
-cache identity. Both outputs retain their existing names, dtypes, empty facets
+cache identity. Both outputs retain their existing names, dtypes, no attached domain description
 and independent identity; there is no new pairing object. Returned owners survive
 context destruction. A nonempty local request computes the complete dense
 output and the returned Result certifies full coverage in global sample
@@ -463,7 +462,7 @@ runs are additional coverage.
 
 ## Current implementation and verification
 
-The maintained implementation registers the three profile keys in `plugins/ops/01-numeric/bezier_function.cpp` as Whole Result operations. Each input is a sole tensor member under any schema id/version/key; shapes derive from `sample_shape()`. Output ports use `photospider.tensor` v1 / `samples`, with `values[count]` and atomic Float64 `axis[3]`, empty facets and source associations. Input needs use role 13. For count=1, the values dependency omits end and the axis dependency contains only start. Nonempty requests return full certified coverage in global sample coordinates; Empty reads no payload. It performs exact x topology and monotonicity validation, RN64 control reconstruction, an inverse solver with up to 8192 fractional bits of dyadic refinement, exact polynomial/Horner evaluation and direct output rounding. The polynomial workspace is 40,960 bits with a 96-slot arena; the static live-slot bound is at most 44. All profiles use the same exact mathematical path with scalar/NEON/AVX2 integer helpers; the numerical contract retains the shared accelerated allowance. Whole eliminates per-sample dependency certificates and staged read windows. Fixed state is allocator-owned; topology has 8*(K+(degree-1)*(K-1)) element bytes plus metadata overhead. Complete values cost b*count; axis costs 24 bytes. The common operation workspace declaration conservatively bounds the larger values state even for axis, whose actual callback allocates only its smaller state.
+The maintained implementation registers the three profile keys in `plugins/ops/01-numeric/bezier_function.cpp` as Whole Result operations. Each input is a sole tensor member under any schema id/version/key; shapes derive from `sample_shape()`. Output ports use `photospider.tensor` v1 / `samples`, with `values[count]` and atomic Float64 `axis[3]`, no attached domain description and source associations. Input needs use role 13. For count=1, the values dependency omits end and the axis dependency contains only start. Nonempty requests return full certified coverage in global sample coordinates; Empty reads no payload. It performs exact x topology and monotonicity validation, RN64 control reconstruction, an inverse solver with up to 8192 fractional bits of dyadic refinement, exact polynomial/Horner evaluation and direct output rounding. The polynomial workspace is 40,960 bits with a 96-slot arena; the static live-slot bound is at most 44. All profiles use the same exact mathematical path with scalar/NEON/AVX2 integer helpers; the numerical contract retains the shared accelerated allowance. Whole eliminates per-sample dependency certificates and staged read windows. Fixed state is allocator-owned; topology has 8*(K+(degree-1)*(K-1)) element bytes plus metadata overhead. Complete values cost b*count; axis costs 24 bytes. The common operation workspace declaration conservatively bounds the larger values state even for axis, whose actual callback allocates only its smaller state.
 
 Acceptance should cover count-one and axis projection, complete Whole coverage
 under sparse requests, current source associations, preparation reuse, layouts,

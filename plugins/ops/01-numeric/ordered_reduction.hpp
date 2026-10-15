@@ -9,10 +9,9 @@
 #include <vector>
 
 #include "01-numeric/ordered_result.hpp"
+#include "common/floating_environment.hpp"
 #include "common/numeric_common.hpp"
-#include "common/typed_need_validation.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
-#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 /** @brief Exact rectangular decomposition of one logical row-major interval.
@@ -66,12 +65,9 @@ struct OrderedReductionState final {
   unsigned pass;
   double sum = 0, mean = 0;
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     if (phase.query.tensor_outputs && phase.query.tensor_outputs->empty())
       return ordered_empty_output(phase);
-    input_internal::Float32Environment environment;
+    plugin_internal::FloatingEnvironment environment;
     if (!environment.active())
       return Result<ResultProgramPoll>(Status{
           ErrorCode::InvalidArgument, "numeric environment unavailable"});
@@ -234,15 +230,14 @@ inline OperationDefinition ordered_reduction(const char* key, bool variance) {
             ? 64U
             : static_cast<std::uint64_t>(std::get<std::int64_t>(found->second));
     const auto& input = query.inputs[0].result_schema->tensors[0];
-    const auto channels =
-        input_internal::tuple_channel_axis(input.descriptor, input.facets);
-    const bool typed = std::any_of(
-        input.facets.begin(), input.facets.end(), [](const auto& facet) {
-          return input_internal::typed_facet(facet.key);
-        });
+    std::uint64_t channels = 1;
+    for (std::size_t axis =
+             input.descriptor.shape.size() - input.atomic_trailing_axes;
+         axis < input.descriptor.shape.size(); ++axis)
+      channels *= input.descriptor.shape[axis];
     return ResultContinuation::make<OrderedReductionState>(
-        allocator, variance, block, input.sample_count().value(),
-        channels ? input.descriptor.shape[*channels] : 1, typed);
+        allocator, variance, block, input.sample_count().value(), channels,
+        false);
   };
   return operation;
 }

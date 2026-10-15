@@ -50,8 +50,7 @@ struct TupleProgram {
 int main() {
   using namespace ps;  // NOLINT(build/namespaces)
   auto schema = multi_result::schema(ElementType::Float64, {2, 3});
-  schema.tensors[0].facets = {
-      encode_color_array(ColorArrayDescriptor{}).take_value()};
+  schema.tensors[0].atomic_trailing_axes = 1;
   PS_REQUIRE_OK(schema.validate());
   auto registry = std::make_shared<OperationRegistry>();
   for (unsigned mode = 0; mode < 3; ++mode) {

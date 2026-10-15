@@ -20,11 +20,11 @@ Result<InputSnapshot> import_snapshot(const InputSnapshotStore& store,
 }
 ```
 
-`InputSnapshotStore` 为受支持的内建 numeric Value 类型保留 rank 1 至 rank 8 的不可变 blocks。Import 保留有效 generic 位模式，并校验受支持的 typed scalar/tensor samples。Store 分别限制 block 数量、跨版本实际 payload bytes 和目录 metadata。调用方持有的 Values 与 snapshot metadata 不计入 retained-payload 字节限额。
+`InputSnapshotStore` 为受支持的内建 numeric Value 类型保留 rank 1 至 rank 8 的不可变 blocks。Import 保留所有位模式，只检查 Value 的 descriptor 与 coverage，不解释样本值。Store 分别限制 block 数量、跨版本实际 payload bytes 和目录 metadata。调用方持有的 Values 与 snapshot metadata 不计入 retained-payload 字节限额。
 
-Patch 要求类型、shape 和 facets 匹配，并替换一个精确非空 Region。Store 复制相交 blocks 并保留先前版本。Reads 与 patches 接受 cancellation 和样本上限。取消的 read 可能已部分写入调用方 destination；只有成功才能确认结果完整。
+Patch 要求类型和 shape 匹配，并替换一个精确非空 Region。Store 复制相交 blocks 并保留先前版本。Reads 与 patches 接受 cancellation 和样本上限。取消的 read 可能已部分写入调用方 destination；只有成功才能确认结果完整。
 
-`content_identity(region)` 使用规范 framing 对 dtype、shape、请求坐标、facets 和精确 sample bits 进行 hash。Block geometry、origin、stride 和 allocation 不影响 identity。正负零与不同 NaN payload 保持区分。Snapshot/session identifiers 描述 provenance；deterministic operations 不能从 identifier 字符串推导样本值或依赖。
+`content_identity(region)` 使用规范 framing 对 dtype、shape、请求坐标和精确 sample bits 进行 hash。Block geometry、origin、stride 和 allocation 不影响 identity。正负零与不同 NaN payload 保持区分。Snapshot/session identifiers 描述 provenance；deterministic operations 不能从 identifier 字符串推导样本值或依赖。
 
 ## 完成 Result 复用
 

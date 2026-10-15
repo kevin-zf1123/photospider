@@ -30,13 +30,12 @@ compositions. The specification remains Proposed; current runtime status is desc
 [FMT-01](FMT-01_channel_extraction_contract.md) extracts single components.
 [FMT-02](FMT-02_channel_assembly_contract.md) assembles ordered single components,
 concatenates channel blocks or creates a result from explicit multi-source maps.
-Its A member fixes input i to output i and independently assigns component
-semantics; changing that metadata does not reorder samples. Its C member can
+Its A member fixes input i to output i without assigning component semantics. Its C member can
 perform actual source/destination remapping.
 
 FMT-03's proposed surface specializes single-base channel editing. Overlapping
 copy maps need not acquire a second numerical definition: reuse the same exact
-coordinate and metadata principles where applicable. Association arithmetic and
+coordinate and explicit-selector principles where applicable. Association arithmetic and
 alpha-specific policies remain FMT-04/05 responsibilities; merely editing a
 channel must not silently run those operations.
 
@@ -55,10 +54,10 @@ the FMT-02 mapping contract below.
 | Topic | Selected behavior | State |
 | --- | --- | --- |
 | Members | A lists every output slot for single-base swizzle/subset/repeat/constants; B changes selected slots and preserves all others and the base channel count. | Confirmed |
-| A metadata | Component descriptions follow source selection; retain only groups with an unambiguous valid remapping. Explicit target descriptions permit reinterpretation, as in FMT-02. | Confirmed |
+| A interpretation | Output carries no description. Callers configure subsequent consumers explicitly. | Confirmed |
 | Constant values | General typed scalar constants under NUM-03A numerical rules, rather than only 0/1. | Confirmed |
 | Constant source form | Connected same-dtype shape-[1] scalars, plus authoring sugar for typed literals; scalar values may change between Runs while structure stays static. | Confirmed |
-| B metadata | Preserve the destination slot's interpretation by default, including when replacement is a Gray plane; explicit target fields may redefine it. | Confirmed |
+| B interpretation | Replacement copies data into destination indices; it does not assign destination labels. | Confirmed |
 | B sources | Original base components, external component/channel tensors and explicit scalar constants; all replacements read original inputs simultaneously. | Confirmed |
 | Execution and representation | Inherit exact mapped requests and auto/view/materialize from the previously selected FMT channel contracts; specify constants and overwrite exceptions below. | Inherited |
 | Implementation identity | Compile-time swizzle/replace interfaces lowered to FMT-02C and conforming constant sources, without duplicate native copy operators. | Confirmed |
@@ -78,19 +77,9 @@ channels. B preserves the base channel count and replaces selected destination
 slots, leaving unlisted slots unchanged. Both publish immutable results; neither
 mutates the input. A nonempty result channel axis is required.
 
-Selections use the family's generic tensor/metadata interpretation, not a fixed
-HWC assumption. Source component bytes are preserved, including nonfinite IEEE
-patterns. Assigning an output role does not request numerical conversion or
-automatic alpha association. As established in FMT-02, explicit target component
-or group descriptions authorize reinterpretation without additional source raw
-or override; physical layout and nonchannel grid constraints still apply.
-
-For A's default metadata, selected descriptions follow their source components.
-RGB indexed [2,1,0] therefore produces B/G/R slot descriptions, with a correctly
-remapped RGB group if its dependencies remain unambiguous. A complete color
-group cannot be fabricated when required components are missing or ambiguously
-duplicated. Applicable component descriptions survive without a sample-validity
-certificate. Explicit output descriptions can supply a new coherent grouping.
+Selections use explicit axis/index arguments or caller-supplied input descriptions,
+without a fixed HWC assumption. Source bytes are preserved, including nonfinite
+IEEE patterns. Outputs carry no descriptions or color/alpha validity claims.
 
 Exact Data support is the union of the source samples selected by the requested
 output footprint. Constants require only their own value source, not a read of
@@ -115,7 +104,7 @@ contains one tensor.
 Axis parameters index cell axes and exclude the Result batch prefix. The full
 sample rank, including batch and cell axes, is at most 8.
 Let its channel extent be C and let S be the ordered shape with axis a removed.
-Axis resolution follows FMT-01/02: attached effective metadata or a static axis,
+Axis resolution follows FMT-01/02: an explicit `input_descriptions` entry or a static axis,
 no HWC/CHW guess, ordinary assertions must match, and raw requires an explicit
 axis. Output retains the base channel-axis position; moving that axis is a
 separate explicit operation, for example FMT-02B with one input.
@@ -152,19 +141,17 @@ cast, rounding, range conversion or NaN canonicalization occurs.
 ## Parameters and dynamic values
 
 These are logical authoring parameters, not new registered ABI parameter kinds.
-The shared metadata/map encoding must exist before implementation.
+The helpers serialize the current bounded selector/map encoding.
 
 | Field | Meaning / default |
 | --- | --- |
-| `axis` | Optional static Int64 cell-axis index in [0,base_cell_rank); required when effective metadata has no unique channel axis or mode is raw. Batch axes are excluded. |
-| `metadata_mode` | respect by default; raw/override follow FMT-common. |
-| `input_overrides` | Conditional static per-input effective descriptions, only in override mode. Do not change physical storage. |
-| `output_description` | Optional explicit component/group definitions. Assigning target semantics does not move samples or alter their bytes. |
+| `axis` | Optional static Int64 cell-axis index in [0,base_cell_rank); required when no explicit input description supplies a channel axis. Batch axes are excluded. |
+| `input_descriptions` | Optional map of input ordinals to explicit TensorDescription values. Used for axes and name/role resolution; does not change storage. |
 | `layout` | auto by default; view/materialize have the FMT-02 meanings and failures. |
 | `profile` | strict by default, or the named Apple Silicon/x86-64 CPU profile. Lower to the corresponding primitive keys; unavailable profiles fail explicitly. |
 | A: `slots` | Static ordered list of base selectors or constant references; defines every output slot and M. |
 | B: `replacements` | Static list of unique target selectors and source expressions. External sources have explicit component/channels/scalar structure and axis information. |
-| Scalar source | Connected same-dtype Value of shape [1], read at index zero. Its value may change between executions; its dtype/shape and map structure do not. |
+| Scalar source | Connected single-tensor Result of unbatched shape [1], read at index zero. Its value may change between executions; its dtype/shape and map structure do not. |
 | Typed literal | Authoring shortcut for an immutable scalar source with an explicit dtype and exact represented bits, using shared numeric construction rules. |
 
 A scalar that supplies a channel is constant over that channel's spatial domain,
@@ -174,41 +161,18 @@ construction/validation follows NUM conventions and never silently casts a
 different scalar dtype to base dtype. Preserve Int64 values and all floating
 special bits without routing them through an untyped Float64 parameter.
 
-## Metadata preservation and target assignment
+## Explicit interpretation
 
-A retains an existing group only if all of its required components and referenced
-companions have a unique, complete output remapping. Repeated members, omitted
-members or missing association companions remove the ambiguous/incomplete group
-description while retaining applicable component meaning. Do not select the
-first of duplicate R channels to invent one RGB group. Explicit output grouping
-may establish an intended new group. Constants receive no color/alpha role by
-position alone; provide a target component or group definition when needed.
+A and B copy or fill bytes at selected indices. They neither inherit source
+labels nor assign destination labels. The next operation receives its own
+explicit description. The helper validates supplied input descriptions against
+their structural descriptors and uses them only to resolve axes and selectors.
+There is no output-description parameter or hidden edge-description table.
 
-B starts from base destination descriptions. Choosing a target slot explicitly
-assigns that slot's semantics to the copied replacement, including Gray or
-Black/White source values. No extra raw/override is needed for this assignment.
-Unlisted slots retain their sample bits and component descriptions. Explicit
-target fields may redefine replaced slots or define coherent affected groups;
-they must not silently relabel unlisted components. Use a separate explicit
-assignment or FMT-02C when unlisted component interpretations must also change.
-Drop any group/association description made structurally inapplicable by an
-explicit redefinition; retaining a known-invalid group is forbidden.
-
-Target semantics take precedence over conflicting source component meaning only
-for explicitly assigned fields; discard source fields that become inapplicable.
-Contradictory target definitions fail preflight. Coordinate roles, units, origin
-and sampling-grid consistency follow FMT-02; choosing an R or alpha destination
-does not authorize an implicit spatial shift or resample. Source overrides/raw
-remain available for deliberate source-grid reinterpretation.
-
-Dropping alpha by selection does not flatten against a background or transform
-color samples. Canonical images use straight color; replacing alpha preserves
-those colors, including hidden finite color at zero alpha. Complete image
-metadata uses internal alpha indices only. For explicitly described noncanonical
-numeric boundary payloads, retained premultiplied component meaning is provenance,
-not a canonical image declaration or persistent external alpha relation.
-FMT-04 owns boundary association arithmetic; FMT-05 owns semantic internal-alpha
-editing. This family only copies/fills and adds no sample-validity guarantee.
+Dropping alpha does not flatten against a background. Replacing an alpha slot
+does not multiply or divide color samples or scan a coverage interval. FMT-04
+owns association arithmetic and FMT-05 owns alpha-specific editing. A later
+consumer validates the domain it explicitly requests.
 
 ## Coordinate and dependency reference
 
@@ -244,19 +208,15 @@ their own scope; consumer selection cannot undo already required producer work.
 
 ## Compile-time lowering and execution identity
 
-A builds one FMT-02C row per output slot. B begins with C base-to-same-slot rows
-and substitutes the explicit replacements, retaining untouched rows. Supply C
-with an explicit output description computed from A/B's distinct metadata rules;
-do not accidentally use C's default source-description propagation for B.
-Both preserve base axis a as C's output_axis.
+A builds one FMT-02C row per output slot. B begins with base-to-same-slot
+rows and substitutes explicit replacements. Both preserve base axis a as
+`output_axis`; mapping rows contain input, match, selector and destination.
 
-For a scalar source, generate a conforming scalar-fill source of nonchannel shape
-S, with exact bits and generic view storage. For nonempty S, this may use
-NUM-03A's scalar-copy behavior. If S is empty, pass the original shape-[1] scalar
-as a channel-vector source with axis 0, avoiding a forbidden rank-zero temporary.
-Typed literals lower to equivalent scalar sources. Scalar-fill intermediates
-are generic data; zero-stride storage must not be advertised as a canonical
-planar image. The final C output establishes the required image storage.
+Connected scalar sources remain unbatched shape `[1]`. The generated mapped
+assembly receives an explicit scalar source-structure record and repeats the
+scalar for selected coordinates without a separate fill node. A distinct typed
+literal produces a `channel.scalar_literal_<profile>` node; repeated identical
+literal bits share that node. No rank-zero temporary is created.
 
 Preserve Descriptor dependencies and static validation for the original base and
 all connected sources, even if every requested output is constant. Expand only
@@ -267,7 +227,7 @@ does not become an alias. Constants/helpers must obey the selected FMT metadata
 rules rather than silently restoring legacy typed-scalar validation.
 
 Lowering is conforming only when view availability, exact Data/dirty support,
-output metadata, ownership, errors and publication match these definitions.
+output structure, ownership, errors and publication match these definitions.
 Inlining/fusion may remove intermediates if it preserves those observations.
 Do not fall back to an old Whole packed-image operation to make the graph run.
 
@@ -308,7 +268,7 @@ cache restriction and capacity/work/source failure attribution.
 
 | Failure | Phase | Outcome |
 | --- | --- | --- |
-| Empty A slots, duplicate B targets, invalid axis/index/name/role, malformed literal/source kind or contradictory target description | Authoring/compile/direct preflight | InvalidArgument / InvalidDomain, schema origin. |
+| Empty A slots, duplicate B targets, invalid axis/index/name/role, malformed literal/source kind or invalid explicit input description | Authoring/compile/direct preflight | InvalidArgument / InvalidDomain, schema origin. |
 | Full sample rank above 8, batch-prefix mismatch, cell-rank/dtype/nonchannel-shape mismatch, or scalar batch/shape other than unbatched [1] | Preflight | TypeMismatch / None. |
 | Checked count/graph/map/metadata/work capacity, unavailable forced view or backend | Inherited phase | Preserve FMT-02/NUM/kernel status and diagnostic. |
 | Missing source coverage, required producer failure, cancellation or stale plan | Requested observation | Preserve original failure category/scope; no fabricated success. |
@@ -323,13 +283,13 @@ Member files specify analytic fixtures and conceptual public workflows. Verify
 with an independent coordinate interpreter, byte oracle and finite-set Data/
 dirty evaluator, not with the production lowerer. Cover identity, partial/disjoint
 ROI, source reuse, channel-axis positions, constant-only requests, simultaneous
-swaps, overwritten-value nonreads, target semantics, view/materialization and
+swaps, overwritten-value nonreads, explicit selector descriptions, view/materialization and
 special-value bits. Validate helper lowering against the mathematical expressions
 and retain original source descriptions after execution.
 
 Implementation delivery must include an actual public compile/execute example
 with checked output, commands and an offset channel ROI. FMT-02C, canonical
-metadata/map encodings, missing integer widths, conforming generic constant
+metadata/map encodings, conforming generic constant
 sources and scalar-plus-planar dependency/publication support are prerequisites.
 The CPU implementation uses the kernel mapped-planar path for this composition.
 
@@ -343,7 +303,7 @@ retained peaks. Correctness gates timing; no measured speed claim follows.
 
 No user-facing behavior question remains open. The specifications remain
 Proposed; old runtime tests or kernel page-window tests alone
-cannot establish conformance. The current CPU evidence is linked above.
+cannot establish conformance.
 
 This checks the equations
 and finite dependency sets only; it does not execute the proposed helpers,

@@ -2,6 +2,7 @@
 
 - 状态：Accepted
 - 英文权威文档：[ADR 0021](../0021-independent-node-results.md)
+- 当前边界：原决策中每个输出的 facet 集已被取代；每个输出携带解析后的结构化 Result schema。参见 [数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、[结构化 Result 与 tensor slot](../../kernel-architecture/zh/Global-Results.zh.md) 和 [Tensor 描述](../../kernel-architecture/zh/Tensor-Semantic-Metadata.zh.md)。
 
 ## 1. 核心摘要（TL;DR）
 
@@ -9,7 +10,7 @@
 
 ## 2. 架构心智模型（Mental Model & Intuition）
 
-Compiler 根据静态输入元数据和参数解析所有输出 descriptor 与 facets。执行只沿着有需求的结果端口及其相关输入边推进。每个被请求的结果拥有自己的任务、读取、依赖记录、缓存身份和结果。
+Compiler 根据静态输入元数据和参数解析每个输出的 Result schema。执行只沿着有需求的结果端口及其相关输入边推进。每个被请求的结果拥有自己的任务、读取、依赖记录、缓存身份和结果。
 
 ```text
                   一个 operation node
@@ -32,8 +33,7 @@ Compiler 根据静态输入元数据和参数解析所有输出 descriptor 与 f
 ```cpp
 struct SemanticOutput {
   std::string key;
-  ValueDescriptor descriptor;
-  std::vector<ValueFacet> facets;
+  std::shared_ptr<const SchemaTemplate> result_schema;
 };
 
 struct WorkflowNodeOutput {
@@ -72,7 +72,7 @@ class ExecutionContext {
 
 以上 class 摘录省略了其他无关成员。
 
-这些 C++ 声明展示结果路由字段，省略了外围类型和校验。`OperationTraits` 以声明顺序保存输出。每个输出都有唯一名称及独立推断的 descriptor 和 facet 集。C operation descriptor 采用相同的有序模型，最多包含 64 项。多输出 operation 必须确定且无副作用。单输出 operation 明确声明 `value`。
+这些 C++ 声明展示结果路由字段，省略了外围类型和校验。`OperationTraits` 以声明顺序保存输出。每个输出都有唯一名称及独立推断的 Result schema。C operation descriptor 采用相同的有序模型，最多包含 64 项。多输出 operation 必须确定且无副作用。
 
 Workflow 边按名称选择精确的 producer 端口。调用方可见的 `WorkflowOutput` 选择 node 与 port，再为结果指定唯一标签。Compiler 将输出名解析为声明顺序索引，并用 `ValueRef` 记录结果。静态推断使用完整输入元数据；输出的 `input_indices` 投影决定其可执行输入祖先和 callback 视图。投影后的 C callback 输入仍携带原始 schema 索引。
 
@@ -89,6 +89,6 @@ Workflow 边按名称选择精确的 producer 端口。调用方可见的 `Workf
 
 ## 5. 后果与代价（Consequences）
 
-输出元数据和结果身份包含被选输出契约、解析后的 descriptor 与 facets、静态参数及实际输入依赖。改变输出角色、shape 或相关输入投影会改变其身份。无关 node id 和整张图的身份不能替代被选输出的内容依赖。
+输出元数据和结果身份包含被选输出契约、解析后的 Result schema、静态参数及实际输入依赖。改变输出角色、shape 或相关输入投影会改变其身份。无关 node id 和整张图的身份不能替代被选输出的内容依赖。
 
 每个发布结果都拥有自己的字节，或持有 backing owner 的引用。缓存命中会获得该结果已验证的 tile 记录。取消只停止本次 Run 的工作。保留的 view 会继续持有存储所有者，并在最后一个引用退出前占用预算。

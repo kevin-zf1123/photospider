@@ -10,7 +10,7 @@
 
 #include "02-format-color/transfer_program.hpp"
 #include "common/tensor_program.hpp"
-#include "photospider/data/tensor_description.hpp"
+#include "photospider/ops/tensor_description.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::plugin_internal::transfer_ops {
@@ -173,7 +173,7 @@ inline Result<OperationPreparation> prepare(
     const std::vector<OperationMetadata>& inputs, const Parameters& p,
     bool encode, SequenceProfile profile) {
   using R = Result<OperationPreparation>;
-  input_internal::Float32Environment environment;
+  plugin_internal::FloatingEnvironment environment;
   if (!environment.active())
     return R(sample_error("floating environment unavailable"));
   auto available = numeric_ops::sequence_profile_available(profile);
@@ -199,32 +199,18 @@ inline Result<OperationPreparation> prepare(
   auto state = std::make_shared<Preparation>();
   state->profile = profile;
   state->narrow = type == ElementType::Float32;
-  const auto mode = text(p, "metadata_mode", "respect"),
-             layout = text(p, "layout", "auto");
-  if (mode != "respect" && mode != "override" && mode != "raw")
-    return R(invalid("metadata_mode"));
+  const auto layout = text(p, "layout", "auto");
   if (layout != "auto" && layout != "view" && layout != "materialize")
     return R(invalid("layout"));
-  if ((mode == "override") != (p.count("metadata_override") != 0))
-    return R(invalid("metadata_override must occur exactly in override mode"));
-  state->semantic = mode != "raw";
+  state->semantic = p.count("input_description") != 0;
   state->materialize = layout == "materialize";
   state->layout = layout;
   std::optional<TensorDescription> description;
-  if (mode == "override") {
-    auto d = tensor_description_from_parameter(text(p, "metadata_override"));
+  if (state->semantic) {
+    auto d = tensor_description_from_parameter(text(p, "input_description"));
     if (!d.ok())
       return R(d.status());
     description = d.take_value();
-  } else {
-    for (const auto& f : input.facets)
-      if (f.key == "photospider.tensor-description") {
-        auto d = decode_tensor_description(f);
-        if (!d.ok() && state->semantic)
-          return R(d.status());
-        if (d.ok())
-          description = d.take_value();
-      }
   }
   if (description) {
     auto s = validate_tensor_description(*description, input.descriptor);
@@ -376,66 +362,6 @@ inline Result<OperationPreparation> prepare(
   auto schema = *inputs[0].result_schema;
   auto& output_tensor = schema.tensors[0];
   output_tensor.atomic_trailing_axes = 0;
-  if (state->semantic) {
-    auto& desc = *description;
-    const auto target =
-        encode ? encode_transfer_definition(d).value() : std::string("linear");
-    // Partly intersected overlapping group claims cannot survive as complete
-    // descriptions. Fully transformed groups retain basis/white and roles.
-    std::vector<TensorColorGroup> groups;
-    for (std::size_t i = 0; i < desc.groups.size(); ++i) {
-      auto g = desc.groups[i];
-      unsigned touched = 0;
-      for (auto index : g.indices)
-        touched += state->selected(index);
-      if (!touched) {
-        groups.push_back(std::move(g));
-        continue;
-      }
-      if (touched != g.indices.size())
-        continue;
-      auto a = analytic(g.interpretation);
-      if (!a.ok())
-        return R(a.status());
-      g.interpretation = a.take_value();
-      g.interpretation.transfer = target;
-      groups.push_back(std::move(g));
-    }
-    desc.groups = std::move(groups);
-    for (std::size_t i = 0; i < desc.channels.size(); ++i)
-      if (state->selected(i) && desc.channels[i].interpretation) {
-        auto a = analytic(*desc.channels[i].interpretation);
-        if (!a.ok())
-          return R(a.status());
-        desc.channels[i].interpretation = a.take_value();
-        desc.channels[i].interpretation->transfer = target;
-      }
-    if (!state->axis && desc.component && desc.component->interpretation) {
-      desc.component->interpretation = effective;
-      desc.component->interpretation->transfer = target;
-    }
-    // Legacy tensor-wide transfer/profile labels cannot describe mixed groups.
-    if (!desc.transfer.empty())
-      desc.transfer = desc.groups.size() == 1 ? target : "";
-    if (desc.profile || desc.configured) {
-      desc.profile.reset();
-      desc.configured.reset();
-      desc.analytic_binding.reset();
-      desc.convention = "relative-v1";
-    }
-    auto checked = validate_tensor_description(desc, input.descriptor);
-    if (!checked.ok())
-      return R(checked);
-    auto facet = encode_tensor_description(desc);
-    if (!facet.ok())
-      return R(facet.status());
-    output_tensor.facets.clear();
-    for (const auto& f : input.facets)
-      if (f.key != "photospider.tensor-description")
-        output_tensor.facets.push_back(f);
-    output_tensor.facets.push_back(facet.take_value());
-  }  // raw deliberately retains bytes, never asserts a new transfer or
-     // validity.
   if (output_tensor.layout.spatial &&
       (!state->program.identity || state->materialize))
     output_tensor.layout.row_pitch_bytes = 0;

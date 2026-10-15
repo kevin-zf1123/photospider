@@ -80,5 +80,5 @@ for bypass-only requests; runtime sample failures have exact requested support.
   work/capacity budgets, latched internal failure and bounded cancellation.
 
 The future public workflow explicitly lists its stages and immutable resources,
-binds input metadata, selects an execution configuration and requests a sparse
+supplies explicit input configuration, selects an execution configuration and requests a sparse
 ROI. No runtime implementation or measured profile corpus exists in this spec.

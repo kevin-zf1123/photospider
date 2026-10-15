@@ -31,7 +31,7 @@ class Compiler final {
  public:
   explicit Compiler(std::shared_ptr<OperationRegistry> operations);
   Result<SemanticGraphIR> analyze(const GraphSnapshot& snapshot,
-                                  ResourceBindings resources = {}) const;
+                                  ResourceSet resources = {}) const;
   Result<OptimizedGraphIR> optimize(const SemanticGraphIR& semantic) const;
   Result<ExecutionPlan> plan(const OptimizedGraphIR& optimized,
                              const PlanningOptions& options = {}) const;
@@ -46,7 +46,7 @@ class PHOTOSPIDER_API ExecutionContext final {
 };
 ```
 
-这些代码还原公开 compiler 和 execution 方法的签名；省略了头文件与无关声明。`Compiler::analyze` 接收 graph snapshot 和可选的 resource bindings。`ExecutionPlan` 是公开 class。
+这些代码还原公开 compiler 和 execution 方法的签名；省略了头文件与无关声明。`Compiler::analyze` 接收 graph snapshot 和可选的 `ResourceSet`，后者由按内容寻址的 `ImmutableResource` 句柄组成。Operation preparation 通过显式 `ResourceIdentity` 从该集合中选取资源；prepared operation、plan 和执行状态持有所选 owner，Result 只持有它实际保存的存储。`ExecutionPlan` 是公开 class。
 
 内核拥有 `WorkflowDocument` 的解释、图验证、语义与优化 IR、算子 traits、规划、`Value` 和 `Region` 契约、本地执行、资源计账、取消、后端选择、fallback 与结果发布。`GraphContext` 和 `ExecutionContext` 是独立对象，既不是 daemon session，也不是全局注册表条目。阶段 digest 和 plan/cache key 是用于复现与可丢弃派生数据的非安全身份。
 

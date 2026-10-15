@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_2
+implementation_status: implemented_cpu_result_abi_4
 clarification_status: complete
 registered_operation_keys:
   - color.color_to_gray_strict
@@ -27,18 +27,19 @@ One Result containing a single Float32 or Float64 tensor and no fields produces 
 Source: XYZ, NCL YCbCr, normalized CIELAB or OKLab. Target: linear_y, encoded_luma, cielab_l or oklab_l Gray.
 Q/R structural remapping and axis rules apply exactly as specified in the family.
 Unrelated groups, internal alpha and AOV samples pass through bit-for-bit.
-Semantic mode selects a complete group; raw uses the family ordered selector.
+An explicit input_description selects the described path; otherwise use the
+family raw selector. The output carries no description.
 Member-specific statics: gray_kind inferred semantically, explicit in raw.
-All generic mode, source consistency, metadata and layout fields inherit the
+All explicit-description, source-consistency, algorithm and layout fields inherit the
 family; no missing semantic interpretation is inferred from sample magnitudes.
 
 ## Mathematics, sample support and errors
 
-Copy the native coordinate and publish complete Gray meaning. Contract three selected slots into one at their smallest physical index; retain channel axis and other channels.
+Copy the native coordinate; the caller supplies the corresponding Gray configuration downstream. Contract three selected slots into one at their smallest physical index; retain channel axis and other channels.
 
 Exact same-position support: only selected Y/Y′/l/L; discarded chroma is not read.
 Take unions for multiple requested outputs and the forward relation for dirty
-mapping. Static metadata checks apply even to Empty/bypass-only requests.
+mapping. Static structure and explicit-configuration checks apply even to Empty/bypass-only requests.
 No halo, hidden-color skip, alpha validation or full-image scan is introduced.
 Strict evaluates the complete specified formula with its stated copy/selection
 exceptions; accelerated numerical rules, raw specials and errors inherit the
@@ -51,13 +52,13 @@ publication; unrelated unobserved sample errors do not. Preserve upstream scope.
 This is a registered native Result primitive. Internal helper reuse preserves its declared support, rounding and validation.
 auto can share a legal same-owner view while retaining validation; forced view fails if that mapping cannot be represented.
 The implementation supports generic and spatial layouts. Empty demand is stateless, and publication is transactional.
-The implementation uses Result ABI 3 and the registered CPU profiles.
+The implementation uses Result ABI 4 and the registered CPU profiles.
 
 ## Independent acceptance and conceptual workflow
 
 Lab=(0.5,NaN,10) permits Gray l=0.5. Test permuted/interleaved logical group indices and alpha/AOV remapping independently of the physical layout.
 
-Also apply common mixed-region/component, dtype/profile, signed-zero, metadata,
+Also apply common mixed-region/component, dtype/profile, signed-zero, explicit-configuration,
 resource/cancellation and owner-lifetime acceptance where relevant. An independent
 formula oracle must use actual stored floating inputs, not ideal decimal inputs.
 Conceptual paths are `linear RGB -> FMT-10A -> Q` for luminance Gray,

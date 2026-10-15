@@ -3,6 +3,7 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/data/result.hpp"
 #include "photospider/data/value_fragments.hpp"
 #include "support/test_support.hpp"
 
@@ -19,7 +20,7 @@ int bounded_read() {
   FootprintLimits construction;
   construction.maximum_work = 1000000000;
   auto created = ValueFragments::create(
-      descriptor, {}, Footprint::all(descriptor.shape).take_value(), pieces,
+      descriptor, Footprint::all(descriptor.shape).take_value(), pieces,
       construction);
   PS_CHECK(created.ok());
   const auto& fragments = created.value();
@@ -95,7 +96,7 @@ int packed_collection() {
                       .take_value();
     auto fragments =
         ValueFragments::create(
-            descriptor, {},
+            descriptor,
             Footprint::from_regions(descriptor.shape, {region}).take_value(),
             {source})
             .take_value();
@@ -170,7 +171,7 @@ int packed_collection() {
                            {0, 1, 2, 3, 4, 5, 6, 7, 8})
                  .take_value();
     auto f =
-        ValueFragments::create(d, {}, Footprint::all(d.shape).take_value(), {v})
+        ValueFragments::create(d, Footprint::all(d.shape).take_value(), {v})
             .take_value();
     const auto collected =
         f.collect(v.region(), BufferAllocator{}).take_value();
@@ -208,7 +209,7 @@ int main() {
     auto wanted = Footprint::from_regions(descriptor.shape,
                                           {left.region(), right.region()})
                       .take_value();
-    auto sparse = ValueFragments::create(descriptor, {}, wanted, {left, right});
+    auto sparse = ValueFragments::create(descriptor, wanted, {left, right});
     PS_CHECK(sparse.ok() && sparse.value().fragments().size() == 2);
     std::vector<std::uint8_t> sample(width, 0);
     PS_CHECK(sparse.value().read({1}, sample.data(), width).ok());
@@ -233,9 +234,8 @@ int main() {
     PS_CHECK(restricted.ok() && restricted.value().fragments().size() == 1);
     PS_CHECK(!restricted.value().read({0}, sample.data(), width).ok());
     PS_CHECK(!restricted.value().restrict(wanted).ok());
-    PS_CHECK(
-        ValueFragments::create(descriptor, {}, wanted, {left}).status().code ==
-        ErrorCode::NotFound);
+    PS_CHECK(ValueFragments::create(descriptor, wanted, {left}).status().code ==
+             ErrorCode::NotFound);
     // Retained owner survives the original inputs and the full sparse carrier.
     std::weak_ptr<const CpuStorage> owner = left.storage();
     sparse = Result<ValueFragments>(ValueFragments{});
@@ -249,7 +249,7 @@ int main() {
                    .take_value();
   const auto all = Footprint::all({4}).take_value();
   auto duplicate = ValueFragments::create(
-      value.descriptor(), {}, all,
+      value.descriptor(), all,
       {value, value.view(Region({{1, 2}})).take_value()});
   PS_CHECK(duplicate.ok());
   PS_CHECK(duplicate.value().retained_bytes().value() ==
@@ -262,14 +262,14 @@ int main() {
                           value.storage())
           .take_value();
   auto aliases = ValueFragments::create(
-      value.descriptor(), {}, all, {value, explicit_origin, shifted_origin});
+      value.descriptor(), all, {value, explicit_origin, shifted_origin});
   PS_CHECK(aliases.ok() && aliases.value().retained_bytes().value() ==
                                value.storage()->capacity());
   auto other = Value::create(value.descriptor(), value.region(), value.layout(),
                              {4, 3, 2, 1})
                    .take_value();
-  PS_CHECK(!ValueFragments::create(value.descriptor(), {}, all, {value, other})
-                .ok());
+  PS_CHECK(
+      !ValueFragments::create(value.descriptor(), all, {value, other}).ok());
   // A shared parameter-sized table stays compact even with atomic publication.
   const ValueDescriptor table_descriptor{ElementType::UInt8, {129, 129}};
   auto table = Value::create(table_descriptor, Region::whole({129, 129}),
@@ -280,7 +280,7 @@ int main() {
     for (std::uint64_t x = 0; x < 129; ++x)
       atoms.push_back(table.view(Region({{y, 1}, {x, 1}})).take_value());
   auto compact = ValueFragments::create(
-      table_descriptor, {}, Footprint::all({129, 129}).take_value(), atoms);
+      table_descriptor, Footprint::all({129, 129}).take_value(), atoms);
   PS_CHECK(compact.ok() && compact.value().fragments().size() == 1);
   PS_CHECK(compact.value().retained_bytes().value() ==
            table.storage()->capacity());
@@ -291,7 +291,7 @@ int main() {
                                            {3, {-1}, {2}}, value.storage())
                            .take_value();
   auto mixed = ValueFragments::create(
-      value.descriptor(), {}, all,
+      value.descriptor(), all,
       {value.view(Region({{0, 2}})).take_value(), reversed_tail});
   PS_CHECK(mixed.ok() && mixed.value().fragments().size() == 2);
   PS_CHECK(mixed.value().read({2}, &last, 1).ok() && last == 4);
@@ -304,7 +304,7 @@ int main() {
                                      {3, {-1}, {0}}, value.storage())
                      .take_value();
   auto reverse_parts =
-      ValueFragments::create(value.descriptor(), {}, all,
+      ValueFragments::create(value.descriptor(), all,
                              {reverse.view(Region({{0, 2}})).take_value(),
                               reverse.view(Region({{2, 2}})).take_value()});
   PS_CHECK(reverse_parts.ok() && reverse_parts.value().fragments().size() == 1);
@@ -317,17 +317,13 @@ int main() {
   auto generic = Value::create(image, Region::whole(image.shape),
                                {0, {16, 16, 4}}, std::vector<std::uint8_t>(16))
                      .take_value();
-  PS_CHECK(ValueFragments::create(image, {}, channel, {generic}).ok());
-  const auto facet = encode_semantic(rgba_semantics()).take_value();
-  auto rejected_image = Value::create(image, generic.region(), generic.layout(),
-                                      generic.copy_bytes(), {facet});
-  PS_CHECK(rejected_image.status().code == ErrorCode::TypeMismatch);
+  PS_CHECK(ValueFragments::create(image, channel, {generic}).ok());
   SchemaTemplate typed_schema;
   typed_schema.id = "test.fragment.image";
   ResultTensorSpec pixels;
   pixels.key = "pixels";
   pixels.descriptor = image;
-  pixels.facets = {facet};
+  pixels.atomic_trailing_axes = 1;
   pixels.layout.spatial = true;
   pixels.layout.channel_axis = 2;
   typed_schema.tensors.push_back(std::move(pixels));

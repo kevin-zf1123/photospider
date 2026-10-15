@@ -93,51 +93,11 @@ int on_demand_payload() {
   state = {};
   PS_CHECK(budget->live() == 0 && budget->available() == 8192);
   PS_CHECK(root->statistics().live[ResourceKind::Payload] == 0);
-  NumericDiagnostics report;
-  report.profile = CpuNumericProfile::Strict;
-  report.implementation[0] = 'x';
-  report.view_elements = UINT64_MAX;
-  NumericDiagnostics merged;
-  PS_CHECK(merge_numeric_diagnostics(&merged, report).ok());
-  report.view_elements = 1;
-  report.copied_elements = 1;
-  PS_CHECK(merge_numeric_diagnostics(&merged, report).reason ==
-           FailureReason::CapacityLimit);
-  PS_CHECK(merged.view_elements == UINT64_MAX && merged.copied_elements == 0);
-  return 0;
-}
-int numeric_function_counters() {
-  ps::NumericDiagnostics report;
-  report.profile = ps::CpuNumericProfile::Strict;
-  const char identity[] = "manual-function-counters/1";
-  std::memcpy(report.implementation.data(), identity, sizeof(identity));
-  report.strict_math_calls = 3;
-  report.strict_fallbacks = 2;
-  report.fallback_reasons[1] = 2;
-  report.function_fallbacks[static_cast<unsigned>(ps::NumericMathFunction::Sin)]
-                           [1] = 1;
-  ps::NumericDiagnostics total;
-  PS_CHECK(ps::merge_numeric_diagnostics(&total, report).ok() &&
-           total.strict_math_calls == 3 && total.function_fallbacks[0][1] == 1);
-  PS_CHECK(ps::merge_numeric_diagnostics(&total, report).ok() &&
-           total.strict_math_calls == 6 &&
-           total.function_fallbacks[static_cast<unsigned>(
-               ps::NumericMathFunction::Sin)][1] == 2);
-  const auto saved = total;
-  report.function_fallbacks[1][1] = 2;
-  PS_CHECK(!ps::merge_numeric_diagnostics(&total, report).ok() &&
-           total.function_fallbacks == saved.function_fallbacks &&
-           total.strict_math_calls == saved.strict_math_calls);
-  report.function_fallbacks[1][1] = 0;
-  total.strict_math_calls = UINT64_MAX;
-  PS_CHECK(!ps::merge_numeric_diagnostics(&total, report).ok() &&
-           total.strict_math_calls == UINT64_MAX);
   return 0;
 }
 }  // namespace
 int main() {
   PS_CHECK(failure_latch_publication() == 0);
   PS_CHECK(on_demand_payload() == 0);
-  PS_CHECK(numeric_function_counters() == 0);
   return 0;
 }

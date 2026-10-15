@@ -62,7 +62,7 @@ inline ps::ResultBuilder builder(const ps::ResultProgramPhase& phase) {
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_extent, phase.query.resources));
+      phase.query.tile_extent));
   return result;
 }
 inline ps::Result<ps::ResultProgramPoll> need(

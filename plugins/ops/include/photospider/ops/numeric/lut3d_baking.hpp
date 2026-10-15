@@ -1,3 +1,4 @@
+#include "photospider/ops/numeric/diagnostics.hpp"
 #pragma once
 
 #include <array>
@@ -6,9 +7,9 @@
 #include <optional>
 
 #include "photospider/compiler/compiler.hpp"
-#include "photospider/data/lut3d_bake.hpp"
 #include "photospider/ops/export.hpp"
 #include "photospider/ops/numeric/lut3d.hpp"
+#include "photospider/ops/numeric/lut3d_bake.hpp"
 #include "photospider/ops/numeric/workflow_authoring.hpp"
 
 namespace ps::numeric {
@@ -24,12 +25,11 @@ struct Lut3dSourceInput {
 };
 /** @brief Authoring-only source expansion, called twice on a staged document.
  * Append ordinary nodes and return an output that resolves to one Result tensor
- * with the supplied complete sample shape and Float32/64 dtype. A supplied
- * ColorArray facet must match the requested description; a generic tensor may
- * omit that facet. Preserve existing input declarations (including Result
- * schemas), nodes and exports. No computation, runtime callback or captured
- * closure is retained. The supplied graph's keys/profiles and explicit casts
- * define the reference.
+ * with the supplied complete sample shape and Float32/64 dtype. The builder
+ * supplies source interpretation explicitly through node parameters. Preserve
+ * existing input declarations (including Result schemas), nodes and exports. No
+ * computation, runtime callback or captured closure is retained. The supplied
+ * graph's keys/profiles and explicit casts define the reference.
  */
 using Lut3dSourceBuilder = std::function<Result<WorkflowNodeOutput>(
     WorkflowDocument&, const Lut3dSourceInput&)>;
@@ -56,16 +56,21 @@ struct Lut3dValidationPoints {
 };
 /** @brief Connectable exports; table is a globally quality-gated
  * `photospider.tensor` v1 Result with `samples` shape [N0,N1,N2,3], selected
- * dtype and ColorArray v1 facet. Axis is an independent Float64 tensor. report
- * is a curve.bake_lut3d.report v1 ResultRef; request it through
+ * dtype and atomic trailing color axis. Axis is an independent Float64 tensor.
+ * report is a curve.bake_lut3d.report v1 ResultRef; request it through
  * `ExecutionContext::execute()` and read it with the public
- * read_lut3d_bake_report helper. Its association records observed Result input
+ * read_lut3d_bake_report helper with description. Its association records
+ * observed Result input
  * ObjectIds in port order: axis, grid and owned table occupy the first three
  * entries, followed by owners observed from source batches. Names are not
  * auto-exported.
  */
 struct BakedLut3d {
   WorkflowNodeOutput table, axis, report;
+  /** @brief Owned static configuration for explicit report reading and reuse.
+   * It is not attached to any generated Result.
+   */
+  Lut3dBakeDescription description;
 };
 /** @brief Appends an ordinary graph for measured source sampling and LUT
  * baking. registry must be frozen and include the source keys. Compiler
@@ -108,5 +113,5 @@ PHOTOSPIDER_OPS_API Result<BakedLut3d> bake_lut3d(
     WorkflowInput axis, const Lut3dSourceBuilder& source,
     const Lut3dBakeOptions& options,
     std::optional<Lut3dValidationPoints> validation_points = {},
-    ResourceBindings resources = {});
+    ResourceSet resources = {});
 }  // namespace ps::numeric

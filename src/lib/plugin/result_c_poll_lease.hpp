@@ -21,8 +21,8 @@ struct CResultPollLease {
       ResourceAllocator<std::pair<const std::uint64_t, std::uint64_t>>>;
   using AtlasKey = std::pair<std::uint32_t, std::uint32_t>;
   using Atlases = std::map<
-      AtlasKey, ps_result_native_atlas_v3, std::less<AtlasKey>,
-      ResourceAllocator<std::pair<const AtlasKey, ps_result_native_atlas_v3>>>;
+      AtlasKey, ps_result_native_atlas_v4, std::less<AtlasKey>,
+      ResourceAllocator<std::pair<const AtlasKey, ps_result_native_atlas_v4>>>;
   using Checkpoints = std::map<
       std::uint64_t, ResultCheckpoint, std::less<std::uint64_t>,
       ResourceAllocator<std::pair<const std::uint64_t, ResultCheckpoint>>>;

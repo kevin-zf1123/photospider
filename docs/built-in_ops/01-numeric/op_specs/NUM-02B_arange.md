@@ -24,7 +24,7 @@ The strict key follows the exact reference below. Accelerated floating results f
 
 Integer mode requires both inputs to be Int64 and produces Int64 values and an Int64 axis. Floating mode accepts Float32 or Float64 inputs, including mixed floating input types, and produces Float32 or Float64 values with a Float64 axis. Integer/float mixing requires an explicit cast. The public `arange_node` helper defaults to Int64 when both input schemas are Int64, otherwise Float64; callers can explicitly select Float32.
 
-The `values` output is a Result with schema `photospider.tensor`, member `samples`, shape `[count]` and the selected dtype. The `axis` output uses that schema and member key with shape `[3]` and `atomic_trailing_axes=1`. Both outputs use ordinary tensor axes and drop facets and batch topology. The axis tuple is `[start, last, step]`, with Int64 elements in integer mode and Float64 elements in floating mode. A request for one axis component closes demand over the full tuple. Values and axis are independent output identities.
+The `values` output is a Result with schema `photospider.tensor`, member `samples`, shape `[count]` and the selected dtype. The `axis` output uses that schema and member key with shape `[3]` and `atomic_trailing_axes=1`. Both outputs use ordinary tensor axes and drop batch topology. The axis tuple is `[start, last, step]`, with Int64 elements in integer mode and Float64 elements in floating mode. A request for one axis component closes demand over the full tuple. Values and axis are independent output identities.
 
 ## Exact progression and axis
 

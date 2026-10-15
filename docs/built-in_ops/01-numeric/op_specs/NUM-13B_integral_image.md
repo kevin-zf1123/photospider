@@ -30,13 +30,13 @@ The `numeric.integral_image_*` operations accept one `Result` tensor member unde
 any member key. The output port key is `values`; its Result schema is
 `photospider.tensor` with tensor member `samples`. The source
 `sample_shape()` includes batch axes; the output uses that complete shape as
-ordinary axes and has no facets or batch topology. Compute two-axis rectangular
+ordinary axes and has no batch topology. Compute two-axis rectangular
 prefix sums with leading zero boundaries. Required static String axes name
 exactly two distinct nonnegative input axes; normalize the pair to increasing
 order. Input rank is 2..8 with positive extents. The output retains all other
 axes and adds one to each selected axis. All other axes
 are independent batches, with no image/color semantics inferred. Input/output
-logical counts must not exceed 2^40; output facets are empty.
+logical counts must not exceed 2^40; output carries no domain description.
 
 For selected axes a,b and an output coordinate o, sum the input rectangle
 s[a] in [0,o[a]), s[b] in [0,o[b]), with all other coordinates equal to o.

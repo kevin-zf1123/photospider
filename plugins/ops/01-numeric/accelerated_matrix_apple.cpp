@@ -1,4 +1,5 @@
 #include "01-numeric/accelerated_matrix.hpp"
+#include "photospider/core/status.hpp"
 
 #if defined(PHOTOSPIDER_HAS_ACCELERATE) && defined(__APPLE__) && \
     defined(__aarch64__)

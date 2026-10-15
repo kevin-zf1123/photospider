@@ -8,7 +8,7 @@ Each input port is a `Result` with exactly one tensor member at tensor index zer
 
 Clamp accepts UInt8, Int64, Float32 and Float64 with three inputs in order: `input`, `lower`, `upper`. Remap accepts Float32 or Float64 with five inputs in order: `input`, `source_lower`, `source_upper`, `target_lower`, `target_upper`.
 
-Input sample rank is 1 through 8 and the complete logical element count is at most 2^40. Output `values` is a `Result` using schema `photospider.tensor` and tensor key `samples`. Its cell shape is the complete input `sample_shape()`; input batch prefixes become ordinary output axes. Output facets and batch-axis topology are empty. The output retains the input element type.
+Input sample rank is 1 through 8 and the complete logical element count is at most 2^40. Output `values` is a `Result` using schema `photospider.tensor` and tensor key `samples`. Its cell shape is the complete input `sample_shape()`; input batch prefixes become ordinary output axes. Output batch-axis topology are empty. The output retains the input element type.
 
 For every nonempty request, the continuation issues one Need for the complete tensor member on every input with roles 13 (Data, Validation and Descriptor), then publishes the complete output in its next stage. It reads through authorized tensor windows and writes through one direct tensor writer. Whole execution means sparse requested output regions do not reduce the input validation or arithmetic domain. The published Result retains the full output and its global coordinates; query coverage `Q` identifies the observed dependency footprint rather than a packed ROI publication. A bound error outside the requested projection still fails the invocation.
 

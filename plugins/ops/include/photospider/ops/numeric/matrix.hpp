@@ -5,7 +5,7 @@
 #include <utility>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 /** @brief Authors a Whole Result operation for y=M*x+b.
@@ -14,7 +14,7 @@ namespace ps::numeric {
  * [Cout,Cin], and [Cout]; all dtypes match and are Float32 or Float64, Cin/Cout
  * are in 2..4, and vector rank is 1..8. Input and output logical counts are at
  * most 2^40. The `values` output is a Result with `photospider.tensor` schema,
- * tensor member `samples`, shape [...,Cout], no facets, and no batch topology.
+ * tensor member `samples`, shape [...,Cout], no batch topology.
  * The returned node has no parameters, casts, implicit broadcast, inverse, or
  * homogeneous-coordinate division; singular matrices are valid.
  *

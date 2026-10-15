@@ -13,10 +13,10 @@ namespace ps::format {
  *
  * Select exactly one of `scalar`, `component`, or channel-tensor structure.
  * Scalar and component structures have no axis. A channel tensor has both
- * flags false and may assert its channel axis; metadata resolves an omitted
- * axis except in raw mode, which requires an explicit axis. Axis indices
- * address cell axes and exclude the Result batch prefix; the complete sample
- * rank is at most 8.
+ * flags false and may assert its channel axis. An omitted axis requires the
+ * corresponding `ChannelAssemblyOptions::input_descriptions` entry to supply
+ * it. Axis indices address cell axes and exclude the Result batch prefix;
+ * the complete sample rank is at most 8.
  */
 struct ChannelEditStructure final {
   bool component = false;
@@ -87,9 +87,10 @@ PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> swizzle_channels(
  * nonscalar source has the base batch prefix; scalar sources are unbatched
  * shape `[1]`. Complete sample rank, including batch and cell axes, is at most
  * 8. Every source reads the original immutable inputs. Unlisted destinations
- * retain their samples and semantics; replacements inherit destination
- * semantics, subject to explicit target fields. External component, channel and
- * scalar sources require explicit structure, the exact sample grid and the base
+ * retain their sample bits; replacements copy the selected source bits.
+ * Callers supply domain interpretation explicitly to downstream operations.
+ * External component, channel and scalar sources require explicit structure,
+ * the exact sample grid and the base
  * dtype. Transaction, exception, ownership and execution guarantees match
  * `swizzle_channels`.
  */

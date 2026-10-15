@@ -1,3 +1,4 @@
+#include "photospider/ops/errors.hpp"
 #pragma once
 
 #include <array>
@@ -11,7 +12,7 @@
 #include "01-numeric/certified_math.hpp"
 #include "01-numeric/exact_elementary.hpp"
 #include "01-numeric/expression_program.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 inline std::string expression_coordinate(std::uint64_t bits) {
@@ -23,8 +24,9 @@ inline std::string expression_coordinate(std::uint64_t bits) {
   return written.ec == std::errc{} ? std::string(text.data(), written.ptr)
                                    : "unavailable";
 }
+template <class Reason>
 inline Status expression_failure(std::uint64_t index, bool have_x,
-                                 std::uint64_t x, FailureReason reason,
+                                 std::uint64_t x, Reason reason,
                                  const std::string& message) {
   AtomKey atom;
   atom.rank = 1;
@@ -64,7 +66,7 @@ struct ExpressionEvaluator final {
                  b = leaf ? 0 : values[node.right];
       const auto left = BinaryParts::decode(a, false),
                  right = BinaryParts::decode(b, false);
-      const auto fail = [&](FailureReason reason, const char* message) {
+      const auto fail = [&](auto reason, const char* message) {
         return Answer(expression_failure(sample, true, x, reason,
                                          "span=[" + std::to_string(node.begin) +
                                              "," + std::to_string(node.end) +
@@ -91,14 +93,14 @@ struct ExpressionEvaluator final {
         continue;
       }
       if (node.kind == K::Divide && !right.magnitude)
-        return fail(FailureReason::DivideByZero, "division by zero");
+        return fail(ops_error::DivideByZero, "division by zero");
       if (node.kind == K::Sqrt && left.negative && left.magnitude)
         return fail(FailureReason::InvalidDomain, "sqrt negative operand");
       if (node.kind == K::Ln && (!left.magnitude || left.negative))
         return fail(FailureReason::InvalidDomain, "ln nonpositive operand");
       if (node.kind == K::Power) {
         if (!left.magnitude && right.negative && right.magnitude)
-          return fail(FailureReason::DivideByZero, "zero to negative power");
+          return fail(ops_error::DivideByZero, "zero to negative power");
         const bool integer =
             right.exponent >= 0 || !right.magnitude ||
             (-right.exponent < 64 &&

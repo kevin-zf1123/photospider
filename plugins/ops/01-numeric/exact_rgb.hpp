@@ -1,3 +1,4 @@
+#include "photospider/ops/errors.hpp"
 #pragma once
 
 #include <array>
@@ -6,7 +7,7 @@
 
 #include "01-numeric/directed_color_functions.hpp"
 #include "01-numeric/exact_polynomial.hpp"
-#include "photospider/data/color_array.hpp"
+#include "photospider/ops/color_array.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Algebraic RGB paths: direct association conversion, linear transfer and
@@ -427,7 +428,7 @@ class ExactRgb final {
             return Answer(
                 Status{ErrorCode::OperationFailed,
                        "positive alpha rounds to zero with nonzero RGB",
-                       FailureReason::AssociationUnderflow});
+                       ops_error::AssociationUnderflow});
         result.fill(0);
       }
       return Answer(result);
@@ -550,7 +551,7 @@ class ExactRgb final {
         if (BinaryParts::decode(result[channel], narrow).magnitude)
           return Answer(Status{ErrorCode::OperationFailed,
                                "positive alpha rounds to zero with nonzero RGB",
-                               FailureReason::AssociationUnderflow});
+                               ops_error::AssociationUnderflow});
       result.fill(0);
     }
     return Answer(result);

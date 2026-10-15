@@ -4,26 +4,27 @@
 
 `Region` describes logical samples in a descriptor domain. A `Footprint` stores an exact set of such samples, including disjoint boxes and holes. Storage origin, byte offsets, strides, padding, planar pages, and tile geometry describe physical access; they do not redefine logical coordinates or valid coverage.
 
-For images, the descriptor domain is extended by Result frame and layer axes. `ResultRef` owns image meaning, descriptor, published coverage, dependency relation, and lifetime. `PlanarImage` backs a Result image slot and answers authorized sample reads. The planner determines requested samples, the operation declares input support, and the coordinator admits only the requested reads and publication.
+For images, the descriptor domain is extended by the tensor's batch axes, such as frame and layer. `ResultRef` owns the image structure, descriptor, published coverage, dependency relation, and lifetime; color and alpha meaning come from operation parameters. `PlanarImage` backs a Result image slot and answers authorized sample reads. The planner determines requested samples, the operation declares input support, and the coordinator admits only the requested reads and publication.
 
 ## Data Layout & Memory
 
 ```cpp
-struct ResultImageSpec final {
+struct ResultTensorSpec final {
+  ResourceLease metadata_owner;
   ResourceString key;
-  std::uint64_t frames = 1, layers = 1;
+  ResourceVector<std::uint64_t> batch_axes;
+  std::uint32_t atomic_trailing_axes = 0;
   ValueDescriptor descriptor;
-  PlanarImageLayout layout;
-  std::vector<ValueFacet> facets;
+  ResultTensorLayout layout;
   std::vector<std::uint64_t> sample_shape() const;
   Result<Footprint> close_samples(const Footprint& samples,
                                   const FootprintLimits& limits = {}) const;
 };
 ```
 
-The snippet omits fields and ownership helpers. The logical image shape is `{N,L,H,W}` or `{N,L,H,W,C}`: `N` selects a frame, `L` selects a layer, `H/W` select a spatial sample, and optional `C` selects a channel. The current implementation requires positive `N` and `L` with `N*L <= 4096`, and a per-frame/layer descriptor of rank two or three. A four-channel pixel can be stored as separate planes; logical tuple completeness does not make the bytes interleaved.
+An image is a tensor slot whose `layout.spatial` is true. Its logical sample shape is `batch_axes` followed by the cell descriptor, for example `{N,L,H,W}` or `{N,L,H,W,C}`: `N` and `L` are batch axes such as frame and layer, `H/W` select a spatial sample, and optional `C` selects a channel. The cell descriptor has rank two or three. A four-channel pixel can be stored as separate planes; logical tuple completeness does not make the bytes interleaved.
 
-A request for a semantic image sample preserves the legacy image tuple closure across its complete channel axis, including alpha when alpha is a channel. A `ColorArray` request closes over the complete tuple described by its validated facet. TDM-only facets and structural layout groups do not expand the sample set to include peer channels or alpha. A typed image slot without either tuple facet follows its descriptor sample coordinates. Padding, plane gaps, and unpublished samples remain inaccessible. Storage views retain their backing owner, while Result coverage and its captured descriptor authorize what a callback may read.
+`close_samples` expands a request over the `atomic_trailing_axes` trailing cell axes. With `atomic_trailing_axes = 1` on an HWC image, a request for one channel of a pixel receives every channel of that pixel, including alpha when alpha is stored on the channel axis. Structural layout groups, the schema id, and the channel count do not expand the sample set. A slot with `atomic_trailing_axes = 0` follows its descriptor sample coordinates exactly. Padding, plane gaps, and unpublished samples remain inaccessible. Storage views retain their backing owner, while Result coverage and its captured descriptor authorize what a callback may read.
 
 Ordinary Value descriptors and structured Result image descriptors have distinct contracts. A Value has nonzero extents; its request Footprint may be Empty while retaining the nonzero descriptor. A Result may have zero rows for a dynamic structured field, and an image slot may have an Empty requested footprint. Neither empty case authorizes fabricated samples or removes descriptor/count obligations.
 
@@ -31,7 +32,7 @@ Ordinary Value descriptors and structured Result image descriptors have distinct
 
 The compiler resolves each named output's requested `Q`. For an image output, the Result continuation receives the captured output footprint and image slot. Its callback can request staged input needs: first Control samples, then Data image samples chosen from those control values. Each Need is checked against the Result schema, slot, logical sample domain, and the input's published coverage. A callback cannot synchronously fetch a hole or sample outside its current capability.
 
-Whole operations keep Whole dependencies. Tensor semantic metadata such as channel roles and ColorArray tuples participates in validation and sample closure where the contract declares it; physical `PlanarImageLayout::groups` do not silently create dependency edges.
+Whole operations keep Whole dependencies. Only `atomic_trailing_axes` participates in sample closure; channel roles and color interpretations are operation parameters and do not change dependency support. Physical `PlanarImageLayout::groups` do not silently create dependency edges. An input port bound to a `requires_complete` validator needs a Whole Need, so its operation cannot use a tile Need on that port.
 
 Dirty means potentially affected, not numerically different. Footprint transformations are bounded and charged to the execution root; exceeding the work or metadata limit returns an error.
 
@@ -49,7 +50,7 @@ The integer form avoids evaluating `E + T - 1`, which can overflow. Tile project
 
 ## Limits & Error Handling
 
-Out-of-domain regions, invalid frame/layer products, unauthorized reads, incomplete publication, and overlapping image writes fail validation. Semantic image and ColorArray requests expand to their complete channel tuples before access; an invalid tuple description or a closure outside the slot domain fails validation. Resource exhaustion, cancellation, stale binding replacement, sticky callback failure, and protocol errors retain their execution statuses; they do not become Empty coverage. Admitted callbacks retire before the coordinator reuses borrowed storage.
+Out-of-domain regions, unauthorized reads, incomplete publication, and overlapping image writes fail validation. Requests expand over the atomic trailing axes before access; an `atomic_trailing_axes` value larger than the cell rank or a closure outside the slot domain fails validation. Resource exhaustion, cancellation, stale binding replacement, sticky callback failure, and protocol errors retain their execution statuses; they do not become Empty coverage. Admitted callbacks retire before the coordinator reuses borrowed storage.
 
 An empty output demand performs no image sample work, while descriptor and control obligations remain explicit. A successful image publication must cover the captured output demand and provide relation evidence. Previously published Result prefixes remain immutable; a later producer failure does not expand an older descriptor's authorization.
 

@@ -32,7 +32,7 @@ and [unary contract](NUM-04_unary_contract.md), including execution, resources,
 NaN handling, platform availability, strict fallback and acceptance obligations.
 
 One input `input` and one output `values` have identical shape and dtype,
-Float32 or Float64. Output facets are empty. There are no static numeric
+Float32 or Float64. Output carries no domain description. There are no static numeric
 parameters, implicit casts or rounded-pi multiplication in the definition.
 
 ## Function-specific values and quality

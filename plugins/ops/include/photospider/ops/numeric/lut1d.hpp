@@ -1,3 +1,4 @@
+#include "photospider/ops/numeric/diagnostics.hpp"
 #pragma once
 
 #include <array>
@@ -254,7 +255,7 @@ inline Result<BakedLut1d> bake_lut1d_pchip_multi(
  * 1..1048576 and products are <=2^40. Channels use the final input axis,
  * including rank-1 [C] and C=1. Output `values` uses photospider.tensor v1 /
  * member samples, preserves the complete input shape in immutable packed
- * samples, and has empty facets. `input_type` is an authoring hint used only
+ * samples, and has ordinary data. `input_type` is an authoring hint used only
  * for default output dtype; compiler validates actual graph edges. Helpers own
  * node metadata and may be used concurrently; allocation may throw bad_alloc.
  * Invalid authoring parameters fail InvalidArgument/InvalidDomain.

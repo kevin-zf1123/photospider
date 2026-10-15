@@ -10,19 +10,18 @@ implementation_status: implemented
 
 # NUM: specification and execution baseline
 
-The [FMT shared metadata target](../../02-format-color/op_specs/FMT_common_contract.md)
-defines a target revision of metadata consumption/propagation: ordinary numeric
-operations do not validate color merely because a description is attached, and
-raw outputs retain applicable descriptions without inherited sample-validity
-guarantees. Explicit overrides are local to a consuming invocation. The current
-implementation clears facets and performs the typed validation documented below
-until it adopts that target. Numerical formulas, rounding and strict/accelerated
-precision are unaffected by that target.
+The [FMT explicit-configuration contract](../../02-format-color/op_specs/FMT_common_contract.md)
+keeps domain interpretation outside Result/Value. Numeric operations receive
+structure and samples; any color, alpha, sampling or LUT interpretation required
+by an operation is a declared static parameter. Outputs do not propagate or
+clear a facet list, because no such list exists. Domain checks come from the
+operation or an explicitly bound validator. Numerical formulas, rounding and
+strict/accelerated precision are unchanged by this ownership boundary.
 
 The [relative-coordinate scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 sets native CIELAB/CIELCh lightness to l=L*/100 for the unified semantic target.
 It changes color interpretation, not ordinary numeric formulas or precision.
-The current ColorArray v1 metadata and its consuming runtime use the implicit
+The current ColorArray SDK configuration and its consuming runtime use the implicit
 0..100 L* unit until they adopt that scale.
 
 Numeric profile: strict retains the exact reference defined below. Floating
@@ -72,14 +71,16 @@ Resource, cancellation and upstream failure must not be hidden by fallback.
 
 ## Interface and descriptor conventions
 
-All listed ports are Value ports, required unless explicitly stated otherwise.
+Runtime operation ports are Results, required unless explicitly stated otherwise.
+A numeric input normally contains one tensor and no fields; individual contracts
+define the allowed schema and any field-only reports. Value is backing storage.
 Input and output order is their listed order; single-output specifications use
 values unless explicitly named otherwise. Each file supplies the shape, dtype
 and static parameters or names the family from which it inherits them. Rank is
 1..8, extents are positive and generic arrays have at most 2^40 logical elements;
 the smaller count/K limits in generator specs take precedence. Shape products
-and indexing use checked integer arithmetic. Outputs have empty facets and no
-implicit physical units, colors or alpha roles. Typed input validation is retained
+and indexing use checked integer arithmetic. Outputs have no attached domain description or implicit physical units, colors
+or alpha roles. Typed input validation is retained
 only under the actual-read obligations described by the individual contract.
 
 Static parameters are supplied explicitly in direct WorkflowDocument nodes;
@@ -105,8 +106,8 @@ descriptors, including explicit Result schema specialization where specified.
 ## Demand, errors and returned observations
 
 Q denotes requested logical output coordinates, independent of physical stride.
-Individual files define exact per-port Data and Control sets and add recognized
-typed Validation closures separately. Descriptor demand covers the static input
+Individual files define exact per-port Data and Control sets and declare sample Validation support separately; structural
+tuple closure uses atomic_trailing_axes. Descriptor demand covers the static input
 metadata needed by compilation. Empty Q introduces no runtime payload reads.
 Dynamic controls retain witnesses even when they do not change returned values.
 The operator must not enlarge its support to a bounding gap. Required upstream
@@ -146,6 +147,35 @@ view policies may retain source owners or publish broader valid constant coverag
 only as stated by that operation. Missing coverage is not an implicit zero.
 All backing is immutable, survives context destruction while owners remain, and
 is released at the final owner; unpublished allocations are released on failure.
+
+## SDK numeric reports
+
+`NumericDiagnostics` and its classification codec are declared in
+`photospider/ops/numeric/diagnostics.hpp` and belong to `Photospider::ops_sdk`.
+Operations declare `numeric_diagnostic_identity()` in their diagnostics list and
+use `ps::report_numeric(phase, report)`. The SDK encodes a bounded record and
+calls the kernel's generic `report_diagnostic` service. The host admits storage,
+validates and transactionally merges reports by operation/output/backend.
+
+Execution returns reports in `diagnostics.operation_timings`; each timing has an
+optional `reports` accumulator. Read the numeric type explicitly:
+
+```cpp
+for (const auto& timing : execution.diagnostics.operation_timings) {
+  if (!timing.reports) continue;
+  auto bytes = timing.reports->find(ps::numeric_diagnostic_identity());
+  if (!bytes.ok()) continue;  // this attempt did not report this type
+  auto numeric = ps::read_numeric_report(bytes.value());
+  if (!numeric.ok()) return numeric.status();
+  const auto evaluated = numeric.value().evaluated_values;
+  // Consume evaluated together with timing.output and timing.backend.
+}
+```
+
+Success, Need and failed polls retain actual reported work. Cache hits do not
+repeat arithmetic counts. `computed_elements` is a separate structural output
+counter, and diagnostic failure does not replace an earlier computation failure.
+Report bytes and callback addresses do not enter computation identity.
 
 ## Resource and acceptance evidence
 

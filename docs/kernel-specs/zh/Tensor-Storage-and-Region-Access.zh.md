@@ -8,7 +8,7 @@ implementation_status: implemented_cpu
 
 # 张量存储与区域访问
 
-本文定义由 `Result` 拥有的张量存储和有界访问契约。[英文版本](../Tensor-Storage-and-Region-Access.md)为权威文档。`ResultTensorSpec` 定义逻辑形状、样本分组及可选的空间拓扑；底层存储可以使用私有 planar 页或 affine CPU 存储。颜色与 alpha 的含义属于 tensor facets，字节布局和区域访问由本文定义。
+本文定义由 `Result` 拥有的张量存储和有界访问契约。[英文版本](../Tensor-Storage-and-Region-Access.md)为权威文档。`ResultTensorSpec` 定义逻辑形状、样本分组及可选的空间拓扑；底层存储可以使用私有 planar 页或 affine CPU 存储。颜色与 alpha 解释由算子显式配置，字节布局和区域访问由本文定义。
 
 ## 范围与所有权
 
@@ -42,7 +42,6 @@ struct ResultTensorSpec final {
   std::uint32_t atomic_trailing_axes = 0;
   ValueDescriptor descriptor;
   ResultTensorLayout layout;
-  std::vector<ValueFacet> facets;
 
   std::vector<std::uint64_t> sample_shape() const;
   std::vector<std::uint64_t> observation_shape() const;
@@ -58,13 +57,12 @@ struct SchemaTemplate final {
   ResourceVector<ResultFieldSpec> fields;
   ResourceVector<ResultTensorSpec> tensors;
   ResourceVector<ResultExtent> domain;
-  ResourceVector<ResultFacet> metadata;
 };
 ```
 
 片段省略了 validation、managed-copy 和 canonical identity 方法。`ResultFieldSpec` 仍用于有界 primitive records；张量样本使用 `SchemaTemplate::tensors`。物理 order 和 row pitch 不参与 semantic schema identity。因此，逻辑 schema 相同的两个 slot 可以采用不同且有效的 CPU backing 策略。
 
-`atomic_trailing_axes` 将指定的末尾 cell axes 作为一个不可拆分的 observation：`close_samples()` 会将每个非空请求扩展到这些 axes 的完整范围。已识别的 Semantic Image 和 ColorArray facets 也会闭合到完整 channel tuple。Tensor description metadata 和物理 `groups` 本身不创建 peer-channel demand。Operation 声明的 sample Need 仍决定样本读取权限。
+`atomic_trailing_axes` 将指定的末尾 cell axes 作为一个不可拆分的 observation：`close_samples()` 会将每个非空请求扩展到这些 axes 的完整范围。领域标签或通道数推断不增加 tuple closure；物理 `groups` 不创建 peer-channel demand。Operation 声明的 sample Need 仍决定样本读取权限。
 
 逻辑 batch axes 可以表达 schema 声明的上下文，包括应用选择使用这些名称时的 frame/layer。存储层不会给非空间张量附加 frame/layer 含义。Spatial batch domain 使用逻辑 extents 表示；schema validation 没有固定的 4096 乘积上限，Result 也不会按完整乘积分配稠密 backing directory。具体读取、relation 构造和 backing 请求仍受各自的算术检查与资源限额约束。
 
@@ -206,7 +204,7 @@ source_coordinate = source_origin
 
 设置 `reshape == true` 时，`source_axes` 必须为空。Transform 将完整 source window 按逻辑 row-major 顺序展平，再将该顺序分配给完整 output shape。Relation 使用完整 output shape 作为 ordinal 基准：先按 source-window extents 将 output ordinal 反解为坐标，再把各局部坐标加上 source-window offset，得到更大 input tensor 中的坐标。该逻辑映射独立于 source 的物理布局。有符号和零 stride 影响 payload 是否能表示为 view，但不改变 dependency support。
 
-C ABI 2 service [`ps_result_services_v2::publish_tensor_view`](../../../include/photospider/plugin/result_operation_plugin_api.h) 使用可空的 `ps_result_tensor_transform_v2`。`NULL` 选择 ordered planar assembly，可以提供多个 source window handles。非 `NULL` transform 选择 affine 形式，并且必须提供一个 source window。`reshape == 0` 时，`axes` 对每个 source axis 提供一个 anchored point map；`reshape == 1` 时，`source_rank` 为零且 `axes` 为 `NULL`。C transform 对象仅借用到本次 service call 结束；成功 publication 会独立保留 source，不依赖其 window handle。
+C ABI 4 service [`ps_result_services_v4::publish_tensor_view`](../../../include/photospider/plugin/result_operation_plugin_api.h) 使用可空的 `ps_result_tensor_transform_v4`。`NULL` 选择 ordered planar assembly，可以提供多个 source window handles。非 `NULL` transform 选择 affine 形式，并且必须提供一个 source window。`reshape == 0` 时，`axes` 对每个 source axis 提供一个 anchored point map；`reshape == 1` 时，`source_rank` 为零且 `axes` 为 `NULL`。C transform 对象仅借用到本次 service call 结束；成功 publication 会独立保留 source，不依赖其 window handle。
 
 对于 affine transform 形式，`ViewUnavailable` 表示 source backing 无法表达所请求的映射，包括 page-backed 或非 affine source windows，以及 owner 不同的 affine fragments。Ordered-window 形式则单独支持符合条件的 planar pieces。Affine `ViewUnavailable` 会保留 builder 可用，使调用者可以显式执行 materializing copy；numeric `auto` layout 可选择该路径，`view` 则报告映射不可用。资源准入或 work-limit 错误、取消、Invalid transform、source authorization、channel closure、target overlap、循环都会返回错误，不会选择 copy retry。因而 `2` reshape 为 `3` 会先返回 `InvalidArgument`，即使 source 的物理布局随后也可能被判为 fragmented。
 
@@ -215,7 +213,7 @@ C ABI 2 service [`ps_result_services_v2::publish_tensor_view`](../../../include/
 
 分别记录虚拟地址预留、已提供页容量、有效样本 coverage 和已计费 metadata。一个小逻辑 view 可能保留较大的 backing 页集合。Resource root 按各自限制计量输出存储、windows 和 metadata。`resident_bytes()` 返回 backing 与 metadata 的计费快照，不是实测进程 RSS，也不保证操作系统会让每一页常驻。
 
-`ResultRef::association()` 记录经过验证且保持顺序的 source object IDs；dependency bundle 保留 source observations，但不会持有 input payload。因此 materialized 或 scalar-copy output 可以在 inputs 退役后继续保留 source identities 和 dependency facts。已发布的 affine 或 planar view 会独立保留其实际使用 payload bytes 的每个 source `ResultRef`，并随之保留 source schema、resources 和 backing。最后一个 owning Result 或 retained window 会释放这些 view-source owners。只要 Result 仍存活，关闭 read window 不会撤销已发布样本。Tensor facets 引用的 resources 会随其 Result owner 保留。取消或失败会正常释放未发布分配，同时保留已发布样本和 observations。
+`ResultRef::association()` 记录经过验证且保持顺序的 source object IDs；dependency bundle 保留 source observations，但不会持有 input payload。因此 materialized 或 scalar-copy output 可以在 inputs 退役后继续保留 source identities 和 dependency facts。已发布的 affine 或 planar view 会独立保留其实际使用 payload bytes 的每个 source `ResultRef`，并随之保留 source schema 和 backing。最后一个 owning Result 或 retained window 会释放这些 view-source owners。只要 Result 仍存活，关闭 read window 不会撤销已发布样本。算子资源由 preparation 显式选择，并由 plan/执行状态持有；Result 只保留存储所需 owner。取消或失败会正常释放未发布分配，同时保留已发布样本和 observations。
 
 ## 限制与非目标
 

@@ -32,7 +32,7 @@ resource, demand, backend and acceptance requirements from the
 [unary contract](NUM-04_unary_contract.md).
 
 Input/output dtype is Float32 or Float64 and shape is unchanged. The named
-output is values, with empty facets; there are no static numeric parameters.
+output is values, with no attached domain description; there are no static numeric parameters.
 
 ## Function-specific values
 

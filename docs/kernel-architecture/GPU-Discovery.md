@@ -2,16 +2,16 @@
 
 ### Scope and ownership
 
-The executor owns the table, drains native work, validates each record, and attaches the resulting typed Needs to the operation's yielded `ResultProgramNeed`. Discovery does not trace arbitrary shader reads. Both the C Result ABI 3 service and the C++ `ResultProgramPhase::discover` entry use this Result path. `Value` can provide private backing storage, but it does not expose a separate public dependency-discovery phase.
+The executor owns the table, drains native work, validates each record, and attaches the resulting typed Needs to the operation's yielded `ResultProgramNeed`. Discovery does not trace arbitrary shader reads. Both the C Result ABI 4 service and the C++ `ResultProgramPhase::discover` entry use this Result path. `Value` can provide private backing storage, but it does not expose a separate public dependency-discovery phase.
 
-A C Result operation calls `ps_result_services_v3::discover` from its ordinary `poll` callback. The discovery callback receives only current Need reads, native atlas access, scratch, work, cancellation, and GPU dispatch services. It returns an ordinary status and must submit real native work. The outer operation callback returns `PS_RESULT_NEED_V3` when the receipt contains requests. The host rejects publication while discovered Needs remain unresolved. An empty receipt adds no Need and can be followed by further callback work.
+A C Result operation calls `ps_result_services_v4::discover` from its ordinary `poll` callback. The discovery callback receives only current Need reads, native atlas access, scratch, work, cancellation, and GPU dispatch services. It returns an ordinary status and must submit real native work. The outer operation callback returns `PS_RESULT_NEED_V4` when the receipt contains requests. The host rejects publication while discovered Needs remain unresolved. An empty receipt adds no Need and can be followed by further callback work.
 
 ```c
 uint64_t receipt = 0;
 if (services->discover(services->context, capacity, candidates,
                        compute_requests, user, &receipt))
   return 1;
-return PS_RESULT_NEED_V3;
+return PS_RESULT_NEED_V4;
 ```
 
 The callback stores the receipt handle in operation state when it needs the normalized records during a later poll. It releases that handle after reading the records. `discovery_requests` supports a count query with `output == NULL` and `capacity == 0`, followed by a copy into initialized records. The C handle remains owned by that plugin instance across polls until explicit release or operation destruction. A receipt retains no source payload.
@@ -49,4 +49,4 @@ The decoder and normalization source tests are [`tests/unit/kernel/test_result_d
 Discovery must run on the active callback entry thread. In C++, `ResultProgramPhase::consume_work` may charge from worker threads; C discovery services remain entry-thread-only. Work and metadata bounds persist across calls in an active poll, and each call also consumes Run and Root work. Duplicate records still consume emission and normalization work.
 
 The capacity, candidate, Root and dependency bounds are independent. Reads and atlas access remain limited to current Needs. Discovery cannot issue another Need, publish output, enter a block callback or recursively invoke discovery. A native callback that submits no work fails with `OperationFailed`. Submitted dispatches drain before the table owners retire.
-The native GPU service is independently versioned as `PS_GPU_ABI_VERSION_1`; it supplies the synchronous buffer and dispatch operations used by discovery. Result discovery itself remains part of Operation Plugin ABI 3. Vulkan support is optional at build time. Native GPU behavior depends on an enabled backend and a usable device; protocol mocks cover validation and failure paths but do not establish native execution.
+The native GPU service is independently versioned as `PS_GPU_ABI_VERSION_1`; it supplies the synchronous buffer and dispatch operations used by discovery. Result discovery itself remains part of Operation Plugin ABI 4. Vulkan support is optional at build time. Native GPU behavior depends on an enabled backend and a usable device; protocol mocks cover validation and failure paths but do not establish native execution.

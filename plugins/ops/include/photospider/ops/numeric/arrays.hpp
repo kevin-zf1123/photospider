@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 /** @brief Explicit immutable view or complete packed-copy representation. */
@@ -15,7 +15,7 @@ enum class ArrayLayout { View, Dense };
  * Pure concurrent-safe authoring with no payload access. Shape has 1..8
  * positive extents and at most 2^40 elements. Writes canonical shape and
  * explicit layout strings; source dtype/scalar shape are checked by Compiler.
- * Output is named values, preserves input bits/dtype and has empty facets.
+ * Output is named values, preserves input bits/dtype and has ordinary data.
  * View execution through execute_fragments owns one scalar-sized copy with
  * zero strides. Ordinary/direct execution preserves a single covering view;
  * all nonempty requests use Whole execution before consumer projection. Dense

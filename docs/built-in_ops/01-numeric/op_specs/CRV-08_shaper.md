@@ -22,7 +22,7 @@ registration status, CPU target identity, floating environment, diagnostic prove
 host observation isolation, resource accounting and public/performance acceptance.
 In particular, rounding is nearest/ties-to-even with gradual underflow and the
 caller floating environment is preserved. This is limited inheritance: the ports,
-output kinds/facets, observation units, mathematical rounding boundaries and
+output structures, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
 turn a composite template or structured Result into a generic NUM Value primitive.
 A stated four-ULP final bound uses the shared FP32-scaled contract for both
@@ -47,7 +47,7 @@ has one tensor member under any schema id/version/key; use the full
 `sample_shape()`, including batch axes. `input` has Float32/Float64 dtype, rank
 1..8, positive extents and at most 2^40 elements. Bounds are same-dtype scalar
 tensors of shape [1]. The output port `values` is an immutable Result using
-`photospider.tensor` v1/member `samples`, with input shape/dtype and empty facets.
+`photospider.tensor` v1/member `samples`, with input shape/dtype and no attached domain description.
 Bounds are finite, shared across the input and strictly ordered lower<upper.
 Linear templates explicitly broadcast scalar boundaries. The inverse linear
 template enforces bound order rather than inheriting remap_range's more
@@ -94,7 +94,7 @@ requested output batch to repair an invalid implementation.
 Each Result input has one tensor under an arbitrary schema id/version/key.
 `sample_shape()` includes all batch and cell axes. Bounds have shape [1] and the
 same dtype as `input`; output port `values` uses `photospider.tensor` v1/member
-`samples`, preserving input shape and dtype with empty facets. There is no output
+`samples`, preserving input shape and dtype with no attached domain description. There is no output
 dtype conversion parameter. All six log primitive keys execute with Whole Result
 programs. The linear templates expand to the existing Whole Result remap and
 constant nodes, including the inverse scalar order guard.

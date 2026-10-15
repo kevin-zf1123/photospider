@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_2
+implementation_status: implemented_cpu_result_abi_4
 clarification_status: complete
 registered_operation_keys:
   - color.transfer_encode_strict
@@ -19,7 +19,7 @@ registered_operation_keys:
 
 Inherit the complete [FMT-09 contract](FMT-09_transfer_contract.md) and
 [scalar definitions](FMT-09_transfer_math.md). This direction has strict,
-accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 3 keys. The
+accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 4 keys. The
 specification remains Proposed.
 
 ## Interface and observable behavior
@@ -27,12 +27,11 @@ specification remains Proposed.
 One input Result with one tensor member and no fields produces one `values`
 output Result containing one tensor. The member uses Float32 or Float64, retains
 its dtype, shape and axis positions, and preserves Result schema identity, tensor
-key and batch axes. Semantic output updates transfer facets; raw output retains
-the input facets. Both set `atomic_trailing_axes` to zero. Complete sample rank,
+key and batch axes. Neither path attaches a description to the output. Both set `atomic_trailing_axes` to zero. Complete sample rank,
 including batch and cell axes, is at most 8; sample count is at most 2^40. Axis
 indices refer to cell axes and exclude the Result batch prefix. A target
 curve is always explicit; gamma, BT.2020 variant and BT.1886 black/white parameters
-follow the family table. Semantic source metadata must already identify the
+follow the family table. The explicit source description must already identify the
 compatible linear quantity. An encoded source is rejected rather than encoded
 again, even when its existing transfer matches the chosen target.
 
@@ -44,10 +43,10 @@ range normalization is implicit. Integer dtype must be converted before B in
 all modes. Non-native floating code ranges require explicit decoding in semantic
 mode; raw may apply E directly to their stored numeric values.
 
-Semantic output records the selected curve, coefficients/parameters and native
-linear interpretation without changing primaries/white. An ACEScct curve on
-another RGB basis does not assert a complete ACEScct space. Raw retains applicable
-input descriptions without marking them as correctly encoded or sample-valid.
+Encode produces values for the selected curve without changing primaries or
+white. No output description is attached. An ACEScct curve on another RGB basis
+does not imply a complete ACEScct space; the next consumer receives its own
+explicit description.
 
 ## Dependencies, errors and storage
 
@@ -57,7 +56,7 @@ Reference incompatibility is static; no metadata update performs a scene-to-disp
 rendering. Static parameter checks precede sample evaluation in all modes.
 
 Auto/view/materialize follows the family identity rule. Semantic identity retains
-its requested finite checks and independent output metadata. Nonidentity B
+its requested finite checks and independent output structure. Nonidentity B
 materializes requested coverage under Result owner, prepared-coverage,
 cancellation, bounded strict-math and publication rules. Intrinsic ACEScc floor
 samples retain their source witnesses and can still fail input validation.
@@ -86,7 +85,7 @@ The decimal breakpoint is not an exactly representable Float32/64 sample.
 8. ACEScct: E(0)=RN_dtype(B); E(-1)=RN_dtype(B-A). Test Xbreak and neighbors.
    There is no low-end clipping or sRGB-style odd extension.
 9. Encoded-source rejection, incompatible reference/unit rejection, explicit
-   override behavior and raw metadata retention must be distinct fixtures.
+   different explicit descriptions and raw calls must be distinct fixtures.
    A P3 group with linear relative values may use sRGB E without changing basis.
 10. Alpha-only/AOV-only and disjoint tile-crossing requests copy only requested
     samples. A nonfinite requested color fails even at alpha=0. Forced view of

@@ -41,9 +41,8 @@ There is no -1 inference, zero extent, automatic axis insertion or order paramet
 Static String `layout` is auto/view/dense; constructors write auto by default,
 and direct nodes specify it. Input/output logical element count is at most 2^40.
 The published Result uses `photospider.tensor` v1/member `samples`; the target
-shape is its complete ordinary-axis shape. Output facets and batch-axis metadata
-are empty. Recognized input facets retain their actual-read validation
-obligations.
+shape is its complete ordinary-axis shape. Output batch axes are empty. Input structure and explicitly bound contracts
+retain their validation obligations.
 
 ## Exact coordinate mapping and support
 

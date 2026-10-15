@@ -30,22 +30,14 @@ enum class ErrorCode {
   Internal,
 };
 
-/** @brief Stable numerical detail, independent of human diagnostics.
+/** @brief Generic failure detail, independent of human diagnostics.
  * None means the category alone describes the failure. These reasons do not
  * change the C operation ABI's existing error-code projection.
  */
 enum class FailureReason {
   None = 0,
-  InvalidAssociation,
-  AssociationUnderflow,
   ArithmeticOverflow,
-  EmptyWeightedResult,
-  DivideByZero,
   InvalidDomain,
-  NotConverged,
-  NoSolution,
-  MultipleSolutions,
-  IllConditioned,
   MalformedEnvelope,
   UnauthorizedRead,
   StaleHandle,
@@ -56,7 +48,6 @@ enum class FailureReason {
   StageLimit,
   Cancelled,
   StaleVersion,
-  InvalidQuality,
   /** @brief Valid view request requires materialization; no mutation occurred.
    */
   ViewUnavailable
@@ -101,6 +92,9 @@ struct FailureDetail final {
    * exclusive with node_id. Zero leaves the direct-session source unnamed.
    */
   std::uint64_t input_id = 0;
+  /** @brief Opaque domain-owned code; the kernel preserves it without
+   * interpretation. */
+  std::uint64_t domain_code = 0;
 };
 
 /**
@@ -108,7 +102,25 @@ struct FailureDetail final {
  *
  * @note The type owns its diagnostic and is safe to copy between threads.
  */
+struct DomainErrorCode final {
+  std::uint64_t value = 0;
+};
+
 struct PHOTOSPIDER_API Status final {
+  Status() = default;
+  Status(ErrorCode category, std::string text,
+         FailureReason why = FailureReason::None, FailureDetail context = {})
+      : code(category),
+        message(std::move(text)),
+        reason(why),
+        detail(std::move(context)) {}
+  Status(ErrorCode category, std::string text, DomainErrorCode domain,
+         FailureDetail context = {})
+      : Status(category, std::move(text), FailureReason::None,
+               std::move(context)) {
+    detail.domain_code = domain.value;
+  }
+
   /** @brief Stable programmatic category. */
   ErrorCode code = ErrorCode::Ok;
   /** @brief Human-readable bounded diagnostic. */

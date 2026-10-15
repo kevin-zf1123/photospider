@@ -23,7 +23,6 @@
 #include "data/result_window_access.hpp"
 #include "data/value_validation.hpp"
 #include "photospider/data/result.hpp"
-#include "photospider/data/tensor_description.hpp"
 
 namespace ps {
 ResultBuilder::ResultBuilder(ResultBuilder&& other) noexcept
@@ -41,8 +40,7 @@ ResultBuilder::~ResultBuilder() noexcept {
 Result<ResultBuilder> ResultBuilder::start(
     ResourceBudget budget, const SchemaTemplate& schema,
     std::string_view semantic_key, ResultGrowthLimits limits,
-    std::vector<std::uint64_t> association, std::uint64_t tile_extent,
-    ResourceBindings resources) {
+    std::vector<std::uint64_t> association, std::uint64_t tile_extent) {
   std::optional<ResourceAllocationScope> metadata_scope;
   const auto* active_root = resource_internal::metadata_budget();
   if (!active_root || !active_root->same_owner(budget))
@@ -63,10 +61,6 @@ Result<ResultBuilder> ResultBuilder::start(
       std::any_of(association.begin(), association.end(),
                   [](auto id) { return id == 0; }))
     return Result<ResultBuilder>(data_internal::invalid_schema());
-  auto admitted_resources = resources.reference(budget);
-  if (!admitted_resources.ok())
-    return Result<ResultBuilder>(admitted_resources.status());
-  resources = admitted_resources.take_value();
   for (const auto& field : schema.fields)
     if (field.rows.kind == ResultExtentKind::Fixed &&
         data_internal::scaled(field.rows, field.rows.value).value() >
@@ -104,13 +98,6 @@ Result<ResultBuilder> ResultBuilder::start(
     auto impl = std::shared_ptr<ResultRef::Impl>(new ResultRef::Impl(budget));
     impl->lease = lease.take_value();
     impl->schema = copied.take_value();
-    auto selected_resources = impl->schema.select_resources(resources);
-    if (!selected_resources.ok())
-      return Result<ResultBuilder>(selected_resources.status());
-    auto owned_resources = selected_resources.value().reference(impl->budget);
-    if (!owned_resources.ok())
-      return Result<ResultBuilder>(owned_resources.status());
-    impl->resources = owned_resources.take_value();
     impl->key = std::move(schema_key);
     impl->association = ResourceVector<std::uint64_t>(
         association.begin(), association.end(),

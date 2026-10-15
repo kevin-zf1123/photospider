@@ -16,12 +16,10 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
 #include "data/result_support.hpp"
 #include "data/value_validation.hpp"
-#include "photospider/data/representation.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/data/result.hpp"
-#include "photospider/data/tensor_description.hpp"
 
 namespace ps {
 namespace {
@@ -85,12 +83,9 @@ Result<Footprint> ResultTensorSpec::close_samples(
   }
   std::vector<Region> boxes;
   boxes.reserve(samples.boxes().size());
-  const auto tuple = input_internal::tuple_channel_axis(descriptor, facets);
   for (const auto& box : samples.boxes()) {
     auto dimensions = box.dimensions();
     if (!box.empty()) {
-      if (tuple)
-        dimensions[*tuple + batch_axes.size()] = {0, descriptor.shape[*tuple]};
       for (std::size_t axis = descriptor.shape.size() - atomic_trailing_axes;
            axis < descriptor.shape.size(); ++axis)
         dimensions[axis + batch_axes.size()] = {0, descriptor.shape[axis]};
@@ -105,26 +100,12 @@ const Footprint& ResultDescriptor::tensor_coverage(std::uint32_t slot) const {
   return tensors_[slot];
 }
 Status SchemaTemplate::validate(bool resolved) const {
-  // These historical schemas pack image planes into result fields. Structural
-  // tensors now require PlanarImage owners and cannot use ResultBuilder.
-  if (id == "photospider.layer" || id == "photospider.layer_response" ||
-      id == "photospider.raw_rgba_sum" ||
-      id == "photospider.layer_contributions" ||
-      id == "photospider.weighted_layer_sum" ||
-      id == "photospider.optional_layer" ||
-      std::any_of(metadata.begin(), metadata.end(),
-                  [](const ResultFacet& facet) {
-                    return facet.key == "photospider.layer";
-                  }))
-    return Status::failure(ErrorCode::TypeMismatch,
-                           "legacy layer schema requires planar storage");
   if (!key_valid(id, 128) || !version || (fields.empty() && tensors.empty()) ||
       !core_internal::can_add(fields.size(), tensors.size(), 16) ||
       domain.size() > 8 ||
       (publication != PublishPolicy::CompleteBundle &&
        publication != PublishPolicy::IndependentChunks &&
-       publication != PublishPolicy::StablePrefix) ||
-      metadata.size() > 64)
+       publication != PublishPolicy::StablePrefix))
     return data_internal::invalid_schema();
   std::array<std::string_view, 64> keys;
   std::size_t key_count = 0;
@@ -148,34 +129,7 @@ Status SchemaTemplate::validate(bool resolved) const {
     if (!key_valid(image.key, 128) || !add_key(image.key) ||
         !data_internal::tensor_topology(image).ok())
       return data_internal::invalid_schema();
-    const auto tuple =
-        input_internal::tuple_channel_axis(image.descriptor, image.facets);
-    if (input_internal::color_array(image.facets) &&
-        image.atomic_trailing_axes > 1)
-      return {ErrorCode::TypeMismatch,
-              "color observations group exactly one trailing axis",
-              FailureReason::None,
-              {FailureOrigin::Schema, FailureScope::Unspecified}};
-    if (tuple && image.layout.spatial &&
-        (image.descriptor.shape.size() != 3 || !image.layout.channel_axis ||
-         *tuple != *image.layout.channel_axis))
-      return data_internal::invalid_schema();
-    for (const auto& facet : image.facets) {
-      if (facet.key == "photospider.image" &&
-          (!image.layout.spatial || image.layout.height_axis != 0 ||
-           image.layout.width_axis != 1))
-        return data_internal::invalid_schema();
-      if (facet.key == "photospider.tensor-description") {
-        auto tensor = decode_tensor_description(facet);
-        if (!tensor.ok())
-          return tensor.status();
-        if (image.layout.spatial && tensor.value().channel_axis &&
-            tensor.value().channel_axis != image.layout.channel_axis)
-          return data_internal::invalid_schema();
-      }
-    }
-    auto validated =
-        input_internal::validate_value_metadata(image.descriptor, image.facets);
+    auto validated = input_internal::validate_value_structure(image.descriptor);
     if (!validated.ok())
       return validated;
   }
@@ -183,51 +137,7 @@ Status SchemaTemplate::validate(bool resolved) const {
     if (!extent_valid(extent, resolved, fields.size()) ||
         extent.kind == ResultExtentKind::RuntimeCount)
       return data_internal::invalid_schema();
-  key_count = 0;
-  std::uint64_t payload = 0;
-  for (const auto& facet : metadata) {
-    if (!key_valid(facet.key, 256) || !facet.version || !add_key(facet.key) ||
-        facet.payload.size() > 65536 ||
-        !core_internal::can_add(payload, facet.payload.size(), 1048576))
-      return data_internal::invalid_schema();
-    payload += facet.payload.size();
-  }
-  return validate_representation_schema(*this);
-}
-Result<ResourceBindings> SchemaTemplate::select_resources(
-    const ResourceBindings& supplied) const try {
-  ResourceBindings accepted;
-  for (const auto& image : tensors) {
-    auto subset = supplied.select(image.facets);
-    if (!subset.ok())
-      return subset;
-    auto joined = accepted.unite(subset.value());
-    if (!joined.ok())
-      return joined;
-    accepted = joined.take_value();
-  }
-  std::uint64_t bytes = metadata.size() * sizeof(ValueFacet);
-  for (const auto& facet : metadata)
-    bytes += facet.key.size() + 1 + facet.payload.size();
-  ResourceLease bridge;
-  if (const auto* root = resource_internal::metadata_budget()) {
-    auto admitted = root->reserve(ResourceCapacity::host(bytes, bytes));
-    if (!admitted.ok())
-      return Result<ResourceBindings>(admitted.status());
-    bridge = admitted.take_value();
-  }
-  std::vector<ValueFacet> facets;
-  facets.reserve(metadata.size());
-  for (const auto& f : metadata)
-    facets.push_back(
-        {std::string(f.key), f.version,
-         std::vector<uint8_t>(f.payload.begin(), f.payload.end())});
-  auto subset = supplied.select(facets);
-  if (!subset.ok())
-    return subset;
-  return accepted.unite(subset.value());
-} catch (const std::bad_alloc&) {
-  return Result<ResourceBindings>(Status{ErrorCode::ResourceExhausted, {}});
+  return Status::success();
 }
 Result<std::uint64_t> SchemaTemplate::row_bytes(std::uint32_t field) const {
   if (field >= fields.size())
@@ -310,7 +220,7 @@ void encode_schema(String* destination, const SchemaTemplate& schema) {
     word(e.divisor);
     word(e.offset);
   };
-  text("photospider.result-schema.v3");
+  text("photospider.result-schema.v4");
   text(schema.id);
   word(schema.version);
   word(static_cast<std::uint32_t>(schema.publication));
@@ -346,36 +256,10 @@ void encode_schema(String* destination, const SchemaTemplate& schema) {
       word(group.first_channel);
       word(group.channel_count);
     }
-    word(image.facets.size());
-    for (const auto& facet : image.facets) {
-      text(facet.key);
-      word(facet.version);
-      word(facet.payload.size());
-      if (!facet.payload.empty())
-        bytes.append(reinterpret_cast<const char*>(facet.payload.data()),
-                     facet.payload.size());
-    }
   }
   word(schema.domain.size());
   for (const auto& e : schema.domain)
     extent(e);
-  std::array<std::size_t, 64> order{};
-  for (std::size_t i = 0; i < schema.metadata.size(); ++i)
-    order[i] = i;
-  std::sort(order.begin(), order.begin() + schema.metadata.size(),
-            [&](auto a, auto b) {
-              return schema.metadata[a].key < schema.metadata[b].key;
-            });
-  word(schema.metadata.size());
-  for (std::size_t i = 0; i < schema.metadata.size(); ++i) {
-    const auto& facet = schema.metadata[order[i]];
-    text(facet.key);
-    word(facet.version);
-    word(facet.payload.size());
-    if (!facet.payload.empty())
-      bytes.append(reinterpret_cast<const char*>(facet.payload.data()),
-                   facet.payload.size());
-  }
 }
 bool same_extent(const ResultExtent& a, const ResultExtent& b) {
   return a.kind == b.kind && a.value == b.value && a.input == b.input &&
@@ -385,20 +269,16 @@ bool same_extent(const ResultExtent& a, const ResultExtent& b) {
 }  // namespace
 std::uint64_t SchemaTemplate::canonical_size() const noexcept {
   std::uint64_t size =
-      8 + sizeof("photospider.result-schema.v3") - 1 + 8 + id.size() + 24 + 24;
+      8 + sizeof("photospider.result-schema.v4") - 1 + 8 + id.size() + 24 + 16;
   for (const auto& field : fields)
     size += 8 + field.key.size() + 8 + 56 + 8 + field.record_shape.size() * 8;
   for (const auto& image : tensors) {
-    size += 8 + image.key.size() + 80 +
+    size += 8 + image.key.size() + 72 +
             (image.descriptor.shape.size() + image.batch_axes.size()) * 8;
     for (const auto& group : image.layout.groups)
       size += 24 + group.role.size();
-    for (const auto& facet : image.facets)
-      size += 24 + facet.key.size() + facet.payload.size();
   }
   size += domain.size() * 56;
-  for (const auto& facet : metadata)
-    size += 8 + facet.key.size() + 16 + facet.payload.size();
   return size;
 }
 ResourceString SchemaTemplate::canonical() const {
@@ -476,11 +356,8 @@ Result<SchemaTemplate> SchemaTemplate::managed_copy(
           (image.descriptor.shape.size() + image.batch_axes.size()) *
           sizeof(std::uint64_t);
       bytes += image.layout.groups.size() * sizeof(ImageComponentGroup);
-      bytes += image.facets.size() * sizeof(ValueFacet);
       for (const auto& group : image.layout.groups)
         bytes += group.role.size() + 1;
-      for (const auto& facet : image.facets)
-        bytes += facet.key.size() + 1 + facet.payload.size();
       auto lease = budget.reserve(ResourceCapacity::host(bytes, bytes));
       if (!lease.ok())
         return Result<SchemaTemplate>(lease.status());
@@ -495,19 +372,6 @@ Result<SchemaTemplate> SchemaTemplate::managed_copy(
     }
     copy.domain = ResourceVector<ResultExtent>(
         domain.begin(), domain.end(), ResourceAllocator<ResultExtent>(budget));
-    copy.metadata =
-        ResourceVector<ResultFacet>(ResourceAllocator<ResultFacet>(budget));
-    copy.metadata.reserve(metadata.size());
-    for (const auto& facet : metadata) {
-      ResultFacet target;
-      target.key = ResourceString(facet.key.data(), facet.key.size(),
-                                  ResourceAllocator<char>(budget));
-      target.version = facet.version;
-      target.payload = ResourceVector<std::uint8_t>(
-          facet.payload.begin(), facet.payload.end(),
-          ResourceAllocator<std::uint8_t>(budget));
-      copy.metadata.push_back(std::move(target));
-    }
     return Result<SchemaTemplate>(std::move(copy));
   } catch (const std::bad_alloc&) {
     return Result<SchemaTemplate>(Status{ErrorCode::ResourceExhausted, {}});
@@ -518,8 +382,7 @@ bool SchemaTemplate::same_schema(const SchemaTemplate& other) const noexcept {
       publication != other.publication ||
       fields.size() != other.fields.size() ||
       tensors.size() != other.tensors.size() ||
-      domain.size() != other.domain.size() ||
-      metadata.size() != other.metadata.size())
+      domain.size() != other.domain.size())
     return false;
   for (std::size_t i = 0; i < tensors.size(); ++i) {
     const auto& a = tensors[i];
@@ -533,8 +396,7 @@ bool SchemaTemplate::same_schema(const SchemaTemplate& other) const noexcept {
          (a.layout.height_axis != b.layout.height_axis ||
           a.layout.width_axis != b.layout.width_axis ||
           a.layout.channel_axis != b.layout.channel_axis)) ||
-        a.layout.groups.size() != b.layout.groups.size() ||
-        !input_internal::same_facets(a.facets, b.facets))
+        a.layout.groups.size() != b.layout.groups.size())
       return false;
     for (std::size_t j = 0; j < a.layout.groups.size(); ++j)
       if (a.layout.groups[j].role != b.layout.groups[j].role ||
@@ -553,13 +415,6 @@ bool SchemaTemplate::same_schema(const SchemaTemplate& other) const noexcept {
   for (std::size_t i = 0; i < domain.size(); ++i)
     if (!same_extent(domain[i], other.domain[i]))
       return false;
-  for (const auto& a : metadata) {
-    auto b = std::find_if(other.metadata.begin(), other.metadata.end(),
-                          [&](const auto& v) { return v.key == a.key; });
-    if (b == other.metadata.end() || a.version != b->version ||
-        a.payload != b->payload)
-      return false;
-  }
   return true;
 }
 }  // namespace ps

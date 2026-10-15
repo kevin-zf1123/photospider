@@ -254,7 +254,7 @@ class ExactCurve final {
       auto work = consume(512);
       if (!work.ok())
         return Result<std::uint64_t>(work);
-      std::optional<input_internal::Float32Environment> environment;
+      std::optional<plugin_internal::FloatingEnvironment> environment;
       if (!normalized_environment)
         environment.emplace();
       if (normalized_environment || environment->active()) {
@@ -345,7 +345,7 @@ class ExactCurve final {
       }
     } end{consume_, ratio_.profile, ratio_.profile};
     if (selected < 0 && narrow && ratio_.profile != SequenceProfile::Strict) {
-      std::optional<input_internal::Float32Environment> environment;
+      std::optional<plugin_internal::FloatingEnvironment> environment;
       if (!normalized_environment)
         environment.emplace();
       if (normalized_environment || environment->active()) {

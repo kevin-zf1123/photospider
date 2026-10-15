@@ -15,7 +15,7 @@ FMT-05 remains Proposed. The installed `photospider/ops/format/alpha.hpp` expose
 `format::set_alpha`, `format::extract_alpha`, and `format::remove_alpha`.
 `set_alpha` appends the registered `alpha.set_<profile>` Result operation;
 B/C compile into compositions of registered channel extraction, literal-like
-fill, mapped assembly and metadata assignment operations. FMT-04 association
+fill, mapped assembly and core identity operations. FMT-04 association
 operations are also registered. The profiles are `strict`,
 `accelerated_apple_silicon`, and `accelerated_x86_64`.
 
@@ -23,7 +23,7 @@ All FMT-05B/C inputs and outputs use the single-tensor Result ABI with no fields
 support the seven native copy dtypes, preserve the batch prefix, and avoid
 sample-domain validation. Axes are cell-relative and exclude the Result batch
 prefix. The complete sample rank, including batch and cell axes, is at most 8;
-full sample count is at most 2^40. Native FMT-04/FMT-05A operations execute as Result ABI 3 operations. B/C are
+full sample count is at most 2^40. Native FMT-04/FMT-05A operations execute as Result ABI 4 operations. B/C are
 compile-time compositions over registered Result operations.
 
 Inherit [FMT-common](FMT_common_contract.md), its NUM baseline and the
@@ -51,7 +51,7 @@ physical `ViewUnavailable`.
 A sets/adds alpha, B extracts alpha and C removes alpha for one explicitly
 selected color group. Complete images use straight color coordinates, including
 RGB, Gray and non-RGB models. Alpha is an independent plane in the same tensor,
-identified by metadata rather than a fixed last-channel convention.
+identified by the required explicit `input_description`, never by channel count.
 No operation composites a background, transforms a color model or changes
 transfer, numeric encoding or spatial sampling implicitly.
 
@@ -71,7 +71,7 @@ straight images; this family does not silently accept or normalize them.
 | Topic | Selected contract |
 | --- | --- |
 | Members | A set/add; B extract; C remove; one group per invocation. |
-| Identity | A uses the registered `alpha.set_<profile>` Result operation. B/C are executable compile-time compositions of registered channel operations, constants and metadata edits. |
+| Identity | A uses the registered `alpha.set_<profile>` Result operation. B/C are executable compile-time compositions of registered channel operations, constants and core identity. |
 | Representation | Canonical straight image, with any alpha in the same tensor. No external persistent binding. |
 | A source | Same-tensor selected channel, matching explicit external component plane, or explicit shape-[1] scalar. No implicit broadcast of a plane. |
 | A placement | Preserve an existing alpha position by default; otherwise explicit channel position. New alpha has no guessed last-channel placement. |
@@ -80,9 +80,9 @@ straight images; this family does not silently accept or normalize them.
 | B absence | missing_alpha=error by default; explicit opaque generates the legal exact code for decoded coverage one. |
 | B samples | Copy actual alpha bits without color reads or an added finite/range scan. |
 | B shape | Complete nonchannel shape S; keepdims=false by default, optional singleton original channel axis; no rank-zero result. |
-| C absence | missing_alpha=error by default; explicit identity returns unchanged data/description. |
+| C absence | missing_alpha=error by default; explicit identity returns unchanged data. |
 | C color | Copy stored straight color; no restoration division, hidden-color loss or background blending. |
-| Shared alpha | Reject A's in-place overwrite of an alpha slot referenced by other groups; use a new channel. C detaches only the selected group. |
+| Shared alpha | Reject A's in-place overwrite of an alpha slot referenced by other groups; use a new channel. C keeps the shared sample slot; callers configure the selected group downstream. |
 | Old alpha cleanup | Remove an old internal alpha channel only when no other declared reference remains; retain shared channels. |
 | Target index | A's channel_index is a final output position, never a request to overwrite color/AOV data. |
 | Layout | auto by default; explicit view/materialize. A view must still perform required semantic validation. |
@@ -93,7 +93,8 @@ straight images; this family does not silently accept or normalize them.
 A has `input`, optional explicit `alpha`, and one `values` output. Its helper is
 available and lowers to the registered `alpha.set_<profile>` operation. B/C are
 public compile-time helpers taking a graph, a single-tensor `input` Result edge
-and inferred `OperationMetadata`, and returning one `values` edge. Their Result
+and inferred structural `OperationMetadata`. B returns `values`; C returns
+`values` for mapped assembly and `value` for axis-free `core.identity`. Their Result
 paths are executable through existing registered operations. All outputs
 preserve input dtype. A accepts Float32/Float64, with external
 alpha/scalar matching exactly; it interprets alpha directly in [0,1]. Integer
@@ -112,20 +113,15 @@ Do not quantize an almost-opaque substitute or silently clamp it.
 
 The alpha_encoding parameter describes the missing-alpha fallback only. It is
 allowed with missing_alpha=opaque, structurally validated, and never re-encodes
-an alpha channel that actually exists. Generated output carries its selected
-encoding/coverage description. Explicit code-domain restrictions must be supplied
-by the encoding description; naming a container dtype does not infer a reduced
-bit depth. Existing integer alpha extraction and removal remain bit copies,
-retaining applicable encoding without decode/re-encode. A float alpha carrying
-a conflicting numeric encoding still requires explicit decoding/reinterpretation
-before A's normalized semantic use. Generic encoding metadata and missing native
-dtypes are implementation prerequisites.
+an alpha channel that actually exists. Generated output carries no encoding
+or coverage description. Callers supply the encoding to downstream consumers.
+Naming a container dtype does not infer reduced bit depth. Existing integer
+alpha extraction and removal remain bit copies without decode/re-encode.
 
 | Common static parameter | Contract |
 | --- | --- |
-| group | Required explicit group identity; exact unique resolution in effective metadata. Do not infer a group from channel count. |
-| metadata_mode | respect by default, or explicit override. This semantic family has no raw mode; raw channel edits use FMT-01/02/03. |
-| metadata_override | Effective input description only with override; source identity remains immutable and actual shape/storage cannot be overridden. |
+| group | Required explicit group identity; exact unique resolution in input_description. Do not infer a group from channel count. |
+| input_description | Required explicit source interpretation, validated against the input structure. Raw channel edits use FMT-01/02/03. |
 | axis | Optional Int64 assertion of the effective cell-channel axis, nonnegative and within cell rank; excludes the batch prefix and is absent for a component Gray input. |
 | layout | auto by default; view/materialize explicit, with the rules below. |
 | profile | B/C helper selection: strict by default, accelerated_apple_silicon or accelerated_x86_64. A selects the corresponding proposed primitive key. |
@@ -135,19 +131,19 @@ between executions. Cell axes are indexed relative to the Result batch prefix. T
 rank, including batch and cell axes, stays at most 8; full sample count is at
 most 2^40 with checked positive extents. When insertion adds a cell axis, the full input sample rank must be at most 7
 so the output rank remains at most 8. The same
-spatial axes, origin and grid survive channel surgery. Static coordinate conflicts
-require explicit override, never automatic transposition/resampling. Strict and
+spatial sample grid survives channel surgery. External inputs are matched by
+shape and dtype; no attached coordinate labels are compared or propagated. Strict and
 accelerated outputs are bit-identical; predicates, metadata and failures remain
 exact, with no floating tolerance. CPU strict/named profiles are the target;
 GPU and cross-backend conformance are not claimed.
 
 ## Structure and channel surgery
 
-Resolve the selected group and input channel axis from effective metadata using
-shared source-authority and override rules. Let S be the shape after erasing
+Resolve the selected group and input channel axis from the explicit
+`input_description`. Let S be the shape after erasing
 the channel axis, or the whole shape of a component Gray input. Group selectors,
 axis choices, placements and channel maps are static; sample values may vary
-between executions. Spatial planes must match S and the declared coordinate grid;
+between executions. Spatial planes must match S and the batch prefix;
 there is no implicit squeeze, resize or spatial broadcast. Scalar is an explicit
 source kind, even when a plane happens to have shape [1].
 
@@ -167,11 +163,11 @@ A component input with no channel axis retains its original nonchannel shape;
 keepdims cannot invent an axis. Missing-alpha opaque generation uses this same
 output shape, not the shape of a scalar constant source.
 
-For C, remove the selected group's alpha reference. Delete the former alpha
-channel only when no other declared reference remains. Reindex all surviving
-channel/axis metadata coherently. Do not squeeze an existing channel axis when
-only one channel remains. Keep color values and straight interpretation.
-A retained shared alpha continues serving other groups, never the detached group.
+For C, inspect alpha references in the explicit input configuration and delete
+the alpha sample channel only when no other group uses it. Preserve shared
+channels, all surviving sample bits and an existing channel axis even if one
+channel remains. The helper does not edit descriptions: callers construct the
+selected group's downstream configuration explicitly.
 
 Every channel map reads original immutable inputs. Static shape/description
 checks apply to all required ports even when samples are not requested. Target
@@ -208,7 +204,7 @@ whole image. Required upstream Whole work retains its original scope.
 FMT-05A exposes `layout=auto|view|materialize`. A generic forced view requires
 the entire declared output map to use one `CpuStorage` owner, one affine address
 expression and in-bounds spans. The spatial path is limited to an internal
-identity map. FMT-05B/C pass layout policy to their registered Result primitives;
+identity map. FMT-05B and channel-bearing FMT-05C pass layout to their registered primitives;
 a forced view follows each primitive's representability rules. A forced view
 reports `ViewUnavailable` when the physical proof fails.
 
@@ -221,8 +217,8 @@ obligations, metadata semantics and required source failures.
 
 B extraction and C channel mapping can use existing Result views when those
 operations prove the requested mapping. Opaque B generation cannot view generated
-pixels. C component Gray identity still obeys `metadata.assign` layout behavior;
-channel-bearing C follows mapped assembly's view and materialization rules.
+pixels. C component Gray identity uses `core.identity`, returning the input samples
+without a layout conversion. Channel-bearing C forwards layout to mapped assembly.
 
 ## Ownership, partial results and failures
 
@@ -258,23 +254,23 @@ Required independent cases include:
 - B preserves negative zero, out-of-range samples and NaN payload bits; opaque
   fallback generates the exact encoded coverage-one code over S. No source color read occurs.
 - A shared-slot replacement fails; explicit insertion retains the old shared
-  slot. C detaches one group while keeping the channel for others.
+  slot. C keeps the shared channel; downstream group configuration is explicit.
 - Moving a private alpha removes its former slot, inserts at the final specified
   index and preserves every other channel's order and exact values.
 - R-only A output does not certify or secretly supply unproduced alpha. A later
   alpha request obtains the declared output channel through normal execution.
 - External/scalar inputs never leave persistent alpha-source references in
-  result metadata. Public image outputs are straight in respect/override modes.
+  the result. Output interpretation must be supplied explicitly to later consumers.
 
 ## Reference execution, resources and composition
 
-Resolve group, effective metadata, channel surgery and layout before evaluating
+Resolve group, explicit input description, channel surgery and layout before evaluating
 payloads. Compile a direct source map and reverse dirty map; never repeatedly
 search all channels per output sample. For Q, acquire only declared Data and
 Validation windows. A validates exactly the requested selected components and
 mapped new alpha even when values alias a legal view. Allocate/prepare destination
 pages only for materialization, copy/generate exact bytes, check cancellation and
-publish exact successful coverage with coherent metadata. Original input values
+publish exact successful coverage with its structural schema. Original input values
 always supply sources; no mutation or sequential overwrite occurs.
 
 For rank r, C channel descriptors, Nq requested samples and F windows, reference
@@ -300,11 +296,12 @@ Construct Int64 endpoints directly, never through Float64.
 
 B/C stage their helper expansion and handles transactionally, using the existing
 collision-aware authoring ID rules. Errors leave the caller graph unchanged.
-Lower B to exact FMT-01A extraction or a conforming constant source containing
-the exact opaque code with explicit result shape/storage/metadata. Lower C to FMT-02C/FMT-03 channel mapping
-and explicit target grouping; when only metadata changes, use a conforming
-identity/remap that still honors layout. These helpers must not add sample checks
-from A or retain a reference removed by C. Host graph/arity/resource limits remain applicable.
+Lower B to exact FMT-01A extraction or literal-like fill with the exact opaque
+code and structural output shape. Lower channel-bearing C to mapped assembly;
+axis-free C identity uses `core.identity` with output `value`. That identity
+branch adds no source-schema assertion or layout conversion. Mapped assembly
+uses the aggregate structural `expected_inputs` assertion. These helpers add
+no sample checks from A and no persistent alpha relation.
 
 Initial optional sample-only completed-result caching is disabled, following the
 inherited primitives. Any later cache needs source/descriptor/coverage/layout
@@ -317,7 +314,7 @@ needed for cache identity; ordinary declared inputs remain dependencies.
 
 | Condition | Phase | Status / reason |
 | --- | --- | --- |
-| Missing/ambiguous group or selector, invalid axis/placement/mode, overlapping color and target alpha roles, shared-slot overwrite, malformed override | Compile/direct preflight | InvalidArgument / InvalidDomain. |
+| Missing/ambiguous group or selector, invalid axis/placement, overlapping color and target alpha roles, shared-slot overwrite, malformed input_description | Compile/direct preflight | InvalidArgument / InvalidDomain. |
 | Missing alpha without the selected fallback | Static preflight | InvalidArgument / InvalidDomain; identify selected group. |
 | Unsupported dtype, mixed A dtypes, nonchannel shape mismatch or noncanonical premultiplied input | Static preflight | TypeMismatch / None. |
 | Invalid opaque encoding, or coverage one has no legal exactly representable output code | Static preflight | InvalidArgument / InvalidDomain. |
@@ -332,9 +329,9 @@ not an implicit zero. Required upstream failures keep their original scope.
 
 ## Validation and performance evidence
 
-Focused integration coverage should inspect output samples, descriptors, Data and
-Validation support, and failure rollback. The native FMT-04/FMT-05A implementation
-has a dedicated Result integration test; the B/C authoring compositions have
-separate integration coverage. Numeric alpha math tests do not establish Result
-operation behavior. Installed-consumer
-validation remains separate.
+Temporary public workflow checks should inspect output samples, structural
+schemas, Data/Validation support, exact opaque encodings and failed-expansion
+rollback for A/B/C. Numerical alpha oracles remain independent references;
+unit arithmetic alone does not prove workflow behavior. Delete temporary
+numeric/integration checks after validation. No installed-consumer or current
+performance result is asserted here.

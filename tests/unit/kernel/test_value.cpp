@@ -7,7 +7,7 @@
 #include "support/test_support.hpp"
 
 /**
- * @brief Exercises Region, layout, facet, type, bounds, and scalar paths.
+ * @brief Exercises Region, layout, type, bounds, and scalar paths.
  * @return Zero when all checks pass.
  * @throws std::bad_alloc If test setup allocation fails.
  * @note Behavioral failures otherwise return nonzero through `PS_CHECK`.
@@ -20,7 +20,6 @@ int main() {
   using ps::StridedLayout;
   using ps::Value;
   using ps::ValueDescriptor;
-  using ps::ValueFacet;
 
   const Region whole = Region::whole({2U, 3U});
   PS_CHECK(whole.rank() == 2U);
@@ -43,35 +42,10 @@ int main() {
   PS_CHECK(overflow_rejected);
 
   std::vector<std::uint8_t> bytes(6U, 9U);
-  auto value = Value::create(
-      ValueDescriptor{ElementType::UInt8, {2U, 3U}}, whole,
-      StridedLayout{0U, {3, 1}}, bytes,
-      {ValueFacet{"zeta", 2U, {9U}}, ValueFacet{"alpha", 1U, {1U, 2U}}});
+  auto value = Value::create(ValueDescriptor{ElementType::UInt8, {2U, 3U}},
+                             whole, StridedLayout{0U, {3, 1}}, bytes);
   PS_CHECK(value.ok());
   PS_CHECK(value.value().bytes().size() == 6U);
-  PS_CHECK(value.value().facets().size() == 2U);
-  PS_CHECK(value.value().facets()[0].key == "alpha");
-  PS_CHECK(value.value().facets()[1].key == "zeta");
-
-  auto duplicate_facet =
-      Value::create(ValueDescriptor{ElementType::UInt8, {1U}},
-                    Region::whole({1U}), StridedLayout{0U, {1}}, {1U},
-                    {ValueFacet{"same", 1U, {}}, ValueFacet{"same", 2U, {}}});
-  PS_CHECK(!duplicate_facet.ok());
-  PS_CHECK(duplicate_facet.status().code == ErrorCode::InvalidArgument);
-
-  auto malformed_facet = Value::create(
-      ValueDescriptor{ElementType::UInt8, {1U}}, Region::whole({1U}),
-      StridedLayout{0U, {1}}, {1U}, {ValueFacet{"bad key", 0U, {}}});
-  PS_CHECK(!malformed_facet.ok());
-
-  auto oversized_facet = Value::create(
-      ValueDescriptor{ElementType::UInt8, {1U}}, Region::whole({1U}),
-      StridedLayout{0U, {1}}, {1U},
-      {ValueFacet{"large", 1U, std::vector<std::uint8_t>(65537U)}});
-  PS_CHECK(!oversized_facet.ok());
-  PS_CHECK(oversized_facet.status().code == ErrorCode::ResourceExhausted);
-
   auto outside =
       Value::create(ValueDescriptor{ElementType::UInt8, {2U, 3U}}, whole,
                     StridedLayout{0U, {4, 1}}, std::vector<std::uint8_t>(6U));

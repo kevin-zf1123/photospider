@@ -78,7 +78,7 @@ checks finite ULP distance and separate exact classification/NaN/zero behavior.
 Include hard-to-round inputs and forced input-range fallback.
 
 Use a public WorkflowDocument fixture binding `[0,-Inf,+Inf]`; values must be
-`[1,+0,+Inf]`, with generic output facets. Also execute nonzero/disjoint regions,
+`[1,+0,+Inf]`, with no attached domain description. Also execute nonzero/disjoint regions,
 changed NaN payloads, altered host rounding settings and common cache/lifetime/
 budget/cancellation cases. An independent high-precision interval oracle is
 required; calling the production function twice is not acceptance.

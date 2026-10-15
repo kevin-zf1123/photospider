@@ -59,17 +59,12 @@ Answer associate(WorkflowDocument& document, WorkflowInput input,
   if (!status.ok()) {
     return Answer(status);
   }
-  if (options.metadata_mode != "respect" &&
-      options.metadata_mode != "override" && options.metadata_mode != "raw") {
-    return Answer(invalid("unknown metadata mode"));
-  }
   if (options.algorithm != "auto" && options.algorithm != "scalar" &&
       options.algorithm != "simd" && options.algorithm != "reference") {
     return Answer(invalid("unknown arithmetic algorithm"));
   }
-  Params p{{"metadata_mode", options.metadata_mode},
-           {"algorithm", options.algorithm}};
-  status = add_override(&p, options.metadata_mode, options.metadata_override);
+  Params p{{"algorithm", options.algorithm}};
+  status = add_description(&p, options.input_description);
   if (!status.ok()) {
     return Answer(status);
   }
@@ -97,7 +92,7 @@ Answer associate(WorkflowDocument& document, WorkflowInput input,
     if (!status.ok()) {
       return Answer(status);
     }
-  } else if (alpha || options.metadata_mode == "raw") {
+  } else if (alpha || !options.input_description) {
     return Answer(
         invalid("raw/external use requires an explicit alpha source"));
   }
@@ -129,7 +124,7 @@ Result<SemanticSource> helper_source(const WorkflowDocument& doc,
     return R(status);
   }
   auto p = edit_params(options);
-  status = add_override(&p, options.metadata_mode, options.metadata_override);
+  status = add_description(&p, options.input_description);
   if (!status.ok()) {
     return R(status);
   }
@@ -272,7 +267,7 @@ Result<std::string> opaque_bits(ElementType type,
 }  // namespace ps::plugin_internal::alpha_ops
 
 namespace ps::format {
-using plugin_internal::alpha_ops::add_override;
+using plugin_internal::alpha_ops::add_description;
 using plugin_internal::alpha_ops::alpha_description;
 using plugin_internal::alpha_ops::Answer;
 using plugin_internal::alpha_ops::append;
@@ -318,7 +313,7 @@ Result<WorkflowNodeOutput> set_alpha(WorkflowDocument& d, WorkflowInput input,
     return Answer(status);
   }
   Params p = edit_params(o);
-  status = add_override(&p, o.metadata_mode, o.metadata_override);
+  status = add_description(&p, o.input_description);
   if (!status.ok()) {
     return Answer(status);
   }
@@ -390,23 +385,17 @@ Result<WorkflowNodeOutput> extract_alpha(WorkflowDocument& document,
   if (!checked.ok()) {
     return Answer(checked);
   }
-  auto encoded = tensor_description_parameter(target);
-  if (!encoded.ok()) {
-    return Answer(encoded.status());
-  }
   Params p{{"keepdims", o.keepdims},
            {"layout", o.layout},
            {"expected_inputs", source_assertion({metadata})},
-           {"authoring_member", std::string("FMT-05B")},
-           {"output_description", encoded.take_value()}};
+           {"authoring_member", std::string("FMT-05B")}};
   if (s.axis) {
     p["axis"] = static_cast<std::int64_t>(*s.axis);
   }
   std::string key;
   if (s.group.alpha) {
     p["index"] = static_cast<std::int64_t>(*s.group.alpha);
-    p["metadata_mode"] = o.metadata_mode;
-    checked = add_override(&p, o.metadata_mode, o.metadata_override);
+    checked = add_description(&p, o.input_description);
     if (!checked.ok()) {
       return Answer(checked);
     }
@@ -457,41 +446,26 @@ Result<WorkflowNodeOutput> remove_alpha(WorkflowDocument& document,
   }
   WorkflowDocument staged = document;
   if (!s.axis) {
-    MetadataOptions options;
-    options.mode = "replace";
-    options.description = s.description;
-    options.profile = o.profile;
-    options.layout = o.layout;
-    auto node = assign_metadata(staged, input, options);
-    if (!node.ok()) {
-      return node;
-    }
-    staged.nodes.back().parameters["expected_source"] =
-        source_assertion({metadata});
+    auto ids = numeric::available_workflow_node_ids(staged, 1, {input});
+    if (!ids.ok())
+      return Answer(ids.status());
+    staged.nodes.push_back({ids.value()[0], "core.identity", {input}, {}});
     document = std::move(staged);
-    return node;
+    return Answer(WorkflowNodeOutput{ids.value()[0], "value"});
   }
   const bool erase = s.group.alpha && !referenced_elsewhere(s, *s.group.alpha);
-  std::vector<std::int64_t> indices;
   std::vector<ChannelMapping> rows;
   for (std::uint64_t c = 0; c < input_spec.descriptor.shape[*s.axis]; ++c) {
     if (erase && c == *s.group.alpha) {
       continue;
     }
-    rows.push_back({0, "index", std::to_string(c), rows.size(), {}});
-    indices.push_back(static_cast<std::int64_t>(c));
-  }
-  auto target = remap_description(s, indices, *s.axis, {});
-  if (!target.ok()) {
-    return Answer(target.status());
+    rows.push_back({0, "index", std::to_string(c), rows.size()});
   }
   ChannelAssemblyOptions options;
-  options.metadata_mode = o.metadata_mode;
   options.profile = o.profile;
   options.layout = o.layout;
-  options.output_description = target.take_value();
-  if (o.metadata_override) {
-    options.input_overrides[0] = *o.metadata_override;
+  if (o.input_description) {
+    options.input_descriptions[0] = *o.input_description;
   }
   auto node = assemble_mapped_channels(staged, {input}, *s.axis,
                                        {{false, s.axis}}, rows, options);
@@ -499,7 +473,6 @@ Result<WorkflowNodeOutput> remove_alpha(WorkflowDocument& document,
     return node;
   }
   auto& p = staged.nodes.back().parameters;
-  p["output_description_complete"] = true;
   p["expected_inputs"] =
       plugin_internal::format_result::assembly_source_assertion({metadata});
   p["authoring_member"] = std::string("FMT-05C");

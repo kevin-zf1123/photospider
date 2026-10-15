@@ -34,17 +34,16 @@ Do not reinterpret this as rebuilding a two-profile transform with new rendering
 settings. No proofing or gamut alarm is part of B.
 
 Entry/exit descriptions are explicit caller assertions, not facts proved by
-optional sequence tags or channel names. Respect verifies the selected input
-interpretation against entry_space; override explicitly replaces it locally.
-Raw still supplies structurally complete endpoint declarations and resources
-needed to define formatter units, but bypasses semantic consistency and does
-not publish exit_space as a new valid color declaration.
+optional sequence tags or channel names. Every path supplies structurally
+complete endpoint declarations and resources for formatter units. Static checks
+compare those declarations with the link endpoint structure; they do not compare
+against labels on the input.
 
 ## Output, demand and numerical behavior
 
 Use family unit adaptation, domain checks, fixed engine settings and same-count
 or changed-count group placement. Retain bypass alpha/AOV bits and remap internal
-references. Publish complete declared exit interpretation only in semantic mode.
+references. Pass the exit interpretation explicitly to subsequent consumers.
 No persistent external alpha reference or multi-owner image storage is introduced.
 
 The complete source color tuple at a point supports any target color request.
@@ -61,11 +60,9 @@ cannot silently substitute the source data or a different link.
 - Use a link without sequence-description/ID tags. Explicit endpoint declarations
   remain required; missing declarations fail rather than inferred device names.
 - Reject wrong model/count, non-link class, unsupported header intent or extra
-  BPC/adaptation/intent parameters. Check that output profile resources remain
-  alive after the execution context is destroyed.
-- Compare header-selected tag/fallback against a direct-CMM harness. A tagged
-  CMYK input using a different declared entry profile fails in respect; explicit
-  override permits intentional reinterpretation without mutating other consumers.
+  BPC/adaptation/intent parameters. Check resource retention by prepared operations, plans and active calls.
+- Compare header-selected tag/fallback against a direct-CMM harness. Different explicit entry-profile parameters produce distinct computation
+  identities, even when input data and structure are identical.
 - Check NaN/Inf and formatter overflow in raw, valid out-of-range finite raw
   CMYK, alpha-only requests and cross-tile exact support.
 

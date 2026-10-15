@@ -16,7 +16,7 @@ class FailureLatch final {
  public:
   static bool retryable_backend_failure(const Status& status) noexcept {
     return status.code == ErrorCode::BackendUnavailable &&
-           status.reason == FailureReason::None &&
+           status.reason == FailureReason::None && !status.detail.domain_code &&
            (status.detail.origin == FailureOrigin::Unspecified ||
             status.detail.origin == FailureOrigin::Backend) &&
            (status.detail.scope == FailureScope::Unspecified ||

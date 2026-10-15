@@ -33,17 +33,17 @@ NUM quality verification. A caller chooses a member; there is no automatic
 choice of mapping algorithm. B is not CSS Local MINDE, and C is not a
 perceptually uniform compression or ACES reference gamut compression.
 
-## Interface, parameters and metadata
+## Interface, parameters and interpretation
 
 One `input` tensor Value, Float32/Float64, contains one selected RGB group and
 optional same-tensor straight alpha/AOVs. A/B/C produce `values` with identical
 dtype, shape, axis and ordered R/G/B slots. D produces `mask` with the same dtype
 and non-channel shape S; `keepdims=false` by default, true keeps the original
 channel axis at length one. If removal would produce rank zero, true is required.
-D metadata contains spatial coordinates, binary diagnostic role and the tested
-space/algorithm provenance, not a complete color group or alpha relation.
+D returns binary diagnostic samples. Its selected space and algorithm are
+explicit node parameters; no domain description is attached to the mask.
 
-Semantic modes require native relative linear RGB in the already selected target
+The explicit description path requires native relative linear RGB in the already selected target
 basis. Target limits are exactly the closed cube [0,1]^3. Source RGB is already
 expressed in that basis; convert primaries explicitly through FMT-10 first.
 HDR output headroom or absolute nits must be explicitly normalized before these
@@ -51,29 +51,27 @@ members. Finite signed/HDR inputs are valid candidates for mapping, not automati
 input errors. Scene/display reference is retained; this family does not render
 scene-referred data to display-referred data.
 
-Static fields: `group`, `metadata_mode=respect|override|raw` (respect default),
-applicable source override/assertions, `layout=auto|materialize` (auto default),
+Static fields include explicit `input_description` and `group`, or the raw
+selectors and geometry below; `layout=auto|materialize` defaults to auto,
 and member-specific fields. Forced `view` is rejected for every member, including
 sample-dependent identity branches. No data-dependent layout or profile choice.
 A/D raw require three ordered distinct slots, but no geometric basis. B/C raw
 also require the full explicit target basis needed by their formulas. All modes
 require finite consumed samples; this is a finite-domain mapping/classification
-contract. Raw skips color consistency, not the finite domain or structural rules;
-it retains applicable unverified descriptions instead of certifying target color.
-D still publishes the diagnostic meaning of its actual comparison.
+contract. Raw skips the described color-interpretation checks, not the finite domain or
+structural rules. Every output is ordinary numeric data with no attached
+description. D's +0/1 values encode the actual comparison.
 
 B requires D65=(RN64(.3127),RN64(.3290)) and relative Y=1. Other whites require
 explicit adaptation before entering B. C admits any FMT-10 basis whose exact
 Y-row weights are all strictly positive (they sum exactly to one). This excludes
 some virtual-primary bases admitted by general basis conversion. A/D impose no
-additional primary restrictions. Geometry and metadata are checked statically,
+additional primary restrictions. Geometry and explicit configuration are checked statically,
 even when only bypass data or an empty region is requested.
 
-A/B/C preserve the selected complete RGB interpretation and straight alpha
-relation in semantic modes, with processing provenance and no inherited global
-sample-validity guarantee. Other groups and opaque annotations follow common
-propagation rules. Reject overlapping semantic groups whose unchanged claims
-would become inconsistent; source metadata is never mutated.
+A/B/C compute coordinates in the selected RGB basis and preserve bypass alpha
+and unrelated samples. Callers provide the corresponding configuration to later
+consumers. There is no automatic description or validity propagation.
 
 ## A: component projection
 

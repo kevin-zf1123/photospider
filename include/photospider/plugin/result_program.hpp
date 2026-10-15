@@ -16,9 +16,8 @@
 
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/core/atom_key.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
 #include "photospider/data/fragment_atlas.hpp"
-#include "photospider/data/quality.hpp"
+#include "photospider/data/resource_set.hpp"
 #include "photospider/data/result.hpp"
 #include "photospider/data/tiles.hpp"
 #include "photospider/plugin/cpu_parallel_api.h"
@@ -114,11 +113,11 @@ struct ResultProgramQuery final {
   std::uint32_t output_index = 0;
   std::uint64_t page_bytes = 4096;
   CancellationToken cancellation;
-  /** @brief Immutable resource owners selected for the Result input/output
-   * schemas. The continuation retains the admitted set independently of this
-   * query.
+  /** @brief Immutable resources explicitly selected by static operation
+   * preparation. The continuation retains the admitted set independently of
+   * this query.
    */
-  ResourceBindings resources = {};
+  ResourceSet resources = {};
   /** @brief Owning immutable metadata/static-parameter preparation. Compiled
    * starts preserve and validate this handle; direct starts prepare once when
    * absent. Continuations retain it for all polls and concurrent plan reuse.
@@ -313,11 +312,10 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
    * the borrowed vector object remains valid through the poll.
    */
   const ResourceVector<std::uint64_t>* association = nullptr;
-  /** @brief Reports actual numeric/copy/view work for this poll. Reports are
-   * validated and merged by the host; ignored failures remain sticky. Borrowed
-   * until poll returns and only callable on its entry thread.
+  /** @brief Report opaque bytes for a type declared in operation diagnostics.
+   * Borrowed during this synchronous entry-thread call; errors remain sticky.
    */
-  std::function<Status(const NumericDiagnostics&)> report_numeric = {};
+  std::function<Status(std::uint32_t, ByteView)> report_diagnostic = {};
   /** @brief Find the greatest saved sequence <= `before` in one checkpoint
    * phase. A miss, including optional cache/capacity exhaustion, returns an
    * empty optional. A successful restore also refreshes `association` before
@@ -495,7 +493,7 @@ class PHOTOSPIDER_API ResultContinuation final {
    * the publication's unique physical backing against that cap. It excludes
    * owners still live through exposed Result inputs or authorized tensor
    * grants, tracked with weak references across polls. Each prefix is checked
-   * as a whole Result. Workspace, metadata and ICC/OCIO resource admission are
+   * as a whole Result. Workspace, metadata and immutable resource admission are
    * separate; the callback's earlier Root allocations are not precluded by
    * this publication-time check. On the first poll, the host allocates the
    * bound guard and its shared control block from the Result Root before
@@ -515,7 +513,12 @@ class PHOTOSPIDER_API ResultContinuation final {
   Result<ResultProgramPoll> poll_guarded(const ResultProgramPhase& phase);
   std::shared_ptr<const void> definition_;
   std::shared_ptr<const PreparedOperation> prepared_;
-  ResourceBindings resources_;
+  std::uint32_t output_index_ = 0;
+  std::shared_ptr<const SchemaTemplate> output_schema_;
+  std::string semantic_key_;
+  bool host_validates_ = false;
+  std::optional<ResultDescriptor> validated_publication_;
+  ResourceSet resources_;
   std::shared_ptr<plugin_internal::ResultPayloadBound> payload_bound_;
   std::optional<std::uint64_t> payload_limit_;
   MutableBuffer storage_;

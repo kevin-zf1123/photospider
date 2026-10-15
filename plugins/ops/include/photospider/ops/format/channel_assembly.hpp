@@ -10,10 +10,10 @@
 #include "photospider/ops/format/channel.hpp"
 
 namespace ps::format {
-/** @brief Static FMT-02 metadata, output-layout and CPU-profile policy.
+/** @brief Explicit FMT-02 descriptions, output layout and CPU profile.
  *
  * The helpers serialize these options into an invocation-local graph node and
- * perform no sample reads. `output_description` can define result semantics;
+ * perform no sample reads. Output interpretation is configured by the caller;
  * execution copies source element bits without color or numeric conversion.
  * `auto` retains a view when the complete requested mapping is representable,
  * otherwise it materializes requested samples. `view` requires a legal retained
@@ -21,9 +21,7 @@ namespace ps::format {
  * `accelerated_apple_silicon`, and `accelerated_x86_64`.
  */
 struct ChannelAssemblyOptions final {
-  std::string metadata_mode = "respect";
-  std::map<std::uint32_t, TensorDescription> input_overrides;
-  std::optional<TensorDescription> output_description;
+  std::map<std::uint32_t, TensorDescription> input_descriptions;
   std::string layout = "auto";
   std::string profile = "strict";
 };
@@ -32,7 +30,8 @@ struct ChannelAssemblyOptions final {
  * Each input Result carries one tensor. `component=true` describes an input
  * with no channel axis and requires `axis` to be empty. Otherwise `axis`
  * optionally asserts its channel cell axis, excluding the batch prefix; an
- * empty axis resolves from effective metadata, except raw mode requires it.
+ * empty axis resolves from the corresponding `input_descriptions` entry.
+ * Without an explicit description, the caller must supply the axis.
  */
 struct ChannelSourceStructure final {
   bool component = false;
@@ -42,15 +41,13 @@ struct ChannelSourceStructure final {
  *
  * `selector` is canonical unsigned decimal for `index`, or an exact UTF-8
  * `name`/`role` value. Every destination in `[0, mapping.size())` occurs once;
- * source selections may repeat. `destination_component` supplies explicit
- * semantic fields for this result slot.
+ * source selections may repeat. Each row selects raw source data.
  */
 struct ChannelMapping final {
   std::uint32_t input = 0;
   std::string match = "index";
   std::string selector = "0";
   std::uint64_t destination = 0;
-  std::optional<TensorChannelDescription> destination_component;
 };
 namespace detail {
 inline std::string assembly_hex(const std::string& text) {
@@ -74,23 +71,16 @@ inline Result<WorkflowNodeOutput> append_assembly(
        options.profile != "accelerated_x86_64"))
     return Answer(
         Status{ErrorCode::InvalidArgument, "invalid assembly arity/profile"});
-  parameters["metadata_mode"] = options.metadata_mode;
   parameters["layout"] = options.layout;
-  if (!options.input_overrides.empty()) {
+  if (!options.input_descriptions.empty()) {
     std::string encoded = "v1";
-    for (const auto& entry : options.input_overrides) {
+    for (const auto& entry : options.input_descriptions) {
       auto value = tensor_description_parameter(entry.second);
       if (!value.ok())
         return Answer(value.status());
       encoded += ";" + std::to_string(entry.first) + ":" + value.take_value();
     }
-    parameters["input_overrides"] = std::move(encoded);
-  }
-  if (options.output_description) {
-    auto value = tensor_description_parameter(*options.output_description);
-    if (!value.ok())
-      return Answer(value.status());
-    parameters["output_description"] = value.take_value();
+    parameters["input_descriptions"] = std::move(encoded);
   }
   auto ids = numeric::available_workflow_node_ids(document, 1, inputs);
   if (!ids.ok())
@@ -122,8 +112,9 @@ inline Result<WorkflowNodeOutput> assemble_channels(
 /** @brief Append FMT-02B for ordered channel-block concatenation.
  *
  * Inputs are single-tensor Results. `axes` is empty to resolve all input cell
- * axes from metadata, or supplies one optional cell-axis assertion per input;
- * null entries resolve from metadata.
+ * axes from `options.input_descriptions`, or supplies one optional cell-axis
+ * assertion per input. Null entries require the corresponding explicit
+ * description to supply the axis.
  * `output_axis` is a cell-axis index too. All axis values exclude the Result
  * batch prefix. Complete sample rank, including
  * batch and cell axes, is at most 8. The helper reads no samples. Compilation
@@ -174,18 +165,9 @@ inline Result<WorkflowNodeOutput> assemble_mapped_channels(
         s.component ? ";c" : ";h" + (s.axis ? std::to_string(*s.axis) : "_");
   }
   for (const auto& row : mapping) {
-    std::string destination = "_";
-    if (row.destination_component) {
-      TensorDescription description;
-      description.component = row.destination_component;
-      auto encoded = tensor_description_parameter(description);
-      if (!encoded.ok())
-        return Answer(encoded.status());
-      destination = encoded.take_value();
-    }
     rows += ";" + std::to_string(row.input) + "," + row.match + "," +
             detail::assembly_hex(row.selector) + "," +
-            std::to_string(row.destination) + "," + destination;
+            std::to_string(row.destination);
   }
   return detail::append_assembly(
       document, "assemble_mapped", std::move(inputs),

@@ -78,13 +78,11 @@ the same specified space. Necessary color-management
 dependencies may be clarified in their corresponding specifications, without
 silently extending current accepted runtime metadata or conversion behavior.
 
-Current typed Image validation in
-[semantic.cpp](../../../../src/lib/data/semantic.cpp) accepts RGB only with
-primaries=srgb and transfer=linear. Image samples are Float32 HWC; the generic
-sample_shape(input)+[C] output and configurable RGB encoding are not already supported
-typed Image metadata. The required color-description and transfer extensions
-must be specified and implemented explicitly rather than relabeling incompatible
-data as the existing profile.
+Color ramp configuration is supplied by the required String `color_description`,
+encoded with the SDK `color_array_parameter`. The operation validates it against
+the selected model and source layout. Dtype and out_of_domain are explicit
+parameters; RGB also declares output_association, and polar members declare
+output_hue_unit. No input or output Result carries a ColorArray label.
 
 The standard sRGB transfer is independently documented in
 [W3C CSS Color 4](https://www.w3.org/TR/2026/CRD-css-color-4-20260913/#valdef-color-srgb).
@@ -95,8 +93,8 @@ already separates assignment, transfer, RGB matrix and model conversion.
 The maintainer selected a new
 [generic color-array description](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md)
 supporting Float32/Float64 and arbitrary legal shapes with a final color axis.
-Color ramp outputs carry this complete color information to downstream consumers;
-it is not silently discarded into an untyped numeric array.
+Callers provide the required color configuration to every downstream consumer;
+the output itself carries only structure and numerical samples.
 
 - [Curve category](../curves.md).
 - [RGB ramp specification](CRV-06A_color_ramp_rgb.md).
@@ -115,9 +113,9 @@ it is not silently discarded into an untyped numeric array.
 
 The current runtime registers 45 CRV-06 keys and exposes 15 primitive helpers
 through `photospider/ops/numeric/color_ramps.hpp`; this shared contract is not itself
-a registered operation. ColorArray codec/metadata and full-color closure are
-implemented, with ICC import/bind and immutable ownership. Result output schemas select the
-resource identities required by their ColorArray facets.
+a registered operation. ColorArray codecs and domain validation belong to the SDK. Atomic trailing
+axes express complete-color tuple structure. CMYK preparation explicitly selects
+its ICC resource identity; schemas do not select or retain color resources.
 
 RGB direct, linear and gamma=2 paths are exact; sRGB and general-gamma paths use
 certified full expressions. Gamma normalization and deferred scaling preserve HDR
@@ -160,8 +158,7 @@ unused, while their typed/upstream validation still applies. Empty reads no samp
 payload after static preparation.
 
 The `values` port publishes an immutable `photospider.tensor` v1 Result with
-`samples` shape `sample_shape(input)+[C]`, the ColorArray v1 facet and
-`atomic_trailing_axes=1`. Whole writes publish the full output transactionally;
+`samples` shape `sample_shape(input)+[C]`, `atomic_trailing_axes=1`. Whole writes publish the full output transactionally;
 the Result retains full certified coverage and global coordinates. Fragments expose
 requested regions while retaining the full output owner. Arbitrary immutable source
 strides, offsets and unaligned storage are supported. Result association records

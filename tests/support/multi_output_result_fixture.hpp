@@ -155,7 +155,7 @@ struct Program {
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
             : std::vector<std::uint64_t>{},
-        phase.query.tile_extent, phase.query.resources));
+        phase.query.tile_extent));
     for (const auto& box : demand.boxes()) {
       if (input >= 0) {
         auto window =

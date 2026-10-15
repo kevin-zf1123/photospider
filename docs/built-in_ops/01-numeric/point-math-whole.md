@@ -7,15 +7,14 @@ The current unary family registers 66 Result operations in
 `photospider/ops/numeric/unary.hpp`. Each input Result contains exactly one numeric
 tensor member in slot 0 and may also carry fields. Metadata specialization
 requires matching dtype and complete sample shape, rank 1..8, positive extents,
-and at most 2^40 samples; input schema IDs and facet identities are not fixed.
-Recognized tensor facets and spatial metadata still receive full-input typed
-validation.
+and at most 2^40 samples; input schema IDs are not fixed. Structure is checked independently from
+any explicitly declared domain validator; there is no label-triggered scan.
 
 The Whole continuation requests complete input support with Data, Validation
 and Descriptor roles. It reads authorized Result windows and preserves compatible
 signed or zero strides without requiring packed input collection. Every
 nonempty execution validates all input samples and writes one complete packed
-Result with schema `photospider.tensor`, tensor key `samples`, and empty facets;
+Result with schema `photospider.tensor`, tensor key `samples`, and no attached domain description;
 the executor then projects requested coordinates. Ordinary unary output keeps
 the input dtype. Rational pi constructors accept matching Int64 tensors and
 select a Float32 or Float64 output explicitly. Empty requests pass static
@@ -32,12 +31,12 @@ and returned Results keep immutable backing after the execution context retires.
 Each input Result has one tensor member in slot 0 and may also contain fields.
 Input schema IDs may differ, but dtype and the complete `sample_shape()` must
 match. Rank is 1..8, extents are positive, and the sample count is at most
-2^40. Recognized tensor facets and spatial metadata still receive full-input
-typed validation. Nonempty Whole execution requests Data, Validation and
+2^40. Input structure and explicitly declared validators are checked without
+color or image label inference. Nonempty Whole execution requests Data, Validation and
 Descriptor support for both inputs, reads authorized windows, and publishes a
 complete packed Result. The output uses `photospider.tensor` with tensor key
 `samples`, retains the full logical sample shape as ordinary axes, and drops
-input facets and batch topology. The executor projects requested coordinates
+input batch topology. The executor projects requested coordinates
 after publication. Empty requests can take a metadata-only poll and produce
 empty coverage without sample reads or arithmetic. Integer overflow anywhere
 in the full operation returns OperationFailed/ArithmeticOverflow/Run and no

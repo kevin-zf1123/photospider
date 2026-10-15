@@ -22,9 +22,9 @@ It is not a native NUM strict/accelerated primitive.
 ## Interface and construction
 
 One `input` tensor produces same-dtype `values`. Select one complete color group
-in respect/override, or explicit ordered slots in raw. Bind source_profile and
-destination_profile as immutable resources; source may be resolved from attached
-profile-defined metadata in semantic mode. Destination is mandatory. An analytic
+using explicit input configuration, or explicit ordered slots in raw. Bind
+source_profile and destination_profile as immutable resources; both identities
+are explicit static parameters. An analytic
 source requires an explicit endpoint binding or interpretation change; a name
 such as sRGB does not identify arbitrary profile bytes.
 
@@ -54,9 +54,8 @@ the family finite/range rules, including raw's finite-only engine boundary.
 
 Same-count conversion retains ordered source slots. Different counts replace
 the source group at its smallest index with consecutive target components and
-remap alpha/AOVs. Publish destination profile-defined interpretation or its
-explicit compatible analytic binding in semantic modes. Raw retains only
-applicable unverified descriptions. Images remain planar and straight.
+remap alpha/AOVs. Callers pass destination profile-defined configuration or its compatible
+analytic binding explicitly to later consumers. No output carries a description. Images remain planar and straight.
 
 Any requested target color component depends on all source colors at that point;
 bypass depends only on its own source. Hidden color does not depend on alpha.

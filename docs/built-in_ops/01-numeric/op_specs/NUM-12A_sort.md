@@ -38,8 +38,7 @@ The operation exposes two independently selectable named outputs. `values` is
 a `Result` with schema `photospider.tensor`, tensor key `samples`, source
 element type and full input shape. `indices` has the same shape and schema but
 Int64 elements; each value is the original coordinate on the sorted axis.
-Batch axes become ordinary output axes and both output tensor specs have empty
-facets. Each selected output produces its own complete Result payload. A joint
+Batch axes become ordinary output axes and both output tensor specs have no attached domain description. Each selected output produces its own complete Result payload. A joint
 workflow therefore has distinct Result owners for `values` and `indices`.
 
 ## Ordering and value preservation
@@ -98,5 +97,5 @@ Arbitrary valid affine source strides are read through owning tensor windows.
 ## Current behavior checks
 
  The checks do not claim x86 arithmetic execution, performance
-or complete typed-facet/error/resource coverage. The specification remains
+or complete structural-contract/error/resource coverage. The specification remains
 Proposed.

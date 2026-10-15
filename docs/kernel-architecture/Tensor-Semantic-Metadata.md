@@ -1,16 +1,25 @@
-# Tensor semantic metadata and atomic editing
+# Tensor descriptions and description editing (operations SDK)
 
 [Chinese reader version](zh/Tensor-Semantic-Metadata.zh.md).
 
+This page describes an operations-SDK configuration type. The kernel does not store, propagate, or validate tensor descriptions: Result and Value carry only structure, data, and storage owners. A `TensorDescription` exists only as an explicit static parameter of the operation that reads it.
+
 ## 1. Scope and ownership
 
-`TensorDescription` carries logical tensor, channel, axis, color-group, encoding, sampling, profile, and configured-space descriptions. It does not own sample storage, certify sample values, or imply image layout. `ResourceBindings` owns immutable ICC profiles and frozen OCIO snapshots referenced by metadata. A Result owns its immutable schema and facets; a Result view can retain source backing and resource owners independently of the metadata header.
+`TensorDescription` records logical tensor, channel, axis, color-group, encoding, sampling, profile, and configured-space interpretation. The type and its codecs are declared in `photospider/ops/tensor_description.hpp`; the pure editor is declared in `photospider/ops/format/metadata.hpp`. Both belong to `Photospider::ops_sdk`, which depends only on the kernel's public interface.
+
+The SDK owns the description value, its codec, and its editor. The caller owns the decision of which description applies to which operation input: a format or color operation receives it as a static String parameter (for example `input_description`), and that parameter enters the operation's compile identity. Immutable profile and configuration bytes are separate `ImmutableResource` handles; the caller passes them in a `ResourceSet` to `Compiler::compile`, and the operation's preparation selects them by `ResourceIdentity`. A description can name a profile identity, but it cannot create resource ownership.
+
+A description does not own sample storage, certify sample values, or imply image layout.
 
 ## 2. Data layout and memory
 
 ```cpp
-using TensorEndpoint = std::variant<std::int64_t, double, TensorRationalEndpoint>;
+using TensorEndpoint =
+    std::variant<std::int64_t, double, TensorRationalEndpoint>;
+
 struct TensorDescription final {
+  ResourceLease metadata_owner;
   std::optional<std::uint32_t> channel_axis;
   std::vector<TensorChannelDescription> channels;
   std::optional<TensorChannelDescription> component;
@@ -18,20 +27,28 @@ struct TensorDescription final {
   std::string model, primaries, transfer, reference, association;
   std::optional<std::array<double, 2>> white;
   std::optional<std::array<double, 6>> primaries_xy;
-  std::optional<ColorProfileIdentity> profile;
+  std::optional<ResourceIdentity> profile;
   std::vector<TensorColorGroup> groups;
   std::optional<TensorEncoding> encoding;
   std::optional<TensorSampling> sampling;
   std::string convention = "relative-v1";
   std::optional<TensorConfiguredSpace> configured;
   std::optional<TensorAnalyticBinding> analytic_binding;
-  std::optional<TensorModelCoordinates> coordinates;
+  std::optional<TensorModelCoordinates> coordinates = {};
 };
-Result<ValueFacet> encode_tensor_description(const TensorDescription&);
-Result<TensorDescription> decode_tensor_description(const ValueFacet&);
+
+Result<std::vector<std::uint8_t>> encode_tensor_description(
+    const TensorDescription&);
+Result<TensorDescription> decode_tensor_description(
+    const std::vector<std::uint8_t>&);
+Result<std::string> tensor_description_parameter(const TensorDescription&);
+Result<TensorDescription> tensor_description_from_parameter(
+    const std::string&);
+Status validate_tensor_description(const TensorDescription&,
+                                   const ValueDescriptor&);
 ```
 
-`TensorDescription` records ordered channels on an optional channel axis, one selected component, logical axes, global interpretation defaults, and complete color groups. Validation requires rank 1 through 8, a channel axis inside that rank, and either an empty axes table or one entry per logical axis. Each axis has a name, unit, finite origin, and positive finite step. A complete group names ordered distinct component indices and corresponding channel descriptions; its optional alpha index is within the same tensor and outside the color indices. Group and explicitly supplied channel declarations must agree.
+`TensorDescription` records ordered channels on an optional channel axis, one selected component, logical axes, global interpretation defaults, and complete color groups. `validate_tensor_description` checks the description against a `ValueDescriptor` without reading samples. Validation requires rank 1 through 8, a channel axis inside that rank, and either an empty axes table or one entry per logical axis. Each axis has a name, unit, finite origin, and positive finite step. A complete group names ordered distinct component indices and corresponding channel descriptions; its optional alpha index is within the same tensor and outside the color indices. Group and explicitly supplied channel declarations must agree.
 
 `TensorEncoding` maps stored values to decoded values by
 
@@ -39,83 +56,82 @@ $$
 D(x)=d_0 + (x-s_0)\frac{d_1-d_0}{s_1-s_0}.
 $$
 
-The stored endpoints must increase; decoded endpoints must differ and may descend. Stored endpoints must fit the tensor dtype. Endpoints retain their type as Int64, binary64, or a reduced exact rational. Rational magnitudes use little-endian base-2^32 limbs, with at most 128 words for each reduced numerator and positive denominator; integers never pass through binary64. The description attaches interpretation only. It does not convert, clamp, or rescale samples. A complete integer color group needs an explicit decoder from its component, channel, or tensor default. Removing that decoder invalidates the complete native-color claim. Conflicting explicit encodings or sampling grids fail validation.
+The stored endpoints must increase; decoded endpoints must differ and may descend. Stored endpoints must fit the tensor dtype. Endpoints retain their type as Int64, binary64, or a reduced exact rational. Rational magnitudes use little-endian base-2^32 limbs, with at most 128 words for each reduced numerator and positive denominator; integers never pass through binary64. The description states an interpretation only. It does not convert, clamp, or rescale samples. A complete integer color group needs an explicit decoder from its component, channel, or tensor default. Removing that decoder invalidates the complete native-color claim. Conflicting explicit encodings or sampling grids fail validation.
 
 Internal color groups use same-size co-sited sampling: an explicit grid, scale `(1,1)`, and offset `(0,0)`. External subsampling belongs to an I/O codec. Configured spaces name a frozen config identity, canonical space, and `scene` or `display` reference. Analytic bindings are caller-supplied model/primaries/transfer/reference/white, ordered roles/units, and convention assertions; they do not prove mathematical equivalence.
 
 Color coordinates allow empty or `relative`/`absolute` scale, an optional descriptive observer, a gray interpretation (`linear_y`, `encoded_luma`, `cielab_l`, or `oklab_l`), and optional finite binary64 NCL coefficients `[Kr,Kb]`. Empty fields make no assertion. `relative-v1` stores CIELAB/CIELCh lightness as `L*/100`, leaves a/b/chroma unchanged, and retains the existing XYZ Y=1 reference scale. It is not a range clamp. ICC/OCIO-native conventions refer to resource-defined coordinates. None of these fields establishes sample finiteness, alpha validity, or premultiplication.
 
-The `photospider.tensor-description` facet is bounded to 4096 bytes. Text is strict UTF-8 and at most 128 bytes; at most 128 groups are allowed, each with at most 64 components. The canonical little-endian codec preserves integer and IEEE binary64 bits, ordered tables, explicit presence bytes, and resource identities. Version 4 preserves its existing meaning; version 5 adds model-coordinate records. Encoding selects v5 when coordinates are present at any tensor, component, channel, or group level, including a present-but-empty record; otherwise it selects v4. Older versions, mismatched version/discriminator pairs, noncanonical encodings, and trailing bytes are rejected. Opaque annotations are separate facets on the Result tensor and retain the host's normal facet limits.
+The canonical encoding is bounded to 4096 bytes. Text is strict UTF-8 and at most 128 bytes; at most 128 groups are allowed, each with at most 64 components. The canonical little-endian codec preserves integer and IEEE binary64 bits, ordered tables, explicit presence bytes, and resource identities. Version 4 preserves its existing meaning; version 5 adds model-coordinate records. Encoding selects v5 when coordinates are present at any tensor, component, channel, or group level, including a present-but-empty record; otherwise it selects v4. Older versions, mismatched version/discriminator pairs, noncanonical encodings, and trailing bytes are rejected. `tensor_description_parameter` writes the canonical bytes as lowercase hexadecimal for a String parameter, and `tensor_description_from_parameter` accepts only that canonical form.
 
-## 3. Execution and state machine
-
-`ps::format::assign_metadata` appends one node after checking edit syntax, types, options, path overlap, and bounded transaction encoding. The compiler then resolves source-relative selectors and validates the complete candidate. The current package is 0.33.0, WorkflowDocument schema is 5, OperationTraits version is 25, and the Result C operation ABI is 3. Each input Result contains one tensor member and no fields. An internal node may supply an optional canonical-schema assertion; the public helper does not set it.
-
-```text
-authoring: validate edit syntax -> encode bounded transaction -> append node
-                                                        |
-compile: resolve selectors on source -> build candidate -> validate
-                                                +----------+----------+
-                                                |                     |
-                                              valid                invalid
-                                                |                     |
-runtime: exact coordinate mapping -> view/copy  compiler error; no output
-```
-
-The public helpers are in `ps::format`:
+## 3. Execution: pure description editing
 
 ```cpp
+namespace ps::format {
+struct MetadataSet final {
+  std::string path;
+  MetadataValue value;
+};
 struct MetadataOptions final {
-  std::string mode = "patch";
+  std::string mode = "patch";        // "patch" or "replace"
   std::vector<MetadataSet> set;
   std::optional<TensorDescription> description;
   std::vector<std::string> remove;
-  std::string dependencies = "error", missing = "error";
-  std::string layout = "auto", profile = "strict";
+  std::string dependencies = "error";  // "error" or "cascade"
+  std::string missing = "error";       // "error" or "ignore"
 };
-Result<WorkflowNodeOutput> assign_metadata(
-    WorkflowDocument&, WorkflowInput, const MetadataOptions& = {});
-Result<WorkflowNodeOutput> remove_metadata(
-    WorkflowDocument&, WorkflowInput, const std::vector<std::string>&,
-    const MetadataOptions& = {});
+Result<TensorDescription> edit_description(
+    const TensorDescription& source, const ValueDescriptor& descriptor,
+    const MetadataOptions& options = {});
+}  // namespace ps::format
 ```
 
-Defaults are `mode=patch`, `dependencies=error`, `missing=error`, `layout=auto`, and `profile=strict`. Registered CPU profiles are `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64`; they produce identical metadata and sample bits under their backend admission rules. Replace requires a complete `description` (which may be empty), retains opaque annotations, and permits only annotation edits. Patch forbids `description`. `remove_metadata` lowers a deletion-only patch through the same authoring path. Malformed authoring leaves the document unchanged. Source-relative selectors and target structure are checked during compilation. The output schema retains the source schema id, tensor key, descriptor, batches and physical layout, changing only the semantic and edited annotation facets.
+`edit_description` is a pure function. It validates `source` against `descriptor`, applies one transactional edit, validates the candidate, and returns a new description. It appends no workflow node, reads no payload, looks up no resource, and leaves `source` unchanged on failure. Allocation failure may throw `std::bad_alloc`. There is no `metadata.assign` or `metadata.remove` workflow operation; a caller that needs an edited description passes the returned value to the consuming operation as its static parameter.
 
-For requested output footprint Q, the Result continuation requests Data support on Q and Descriptor support for the source description using role mask 9 (Data 1 | Descriptor 8). It requests no pixel Validation or Control support. Dependency-v2 maps each output coordinate to the same input coordinate, so a changed sample dirties the corresponding output sample. Empty output demand uses a stateless continuation and publishes an empty Result without requesting payload.
+```text
+source description + descriptor
+              |
+       validate source
+              |
+   resolve paths on source -> build candidate -> validate candidate
+                                                  +--------+--------+
+                                                  |                 |
+                                                valid            invalid
+                                                  |                 |
+                                    new TensorDescription    InvalidArgument;
+                                                             source unchanged
+```
 
-`auto` and `view` publish a Result view retaining the source backing, resources and association when the requested mapping can be represented. `auto` falls back to materialization only after `ViewUnavailable`; forced `view` reports that error. `materialize` allocates requested output coverage and copies sample bytes transactionally. Copy work checks cancellation at most every 256 samples. Positive, negative and zero-stride generic tensors are supported when their Result views are valid. For spatial layouts the implementation can preserve the source physical owner and DAG tile geometry. The operation retains the source publication policy and disables Result caching.
+`replace` requires a complete `description` (which may be empty) and accepts no path edits. `patch` forbids `description`. Only `/semantic` paths are accepted.
 
 ## 4. Algorithms and math
 
-Paths are slash-separated; `~0` escapes `~` and `~1` escapes `/`.
+Paths are slash-separated; `~0` escapes `~` and `~1` escapes `/`. A path is at most 1024 bytes.
 
-- `/semantic` selects the complete semantic record.
+- `/semantic` selects the complete description.
 - `/semantic/channels/index:0/unit` selects an original channel. `name:` and `role:` selectors require one exact unique match; `missing=ignore` can ignore a zero-match deletion, while ambiguous selectors still fail.
 - `/semantic/groups/color/interpretation/primaries` selects a group field; `/semantic/axes/0/origin` selects an axis field.
 - Coordinate subtree and leaf paths include `/semantic/coordinates`, `/semantic/component/interpretation/coordinates`, `/semantic/channels/index:0/interpretation/coordinates`, and `/semantic/groups/gray/interpretation/coordinates`, with the supported channel selectors.
-- `/annotations/app.note` selects an opaque facet. The `photospider.` namespace is reserved for semantic facets.
 
-Selectors resolve against the original source before edits. Whole-subtree sets replace the subtree; leaf sets preserve siblings. Duplicate paths, overlapping ancestor/descendant edits, and aliases that resolve to one target fail. A channel or axis description can be deleted while its data slot remains. Cascade removes only affected old dependent descriptions and preserves every explicit set; if cleanup would erase a new explicit value, the transaction fails. The compiler publishes one immutable candidate without modifying the source or repairing samples.
+Selectors resolve against the original source before edits. Whole-subtree sets replace the subtree; leaf sets preserve siblings. Duplicate paths, overlapping ancestor/descendant edits, and aliases that resolve to one target fail. A channel or axis description can be deleted while its data slot remains. `cascade` removes only affected old dependent descriptions and preserves every explicit set; if cleanup would erase a new explicit value, the transaction fails. Group order follows the source order in patch mode.
 
-Coordinate assertions merge field by field across channel, component, and overlapping group declarations. Empty values make no assertion and cannot erase an earlier nonempty assertion. Unequal nonempty values for one field conflict. Exact `operator==` compares complete records and is not the compatibility predicate. The codec checks compatibility without rewriting provenance; channel assembly resolves overlays in its output description.
+Coordinate assertions merge field by field across channel, component, and overlapping group declarations. Empty values make no assertion and cannot erase an earlier nonempty assertion. Unequal nonempty values for one field conflict. Exact `operator==` compares complete records and is not the compatibility predicate. The codec checks compatibility without rewriting provenance.
 
-The edit transaction is a bounded v1 record encoded as lowercase hexadecimal in the node's `edits` string. Its decoded form is at most 4096 bytes, 1024 nodes, and depth 12; the hex String is at most 8192 bytes. The tree encoding uses `o` for ordered maps, `s` for strings, `u`/`i` for unsigned/exact signed integers, `d` for eight little-endian Float64 bytes, and `b` for opaque bytes, each with a decimal length or count and `:` delimiter. This transaction codec is separate from the TDM4/TDM5 facet codec. Prefer `MetadataOptions` and typed paths over manual encoding.
+Internally, the editor encodes the options as a bounded v1 transaction tree: at most 4096 encoded bytes, 1024 nodes, and depth 12. The tree encoding uses `o` for ordered maps, `s` for strings, `u`/`i` for unsigned/exact signed integers, `d` for eight little-endian Float64 bytes, and `b` for opaque bytes, each with a decimal length or count and `:` delimiter. This transaction codec is separate from the TDM4/TDM5 description codec and is not a public parameter format.
 
-`ResourceBindings` seals and deduplicates explicit ICC and OCIO handles. Every referenced identity must resolve at compile, binding, and output admission, and an ICC header model must match the declared interpretation. ICC admission checks explicit v2/v4 bytes, profile class/PCS, required tags, TRC/LUT envelopes, and profile identity. It accepts RGB/Gray matrix/TRC profiles and admitted LUT forms; profile-defined XYZ/Lab endpoints require an explicit LUT, and the CMYK endpoint path requires its declared LUT set. Abstract and DeviceLink profiles are not endpoint resources. This structural admission does not run a color-management module.
+`IccProfile` (`photospider/ops/icc_profile.hpp`) copies and admits explicit profile bytes. Admission checks v2/v4 bytes, profile class/PCS, required tags, TRC/LUT envelopes, and profile identity. It accepts RGB/Gray matrix/TRC profiles and admitted LUT forms; profile-defined XYZ/Lab endpoints require an explicit LUT, and the CMYK endpoint path requires its declared LUT set. Abstract and DeviceLink profiles are not endpoint resources. This structural admission does not run a color-management module. `resource()` returns the owning `ImmutableResource` for the caller's `ResourceSet`.
 
-An OCIO snapshot includes explicit config bytes, the complete sorted logical file map, resolved context, declared canonical spaces/references, and pinned engine/build/settings identity. Its hash and byte length cover the framed bytes, including lookup absence. Admission validates snapshot structure and ownership, not transform executability. After freezing, lookup does not consult files, network, or process environment. Snapshot copies and comparisons consume `ResourceBudget` and cancellation/work checks in chunks of at most 1024 bytes; the file/context/space tables are limited to 1024 entries in total. `ValueFragments::retained_bytes` deduplicates actual resource storage identities, including config manifests.
+`OcioConfigResource` (`photospider/ops/ocio_config_resource.hpp`) seals an explicit snapshot: config bytes, the complete sorted logical file map, resolved context, declared canonical spaces/references, and pinned engine/build/settings identity. Its SHA-256 identity and byte length cover the framed bytes, including lookup absence. Admission validates snapshot structure and ownership, not transform executability. After freezing, lookup does not consult files, network, or process environment. Snapshot copies and comparisons consume `ResourceBudget` and cancellation/work checks in chunks of at most 1024 bytes; the file/context/space tables are limited to 1024 entries in total.
 
 ## 5. Limitations and non-goals
 
-- Tensor metadata describes logical axes and interpretation; it does not define physical strides, planar/tiled storage, or image ownership.
-- Profile identities do not carry resource bytes. Callers must provide resolvable handles in `ResourceBindings`.
-- A profile/configured-space declaration does not infer analytic primaries, transfer, or white. An analytic binding remains caller provenance.
-- Metadata validation does not certify numeric sample range, finiteness, coverage, or color correctness. Registered `photospider.` facets other than `photospider.tensor-description` require an explicit import before this editor can consume them.
-- ICC admission is structural; OCIO admission validates the frozen snapshot rather than transform execution. Metadata assignment does not run color-management conversion or introduce a private worker pool. See [ICC profile validation](../../src/lib/data/icc_validation.cpp) for the accepted profile classes, tags, and LUT envelopes.
-- Static authoring is bounded by facet and transaction limits. Its preparation path has no runtime cancellation token; runtime resource admission uses the applicable root budget and cancellation checks.
-- Metadata edits disable sample-only cache reuse because output identity includes metadata.
-- Color-group and alpha indices name positions on the channel axis, and axis roles name logical dimensions; neither selects byte order. The channel-last form of the `ColorArray` descriptor is a property of that descriptor, not a general constraint. [ADR 0022](../adr/0022-freeze-operation-c-abi-v3.md) D9 (Proposed) records the canonical image target.
-- `ResourceBindings` currently carries ICC profiles and OCIO snapshots. Generic content-addressed model and engine resources described in ADR 0022 D8 are not implemented.
+- A description is static operator configuration. It is not attached to a Result or Value, it does not flow along graph edges, and no operation output carries the input's description forward.
+- The kernel does not reject a connection because two Results have different intended descriptions; structure alone decides port compatibility. An operation checks its explicit description against the input descriptor when it prepares, and a bound validator can check sample values.
+- Tensor descriptions describe logical axes and interpretation; they do not define physical strides, planar/tiled storage, or image ownership.
+- Profile identities do not carry resource bytes. Callers must provide the resources in the `ResourceSet` given to the compiler.
+- A profile or configured-space declaration does not infer analytic primaries, transfer, or white. An analytic binding remains caller provenance.
+- Description validation does not certify numeric sample range, finiteness, coverage, or color correctness.
+- ICC admission is structural; OCIO admission validates the frozen snapshot rather than transform execution. No ICC or OCIO color-conversion engine is provided.
+- Color-group and alpha indices name positions on the channel axis, and axis roles name logical dimensions; neither selects byte order. [ADR 0022](../adr/0022-freeze-operation-c-abi-v3.md) D9 (Proposed) records the canonical image target.
 
-Resource admission, copy, or hash failure prevents publication and releases unpublished owners. A Result header can drop one resource reference while an older view still retains sample backing; removing a facet does not promise immediate release of every ancestor allocation. Current behavior is exercised by the registered metadata assignment tests and installed consumer fixtures. Result allocation and work admission are not RSS bounds, and block-cache observations do not establish performance.
+Malformed descriptions and edits return `InvalidArgument` from the SDK call. A format operation decodes and validates its `input_description` parameter during static preparation, so a malformed parameter or a description that does not match the input descriptor fails compilation. ICC and OCIO resource admission charges the `ResourceBudget` supplied to the import call; resource admission, copy, or hash failure publishes no owner.

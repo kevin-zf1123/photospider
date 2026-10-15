@@ -47,7 +47,7 @@ Descriptor (role 13), including recognized typed validation and upstream failure
 handling. It validates the complete reconstructed axis, then every finite/domain
 query before table arithmetic. It computes every output element/channel and
 publishes an immutable packed dense Result using `photospider.tensor` v1/member `samples`,
-with the complete input shape, selected Float32/Float64 dtype and empty facets.
+with the complete input shape, selected Float32/Float64 dtype and no attached domain description.
 The Result association records actual source ObjectIds. A nonempty request returns
 full certified coverage with global sample coordinates. Empty reads no payload;
 all static metadata checks still apply.
@@ -60,7 +60,7 @@ Errors in otherwise-unrequested queries or evaluated channels can fail the Run.
 Any input/table/axis edit invalidates the recorded output demand; dirty mapping
 follows that recorded demand. Cache identity
 retains all input versions, profile, metadata and parameters. There is no
-per-channel Atom success isolation. Output dtype, shape and empty facets remain
+per-channel Atom success isolation. Output dtype, shape and no attached domain description remain
 unchanged; arbitrary input offsets, unaligned and signed/zero strides remain
 legal. The complete immutable owner survives context destruction.
 

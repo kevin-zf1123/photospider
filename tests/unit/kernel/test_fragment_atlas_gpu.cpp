@@ -60,7 +60,7 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
   }
   auto coverage = Footprint::from_regions(shape, boxes).take_value();
   auto input =
-      ValueFragments::create(descriptor, {}, coverage, values).take_value();
+      ValueFragments::create(descriptor, coverage, values).take_value();
   auto plan = FragmentAtlasPlan::prepare(input, geometry).take_value();
   std::vector<std::uint64_t> coordinates;
   for (const auto& at : queries)

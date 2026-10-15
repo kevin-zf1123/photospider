@@ -15,9 +15,12 @@
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "common/floating_environment.hpp"
 #include "common/numeric_common.hpp"
-#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::expression_result {
+struct SamplingDomain {
+  double sample_origin = 0, sample_step = 1;
+};
+
 using namespace numeric_ops;  // NOLINT(build/namespaces)
 template <class Number>
 Number read(MathTensorReader& reader, const std::vector<std::uint64_t>& at) {
@@ -27,8 +30,7 @@ Number read(MathTensorReader& reader, const std::vector<std::uint64_t>& at) {
   return number;
 }
 inline Result<double> interpolate(MathTensorReader& table, std::uint64_t size,
-                                  double query,
-                                  const SemanticDescriptor& domain,
+                                  double query, const SamplingDomain& domain,
                                   std::uint64_t sample) {
   using numeric_internal::add_split;
   using numeric_internal::Split;
@@ -104,7 +106,7 @@ inline Result<double> interpolate(MathTensorReader& table, std::uint64_t size,
 
 struct Prepared final {
   expression_internal::Expression expression;
-  SemanticDescriptor domain;
+  SamplingDomain domain;
 };
 struct Kernel final {
   bool lut;
@@ -211,7 +213,9 @@ inline OperationDefinition operation(const char* key, bool lut) {
   const double maximum = std::numeric_limits<double>::max();
   if (lut) {
     traits.parameter_schema = {
-        {"out_of_domain", OperationParameterType::String, true}};
+        {"out_of_domain", OperationParameterType::String, true},
+        {"sample_origin", OperationParameterType::Float64, true},
+        {"sample_step", OperationParameterType::Float64, true}};
   } else {
     traits.parameter_schema = {
         {"count", OperationParameterType::Int64, true, true, 1, 1048576},
@@ -237,7 +241,7 @@ inline OperationDefinition operation(const char* key, bool lut) {
               Status{ErrorCode::TypeMismatch,
                      "expression requires one tensor and no fields"});
         const auto& member = input.result_schema->tensors[0];
-        metadata.push_back({member.descriptor, member.facets});
+        metadata.push_back({member.descriptor});
       }
       if ((!lut && !inputs[0].result_schema->tensors[0].batch_axes.empty()) ||
           (lut && !inputs[1].result_schema->tensors[0].batch_axes.empty()))
@@ -248,15 +252,16 @@ inline OperationDefinition operation(const char* key, bool lut) {
           lut ? metadata[0].descriptor.shape
               : std::vector<std::uint64_t>{static_cast<std::uint64_t>(
                     std::get<std::int64_t>(params.at("count")))});
-      schema.tensors[0].facets = math_take(infer_expression_facets(
-          lut, metadata, params, schema.tensors[0].descriptor));
+      auto checked = validate_expression_metadata(lut, metadata, params,
+                                                  schema.tensors[0].descriptor);
+      if (!checked.ok())
+        return Result<OperationPreparation>(checked);
       auto state = std::make_shared<Prepared>();
       if (lut) {
         schema.tensors[0].batch_axes =
             inputs[0].result_schema->tensors[0].batch_axes;
-        for (const auto& facet : metadata[1].facets)
-          if (facet.key == "photospider.semantic")
-            state->domain = math_take(decode_semantic(facet));
+        state->domain = {std::get<double>(params.at("sample_origin")),
+                         std::get<double>(params.at("sample_step"))};
       } else {
         state->expression = math_take(expression_internal::parse(
             std::get<std::string>(params.at("expression")),

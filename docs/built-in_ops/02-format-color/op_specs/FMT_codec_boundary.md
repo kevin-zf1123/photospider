@@ -25,7 +25,7 @@ no replacement kernel operators are assigned to them.
   external alpha binding is introduced for subsampled video/file data.
 - Every kernel image operator obeys the accepted planar storage contract:
   common DAG tile geometry, whole-image virtual span, row/edge padding, page
-  alignment and explicit backing preparation. Raw/override cannot waive the
+  alignment and explicit backing preparation. Explicit raw configuration cannot waive the
   physical storage contract. Generic non-image arrays retain their own tensor
   contracts; this does not make scalar/vector/table operands into images.
 - [ADR 0022](../../../adr/0022-freeze-operation-c-abi-v3.md) D9 (Proposed)
@@ -45,7 +45,7 @@ not alternative kernel image layouts or FMT operation outputs.
 
 Codec contracts still need concrete filters/siting, odd-edge behavior, input
 validation, region requests, resource limits, cancellation, errors and resulting
-color/encoding metadata. Region-limited decoding may need source neighborhoods;
+explicit color/encoding configuration. Region-limited decoding may need source neighborhoods;
 this is a codec dependency obligation rather than a new heterogeneous DAG image
 model. This decision neither requires whole-file decoding nor promises a codec
 supports random access.
@@ -54,7 +54,8 @@ The choice of codec output model and numeric encoding must be explicit in its
 own contract. Decoding bytes or reconstructing chroma does not, by itself,
 authorize unspecified gamut mapping, tone mapping, ICC/OCIO processing or ACES
 input/output rendering. If a codec intrinsically converts a color representation,
-its declared output metadata and numerical contract must describe the result.
+its explicit output configuration and numerical contract must describe the result.
+A consumer receives that configuration separately; the tensor does not carry it.
 Physical layout conversion does not change color interpretation.
 
 ## Remaining operator responsibilities

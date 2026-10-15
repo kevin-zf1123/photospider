@@ -8,9 +8,9 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
 #include "core/radix_sort.hpp"
 #include "data/footprint_index.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
 namespace ps {

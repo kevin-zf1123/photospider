@@ -1,3 +1,4 @@
+#include "photospider/ops/numeric/diagnostics.hpp"
 #pragma once
 
 #include <cstdint>
@@ -10,7 +11,7 @@
 namespace ps::numeric {
 /** @brief Authors exact boundary prefix sums on one static axis.
  * Input rank is 1..8; output extends axis by one. Input and output counts must
- * be <=2^40. Output values has empty facets. Boundary zero is +0. For a
+ * be <=2^40. Output values has ordinary data. Boundary zero is +0. For a
  * nonempty demand, Whole requests complete input support with Data, Validation
  * and Descriptor roles, including a zero-boundary projection. It reads through
  * authorized Result windows and does not pack the complete input; Empty reads

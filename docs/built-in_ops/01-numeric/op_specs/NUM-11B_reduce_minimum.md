@@ -18,7 +18,7 @@ implementation_status: implemented_manual_acceptance
 
 Inherit the [NUM baseline](NUM_common_contract.md) and [NUM-11 shared contract](NUM-11_reduction_contract.md). The strict key follows the exact reference. Floating selection and special-value behavior are exact in all profiles.
 
-`numeric.reduce_minimum_*` reduces complete groups along required static `axes`. Its single Result input contains exactly one tensor member at any key. The `values` Result uses schema `photospider.tensor` and member `samples`; it preserves input dtype and rank, replaces reduced extents with one, and drops facets. There is no dtype parameter.
+`numeric.reduce_minimum_*` reduces complete groups along required static `axes`. Its single Result input contains exactly one tensor member at any key. The `values` Result uses schema `photospider.tensor` and member `samples`; it preserves input dtype and rank, replaces reduced extents with one, and carries no domain description. There is no dtype parameter.
 
 Select the numeric minimum with infinities in ordinary extended order. Int64 comparison remains integer comparison, including values above 2^53. The first NaN in logical row-major order wins, preserving its sign and payload while setting the quiet bit. A singleton sNaN is quieted. For mixed signed zeros, return -0; same-sign zeros retain their sign.
 

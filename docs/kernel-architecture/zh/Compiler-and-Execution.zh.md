@@ -2,9 +2,11 @@
 
 ## 范围与 ownership
 
-Compiler 验证 schema-5 `WorkflowDocument`、解析 Result operation contracts，并生成 immutable semantic、optimized 和 physical plans。当前 package 为 0.33.0，OperationTraits version 为 25；规范 identity 使用 semantic graph v20、physical plan v20 和 outer plan-cache key v16。`ExecutionContext` 拥有有界 CPU pool、可选 native backend lane、caches，以及由 runs 和仍存活 owners 共享的 resource root。未设置 `managed_resources` 时，context 使用默认 `ResourceLimits`；设置后使用显式 limits。`maximum_live_bytes` 也限制 Payload。Run 拥有 continuation state，只有 callbacks 退出且 cancellation 与 graph-currentness checks 允许 publication 后才返回具名 Results。
+Compiler 验证 schema-6 `WorkflowDocument`、解析 Result operation contracts，并生成 immutable semantic、optimized 和 physical plans。它拒绝其他任何 schema 版本，包括早期基于标签的 workflow。当前 package 为 0.34.0，OperationTraits version 为 26；规范 identity 使用 semantic graph v21、physical plan v21 和 outer plan-cache key v17。`ExecutionContext` 拥有有界 CPU pool、可选 native backend lane、caches，以及由 runs 和仍存活 owners 共享的 resource root。未设置 `managed_resources` 时，context 使用默认 `ResourceLimits`；设置后使用显式 limits。`maximum_live_bytes` 也限制 Payload。Run 拥有 continuation state，只有 callbacks 退出且 cancellation 与 graph-currentness checks 允许 publication 后才返回具名 Results。
 
-`WorkflowInputDeclaration` 保存 id、精确 name 和必需的 Result schema。`ExecutionBinding` 保存 name 和 owning `ResultRef`。Value 是 Result storage 和 codecs 使用的 typed backing。输入 metadata 描述 Result schema；tensor shape、facets 和 layout 属于 `ResultTensorSpec`。
+`WorkflowInputDeclaration` 保存 id、精确 name 和必需的 Result schema。`ExecutionBinding` 保存 name 和 owning `ResultRef`。Value 是 Result storage 和 codecs 使用的 typed backing。`OperationMetadata` 只携带完整 Result schema；metadata specialization 是根据输入 schema 和静态参数对输出 schema 做的结构推导。Tensor shape 和 layout 属于 `ResultTensorSpec`。端口在结构谓词匹配时即可连接；compiler 不比较领域标签，因此结构相同但预期含义不同的 Result 可以连接到同一个端口。
+
+`Compiler::compile(context, options, resources)` 接收显式 `ResourceSet`。每个算子的静态 preparation 列出所需的 `ResourceIdentity`；compiler 从集合中精确选择这些条目，缺失时失败，plan 保留所选资源。SemanticGraphIR 及其 digest 仍是编译与计算身份：semantic digest 覆盖 declarations、operation keys、有序输入、静态参数、operation traits（包括绑定的校验器与声明的诊断 identity 及其 version 和 implementation）、所选资源 identity 以及输出 schema。地址、回调指针和诊断内容不参与。每个 step 的 dependency template 和 shared block contract 也纳入相同的显式资源 identity。
 
 `FrozenExecution` 共享包含 plan、binding snapshot、operation registry 和 execution identity 的 immutable state。只要 handle 仍持有 state，`plan()` 返回的借用引用就有效。每次 frozen execution 在进入 Run 前捕获 handle，并为 structured execution 提供 plan 的 shared owner。调用方未提供 plan owner 时，普通 `ExecutionPlan` 调用借用该 plan。
 
@@ -72,6 +74,10 @@ Coordinator 在调度边界依次检查 cancellation、stale graph state 和首�
 ## 存储与资源
 
 Structured Results 拥有 schema、descriptor facts、typed tensor backing、relations 和 retained input owners。图像像素使用由 planar pages 支撑的 typed Result tensor slots，不会编码成 packed primitive Result fields。Captured Result references 固定一个 revision 下的 descriptor 与 relation evidence。Execution root 计入 work、stage state、I/O、relation/map 构造、payload capacity 和 owner retention。内部 dependency-evidence records 保留不可变 ancestry 与 support facts，但不保留输入 payload；每 Run recorder、导入集合和冻结查询 bundle 分别拥有自己的状态。返回的 `ResourceMap` 保留相同 root ownership。释放最后一个 Result 或 read-window owner 后，其 backing 和 retained associations 才会释放。
+
+编译时选择的算子资源保留在 plan 和执行状态中；Result 不保留它们。
+
+`OperationTiming::reports` 持有有界算子报告的 owning `DiagnosticAccumulator`；内核合并并保存这些字节，但不解释它们。Completed-result cache 命中不会为未重复的计算增加新的工作报告。
 
 `ExecutionDiagnostics::peak_live_bytes` 表示当前 Run 归属的受控 Payload backing 已提交容量峰值。并行 callback 都会计入其 Run observation；调用方执行前已有的输入 backing 与先前完成 cache 中的 storage 不计入。`planned_peak_bytes` 表示预留 Payload capacity 峰值，包括完整 CPU reservation 和增量 native allocation；这是容量预留值，不是已提交字节数。复用已完成的 cache Result 不会带入之前 producer epoch 的峰值。这些计数描述 Root 控制的 backing，包括已发布的 planar pages，不代表进程 RSS。
 

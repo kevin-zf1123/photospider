@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_2
+implementation_status: implemented_cpu_result_abi_4
 clarification_status: complete
 ---
 
@@ -15,7 +15,7 @@ Inherit [FMT-common](FMT_common_contract.md), the NUM numerical/execution baseli
 [model coverage](FMT_model_conversion_coverage.md) and
 [canonical image/codec boundary](FMT_codec_boundary.md). The family contains [A decode](FMT-09A_decode_transfer.md) and
 [B encode](FMT-09B_encode_transfer.md). Each direction has strict, accelerated
-Apple Silicon and accelerated x86-64 CPU Result ABI 3 keys. Their exact scalar
+Apple Silicon and accelerated x86-64 CPU Result ABI 4 keys. Their exact scalar
 definitions are normative in [FMT-09 mathematics](FMT-09_transfer_math.md). The
 specification remains Proposed; registration and implementation status are separate.
 
@@ -34,7 +34,7 @@ arbitrary luminance to 1. A transfer curve does not itself change primaries,
 white or turn scene coordinates into display rendering.
 
 Current ColorTransferKind in
-[color_array.hpp](../../../../include/photospider/data/color_array.hpp) only
+[color_array.hpp](../../../../include/photospider/ops/color_array.hpp) only
 contains linear, sRGB and gamma. NUM/CRV ramp helpers do not implement independent
 FMT-09 nodes or the new units/reference vocabulary. Their old association and
 last-axis conventions do not override the FMT contract.
@@ -77,8 +77,7 @@ output Result containing one tensor. The member must use Float32 or Float64; the
 output retains the dtype, logical shape, axes and channel order. Complete sample
 rank, including batch and cell axes, is at most 8; sample count is at most 2^40.
 The operation preserves Result schema identity, tensor key, logical shape and
-batch axes. It updates semantic transfer facets and sets `atomic_trailing_axes`
-to zero. No additional resource port, optional data input or runtime-dependent
+batch axes. It carries no description and sets `atomic_trailing_axes` to zero. No additional resource port, optional data input or runtime-dependent
 shape is introduced.
 Rank and extent validity inherit NUM/kernel. No implicit broadcasting, casting,
 axis movement, range scaling or integer decoding occurs. In semantic mode,
@@ -88,7 +87,7 @@ FMT-06 first. Raw floating calls apply the formula to stored numeric values
 without requiring that semantic decoding; integer dtype remains unsupported in
 all modes.
 
-Semantic respect/override mode processes one explicitly selected RGB or Gray
+With `input_description`, the described path processes one explicitly selected RGB or Gray
 group. A Gray group without a channel axis is its one component; an explicit
 channel axis can occupy any structurally valid position. `axis` indexes a cell
 axis and excludes the Result batch prefix. The group selector and axis
@@ -105,62 +104,53 @@ and dtype remain unchanged, and unselected samples copy exactly.
 
 | Logical parameter | Rule |
 | --- | --- |
-| metadata_mode | respect by default; override or raw explicitly selected. |
+| input_description | Optional explicit TensorDescription. Presence selects the described RGB/Gray path; absence selects raw numerical components. |
 | group | Required static unique RGB/Gray group in semantic mode. |
 | components / axis | Raw all-components or explicit index selection; do not also supply semantic group. |
-| curve | A may resolve from input metadata; an explicit assertion must agree in respect. B and raw require an explicit curve. No default sRGB guess. |
+| curve | A may resolve from input_description; an explicit assertion must agree. B and raw require an explicit curve. No default sRGB guess. |
 | gamma | Required only for power_gamma; finite static Float64 >0; no implicit 2.2 exponent. |
 | coefficient_variant | Only for bt2020: smooth (authoring default), rounded_10bit or rounded_12bit. |
 | black_luminance / white_luminance | Required only for bt1886; finite static Float64 Lb,Lw in cd/m² with 0<=Lb<Lw. |
-| metadata_override | Complete effective source interpretation when override is selected; cannot change actual dtype, shape or backing. |
 | layout | auto by default; view or materialize explicitly selected. |
 
 Irrelevant, contradictory or malformed parameters fail rather than being ignored.
 A omitted curve takes the complete transfer record, including its parameters,
-from the source. When a curve is explicitly supplied, its resolved defaults and
+from input_description. When a curve is explicitly supplied, its resolved defaults and
 parameters form a full assertion. Thus an explicit bt2020 with omitted variant
-means smooth, and conflicts with a rounded_10bit source unless overridden.
+means smooth, and conflicts with a rounded_10bit source unless the caller supplies a different explicit description.
 B's target defaults never repair or overwrite an inconsistent source implicitly.
-Mode, curve, variant and layout are closed String choices in authoring;
+Curve, variant and layout are closed String choices in authoring;
 group and raw selectors are typed static metadata/axis selectors, with bounded
 integer indices. The public `TransferDefinition` codec encodes complete transfer identities in
-bounded `fmt09-v1:` records for tensor-description metadata. Parameter-free
+bounded `fmt09-v1:` records for explicit tensor-description configuration. Parameter-free
 curves use their canonical identifier; parameterized records preserve exact
 Float64 parameter bits. Raw selectors use a bounded canonical index string.
 
 ## Curve identity, metadata and reference checks
 
-A's effective source transfer must match the chosen curve and parameters. A
-publishes its native linear descriptor. B requires source transfer=linear and
-compatible native units/reference, then publishes the explicit target transfer.
-Applying B to already encoded data fails even if the target curve is identical.
-A cannot use a non-linear curve to decode an explicitly linear source in respect
-mode. The linear curve itself is admitted as the explicit identity.
+The described path reads only the explicit `input_description`. It requires a
+unique `group` and rejects `axis/components`. Decode A resolves the complete
+source transfer when `curve` is omitted; any supplied curve and its parameters
+must agree with the description. Encode B always requires a target curve and
+requires the explicit source transfer to be linear. No sRGB guess or automatic
+scene/display conversion occurs.
 
-Gamma/sRGB preserve explicit scene-relative or display-relative interpretation.
-709/2020 OETF, HLG OETF and ACES scalar curves require scene-relative native
-quantities; PQ/1886 require absolute display-linear quantities. Encoded metadata
-retains that native interpretation even where stored samples are dimensionless.
-No transfer call silently converts scene to display reference. Source assertions
-must agree; deliberate reinterpretation uses override or raw.
+Gamma/sRGB preserve the chosen scene-relative or display-relative scale.
+709/2020 OETF, HLG OETF and ACES scalar curves require scene-relative quantities;
+PQ/1886 require absolute display-linear quantities. Curves are independent of
+RGB primaries: applying an ACEScct scalar curve does not establish a complete
+ACEScct color space. All native units/reference checks remain in preparation.
 
-Curves are independent of RGB primaries. P3 may use sRGB transfer; another RGB
-basis may use the ACEScct scalar curve without becoming the full ACEScct space.
-Preserve primaries, white, channel roles/names, coordinates, internal alpha and
-unaffected groups. Update the selected group's transfer, native unit/reference
-and actual numeric-encoding description. Incompatible complete named-space
-labels cannot survive; update or remove them. A full named-space claim validates
-basis, white, transfer and reference together, using explicit FMT-10 conversion
-where needed. Static structural checks do not validate all pixel values.
+Without `input_description`, raw calls require `components` and an explicit
+curve. An index list requires `axis`; `components=all` may omit it. Raw formula
+evaluation omits described-domain finiteness checks, while intrinsic PQ/1886
+max and ACES cap/floor branches still execute. Static parameter and storage
+checks apply in both paths.
 
-Raw requires the chosen curve/parameters explicitly. It omits sample finiteness
-and semantic-domain checks, using NUM formula outcomes. It retains still-applicable
-source descriptions without previous validity guarantees and does not change
-transfer metadata to claim a valid color conversion. Intrinsic curve branches,
-including PQ/1886 max and ACES cap/floor, still execute. Static parameter checks
-and physical storage constraints apply in every mode. Raw execution retains the
-input facets byte-for-byte and does not assert that samples represent valid
-color or the result of a semantic transfer conversion.
+Neither path retains or creates a description in the output. A computes the
+curve's linear quantity and B computes the target encoded quantity; callers
+provide the corresponding configuration to later consumers. Description
+parameters affect computation identity but do not certify unrequested samples.
 
 ## Exact requests, validation and invalidation
 

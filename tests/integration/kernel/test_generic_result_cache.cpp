@@ -159,7 +159,7 @@ int opaque_result_cache_preservation() {
   auto operations = std::make_shared<OperationRegistry>();
   auto input_schema = multi_result::schema(ElementType::Float32);
   auto output_schema = multi_result::schema();
-  output_schema.tensors[0].facets = {{"vendor.test", 1, {42}}};
+  output_schema.tensors[0].atomic_trailing_axes = 1;
   auto calls = std::make_shared<std::atomic<unsigned>>(0);
   PS_CHECK(operations
                ->register_operation(
@@ -191,10 +191,7 @@ int opaque_result_cache_preservation() {
     PS_CHECK(result.ok());
     const auto& output = result.value().results.at("result");
     PS_CHECK(multi_result::number(output) == 2);
-    const auto& facets = output.schema().tensors[0].facets;
-    PS_CHECK(facets.size() == 1 && facets[0].key == "vendor.test" &&
-             facets[0].version == 1 &&
-             facets[0].payload == std::vector<uint8_t>{42});
+    PS_CHECK(output.schema().tensors[0].atomic_trailing_axes == 1);
     auto copied = execution.execute(copied_plan, bindings);
     PS_CHECK(copied.ok() &&
              multi_result::number(copied.value().results.at("result")) == 2);
@@ -202,8 +199,7 @@ int opaque_result_cache_preservation() {
                  .results.at("result")
                  .schema()
                  .tensors[0]
-                 .facets[0]
-                 .payload == facets[0].payload);
+                 .atomic_trailing_axes == 1);
     PS_CHECK(*calls == 1);
   }
   return 0;
@@ -312,7 +308,7 @@ int fragment_lru_storage() {
   cache.put("new-tail", next[1], epoch);
   std::vector<Value> retained{cache.get("new-head"), cache.get("new-tail")};
   auto result = ValueFragments::create(
-      descriptor, {}, Footprint::all({4}).take_value(), retained);
+      descriptor, Footprint::all({4}).take_value(), retained);
   PS_CHECK(result.ok());
   for (std::uint64_t i = 0; i < 4; ++i) {
     float value = 0;

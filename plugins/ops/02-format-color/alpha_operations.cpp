@@ -12,7 +12,6 @@
 #include "02-format-color/alpha_common.hpp"
 #include "02-format-color/alpha_math.hpp"
 #include "02-format-color/alpha_numeric_metadata.hpp"
-#include "common/typed_need_validation.hpp"
 #include "photospider/data/region_runs.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
 
@@ -181,7 +180,7 @@ Result<OperationPreparation> prepare_alpha(
   Preparation s;
   s.action = action;
   s.narrow = main.descriptor.element_type == ElementType::Float32;
-  s.raw = text(p, "metadata_mode", "respect") == "raw";
+  s.raw = !p.count("input_description");
   s.group = text(p, "group");
   s.layout = text(p, "layout", action == Action::Set ? "auto" : "materialize");
   if (s.layout != "auto" && s.layout != "view" && s.layout != "materialize") {
@@ -325,7 +324,7 @@ Result<OperationPreparation> prepare_alpha(
       return Answer(mismatch("external alpha shape/structure mismatch"));
     }
     if (!s.scalar) {
-      Params source_params{{"metadata_mode", std::string("raw")}};
+      Params source_params;
       auto alpha_desc = effective_description(inputs[1], source_params, true);
       if (!alpha_desc.ok()) {
         return Answer(alpha_desc.status());
@@ -390,7 +389,7 @@ Result<OperationPreparation> prepare_alpha(
   if (!s.raw) {
     std::optional<TensorDescription> alpha_description = desc;
     if (s.external) {
-      Params source_params{{"metadata_mode", std::string("raw")}};
+      Params source_params;
       auto resolved = effective_description(inputs[1], source_params, true);
       if (!resolved.ok()) {
         return Answer(resolved.status());
@@ -544,13 +543,6 @@ Result<OperationPreparation> prepare_alpha(
     if (!valid.ok()) {
       return Answer(valid);
     }
-    auto encoded = encode_tensor_description(*desc);
-    if (!encoded.ok()) {
-      return Answer(encoded.status());
-    }
-    if (!s.raw) {
-      output_spec.facets = output_facets(inputs[0], *desc);
-    }
   }
   output.metadata.result_schema =
       std::make_shared<const SchemaTemplate>(std::move(schema));
@@ -644,7 +636,7 @@ ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_extent, phase.query.resources));
+      phase.query.tile_extent));
   return result;
 }
 Poll empty_result(const ResultProgramPhase& phase) try {
@@ -683,13 +675,11 @@ Status generic_view(const ResultProgramPhase& phase, const Preparation& s,
     inspect = [&](const Region& region) {
       require(phase.consume_work(1 + rank));
       auto window = take(input.acquire(region, phase.query.cancellation));
-      auto value = execution_internal::ResultWindowAccess::affine(window);
+      auto value = window.affine_view();
       if (!value.ok()) {
         if (value.status().code != ErrorCode::NotFound)
           return value.status();
-        auto split =
-            execution_internal::ResultWindowAccess::visit_backing_regions(
-                window, phase.resources, inspect);
+        auto split = window.visit_backing_regions(phase.resources, inspect);
         if (!split.ok())
           return split.status();
         return split.value() ? Status::success() : unavailable_view();
@@ -789,7 +779,7 @@ Status evaluate(const ResultProgramPhase& phase, const Preparation& s,
   const auto axis = output_axis(s, spec);
   const auto channels = axis ? box.dimensions()[*axis] : RegionDimension{0, 1};
   const std::size_t width = s.narrow ? 4 : 8;
-  input_internal::Float32Environment environment;
+  plugin_internal::FloatingEnvironment environment;
   const std::function<Status(std::uint64_t)> consume = [&](std::uint64_t n) {
     if (phase.query.cancellation.cancelled())
       return Status{ErrorCode::Cancelled, "alpha exact arithmetic cancelled"};
@@ -813,9 +803,7 @@ Status evaluate(const ResultProgramPhase& phase, const Preparation& s,
               .acquire(format_result::mapped_region(selected, s.alpha_map.axes),
                        phase.query.cancellation)));
     const auto work =
-        take(execution_internal::ResultWindowAccess::read_work(color)) +
-        (alpha ? take(execution_internal::ResultWindowAccess::read_work(*alpha))
-               : 0);
+        take(color.read_work()) + (alpha ? take(alpha->read_work()) : 0);
     const auto calculate = [&](const std::uint8_t* colors,
                                const std::uint8_t* weights, std::uint64_t n) {
       if (!slot.color && !slot.alpha) {
@@ -927,9 +915,6 @@ struct State final {
   Footprint output;
   explicit State(const Preparation* prepared) : state(prepared) {}
   Poll poll(const ResultProgramPhase& phase) try {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     auto scratch =
         take(phase.resources.reserve(ResourceCapacity::host(16384, 16384)));
     const auto& spec = phase.query.output.result_schema->tensors[0];
@@ -1067,8 +1052,7 @@ OperationDefinition alpha_definition(const std::string& key, Action action,
   t.requires_metadata_specialization = true;
   t.workspace_bytes = 16384;
   t.parameter_schema = {
-      {"metadata_mode", OperationParameterType::String, false},
-      {"metadata_override", OperationParameterType::String, false},
+      {"input_description", OperationParameterType::String, false},
       {"group", OperationParameterType::String, false},
       {"axis", OperationParameterType::Int64, false},
       {"alpha_source", OperationParameterType::String, false},

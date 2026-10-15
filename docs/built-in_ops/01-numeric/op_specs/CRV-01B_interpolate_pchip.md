@@ -44,7 +44,7 @@ and repetition are unrestricted; preserve query order in output.
 
 For every nonempty output request, request complete x, y and query Results with Data, Validation and Descriptor (role 13), validate the complete x array and evaluate every query entry. The PCHIP-specific y support and numerical
 profile below replace linear's two-endpoint support and accelerated bit equality.
-Output facets are empty, no axis output is added and no units are inferred.
+Output carries no domain description, no axis output is added and no units are inferred.
 All inputs support the same legal immutable stride/offset layouts as linear.
 Required static String parameters dtype and out_of_domain are supplied explicitly
 in direct nodes; constructors write float64 and reject respectively. No method,

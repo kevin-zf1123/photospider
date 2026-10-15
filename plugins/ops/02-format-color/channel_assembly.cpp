@@ -14,10 +14,10 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "common/domain/model_coordinates.hpp"
 #include "common/registry.hpp"
-#include "core/status_helpers.hpp"
-#include "core/utf8_validation.hpp"
-#include "data/model_coordinates.hpp"
+#include "photospider/core/status_helpers.hpp"
+#include "photospider/core/utf8_validation.hpp"
 #include "photospider/data/region_runs.hpp"
 #include "photospider/ops/format/channel_editing.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
@@ -96,133 +96,6 @@ Result<std::string> unhex(const std::string& text) {
         core_internal::invalid_schema_domain("invalid UTF-8 selector"));
   return Result<std::string>(std::move(out));
 }
-TensorInterpretation interpretation(const TensorDescription& d) {
-  return {d.model,       d.primaries,  d.transfer,         d.reference,
-          d.association, d.white,      d.primaries_xy,     d.profile,
-          d.convention,  d.configured, d.analytic_binding, d.coordinates};
-}
-bool empty(const TensorInterpretation& d) {
-  return d.model.empty() && d.primaries.empty() && d.transfer.empty() &&
-         d.reference.empty() && d.association.empty() && !d.white &&
-         !d.primaries_xy && !d.profile && !d.configured &&
-         !d.analytic_binding && !d.coordinates;
-}
-Status overlay(TensorInterpretation* value, const TensorInterpretation& target,
-               bool assertion) {
-  const bool described = !empty(*value);
-  if (!assertion && !value->model.empty() && !target.model.empty() &&
-      target.model != value->model) {
-    value->primaries.clear();
-    value->transfer.clear();
-    value->white.reset();
-    value->primaries_xy.reset();
-    value->profile.reset();
-    value->configured.reset();
-    value->analytic_binding.reset();
-    value->coordinates.reset();
-    value->association.clear();
-  }
-  const auto text = [assertion](std::string* a, const std::string& b) {
-    if (b.empty())
-      return true;
-    if (assertion && !a->empty() && *a != b)
-      return false;
-    *a = b;
-    return true;
-  };
-  if (!text(&value->model, target.model) ||
-      !text(&value->primaries, target.primaries) ||
-      !text(&value->transfer, target.transfer) ||
-      !text(&value->reference, target.reference) ||
-      !text(&value->association, target.association))
-    return core_internal::invalid_schema_domain(
-        "conflicting component interpretation");
-  if (!empty(target)) {
-    if (assertion && described && value->convention != target.convention)
-      return core_internal::invalid_schema_domain(
-          "conflicting coordinate conventions");
-    value->convention = target.convention;
-  }
-  const auto field = [assertion](auto* a, const auto& b) {
-    if (!b)
-      return true;
-    if (assertion && *a && !(**a == *b))
-      return false;
-    *a = b;
-    return true;
-  };
-  if (!field(&value->white, target.white) ||
-      !field(&value->primaries_xy, target.primaries_xy) ||
-      !field(&value->profile, target.profile) ||
-      !field(&value->configured, target.configured) ||
-      !field(&value->analytic_binding, target.analytic_binding) ||
-      !data_internal::overlay_model_coordinates(&value->coordinates,
-                                                target.coordinates, assertion))
-    return core_internal::invalid_schema_domain(
-        "conflicting component reference");
-  return Status::success();
-}
-Status overlay(TensorChannelDescription* value,
-               const TensorChannelDescription& target, bool assertion) {
-  for (auto pair : {std::make_pair(&value->name, &target.name),
-                    std::make_pair(&value->role, &target.role),
-                    std::make_pair(&value->unit, &target.unit)}) {
-    if (pair.second->empty())
-      continue;
-    if (assertion && !pair.first->empty() && *pair.first != *pair.second)
-      return core_internal::invalid_schema_domain(
-          "conflicting destination component field");
-    *pair.first = *pair.second;
-  }
-  if (target.encoding) {
-    if (assertion && value->encoding && !(*value->encoding == *target.encoding))
-      return core_internal::invalid_schema_domain(
-          "conflicting component encoding");
-    value->encoding = target.encoding;
-  }
-  if (target.sampling) {
-    if (assertion && value->sampling && !(*value->sampling == *target.sampling))
-      return core_internal::invalid_schema_domain(
-          "conflicting component sampling");
-    value->sampling = target.sampling;
-  }
-  if (target.interpretation) {
-    if (!value->interpretation)
-      value->interpretation.emplace();
-    return overlay(&*value->interpretation, *target.interpretation, assertion);
-  }
-  return Status::success();
-}
-TensorChannelDescription component(const std::optional<TensorDescription>& d,
-                                   std::uint64_t index, bool channels) {
-  TensorChannelDescription out;
-  if (!d)
-    return out;
-  if (channels && !d->channels.empty())
-    out = d->channels[index];
-  else if (!channels && d->component)
-    out = *d->component;
-  if (!out.encoding)
-    out.encoding = d->encoding;
-  if (!out.sampling)
-    out.sampling = d->sampling;
-  auto global = interpretation(*d);
-  if (out.interpretation)
-    overlay(&global, *out.interpretation, false);
-  if (!empty(global))
-    out.interpretation = global;
-  if (channels) {
-    for (const auto& group : d->groups)
-      for (std::size_t j = 0; j < group.indices.size(); ++j)
-        if (group.indices[j] == index) {
-          overlay(&out, group.components[j], false);
-          if (!out.interpretation)
-            out.interpretation.emplace();
-          overlay(&*out.interpretation, group.interpretation, false);
-        }
-  }
-  return out;
-}
 const ResultTensorSpec& tensor(const OperationMetadata& input) {
   require(tensor_ops::check_tensor(input));
   return input.result_schema->tensors[0];
@@ -243,19 +116,12 @@ Result<OperationPreparation> prepare(
   if (inputs.empty())
     return Answer(core_internal::invalid_schema_domain(
         "assembly requires at least one input"));
-  const auto mode = std::get<std::string>(p.at("metadata_mode"));
   const auto layout = std::get<std::string>(p.at("layout"));
-  if (mode != "respect" && mode != "raw" && mode != "override")
-    return Answer(
-        core_internal::invalid_schema_domain("invalid metadata_mode"));
   if (layout != "auto" && layout != "view" && layout != "materialize")
     return Answer(core_internal::invalid_schema_domain("invalid layout"));
-  auto override_records = records(p, "input_overrides");
+  auto override_records = records(p, "input_descriptions");
   if (!override_records.ok())
     return Answer(override_records.status());
-  if ((mode == "override") != !override_records.value().empty())
-    return Answer(core_internal::invalid_schema_domain(
-        "input_overrides must occur exactly in override mode"));
   std::map<std::uint32_t, TensorDescription> overrides;
   std::uint64_t previous = 0;
   for (const auto& row : override_records.value()) {
@@ -264,7 +130,7 @@ Result<OperationPreparation> prepare(
     if (fields.size() != 2 || !number(fields[0], &port) ||
         port >= inputs.size() || (!overrides.empty() && port <= previous))
       return Answer(core_internal::invalid_schema_domain(
-          "input_overrides requires sorted unique input ordinals"));
+          "input_descriptions requires sorted unique input ordinals"));
     auto value = tensor_description_from_parameter(fields[1]);
     if (!value.ok())
       return Answer(value.status());
@@ -302,22 +168,11 @@ Result<OperationPreparation> prepare(
     std::optional<TensorDescription> description;
     if (overrides.count(i)) {
       description = overrides.at(i);
-    } else {
-      for (const auto& facet : input.facets)
-        if (facet.key == "photospider.tensor-description") {
-          auto decoded = decode_tensor_description(facet);
-          if (!decoded.ok()) {
-            if (mode != "raw")
-              return Answer(decoded.status());
-          } else {
-            description = decoded.take_value();
-          }
-        }
     }
     if (description) {
       auto status = validate_tensor_description(*description, input.descriptor);
       if (!status.ok()) {
-        if (mode != "raw")
+        if (description)
           return Answer(status);
         description.reset();
       }
@@ -353,12 +208,11 @@ Result<OperationPreparation> prepare(
           !input.batch_axes.empty())
         return Answer(mismatch(where + "scalar requires generic shape [1]"));
     } else if (single) {
-      if (dimensions.size() > 7 ||
-          (mode != "raw" && description && description->channel_axis))
+      if (dimensions.size() > 7 || (description && description->channel_axis))
         return Answer(core_internal::invalid_schema_domain(
             where + "component has an existing channel axis or rank eight"));
     } else {
-      if (mode != "raw" && description && description->channel_axis) {
+      if (description && description->channel_axis) {
         if (axis && *axis != *description->channel_axis)
           return Answer(core_internal::invalid_schema_domain(
               where + "axis assertion conflicts with description"));
@@ -368,7 +222,7 @@ Result<OperationPreparation> prepare(
         return Answer(core_internal::invalid_schema_domain(
             where + "channel axis must be supplied or described"));
     }
-    if (mode == "raw" && description && description->channel_axis != axis)
+    if (description && description->channel_axis != axis)
       description.reset();
     auto nonchannel = dimensions;
     if (axis)
@@ -415,7 +269,6 @@ Result<OperationPreparation> prepare(
     return Answer(core_internal::invalid_schema_domain(
         "output channel axis out of range"));
   assembly.axis = output_axis;
-  std::map<std::uint64_t, TensorChannelDescription> mapped_targets;
   std::uint64_t channels = 0;
   if (member != 2) {
     for (std::size_t i = 0; i < inputs.size(); ++i) {
@@ -441,7 +294,7 @@ Result<OperationPreparation> prepare(
     for (const auto& row : rows.value()) {
       auto fields = split(row, ',');
       std::uint64_t port = 0, dest = 0, selected = 0;
-      if (fields.size() != 5 || !number(fields[0], &port) ||
+      if (fields.size() != 4 || !number(fields[0], &port) ||
           port >= inputs.size() || !number(fields[3], &dest) ||
           dest >= channels || !destinations.insert(dest).second)
         return Answer(core_internal::invalid_schema_domain(
@@ -458,7 +311,7 @@ Result<OperationPreparation> prepare(
           return Answer(core_internal::invalid_schema_domain(
               "source selector index out of range"));
       } else {
-        if (mode == "raw" || (fields[1] != "name" && fields[1] != "role"))
+        if ((fields[1] != "name" && fields[1] != "role"))
           return Answer(core_internal::invalid_schema_domain(
               "raw permits only index selectors"));
         const auto& desc = descriptions[port];
@@ -482,19 +335,6 @@ Result<OperationPreparation> prepare(
           return Answer(
               core_internal::invalid_schema_domain("source selector absent"));
       }
-      if (fields[4] != "_") {
-        auto target = tensor_description_from_parameter(fields[4]);
-        if (!target.ok())
-          return Answer(target.status());
-        TensorDescription only;
-        only.component = target.value().component;
-        auto canonical = tensor_description_parameter(only);
-        if (!only.component || !canonical.ok() ||
-            canonical.value() != fields[4])
-          return Answer(core_internal::invalid_schema_domain(
-              "mapping destination must contain only a component"));
-        mapped_targets.emplace(dest, *only.component);
-      }
       assembly.spans.push_back(
           {static_cast<std::uint32_t>(port), dest, selected, 1});
     }
@@ -517,188 +357,6 @@ Result<OperationPreparation> prepare(
   if (output_count.value() > (1ULL << 40))
     return Answer(
         core_internal::invalid_schema_domain("output exceeds element limit"));
-  TensorDescription result;
-  result.channel_axis = assembly.axis;
-  std::optional<TensorDescription> target;
-  if (p.count("output_description")) {
-    auto decoded = tensor_description_from_parameter(
-        std::get<std::string>(p.at("output_description")));
-    if (!decoded.ok())
-      return Answer(decoded.status());
-    target = decoded.take_value();
-    auto status =
-        validate_tensor_description(*target, output_tensor.descriptor);
-    if (!status.ok())
-      return Answer(status);
-    if ((target->channel_axis && *target->channel_axis != assembly.axis) ||
-        target->component)
-      return Answer(core_internal::invalid_schema_domain(
-          "output description disagrees with channel structure"));
-    result.groups = target->groups;
-  }
-  // Coordinate assertions apply to every connected input, including unused
-  // ones.
-  std::optional<std::vector<TensorAxisDescription>> common_axes;
-  bool all_axes = true;
-  for (std::size_t i = 0; i < descriptions.size(); ++i) {
-    if (assembly.scalars[i])
-      continue;
-    if (mode == "raw" || !descriptions[i] || descriptions[i]->axes.empty()) {
-      all_axes = false;
-      continue;
-    }
-    auto axes = descriptions[i]->axes;
-    if (assembly.axes[i])
-      axes.erase(axes.begin() + *assembly.axes[i]);
-    if (common_axes) {
-      for (std::size_t j = 0; j < axes.size(); ++j) {
-        auto& old = (*common_axes)[j];
-        const auto& fresh = axes[j];
-        if ((!old.name.empty() && !fresh.name.empty() &&
-             old.name != fresh.name) ||
-            (!old.unit.empty() && !fresh.unit.empty() &&
-             old.unit != fresh.unit) ||
-            old.origin != fresh.origin || old.step != fresh.step)
-          return Answer(core_internal::invalid_schema_domain(
-              "input " + std::to_string(i) + ": conflicting nonchannel grid"));
-        if (old.name != fresh.name)
-          old.name.clear();
-        if (old.unit != fresh.unit)
-          old.unit.clear();
-      }
-    } else {
-      common_axes = std::move(axes);
-    }
-  }
-  if (common_axes && all_axes) {
-    result.axes = *common_axes;
-    result.axes.insert(result.axes.begin() + assembly.axis,
-                       TensorAxisDescription{});
-  }
-  if (target && !target->axes.empty()) {
-    if (common_axes) {
-      for (std::size_t j = 0; j < shape.size(); ++j) {
-        const auto& a = (*common_axes)[j];
-        const auto& b = target->axes[j < assembly.axis ? j : j + 1];
-        if ((!a.name.empty() && !b.name.empty() && a.name != b.name) ||
-            (!a.unit.empty() && !b.unit.empty() && a.unit != b.unit) ||
-            a.origin != b.origin || a.step != b.step)
-          return Answer(core_internal::invalid_schema_domain(
-              "target cannot override nonchannel coordinate grid"));
-      }
-    }
-    result.axes = target->axes;
-  }
-  const bool complete = p.count("output_description_complete") &&
-                        std::get<bool>(p.at("output_description_complete"));
-  if (complete && !target)
-    return Answer(core_internal::invalid_schema_domain(
-        "complete output description is absent"));
-  bool semantic = target.has_value() || !mapped_targets.empty();
-  for (const auto& d : descriptions)
-    semantic =
-        semantic || (d && (!d->channels.empty() || d->component ||
-                           !empty(interpretation(*d)) || !d->groups.empty()));
-  if (semantic) {
-    if (channels > 1024)
-      return Answer(
-          Status{ErrorCode::ResourceExhausted, "channel metadata capacity"});
-    result.channels.resize(channels);
-    TensorInterpretation common;
-    for (const auto& span : assembly.spans) {
-      for (std::uint64_t j = 0; j < span.count; ++j) {
-        const auto k = span.destination + j;
-        auto value = complete
-                         ? TensorChannelDescription{}
-                         : component(descriptions[span.port], span.source + j,
-                                     assembly.axes[span.port].has_value());
-        TensorChannelDescription assignment;
-        if (target) {
-          auto global = interpretation(*target);
-          if (!empty(global))
-            assignment.interpretation = global;
-          if (!target->channels.empty()) {
-            auto status = overlay(&assignment, target->channels[k], true);
-            if (!status.ok())
-              return Answer(status);
-          }
-          for (const auto& group : target->groups)
-            for (std::size_t g = 0; g < group.indices.size(); ++g)
-              if (group.indices[g] == k) {
-                auto status = overlay(&assignment, group.components[g], true);
-                if (!status.ok())
-                  return Answer(status);
-                if (!assignment.interpretation)
-                  assignment.interpretation.emplace();
-                status = overlay(&*assignment.interpretation,
-                                 group.interpretation, true);
-                if (!status.ok())
-                  return Answer(status);
-              }
-        }
-        if (mapped_targets.count(k)) {
-          auto status = overlay(&assignment, mapped_targets.at(k), true);
-          if (!status.ok())
-            return Answer(status);
-        }
-        auto status = overlay(&value, assignment, false);
-        if (!status.ok())
-          return Answer(status);
-        // Independent explicit target groups may intentionally differ. Without
-        // a target interpretation, retain respect's common-field assertion.
-        if (mode != "raw" && value.interpretation) {
-          auto respected = *value.interpretation;
-          if (assignment.interpretation) {
-            const auto& assigned = *assignment.interpretation;
-            if (!assigned.model.empty()) {
-              respected.model.clear();
-              respected.primaries.clear();
-              respected.transfer.clear();
-              respected.association.clear();
-              respected.white.reset();
-              respected.primaries_xy.reset();
-              respected.profile.reset();
-              respected.coordinates.reset();
-            }
-            if (!assigned.primaries.empty())
-              respected.primaries.clear();
-            if (!assigned.transfer.empty())
-              respected.transfer.clear();
-            if (!assigned.reference.empty())
-              respected.reference.clear();
-            if (!assigned.association.empty())
-              respected.association.clear();
-            if (assigned.white)
-              respected.white.reset();
-            if (assigned.primaries_xy)
-              respected.primaries_xy.reset();
-            if (assigned.profile)
-              respected.profile.reset();
-            if (assigned.coordinates && respected.coordinates) {
-              const auto& assigned_coordinates = *assigned.coordinates;
-              auto& remaining = *respected.coordinates;
-              if (!assigned_coordinates.scale.empty())
-                remaining.scale.clear();
-              if (!assigned_coordinates.observer.empty())
-                remaining.observer.clear();
-              if (!assigned_coordinates.gray_kind.empty())
-                remaining.gray_kind.clear();
-              if (assigned_coordinates.ncl_coefficients)
-                remaining.ncl_coefficients.reset();
-            }
-          }
-          status = overlay(&common, respected, true);
-          if (!status.ok())
-            return Answer(status);
-        }
-        result.channels[k] = std::move(value);
-      }
-    }
-  }
-  auto encoded = encode_tensor_description(result);
-  if (!encoded.ok())
-    return Answer(encoded.status());
-  output_tensor.facets = {encoded.take_value()};
   if (any_image) {
     auto physical = *image_layout;
     if (physical.height_axis >= assembly.axis)
@@ -733,7 +391,7 @@ ResultBuilder assembly_builder(const ResultProgramPhase& phase,
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_extent, phase.query.resources));
+      phase.query.tile_extent));
   return result;
 }
 Poll empty_result(const ResultProgramPhase& phase) try {
@@ -798,27 +456,26 @@ Status generic_view(const ResultProgramPhase& phase, const Assembly& a,
     std::function<Status(const Region&, const ResultTensorReadWindow&)> inspect;
     inspect = [&](const Region& box, const ResultTensorReadWindow& window) {
       require(phase.consume_work(rank + axes.size()));
-      auto affine = execution_internal::ResultWindowAccess::affine(window);
+      auto affine = window.affine_view();
       if (!affine.ok()) {
         if (affine.status().code != ErrorCode::NotFound)
           return affine.status();
-        auto partitioned =
-            execution_internal::ResultWindowAccess::visit_backing_regions(
-                window, phase.resources, [&](const Region& region) {
-                  const auto selected =
-                      format_result::mapped_preimage(box, region, axes);
-                  if (selected) {
-                    const auto& part = *selected;
-                    auto source = take(
-                        phase.tensors->at({span.port, 0})
-                            .acquire(format_result::mapped_region(part, axes),
-                                     phase.query.cancellation));
-                    auto status = inspect(part, source);
-                    if (!status.ok())
-                      return status;
-                  }
-                  return Status::success();
-                });
+        auto partitioned = window.visit_backing_regions(
+            phase.resources, [&](const Region& region) {
+              const auto selected =
+                  format_result::mapped_preimage(box, region, axes);
+              if (selected) {
+                const auto& part = *selected;
+                auto source =
+                    take(phase.tensors->at({span.port, 0})
+                             .acquire(format_result::mapped_region(part, axes),
+                                      phase.query.cancellation));
+                auto status = inspect(part, source);
+                if (!status.ok())
+                  return status;
+              }
+              return Status::success();
+            });
         if (!partitioned.ok())
           return partitioned.status();
         return partitioned.value() ? Status::success() : unavailable_view();
@@ -1044,11 +701,8 @@ OperationDefinition definition(const std::string& key, int member,
   t.cacheable = false;
   t.requires_metadata_specialization = true;
   t.parameter_schema = {
-      {"input_overrides", OperationParameterType::String, false},
+      {"input_descriptions", OperationParameterType::String, false},
       {"layout", OperationParameterType::String},
-      {"metadata_mode", OperationParameterType::String},
-      {"output_description", OperationParameterType::String, false},
-      {"output_description_complete", OperationParameterType::Bool, false},
       {"expected_inputs", OperationParameterType::String, false},
       {"authoring_member", OperationParameterType::String, false}};
   if (member == 0)
@@ -1172,27 +826,14 @@ Result<std::optional<TensorDescription>> edit_description(
     const format::ChannelAssemblyOptions& options) {
   using Answer = Result<std::optional<TensorDescription>>;
   std::optional<TensorDescription> result;
-  if (options.input_overrides.count(port)) {
-    result = options.input_overrides.at(port);
-  } else {
-    for (const auto& f : tensor(metadata).facets)
-      if (f.key == "photospider.tensor-description") {
-        auto decoded = decode_tensor_description(f);
-        if (!decoded.ok()) {
-          if (options.metadata_mode != "raw")
-            return Answer(decoded.status());
-        } else {
-          result = decoded.take_value();
-        }
-      }
+  if (options.input_descriptions.count(port)) {
+    result = options.input_descriptions.at(port);
   }
   if (result) {
     auto valid =
         validate_tensor_description(*result, tensor(metadata).descriptor);
     if (!valid.ok()) {
-      if (options.metadata_mode != "raw")
-        return Answer(valid);
-      result.reset();
+      return Answer(valid);
     }
   }
   return Answer(std::move(result));
@@ -1236,10 +877,7 @@ Result<WorkflowNodeOutput> edit_channels(
     const format::ChannelAssemblyOptions& options) try {
   using Answer = Result<WorkflowNodeOutput>;
   if (inputs.empty() || inputs.size() > 1024 || inputs[0].structure.component ||
-      inputs[0].structure.scalar ||
-      (options.metadata_mode != "respect" && options.metadata_mode != "raw" &&
-       options.metadata_mode != "override") ||
-      (options.metadata_mode == "override") != !options.input_overrides.empty())
+      inputs[0].structure.scalar)
     return Answer(core_internal::invalid_schema_domain(
         "FMT-03 invalid base/metadata mode/arity"));
   if (!replacements) {
@@ -1248,7 +886,7 @@ Result<WorkflowNodeOutput> edit_channels(
         return Answer(core_internal::invalid_schema_domain(
             "FMT-03A external inputs must be explicit scalars"));
   }
-  for (const auto& entry : options.input_overrides)
+  for (const auto& entry : options.input_descriptions)
     if (entry.first >= inputs.size())
       return Answer(core_internal::invalid_schema_domain(
           "FMT-03 override input ordinal is absent"));
@@ -1266,7 +904,7 @@ Result<WorkflowNodeOutput> edit_channels(
     return Answer(base_description.status());
   auto axis = inputs[0].structure.axis;
   auto desc = base_description.take_value();
-  if (options.metadata_mode != "raw" && desc && desc->channel_axis) {
+  if (desc && desc->channel_axis) {
     if (axis && axis != desc->channel_axis)
       return Answer(core_internal::invalid_schema_domain(
           "FMT-03 base axis disagrees with metadata"));
@@ -1275,7 +913,7 @@ Result<WorkflowNodeOutput> edit_channels(
   if (!axis || *axis >= base.descriptor.shape.size())
     return Answer(core_internal::invalid_schema_domain(
         "FMT-03 base axis required/in range"));
-  if (options.metadata_mode == "raw" && desc && desc->channel_axis != axis)
+  if (false && desc && desc->channel_axis != axis)
     desc.reset();
   inputs[0].structure.axis = axis;
   const auto count = base.descriptor.shape[*axis];
@@ -1290,8 +928,7 @@ Result<WorkflowNodeOutput> edit_channels(
     for (std::uint64_t i = 0; i < count; ++i)
       effective[i].selector.value = std::to_string(i);
     for (const auto& r : *replacements) {
-      auto destination = edit_select(r.destination, count, desc, true,
-                                     options.metadata_mode == "raw");
+      auto destination = edit_select(r.destination, count, desc, true, false);
       if (!destination.ok())
         return Answer(destination.status());
       if (!changed.insert(destination.value()).second)
@@ -1382,12 +1019,6 @@ Result<WorkflowNodeOutput> edit_channels(
     structures.push_back(input.structure);
   }
   std::vector<format::ChannelMapping> mapping;
-  std::vector<std::optional<std::uint64_t>> base_selection(output_count);
-  TensorDescription target;
-  target.channel_axis = axis;
-  target.channels.resize(output_count);
-  if (desc && !desc->axes.empty() && options.metadata_mode != "raw")
-    target.axes = desc->axes;
   for (std::size_t k = 0; k < effective.size(); ++k) {
     const auto& e = effective[k];
     if (e.input >= inputs.size() ||
@@ -1399,128 +1030,18 @@ Result<WorkflowNodeOutput> edit_channels(
       return Answer(d.status());
     const auto& structure = structures[e.input];
     auto a = structure.axis;
-    if (options.metadata_mode != "raw" && d.value() &&
-        d.value()->channel_axis && !structure.scalar && !structure.component)
+    if (d.value() && d.value()->channel_axis && !structure.scalar &&
+        !structure.component)
       a = d.value()->channel_axis;
     const auto& shape = tensor(metadata[e.input]).descriptor.shape;
     if (shape.empty() || (a && *a >= shape.size()))
       return Answer(mismatch("FMT-03 source rank/axis mismatch"));
     const auto n = a ? shape[*a] : 1;
-    auto selected = edit_select(e.selector, n, d.value(), a.has_value(),
-                                options.metadata_mode == "raw");
+    auto selected = edit_select(e.selector, n, d.value(), a.has_value(), false);
     if (!selected.ok())
       return Answer(selected.status());
-    mapping.push_back(
-        {e.input, "index", std::to_string(selected.value()), k, {}});
-    if (e.input == 0)
-      base_selection[k] = selected.value();
-    target.channels[k] = replacements ? component(desc, k, true)
-                         : e.input == 0
-                             ? component(desc, selected.value(), true)
-                             : TensorChannelDescription{};
+    mapping.push_back({e.input, "index", std::to_string(selected.value()), k});
   }
-  if (desc) {
-    for (auto group : desc->groups) {
-      bool keep = true;
-      const auto remap = [&](std::uint64_t source, std::uint64_t* destination) {
-        if (replacements) {
-          *destination = source;
-          return true;
-        }
-        unsigned matches = 0;
-        for (std::size_t k = 0; k < base_selection.size(); ++k)
-          if (base_selection[k] == source) {
-            *destination = k;
-            ++matches;
-          }
-        return matches == 1;
-      };
-      for (auto& index : group.indices)
-        keep = remap(index, &index) && keep;
-      if (group.alpha)
-        keep = remap(*group.alpha, &*group.alpha) && keep;
-      if (keep)
-        target.groups.push_back(std::move(group));
-    }
-  }
-  if (options.output_description) {
-    const auto& explicit_target = *options.output_description;
-    auto shape = base.descriptor;
-    shape.shape[*axis] = output_count;
-    auto valid = validate_tensor_description(explicit_target, shape);
-    if (!valid.ok())
-      return Answer(valid);
-    if (explicit_target.component ||
-        (explicit_target.channel_axis && explicit_target.channel_axis != axis))
-      return Answer(core_internal::invalid_schema_domain(
-          "FMT-03 output channel structure mismatch"));
-    for (std::size_t k = 0; k < output_count; ++k) {
-      auto assigned = target.channels[k];
-      auto global = interpretation(explicit_target);
-      if (!empty(global)) {
-        if (!assigned.interpretation)
-          assigned.interpretation.emplace();
-        auto status = overlay(&*assigned.interpretation, global, false);
-        if (!status.ok())
-          return Answer(status);
-      }
-      if (!explicit_target.channels.empty()) {
-        auto status = overlay(&assigned, explicit_target.channels[k], false);
-        if (!status.ok())
-          return Answer(status);
-      }
-      for (const auto& group : explicit_target.groups)
-        for (std::size_t j = 0; j < group.indices.size(); ++j)
-          if (group.indices[j] == k) {
-            auto status = overlay(&assigned, group.components[j], false);
-            if (!status.ok())
-              return Answer(status);
-            if (!assigned.interpretation)
-              assigned.interpretation.emplace();
-            status =
-                overlay(&*assigned.interpretation, group.interpretation, false);
-            if (!status.ok())
-              return Answer(status);
-          }
-      TensorDescription before, after;
-      before.component = target.channels[k];
-      after.component = assigned;
-      if (replacements && !changed.count(k) &&
-          tensor_description_parameter(before).value() !=
-              tensor_description_parameter(after).value())
-        return Answer(core_internal::invalid_schema_domain(
-            "FMT-03B target changes an unlisted component"));
-      target.channels[k] = std::move(assigned);
-    }
-    if (!explicit_target.axes.empty())
-      target.axes = explicit_target.axes;
-    std::vector<TensorColorGroup> retained;
-    for (const auto& group : target.groups) {
-      TensorDescription trial = target;
-      trial.groups = {group};
-      if (encode_tensor_description(trial).ok())
-        retained.push_back(group);
-    }
-    // Explicit groups replace overlapping/namesake groups only. Independent
-    // complete groups retain their original interpretation.
-    target.groups.clear();
-    for (const auto& old : retained) {
-      bool replaced = false;
-      for (const auto& fresh : explicit_target.groups) {
-        replaced = replaced || old.name == fresh.name;
-        for (auto index : old.indices)
-          replaced =
-              replaced || std::find(fresh.indices.begin(), fresh.indices.end(),
-                                    index) != fresh.indices.end();
-      }
-      if (!replaced)
-        target.groups.push_back(old);
-    }
-    target.groups.insert(target.groups.end(), explicit_target.groups.begin(),
-                         explicit_target.groups.end());
-  }
-  auto lowered_options = options;
-  lowered_options.output_description = target;
   std::vector<format::ChannelSourceStructure> primitive_structures;
   std::string fused_structure = "v1";
   for (const auto& structure : structures) {
@@ -1531,14 +1052,12 @@ Result<WorkflowNodeOutput> edit_channels(
             ? ";c"
             : ";h" + (structure.axis ? std::to_string(*structure.axis) : "_");
   }
-  auto output = format::assemble_mapped_channels(staged, references, *axis,
-                                                 primitive_structures, mapping,
-                                                 lowered_options);
+  auto output = format::assemble_mapped_channels(
+      staged, references, *axis, primitive_structures, mapping, options);
   if (!output.ok())
     return Answer(output.status());
   auto& node = staged.nodes.back();
   node.parameters["input_structure"] = fused_structure;
-  node.parameters["output_description_complete"] = true;
   node.parameters["expected_inputs"] = assembly_source_assertion(metadata);
   node.parameters["authoring_member"] =
       std::string(replacements ? "FMT-03B" : "FMT-03A");

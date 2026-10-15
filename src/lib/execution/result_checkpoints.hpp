@@ -11,8 +11,8 @@
 #include <tuple>
 #include <utility>
 
-#include "core/checked_math.hpp"
 #include "execution/tile_records.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/plugin/result_program.hpp"
 
 namespace ps::execution_internal {

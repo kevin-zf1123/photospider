@@ -29,7 +29,7 @@ batch axes. `input` is Float32/64, rank 1..8, positive extents and at most 2^40
 elements. Bounds are same-dtype scalar tensors of shape [1], finite and ordered
 lower<upper. Output port `values` is an immutable Result using
 `photospider.tensor` v1/member `samples`, preserving input shape/dtype with
-empty facets. No implicit clipping occurs.
+no attached domain description. No implicit clipping occurs.
 The mathematical formula is (input-lower)/(upper-lower), with whole-expression final rounding.
 This named authoring template expands Result-based remap_range and explicit
 broadcast/constant nodes. Static profile is strict/apple_silicon/x86_64, default

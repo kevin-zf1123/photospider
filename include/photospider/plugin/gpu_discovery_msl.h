@@ -11,7 +11,7 @@
  * record for the same input requests Whole.
  */
 // NOLINTBEGIN(whitespace/indent_namespace)
-#define PS_RESULT_GPU_DISCOVERY_MSL_V3                                     \
+#define PS_RESULT_GPU_DISCOVERY_MSL_V4                                     \
   "#include <metal_stdlib>\nusing namespace metal;\n"                      \
   "bool ps_result_discovery_emit(device atomic_uint* table,uint capacity," \
   "uint port,uint kind,ulong tile) {"                                      \

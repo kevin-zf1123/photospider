@@ -24,7 +24,6 @@ inline Result<std::optional<Value>> whole_input_view(
     if (domain.dimensions()[j].offset ||
         domain.dimensions()[j].extent != shape[j])
       return Answer(std::optional<Value>{});
-  return join_affine_view(values.descriptor(), domain, parts, limits,
-                          values.facets(), values.resources());
+  return join_affine_view(values.descriptor(), domain, parts, limits);
 }
 }  // namespace ps::input_internal

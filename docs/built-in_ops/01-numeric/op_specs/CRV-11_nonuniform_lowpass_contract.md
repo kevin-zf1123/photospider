@@ -23,7 +23,7 @@ registration status, CPU target identity, floating environment, diagnostic prove
 host observation isolation, resource accounting and public/performance acceptance.
 In particular, rounding is nearest/ties-to-even with gradual underflow and the
 caller floating environment is preserved. This is limited inheritance: the ports,
-output kinds/facets, observation units, mathematical rounding boundaries and
+output structures, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
 turn a composite template or structured Result into a generic NUM Value primitive.
 A stated four-ULP final bound uses the shared FP32-scaled contract for both
@@ -121,8 +121,7 @@ id/version/member key. Use the complete `sample_shape()` including batch axes.
 and K=2..1048576. `values` has rank 1..8, positive extents and product <=2^40;
 static axis selects its extent K. The `samples` output is an immutable
 `photospider.tensor` v1 Result member with the original full shape and dtype and
-generic facets, evaluated at the original positions. The output schema selects
-its own resources rather than copying unrelated source facets/resources.
+no attached domain description, evaluated at the original positions. The output retains its backing owners; the schema carries no operation resource configuration.
 Nonempty output has full certified coverage and retains global coordinates and
 source associations.
 Static support_radius is a finite positive Float64; boundary is String default

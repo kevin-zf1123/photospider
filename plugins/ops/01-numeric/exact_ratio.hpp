@@ -8,8 +8,8 @@
 #include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/comparison_profiles.hpp"
 #include "01-numeric/exact_predicate.hpp"
-#include "core/work_consumer.hpp"
 #include "photospider/core/status.hpp"
+#include "photospider/core/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Caller-owned, fixed-capacity exact rational scratch. round() computes
@@ -177,7 +177,7 @@ struct ExactRatioWorkspace final {
     // widen the endpoint, so cancellation in constructing numerator remains
     // exact. No original Float64 operand is narrowed to Float32.
     if (approximate && profile != SequenceProfile::Strict) {
-      input_internal::Float32Environment environment;
+      plugin_internal::FloatingEnvironment environment;
       const int exponent = n_top - d_top + scale;
       if (environment.active() && exponent >= -127 && exponent <= 128) {
         const auto normalized = [](const Integer& integer, int highest) {

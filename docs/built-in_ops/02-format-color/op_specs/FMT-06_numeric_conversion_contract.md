@@ -5,13 +5,13 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_2
+implementation_status: implemented_cpu_result_abi_4
 clarification_status: current_member_complete_extensions_pending
 ---
 
 # FMT-06: numerical dtype and interval conversion
 
-The default registry provides one native Result ABI 3 key,
+The default registry provides one native Result ABI 4 key,
 `numeric.convert_format_strict`. It accepts one single-tensor Result with no
 fields and publishes one `values` output Result containing one tensor. It supports
 all 49 source/target pairs among UInt8, UInt16, Int8, Int16, Int64, Float32 and
@@ -22,7 +22,7 @@ SIMD and eligible SME paths are internal implementations.
 This family and its member remain Proposed. That design status is independent of
 the current registered implementation. The operation preserves Result schema
 identity, tensor key, logical shape and batch axes. It updates the tensor dtype,
-encoding facets and `atomic_trailing_axes` for the conversion. It reports full sample rank
+dtype and `atomic_trailing_axes` for the conversion. It reports full sample rank
 including batch and cell axes at most 8, and a full sample count at most 2^40.
 
 Inherit [FMT-common](FMT_common_contract.md), the NUM numerical baseline and
@@ -95,11 +95,9 @@ These static parameters use the registered operation's typed parameter codec:
 | dtype | Required target type, using the seven lowercase names corresponding to the table. |
 | rescale | Bool, true by default. False rejects explicit range fields/axis tables. |
 | source_range / target_range | Optional typed endpoint pair or complete per-channel pair table; omission independently selects that side's dtype default. |
-| axis | Required nonnegative Int64 cell axis if either range is a table; excludes the Result batch prefix. Assert consistency with effective metadata when present; raw supplies the axis directly. |
+| axis | Required nonnegative Int64 cell axis when a range has more than one pair; excludes the Result batch prefix. A shared one-pair range needs no axis. Pure cast rejects axis. |
 | rounding | ties_even only, inherited default; other modes require explicit preceding NUM operations. |
 | overflow | reject by default, or clip. No wrap mode. |
-| metadata_mode | respect by default; override or raw explicitly. |
-| metadata_override | Effective input interpretation only with override; cannot alter physical shape/dtype/storage. |
 | layout | auto by default; view or materialize. |
 
 An endpoint is an exact finite typed numeric constant, including the represented
@@ -182,42 +180,29 @@ Lanes outside a proven SIMD domain use the exact scalar path. Preserve the
 caller's floating environment. ISA dispatch is an implementation detail of the
 strict operation and does not relax its numerical contract.
 
-## Metadata authority and propagation
+## Explicit numeric ranges and downstream interpretation
 
-In respect mode, an explicitly declared input numeric encoding interval must
-agree with the resolved source interval, including when a default was selected.
-For Float32 described as 0..255 codes, default 0..1 therefore fails; explicitly
-supply [0,255] or change effective interpretation through override/raw. Do not
-silently use metadata in place of the selected default. Interval assertions
-compare lower/upper numeric bounds; orientation lives in the decoding map.
-Thus a prior reversed target [1,0] has stored bounds [0,1] and a reversed decoder,
-not an illegal descending source interval for the next conversion.
+This operation accepts no description or metadata-mode parameter. It chooses
+source and target ranges solely from explicit range parameters or the dtype
+defaults above. A caller treating Float32 samples as 0..255 codes must supply
+`source_range=[0,255]`; the operation cannot discover that interpretation from
+the input. Omitting it selects the Float32 default [0,1].
 
-Preserve applicable color model, primaries/white/transfer, straight alpha
-references, coordinates, names/roles and units. Update dtype-dependent storage
-fields and each component's encoding/decoding relation. If source decoder is
-D and the affine map is f, the target decoder is D composed with inverse(f).
-This is an encoding correspondence, not a guarantee to recover samples lost by
-rounding or clipping. Native coordinates use an identity decoder when no explicit
-encoding exists. Do not claim that alpha byte 255 is mathematical coverage 255.
-Consumers requiring normalized alpha or native color coordinates must decode
-encoded output explicitly; a dtype-only float cast does not perform that step.
-
-Scaling disabled preserves applicable source decoder/code interval while
-changing dtype. No source-range consistency check applies because no mapping
-range is selected. In all cases drop stale sample-validity guarantees; do not
-validate complete RGB/alpha just because descriptions exist. Raw ignores semantic
-source assertions, retains only applicable descriptions/provenance and removes
-encoding/group claims whose propagation is invalid under that reinterpretation.
-Override changes effective source fields for this call, never another consumer.
-Neither mode creates an external alpha relation or a premultiplied canonical image.
+The result carries structural schema and converted samples. It does not carry
+an updated encoding, decoder, model, alpha association or sampling description.
+Callers configure each downstream consumer explicitly. If a source decoder is
+D and the conversion map is invertible f, D composed with inverse(f) describes
+the ideal output encoding; the caller may use that relation when constructing
+its configuration. Rounding and clipping can lose information, so this relation
+is not a promise of exact sample recovery. A pure float cast does not decode
+integer-like alpha codes into normalized coverage.
 
 ## Exact demand, layout and invalidation
 
 For requested coordinates Q, Data is exactly input[Q]. Value conversion checks
 only those samples, including nonfinite integer errors or overflow. Do not read
 other channels, scan global extrema or close over complete color groups. All
-static dtype/shape/bounds/consumed metadata belong to Descriptor support and are
+static dtype/shape/bounds belong to Descriptor support and are
 checked independently of Q. There is no sample-derived Control dependency.
 Dirty samples map to identical logical output coordinates. Static intervals,
 mode, dtype or applicable metadata changes invalidate inference/results; no
@@ -235,8 +220,8 @@ unrequested coverage merely because source bytes are available.
 
 ## Reference algorithm, resources and errors
 
-Resolve modes/types/intervals and validate every static table/description. Build
-bounded per-channel constants and mapping/decoder metadata. Map Q to identical
+Resolve types, ranges and numeric policies; validate every static range table
+and typed endpoint. Build bounded per-channel constants and numeric mappings. Map Q to identical
 source coordinates, acquire admitted read windows, prove any identity view or
 reserve output with target-width layout and prepare required pages. For each
 requested sample, copy identity bytes or classify/transform/convert according
@@ -290,7 +275,7 @@ adds the cell-relative `channel_axis` and selected `channel`. `range_index` refe
 to the static interval table. These fields are added for numerical failures in
 `convert_one`; upstream, resource and cancellation diagnostics keep their original
 content.
-The operation is registered as one CPU strict key using Result operation ABI 3.
+The operation is registered as one CPU strict key using Result operation ABI 4.
 Eligible contiguous spans use internal AArch64 NEON or runtime-checked amd64 AVX2;
 eligible Apple arm64 Float32→UInt8 spatial tiles may use the internal SME path.
 These paths preserve the exact same numerical behavior. No GPU backend is provided.
@@ -300,7 +285,7 @@ These paths preserve the exact same numerical behavior. No GPU backend is provid
 The member lists independent analytic cases. Compare exact integer/rational
 oracles with strict rounding and use explicit bit patterns for NaNs/zero. Test all
 49 pairs, endpoints, outside-interval extrapolation, narrowing, large Int64 values,
-per-channel maps, metadata conflict/override/raw, exact regional failures, static
+per-channel maps, explicit range selection and downstream configuration, exact regional failures, static
 invalid unrequested table entries and whole/disjoint/tile request equivalence.
 Verify view/materialize, context-independent owners, low budgets, cancellation,
 currentness, floating environment and declared fallback diagnostics.

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.33.0
+  VERSION 0.34.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -93,11 +93,8 @@ set(
   src/lib/data/tiles.cpp
   src/lib/data/region_runs.cpp
   src/lib/data/storage.cpp
-  src/lib/data/representation.cpp
-  src/lib/data/layer.cpp
-  src/lib/data/quality.cpp
-  src/lib/data/lut3d_bake.cpp
-  src/lib/data/lut3d_bake_validation.cpp
+  src/lib/data/immutable_resource.cpp
+  src/lib/data/resource_set.cpp
   src/lib/data/result.cpp
   src/lib/data/result_builder.cpp
   src/lib/data/result_tensor_store.cpp
@@ -111,17 +108,11 @@ set(
   src/lib/data/resource_storage.cpp
   src/lib/core/cancellation.cpp
   src/lib/data/value.cpp
-  src/lib/data/tensor_description.cpp
   src/lib/data/planar_image.cpp
-  src/lib/data/semantic.cpp
-  src/lib/data/color_array.cpp
-  src/lib/data/icc_profile.cpp
-  src/lib/data/icc_validation.cpp
-  src/lib/data/ocio_config_resource.cpp
-  src/lib/data/resource_bindings.cpp
   src/lib/plugin/result_fragment_atlas.cpp
   src/lib/plugin/result_program.cpp
   src/lib/plugin/result_plugin_import.cpp
+  src/lib/plugin/result_c_extensions.cpp
   src/lib/plugin/result_c_codec.cpp
   src/lib/plugin/result_c_member.cpp
   src/lib/plugin/result_c_poll_lease.cpp
@@ -153,6 +144,8 @@ set(
   src/lib/execution/native_gpu.cpp
   src/lib/graph/graph_context.cpp
   src/lib/plugin/operation_registry.cpp
+  src/lib/plugin/operation_extensions.cpp
+  src/lib/plugin/validation_dispatch.cpp
   src/lib/core/utf8_validation.cpp)
 if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
   list(APPEND PHOTOSPIDER_KERNEL_SOURCES src/lib/execution/native_gpu_metal.mm)
@@ -162,12 +155,10 @@ endif()
 if(PHOTOSPIDER_ENABLE_VULKAN)
   list(APPEND PHOTOSPIDER_KERNEL_SOURCES src/lib/execution/native_gpu_vulkan.cpp)
 endif()
-# S1 binary32 contracts require nearest rounding and gradual underflow at runtime.
+# Scalar bounds require nearest rounding and gradual underflow at runtime.
 set_source_files_properties(
   src/lib/data/value_validation.cpp
   src/lib/plugin/port_validation.cpp src/lib/compiler/compiler.cpp
-  src/lib/data/layer.cpp src/lib/data/representation.cpp
-  src/lib/data/quality.cpp
   src/lib/plugin/operation_registry.cpp PROPERTIES
   COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
 # Native GPU cache identities include the maintained implementation.
@@ -175,6 +166,7 @@ file(GLOB_RECURSE _cache_identity_inputs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.mm")
+list(FILTER _cache_identity_inputs EXCLUDE REGEX "/include/photospider/ops/")
 list(APPEND _cache_identity_inputs "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt")
 list(SORT _cache_identity_inputs)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_cache_identity_inputs})
@@ -284,6 +276,7 @@ if(NOT BUILD_SHARED_LIBS)
   target_compile_definitions(photospider_runtime_objects PRIVATE PHOTOSPIDER_STATIC)
 endif()
 
+include(cmake/OpsSdk.cmake)
 if(PHOTOSPIDER_BUILD_OPS)
   include(cmake/BundledOperations.cmake)
 endif()
@@ -322,7 +315,7 @@ install(
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY include/photospider DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-  FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h")
+  FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h" PATTERN "ops" EXCLUDE)
 install(
   EXPORT PhotospiderTargets
   FILE PhotospiderTargets.cmake

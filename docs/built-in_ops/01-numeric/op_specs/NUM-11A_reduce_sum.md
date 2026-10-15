@@ -18,7 +18,7 @@ implementation_status: implemented_manual_acceptance
 
 Inherit the [NUM baseline](NUM_common_contract.md) and [NUM-11 shared contract](NUM-11_reduction_contract.md). The strict key follows the exact reference; accelerated floating results follow the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md), including its range and fallback rules. Integer results and copies remain exact.
 
-`numeric.reduce_sum_*` reduces complete input groups selected by required static `axes`. Each input is a Result with exactly one tensor member at any member key. The `values` output is a Result using `photospider.tensor` / `samples`, with rank-preserving keepdims shape, ordinary axes and empty facets. Input supports UInt8, Int64, Float32 and Float64. Static `dtype` selects UInt8 or Int64 for integer input and Float32 or Float64 for floating input. The authoring helper defaults to Int64 and Float64, respectively; integer/floating domain conversion is rejected.
+`numeric.reduce_sum_*` reduces complete input groups selected by required static `axes`. Each input is a Result with exactly one tensor member at any member key. The `values` output is a Result using `photospider.tensor` / `samples`, with rank-preserving keepdims shape, ordinary axes and no attached domain description. Input supports UInt8, Int64, Float32 and Float64. Static `dtype` selects UInt8 or Int64 for integer input and Float32 or Float64 for floating input. The authoring helper defaults to Int64 and Float64, respectively; integer/floating domain conversion is rejected.
 
 ## Numeric semantics
 

@@ -8,9 +8,9 @@
 #include <string>
 #include <utility>
 
-#include "core/checked_math.hpp"
 #include "execution/result_blocks.hpp"
 #include "execution/result_cache_proof.hpp"
+#include "photospider/core/checked_math.hpp"
 
 namespace ps::execution_internal {
 Status StructuredResultCache::charge(std::uint64_t units,

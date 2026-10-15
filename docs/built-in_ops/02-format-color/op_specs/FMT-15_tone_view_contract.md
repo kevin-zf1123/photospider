@@ -43,22 +43,18 @@ some otherwise legal virtual bases. B is componentwise and imposes no extra
 primary restriction. Gray lightness/luma is converted explicitly before use.
 Integers and numeric code-domain values require explicit decoding first.
 
-Static fields: group, metadata_mode=respect|override|raw (respect default),
-source assertions/override, layout=auto|materialize (auto default), and the
+Static fields include explicit input_description/group or raw selectors and
+geometry, layout=auto|materialize (auto default), and the
 member fields below. Forced view is rejected even for a numerically identity
-parameter choice because the operation publishes a specified rendering/unit
-interpretation. Raw supplies ordered slots, RGB/Gray choice and all required
+parameter choice under this family's fixed materialization policy. Raw supplies ordered slots, RGB/Gray choice and all required
 weights/basis and units explicitly. All modes require consumed inputs and
-requested outputs finite; raw does not acquire a new semantic target label.
-It retains only applicable unverified original descriptions. Finite-domain
+requested outputs finite. No output carries an attached domain description. Finite-domain
 mapping is an explicit exception to unrestricted NUM special-value arithmetic.
 
-Semantic A/B outputs preserve primaries, white, channel roles, coordinates and
-same-tensor straight alpha; they publish the reference/units described below.
-Other groups/AOVs and alpha pass through bit-for-bit. Reject incompatible
-shared/overlapping group declarations; do not silently invalidate another
-complete group's meaning. Static metadata checks run even for empty and
-bypass-only requests. Color arithmetic never checks or depends on alpha.
+A/B compute in the configured primaries and white with the reference/units
+described below. Other groups/AOVs and alpha pass through bit-for-bit. Callers
+supply the resulting interpretation explicitly to later consumers. Static
+configuration checks run even for empty and bypass-only requests. Color arithmetic never checks or depends on alpha.
 
 ## A: reinhard_luminance_v1
 
@@ -121,8 +117,8 @@ exact arithmetic. For relative_to_nits, input coordinate 0 represents the chosen
 black and 1 the chosen white under this mapping; output is absolute display-linear
 cd/m², compatible in units with PQ/BT.1886 when their own domains are satisfied.
 For nits_to_relative output is a display-relative coordinate referenced to this
-explicit black/white range. Record the range convention as provenance; preserve
-it on matching inverse use, and reject conflicting assertions in respect mode.
+explicit black/white range. Supply the same explicit range convention when composing a matching inverse;
+reject contradictory range assertions during authoring.
 
 B accepts finite negative/headroom values without clamping or inferring physical
 validity. Absolute display unit conversion does not imply a tone curve, scene
@@ -140,16 +136,15 @@ publishes no native C key. Stage choices are explicit members of FMT-09, FMT-10,
 FMT-14A/B/C, FMT-15A/B or FMT-13A..F. No arbitrary script or automatically searched
 conversion route. An explicitly retained input edge handles a no-operation path.
 
-Each stage supplies its own required parameters and backend/profile. Respect
-checks inferred intermediate descriptors. A source override applies to the first
-stage only; later stages must consume their real predecessor interpretation.
-This semantic view helper has no whole-pipeline raw switch; raw numerical
-experiments can explicitly author the constituent nodes outside C. A selected
-raw stage cannot establish C's complete display-color output claim.
+Each stage supplies its own required parameters and backend/profile. The helper
+checks explicit stage input/output configurations and serializes complete node
+parameters. It retains no hidden edge-to-description map and adds no descriptor
+propagation. Raw numerical experiments may author constituent nodes directly;
+C requires complete configuration for each declared transition.
 
 Infer and check each transition, including model, basis/white, units, transfer,
 reference, numeric encoding and engine resource bindings. C does not insert
-FMT-08 relabels, hidden transfer operations or missing bridges. Native stage
+description-editing graph nodes, hidden transfer operations or missing bridges. Native stage
 outputs must match the explicit final display interpretation and black/white
 conditions; claimed values must agree with B/transfer parameters where present.
 Conditions are descriptive unless a listed stage actually uses them.

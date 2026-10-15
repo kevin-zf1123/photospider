@@ -238,7 +238,7 @@ FixturePoll publish_backing(const ps::ResultProgramPhase& phase,
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_extent, phase.query.resources));
+      phase.query.tile_extent));
   for (const auto& region : fixture_outputs(phase).boxes()) {
     multi_result::check(builder.publish_tensor(
         0, region, backing.layout(),
@@ -1666,7 +1666,6 @@ int main(int argc, char** argv) {
   using ps::StridedLayout;
   using ps::Value;
   using ps::ValueDescriptor;
-  using ps::ValueFacet;
   using ps::WorkflowDocument;
   using ps::WorkflowNode;
   using ps::WorkflowNodeOutput;
@@ -2626,75 +2625,72 @@ int main(int argc, char** argv) {
 
   PS_CHECK(result_dso_contracts(false) == 0);
 
-  auto facet_operations = std::make_shared<OperationRegistry>();
-  OperationTraits facet_source_traits;
-  facet_source_traits.outputs[0].result_schema =
+  auto atomic_operations = std::make_shared<OperationRegistry>();
+  OperationTraits atomic_source_traits;
+  atomic_source_traits.outputs[0].result_schema =
       multi_result::schema(ElementType::UInt8, {1});
-  facet_source_traits.outputs[0].result_schema->tensors[0].facets = {
-      ValueFacet{"test.semantic", 3U, {4U, 5U}}};
-  PS_CHECK(facet_operations
-               ->register_operation(fixture_operation(
-                   "test.facet_source", facet_source_traits,
-                   [](const ResultProgramPhase& invocation) -> FixturePoll {
-                     return publish_backing(
-                         invocation,
-                         multi_result::take(Value::create(
-                             ValueDescriptor{ElementType::UInt8, {1U}},
-                             Region::whole({1U}), StridedLayout{0U, {1}}, {7U},
-                             {ValueFacet{"test.semantic", 3U, {4U, 5U}}})));
-                   }))
-               .ok());
-  OperationTraits facet_identity_traits;
-  facet_identity_traits.input_count = 1U;
-  facet_identity_traits.requires_metadata_specialization = true;
-  facet_identity_traits.input_schema.resize(1);
-  facet_identity_traits.supports_gpu = true;
-  facet_identity_traits.outputs[0].result_schema =
+  atomic_source_traits.outputs[0]
+      .result_schema->tensors[0]
+      .atomic_trailing_axes = 1;
+  PS_CHECK(
+      atomic_operations
+          ->register_operation(fixture_operation(
+              "test.atomic_source", atomic_source_traits,
+              [](const ResultProgramPhase& invocation) -> FixturePoll {
+                return publish_backing(
+                    invocation,
+                    multi_result::take(Value::create(
+                        ValueDescriptor{ElementType::UInt8, {1U}},
+                        Region::whole({1U}), StridedLayout{0U, {1}}, {7U})));
+              }))
+          .ok());
+  OperationTraits atomic_identity_traits;
+  atomic_identity_traits.input_count = 1U;
+  atomic_identity_traits.requires_metadata_specialization = true;
+  atomic_identity_traits.input_schema.resize(1);
+  atomic_identity_traits.supports_gpu = true;
+  atomic_identity_traits.outputs[0].result_schema =
       multi_result::schema(ElementType::UInt8, {1});
-  facet_identity_traits.outputs[0].region_rule = OperationRegionRule::Tiled;
-  PS_CHECK(facet_operations
+  atomic_identity_traits.outputs[0].region_rule = OperationRegionRule::Tiled;
+  PS_CHECK(atomic_operations
                ->register_operation(fixture_operation(
-                   "test.facet_identity", facet_identity_traits,
+                   "test.atomic_identity", atomic_identity_traits,
                    [](const ResultProgramPhase& invocation) -> FixturePoll {
                      return publish_input(invocation);
                    }))
                .ok());
-  facet_operations->freeze();
-  Compiler facet_compiler(facet_operations);
-  ExecutionContext facet_execution(
-      facet_operations, ExecutionContextConfig{1U, true, 8U, 65536U});
-  WorkflowDocument facet_document;
-  facet_document.nodes = {
-      WorkflowNode{1U, "test.facet_source", {}, {}},
+  atomic_operations->freeze();
+  Compiler atomic_compiler(atomic_operations);
+  ExecutionContext atomic_execution(
+      atomic_operations, ExecutionContextConfig{1U, true, 8U, 65536U});
+  WorkflowDocument atomic_document;
+  atomic_document.nodes = {
+      WorkflowNode{1U, "test.atomic_source", {}, {}},
       WorkflowNode{2U,
-                   "test.facet_identity",
+                   "test.atomic_identity",
                    {WorkflowNodeOutput{1U, "value"}},
                    {}},
   };
-  facet_document.outputs = {WorkflowOutput{"faceted", 2U, "value"}};
-  GraphContext facet_graph(std::move(facet_document));
-  CompiledWorkflow facet_workflow =
-      compile_or_throw(&facet_compiler, facet_graph, true);
-  auto facet_result = facet_execution.execute(facet_workflow.plan);
-  PS_CHECK(facet_result.ok());
-  PS_CHECK(facet_result.value().diagnostics.transfer_count == 0U &&
-           facet_result.value().diagnostics.native_dispatch_count == 0U &&
-           facet_result.value().diagnostics.selected_backends.at({2U, 0U}) ==
+  atomic_document.outputs = {WorkflowOutput{"atomiced", 2U, "value"}};
+  GraphContext atomic_graph(std::move(atomic_document));
+  CompiledWorkflow atomic_workflow =
+      compile_or_throw(&atomic_compiler, atomic_graph, true);
+  auto atomic_result = atomic_execution.execute(atomic_workflow.plan);
+  PS_CHECK(atomic_result.ok());
+  PS_CHECK(atomic_result.value().diagnostics.transfer_count == 0U &&
+           atomic_result.value().diagnostics.native_dispatch_count == 0U &&
+           atomic_result.value().diagnostics.selected_backends.at({2U, 0U}) ==
                Backend::Gpu);
-  const auto& facet_object = facet_result.value().results.at("faceted");
-  std::uint8_t facet_byte = 0;
-  PS_CHECK(facet_object
-               .read_tensor(facet_object.descriptor().take_value(), 0, {0},
-                            &facet_byte, 1)
+  const auto& atomic_object = atomic_result.value().results.at("atomiced");
+  std::uint8_t atomic_byte = 0;
+  PS_CHECK(atomic_object
+               .read_tensor(atomic_object.descriptor().take_value(), 0, {0},
+                            &atomic_byte, 1)
                .ok() &&
-           facet_byte == 7);
-  const auto& faceted =
-      facet_result.value().results.at("faceted").schema().tensors[0];
-  PS_CHECK(faceted.facets.size() == 1U);
-  PS_CHECK(faceted.facets.front().key == "test.semantic");
-  PS_CHECK(faceted.facets.front().version == 3U);
-  PS_CHECK(faceted.facets.front().payload ==
-           std::vector<std::uint8_t>({4U, 5U}));
+           atomic_byte == 7);
+  const auto& atomiced =
+      atomic_result.value().results.at("atomiced").schema().tensors[0];
+  PS_CHECK(atomiced.atomic_trailing_axes == 1);
 
   auto whole_observed = std::make_shared<Region>();
   auto whole_operations = make_region_registry(whole_observed);

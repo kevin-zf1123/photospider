@@ -10,8 +10,7 @@
 #include <vector>
 
 #include "common/tensor_program.hpp"
-#include "data/content_digest.hpp"
-#include "data/result_window_access.hpp"
+#include "photospider/core/content_digest.hpp"
 #include "photospider/ops/format/channel.hpp"
 
 namespace ps::plugin_internal::format_result {
@@ -148,27 +147,25 @@ inline Status publish(const ResultProgramPhase& phase, ResultBuilder* builder,
                                             phase.query.cancellation);
   }
   if (policy != "materialize" && view_unavailable(status)) {
-    const auto partitioned =
-        execution_internal::ResultWindowAccess::visit_backing_regions(
-            window, phase.resources, [&](const Region& source_region) {
-              auto work =
-                  phase.consume_work(source_region.rank() + box.rank() + 1);
-              if (!work.ok())
-                return work;
-              const auto selected = mapped_preimage(box, source_region, axes);
-              if (selected) {
-                const auto& part = *selected;
-                auto input = phase.tensors->at({port, 0}).acquire(
-                    mapped_region(part, axes), phase.query.cancellation);
-                if (!input.ok())
-                  return input.status();
-                auto published = publish(phase, builder, part, input.value(),
-                                         axes, policy, port, counts);
-                if (!published.ok())
-                  return published;
-              }
-              return Status::success();
-            });
+    const auto partitioned = window.visit_backing_regions(
+        phase.resources, [&](const Region& source_region) {
+          auto work = phase.consume_work(source_region.rank() + box.rank() + 1);
+          if (!work.ok())
+            return work;
+          const auto selected = mapped_preimage(box, source_region, axes);
+          if (selected) {
+            const auto& part = *selected;
+            auto input = phase.tensors->at({port, 0}).acquire(
+                mapped_region(part, axes), phase.query.cancellation);
+            if (!input.ok())
+              return input.status();
+            auto published = publish(phase, builder, part, input.value(), axes,
+                                     policy, port, counts);
+            if (!published.ok())
+              return published;
+          }
+          return Status::success();
+        });
     if (!partitioned.ok())
       return partitioned.status();
     if (partitioned.value())
@@ -185,7 +182,7 @@ inline Status publish(const ResultProgramPhase& phase, ResultBuilder* builder,
     return status;
   }
   const auto width = Value::element_size(tensor.descriptor.element_type);
-  auto work = execution_internal::ResultWindowAccess::read_work(window);
+  auto work = window.read_work();
   if (!work.ok())
     return work.status();
   auto copied = builder->publish_tensor_kernel(

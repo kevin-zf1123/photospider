@@ -14,8 +14,8 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/lowpass_uniform_math.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/core/resource_allocator.hpp"
 #include "common/registry.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -108,7 +108,7 @@ struct UniformState {
     for (auto extent : shape)
       count *= extent;
     std::vector<std::uint64_t> coordinate(shape.size()), at(shape.size());
-    std::optional<input_internal::Float32Environment> environment;
+    std::optional<plugin_internal::FloatingEnvironment> environment;
     if (coefficients_ready)
       environment.emplace();
     for (std::uint64_t row = 0; row < count; ++row) {

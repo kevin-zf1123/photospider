@@ -11,8 +11,8 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
-#include "photospider/ops/format/alpha.hpp"
 #include "common/registry.hpp"
+#include "photospider/ops/format/alpha.hpp"
 
 namespace ps::plugin_internal::alpha_ops {
 using Params = std::map<std::string, ParameterValue>;
@@ -59,34 +59,13 @@ inline Status shape_valid(const OperationMetadata& m) {
 inline Result<std::optional<TensorDescription>> effective_description(
     const OperationMetadata& m, const Params& p, bool allow_raw) {
   using Answer = Result<std::optional<TensorDescription>>;
-  const auto mode = text(p, "metadata_mode", "respect");
-  if (mode != "respect" && mode != "override" &&
-      !(allow_raw && mode == "raw")) {
-    return Answer(invalid("unsupported metadata_mode"));
-  }
-  if ((mode == "override") != (p.count("metadata_override") != 0)) {
-    return Answer(
-        invalid("metadata_override must occur exactly with override"));
-  }
   std::optional<TensorDescription> d;
-  if (mode == "override") {
+  if (p.count("input_description")) {
     auto parsed =
-        tensor_description_from_parameter(text(p, "metadata_override"));
-    if (!parsed.ok()) {
+        tensor_description_from_parameter(text(p, "input_description"));
+    if (!parsed.ok())
       return Answer(parsed.status());
-    }
     d = parsed.take_value();
-  } else {
-    for (const auto& facet : tensor(m).facets) {
-      if (facet.key != "photospider.tensor-description") {
-        continue;
-      }
-      auto parsed = decode_tensor_description(facet);
-      if (!parsed.ok()) {
-        return Answer(parsed.status());
-      }
-      d = parsed.take_value();
-    }
   }
   if (d) {
     auto valid = validate_tensor_description(*d, tensor(m).descriptor);
@@ -94,7 +73,7 @@ inline Result<std::optional<TensorDescription>> effective_description(
       return Answer(valid);
     }
   }
-  if (!d && mode != "raw") {
+  if (!d && !allow_raw) {
     return Answer(mismatch("tensor description is required"));
   }
   return Answer(std::move(d));
@@ -347,19 +326,14 @@ inline Status declaration_matches(const WorkflowDocument& document,
   return invalid("input declaration is absent");
 }
 inline Params edit_params(const format::AlphaEditOptions& o) {
-  Params p{{"metadata_mode", o.metadata_mode},
-           {"group", o.group},
-           {"layout", o.layout}};
+  Params p{{"group", o.group}, {"layout", o.layout}};
   if (o.axis) {
     p["axis"] = static_cast<std::int64_t>(*o.axis);
   }
   return p;
 }
-inline Status add_override(Params* p, const std::string& mode,
-                           const std::optional<TensorDescription>& d) {
-  if ((mode == "override") != d.has_value()) {
-    return invalid("metadata override/mode mismatch");
-  }
+inline Status add_description(Params* p,
+                              const std::optional<TensorDescription>& d) {
   if (!d) {
     return Status::success();
   }
@@ -367,7 +341,7 @@ inline Status add_override(Params* p, const std::string& mode,
   if (!encoded.ok()) {
     return encoded.status();
   }
-  (*p)["metadata_override"] = encoded.take_value();
+  (*p)["input_description"] = encoded.take_value();
   return Status::success();
 }
 inline Status profile_valid(const std::string& profile) {
@@ -382,23 +356,5 @@ inline numeric_ops::SequenceProfile profile_kind(const std::string& p) {
          : p == "accelerated_apple_silicon"
              ? numeric_ops::SequenceProfile::AppleSilicon
              : numeric_ops::SequenceProfile::X86Avx2;
-}
-inline std::vector<ValueFacet> output_facets(const OperationMetadata& input,
-                                             const TensorDescription& d) {
-  auto facets = tensor(input).facets;
-  facets.erase(std::remove_if(facets.begin(), facets.end(),
-                              [](const auto& f) {
-                                return f.key ==
-                                           "photospider.tensor-description" ||
-                                       f.key == "photospider.semantic" ||
-                                       f.key == "photospider.image" ||
-                                       f.key == "photospider.color-array";
-                              }),
-               facets.end());
-  auto encoded = encode_tensor_description(d);
-  if (encoded.ok()) {
-    facets.push_back(encoded.take_value());
-  }
-  return facets;
 }
 }  // namespace ps::plugin_internal::alpha_ops

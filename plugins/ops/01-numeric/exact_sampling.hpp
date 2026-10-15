@@ -8,7 +8,7 @@
 
 #include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/sequence_profiles.hpp"
-#include "core/exact_binary_sum.hpp"
+#include "common/exact_binary_sum.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Shared finite-input endpoint interpolation, RN64 control reconstruction and
@@ -31,7 +31,7 @@ struct ExactSampling final {
     double x = 0, y = 0;
     std::memcpy(&x, &a, 8);
     std::memcpy(&y, &b, 8);
-    std::optional<input_internal::Float32Environment> environment;
+    std::optional<plugin_internal::FloatingEnvironment> environment;
     if (!environment_established)
       environment.emplace();
     if (environment_established || environment->active()) {

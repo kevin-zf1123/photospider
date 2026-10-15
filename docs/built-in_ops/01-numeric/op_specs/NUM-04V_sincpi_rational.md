@@ -28,7 +28,7 @@ Compute sin(pi*p/q)/(pi*p/q) with exact pi and the exact Int64 fraction p/q. Inh
 denominator inputs, identical positive rank-1..8 shapes, q>0, unreduced fraction
 support, floating output dtype default Float64, Whole demand,
 integer range-safe reduction, errors, resources, fallback, cache and ownership.
-Output values preserves shape with empty facets. No implicit floating division
+Output values preserves shape with no attached domain description. No implicit floating division
 or conversion of p/q defines this operation.
 
 ## Numeric behavior and acceptance

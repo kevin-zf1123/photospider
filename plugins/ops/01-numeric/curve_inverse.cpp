@@ -14,8 +14,8 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_curve.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/core/resource_allocator.hpp"
 #include "common/registry.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -160,7 +160,7 @@ struct InverseState {
         ElementType::Float32;
     const unsigned width = narrow ? 4 : 8;
     numeric_ops::MathTensorWriter output(writers[0]);
-    std::optional<input_internal::Float32Environment> environment;
+    std::optional<plugin_internal::FloatingEnvironment> environment;
     if (profile != SequenceProfile::Strict)
       environment.emplace();
     for (std::uint64_t row = 0; row < count; ++row) {

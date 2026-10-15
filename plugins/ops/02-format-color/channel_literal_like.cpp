@@ -9,8 +9,8 @@
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
 #include "common/registry.hpp"
-#include "core/status_helpers.hpp"
-#include "photospider/data/tensor_description.hpp"
+#include "photospider/core/status_helpers.hpp"
+#include "photospider/ops/tensor_description.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal {
@@ -48,7 +48,7 @@ ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_extent, phase.query.resources));
+      phase.query.tile_extent));
 
   return result;
 }
@@ -247,30 +247,6 @@ Result<OperationPreparation> prepare_channel_literal_like(
   if (tensor.layout.spatial) {
     tensor.layout.groups.clear();
   }
-  auto description =
-      tensor_description_from_parameter(text(p, "output_description"));
-  if (!description.ok()) {
-    return R(description.status());
-  }
-  status = validate_tensor_description(description.value(), tensor.descriptor);
-  if (!status.ok()) {
-    return R(status);
-  }
-  tensor.facets.erase(
-      std::remove_if(tensor.facets.begin(), tensor.facets.end(),
-                     [](const auto& f) {
-                       return f.key == "photospider.tensor-description" ||
-                              f.key == "photospider.semantic" ||
-                              f.key == "photospider.image" ||
-                              f.key == "photospider.color-array";
-                     }),
-      tensor.facets.end());
-  auto facet = encode_tensor_description(description.value());
-  if (!facet.ok())
-    return R(facet.status());
-  tensor.facets.push_back(facet.take_value());
-  std::sort(tensor.facets.begin(), tensor.facets.end(),
-            [](const auto& a, const auto& b) { return a.key < b.key; });
   output.metadata.result_schema =
       std::make_shared<const SchemaTemplate>(std::move(schema));
   OperationPreparation result;
@@ -297,8 +273,8 @@ Status register_channel_literal_like(OperationRegistry* registry) {
     t.input_schema = {port};
     t.cacheable = false;
     t.requires_metadata_specialization = true;
-    for (const auto* key : {"bits", "expected_inputs", "output_description",
-                            "layout", "authoring_member"}) {
+    for (const auto* key :
+         {"bits", "expected_inputs", "layout", "authoring_member"}) {
       t.parameter_schema.push_back({key, OperationParameterType::String});
     }
     t.parameter_schema.push_back(

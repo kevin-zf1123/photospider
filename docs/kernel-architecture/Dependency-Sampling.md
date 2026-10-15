@@ -6,7 +6,7 @@ The registry owns each immutable operation definition. Its continuation retains 
 
 ## STMap Result contract
 
-`image.stmap(source, map, boundary)` requires a source Result with schema `photospider.image` v1, one `pixels` tensor, no fields, canonical linear-premultiplied Float32 RGBA, and sample shape `[F,L,Hs,Ws,4]` with `batch_axes=[F,L]`. The map is a Result with exactly one tensor and no fields, any structurally valid schema id/version/member key, Float64 shape `[Ho,Wo,2]`, and empty facets. Its `batch_axes` are either empty, which broadcasts the same map over every source frame/layer, or equal to the source batch axes. The source H/W axes are at most 2^40. Output port `value` is a Result with canonical `photospider.image` v1/member `pixels`, Float32 shape `[F,L,Ho,Wo,4]`, and the source frame/layer extents.
+`image.stmap(source, map, boundary)` requires a source Result with schema `photospider.image` v1, one `pixels` tensor, no fields, canonical linear-premultiplied Float32 RGBA, and sample shape `[F,L,Hs,Ws,4]` with `batch_axes=[F,L]`. The map is a Result with exactly one tensor and no fields, any structurally valid schema id/version/member key, and Float64 shape `[Ho,Wo,2]`. Its `batch_axes` are either empty, which broadcasts the same map over every source frame/layer, or equal to the source batch axes. The source H/W axes are at most 2^40. Output port `value` is a Result with canonical `photospider.image` v1/member `pixels`, Float32 shape `[F,L,Ho,Wo,4]`, and the source frame/layer extents.
 
 The required String parameter `boundary` has no default, including for Empty requests:
 
@@ -18,7 +18,7 @@ The required String parameter `boundary` has no default, including for Empty req
 | `reflect` | Period `2N`, repeated endpoints: `p<N ? p : 2N-1-p`. |
 | `mirror` | Period `2N-2`, unrepeated endpoints: `p<N ? p : 2N-2-p`. |
 
-For `N=1`, every nonconstant mode selects coordinate zero. These mappings use global source coordinates, not fragment-local coordinates. Static preparation checks the canonical source metadata, map tensor shape/facets/batch compatibility, source axis bounds and boundary name. Empty demand performs those checks without requesting sample payload.
+For `N=1`, every nonconstant mode selects coordinate zero. These mappings use global source coordinates, not fragment-local coordinates. Static preparation checks the canonical source metadata, map tensor shape/batch compatibility, source axis bounds and boundary name. Empty demand performs those checks without requesting sample payload.
 
 For map coordinates `u` and `v`, the operation selects the four neighbors from `l=floor(u-0.5)` and `t=floor(v-0.5)`. The fractional offsets, weights and output channel are:
 
@@ -51,6 +51,6 @@ The program charges its state, tensor windows, workspace, output and work throug
 
 ## Generic tuple observations and numeric diagnostics
 
-Structured Result callbacks report bounded `NumericDiagnostics` through `ResultProgramPhase::report_numeric`. Reports identify the actual CPU profile and implementation, evaluated values, strict fallbacks and bounded fallback reasons. The host admits the per-output/per-backend `OperationTiming` record against Root resources before dispatching a Result callback. Each poll's report is merged once, including a poll that returns Need or fails. For a failed callback, the host latches the first cause before the failure-report merge, so a merge failure does not replace that cause. If `BackendUnavailable` qualifies for CPU fallback, the host records the failed GPU attempt before restarting on CPU.
+Structured Result callbacks report bounded [`NumericDiagnostics`](../../include/photospider/ops/numeric/diagnostics.hpp) through `ps::report_numeric`. Reports identify the actual CPU profile and implementation, evaluated values, strict fallbacks and bounded fallback reasons. The host admits the per-output/per-backend `OperationTiming` record against Root resources before dispatching a Result callback. Each poll's report is merged once, including a poll that returns Need or fails. For a failed callback, the host latches the first cause before the failure-report merge, so a merge failure does not replace that cause. If `BackendUnavailable` qualifies for CPU fallback, the host records the failed GPU attempt before restarting on CPU.
 
 `NumericDiagnostics::evaluated_values` counts reported arithmetic attempts, including work performed before a later failure. `OperationTiming::computed_elements` is separate: for Result publication it counts newly published field rows and tensor samples. A later Result revision counts only rows and tensor coverage added since the prior revision, and cache-hit publication adds no computed elements. The counter saturates at `UINT64_MAX` and sets `computed_elements_saturated` when the logical count exceeds that range or the sample cardinality is unrepresentable; an exact count of `UINT64_MAX` leaves the flag clear. Diagnostic saturation does not invalidate an otherwise legal Result. These diagnostics do not change semantic identity or establish an accuracy bound.

@@ -24,8 +24,7 @@ ValueFragments scattered(ElementType type, std::uint64_t add = 0) {
     boxes.push_back(box);
   }
   auto coverage = Footprint::from_regions({1000}, boxes).take_value();
-  return ValueFragments::create(descriptor, {}, coverage, fragments)
-      .take_value();
+  return ValueFragments::create(descriptor, coverage, fragments).take_value();
 }
 int exact_bytes() {
   for (const auto type : {ElementType::UInt8, ElementType::Int64,
@@ -93,7 +92,7 @@ int strided_and_huge() {
   auto set = Footprint::from_regions({8}, {Region({{1, 2}}), Region({{6, 1}})})
                  .take_value();
   auto source =
-      ValueFragments::create(value.descriptor(), {}, set, {value}).take_value();
+      ValueFragments::create(value.descriptor(), set, {value}).take_value();
   auto atlas = FragmentAtlasPlan::prepare(source, {4})
                    .value()
                    .materialize(source, BufferAllocator{});
@@ -114,7 +113,7 @@ int strided_and_huge() {
   auto fragment = std::move(writer).publish().take_value();
   auto coverage = Footprint::from_regions(shape, {corner}).take_value();
   auto huge =
-      ValueFragments::create(fragment.descriptor(), {}, coverage, {fragment})
+      ValueFragments::create(fragment.descriptor(), coverage, {fragment})
           .take_value();
   auto packed = FragmentAtlasPlan::prepare(huge).value().materialize(
       huge, BufferAllocator{});
@@ -173,7 +172,7 @@ int limits_and_owners() {
     independent = FragmentAtlasPlan::prepare(source).take_value();
   }
   PS_CHECK(owner.expired() && independent.valid());
-  auto empty = ValueFragments::create({ElementType::UInt8, {8}}, {},
+  auto empty = ValueFragments::create({ElementType::UInt8, {8}},
                                       Footprint::none({8}).take_value(), {})
                    .take_value();
   auto none = FragmentAtlasPlan::prepare(empty).value().materialize(

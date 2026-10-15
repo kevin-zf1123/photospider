@@ -2,16 +2,16 @@
 
 ### 范围与所有权
 
-Executor 拥有 table 分配、native work 排空、记录校验和 typed Need 附加。Discovery 不会追踪任意 shader 读取。C Result ABI 3 service 和 C++ `ResultProgramPhase::discover` 入口都使用这条 Result 路径。`Value` 可以提供私有 backing storage，但不再公开独立的 dependency discovery phase。
+Executor 拥有 table 分配、native work 排空、记录校验和 typed Need 附加。Discovery 不会追踪任意 shader 读取。C Result ABI 4 service 和 C++ `ResultProgramPhase::discover` 入口都使用这条 Result 路径。`Value` 可以提供私有 backing storage，但不再公开独立的 dependency discovery phase。
 
-C Result operation 在普通 `poll` callback 中调用 `ps_result_services_v3::discover`。Discovery callback 只能使用当前 Need 的 read、native atlas、scratch、work、cancellation 和 GPU dispatch services；它返回普通 status，并且必须提交实际 native work。若 receipt 非空，外层 operation callback 必须返回 `PS_RESULT_NEED_V3`。Executor 会在这些 Need 尚未供给时拒绝 publication。空 receipt 不增加 Need，callback 可以继续执行。
+C Result operation 在普通 `poll` callback 中调用 `ps_result_services_v4::discover`。Discovery callback 只能使用当前 Need 的 read、native atlas、scratch、work、cancellation 和 GPU dispatch services；它返回普通 status，并且必须提交实际 native work。若 receipt 非空，外层 operation callback 必须返回 `PS_RESULT_NEED_V4`。Executor 会在这些 Need 尚未供给时拒绝 publication。空 receipt 不增加 Need，callback 可以继续执行。
 
 ```c
 uint64_t receipt = 0;
 if (services->discover(services->context, capacity, candidates,
                        compute_requests, user, &receipt))
   return 1;
-return PS_RESULT_NEED_V3;
+return PS_RESULT_NEED_V4;
 ```
 
 若之后的 poll 需要读取规范化记录，callback 应将 receipt handle 保存在 operation state 中。读取完 records 后释放 handle。`discovery_requests` 支持 count-only 查询：`output == NULL` 且 `capacity == 0`；随后可将 records 复制到已初始化的目标结构中。C handle 在跨 poll 期间归该 plugin instance 所有，直到显式释放或 operation 销毁。
@@ -49,4 +49,4 @@ Decoder 与 normalization 源测试为 [`tests/unit/kernel/test_result_discovery
 Discovery 必须在当前 callback entry thread 执行。C++ `ResultProgramPhase::consume_work` 可从 worker thread 计费；C discovery service 仍限于 entry thread。Work 与 metadata 限额跨 active poll 中的调用累计，每次调用也消耗 Run 和 Root work。重复记录仍消耗 emission 与 normalization work。
 
 Capacity、candidate、Root 和 dependency 限额相互独立。读取与 atlas access 仍受当前 Needs 限制。Discovery 不能再发 Need、发布 output、进入 block callback 或递归调用 discovery。未提交 GPU work 的 native callback 返回 `OperationFailed`。表 owner 退休前会排空已提交的 dispatch。
-Native GPU service 独立使用 `PS_GPU_ABI_VERSION_1` 版本，提供 discovery 使用的同步 buffer 与 dispatch 操作。Result discovery 本身属于 Operation Plugin ABI 3。Vulkan 构建支持为可选项。Native GPU 行为要求构建启用了对应 backend 且设备可用；协议 mock 只能覆盖校验和错误路径，不能证明 native 执行。
+Native GPU service 独立使用 `PS_GPU_ABI_VERSION_1` 版本，提供 discovery 使用的同步 buffer 与 dispatch 操作。Result discovery 本身属于 Operation Plugin ABI 4。Vulkan 构建支持为可选项。Native GPU 行为要求构建启用了对应 backend 且设备可用；协议 mock 只能覆盖校验和错误路径，不能证明 native 执行。

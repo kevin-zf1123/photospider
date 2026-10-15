@@ -26,10 +26,9 @@ struct Computation final {
     *output.data() = size ? scratch.data()[size - 1] : 0;
     if (completed)
       ++*completed;
-    auto builder = take(
-        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key, {}, {},
-                             phase.query.tile_extent, phase.query.resources));
+    auto builder = take(ResultBuilder::start(
+        phase.resources, *phase.query.output.result_schema,
+        phase.query.semantic_key, {}, {}, phase.query.tile_extent));
 
     check(builder.publish_tensor(0, Region::whole({1, 1}), {0, {1, 1}},
                                  std::move(output).freeze()));

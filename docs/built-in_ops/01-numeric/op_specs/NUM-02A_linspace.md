@@ -22,7 +22,7 @@ The strict key follows the exact reference below. Accelerated floating results f
 
 `numeric.linspace_{strict,accelerated_apple_silicon,accelerated_x86_64}` creates a one-dimensional sequence from `start`, `end` and a static `count`. Each input is a Result containing exactly one tensor member at any member key. Its complete `sample_shape()` must be `[1]`; both inputs are Float32 or Float64 and may use different floating types. `count` is a required static Int64 in `[1, 1048576]`. `dtype` is a required static String, `float32` or `float64`. The public `linspace_node` helper defaults to Float64 output and the strict CPU profile; callers can select another supported CPU profile explicitly.
 
-The `values` output is a Result with schema `photospider.tensor`, member `samples`, shape `[count]` and the selected floating dtype. The `axis` output uses the same schema and member key, Float64 shape `[3]`, and `atomic_trailing_axes=1`. Both outputs use ordinary tensor axes and drop facets and batch topology. The axis tuple is `[start, end, step]`. Values and axis are independent output identities; requesting an axis component closes demand over the complete three-component tuple.
+The `values` output is a Result with schema `photospider.tensor`, member `samples`, shape `[count]` and the selected floating dtype. The `axis` output uses the same schema and member key, Float64 shape `[3]`, and `atomic_trailing_axes=1`. Both outputs use ordinary tensor axes and drop batch topology. The axis tuple is `[start, end, step]`. Values and axis are independent output identities; requesting an axis component closes demand over the complete three-component tuple.
 
 ## Exact sequence and axis
 

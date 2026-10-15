@@ -31,7 +31,7 @@ stored in the original floating dtype. UInt8 and Int64 are exact identity.
 Shape and dtype are preserved; there are no operation parameters or implicit
 conversion to an integer output array. Inherit the
 [NUM-04 common contract](NUM-04_unary_contract.md) for the input/values interface,
-Whole/typed-validation support, output facets, resources and lifetime.
+Whole/typed-validation support, output structure, resources and lifetime.
 
 ## Exact semantics
 

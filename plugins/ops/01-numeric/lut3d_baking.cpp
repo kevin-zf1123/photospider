@@ -8,8 +8,9 @@
 #include <utility>
 #include <vector>
 
-#include "core/status_helpers.hpp"
-#include "data/content_digest.hpp"
+#include "photospider/core/content_digest.hpp"
+#include "photospider/core/status_helpers.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 namespace {
@@ -110,15 +111,10 @@ Result<ElementType> source_type(const SemanticGraphIR& graph,
             (tensor.descriptor.element_type != ElementType::Float32 &&
              tensor.descriptor.element_type != ElementType::Float64))
           break;
-        auto expected = encode_color_array(color);
-        if (!expected.ok())
-          return Result<ElementType>(expected.status());
-        for (const auto& facet : tensor.facets)
-          if (facet.key == "photospider.color-array" &&
-              (facet.version != expected.value().version ||
-               facet.payload != expected.value().payload))
-            return Result<ElementType>(
-                type_error("source color description mismatch"));
+        auto checked = validate_color_array_descriptor(
+            color, {tensor.descriptor.element_type, tensor.sample_shape()});
+        if (!checked.ok())
+          return Result<ElementType>(checked);
         return Result<ElementType>(tensor.descriptor.element_type);
       }
   }
@@ -132,7 +128,7 @@ Result<BakedLut3d> bake_lut3d(WorkflowDocument& document,
                               const Lut3dSourceBuilder& source,
                               const Lut3dBakeOptions& options,
                               std::optional<Lut3dValidationPoints> extra,
-                              ResourceBindings resources) {
+                              ResourceSet resources) {
   using Answer = Result<BakedLut3d>;
   if (!registry || !registry->frozen() || !source ||
       !options.source_pointwise ||
@@ -291,15 +287,15 @@ Result<BakedLut3d> bake_lut3d(WorkflowDocument& document,
   staged.nodes.push_back(
       {owned.source_node, "curve.pack_lut3d", {table}, parameters});
   staged.nodes.push_back(
-      {unpacked.source_node, "curve.unpack_lut3d", {owned}, {}});
+      {unpacked.source_node, "curve.unpack_lut3d", {owned}, parameters});
   staged.nodes.push_back(
       {report.source_node,
        "curve.measure_lut3d",
        {checked_axis, grid, owned, points, reference, applied},
-       std::move(parameters)});
+       parameters});
   staged.nodes.push_back(
-      {gated.source_node, "curve.gate_lut3d", {owned, report}, {}});
-  Answer answer(BakedLut3d{gated, checked_axis, report});
+      {gated.source_node, "curve.gate_lut3d", {owned, report}, parameters});
+  Answer answer(BakedLut3d{gated, checked_axis, report, spec});
   static_assert(std::is_nothrow_move_assignable_v<WorkflowDocument>);
   document = std::move(staged);
   return answer;

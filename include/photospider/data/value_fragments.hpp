@@ -26,25 +26,19 @@ class PHOTOSPIDER_API ValueFragments final {
   ValueFragments& operator=(ValueFragments&&) noexcept;
   /** @brief Clips supplied Values to authorization, checks exact completeness.
    * @param descriptor Full domain and dtype, independent of stored rectangles.
-   * @param facets Canonical immutable metadata shared by every fragment.
    * @param authorized Exact permitted set, in the descriptor domain.
    * @param fragments Immutable owners; metadata must match. Overlaps are legal
    * only for identical storage and address mappings. Identical overlaps dedup.
    * Rectangular neighbors with the same owner/mapping may coalesce; returned
    * fragment count and partition need not equal the supplied partition.
    * @param limits Bounds normalization, including cancellation.
-   * @param resources Facet resources, inferred from the first fragment when
-   * omitted. Empty CMYK coverage still requires explicit owning resources.
    * @return Complete fragments or InvalidArgument/TypeMismatch/NotFound (hole),
-   * ResourceExhausted/Cancelled. Typed tensors require full C in every
-   * fragment.
+   * ResourceExhausted/Cancelled.
    */
   static Result<ValueFragments> create(ValueDescriptor descriptor,
-                                       std::vector<ValueFacet> facets,
                                        Footprint authorized,
                                        const std::vector<Value>& fragments,
-                                       const FootprintLimits& limits = {},
-                                       ResourceBindings resources = {});
+                                       const FootprintLimits& limits = {});
   /** @brief Same validation from a borrowed contiguous array, without a
    * temporary std::vector. A null pointer is valid only for count zero.
    * The array is borrowed for this call; returned fragments retain owners.
@@ -53,15 +47,11 @@ class PHOTOSPIDER_API ValueFragments final {
    * its Values. This lifetime token does not account arbitrary caller copies.
    */
   static Result<ValueFragments> create_view(
-      ValueDescriptor descriptor, std::vector<ValueFacet> facets,
-      Footprint authorized, const Value* fragments, std::size_t count,
-      const FootprintLimits& limits = {},
-      std::shared_ptr<const void> metadata_lifetime = {},
-      ResourceBindings resources = {});
+      ValueDescriptor descriptor, Footprint authorized, const Value* fragments,
+      std::size_t count, const FootprintLimits& limits = {},
+      std::shared_ptr<const void> metadata_lifetime = {});
   bool valid() const noexcept { return authorized_.valid(); }
   const ValueDescriptor& descriptor() const noexcept { return descriptor_; }
-  const std::vector<ValueFacet>& facets() const noexcept { return facets_; }
-  const ResourceBindings& resources() const noexcept { return resources_; }
   const Footprint& coverage() const noexcept { return authorized_; }
   const std::vector<Value>& fragments() const noexcept { return fragments_; }
   /** @brief Copies one authorized sample, with checked logical addressing.
@@ -96,7 +86,7 @@ class PHOTOSPIDER_API ValueFragments final {
    * samples in logical order and observes cancellation before publication.
    * A packed rectangle from one fragment uses bounded bulk copies; general
    * layouts use checked sample reads. Both retain logical-sample work limits,
-   * fresh allocator-owned storage, facets and resource owners.
+   * fresh allocator-owned storage.
    */
   Result<Value> collect(const Region& region, const BufferAllocator& allocator,
                         const FootprintLimits& limits = {}) const;
@@ -108,9 +98,7 @@ class PHOTOSPIDER_API ValueFragments final {
  private:
   void swap(ValueFragments&) noexcept;
   std::shared_ptr<const void> metadata_lifetime_;
-  ResourceBindings resources_;
   ValueDescriptor descriptor_;
-  std::vector<ValueFacet> facets_;
   Footprint authorized_;
   std::vector<Value> fragments_;
 };

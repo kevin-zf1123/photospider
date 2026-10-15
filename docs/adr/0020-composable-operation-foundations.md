@@ -2,14 +2,15 @@
 
 - Status: Accepted
 - Reader mirror: [Chinese](zh/0020-composable-operation-foundations.zh.md)
+- Current boundary: the semantic facets, typed semantic descriptors, and output semantic rules of the original decision are superseded. Results carry structure only, and domain interpretation is an explicit static parameter of each operation. See [Data Model](../kernel-architecture/Data-Model.md), [Structured Results and tensor slots](../kernel-architecture/Global-Results.md), and [Tensor descriptions](../kernel-architecture/Tensor-Semantic-Metadata.md).
 
 ## 1. Core summary (TL;DR)
 
-Composed workflows need operations to preserve, transform or drop semantic meaning as well as compute bytes. The compiler and operation registry share declarative input constraints, output shape and dtype inference, semantic rules and named output contracts. Callbacks run only after static metadata and parameters resolve successfully.
+Composed workflows need every operation output to be known before execution. The compiler and operation registry share declarative input constraints, Result schema inference, explicitly bound validators and named output contracts. Callbacks run only after static metadata and parameters resolve successfully.
 
 ## 2. Mental model and intuition
 
-`ValueDescriptor` describes how many samples exist and their physical scalar type. A `ValueFacet` adds an interpretation such as image channels and color model. The compiler propagates these descriptions before execution, while callbacks compute samples under the resolved contract.
+`ValueDescriptor` describes how many samples exist and their physical scalar type. A Result schema groups typed tensor slots and packed fields; atomic trailing axes and spatial layout describe structural completeness and storage. Interpretation such as channel roles, color model or sampling grid is a static parameter of the operation that reads it, and an output does not inherit it from an input. The compiler resolves schemas before execution, while callbacks compute samples under the resolved contract.
 
 ```text
 ordered inputs + static parameters
@@ -17,7 +18,7 @@ ordered inputs + static parameters
        registry specialization
                |
   validate constraints and infer
-      dtype / shape / facets
+     Result schemas (dtype / shape / slots)
                |
       SemanticGraphIR outputs
                |
@@ -28,7 +29,7 @@ ordered inputs + static parameters
  callback -> validate output -> publish
 ```
 
-The C++ registry owns copied traits and immutable preparation. A C plugin supplies descriptor-owned records; the host validates and copies them before registry publication and holds a module lease while callbacks can run. Runtime `Value` storage remains immutable after publication. The semantic descriptor is metadata, not a claim that the samples satisfy it; operation validation checks samples where the contract requires.
+The C++ registry owns copied traits and immutable preparation. A C plugin supplies descriptor-owned records; the host validates and copies them before registry publication and holds a module lease while callbacks can run. Runtime Result and `Value` storage remains immutable after publication. A Result schema states structure, not that sample values satisfy a domain contract; explicitly bound validators check samples where an operation requires it.
 
 ## 3. Formal contracts and APIs
 
@@ -43,20 +44,26 @@ struct ValueDescriptor {
   std::vector<std::uint64_t> shape;  // rank 1..8; every extent is positive
 };
 
-struct ValueFacet {
-  std::string key;
-  std::uint32_t version;
-  std::vector<std::uint8_t> payload;
+struct OperationPortConstraint {
+  std::vector<ExtensionIdentity> validators;
+  OperationPortKind kind = OperationPortKind::Result;
+  float minimum = 0.0F;
+  float maximum = 0.0F;
+  std::uint32_t element_type = 0;
+  std::uint32_t rank = 0;
+  std::uint32_t element_type_mask = 0;
+  std::string result_schema_id;
+  std::uint32_t result_schema_version = 0;
+  std::string tensor_key;
+  bool scalar_bounds = false;
 };
 
 struct OperationOutputTraits {
   std::string key = "value";
-  OperationShapeRule shape_rule = OperationShapeRule::Scalar;
-  OperationRegionRule region_rule = OperationRegionRule::Whole;
-  OperationDtypeRule output_dtype_rule = OperationDtypeRule::Declared;
-  OperationSemanticRule output_semantic_rule = OperationSemanticRule::Drop;
-  std::vector<OperationExtent> output_axes;
   std::optional<std::vector<std::uint32_t>> input_indices;
+  OperationRegionRule region_rule = OperationRegionRule::Whole;
+  OperationPortConstraint output_schema;
+  std::optional<SchemaTemplate> result_schema;
 };
 
 struct OperationTraits {
@@ -65,48 +72,46 @@ struct OperationTraits {
   bool supports_cpu = true;
   bool supports_gpu = false;
   bool allows_cpu_fallback = false;
+  std::uint32_t version = 26U;
   bool cacheable = true;
+  std::vector<OperationParameterSpec> parameter_schema;
   std::vector<OperationPortConstraint> input_schema;
   std::vector<OperationOutputTraits> outputs;
 };
 ```
 
-These are contract excerpts, not complete construction code. Operation plugins use Result C ABI 2. A plugin descriptor declares up to 64 named outputs; output names are unique and map to declaration-order indices. A single-output operation explicitly uses `value`.
+These are contract excerpts, not complete construction code; other members are omitted. Operation plugins use Result C operation ABI 4. An operation declares up to 64 named outputs; output names are unique and map to declaration-order indices.
 
-`ValueDescriptor` has rank 1 through 8 and nonzero extents. Its element type is independent of semantic interpretation and memory layout. A `Value` can be strided; shape inference describes logical samples and does not imply dense contiguous storage. Sample bit validity belongs to the operation or typed semantic contract rather than the generic Value container. Input constraints can specify an exact dtype or an allowed dtype mask, rank, semantic kind/facets, or a finite scalar interval. Registry validation rejects contradictory or unknown constraint fields before publication.
+`ValueDescriptor` has rank 1 through 8 and nonzero extents. Its element type is independent of interpretation and memory layout. A `Value` can be strided; shape inference describes logical samples and does not imply dense contiguous storage. Sample bit validity belongs to the operation or its bound validators rather than the generic Value container. Input constraints can specify an exact dtype or an allowed dtype mask, rank, a fixed Result schema id and version, a named tensor member, explicit validators, or a finite Float32 scalar interval. Registry validation rejects contradictory or unknown constraint fields before publication.
 
-`SemanticDescriptor` is the owned C++ representation encoded by the public `encode_semantic` helper. Image descriptors use facet `photospider.image` version 2; the other typed semantic kinds use `photospider.semantic` version 1. A generic Value can omit semantic facets. Decoding accepts the current canonical format and does not translate an older image facet. Canonical metadata is limited to 4096 encoded bytes, each text field to 128 UTF-8 bytes and channel count to 64. Unused fields are empty or positive zero; metadata numbers must be finite. The `semantic_parameter` helper returns lowercase hexadecimal capped at 8192 characters.
+A Result schema id and version name an explicit structural contract and enter compile identity; the kernel does not dispatch on them to a domain interpretation. A tensor slot declares its cell descriptor, batch prefix, `atomic_trailing_axes`, and optional spatial planar layout. Two Results with the same structure connect to the same port even when the caller assigns them different meanings. An operation that needs channel roles, color model, transfer, white point, alpha association, sampling or LUT axes reads them from an explicit static parameter, typically a `TensorDescription` encoded by the operations SDK (`Photospider::ops_sdk`). The operation validates that parameter against its input descriptor during preparation and does not copy it onto its output.
 
-For an `Image` `SemanticDescriptor`, the logical Value shape is Float32 HWC. The first image profile is linear-sRGB/Rec.709 RGB with D65 white and relative scene-referred values; finite signed and HDR RGB values are valid. RGB, XYZ and Lab use explicit channel roles, units and reference white. Alpha, when present, is the final coverage channel with samples in [0,1]. Straight alpha may preserve hidden color at zero alpha; coverage-premultiplied RGB is zero at zero alpha. Unassociation divides by each positive alpha without an epsilon and returns zero RGB at zero alpha. It can lose hidden straight color when associating at zero alpha. Nonlinear conversions require unassociated color, use the declared white and do not apply implicit chromatic adaptation or gamut clipping. Logical HWC axes do not prescribe whether storage is interleaved or planar.
+A port constraint binds validators by registered `ExtensionIdentity`; their order is significant and enters identity. The prepared operation runs exactly those validators on host-granted data. The kernel does not select a validator from a schema id, shape or channel count. The operations SDK owns the existing domain data contracts: the LUT3D bake report and owned-table Result schemas (`lut3d_bake_schema` and `lut3d_bake_table_schema` in `photospider/ops/numeric/lut3d_bake.hpp`) and the `QualityReport` type in `photospider/ops/numeric/quality.hpp`. `NumericDiagnostics` in `photospider/ops/numeric/diagnostics.hpp` is a payload codec for the generic diagnostic report channel, registered under `numeric_diagnostic_identity()` by `register_numeric_diagnostics`. The Layer types in `photospider/ops/composite/layer.hpp` are pure value types with validation and arithmetic functions and define no Result schema.
 
-Other semantic kinds describe masks, scalar/vector/complex fields, sampled signals, LUTs, byte resources and image planes. A mask distinguishes coverage, probability and membership. A vector field declares coordinate space and direction. A complex field declares real/imaginary components and the unshifted frequency convention. An `ImagePlane` stores one Float32 HW plane with explicit nominal sampling origin and positive Y/X steps; that logical sampling description does not itself prove dependency support or physical storage layout.
+Each operation output resolves to a complete Result schema. A fixed output carries a registered `result_schema` prototype whose extents can be fixed, derived from an input axis or element count, tied to field rows, or counted at publication for a field. An operation whose traits set `requires_metadata_specialization` resolves its outputs per node through a pure specializer or `prepare_static` callback that reads only static input metadata and parameters. Static preparation also names the `ResourceIdentity` values its program needs. The compiler resolves schemas before any value callback and validates published results against them. Runtime samples do not choose dtype, rank or tensor shape; only a field declared with a runtime row count receives that count at publication.
 
-Operation outputs declare dtype and shape independently. The registry supports scalar, preserve-first-input, match-all-inputs, fixed, shrink and statically described axes. Dtype rules select a declared type, an input type, or an allowed static parameter rule. An axis can resolve from a constant, static parameter, input axis/count, canonical channel-index list length or a bounded finite Float64 parameter rounded up. The axis rule can apply a checked subtraction, ceil division, positive multiplier and nonnegative constant offset. The compiler resolves descriptors before any value callback and validates published results against inferred dtype, shape and facets. Runtime samples do not choose output shape.
+An operation output has its own ordered input projection. The compiler infers metadata using the full declared signature, then lowers only the selected output's relevant inputs into its executable ancestry. A repeated-input template has a fixed prefix and one homogeneous suffix template; the resolved call expands to an ordered table and remains within the 1024-input bound. Resolved Result schemas, static parameters and repeated bounds are part of semantic identity.
 
-The output semantic rule explicitly preserves an input facet, establishes facets, reads a static semantic parameter, or drops typed guarantees. Shared rules also describe channel extraction/selection/merge, alpha association changes, and supported color-model conversions. A generic intermediate does not regain lost semantics from its shape; a later merge or metadata assignment must declare the target meaning and validate its constraints. Canonical channel-index parameters contain 1..64 decimal indices from 0 through 63, separated by commas, with no spaces, signs or leading zeroes. The helper APIs construct and parse these values; callers do not assemble semantic payload hex by hand.
+A port with `scalar_bounds` accepts a complete Float32 tensor member with full sample shape `{1}` and no batch axes; another shape returns `TypeMismatch`. Its finite inclusive `[minimum, maximum]` interval is checked before every consumer callback, including when the value came from a result cache. An out-of-range computed value returns `OperationFailed`.
 
-An operation output has its own ordered input projection. The compiler infers metadata using the full declared signature, then lowers only the selected output's relevant inputs into its executable ancestry. A repeated-input template has a fixed prefix and one homogeneous suffix template; the resolved call expands to an ordered table and remains within the 1024-input bound. Dtype and shape inference, static parameters and repeated bounds are part of semantic identity.
-
-The `Float32Scalar` port accepts a complete Float32 `{1}` with no facet, a dimensionless `Scalar` facet, or a dimensionless single-sample `SampledSignal` facet. Its finite inclusive range is checked before every consumer callback, including when the value came from a result cache. A direct binding with an invalid sample returns `InvalidArgument`; an invalid computed value returns `OperationFailed`; an incompatible facet returns `TypeMismatch`.
-
-The public expression rule accepts generic Float64 coefficients `[K]`, where `1 <= K <= 256`, finite start, positive finite step and an inferred Float32 output count from 1 to 1,048,576. Its output is a dimensionless sampled signal with dimensionless sample-axis units. The host parser limits source text to 4096 UTF-8 bytes, the expression tree to 256 nodes and depth 32. It accepts decimal/scientific literals, `x`, `c[index]`, parentheses, unary `+`/`-`, binary `+`, `-`, `*`, `/`, `^`, and the pure functions `abs`, `sqrt`, `exp`, `log`, `sin`, `cos`, `min`, `max`. `lut.apply_1d` accepts a Float32 sampled-signal query and a Float32 one-channel Signal/LUT table with at least two uniformly sampled entries. Query sample units must match the table axis unit; out-of-domain handling is explicit `reject` or `clip`. Both operations use Whole Region semantics.
+`numeric.sample_expression` accepts generic Float64 coefficients `[K]`, where `1 <= K <= 256`, finite `start`, positive finite `step` and an inferred Float32 output count from 1 to 1,048,576. The host parser limits source text to 4096 UTF-8 bytes, the expression tree to 256 nodes and depth 32. It accepts decimal/scientific literals, `x`, `c[index]`, parentheses, unary `+`/`-`, binary `+`, `-`, `*`, `/`, `^`, and the pure functions `abs`, `sqrt`, `exp`, `log`, `sin`, `cos`, `min`, `max`. `lut.apply_1d` accepts a Float32 query and a rank-one Float32 table with at least two entries, and its output has the query's shape. The table sampling grid comes from the static parameters `sample_origin` and `sample_step`, and out-of-domain handling comes from `out_of_domain`, which is `reject` or `clip`. Both operations use Whole Region semantics.
 
 Numerical precision and conversion behavior belong to each operation profile. The generic Value container preserves valid scalar bits, including floating signed zero and non-finite patterns where its physical type permits them. Operations add their own finite/range requirements, integer rounding, overflow behavior and reduction order. No graph-wide tolerance or bit-equivalence promise follows from a single operation's oracle.
 
 ## 4. Non-goals and explicit boundaries
 
-- Shape coincidence alone never proves image, mask, field, signal or LUT meaning.
-- Static inference does not inspect runtime samples to choose dtype, rank or shape.
+- Result structure does not carry or prove image, mask, field, signal or LUT meaning.
+- Operation outputs do not inherit an input's domain description. The kernel does not attach, propagate, match or automatically recognize domain labels.
+- Static inference does not inspect runtime samples to choose dtype, rank or tensor shape.
 - The compiler does not insert implicit casts, broadcasts, gamma operations, epsilon values, chromatic adaptation or gamut clamps.
-- Generic arithmetic does not preserve typed guarantees unless its declared semantic rule proves the result meaning.
 - A `Region` rule is a data dependency contract. It does not specify worker partitioning or internal computation tiles.
 - This decision does not add a script runtime, arbitrary expression language, filesystem access from operations, dynamic per-run output lengths, or implicit mutable state.
 - This document defines reusable contracts, not a promise that every described operation family is registered in every build or supported by every backend.
 
 ## 5. Consequences
 
-The compiler rejects malformed schemas, unsupported semantic combinations, invalid static parameters and unrepresentable checked extents before callbacks execute. Runtime output that differs from the inferred descriptor or facet contract fails publication. Callers should use the semantic and channel-list helpers so static parameters match the canonical representation.
+The compiler rejects malformed schemas, invalid static parameters, missing requested resources and unrepresentable checked extents before callbacks execute. Runtime output that differs from the inferred Result schema fails publication. Callers should build description parameters with the operations SDK codecs so static parameters match the canonical representation.
 
-Typed images require complete logical channel coverage per pixel even when spatial Regions are partial. An H/W tile of RGBA retains all four channel samples for each pixel; planar storage may keep channels in separate planes, so logical channel completeness does not imply interleaved physical bytes. Generic and other typed arrays follow their own Region contract.
+A tensor slot with an atomic channel axis receives complete logical channel coverage per pixel even when spatial Regions are partial. An H/W tile of RGBA retains all four channel samples for each pixel; planar storage may keep channels in separate planes, so logical channel completeness does not imply interleaved physical bytes. Slots without atomic trailing axes follow their sample coordinates exactly.
 
-Semantic descriptors and static inference records consume metadata memory and enter compiler/result identities. Changing a channel role, dtype rule, output shape rule or relevant-input projection changes those identities. Callbacks still own computational cost and output/scratch allocations; they must check cancellation in long loops and stay within declared resource bounds. Cache eligibility also requires deterministic, side-effect-free behavior and proven dependencies.
+Resolved Result schemas and static inference records consume metadata memory and enter compiler/result identities. Changing a dtype, output schema, static description parameter or relevant-input projection changes those identities. Callbacks still own computational cost and output/scratch allocations; they must check cancellation in long loops and stay within declared resource bounds. Cache eligibility also requires deterministic, side-effect-free behavior and proven dependencies.

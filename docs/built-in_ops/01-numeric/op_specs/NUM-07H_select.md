@@ -30,7 +30,7 @@ Select an element from one of two arrays using a boolean-valued UInt8 condition.
 Inputs in order are `condition`, `when_true`, `when_false`; all have the same
 rank-1..8 positive shape. Both value branches share one dtype chosen from UInt8,
 Int64, Float32 and Float64. Output `values` uses the branch dtype, unchanged
-shape and empty facets. Infer dtype from when_true, not the UInt8 condition;
+shape and no attached domain description. Infer dtype from when_true, not the UInt8 condition;
 the registry's output_dtype_input field can identify this source input.
 There are no static numeric parameters or implicit broadcasts/casts.
 

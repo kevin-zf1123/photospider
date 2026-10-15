@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_2
+implementation_status: implemented_cpu_result_abi_4
 clarification_status: complete
 registered_operation_keys:
   - color.xyz_to_rgb_strict
@@ -18,7 +18,7 @@ registered_operation_keys:
 # FMT-10B: XYZ to linear RGB
 
 Inherit the complete [FMT-10 family](FMT-10_rgb_basis_contract.md) and
-[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 3
+[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 4
 operations under the strict, accelerated Apple Silicon and accelerated x86-64
 CPU profiles.
 
@@ -26,8 +26,7 @@ CPU profiles.
 
 One input Result with one Float32 or Float64 tensor and no fields produces one
 `values` output Result containing one tensor. The output preserves Result schema
-identity, tensor key, logical shape and batch axes; it updates applicable
-semantic facets and sets `atomic_trailing_axes` to zero. Complete sample rank,
+identity, tensor key, logical shape and batch axes; it carries no description and sets `atomic_trailing_axes` to zero. Complete sample rank,
 including batch and cell axes, is at most 8; sample count is at most 2^40. Select a
 complete XYZ group in semantic mode, or an explicit ordered raw triple. Target
 RGB basis geometry is required. Construct its exact normalized M and use M^-1;
@@ -42,9 +41,9 @@ accept an unused white_handling field; explicit target geometry remains valid.
 For each requested transformed row i, output RN_dtype(sum_j inverse(M)[i,j]*XYZ[j]+0).
 A nonidentity request reads and validates all source X/Y/Z in semantic mode;
 raw applies NUM's full three-term behavior. Source unit/reference scale stays
-unchanged. Publish linear R/G/B into the original X/Y/Z slots with target basis,
-source reference/units and no incompatible complete-space labels. Raw keeps
-applicable source metadata without asserting RGB conversion.
+unchanged. Write linear R/G/B into the original X/Y/Z slots. The target basis
+and source scale define the numerical interpretation; callers pass that
+configuration downstream explicitly. Neither path attaches a description.
 
 ## Dependencies, storage and errors
 

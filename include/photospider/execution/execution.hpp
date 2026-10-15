@@ -134,10 +134,10 @@ struct PHOTOSPIDER_API ExecutionOptions final {
   std::uint64_t maximum_dependency_work = 1048576;
   /** @brief Separate optional cache-proof traversal/sample budget per Run.
    * @note One shared budget precharges structural traversal, metadata copies,
-   * source sample/facet hashing, internal block keys and finite normalization.
-   * Optional exhaustion skips verification/retention without failing
-   * computation. Zero disables dependency cache verification and retention for
-   * that Run.
+   * source sample/structure hashing, internal block keys and finite
+   * normalization. Optional exhaustion skips verification/retention without
+   * failing computation. Zero disables dependency cache verification and
+   * retention for that Run.
    */
   std::uint64_t maximum_dependency_cache_work = 1048576;
   /** @brief Maximum explicit Result/temporary read or write payload, positive.
@@ -196,10 +196,8 @@ struct PHOTOSPIDER_API OperationTiming final {
   std::uint64_t native_compute_us = 0;
   /** @brief Completed CPU computation stages and their tile callbacks. */
   std::uint64_t cpu_stage_count = 0, cpu_tile_callback_count = 0;
-  /** @brief Actual numeric work of this attempt; empty for nonnumeric/cache
-   * work.
-   */
-  NumericDiagnostics numeric = {};
+  /** @brief Owning opaque operation reports; absent for uninstrumented work. */
+  std::optional<DiagnosticAccumulator> reports = {};
   /** @brief True when computed_elements no longer represents an exact count.
    * False remains valid for an exact count equal to UINT64_MAX.
    */

@@ -8,9 +8,9 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/data/tensor_description.hpp"
 #include "photospider/ops/export.hpp"
 #include "photospider/ops/numeric/workflow_authoring.hpp"
+#include "photospider/ops/tensor_description.hpp"
 #include "photospider/plugin/operation_types.hpp"
 
 namespace ps::format {
@@ -19,7 +19,8 @@ namespace detail {
  *
  * The caller supplies an already-resolved and validated `SchemaTemplate`.
  * This function hashes its complete canonical representation, including
- * metadata and batch axes, with domain-separated SHA-256 and returns the
+ * structural constraints and batch axes, with domain-separated SHA-256 and
+ * returns the
  * lowercase 64-character digest. It reads no sample data and makes no
  * validity claim. Physical layout is asserted separately. The returned string
  * belongs to the caller. Canonicalization and string allocation may throw;
@@ -48,20 +49,17 @@ inline std::string layout_assertion(const ResultTensorLayout& layout) {
 
 /** @brief Static options shared by FMT-01A/B and the split helper.
  *
- * `metadata_mode` is `respect`, `raw` or `override`; override requires a typed
- * `metadata_override` used only by the generated nodes. `axis`, when present,
- * indexes the tensor descriptor's cell axes and excludes the Result batch
- * prefix. Without it, respect/override can use a described channel axis; raw
- * always requires it. `keepdims` controls whether extraction removes the cell
- * axis or leaves it with extent one. `layout` is `auto`, `view` or
+ * `input_description` optionally supplies explicit names and a channel axis.
+ * `axis`, when present, indexes cell axes and excludes the Result batch prefix.
+ * Without a description, the caller supplies the axis explicitly. `keepdims`
+ * leaves the selected cell axis with extent one. `layout` is `auto`, `view` or
  * `materialize`. `profile` selects one of the three CPU registrations. The
  * helpers serialize every default into generated nodes; direct nodes must
  * specify their required values explicitly.
  */
 struct ChannelExtractOptions final {
-  std::string metadata_mode = "respect";
   std::optional<std::uint32_t> axis;
-  std::optional<TensorDescription> metadata_override;
+  std::optional<TensorDescription> input_description;
   bool keepdims = false;
   std::string layout = "auto";
   std::string profile = "strict";
@@ -141,27 +139,10 @@ inline Result<std::vector<ChannelHandle>> split_channels(
       options.profile != "accelerated_apple_silicon" &&
       options.profile != "accelerated_x86_64")
     return Answer(invalid("unknown extraction profile"));
-  if (options.metadata_mode != "respect" && options.metadata_mode != "raw" &&
-      options.metadata_mode != "override")
-    return Answer(invalid("unknown metadata mode"));
-  if ((options.metadata_mode == "override") !=
-      options.metadata_override.has_value())
-    return Answer(invalid("override payload/mode mismatch"));
   if (options.layout != "auto" && options.layout != "view" &&
       options.layout != "materialize")
     return Answer(invalid("unknown extraction layout"));
-  std::optional<TensorDescription> description;
-  if (options.metadata_override) {
-    description = *options.metadata_override;
-  } else if (options.metadata_mode != "raw") {
-    for (const auto& facet : source.facets)
-      if (facet.key == "photospider.tensor-description") {
-        auto decoded = decode_tensor_description(facet);
-        if (!decoded.ok())
-          return Answer(decoded.status());
-        description = decoded.take_value();
-      }
-  }
+  auto description = options.input_description;
   if (description) {
     auto status = validate_tensor_description(*description, source.descriptor);
     if (!status.ok())
@@ -170,8 +151,7 @@ inline Result<std::vector<ChannelHandle>> split_channels(
   std::optional<std::uint32_t> axis = options.axis;
   if (axis && *axis >= source.descriptor.shape.size())
     return Answer(invalid("split axis is outside tensor rank"));
-  if (options.metadata_mode != "raw" && description &&
-      description->channel_axis) {
+  if (description && description->channel_axis) {
     if (axis && *axis != *description->channel_axis)
       return Answer(invalid("split axis disagrees with description"));
     axis = description->channel_axis;
@@ -196,13 +176,12 @@ inline Result<std::vector<ChannelHandle>> split_channels(
       {"expected_source_schema", detail::schema_assertion(schema)},
       {"expected_source_layout", layout_assertion},
       {"keepdims", options.keepdims},
-      {"layout", options.layout},
-      {"metadata_mode", options.metadata_mode}};
-  if (options.metadata_override) {
-    auto encoded = tensor_description_parameter(*options.metadata_override);
+      {"layout", options.layout}};
+  if (options.input_description) {
+    auto encoded = tensor_description_parameter(*options.input_description);
     if (!encoded.ok())
       return Answer(encoded.status());
-    common.emplace("metadata_override", encoded.take_value());
+    common.emplace("input_description", encoded.take_value());
   }
   std::vector<WorkflowNode> nodes;
   std::vector<ChannelHandle> handles;

@@ -1,8 +1,8 @@
 # PNT-05A: local_inpaint_navier_stokes
 
-## Implementation backends
+## Proposed backends
 
-The two public operations share the Result input/output, mask, Whole, Float32
+No PNT-05A operation is currently registered. The two proposed backends share the Result input/output, mask, Whole, Float32
 reference, error and numerical acceptance contracts below. Both expose named
 output port `image` and required static Int64 parameter `radius`.
 
@@ -75,8 +75,8 @@ Both Results have exactly one tensor and no fields; both use sample batch axes
 `[N,L]`. The image and mask batch extents and H/W must match exactly. Their
 complete sample shapes are `[N,L,H,W,4]` and `[N,L,H,W]`. No broadcasting,
 quantization, implicit conversion, thresholding or unassociation. Require
-`3 <= H,W <= 32768` and `H*W <= 2^31-1`. Static preparation checks typed
-schemas, facets, semantic profile and shape before continuation start. Runtime
+`3 <= H,W <= 32768` and `H*W <= 2^31-1`. Static preparation checks structural
+schemas, explicit operation configuration and shape before continuation start. Runtime
 validation checks all tensor samples. Padded extents, strides, byte arithmetic
 and actual allocation must also fit checked arithmetic and the execution root.
 
@@ -106,10 +106,10 @@ parameter identity and replanning.
 ## 5. Output inference and invariants
 
 Static preparation validates both Result schemas, the matching `[N,L]` batch
-axes and `[H,W]` spatial extents, the exact typed image/coverage facets, and the
-radius before execution. It clones input 0's full schema to the output and selects
+axes and `[H,W]` spatial extents, the operation's fixed RGBA/coverage interpretation, and the radius before execution. It clones input 0's full schema to the output and selects
 `CompleteBundle` publication. The output sample shape is `[N,L,H,W,4]` and it
-preserves the scene/display reference. Static preparation reads no pixel payload.
+uses the same caller-supplied scene/display interpretation; no description is
+attached or propagated. Static preparation reads no pixel payload.
 
 For input I, mask M and result J, `M(n,l,y,x)=0` implies bitwise equality
 `J(n,l,y,x,c)=I(n,l,y,x,c)` for every channel c. All alpha samples are
@@ -176,17 +176,17 @@ conservatively records Data and Validation support from both complete inputs.
 There is no regional algorithm or transitive halo because newly filled values
 propagate across the plane. A downstream ROI may collect a region from the
 complete output. A change to any input sample dirties the full output; relevant
-schema, facet, resource or parameter changes invalidate or replan.
+schema, resource or explicit parameter changes invalidate or replan.
 
 The image and mask tensors retain their matching `[N,L]` batch axes. Each
 batch plane solves independently; a nonempty request still validates all planes
 before processing any plane. Empty output demand creates an empty Result without
 payload Need or numerical execution. Use existing operation and schema identity;
-do not add a cache key that omits image resources or semantic metadata.
+do not add a cache key that omits explicit resources or computation parameters.
 
 ## 9. Precision and determinism
 
-Shape, facets, unmasked samples and all alpha are exact; unmasked negative zero
+Shape, unmasked samples and all alpha are exact; unmasked negative zero
 must survive. Same build, snapshot and CPU configuration must repeat bitwise.
 For each hole RGB sample against the pinned oracle:
 `abs(actual-reference) <= 1e-6 + 1e-5*abs(reference)`.
@@ -261,7 +261,7 @@ absent evidence. A test name alone is not proof that every clause is covered.
 | T14 | change known pixels, mask, radius, metadata and distant NaN | no stale successful reuse |
 | T15 | allocation failure injection; minimum budget minus one | ResourceExhausted, released owners, later success |
 | T16 | initialization/frontier/prepublication cancellation, host Stale | no partial success, released owners, host priorities |
-| T17 | public registry -> compile -> bind -> execute -> named image | actual example and installed consumer, facets and numbers |
+| T17 | public registry -> compile -> bind -> execute -> named image | temporary public workflow, structural output and numerical checks |
 | T18 | independent concurrent invocations | no cross-call state or resource interference |
 
 Oracle wrappers must independently use pinned OpenCV 4.12.0, zero hole work

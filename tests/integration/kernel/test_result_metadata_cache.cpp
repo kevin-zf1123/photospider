@@ -19,7 +19,6 @@ SchemaTemplate source_schema(const Value& value) {
   auto schema = multi_result::schema(value.descriptor().element_type,
                                      value.descriptor().shape);
   schema.tensors[0].key = "data";
-  schema.tensors[0].facets = value.facets();
   return schema;
 }
 ExecutionBindings bind_sources(const ResourceBudget& root,
@@ -48,8 +47,7 @@ std::vector<std::uint8_t> bytes(const ResultRef& result) {
 
 template <class T>
 Value array(const std::vector<T>& samples,
-            std::vector<std::uint64_t> shape = {},
-            const std::vector<ValueFacet>& facets = {}) {
+            std::vector<std::uint64_t> shape = {}) {
   if (shape.empty())
     shape = {samples.size()};
   const auto type =
@@ -57,7 +55,7 @@ Value array(const std::vector<T>& samples,
   auto value = take(MutableValue::allocate({type, shape}, Region::whole(shape),
                                            BufferAllocator{}));
   std::memcpy(value.data(), samples.data(), samples.size() * sizeof(T));
-  return take(std::move(value).publish(facets));
+  return take(std::move(value).publish());
 }
 WorkflowDocument document(const std::vector<Value>& inputs,
                           const std::vector<WorkflowNode>& nodes) {
@@ -95,12 +93,13 @@ struct MetadataIdentityProgram {
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
             : std::vector<std::uint64_t>{},
-        phase.query.tile_extent, phase.query.resources));
+        phase.query.tile_extent));
     if (!empty) {
       check(phase.consume_work(shape.size() + 1));
-      double number = static_cast<double>(
-          shape.size() * 100 + shape[0] +
-          static_cast<std::uint32_t>(input.descriptor.element_type));
+      double number = std::get<double>(phase.query.parameters.at("offset")) +
+                      static_cast<double>(shape.size() * 100 + shape[0] +
+                                          static_cast<std::uint32_t>(
+                                              input.descriptor.element_type));
       if (input.descriptor.element_type == ElementType::Float64) {
         double first = 0;
         check(phase.read_tensor(
@@ -108,8 +107,6 @@ struct MetadataIdentityProgram {
         if (std::signbit(first))
           number += 7;
       }
-      if (!input.facets.empty() && !input.facets[0].payload.empty())
-        number += input.facets[0].payload[0];
       check(builder.publish_tensor(
           0, Region::whole({1}),
           ByteView(reinterpret_cast<const std::uint8_t*>(&number), 8)));
@@ -124,6 +121,8 @@ int compact_identity() {
   std::atomic<unsigned> calls{0};
   OperationDefinition metadata;
   metadata.key = "fixture.metadata";
+  metadata.traits.parameter_schema = {
+      {"offset", OperationParameterType::Float64}};
   metadata.traits.input_count = 1;
   metadata.traits.input_schema.resize(1);
   metadata.traits.input_schema[0].kind = OperationPortKind::Result;
@@ -159,9 +158,11 @@ int compact_identity() {
   ExecutionContext execution(registry, {2, false, 16, 1024 * 1024, 65536});
   auto root = execution.resource_budget().take_value();
   auto check = [&](const Value& v, double expected, bool cacheable = true,
-                   std::uint64_t cache_work = 0) {
-    GraphContext graph(document(
-        {v}, {{1, "fixture.metadata", {WorkflowInputReference{1}}, {}}}));
+                   std::uint64_t cache_work = 0, double offset = 0) {
+    GraphContext graph(document({v}, {{1,
+                                       "fixture.metadata",
+                                       {WorkflowInputReference{1}},
+                                       {{"offset", offset}}}}));
     auto plan = Compiler(registry).compile(graph).take_value().plan;
     const auto before = calls.load();
     std::vector<std::uint8_t> observed;
@@ -221,8 +222,8 @@ int compact_identity() {
   PS_CHECK(check(array<double>(std::vector<double>(256), {128, 2}), 331));
   PS_CHECK(check(array<double>({0.}), 104));
   PS_CHECK(check(array<double>({-0.}), 111));
-  PS_CHECK(check(array<double>({0.}, {}, {{"vendor.note", 1, {1}}}), 105));
-  PS_CHECK(check(array<double>({0.}, {}, {{"vendor.note", 1, {2}}}), 106));
+  PS_CHECK(check(array<double>({0.}), 105, true, 0, 1));
+  PS_CHECK(check(array<double>({0.}), 106, true, 0, 2));
   auto bytes =
       Value::create({ElementType::UInt8, {2048}}, Region::whole({2048}),
                     {0, {1}}, std::vector<std::uint8_t>(2048))

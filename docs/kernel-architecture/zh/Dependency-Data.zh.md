@@ -32,9 +32,9 @@ class Footprint final {
 class ValueFragments final {
  public:
   static Result<ValueFragments> create(
-      ValueDescriptor descriptor, std::vector<ValueFacet> facets,
-      Footprint authorized, const std::vector<Value>& fragments,
-      const FootprintLimits& limits = {}, ResourceBindings resources = {});
+      ValueDescriptor descriptor, Footprint authorized,
+      const std::vector<Value>& fragments,
+      const FootprintLimits& limits = {});
   Status read(const std::vector<std::uint64_t>& coordinate, void* destination,
               std::size_t size) const;
 };
@@ -47,13 +47,13 @@ Footprint 表示非零 rank 1..8 逻辑域中的精确集合，以规范不交�
 
 FootprintLimits 对每次集合操作限制候选工作与矩形条目，包括重复构造工作。超限返回 ResourceExhausted，取消返回 Cancelled，两者均不等于 Empty 或 bbox 近似。复合调用方还需限制跨调用的总工作和元数据；单次集合额度不是完整执行预算。
 
-ValueFragments 保存完整 descriptor/facets、授权 Footprint 与有 owner 的矩形 Value。构造时裁剪输入覆盖，拒绝缺失样本和不一致重叠；同 owner 的等价 origin-relative mapping 去重。Generic 数组允许任意样本子集。经验证的 ColorArray tuple 必须覆盖完整 C。结构化 tensor 数据不进入此 Value 容器，而由 typed Result tensor slot 携带，并通过 `ResultTensorInput` 读取。`read` 通过 Value 的 checked signed-stride 地址复制实际 dtype 宽度；空洞、未授权地址或错误宽度均失败，不会同步取数或补零。`restrict` 同时限制 owner 与覆盖；`collect` 在通过完整矩形检查后使用 BufferAllocator 分配。retained capacity 统计实际唯一 storage owner，与有效区域大小分开。
+ValueFragments 保存完整 descriptor、授权 Footprint 与有 owner 的矩形 Value。构造时裁剪输入覆盖，拒绝缺失样本和不一致重叠；同 owner 的等价 origin-relative mapping 去重。`read` 通过 Value 的 checked signed-stride 地址复制实际 dtype 宽度；空洞、未授权地址或错误宽度均失败，不会同步取数或补零。`restrict` 同时限制 owner 与覆盖；`collect` 在通过完整矩形检查后使用 BufferAllocator 分配。retained capacity 统计实际唯一 storage owner，与有效区域大小分开。
 
 ## 调度与状态机
 
-`OperationTraits` 使用语义版本 25 和 Result protocol 2。Result traits 描述 failure delivery、continuation/workspace 上限和 typed output ports。除了声明的 Whole RequestFailureOnly 情况，staged Result program 必须 deterministic 且 side-effect-free。编译器检查所请求 output 和 side-effect root 可达的执行边。Excluded ports 保留静态 metadata，不会运行 producer。Result plan 保留未解析 input demand，不生成矩形近似。普通 execution 会将每个非 side-effect-free operation 作为强制 root 执行，包括没有具名 output 请求的 operation。Fragment execution 仅在 query 包含非空 demand 时执行这些 roots；完全空的 query 会跳过无关副作用 roots。同一 Run 内，副作用 tensor output 的内部 actor identity 使用 slot 0 和完整 coverage，后续请求复用该 actor。该规则不会扩大其他 slots 的授权：每个 slot 仍需自己的 Need 与有效 publication coverage。副作用工作不会跨 Run 共享或缓存。强制 root failure 或 cancellation 会使整个 Run 失败。
+`OperationTraits` 使用语义版本 26 和 Result protocol 2。Result traits 描述 failure delivery、continuation/workspace 上限和 typed output ports。除了声明的 Whole RequestFailureOnly 情况，staged Result program 必须 deterministic 且 side-effect-free。编译器检查所请求 output 和 side-effect root 可达的执行边。Excluded ports 保留静态 metadata，不会运行 producer。Result plan 保留未解析 input demand，不生成矩形近似。普通 execution 会将每个非 side-effect-free operation 作为强制 root 执行，包括没有具名 output 请求的 operation。Fragment execution 仅在 query 包含非空 demand 时执行这些 roots；完全空的 query 会跳过无关副作用 roots。同一 Run 内，副作用 tensor output 的内部 actor identity 使用 slot 0 和完整 coverage，后续请求复用该 actor。该规则不会扩大其他 slots 的授权：每个 slot 仍需自己的 Need 与有效 publication coverage。副作用工作不会跨 Run 共享或缓存。强制 root failure 或 cancellation 会使整个 Run 失败。
 
-每个 `ps_result_output_v3` 还携带不可变的 view policy 和可选 output payload bound。`PRESERVE_VIEWS` 适用于 CPU 的 Atomic output；`REQUIRE_INPUT_VIEWS` 隐含该 flag，且要求 CPU Whole execution。在 compiled structured CPU Whole execution 中，coordinator 会验证 payload Tensor Need，在 computation poll 前准备授权 boxes，再证明 affine views 或采用 Auto collection。Direct registry start 不会自动生成这一 Need preparation。`PAYLOAD_BOUND` 启用 `maximum_output_payload_bytes`，值为零时表示显式零上限；未设置该 flag 时字节字段必须为零。该 bound 支持 CPU Whole 或 staged output，并在 publication 时检查。Input backing、workspace、metadata 与 work 仍分别计入 Root。Importer 会拒绝未知或不一致的 flags；C `start` 和 `poll` 的 `query.output` 都会反映注册时的 policy，metadata resolver 可以推导 output port/schema，但不能改变 policy。这些尾部字段改变嵌套 output record 布局，operation C ABI 仍为版本 3。精确的 `struct_size` 校验会拒绝旧的 prefix record，因此 C module 必须重建；不提供兼容 shim。
+每个 `ps_result_output_v4` 还携带不可变的 view policy 和可选 output payload bound。`PRESERVE_VIEWS` 适用于 CPU 的 Atomic output；`REQUIRE_INPUT_VIEWS` 隐含该 flag，且要求 CPU Whole execution。在 compiled structured CPU Whole execution 中，coordinator 会验证 payload Tensor Need，在 computation poll 前准备授权 boxes，再证明 affine views 或采用 Auto collection。Direct registry start 不会自动生成这一 Need preparation。`PAYLOAD_BOUND` 启用 `maximum_output_payload_bytes`，值为零时表示显式零上限；未设置该 flag 时字节字段必须为零。该 bound 支持 CPU Whole 或 staged output，并在 publication 时检查。Input backing、workspace、metadata 与 work 仍分别计入 Root。Importer 会拒绝未知或不一致的 flags；C `start` 和 `poll` 的 `query.output` 都会反映注册时的 policy，metadata resolver 可以推导 output port/schema，但不能改变 policy。精确的 `struct_size` 校验会拒绝任何其他布局的 record，因此 C module 必须针对 ABI 4 header 重建；不提供兼容 shim。
 
 Result discovery、poll 数、continuation state、output/scratch 和 GPU request table 都有有限上限。读取、显式 work 扣除和分配失败具有粘滞性，即使 callback 忽略返回 Status 也会失败。某个 observer 抛异常不会阻断其他 observer。首个记录的 failure 仍是最终报告原因；host 另外记录是否禁止 CPU fallback。只有 origin/scope 合规且未限定的 `BackendUnavailable` 可继续参与重试判断。已接纳调用失败时，continuation state 只销毁一次并释放 input owners，随后应用 cancellation。Poll admission 非阻塞：并发或重入调用返回 `InvalidArgument/Protocol/Group`，不会进入 callback，也不会触发 failure observer 或 failure latch，也不会修改活动 phase、首个 failure 或 work count。借用的 phase/query/service references 在 callback 返回后失效；不得并发移动或销毁 continuation，且 continuation 必须使用授予的 allocator。`start_result` 在 factory 前后检查 cancellation；factory 进入后观察到 cancellation 时，取消优先于 factory、allocation 和返回 state 校验错误。任何返回的 state 都会在函数返回前销毁，definition lease 保持到销毁完成。
 
@@ -63,7 +63,7 @@ Frozen execution 保留捕获的 graph 与 input owners。Root Actor 以有界 c
 
 ## C 分阶段程序的内存与错误路径
 
-Result ABI 3 C operation table 是唯一的 C staged-operation 接口，提供 typed Result ports、callback-scoped services、分阶段 Needs 和 Result publication。Loader 会校验并复制有界 table，再原子发布 definitions；只要导入的 callbacks 仍可能运行，就保留 module owner。C++ API 通过 `ResultContinuation` 使用同一 staged Result model；Result ABI 3 仍是唯一 C operation-plugin interface。
+Result ABI 4 C operation table 是唯一的 C staged-operation 接口，提供 typed Result ports、callback-scoped services、分阶段 Needs 和 Result publication。Loader 会校验并复制有界 table，再原子发布 definitions；只要导入的 callbacks 仍可能运行，就保留 module owner。C++ API 通过 `ResultContinuation` 使用同一 staged Result model；Result ABI 4 仍是唯一 C operation-plugin interface。
 
 阶段服务提供 checked read，包含实际 dtype、origin、有符号 stride、字节跨度和授权区域。缺失样本不会触发隐藏的上游读取。无效 handle 和被忽略的服务失败保持 sticky。
 
@@ -78,7 +78,7 @@ Result ABI 3 C operation table 是唯一的 C staged-operation 接口，提供 t
 
 C Result services `checkpoint_before`、`checkpoint_read` 和 `checkpoint_publish` 为纯 staged operation 提供 Result checkpoint 路径。查找返回不大于请求上限的最大已存 sequence。未命中时成功返回 handle 0；命中时返回 opaque handle、sequence 和 canonical tensor byte size。Opaque handle 只可在当前 start 或 poll callback 期间使用；其 callback-epoch entry 会保留 state 和 witness。
 
-Checkpoint state 是 sealed generic `CompleteBundle` Result，包含一个完整覆盖的 tensor，不含 fields、metadata 或 domain；tensor 不带 facets、groups、batch axes 或 spatial layout。`create_block_state` 将字节 payload 复制到该 Result，并按 tensor 的逻辑 samples 校验 payload 大小。调用方可将返回的 operation-owned handle 用作 block state 或传给 `checkpoint_publish`。Block-state handle 会跨 poll 保留，直到调用方释放或 callback state 销毁。可选 retention 获准时，发布会保留 Result 与成功 dependency witness。此调用不会消费 handle；调用方仍须通过 `release_block_state` 释放它。
+Checkpoint state 是 sealed generic `CompleteBundle` Result，包含一个完整覆盖的 tensor，不含 fields 或 domain；tensor 不带 groups、batch axes 或 spatial layout。`create_block_state` 将字节 payload 复制到该 Result，并按 tensor 的逻辑 samples 校验 payload 大小。调用方可将返回的 operation-owned handle 用作 block state 或传给 `checkpoint_publish`。Block-state handle 会跨 poll 保留，直到调用方释放或 callback state 销毁。可选 retention 获准时，发布会保留 Result 与成功 dependency witness。此调用不会消费 handle；调用方仍须通过 `release_block_state` 释放它。
 
 `checkpoint_read` 按 canonical row-major logical sample 顺序复制正长度且范围有效的字节区间。区间可以从一个 element 中间开始或结束，也可以跨越 sample 边界。Service 不暴露保留存储的指针，会计入读取 work，并检查 Root capacity 与取消状态。恢复 checkpoint 会重新导入成功 dependency history、facts、ancestry 和 association；它不会恢复 Result input capabilities，也不会授权新的输入读取。Callback 必须另行请求当前 inputs。Checkpoint API 要求 phase 非零且 operation deterministic、side-effect-free。Block callbacks 和 GPU discovery 不能调用这些服务。无效 handle、区间、scope 或禁止的调用会成为 sticky failure。
 
@@ -86,7 +86,7 @@ Checkpoint state 是 sealed generic `CompleteBundle` Result，包含一个完整
 
 Result C module 与 C++ Result continuation 使用相同的结构化输入和 publication 模型。原生插件仍是受信任的进程内代码；指针 metadata 校验不提供内存隔离。C++ Result continuations 与 Result C modules 使用相同 structured input 和 publication model。
 
-`test_result_plugin.cpp` 覆盖 Result ABI 3 C module 导入、callback 执行、sticky service failure 和 plugin owner 生命周期。其 `c_whole_view_policies()` 检查所选 output flags 与 payload bound 在两个 C callback 阶段都可见，并覆盖 Auto collection、strict view 拒绝、兼容/负 stride/零 stride backing、output cap 和 owner 退役。Fixture 还注册 malformed modules，覆盖未知或不一致的 policy flags、bound 声明不匹配、不支持的 view 组合以及截断的 output record。Result checkpoint 和 block fixtures 覆盖对应的 scoped services。
+`test_result_plugin.cpp` 覆盖 Result ABI 4 C module 导入、callback 执行、sticky service failure 和 plugin owner 生命周期。其 `c_whole_view_policies()` 检查所选 output flags 与 payload bound 在两个 C callback 阶段都可见，并覆盖 Auto collection、strict view 拒绝、兼容/负 stride/零 stride backing、output cap 和 owner 退役。Fixture 还注册 malformed modules，覆盖未知或不一致的 policy flags、bound 声明不匹配、不支持的 view 组合以及截断的 output record。Result checkpoint 和 block fixtures 覆盖对应的 scoped services。
 
 
 ## 精确 demand 与 binding generation 状态机
@@ -131,7 +131,7 @@ Whole result 的释放采用保守条件。只有完成的 Whole Actor，并且�
 
 ### 跨 output 的 pure block sharing
 
-`share_blocks_across_outputs` 是 `OperationTraits` v25 的可选字段，默认关闭，适用于 pure deterministic Atomic Result operations。启用后，runtime 可在满足当前输出与输入契约的 block 状态转移间共享 retention；状态不兼容或 retention 不获准时仍会重新计算。Block retention 与完整 Result cache、checkpoint 和公开输出分开管理。命中次数与复用范围是当前实现细节，不构成性能保证。
+`share_blocks_across_outputs` 是 `OperationTraits` v26 的可选字段，默认关闭，适用于 pure deterministic Atomic Result operations。启用后，runtime 可在满足当前输出与输入契约的 block 状态转移间共享 retention；状态不兼容或 retention 不获准时仍会重新计算。Block retention 与完整 Result cache、checkpoint 和公开输出分开管理。命中次数与复用范围是当前实现细节，不构成性能保证。
 
 ## 限制与错误处理
 

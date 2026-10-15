@@ -8,10 +8,9 @@
 #include <vector>
 
 #include "01-numeric/ordered_result.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "common/typed_need_validation.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
-#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -29,12 +28,9 @@ struct ScanState final {
   std::optional<ResultBuilder> builder;
   explicit ScanState(std::uint64_t block) : block(block) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     if (phase.query.tensor_outputs && phase.query.tensor_outputs->empty())
       return numeric_ops::ordered_empty_output(phase);
-    input_internal::Float32Environment environment;
+    plugin_internal::FloatingEnvironment environment;
     if (!environment.active())
       return Result<ResultProgramPoll>(Status{
           ErrorCode::InvalidArgument, "numeric environment unavailable"});

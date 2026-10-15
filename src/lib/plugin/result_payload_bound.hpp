@@ -4,7 +4,7 @@
 #include <set>
 #include <utility>
 
-#include "core/checked_math.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/plugin/result_program.hpp"
 #include "plugin/failure_latch.hpp"
 
@@ -79,7 +79,7 @@ class ResultPayloadBound final {
                  FailureReason::None,
                  {FailureOrigin::Protocol, FailureScope::Group}});
     auto consume = [&](std::uint64_t amount) { return work(phase, amount); };
-    auto output = result.cache_storage(consume, false, false);
+    auto output = result.cache_storage(consume, false);
     if (!output.ok())
       return failure_.record(output.status());
     std::set<const void*, std::less<const void*>,
@@ -92,7 +92,7 @@ class ResultPayloadBound final {
       auto owner = source.owner.lock();
       if (!owner.valid())
         continue;
-      auto storage = owner.cache_storage(consume, false, false);
+      auto storage = owner.cache_storage(consume, false);
       if (!storage.ok())
         return failure_.record(storage.status());
       for (const auto& allocation : storage.value())

@@ -1,6 +1,6 @@
 # NUM-02 Whole execution
 
-The six formal `numeric.linspace_*` and `numeric.arange_*` keys take Result inputs and publish two independently selectable Result outputs, `values` and `axis`. Each input Result contains exactly one tensor member at any key, with complete `sample_shape()` `[1]`. The values output uses `photospider.tensor` / `samples` and shape `[count]`. Axis uses the same schema and member key with shape `[3]`; `atomic_trailing_axes=1` makes the three components one atomic observation. Both outputs use ordinary axes and drop facets and batch topology.
+The six formal `numeric.linspace_*` and `numeric.arange_*` keys take Result inputs and publish two independently selectable Result outputs, `values` and `axis`. Each input Result contains exactly one tensor member at any key, with complete `sample_shape()` `[1]`. The values output uses `photospider.tensor` / `samples` and shape `[count]`. Axis uses the same schema and member key with shape `[3]`; `atomic_trailing_axes=1` makes the three components one atomic observation. Both outputs use ordinary axes and drop batch topology.
 
 ## Input demand and output selection
 

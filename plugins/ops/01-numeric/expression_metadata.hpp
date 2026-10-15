@@ -9,11 +9,11 @@
 
 namespace ps::plugin_internal::expression_result {
 /** @brief Resolve numeric.sample_expression or lut.apply_1d metadata.
- * Uses only static input descriptors/facets and parameters, without payload
+ * Uses only static input descriptors and parameters, without payload
  * reads. The caller validates operation arity and required parameter types.
  * Saves/restores the caller's floating environment on every return.
  */
-Result<std::vector<ValueFacet>> infer_expression_facets(
+Status validate_expression_metadata(
     bool lut, const std::vector<TensorMetadata>& inputs,
     const std::map<std::string, ParameterValue>& parameters,
     const ValueDescriptor& output);

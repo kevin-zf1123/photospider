@@ -3,10 +3,10 @@
 #include <new>
 #include <utility>
 
-#include "core/checked_math.hpp"
 #include "core/resource_state.hpp"
-#include "core/status_helpers.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/core/resources.hpp"
+#include "photospider/core/status_helpers.hpp"
 #include "photospider/data/storage.hpp"
 
 namespace ps {

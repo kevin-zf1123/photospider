@@ -54,7 +54,7 @@ oracle 通过也不表示 runtime 已实现。文档只描述当前功能或当�
 | 对应与区别 | 标准/软件功能、近似替代、同义词、不可替代之处 | 把 mean 与 median 合并 |
 | 端口 | 默认 registry 或显式 factory；每个输入/输出名称与顺序、Value/Result、shape/schema、dtype、单位、颜色/alpha/emission、可选输入 | 将 RGB 曲线称为三维 LUT |
 | 参数 | 类型、范围、建议默认、静态还是运行时、相互约束 | 半径没有 px/mm 区别 |
-| 输出推断 | 静态多输出的 shape/extent/facet；Result schema/RuntimeCount/关联、空 rows、descriptor 与 finality | 使用未实现的动态 shape 推断 |
+| 输出推断 | 静态多输出的 shape/extent；Result schema/RuntimeCount/关联、空 rows、descriptor 与 finality | 使用未实现的动态 shape 推断 |
 | 数学语义 | 公式、坐标方向、端点、颜色域、归一化、精度 | 只写“使用 OpenCV” |
 | 算法 | CPU 参考、优化方案、复杂度、临时内存、并行与取消点 | 将近似算法标成精确 |
 | 支持矩阵 | 通道、dtype、HDR/负值、CPU/GPU、平面/交错 | “支持所有格式” |
@@ -91,4 +91,4 @@ oracle 通过也不表示 runtime 已实现。文档只描述当前功能或当�
 
 `S` 为已公开标准公式；`F` 为官方描述确认功能存在；`B` 为指定产品版本和设置的黑盒结果；`U` 为未核验。F 不推导 B。黑盒差异应固定颜色 profile、传递函数、位深、alpha、图层顺序、mask、是否 linear blending、缩放、CPU/GPU 和输出编码。
 
-当前实现遵循 Photospider 0.33.0 与 Result C ABI 2 的[公共契约索引](contracts.md)及公开头文件；本模板用于组织规格，不会替代当前 API 定义。D2 转为 D1 前必须清除影响可观测结果的未决项。涉及公共数据类型、ABI、缓存身份或输入需求的选择，应走仓库现有 reviewed 流程；本研究不直接接受这些契约。
+当前实现遵循 Photospider 0.34.0 与 Result C ABI 4 的[公共契约索引](contracts.md)及公开头文件；本模板用于组织规格，不会替代当前 API 定义。D2 转为 D1 前必须清除影响可观测结果的未决项。涉及公共数据类型、ABI、缓存身份或输入需求的选择，应走仓库现有 reviewed 流程；本研究不直接接受这些契约。

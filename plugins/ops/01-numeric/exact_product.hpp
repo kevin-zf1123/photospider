@@ -4,7 +4,7 @@
 #include <functional>
 
 #include "01-numeric/exact_ratio.hpp"
-#include "core/work_consumer.hpp"
+#include "photospider/core/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Inputs may alias each other; output must be distinct. Every stored word and

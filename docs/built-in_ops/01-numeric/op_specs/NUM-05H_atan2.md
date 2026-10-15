@@ -28,7 +28,7 @@ and in the named family contract take precedence.
 
 Inputs are named `y` (first operand) and `x` (second operand), with identical
 shape and dtype, Float32 or Float64. Output `values` preserves shape and dtype,
-has empty facets, and expresses the oriented angle in radians.
+has no attached domain description, and expresses the oriented angle in radians.
 No static angle-unit parameter or degree output exists. Inherit the
 [binary contract](NUM-05_binary_contract.md), substituting y/x for a/b in
 both-operand support and NaN priority. Integer inputs require explicit cast.

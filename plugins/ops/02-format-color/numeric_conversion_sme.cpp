@@ -3,7 +3,7 @@
 
 #include <cstdint>
 
-#include "core/cancellation_poll.hpp"
+#include "photospider/core/cancellation_poll.hpp"
 
 namespace ps::plugin_internal::format_numeric {
 __arm_locally_streaming std::uint64_t sme_conversion_vector_bytes() {

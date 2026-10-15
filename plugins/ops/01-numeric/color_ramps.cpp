@@ -16,9 +16,10 @@
 #include "01-numeric/exact_color_coordinate.hpp"
 #include "01-numeric/exact_rgb.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/core/resource_allocator.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "plugin/port_validation.hpp"
+#include "photospider/core/resource_allocator.hpp"
+#include "photospider/ops/errors.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -104,19 +105,6 @@ Result<OperationPreparation> prepare(
        (descriptors[3].shape[0] != knots || descriptors[4].shape[0] != knots)))
     return Answer(
         mismatch("ramp requires matching K=1..65536 and color channels"));
-  for (const auto& facet : inputs[2].result_schema->tensors[0].facets) {
-    if (facet.key != "photospider.color-array")
-      continue;
-    if (rational)
-      return Answer(
-          mismatch("split hue coordinates are not a complete ColorArray"));
-    auto expected = encode_color_array(description);
-    if (!expected.ok())
-      return Answer(expected.status());
-    if (facet.version != expected.value().version ||
-        facet.payload != expected.value().payload)
-      return Answer(mismatch("attached colors differ from ramp description"));
-  }
   auto available = numeric_ops::sequence_profile_available(profile);
   if (!available.ok())
     return Answer(available);
@@ -152,9 +140,6 @@ Result<OperationPreparation> prepare(
     description.hue = program->output_hue;
     description.source_layout = ColorSourceLayout::Interleaved;
   }
-  auto facet = encode_color_array(description);
-  if (!facet.ok())
-    return Answer(facet.status());
   auto shape = descriptors[0].shape;
   shape.push_back(channels);
   OperationPreparation prepared;
@@ -163,7 +148,6 @@ Result<OperationPreparation> prepare(
   auto& output = prepared.outputs[0];
   auto schema = numeric_ops::numeric_tensor_schema(
       dtype == "float32" ? ElementType::Float32 : ElementType::Float64, shape);
-  schema.tensors[0].facets = {facet.take_value()};
   schema.tensors[0].atomic_trailing_axes = 1;
   output.metadata.result_schema =
       std::make_shared<const SchemaTemplate>(std::move(schema));
@@ -204,8 +188,9 @@ struct RampState {
     numeric_ops::math_next(
         at, phase.query.inputs[0].result_schema->tensors[0].sample_shape());
   }
+  template <class Reason = FailureReason>
   Status failure(unsigned port, std::uint64_t row, const char* message,
-                 FailureReason reason = FailureReason::InvalidDomain) const {
+                 Reason reason = FailureReason::InvalidDomain) const {
     Status status{ErrorCode::OperationFailed,
                   std::string(message) + "; port=" + std::to_string(port) +
                       " row=" + std::to_string(row),
@@ -355,14 +340,14 @@ struct RampState {
                     BinaryParts::decode(UINT64_C(0x3ff0000000000000), false)
                         .order_key())
               return failure(2, point.first + row, "RGB alpha outside [0,1]",
-                             FailureReason::InvalidAssociation);
+                             ops_error::InvalidAssociation);
             if (!alpha.magnitude && program->description.association ==
                                         ColorAssociation::Premultiplied) {
               for (unsigned channel = 0; channel < 3; ++channel)
                 if (BinaryParts::decode(rows[row][channel], false).magnitude)
                   return failure(2, point.first + row,
                                  "zero alpha requires zero premultiplied RGB",
-                                 FailureReason::InvalidAssociation);
+                                 ops_error::InvalidAssociation);
             }
           }
         }

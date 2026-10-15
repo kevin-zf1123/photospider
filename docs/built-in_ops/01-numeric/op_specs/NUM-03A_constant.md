@@ -55,12 +55,11 @@ and writes this canonical parameter. Required String `layout` is `view` or
 `dense`; the constructor writes `view` by default. Direct nodes supply both.
 There is no output dtype parameter because it is exactly the input dtype.
 
-Output is a generic Value with empty facets. Valid input metadata is checked by
-the existing generic port/recognized-facet rules. Typed inputs retain their
-normal semantic validation obligations on the read scalar; invalid typed NaN
-cannot bypass them by being copied. Unfaceted numeric inputs preserve every
-bit, including signaling/quiet NaN payloads, without a floating conversion,
-arithmetic instruction or isfinite-based rejection. Logical contents are always
+Output is a generic tensor Result with no attached description. The port checks
+scalar dtype/shape; required upstream failures and explicit port validators
+retain their normal scope. Copying numeric storage preserves every bit,
+including signaling/quiet NaN payloads, without floating conversion, arithmetic
+or isfinite-based rejection. Logical contents are always
 `values[index] = bitcopy(value[0])`.
 
 ## Demand and representation
@@ -130,7 +129,7 @@ capacity/work/stage reasons; no partial failed array is reported as success.
 | C01 | Int64 `[7]`, shape `[2,3]`: six logical sevens; view stores one 8-byte scalar with zero strides |
 | C02 | Same fixture with dense layout: packed 48-byte result; nonzero ROI still owns the full output |
 | C03 | Exhaustive UInt8 values, Int64 extrema, Float32/64 ±0, infinities and multiple NaN payloads preserve exact bits |
-| C04 | Output dtype matches the scalar; all output facets are empty; recognized invalid typed input is still rejected |
+| C04 | Output dtype matches the scalar; all output carries no domain description; invalid scalar structure is rejected |
 | C05 | Rank 1 and 8, singleton axes, product exactly 2^40 and one above; zero/negative/malformed shape parameters reject |
 | C06 | Large view succeeds within scalar-sized payload budget; full dense request fails an insufficient budget without fallback to view |
 | C07 | Changed scalar bits invalidate all output; identical numeric NaNs with different payloads do not share the wrong cached bits |

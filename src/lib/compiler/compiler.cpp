@@ -163,7 +163,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v20");
+  digest.text("semantic-graph-ir-v21");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -186,6 +186,13 @@ std::string semantic_digest(
       append_parameter(&digest, parameter.second);
     }
     contract_internal::append_traits(&digest, node.traits);
+    const auto& resources = node.prepared->resource_ids();
+    digest.integer(resources.size());
+    for (const auto& resource : resources) {
+      digest.integer(resource.byte_length);
+      for (auto byte : resource.sha256)
+        digest.integer(byte);
+    }
     digest.integer(node.outputs.size());
     for (const auto& output : node.outputs) {
       digest.text(output.key);
@@ -239,7 +246,7 @@ std::string physical_digest(
     const std::map<std::string, TileRequest>& output_requests,
     std::uint64_t tile_extent, ExecutionMode execution_mode) {
   DigestBuilder digest;
-  digest.text("physical-plan-v20");
+  digest.text("physical-plan-v21");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
   digest.integer(tile_extent);
   digest.integer(output_requests.size());
@@ -306,7 +313,7 @@ std::string physical_digest(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v16");
+  digest.text("plan-cache-key-v17");
   digest.text(plan);
   return digest.finish();
 }
@@ -377,13 +384,13 @@ Compiler::Compiler(std::shared_ptr<OperationRegistry> operations)
  * @copydetails Compiler::analyze
  */
 Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
-                                          ResourceBindings resources) const {
+                                          ResourceSet resources) const {
   if (!snapshot.current()) {
     return Result<SemanticGraphIR>(
         Status::failure(ErrorCode::Stale, "graph snapshot is stale"));
   }
   const WorkflowDocument& document = snapshot.document();
-  if (document.schema_version != 5U || document.nodes.empty() ||
+  if (document.schema_version != 6U || document.nodes.empty() ||
       document.nodes.size() > 65536U || document.outputs.empty() ||
       document.outputs.size() > 4096U || document.inputs.size() > 4096U) {
     return Result<SemanticGraphIR>(
@@ -396,7 +403,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
     return Result<SemanticGraphIR>(Status::failure(
         ErrorCode::OperationFailed, "cannot set binary32 environment"));
   auto declarations = document.inputs;
-  ResourceBindings retained_resources;
+  ResourceSet retained_resources;
   std::sort(declarations.begin(), declarations.end(),
             [](const auto& a, const auto& b) { return a.id < b.id; });
   std::map<std::uint64_t, std::size_t> declaration_by_id;
@@ -415,15 +422,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
     const auto status = input_internal::validate_declaration(&declaration);
     if (!status.ok())
       return Result<SemanticGraphIR>(status);
-    if (declaration.result_schema) {
-      auto subset = declaration.result_schema->select_resources(resources);
-      if (!subset.ok())
-        return Result<SemanticGraphIR>(subset.status());
-      auto joined = retained_resources.unite(subset.value());
-      if (!joined.ok())
-        return Result<SemanticGraphIR>(joined.status());
-      retained_resources = joined.take_value();
-    }
   }
 
   std::unordered_map<std::uint64_t, const WorkflowNode*> nodes_by_id;
@@ -587,10 +585,18 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
       input_metadata.push_back({std::move(result_schema)});
     }
     auto specialized = operations_->prepare_operation(
-        source.operation, input_metadata, source.parameters);
+        source.operation, input_metadata, source.parameters, resources);
     if (!specialized.ok())
       return Result<SemanticGraphIR>(specialized.status());
     node.prepared = specialized.take_value();
+    auto selected_resources = resources.select(node.prepared->resource_ids());
+    if (!selected_resources.ok())
+      return Result<SemanticGraphIR>(selected_resources.status());
+    auto joined_resources =
+        retained_resources.unite(selected_resources.value());
+    if (!joined_resources.ok())
+      return Result<SemanticGraphIR>(joined_resources.status());
+    retained_resources = joined_resources.take_value();
     node.traits = node.prepared->traits();
     auto output =
         infer_operation_outputs(node.traits, input_metadata, node.parameters);
@@ -599,13 +605,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
     for (std::uint32_t oi = 0; oi < node.traits.outputs.size(); ++oi) {
       const auto& contract = node.traits.outputs[oi];
       const auto& metadata = output.value()[oi];
-      auto subset = metadata.result_schema->select_resources(resources);
-      if (!subset.ok())
-        return Result<SemanticGraphIR>(subset.status());
-      auto joined = retained_resources.unite(subset.value());
-      if (!joined.ok())
-        return Result<SemanticGraphIR>(joined.status());
-      retained_resources = joined.take_value();
       const ValueRef ref{node.id, oi};
       result_schemas.emplace(ref, metadata.result_schema);
       node.outputs.push_back({contract.key, metadata.result_schema});
@@ -891,7 +890,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
  */
 Result<CompiledWorkflow> Compiler::compile(const GraphContext& context,
                                            const PlanningOptions& options,
-                                           ResourceBindings resources) const {
+                                           ResourceSet resources) const {
   const GraphSnapshot snapshot = context.snapshot();
   const auto analyze_start = std::chrono::steady_clock::now();
   auto semantic = analyze(snapshot, std::move(resources));

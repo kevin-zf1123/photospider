@@ -16,175 +16,25 @@
 
 #include "02-format-color/result_mapping.hpp"
 #include "02-format-color/rgb_basis_math.hpp"
+#include "common/domain/rgb_geometry_codec.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
 #include "common/tensor_program.hpp"
-#include "common/typed_need_validation.hpp"
 #include "photospider/data/region_runs.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 #include "photospider/ops/numeric/workflow_authoring.hpp"
 #include "photospider/ops/registry.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
-#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::basis_ops {
 namespace {
 using Parameters = std::map<std::string, ParameterValue>;
 using data_internal::format_numeric::ExactWorkFailure;
 using data_internal::format_numeric::ExactWorkScope;
-struct CheckedFailure final {
-  Status status;
-};
-Status invalid(const std::string& message) {
-  return {ErrorCode::InvalidArgument,
-          "FMT-10: " + message,
-          FailureReason::InvalidDomain,
-          {FailureOrigin::Schema, FailureScope::Unspecified}};
-}
-Status mismatch(const std::string& message) {
-  return {ErrorCode::TypeMismatch,
-          "FMT-10: " + message,
-          FailureReason::None,
-          {FailureOrigin::Schema, FailureScope::Unspecified}};
-}
-void require(bool condition, const std::string& message) {
-  if (!condition)
-    throw CheckedFailure{invalid(message)};
-}
-void typed(bool condition, const std::string& message) {
-  if (!condition)
-    throw CheckedFailure{mismatch(message)};
-}
-template <class T>
-T checked(Result<T> result) {
-  if (!result.ok())
-    throw CheckedFailure{result.status()};
-  return result.take_value();
-}
-void checked(Status result) {
-  if (!result.ok())
-    throw CheckedFailure{std::move(result)};
-}
 std::string text(const Parameters& params, const char* key,
                  const char* default_value = "") {
   const auto it = params.find(key);
   return it == params.end() ? default_value : std::get<std::string>(it->second);
-}
-struct ResolvedBasis final {
-  std::string preset;
-  std::array<double, 6> xy;
-  std::array<double, 2> white;
-};
-ResolvedBasis preset(const std::string& key) {
-  if (key == "srgb_rec709")
-    return {key, {.64, .33, .30, .60, .15, .06}, {.3127, .3290}};
-  if (key == "display_p3")
-    return {key, {.68, .32, .265, .69, .15, .06}, {.3127, .3290}};
-  if (key == "rec2020")
-    return {key, {.708, .292, .170, .797, .131, .046}, {.3127, .3290}};
-  if (key == "adobe_rgb_1998")
-    return {key, {.64, .33, .21, .71, .15, .06}, {.3127, .3290}};
-  if (key == "prophoto_rgb")
-    return {key,
-            {.734699, .265301, .159597, .840403, .036598, .000105},
-            {.3457, .3585}};
-  if (key == "aces_ap0")
-    return {key, {.73470, .26530, 0, 1, .00010, -.077}, {.32168, .33767}};
-  if (key == "aces_ap1")
-    return {key, {.713, .293, .165, .830, .128, .044}, {.32168, .33767}};
-  throw CheckedFailure{invalid("unknown basis preset")};
-}
-ResolvedBasis resolve(const format::RgbBasis& basis) {
-  ResolvedBasis out;
-  if (!basis.preset.empty()) {
-    out = preset(basis.preset);
-    require(!basis.primaries_xy || *basis.primaries_xy == out.xy,
-            "preset/custom primaries disagree");
-    require(!basis.white || *basis.white == out.white,
-            "preset/custom white disagree");
-  } else {
-    require(basis.primaries_xy && basis.white,
-            "custom basis requires all xy coordinates");
-    out = {"", *basis.primaries_xy, *basis.white};
-  }
-  for (auto& value : out.xy) {
-    require(finite_bits(bits(value), false), "nonfinite primary xy");
-    if (value == 0)
-      value = 0;  // Metadata zero canonicalization.
-  }
-  for (auto& value : out.white) {
-    require(finite_bits(bits(value), false), "nonfinite white xy");
-    if (value == 0)
-      value = 0;
-  }
-  return out;
-}
-std::string hex_word(double x) {
-  auto raw = bits(x);
-  if (!(raw & UINT64_C(0x7fffffffffffffff)))
-    raw = 0;
-  static constexpr char digits[] = "0123456789abcdef";
-  std::string out(16, '0');
-  for (unsigned i = 0; i < 16; ++i)
-    out[i] = digits[(raw >> ((15 - i) * 4)) & 15];
-  return out;
-}
-std::vector<double> parse_words(const std::string& value,
-                                const std::string& prefix, unsigned count) {
-  require(value.size() == prefix.size() + count * 17 - 1 &&
-              value.compare(0, prefix.size(), prefix) == 0,
-          "malformed geometry codec");
-  std::vector<double> out;
-  for (unsigned j = 0; j < count; ++j) {
-    if (j)
-      require(value[prefix.size() + j * 17 - 1] == ',',
-              "malformed xy separator");
-    std::uint64_t raw = 0;
-    for (unsigned i = 0; i < 16; ++i) {
-      const char c = value[prefix.size() + j * 17 + i];
-      require((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'),
-              "noncanonical xy hex");
-      raw =
-          (raw << 4) | static_cast<unsigned>(c <= '9' ? c - '0' : c - 'a' + 10);
-    }
-    require(finite_bits(raw, false) && raw != UINT64_C(0x8000000000000000),
-            "xy must be finite and zero-canonical");
-    double x;
-    std::memcpy(&x, &raw, 8);
-    out.push_back(x);
-  }
-  return out;
-}
-std::string basis_codec(const ResolvedBasis& basis) {
-  if (!basis.preset.empty())
-    return basis.preset;
-  std::string out = "basis-v1:";
-  for (unsigned j = 0; j < 8; ++j) {
-    if (j)
-      out += ',';
-    out += hex_word(j < 6 ? basis.xy[j] : basis.white[j - 6]);
-  }
-  return out;
-}
-ResolvedBasis parse_basis(const std::string& value) {
-  if (value.compare(0, 9, "basis-v1:"))
-    return preset(value);
-  const auto words = parse_words(value, "basis-v1:", 8);
-  ResolvedBasis out;
-  std::copy_n(words.begin(), 6, out.xy.begin());
-  std::copy_n(words.begin() + 6, 2, out.white.begin());
-  return out;
-}
-std::array<double, 2> parse_white(const std::string& value) {
-  if (value == "d65")
-    return {.3127, .3290};
-  if (value == "d50")
-    return {.3457, .3585};
-  if (value == "aces")
-    return {.32168, .33767};
-  const auto words = parse_words(value, "xy-v1:", 2);
-  return {words[0], words[1]};
-}
-std::string white_codec(const std::array<double, 2>& white) {
-  return "xy-v1:" + hex_word(white[0]) + ',' + hex_word(white[1]);
 }
 unsigned method_index(const std::string& method) {
   if (method == "xyz_scaling")
@@ -310,6 +160,7 @@ void native_encoding(const std::optional<TensorEncoding>& value) {
       "semantic samples must use native numeric encoding; decode explicitly");
 }
 struct Preparation final {
+  std::optional<TensorDescription> output_description;
   std::array<ExactRow, 3> rows;
   std::array<std::uint64_t, 3> selected{};
   unsigned axis = 0;
@@ -339,7 +190,7 @@ struct Preparation final {
 OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
                                   const Parameters& params, unsigned member,
                                   SequenceProfile profile) {
-  input_internal::Float32Environment environment;
+  plugin_internal::FloatingEnvironment environment;
   typed(environment.active(), "floating environment unavailable");
   checked(numeric_ops::sequence_profile_available(profile));
   require(inputs.size() == 1, "one input required");
@@ -357,29 +208,14 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
           "tensor exceeds 2^40 samples");
     count *= extent;
   }
-  const auto mode = text(params, "metadata_mode", "respect");
-  require(mode == "respect" || mode == "override" || mode == "raw",
-          "unknown metadata mode");
-  require((mode == "override") ==
-              static_cast<bool>(params.count("metadata_override")),
-          "override payload/mode mismatch");
-  const bool semantic = mode != "raw";
+  const bool semantic = params.count("input_description") != 0;
   const auto layout = text(params, "layout", "auto");
   require(layout == "auto" || layout == "view" || layout == "materialize",
           "unknown layout");
   std::optional<TensorDescription> desc;
-  for (const auto& facet : input.facets) {
-    // Do not revive retired typed Image/ColorArray-v1 conversions in raw mode.
-    typed(facet.key != "photospider.image" &&
-              facet.key != "photospider.color-array" &&
-              facet.key != "photospider.semantic",
-          "legacy typed facets need explicit generic/planar migration");
-    if (facet.key == "photospider.tensor-description")
-      desc = checked(decode_tensor_description(facet));
-  }
-  if (mode == "override")
+  if (semantic)
     desc = checked(
-        tensor_description_from_parameter(text(params, "metadata_override")));
+        tensor_description_from_parameter(text(params, "input_description")));
   if (desc)
     checked(validate_tensor_description(*desc, input.descriptor));
   std::array<std::uint64_t, 3> selected{};
@@ -651,11 +487,7 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
     desc->analytic_binding.reset();
     desc->convention = "relative-v1";
     checked(validate_tensor_description(*desc, input.descriptor));
-    output_tensor.facets.clear();
-    for (const auto& f : input.facets)
-      if (f.key != "photospider.tensor-description")
-        output_tensor.facets.push_back(f);
-    output_tensor.facets.push_back(checked(encode_tensor_description(*desc)));
+    state->output_description = *desc;
   }
   if (output_tensor.layout.spatial &&
       (!state->is_identity || state->materialize))
@@ -820,7 +652,7 @@ ResultBuilder result_builder(const ResultProgramPhase& phase, bool /*empty*/) {
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_extent, phase.query.resources));
+      phase.query.tile_extent));
 
   return builder;
 }
@@ -962,9 +794,6 @@ struct Continuation final {
   Footprint output;
   explicit Continuation(const Preparation* p) : state(p) {}
   Poll poll(const ResultProgramPhase& phase) try {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     const auto& spec = phase.query.output.result_schema->tensors[0];
     const auto shape = spec.sample_shape();
     if (!requested) {
@@ -1006,7 +835,7 @@ struct Continuation final {
       }
       return Poll(std::move(need));
     }
-    input_internal::Float32Environment environment;
+    plugin_internal::FloatingEnvironment environment;
     if (!environment.active())
       return Poll(mismatch("floating environment unavailable"));
     const std::function<Status(std::uint64_t)> consume = [&](std::uint64_t n) {
@@ -1097,8 +926,13 @@ struct Continuation final {
                            FailureReason::CapacityLimit});
       }
     }();
-    if (phase.report_numeric)
-      checked(phase.report_numeric(report));
+    if (!result.ok())
+      phase.record_failure(result.status());
+    if (phase.report_diagnostic) {
+      auto reported = report_numeric(phase, report);
+      if (result.ok() && !reported.ok())
+        return Poll(reported);
+    }
     return result;
   } catch (const CheckedFailure& failure) {
     return Poll(failure.status);
@@ -1111,6 +945,7 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
   OperationDefinition op;
   op.key = std::string("color.") + names[member] + '_' + suffix;
   auto& traits = op.traits;
+  traits.diagnostics = {numeric_diagnostic_identity()};
   traits.input_count = 1;
   OperationPortConstraint port;
   port.kind = OperationPortKind::Result;
@@ -1120,7 +955,7 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
   traits.cacheable = false;
   traits.workspace_bytes = sizeof(Workspace) + 65536;
   for (const auto* name :
-       {"metadata_mode", "group", "components", "metadata_override", "layout"})
+       {"group", "components", "input_description", "layout"})
     traits.parameter_schema.push_back(
         {name, OperationParameterType::String, false});
   traits.parameter_schema.push_back(
@@ -1173,7 +1008,8 @@ OperationMetadata edge_metadata(const WorkflowDocument& document,
   std::map<std::uint64_t, OperationMetadata> inputs;
   for (const auto& declaration : document.inputs) {
     auto canonical = declaration;
-    checked(input_internal::validate_declaration(&canonical));
+    require(canonical.id && canonical.result_schema, "invalid graph input");
+    checked(canonical.result_schema->validate(true));
     OperationMetadata m;
     m.result_schema = canonical.result_schema;
     require(inputs.emplace(canonical.id, std::move(m)).second,
@@ -1247,8 +1083,7 @@ Parameters parameters(const format::RgbBasisOptions& options) {
               options.profile == "accelerated_apple_silicon" ||
               options.profile == "accelerated_x86_64",
           "unknown CPU profile");
-  Parameters out{{"metadata_mode", options.metadata_mode},
-                 {"layout", options.layout}};
+  Parameters out{{"layout", options.layout}};
   if (!options.group.empty())
     out.emplace("group", options.group);
   if (options.components) {
@@ -1275,10 +1110,10 @@ Parameters parameters(const format::RgbBasisOptions& options) {
     out.emplace("method", *options.method);
   if (options.white_handling)
     out.emplace("white_handling", *options.white_handling);
-  if (options.metadata_override)
+  if (options.input_description)
     out.emplace(
-        "metadata_override",
-        checked(tensor_description_parameter(*options.metadata_override)));
+        "input_description",
+        checked(tensor_description_parameter(*options.input_description)));
   return out;
 }
 struct Appended final {
@@ -1309,7 +1144,7 @@ Result<WorkflowNodeOutput> author(WorkflowDocument& document,
                                   unsigned member) {
   using Answer = Result<WorkflowNodeOutput>;
   try {
-    input_internal::Float32Environment environment;
+    plugin_internal::FloatingEnvironment environment;
     typed(environment.active(), "floating environment unavailable");
     if (!registry)
       registry = make_default_operation_registry();
@@ -1351,27 +1186,31 @@ Result<WorkflowNodeOutput> author(WorkflowDocument& document,
     typed(policy != "require_match" || prepared_a.source_white == target.white,
           "D require_match rejects unequal whites");
     auto current = first;
+    auto current_description = prepared_a.output_description;
     if (policy == "adapt") {
       auto c = options;
-      c.metadata_mode = options.metadata_mode == "raw" ? "raw" : "respect";
-      c.metadata_override.reset();
+      c.input_description = current_description;
       c.source_basis.reset();
       c.target_basis.reset();
       c.white_handling.reset();
       c.target_white = target.white;
-      if (c.metadata_mode == "raw")
+      if (!c.input_description)
         c.source_white = prepared_a.source_white;
+      const auto converted = prepare_impl({current.metadata}, parameters(c), 2,
+                                          SequenceProfile::Strict);
+      current_description =
+          static_cast<const Preparation*>(converted.state.get())
+              ->output_description;
       current =
           append(&staged, current.edge, current.metadata, 2, c, *registry);
     }
     auto b = options;
-    b.metadata_mode = options.metadata_mode == "raw" ? "raw" : "respect";
-    b.metadata_override.reset();
+    b.input_description = current_description;
     b.source_basis.reset();
     b.source_white.reset();
     b.target_white.reset();
     b.method.reset();
-    if (b.metadata_mode == "raw")
+    if (!b.input_description)
       b.white_handling.reset();
     else
       b.white_handling =
@@ -1416,43 +1255,6 @@ Status register_rgb_basis(OperationRegistry* registry) {
 }  // namespace ps::plugin_internal
 
 namespace ps::format {
-Result<std::string> rgb_basis_parameter(const RgbBasis& basis) {
-  using namespace plugin_internal::basis_ops;  // NOLINT(build/namespaces)
-  try {
-    input_internal::Float32Environment environment;
-    typed(environment.active(), "floating environment unavailable");
-    const auto resolved = resolve(basis);
-    (void)rgb_matrix(resolved.xy, resolved.white);
-    return Result<std::string>(basis_codec(resolved));
-  } catch (const CheckedFailure& f) {
-    return Result<std::string>(f.status);
-  } catch (const GeometryError&) {
-    return Result<std::string>(invalid("invalid/singular RGB geometry"));
-  } catch (const ExactWorkFailure& f) {
-    return Result<std::string>(f.status);
-  } catch (const std::bad_alloc&) {
-    return Result<std::string>(Status{ErrorCode::ResourceExhausted,
-                                      "FMT-10 geometry capacity exhausted",
-                                      FailureReason::CapacityLimit});
-  }
-}
-Result<std::string> xyz_white_parameter(const std::array<double, 2>& white) {
-  using namespace plugin_internal::basis_ops;  // NOLINT(build/namespaces)
-  try {
-    (void)white_xyz(white);
-    return Result<std::string>(white_codec(white));
-  } catch (const CheckedFailure& f) {
-    return Result<std::string>(f.status);
-  } catch (const GeometryError&) {
-    return Result<std::string>(invalid("invalid white xy"));
-  } catch (const ExactWorkFailure& f) {
-    return Result<std::string>(f.status);
-  } catch (const std::bad_alloc&) {
-    return Result<std::string>(Status{ErrorCode::ResourceExhausted,
-                                      "FMT-10 geometry capacity exhausted",
-                                      FailureReason::CapacityLimit});
-  }
-}
 Result<WorkflowNodeOutput> rgb_to_xyz(WorkflowDocument& d, WorkflowInput input,
                                       const RgbBasisOptions& o,
                                       std::shared_ptr<OperationRegistry> r) {

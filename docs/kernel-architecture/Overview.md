@@ -39,7 +39,7 @@ The compiler owns static validation and planning. Each execution owns its ready 
 class Compiler {
  public:
   Result<SemanticGraphIR> analyze(const GraphSnapshot&,
-                                  ResourceBindings = {}) const;
+                                  ResourceSet = {}) const;
   Result<OptimizedGraphIR> optimize(const SemanticGraphIR&) const;
   Result<ExecutionPlan> plan(const OptimizedGraphIR&,
                              const PlanningOptions& = {}) const;
@@ -54,7 +54,7 @@ class ExecutionContext {
 };
 ```
 
-These are abbreviated public signatures; unrelated members are omitted. Each stage returns a complete immutable value or a typed failure. Planning retains all static metadata needed for schema validation and identity, then derives executable demand from the selected output's input projection. Execution checks plan currentness and the frozen operation-registry identity before callbacks, then validates Result schemas, requested coverage, dependency evidence, and publication finality. `analyze` accepts immutable `ResourceBindings` for static facets such as color profiles.
+These are abbreviated public signatures; unrelated members are omitted. Each stage returns a complete immutable value or a typed failure. Planning retains all static metadata needed for schema validation and identity, then derives executable demand from the selected output's input projection. Execution checks plan currentness and the frozen operation-registry identity before callbacks, then validates Result schemas, requested coverage, dependency evidence, and publication finality. `analyze` accepts an immutable `ResourceSet` of content-addressed resources; each operation's preparation selects the identities it needs, such as an ICC profile named by an explicit color parameter. Result and Value carry structure and data only; domain interpretation is an explicit operation parameter, and the kernel performs no label matching on connections.
 
 `CpuExact` is the default execution mode. `NativeGpu` permits placement only for operations that declare a native implementation and match the configured backend. CPU work uses the fixed context pool; native callbacks use the configured backend lane. Cancellation is cooperative, and callbacks already entered may finish before the Run returns.
 

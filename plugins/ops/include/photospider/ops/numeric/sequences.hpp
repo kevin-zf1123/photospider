@@ -8,8 +8,8 @@
 #include <vector>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
 #include "photospider/data/result.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 /** @brief Authoring reference with an owning immutable Result schema hint.
@@ -37,7 +37,7 @@ inline SequenceInput sequence_input(const WorkflowInputDeclaration& input) {
  * `photospider.tensor` v1, tensor key `samples` and shape [count]. `axis` uses
  * the same schema/key, shape [3] and `atomic_trailing_axes=1`; axis elements
  * are Int64 in integer mode and Float64 otherwise. Outputs use ordinary tensor
- * axes and copy no input facets or batch topology. Invalid ID, count or profile
+ * axes and copy no input batch topology. Invalid ID, count or profile
  * returns InvalidArgument; unsupported input/output scalar schemas return
  * TypeMismatch. Authoring is pure and thread-safe; strings and metadata may
  * allocate, and allocation may throw std::bad_alloc.

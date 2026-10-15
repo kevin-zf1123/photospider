@@ -10,10 +10,10 @@
 
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/sequence_profiles.hpp"
-#include "core/exact_binary_sum.hpp"
-#include "photospider/core/resource_allocator.hpp"
+#include "common/exact_binary_sum.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "plugin/port_validation.hpp"
+#include "photospider/core/resource_allocator.hpp"
 namespace ps::plugin_internal {
 namespace {
 using core_internal::ExactBinarySum;
@@ -81,7 +81,7 @@ struct SequenceKernel final {
     std::unique_ptr<SequenceMath, void (*)(SequenceMath*)> math(
         new (scratch.data()) SequenceMath(profile),
         [](SequenceMath* p) { p->~SequenceMath(); });
-    input_internal::Float32Environment environment;
+    plugin_internal::FloatingEnvironment environment;
     if (!integer && !environment.active())
       return Status{ErrorCode::BackendUnavailable,
                     "numeric environment unavailable"};

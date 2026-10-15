@@ -11,6 +11,7 @@
 #include "01-numeric/array_profiles.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "common/registry.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -146,7 +147,7 @@ struct ArrayKernel final {
     if (!status.ok())
       return status;
     math_require(phase.consume_work(1));
-    if (phase.report_numeric) {
+    if (phase.report_diagnostic) {
       NumericDiagnostics report;
       report.profile =
           static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
@@ -157,7 +158,7 @@ struct ArrayKernel final {
         report.view_elements = math_take(target.sample_count());
       else
         report.copied_elements = math_take(target.sample_count());
-      return phase.report_numeric(report);
+      return report_numeric(phase, report);
     }
     return Status::success();
   }
@@ -168,6 +169,7 @@ OperationDefinition array_operation(const std::string& key, bool constant,
   OperationDefinition operation;
   operation.key = key;
   auto& traits = operation.traits;
+  traits.diagnostics = {numeric_diagnostic_identity()};
   traits.requires_metadata_specialization = true;
   traits.input_count = 1;
   traits.input_schema.resize(1);

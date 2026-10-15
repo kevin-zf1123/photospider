@@ -4,8 +4,7 @@ The six `numeric.derivative_1d_*` and `numeric.integrate_1d_*` operations execut
 as Whole Result programs. Each input is one tensor member under any key. Samples
 use Float32 or Float64 `sample_shape()` [N]; step and initial use the same dtype
 and shape [1]. Each output uses port key `values` and has a `photospider.tensor`
-Result schema with tensor member `samples`, shape [N], input dtype, and no
-facets. Whole computes and publishes the
+Result schema with tensor member `samples`, shape [N], input dtype, and no attached domain description. Whole computes and publishes the
 complete output before applying the consumer projection.
 
 `numeric_tensor_program.hpp` supplies the Whole protocol. The writer borrows its window during publication; published Result
@@ -64,8 +63,7 @@ demand starts no failure producer and publishes empty tensor coverage.
 
 Also exercise negative strides and step direction, unaligned input,
 zero-stride broadcast input, caller and worker floating-environment preservation
-on real continuation polls, and schema rejection for incompatible RGBA facets on
-rank-one numeric tensors. Checked continuation adapters impose actual work limits;
+on real continuation polls, and rejection of incompatible scalar/shape structure. Checked continuation adapters impose actual work limits;
 resource and cancellation paths are exercised with payload and scratch limits.
 For an N=3 Float64 case in an isolated Root, after context and source teardown,
 an escaped Result and an authorized read window share one 24-byte Payload allocation. Releasing the Result leaves the

@@ -31,7 +31,7 @@ struct AcceleratedExpression final {
                   bool environment_established = false) {
     using K = ExpressionKind;
     // Whole callers may hold the environment across all coordinate/AST batches.
-    std::optional<input_internal::Float32Environment> environment;
+    std::optional<plugin_internal::FloatingEnvironment> environment;
     if (!environment_established)
       environment.emplace();
     for (std::size_t lane = 0; lane < count; ++lane)

@@ -46,7 +46,7 @@ Status compute_math_batch(Arithmetic& arithmetic, Kind kind,
                           MathBatchWorkspace& block, FloatMathWorkspace& fast,
                           std::size_t size,
                           const std::function<Status(std::uint64_t)>& consume,
-                          const input_internal::Float32Environment& env) {
+                          const plugin_internal::FloatingEnvironment& env) {
   const auto width = Value::element_size(dtype);
   const auto store = [&](std::size_t lane, std::uint64_t bits) {
     std::memcpy(block.destination[lane], &bits, width);
@@ -188,7 +188,7 @@ struct PointMathKernel final {
     std::vector<std::uint64_t> at(descriptor.shape.size(), 0);
     ResultTensorMutableRun row;
     std::uint64_t row_start = 0, row_left = 0;
-    input_internal::Float32Environment environment;
+    plugin_internal::FloatingEnvironment environment;
     for (std::uint64_t offset = 0; offset < count;
          offset += MathBatchWorkspace::kCount) {
       const auto size =

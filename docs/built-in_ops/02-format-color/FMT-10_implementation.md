@@ -1,6 +1,6 @@
-# FMT-10 候选实现说明
+# FMT-10 实现说明
 
-本文件描述此次交接的实现，而非更改原始 op_specs 的数学契约或宣称上游验收完成。原始规格文件的 Proposed/not_implemented 前置字段保留，便于 Codex 按原始要求独立审查。
+本页说明当前 SDK 与内置算子的实现边界。数学契约以对应 op_specs 为准；Proposed 决策状态与已注册实现状态分开记录。
 
 ## 1. 覆盖范围和接口
 
@@ -11,21 +11,21 @@
 | C | `color.adapt_xyz_white_{strict,accelerated_apple_silicon,accelerated_x86_64}` |
 | D | C++ `ps::format::convert_linear_rgb`，事务式展开 A → 可选 C → B；没有 native D 注册项 |
 
-头文件为 `photospider/ops/format/rgb_basis.hpp`，也由 umbrella header 导出。四个同名 authoring helper 接受实际输入边、`RgbBasisOptions` 和可选注册表。它们沿真实输入边推导元数据，不相信另行传入的猜测；新增节点先在工作副本中静态校验，失败时不修改原图。已有/前向引用的节点 ID、导出 ID 均参与占用检查。D 的 override 仅作用于 A 的源解释，后续节点消费前一节点的实际输出描述。
+头文件为 `photospider/ops/format/rgb_basis.hpp`，也由 umbrella header 导出。四个同名 authoring helper 接受实际输入边、`RgbBasisOptions` 和可选注册表。它们沿真实输入边推导结构，颜色解释来自显式 input_description；新增节点先在工作副本中静态校验，失败时不修改原图。已有/前向引用的节点 ID、导出 ID 均参与占用检查。D 根据显式源配置计算中间 XYZ 配置，并写入各生成节点的 input_description 参数；没有 edge→description 隐藏表或 Result 描述传播。
 
 七个 preset 名为 `srgb_rec709`、`display_p3`、`rec2020`、`adobe_rgb_1998`、`prophoto_rgb`、`aces_ap0`、`aces_ap1`。方法为 `xyz_scaling`、`bradford`、`cat02`、`cat16`。B 的 white policy 仅有 require_match/preserve_xyz；D 额外支持 adapt，必须显式选择方法。没有自动 transfer、曝光、色域裁剪或峰值亮度缩放。
 
 `RgbBasis` 支持 preset 以及可选的一致性断言，或完整自定义 6 个 primary xy 和 2 个 white xy。公开 codec 将 preset 编码为名称，自定义编码为 `basis-v1:` 加 8 个以逗号分隔的 16 位小写 binary64 十六进制字；白点为 `xy-v1:` 加 2 个字。解析也接受白点 shorthand `d65`、`d50`、`aces`。作者 helper 会规范化几何零的符号；直接传入非规范字符串会失败，避免多种等价序列化污染 identity。
 
-原生 ParameterValue 层面的 raw `components` 是例如 `"2,3,0"` 的规范三索引字符串，`axis` 是 Int64；推荐使用类型化 helper，避免手写 codec。几何/selector/mode/layout/profile 都是编译期静态选择，非适用字段会被拒绝。
+原生 ParameterValue 层面的 raw `components` 是例如 `"2,3,0"` 的规范三索引字符串，`axis` 是 Int64；推荐使用类型化 helper，避免手写 codec。几何/selector/description/layout/profile 都是编译期静态选择，非适用字段会被拒绝。
 
 ## 2. 元数据与身份变换
 
-使用已有 tensor-description v4，不新增其序列化版本。semantic 必须明确选择三角色完整组，RGB/XYZ 角色顺序独立于物理索引顺序；源与目标 dtype、形状、结构轴和通道数不变。raw 对存储浮点数运算，不伪造 RGB/XYZ 转换标签。legacy typed Image/ColorArray 必须先显式迁移。
+使用 SDK TensorDescription 的 v4/v5 codec 作为显式参数。有描述时必须选择三角色完整组；RGB/XYZ 角色顺序独立于物理索引。没有描述时显式提供 axis、components 和几何。输出只携带结构和样本；下游配置由调用方提供。
 
 本实现的原生单位字符串为 `1` / `cd/m2`；reference 为 `scene_relative`、`display_relative`、`absolute_display_cd_m2`，并接受已有生态中的 `scene` / `display`。绝对值要求 `absolute_display_cd_m2` 或 `display`，相对值不能标成绝对单位。XYZ 使用相同数值尺度，而非隐含 Y=100 归一化。单位字符串的上游统一约定是需要重点复核的接口决定。
 
-非空 global/group/selected-channel 描述必须一致。profile/configured 坐标只有在提供明确、模型/角色顺序/单位一致的 analytic binding 时才被解释为本族的原生解析坐标；不会推断 ICC/OCIO 的等价矩阵，更不会运行 profile engine。变换后的选中组删除失效的 profile/configured/binding 标签，并将由 binding 单独提供的单位实体化。资源引用仍受宿主既有 owner 校验约束，静态描述不能制造资源 owner。
+非空 global/group/selected-channel 描述必须一致。profile/configured 坐标只有在提供明确、模型/角色顺序/单位一致的 analytic binding 时才被解释为本族的原生解析坐标；不会推断 ICC/OCIO 的等价矩阵，更不会运行 profile engine。D 的私有中间配置删除失效的 profile/configured/binding 字段并保留适用单位，随后显式写入后续节点参数。单个算子的 Result 不携带这些配置；资源仅按 preparation 显式返回的身份选择。
 
 其他组、alpha、AOV 的数据按位旁路。与选中组重叠的另一组会被拒绝，避免变换后留下互相矛盾的别名解释；这是明确保守的 admission 边界。
 
@@ -65,7 +65,7 @@ generic materialize 按输出通道组织至多 64 个空间点，保留 packed 
 
 planar 使用宿主 row-run 的真实连续长度，取输入和输出可用长度的最小值后批处理，不跨瓦片/行尾/ROI 边界越读。只写真实请求区域，不把未生产的 padding 当零。矩阵、scratch、依赖/输出 owner 沿用宿主资源与生命周期机制；调用中的工作、取消和当前性检查没有被 raw/identity 绕过。
 
-为了使 semantic identity 在 planar 下也能合法保留 view，宿主新增一个可选、只读的 `PlanarMappedValidationCallback`。BitwiseMapped 仍要求单一数据源，允许其 Data|Validation，并允许附带 tag-only Descriptor 源；没有 validator 的带 Validation 映射在准备阶段拒绝。执行器在发布 alias **或 materialized copy 前**只对相应 exact input window 调用验证，且检查 prepared identity、取消和 currentness。此改动跨越 registry、contract 和 execution，需要比局部数学代码更优先审查。C++ OperationDefinition 布局/API 有扩展，必须整树重编译；没有更改 C operation ABI。
+当前实现通过 Result 的授权 tensor windows 读取数据，并在发布 view 或物化输出前完成算子要求的样本校验。结构与通用端口校验由内核提供，颜色检查属于 ops。共享描述、codec 与精确领域数学在 `Photospider::ops_sdk`；运行与 authoring 实现在 `Photospider::ops`。当前 Result C ABI 为 4。
 
 8192-bit Natural 上限是真正资源上限，而不是所有有限几何都必然成功的承诺。近奇异/极端指数可能耗尽工作或容量，应返回资源错误，不能静默截断。基准和压力测试显式提高自己的预算，**没有放宽项目默认预算**。
 
@@ -73,21 +73,11 @@ planar 使用宿主 row-run 的真实连续长度，取输入和输出可用长�
 
 Python stdlib Fraction + Gaussian elimination 独立生成 28 个矩阵（七 preset、两个可精确对角化 basis、近奇异自定义 basis，以及两对白点的四种方法），两种 dtype、每种 24 组三元组，合计 1,344 case / 4,032 个期望结果。最终 IEEE 舍入用整数商/余数，不经 Python float 近似。生成器支持 `--check`。
 
-数学单测覆盖上述 4,032 个精确结果和固定 raw 特殊值 oracle；另外比较随机 Float32 候选与精确结果以及 SIMD/标量 DAG。集成测试通过真实 registry/compiler/executor 再核对 4,032 个结果，并检查 permuted roles、旁路、元数据、显式 binding、D 事务/逐阶段舍入/中间溢出、tile-cross ROI、身份 view、负步长、rank-one、Empty、错误字段、静态 dependency/dirty、fuel/cancellation、fenv 恢复。ASAN/已有算子回归/变体通过情况以实际日志为准。
+独立 Fraction oracle 保留。修改本族时，现场检查精确结果、raw 特殊值、SIMD/标量、permuted roles、旁路、显式配置、D 事务与逐阶段舍入、ROI/view、负步长、rank-one、Empty、错误参数、资源/取消和 fenv 恢复；临时数值与集成程序用后删除。本文不将历史临时程序描述为当前长期测试入口。
 
-未声称穷尽全部 binary32/binary64 输入、任意自定义几何或全部资源竞争。实际 ICC/OCIO engine、GPU、新 observer、非线性 transfer 不在本族范围。binding 的新增测试是静态元数据测试，不是用伪造 identity 绕过 owner 的执行测试。
+未声称穷尽 binary32/binary64、自定义几何或资源竞争。ICC/OCIO engine、GPU、新 observer 与非线性 transfer 不在本族范围。运行回调通过 SDK `report_numeric` 向宿主有界通用报告通道写入实际数值计数；读取使用 SDK codec。缓存命中不重复计算计数。
 
-当前 planar callback 的公开接口不提供 NumericDiagnostics reporter，所以其 numeric 统计的 0 代表未暴露；generic 的 strict_fallbacks 沿用既有含义，只对 accelerated → exact 计数。要分析 strict 内部 certificate miss 比例，需在 `evaluate`/`certify` 加临时非计时 instrumentation 或 profiler，而不是误读这些列。
-
-D helper 不再把调用者 registry 的 opaque state 当作内部 Preparation。源白点由
-内建私有准备结果获取（仍执行真实 metadata/override/analytic binding 规则），实际
-A/C/B 节点继续由调用者 registry 准备。空 state、合法外来 state、失败时事务回滚有回归。
-此选择增加一次 A 的静态几何推导；准备阶段成本与 execute 成本应分开报告。
-
-mapped validator 和普通 planar callback 共用 worker、waiting admission、资源 Queue/Entries
-租约、异常围栏及退休等待。一个 bounded mapped piece 集合只占一次回调队列项。
-调用后包括普通异常和 bad_alloc 都按 Cancelled > Stale > 普通失败判定；回调引用在退休前
-保持有效。图像操作通过 Result tensor publication、Need-authorized tensor windows，以及 affine view 或显式 materialization 路径访问和发布数据；相关行为入口见 [Tensor storage and region access](../../kernel-specs/Tensor-Storage-and-Region-Access.md)。View 与显式 materialize 路径分别有测试覆盖。
+D 使用私有准备结果计算中间配置，实际 A/C/B 节点仍由调用者 registry 准备；不把外部 registry 的 opaque state 强转为内部 Preparation。准备成本与执行成本应分别衡量。
 
 `RowUnsigned` 只初始化和复制实际有效的 32-bit limb 前缀，最多 256 limb（8192 bit）。
 每行三个乘积、带符号累加和最终至多 54-bit 商除法使用固定栈暂存，不再为每次减法、
@@ -95,7 +85,7 @@ mapped validator 和普通 planar callback 共用 worker、waiting admission、�
 优先顺序、负下溢零和 +0 bias 不变。容量溢出显式抛 bad_alloc；近奇异几何仍可能耗尽
 准备阶段 Natural 上限。乘/加/减和除法循环保留 Natural::work 与取消检查。
 声明的 workspace 仍为 sizeof(Workspace)+64KiB；这不是 OS thread stack/RSS 的计量保证。
-REFERENCE 可独立选择旧精确核；单测还在同一进程逐行对比新旧核。
+REFERENCE 可独立选择参考精确核，现场验证可逐行比较两个实现。
 
 `outward` 仅用于内部证书端点和系数误差界，不是通用 nextafter API：其 IEEE 结果值
 一致，但不复制 libm 的 errno/浮点异常副作用。NaN 端点不被接受，零和无穷显式处理。
@@ -108,24 +98,3 @@ planar 与 mapped validation 按 Float32/Float64 模板分开，使拷贝宽度�
 旁路通道直接复制连续 span，保留 alpha/sNaN/负零全部位模式。有限性分类每 lane 一次，
 strict Float64/EXACT 不填充无用的浮点候选。没有跨 ROI/瓦片/通道越界读取，也没有融合 D。
 SIMD 仍为原有 AVX2/Apple NEON 候选，运行时 ISA admission 未改变。
-
-生成的 oracle fixture 仅排版变化，生成器同步生成规范排版；其全部 UINT64_C 输入与
-预期字不变。仓库默认忽略规则明确放行 benchmark、说明、对照脚本及 oracle 生成器。
-目标机仍须执行仓库指定 ClangFormat/cpplint 版本以及 ARM64 NEON 原生编译运行。
-
-修复版已在 `ops-impl-FMT10` 工作区继续审核。共享 planar 调度入口补充每次
-提交前的 root stage 扣账，及 admission/提交拒绝/提交异常后的统一
-`Cancelled > Stale > ordinary failure` 选择。新增 stage 上限 0/1、跨执行累计
-限制和 12 个提交失败/停止事件组合回归；独立复审关闭这两项 required。
-
-本机只消费安装包的独立 executable 也通过同样门禁。
-ClangFormat 21.1.3、cpplint 2.0.2 和 Fraction fixture 再生成检查通过。
-
-同机补丁前后、相同 profile 的 1024² A/B/C/D accelerated 对照，本机为
-1.98–2.30 倍，FreeBSD 为 1.97–2.04 倍；128² strict Float64 为
-1.97–2.22 倍与 1.67–1.96 倍。4096² D Float32 为 2.23 倍与 2.01 倍，
-Float64 为 2.04 倍与 1.96 倍。均为单 worker、cache off、输入预发布，取
-多次执行去掉首样本后的中位数；不是跨机器比较或全帧独立 oracle 证明。
-小 ROI 未证明稳定提升，generic 仅提升约 5–6%，四 worker 未改善单图内部吞吐。
-
-这些为忽略的本次运行产物。

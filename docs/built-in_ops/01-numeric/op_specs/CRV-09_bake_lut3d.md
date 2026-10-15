@@ -19,8 +19,8 @@ clarification_status: complete
 The [2026-09-23 shared scale revision](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
 LUT input axes and output table coordinates. Finite values outside 0..1 remain
-legal. Opponent/chroma scales and arithmetic formulas are unchanged. The current runtime ColorArray v1 encodes L* in its implicit 0..100 unit;
-this target scale applies only after public metadata, fixtures and consumers
+legal. Opponent/chroma scales and arithmetic formulas are unchanged. The current ColorArray SDK configuration interprets L* in its implicit 0..100 unit;
+this target scale applies only after explicit configuration, fixtures and consumers
 adopt it explicitly. No implicit unit alias or inference from sample magnitude
 is permitted.
 
@@ -35,7 +35,7 @@ registration status, CPU target identity, floating environment, diagnostic prove
 host observation isolation, resource accounting and public/performance acceptance.
 In particular, rounding is nearest/ties-to-even with gradual underflow and the
 caller floating environment is preserved. This is limited inheritance: the ports,
-output kinds/facets, observation units, mathematical rounding boundaries and
+output structures, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
 turn a composite template or structured Result into a generic NUM Value primitive.
 
@@ -67,7 +67,7 @@ shape=[N0,N1,N2]. Inherit CRV-07's
 2..256 extents, independent ascending/descending axes, exact reconstructed
 Float64 coordinates and complete axis validation. Evaluate the source at those
 grid colors. The exported table is a `photospider.tensor` Result with `samples`
-of shape [N0,N1,N2,3], selected table dtype and ColorArray v1 output description;
+of shape [N0,N1,N2,3], selected table dtype and one atomic trailing component axis;
 its internal owned table uses `curve.bake_lut3d.table` v2 with tensor member
 `colors`. Axis is an immutable Float64 Result tensor independent of source
 execution, and its coordinates follow the input description.
@@ -140,8 +140,8 @@ source_pointwise assertion. Descriptions obey CRV-07's same-model requirements.
 The assertion is caller responsibility, not a general compiler independence proof.
 The source builder receives Result tensor references under any schema id/key;
 each source result must contain one tensor with a `sample_shape()` matching the
-generated input and Float32/64 dtype. Any attached ColorArray facet must match
-the required color description; a generic tensor may omit that facet. The source
+generated input and Float32/64 dtype. The caller supplies input/output color
+descriptions as static bake parameters; no facet is read from source Results. The source
 boundary takes one color per logical position with a final extent-3 component
 axis; all execution batching must respect the asserted semantics.
 
@@ -171,20 +171,36 @@ workflow contract rather than a new opaque runtime composition primitive.
 
 ## Structured report schema
 
-Use registered SchemaTemplate id curve.bake_lut3d.report, version 1,
-PublishPolicy::CompleteBundle, observation domain [1]. All fields have fixed
-row counts. Metadata records quality=Measured, shape, interpolation, atol, rtol,
-table/source dtypes, input/output descriptions and source recipe identity.
-Dynamic axis is a data field, not compile-time metadata. The registered schema
-fits the current <=16-field structural vocabulary. Use `ExecutionContext::execute()`
-to observe these fields; `execute_fragments()` requests tensor footprints and
-does not treat the report's fixed fields as a generic [1] tensor.
+The SDK defines SchemaTemplate id `curve.bake_lut3d.report`, version 1,
+PublishPolicy::CompleteBundle, observation domain [1]. The kernel validates its
+structure generically; operations explicitly bind the SDK report validator.
+There are twelve fixed fields:
+
+| Field | Type and logical payload |
+| --- | --- |
+| passed | UInt8 scalar |
+| axis | Float64 [3,3] |
+| validation_count, failed_count | Int64 scalars |
+| max_abs_error | Float64 [3] |
+| max_error_point | Float64 [3,3] |
+| max_error_index | Int64 [3] |
+| first_failure_index | Int64 scalar |
+| first_failure_input, first_failure_reference, first_failure_lut | Float64 [3] each |
+| configuration_id | UInt8 [64], lowercase hexadecimal SHA-256 configuration identity |
+
+The configuration identity covers the explicit shape, interpolation, tolerances,
+source/table dtypes, extra-point count, both color descriptions and source recipe
+identity. It is ordinary report data, not schema metadata or a label. The reader
+and gate receive `Lut3dBakeDescription` explicitly and reject a mismatched
+configuration, including changed tolerance or interpolation. Dynamic axis remains
+a data field. Use `ExecutionContext::execute()` to observe the field-only report;
+`execute_fragments()` requests tensor footprints, not generic report rows.
 
 Compare errors and tolerances using exact arithmetic before report rounding.
 Choose maxima by exact absolute error, breaking ties with the earliest ordinal.
 Report +Inf is a diagnostic bound for an unrepresentable error, not a nonfinite
 source color or a failure of report validity. A zero maximum is +0. The fixed
-field payload is 289 bytes; metadata and all backing capacities are additionally
+field payload is 353 bytes; metadata and all backing capacities are additionally
 budgeted. Report observations cannot publish an incomplete prefix while later
 validation may alter counts/maxima. A passed report corresponds to the same
 owned bake state/binding provenance as its gated table, not merely equal shapes.
@@ -273,26 +289,33 @@ shapes, appends ordinary nodes and returns Result outputs. The helper protects
 existing input declarations, Result schemas, nodes and exports; it retains no
 builder or capture. Both expansions are analyzed by Compiler and execute under
 one frozen binding snapshot, including shared inputs and optional
-`ResourceBindings`. Pointwise independence remains the caller's assertion.
+`ResourceSet`. Pointwise independence remains the caller's assertion.
 
-`BakedLut3d` returns connectable Result references for table, axis and report
-without computing payloads during authoring. The exported table is an immutable tensor
-`photospider.tensor` Result with member `samples`, shape [N0,N1,N2,3], selected
-table dtype, ColorArray v1 facet and `atomic_trailing_axes=1`. The internal owned
-table is a `curve.bake_lut3d.table` v2 Result with one `colors` tensor of the
-same shape and dtype, the ColorArray facet, and measured metadata. The report is
-the registered `curve.bake_lut3d.report` v1 Result with 11 fixed fields and a
-289-byte field payload, read through
-`read_lut3d_bake_report`. Recipe/source identity and binding provenance remain
-attached to the Results. Measure's Result association records observed input
-ObjectIds in port order. Its first entries are the whole axis, grid and owned
-table Results; later entries can include multiple owners from validation-point,
-reference and applied-result batches. Association entry 2 is the owned-table
-ObjectId, which the gate matches to its actual table input. A completed
-failed-tolerance report remains readable as
-`passed=false`, while the dependent table fails with the measured-quality
-diagnostic. Source, resource, cancellation and budget failures remain execution
-failures. There is no opaque compose key or chain object.
+`BakedLut3d` returns connectable Result references for table, axis and report,
+plus an owning `description` configuration value for the caller. No payload is
+computed during authoring. The exported table is `photospider.tensor` v1/member
+`samples`, shape [N0,N1,N2,3], selected dtype and atomic_trailing_axes=1. The
+internal table is `curve.bake_lut3d.table` v2/member `colors` with the same shape
+and dtype. Neither contains a domain description or quality metadata.
+
+The public SDK header is `photospider/ops/numeric/lut3d_bake.hpp`. Read a report
+with the configuration returned by authoring:
+
+```cpp
+// result is the executed report ResultRef; baked is numeric::BakedLut3d.
+auto measured = ps::read_lut3d_bake_report(result, baked.description);
+if (!measured.ok()) return measured.status();
+const bool passed = measured.value().passed;
+```
+
+A standalone caller can retain the same explicit `Lut3dBakeDescription` itself.
+The reader does not recover configuration from the schema. Report association
+records observed input ObjectIds in port order: axis, grid and owned table are
+the first three, followed by observed source-batch owners. Entry 2 identifies
+the table checked by the gate. Association records identity, not an attached
+color configuration. A completed failed-tolerance report remains readable with
+passed=false while the dependent table fails. Source, resource, cancellation
+and budget failures remain execution failures.
 
 All 15 formal `curve.bake_lut3d_{axis,grid,points,points_extra,color}` profile
 keys execute Whole Result programs with role-13 input validation, complete output
@@ -309,13 +332,11 @@ Pack, Unpack and Gate first request authorized Result tensor views. Legal
 common-owner mappings remain views. A physical `ViewUnavailable` causes
 transactional materialization of only the requested region, preserving
 dependency support and sample bits while charging Root Payload. Pack requests
-the complete table, so its fallback may materialize the full table. The harness
-checks Float32/Float64 across all five geometries with reversed and unaligned
-layouts; a legal read window points into the original backing address with zero
-Root Payload. Pack uses two Result polls on this path, without the former
+the complete table, so its fallback may materialize the full table. Acceptance should cover Float32/Float64 across the supported geometries with
+reversed and unaligned layouts; retained views reuse the admitted backing. Pack uses two Result polls on this path, without the former
 Value-copy poll.
 
-Measure reads authorized Result windows and appends the eleven report fields
+Measure reads authorized Result windows and appends the twelve report fields
 only after complete measurement. Gate reads and validates all report fields
 before its table Need; the largest field needs a 72-byte window. It then requests
 the table with role 13 and typed validation, checks association entry 2, and
@@ -328,21 +349,13 @@ Axis grid storage, prepared report/geometry state, source program state, table
 output, read-window ancestry, exact arithmetic workspace, metadata and allocator
 overhead remain managed. Table, axis and report Results can be held independently;
 a retained table read window may keep its backing alive after output handles are
-released. The harness observes zero live Root capacity after the final window is
-released, and verifies that external axis backing expires after context and
-fixture retirement. A small requested table ROI does not reduce source
-evaluation, Whole outputs or global measurement work.
-
- The tests cover
-both table dtypes, all five geometries, layouts, demand and source-error order,
-Empty requests, cache association with current inputs, preparation reuse and
-rebinding, report gating, view and owner lifetime. A huge-grid case verifies
-CapacityLimit at its geometry node; it does not show successful maximum-shape
-execution. The cache fixture uses a 64 MiB Result cache, 1,048,576 proof units
-for `maximum_dependency_cache_metadata`, and 128 Mi dependency-cache work units.
-It observes 14 cache hits in this run, while its assertion requires only a
-positive count; the observed count is not a contract. The metadata limit counts
-proof units rather than bytes.
+released. A small requested table ROI does not reduce source evaluation,
+Whole outputs or global measurement work. Validate owner retirement, both table
+dtypes, geometry/layout combinations, source-error ordering, Empty requests,
+configuration mismatch, cache association, preparation reuse and rebinding with
+temporary public workflows. Delete those programs after validation and retain
+the independent mathematical oracle. No successful maximum-grid execution or
+current performance count is asserted by this document.
 
 - [3D LUT application](CRV-07_apply_lut3d.md).
 - [1D baking templates](CRV-04_bake_lut1d.md).

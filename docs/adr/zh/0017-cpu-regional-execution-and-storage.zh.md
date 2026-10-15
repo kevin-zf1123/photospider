@@ -1,6 +1,7 @@
 # ADR 0017：使用有界 CPU 存储执行区域工作
 
 - 状态：Accepted
+- 当前边界：0.34.0 中，原决定里的 Value facets 和 Value 资源 owner 已被取代。Value 只持有结构与存储；operation preparation 按显式资源身份选择不可变资源。见 [ADR 0020](0020-composable-operation-foundations.zh.md)。
 
 ## 1. 核心摘要 (TL;DR)
 
@@ -61,11 +62,11 @@ class ExecutionContext {
 
 `Region` 在 descriptor 轴顺序中保存左闭右开的逻辑区间。坐标描述样本，不编码字节偏移。工作按整个 plan 统一边长的正方形 tile 请求、计算和发布，tile 划分空间 tensor 的高、宽轴，见 [ADR 0023](0023-track-dependencies-between-fixed-tiles.zh.md)；没有 tile 网格的输出整体计算。每个 tile 覆盖完整的通道组。收集的输出包含被请求的 tile，而 descriptor 仍描述完整逻辑值。
 
-`Value` 描述逻辑 descriptor、有效 region、strided 字节布局、facets、资源 owner 和不可变 `CpuStorage`。`Value::view(region)` 返回一个共享 storage owner 且不复制数据的 owning `Value`。`ValueView` 则借用 `Value` 且不持有存储；被引用的 Value 必须比它活得更久。`MutableBuffer` 独占且只能移动；`freeze()` 将其存储转为不可变所有权。任一 owning `Value` 持有该分配时，已发布分配仍保持有效。Tiled 算子只将被请求的 tile 复制到宿主管理的输出存储。
+`Value` 持有逻辑 descriptor（元素类型和 shape）、有效 region、strided 字节布局，以及不可变 `CpuStorage` 的共享 owner；这些结构成员构成它的全部内容。`Value::view(region)` 返回一个共享 storage owner 且不复制数据的 owning `Value`。`ValueView` 则借用 `Value` 且不持有存储；被引用的 Value 必须比它活得更久。`MutableBuffer` 独占且只能移动；`freeze()` 将其存储转为不可变所有权。任一 owning `Value` 持有该分配时，已发布分配仍保持有效。Tiled 算子只将被请求的 tile 复制到宿主管理的输出存储。
 
 `PlanarImageLayout` 定义 height、width、可选 channel 轴、component group、row pitch，以及 continuous 或 tiled 物理顺序。逻辑轴顺序不代表物理存储交错排列。`PlanarImage` 持有已发布且不可变的样本；写入方通过未发布的 write window 写入，并在完成区域后提交。`PlanarPageBudget` 分别计量图像已 backing 的 page 与最大虚拟地址预留。page owner 及计账 lease 可在 execution context 销毁后继续存活。普通 `execute_stream` 入口接收 Value 区域输出；plan 需要结构化 planar 输出时会返回 `TypeMismatch`，planar 执行使用结构化图像结果路径。
 
-Operation plugin 使用 [`result_operation_plugin_api.h`](../../../include/photospider/plugin/result_operation_plugin_api.h) 声明的 standalone Result C ABI 2。Result callback 接收已校验 metadata、requested tensor coverage 和 host services；registry 在导入前拒绝缺失或不匹配的 Result table，host boundary 会隔离 callback exception。
+Operation plugin 使用 [`result_operation_plugin_api.h`](../../../include/photospider/plugin/result_operation_plugin_api.h) 声明的 standalone Result C ABI 4（`PS_RESULT_OPERATION_ABI_VERSION_4`）。Result callback 接收已校验 metadata、requested tensor coverage、host services，以及 operation preparation 按显式资源身份选定的不可变资源的借用视图；registry 在导入前拒绝缺失或不匹配的 Result table，host boundary 会隔离 callback exception。
 
 `ExecutionContextConfig` 限制 CPU worker 数量、等待 callback 数量、受控活动字节和可选 cache。普通 callback 在 worker 开始执行时释放等待槽位；`CPU_STAGES` job 会保留准入，直到所有已提交 tile 退出且 job 从队列摘除。因此等待上限已满时，即使 staged job 正在运行，也可能阻止另一项提交。共享 scheduler 队列见[并行执行模型](../../kernel-architecture/Parallel-Execution-Model.md)。`maximum_live_bytes` 计入受控计算 payload，包括区域读取、宿主管理的输出、scratch、中间数据和传输。该限制不是进程 RSS，也不计调用方执行前已拥有的输入存储。分配 payload 前先预留预算，计账 lease 会保留到最后一个 storage owner 释放。
 
@@ -74,6 +75,7 @@ Operation plugin 使用 [`result_operation_plugin_api.h`](../../../include/photo
 - CPU 区域执行为必需能力；GPU backend 是可选且按算子支持。GPU 可用不表示每个算子都能在 GPU 执行。
 - 受控字节上限覆盖已纳入计账的 payload 分配，不限制调用方分配、未计账元数据、线程栈或操作系统开销。
 - `Region` 描述逻辑覆盖，不保证一般 strided `Value` 在物理内存连续。
+- `Value` 和 Result 不附着领域标签或 facet，`Value` 也不持有 `ImmutableResource` owner。Operation 从显式静态参数和 prepared 资源读取解释，因此执行器以相同方式接受两个结构相同的输入。
 - planar 图像的通道分组表示逻辑样本和语义分量，不会将 planar 存储转换为交错字节。
 - 执行器不会回滚已被 streaming sink 消费的 tile；streaming 没有持久提交协议。
 - 可信进程内 operation 代码不受沙箱保护。分配服务和 ABI 校验用于约束 callback 契约，不限制任意 native 代码。

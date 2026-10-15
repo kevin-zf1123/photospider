@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "plugin/port_validation.hpp"
+#include "common/floating_environment.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 struct FiniteArithmeticPrepared final {
@@ -73,7 +73,7 @@ struct FiniteArithmeticKernel final {
   }
   Status write(const ResultProgramPhase& phase,
                const ResourceVector<ResultTensorWriteWindow>& writers) {
-    input_internal::Float32Environment environment;
+    plugin_internal::FloatingEnvironment environment;
     if (!environment.active())
       return Status::failure(ErrorCode::InvalidArgument,
                              "numeric environment unavailable");

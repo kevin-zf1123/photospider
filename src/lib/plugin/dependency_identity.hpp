@@ -7,8 +7,8 @@
 #include <utility>
 #include <vector>
 
-#include "data/content_digest.hpp"
 #include "photospider/compiler/compiler.hpp"
+#include "photospider/core/content_digest.hpp"
 #include "plugin/operation_identity.hpp"
 
 namespace ps::contract_internal {
@@ -72,7 +72,7 @@ inline std::vector<std::string> dependency_cache_templates(
       break;
     const auto& step = plan.steps()[index];
     DependencyTemplateDigest hash(work);
-    hash.text("photospider.dependency-static.v1");
+    hash.text("photospider.dependency-static.v2");
     hash.integer(plan.tile_extent());
     hash.integer(static_cast<std::uint32_t>(plan.execution_mode()));
     hash.integer(static_cast<std::uint32_t>(step.backend));
@@ -81,6 +81,12 @@ inline std::vector<std::string> dependency_cache_templates(
     hash.text(step.operation);
     hash.integer(step.output_index);
     contract_internal::append_traits(&hash, step.traits);
+    hash.integer(step.prepared->resource_ids().size());
+    for (const auto& id : step.prepared->resource_ids()) {
+      hash.integer(id.byte_length);
+      for (auto byte : id.sha256)
+        hash.integer(byte);
+    }
     hash.integer(step.parameters.size());
     for (const auto& parameter : step.parameters) {
       hash.text(parameter.first);

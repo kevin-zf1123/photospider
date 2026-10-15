@@ -74,7 +74,7 @@ C Result bridge 使用相同的 Need-scoped atlas。Atlas buffer tokens 和 disp
 
 `prepare` 在物化前报告 payload 与目录的逻辑 allocation 大小。GPU 宿主应分别按设备实际 capacity 取整再 admission。`maximum_boxes` 限制占用 tile，`maximum_work` 限制元数据扫描、样本发现、hash/probe 和 packing；cardinality/equality 扫描前检查取消并预扣 metadata。`preparation_work()` 报告通用几何规划工作量，`materialization_work()` 报告通用 packing 工作量。`ResultTensorInput` overload 通过 `FootprintLimits::consume_work` 直接计入其工作；Result 物化还会额外计入 window acquisition 和 read-bound 工作，这些不包含在 `materialization_work()` 中。`ValueFragments` overload 保留调用方原有的外部计费方式。任一 allocation 后取消（包括 Empty）都会释放新 owner，不发布 atlas。
 
-每个 tile 至多 64 个逻辑样本。可指定正值、rank 对齐且乘积不超过 64 的 tile extents； 默认从最右轴开始确定性填充。仅占用 tile 进入目录。Lookup 使用逐轴全局 tile 坐标， 不要求全局 shape 乘积可表示为 uint64。`ValueFragments` 拒绝需要 `PlanarImage` 的结构化 image facets；atlas 只传输 generic Value 与可接受的完整 ColorArray tuple，不提供 image-v2 dependency execution。
+每个 tile 至多 64 个逻辑样本。可指定正值、rank 对齐且乘积不超过 64 的 tile extents； 默认从最右轴开始确定性填充。仅占用 tile 进入目录。Lookup 使用逐轴全局 tile 坐标， 不要求全局 shape 乘积可表示为 uint64。Atlas 接受 generic Value，不提供 planar image 执行支持；Result 输入的 tuple 完整性来自已按 `atomic_trailing_axes` 闭合的 tensor Need。
 
 Payload 按 tile key 和有效 bit 顺序紧凑存放，孔洞不占样本。空端口使用一个惰性 payload 字节和两个空 slot，均不授权样本。
 
@@ -82,4 +82,4 @@ Payload 按 tile key 和有效 bit 顺序紧凑存放，孔洞不占样本。空
 
 通用 atlas unit suite 注册为 `test_fragment_atlas`，源码为 [`tests/unit/kernel/test_fragment_atlas.cpp`](../../../tests/unit/kernel/test_fragment_atlas.cpp)。Native SDK suite 源码为 [`tests/unit/kernel/test_fragment_atlas_gpu.cpp`](../../../tests/unit/kernel/test_fragment_atlas_gpu.cpp)；Result callback 集成路径见 [`tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp`](../../../tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp)。这些源码共同覆盖 wire layout、坐标查找、sparse holes、有符号与零 stride、rank 和 dtype transport、buffer 准入、取消与 native readback。所需 Metal device 不可用时，native tests 可 skip。
 
-`ValueFragments` overload 保留其允许的 Value coverage；需要 `PlanarImage` 的 structural image facets 会被拒绝。`ResultTensorInput` overload 只读取 tensor Need 授权的 samples。两种 packer 均保留 holes，缺失 directory sample 返回 `NotFound`，超出 tile 或 work limits 的 plan 会失败，取消会退休新分配的 owner。Device host 必须分别准入取整后的 payload 与 directory capacity；Atlas 查找不会触发额外 read 或提供 CPU fallback。
+`ValueFragments` overload 保留其允许的 Value coverage。`ResultTensorInput` overload 只读取 tensor Need 授权的 samples。两种 packer 均保留 holes，缺失 directory sample 返回 `NotFound`，超出 tile 或 work limits 的 plan 会失败，取消会退休新分配的 owner。Device host 必须分别准入取整后的 payload 与 directory capacity；Atlas 查找不会触发额外 read 或提供 CPU fallback。

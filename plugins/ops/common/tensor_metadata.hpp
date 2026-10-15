@@ -2,7 +2,6 @@
 
 #include <vector>
 
-#include "photospider/data/semantic.hpp"
 #include "photospider/data/value.hpp"
 
 namespace ps::plugin_internal {
@@ -11,6 +10,5 @@ namespace ps::plugin_internal {
  */
 struct TensorMetadata final {
   ValueDescriptor descriptor;
-  std::vector<ValueFacet> facets;
 };
 }  // namespace ps::plugin_internal

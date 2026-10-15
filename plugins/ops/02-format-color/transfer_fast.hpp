@@ -6,7 +6,7 @@
 #include <functional>
 
 #include "02-format-color/transfer_program.hpp"
-#include "core/work_consumer.hpp"
+#include "photospider/core/work_consumer.hpp"
 
 #ifndef PHOTOSPIDER_TRANSFER_FAST_MATH
 #define PHOTOSPIDER_TRANSFER_FAST_MATH 1

@@ -67,6 +67,9 @@ if(PHOTOSPIDER_ENABLE_TSAN)
 endif()
 target_include_directories(test_result_metadata_budget PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
 photospider_add_kernel_test(test_resources Photospider::kernel tests/unit/kernel/test_resources.cpp)
+photospider_add_kernel_test(test_immutable_resource Photospider::kernel tests/unit/kernel/test_immutable_resource.cpp)
+photospider_add_kernel_test(test_operation_extensions Photospider::kernel tests/unit/kernel/test_operation_extensions.cpp)
+photospider_add_kernel_test(test_operation_validation Photospider::kernel tests/integration/kernel/test_operation_validation.cpp)
 
 add_library(operation_fixture MODULE tests/fixtures/operation_fixture.cpp)
 target_link_libraries(operation_fixture PRIVATE Photospider::operation_sdk Threads::Threads)
@@ -319,19 +322,19 @@ set_tests_properties(test_result_native_gpu PROPERTIES SKIP_RETURN_CODE 77)
 
 photospider_add_kernel_test(test_result_image_contracts Photospider::kernel tests/integration/kernel/test_result_image_contracts.cpp)
 
-photospider_add_kernel_test(test_semantic_contract Photospider::kernel tests/unit/kernel/test_semantic_contract.cpp)
+photospider_add_kernel_test(test_port_contracts Photospider::kernel tests/unit/kernel/test_port_contracts.cpp)
 add_library(operation_contract_fixture MODULE tests/fixtures/operation_contract_fixture.c)
 target_link_libraries(operation_contract_fixture PRIVATE Photospider::operation_sdk)
 set_target_properties(operation_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
-target_compile_definitions(test_semantic_contract PRIVATE PS_CONTRACT_FIXTURE="$<TARGET_FILE:operation_contract_fixture>")
-add_dependencies(test_semantic_contract operation_contract_fixture)
+target_compile_definitions(test_port_contracts PRIVATE PS_CONTRACT_FIXTURE="$<TARGET_FILE:operation_contract_fixture>")
+add_dependencies(test_port_contracts operation_contract_fixture)
 foreach(_case RANGE 1 12)
   add_library(operation_bad_contract_${_case} MODULE tests/fixtures/operation_contract_fixture.c)
   target_link_libraries(operation_bad_contract_${_case} PRIVATE Photospider::operation_sdk)
   set_target_properties(operation_bad_contract_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
   target_compile_definitions(operation_bad_contract_${_case} PRIVATE PS_BAD_CONTRACT_CASE=${_case})
-  target_compile_definitions(test_semantic_contract PRIVATE PS_BAD_CONTRACT_${_case}="$<TARGET_FILE:operation_bad_contract_${_case}>")
-  add_dependencies(test_semantic_contract operation_bad_contract_${_case})
+  target_compile_definitions(test_port_contracts PRIVATE PS_BAD_CONTRACT_${_case}="$<TARGET_FILE:operation_bad_contract_${_case}>")
+  add_dependencies(test_port_contracts operation_bad_contract_${_case})
 endforeach()
 
 photospider_add_kernel_test(test_footprint Photospider::kernel tests/unit/kernel/test_footprint.cpp)
@@ -354,16 +357,12 @@ photospider_add_kernel_test(test_pipeline_key Photospider::kernel tests/unit/ker
 target_include_directories(test_pipeline_key PRIVATE src/lib)
 target_include_directories(test_native_gpu PRIVATE src/lib)
 set_tests_properties(test_native_gpu PROPERTIES SKIP_RETURN_CODE 77)
-photospider_add_kernel_test(test_quality_report Photospider::kernel tests/unit/kernel/test_quality_report.cpp)
-photospider_add_kernel_test(test_layer Photospider::kernel tests/unit/kernel/test_layer.cpp)
 photospider_add_kernel_test(test_cpu_range Photospider::kernel tests/unit/kernel/test_cpu_range.cpp)
 target_include_directories(test_cpu_range PRIVATE src/lib)
 photospider_add_kernel_test(test_storage Photospider::kernel tests/unit/kernel/test_storage.cpp)
 photospider_add_kernel_test(test_value Photospider::kernel tests/unit/kernel/test_value.cpp)
 photospider_add_kernel_test(test_checked_math Photospider::kernel tests/unit/kernel/test_checked_math.cpp)
 target_include_directories(test_checked_math PRIVATE src/lib)
-photospider_add_kernel_test(test_lut3d_axis Photospider::kernel tests/unit/kernel/test_lut3d_axis.cpp)
-target_include_directories(test_lut3d_axis PRIVATE src/lib)
 photospider_add_kernel_test(
     test_compiler Photospider::kernel tests/unit/kernel/test_compiler.cpp)
 photospider_add_kernel_test(
@@ -389,7 +388,6 @@ photospider_add_kernel_test(
     test_result_diagnostics Photospider::kernel
     tests/integration/kernel/test_result_diagnostics.cpp)
 
-photospider_add_kernel_test(test_model_metadata Photospider::kernel tests/integration/kernel/test_model_metadata.cpp)
 photospider_add_kernel_test(test_frozen_execution Photospider::kernel tests/integration/kernel/test_frozen_execution.cpp)
 
 photospider_add_kernel_test(test_result_image_views Photospider::kernel tests/integration/kernel/image/test_result_image_views.cpp)
@@ -429,6 +427,20 @@ set_property(TEST
   test_result_c_fields test_result_c_tiles test_result_c_abi
   test_result_c_checkpoint test_result_c_block test_plugin_registry
   test_multi_output_contract test_multi_output_execution test_result_repeated
-  test_result_plugin test_semantic_contract test_operation_contract_validation
+  test_result_plugin test_port_contracts test_operation_contract_validation
   test_result_native_gpu test_gpu_c_abi_execution test_execution_result_dso_native
   APPEND PROPERTY LABELS abi)
+
+photospider_add_result_table_fixture(result_extensions_fixture tests/fixtures/result_extensions_fixture.c)
+photospider_add_kernel_test(test_result_extensions Photospider::kernel tests/integration/kernel/test_result_extensions.cpp)
+target_compile_definitions(test_result_extensions PRIVATE PS_EXTENSIONS_FIXTURE="$<TARGET_FILE:result_extensions_fixture>")
+add_dependencies(test_result_extensions result_extensions_fixture)
+
+foreach(_case RANGE 1 7)
+  photospider_add_result_table_fixture(result_extension_failure_${_case}
+    tests/fixtures/result_extensions_failure_fixture.cpp)
+  set_target_properties(result_extension_failure_${_case} PROPERTIES CXX_STANDARD 20)
+  target_compile_definitions(result_extension_failure_${_case} PRIVATE PS_EXTENSION_CASE=${_case})
+  target_compile_definitions(test_result_extensions PRIVATE PS_EXTENSION_FAILURE_${_case}="$<TARGET_FILE:result_extension_failure_${_case}>")
+  add_dependencies(test_result_extensions result_extension_failure_${_case})
+endforeach()

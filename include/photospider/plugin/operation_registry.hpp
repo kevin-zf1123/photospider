@@ -14,11 +14,11 @@
 #include "photospider/core/data_movement.hpp"
 #include "photospider/core/status.hpp"
 #include "photospider/data/planar_image.hpp"
-#include "photospider/data/semantic.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/plugin/cpu_parallel_api.h"
 #include "photospider/plugin/cpu_tiles_api.h"
 #include "photospider/plugin/native_gpu_api.h"
+#include "photospider/plugin/operation_extensions.hpp"
 #include "photospider/plugin/result_program.hpp"
 
 namespace ps {
@@ -70,22 +70,20 @@ enum class OperationPortKind : std::uint32_t { Result = 6 };
 /**
  * @brief Copied compile-time port contract included in stage identities.
  * @note The Result schema is the port value. These predicates validate its
- * tensor descriptor and semantic facets before callback entry. Tensor
- * predicates constrain kind, exact facets, dtype and rank; scalar constraints
- * also apply their finite inclusive interval. The compiler includes the
- * resolved schema in stage identity.
+ * tensor descriptor and explicitly bound contracts before callback entry.
+ * Tensor predicates constrain kind, dtype, rank and explicit validators; scalar
+ * constraints also apply their finite inclusive interval. The compiler includes
+ * the resolved schema in stage identity.
  */
 struct PHOTOSPIDER_API OperationPortConstraint final {
+  /** @brief Explicit validators; order is significant and enters identity. */
+  std::vector<ExtensionIdentity> validators;
   /** @brief Port schema kind; registered operations must select `Result`. */
   OperationPortKind kind = OperationPortKind::Result;
   /** @brief Finite inclusive binary32 lower bound for scalar ports. */
   float minimum = 0.0F;
   /** @brief Finite inclusive binary32 upper bound for scalar ports. */
   float maximum = 0.0F;
-  /** @brief Required tensor semantic kind; zero accepts any recognized kind. */
-  std::uint32_t semantic_kind = 0;
-  /** @brief Exact tensor facets; empty adds no facet equality constraint. */
-  std::vector<ValueFacet> facets = {};
   /** @brief Required dtype when nonzero; zero accepts any valid dtype. */
   std::uint32_t element_type = 0;
   /** @brief Required rank when nonzero. */
@@ -104,8 +102,8 @@ struct PHOTOSPIDER_API OperationPortConstraint final {
    */
   std::string result_schema_id = {};
   std::uint32_t result_schema_version = 0;
-  /** @brief Named Result tensor member constrained by dtype/rank/facets above.
-   * Empty with a dtype/rank/facet predicate selects the sole tensor member;
+  /** @brief Named Result tensor member constrained by dtype/rank above.
+   * Empty with a dtype/rank predicate selects the sole tensor member;
    * multiple tensors require a key. Without member predicates the complete
    * fixed representation is selected. An omitted schema identity accepts any
    * valid representation satisfying the member predicate. For output
@@ -114,9 +112,7 @@ struct PHOTOSPIDER_API OperationPortConstraint final {
    * input schema.
    */
   std::string tensor_key = {};
-  /** @brief Require a recognized semantic facet, including ColorArray. */
-  bool requires_semantics = false;
-  /** @brief Require a complete dimensionless Float32 scalar tensor with full
+  /** @brief Require a complete Float32 scalar tensor with full
    * sample shape {1}; finite samples must satisfy [minimum,maximum] before
    * consumer entry, including cached producers. Signed/zero strides are valid.
    */
@@ -206,6 +202,8 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
  * @note Traits are copied into semantic IR; callback/DSO identities are not.
  */
 struct PHOTOSPIDER_API OperationTraits final {
+  /** @brief Bounded report types that this operation may emit. */
+  std::vector<ExtensionIdentity> diagnostics;
   /** @brief CPU Result orchestration submits bounded computation stages to
    * the host tile service for Whole or protocol-2 Result execution. Coordinator
    * and tile callbacks have separate service permissions. Host range
@@ -263,7 +261,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   bool allows_cpu_fallback = false;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 25U;
+  std::uint32_t version = 26U;
   /** @brief Registered template requires pure per-node metadata resolution.
    * Free inference rejects templates. OperationRegistry::resolve_traits
    * clears this flag only after validated specialization.
@@ -396,6 +394,8 @@ using OperationMetadataSpecializer = std::function<Result<std::vector<
  * owns preparation storage separately from runtime continuation budgets.
  */
 struct OperationPreparation final {
+  /** @brief Explicit resource identities required by this prepared program. */
+  std::vector<ResourceIdentity> resources;
   std::vector<OperationOutputSpecialization> outputs;
   std::shared_ptr<const void> state;
   /** @brief Additional runtime scratch bound derived only from static metadata
@@ -424,6 +424,8 @@ using OperationPreparer = std::function<Result<OperationPreparation>(
  * identity.
  */
 class PHOTOSPIDER_API PreparedOperation final {
+  friend class ResultContinuation;
+
  public:
   PreparedOperation(const PreparedOperation&) = delete;
   PreparedOperation& operator=(const PreparedOperation&) = delete;
@@ -436,6 +438,23 @@ class PHOTOSPIDER_API PreparedOperation final {
    * producing registered operation alone defines its concrete type.
    */
   const void* state() const noexcept;
+  /** @brief Explicit, canonical resource identities selected at preparation. */
+  const std::vector<ResourceIdentity>& resource_ids() const noexcept;
+  /** @brief Immutable report implementations retained independently of
+   * registry. */
+  const std::vector<std::shared_ptr<const DiagnosticDefinition>>&
+  diagnostic_definitions() const noexcept;
+  /** @brief Run the explicitly bound validators on host-granted data.
+   * port is the original full input/output ordinal. Callbacks run without a
+   * registry lock, with admitted scratch and cancellation fencing. Exceptions
+   * become typed failures; no validation state is mutated.
+   */
+  Status validate_port(bool output, std::uint32_t port,
+                       const ValidationContext& context) const;
+  bool has_validators(bool output, std::uint32_t port) const noexcept;
+  /** @brief Whether this port requires a Whole authorized CompleteBundle. */
+  bool requires_complete_validation(bool output,
+                                    std::uint32_t port) const noexcept;
 
  private:
   friend class OperationRegistry;
@@ -486,6 +505,13 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @note Register operations before compilation begins.
    */
   OperationRegistry();
+  /** @brief Register a reentrant immutable validator before freeze.
+   * Keys are unique across versions. Definitions are copied before locking;
+   * malformed, duplicate or frozen registrations fail without partial changes.
+   */
+  Status register_validator(ValidationDefinition definition);
+  /** @brief Register a bounded report codec with the same ownership rules. */
+  Status register_diagnostic(DiagnosticDefinition definition);
 
   /**
    * @brief Stops callbacks, destroys DSO records, and unloads libraries.
@@ -547,7 +573,7 @@ class PHOTOSPIDER_API OperationRegistry final {
    * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
    * @note Path rejection precedes the platform loader. The loader accepts
-   * only the exact Result operation ABI 3 entry point and full table layout;
+   * only the exact Result operation ABI 4 entry point and full table layout;
    * missing, older, and planar-only C entries are rejected. Result modules
    * publish validated tensor/field coverage through the structured contract.
    * No signature, trust-store, sandbox, or process isolation is applied.
@@ -560,7 +586,7 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @throws Nothing.
    * @note Compilation requires a frozen registry.
    */
-  Status freeze() noexcept;
+  Status freeze();
 
   /**
    * @brief Reports whether registry mutation has ended.
@@ -601,9 +627,10 @@ class PHOTOSPIDER_API OperationRegistry final {
    * excluded.
    */
   [[nodiscard]] Result<std::shared_ptr<const PreparedOperation>>
-  prepare_operation(
-      const std::string& key, const std::vector<OperationMetadata>& inputs,
-      const std::map<std::string, ParameterValue>& parameters) const;
+  prepare_operation(const std::string& key,
+                    const std::vector<OperationMetadata>& inputs,
+                    const std::map<std::string, ParameterValue>& parameters,
+                    const ResourceSet& resources = {}) const;
 
   /** @brief Starts a validated structured continuation in host-owned state.
    * Query metadata must match full compiler inference. The backend enum and

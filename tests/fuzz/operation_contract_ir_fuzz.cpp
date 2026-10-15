@@ -83,7 +83,7 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   // The C++ trait schema and the C plugin table have independent versions.
   traits.version = reader.next();
   const auto element_type = static_cast<ps::ElementType>(
-      (reader.next() % 7U) + PS_RESULT_ELEMENT_UINT8_V3);
+      (reader.next() % 7U) + PS_RESULT_ELEMENT_UINT8_V4);
   const std::uint64_t extent = 1U + reader.next() % 16U;
   traits.outputs[0].region_rule =
       static_cast<ps::OperationRegionRule>((reader.next() % 6U) + 1U);

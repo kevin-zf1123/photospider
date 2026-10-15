@@ -1,3 +1,4 @@
+#include "photospider/ops/numeric/diagnostics.hpp"
 #pragma once
 
 #include <cstdint>
@@ -6,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/data/color_array.hpp"
+#include "photospider/ops/color_array.hpp"
 #include "photospider/ops/numeric/curves.hpp"
 
 namespace ps::numeric {
@@ -52,7 +53,7 @@ inline ColorArrayDescriptor color_ramp_rgb_description(
  * owning resource.
  */
 inline ColorArrayDescriptor color_ramp_cmyk_description(
-    ColorProfileIdentity identity) {
+    ResourceIdentity identity) {
   ColorArrayDescriptor result;
   result.model = ColorModel::Cmyk;
   result.reference = ColorReference::ProfileRelative;
@@ -166,7 +167,7 @@ inline Result<WorkflowNode> node(
  * Selected rows define the math, with unused generic rows remaining numerically
  * unused while typed/upstream validation still covers all inputs. Output port
  * `values` is a full-shape immutable Result using `photospider.tensor`
- * v1/member `samples`, shape S+[C], with ColorArray v1 facet and
+ * v1/member `samples`, shape S+[C], with explicit color configuration and
  * `atomic_trailing_axes=1`. A component request closes to its full color tuple;
  * Whole publication retains complete certified coverage, global coordinates and
  * source Result associations. Empty reads no sample payload. Input edits
@@ -179,8 +180,9 @@ inline Result<WorkflowNode> node(
  * including zero chroma/saturation, with certified pi unit conversion. No gamut
  * clipping, model conversion, adaptation or ICC CMM. Host
  * work/capacity/stage/cancellation bounds apply to every refinement; an
- * unfinished proof fails ResourceExhausted. Output owners retain required
- * ColorArray resources and survive context teardown.
+ * unfinished proof fails ResourceExhausted. Output storage owners survive
+ * context teardown. Domain resources remain with preparation, plans and active
+ * execution that explicitly require them.
  */
 /** @brief Linear-light RGB/RGBA; default description is three-channel sRGB. */
 inline Result<WorkflowNode> color_ramp_rgb_node(

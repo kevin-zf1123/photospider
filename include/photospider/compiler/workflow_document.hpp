@@ -120,8 +120,8 @@ struct PHOTOSPIDER_API WorkflowOutput final {
  * identity.
  */
 struct PHOTOSPIDER_API WorkflowDocument final {
-  /** @brief Positive source schema version; current writer emits 5. */
-  std::uint32_t schema_version = 5;
+  /** @brief Positive source schema version; current writer emits 6. */
+  std::uint32_t schema_version = 6;
   /** @brief Required runtime inputs; canonical semantic order is declaration
    * id. */
   std::vector<WorkflowInputDeclaration> inputs;

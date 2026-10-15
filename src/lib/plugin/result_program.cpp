@@ -6,16 +6,17 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
 #include "data/affine_view.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_window_access.hpp"
 #include "execution/result_native.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "plugin/failure_latch.hpp"
 #include "plugin/operation_exception.hpp"
 #include "plugin/port_validation.hpp"
 #include "plugin/result_payload_bound.hpp"
+#include "plugin/validation_dispatch.hpp"
 
 namespace ps {
 void ResultProgramPhase::record_failure(const Status& status) const {
@@ -471,8 +472,13 @@ void ResultContinuation::reset() noexcept {
   prepared_.reset();
   definition_.reset();
   resources_ = {};
+  output_schema_.reset();
+  semantic_key_.clear();
   payload_bound_.reset();
   payload_limit_.reset();
+  validated_publication_.reset();
+  output_index_ = 0;
+  host_validates_ = false;
 }
 ResultContinuation::~ResultContinuation() noexcept {
   reset();
@@ -487,7 +493,12 @@ ResultContinuation& ResultContinuation::operator=(
     storage_ = std::move(other.storage_);
     definition_ = std::move(other.definition_);
     prepared_ = std::move(other.prepared_);
+    output_index_ = other.output_index_;
+    host_validates_ = other.host_validates_;
+    validated_publication_ = std::move(other.validated_publication_);
     resources_ = std::move(other.resources_);
+    output_schema_ = std::move(other.output_schema_);
+    semantic_key_ = std::move(other.semantic_key_);
     payload_bound_ = std::move(other.payload_bound_);
     payload_limit_ = std::exchange(other.payload_limit_, {});
     destroy_ = std::exchange(other.destroy_, nullptr);
@@ -519,6 +530,10 @@ Result<ResultProgramPoll> ResultContinuation::poll(
 }
 Result<ResultProgramPoll> ResultContinuation::poll_guarded(
     const ResultProgramPhase& phase) try {
+  std::optional<ResourceAllocationScope> admission;
+  if (!resource_internal::metadata_budget() ||
+      !resource_internal::metadata_budget()->same_owner(phase.resources))
+    admission.emplace(phase.resources);
   if (!poll_)
     return Result<ResultProgramPoll>(Status{ErrorCode::Stale, {}});
   if (phase.failure_latch) {
@@ -557,6 +572,17 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
     return answer;
   }
   auto query = phase.query;
+  if (prepared_ && !host_validates_) {
+    auto checked = prepared_->validate_inputs(query.inputs, query.parameters);
+    if (!checked.ok())
+      return Result<ResultProgramPoll>(checked);
+    if (query.output_index != output_index_ || !query.output.result_schema ||
+        !output_schema_ ||
+        !query.output.result_schema->same_schema(*output_schema_) ||
+        query.semantic_key != semantic_key_)
+      return Result<ResultProgramPoll>(
+          Status{ErrorCode::Stale, "continuation output changed"});
+  }
   query.resources = resources_;
   query.prepared = prepared_;
   ResultProgramPhase normalized{query,
@@ -574,7 +600,7 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
   normalized.gpu = phase.gpu;
   normalized.gpu_status = phase.gpu_status;
   normalized.association = phase.association;
-  normalized.report_numeric = phase.report_numeric;
+  normalized.report_diagnostic = phase.report_diagnostic;
   normalized.checkpoint_before = phase.checkpoint_before;
   normalized.checkpoint_publish = phase.checkpoint_publish;
   normalized.block = phase.block;
@@ -640,6 +666,74 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
     if (!status.ok())
       return reject_bound(status);
   }
+  if (prepared_ && !host_validates_) {
+    const auto work = [&](std::uint64_t n) {
+      return normalized.consume_work(n);
+    };
+    if (normalized.tensors) {
+      for (const auto& entry : *normalized.tensors) {
+        const auto port = entry.first.first, slot = entry.first.second;
+        if (port >= query.inputs.size())
+          return reject_bound(
+              Status{ErrorCode::InvalidArgument, "invalid direct input port"});
+        const auto& schema = *query.inputs[port].result_schema;
+        if (slot >= schema.tensors.size())
+          return reject_bound(
+              Status{ErrorCode::TypeMismatch, "invalid direct tensor slot"});
+        SchemaTemplate actual, expected;
+        actual.tensors = {entry.second.spec()};
+        expected.tensors = {schema.tensors[slot]};
+        if (!actual.same_schema(expected))
+          return reject_bound(Status{ErrorCode::TypeMismatch,
+                                     "direct tensor structure mismatch"});
+        const auto object = normalized.results.find(port);
+        if (object != normalized.results.end()) {
+          if (!object->second.valid() ||
+              object->second.object_id() != entry.second.object_id() ||
+              !object->second.schema().same_schema(schema))
+            return reject_bound(Status{ErrorCode::TypeMismatch,
+                                       "direct tensor source mismatch"});
+          auto descriptor = object->second.descriptor(false);
+          if (!descriptor.ok())
+            return reject_bound(descriptor.status());
+          FootprintLimits limits;
+          limits.cancellation = query.cancellation;
+          limits.consume_work = work;
+          auto uncovered = entry.second.coverage().subtract(
+              descriptor.value().tensor_coverage(slot), limits);
+          if (!uncovered.ok())
+            return reject_bound(uncovered.status());
+          if (!uncovered.value().empty())
+            return reject_bound(Status{ErrorCode::TypeMismatch,
+                                       "direct tensor coverage mismatch"});
+          continue;  // The same object's authorized coverage is checked below.
+        }
+        auto checked = plugin_internal::validate_tensor_contract(
+            *prepared_, port, *query.inputs[port].result_schema, slot,
+            entry.second, entry.second.coverage(), normalized.resources,
+            query.cancellation, work, ErrorCode::InvalidArgument);
+        if (!checked.ok())
+          return reject_bound(checked);
+      }
+    }
+    for (const auto& entry : normalized.results) {
+      if (entry.first >= query.inputs.size() || !entry.second.valid() ||
+          !query.inputs[entry.first].result_schema ||
+          !entry.second.schema().same_schema(
+              *query.inputs[entry.first].result_schema))
+        return reject_bound(
+            Status{ErrorCode::TypeMismatch, "direct input structure mismatch"});
+      auto descriptor = entry.second.descriptor(false);
+      if (!descriptor.ok())
+        return reject_bound(descriptor.status());
+      auto checked = plugin_internal::validate_result_contract(
+          *prepared_, false, entry.first, entry.second, descriptor.value(),
+          nullptr, normalized.resources, query.cancellation, work,
+          query.page_bytes, ErrorCode::InvalidArgument);
+      if (!checked.ok())
+        return reject_bound(checked);
+    }
+  }
   auto answer = [&]() -> Result<ResultProgramPoll> {
     try {
       return poll_(storage_.data(), normalized);
@@ -671,6 +765,41 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
       auto status = payload_bound_->check(publication->result, normalized);
       if (!status.ok())
         return reject_bound(status);
+    }
+  }
+  if (answer.ok() && prepared_ && !host_validates_) {
+    if (const auto* publication =
+            std::get_if<ResultPublication>(&answer.value())) {
+      if (!publication->result.valid() || !output_schema_ ||
+          !publication->result.schema().same_schema(*output_schema_) ||
+          !publication->result.owned_by(normalized.resources) ||
+          !publication->result.matches_scope(semantic_key_))
+        return reject_bound(
+            Status{ErrorCode::InvalidArgument,
+                   "direct publication schema/scope/owner mismatch",
+                   FailureReason::MalformedEnvelope,
+                   {FailureOrigin::Protocol, FailureScope::Group}});
+      auto descriptor = publication->result.descriptor(publication->complete);
+      if (!descriptor.ok())
+        return reject_bound(descriptor.status());
+      if (validated_publication_ &&
+          (descriptor.value().object_id() !=
+               validated_publication_->object_id() ||
+           descriptor.value().revision() <= validated_publication_->revision()))
+        return reject_bound(
+            Status{ErrorCode::InvalidArgument,
+                   "direct publication identity/revision changed",
+                   FailureReason::MalformedEnvelope,
+                   {FailureOrigin::Protocol, FailureScope::Group}});
+      auto checked = plugin_internal::validate_result_contract(
+          *prepared_, true, output_index_, publication->result,
+          descriptor.value(),
+          validated_publication_ ? &*validated_publication_ : nullptr,
+          normalized.resources, query.cancellation, normalized.consume_work,
+          query.page_bytes, ErrorCode::OperationFailed);
+      if (!checked.ok())
+        return reject_bound(checked);
+      validated_publication_ = descriptor.take_value();
     }
   }
   return answer;

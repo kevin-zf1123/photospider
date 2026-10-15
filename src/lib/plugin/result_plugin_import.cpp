@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "plugin/port_validation.hpp"
 #include "plugin/result_c_codec.hpp"
 #include "plugin/result_c_member.hpp"
@@ -21,19 +21,33 @@ using result_c::port;
 using result_c::prepare_metadata;
 using result_c::start_c_member;
 using result_c::text;
-Result<std::vector<OperationDefinition>> import_result_plugin(
-    const ps_result_operation_plugin_api_v3* api,
+Result<ImportedResultPlugin> import_result_plugin(
+    const ps_result_operation_plugin_api_v4* api,
     std::shared_ptr<void> library) {
   if (!api ||
       reinterpret_cast<std::uintptr_t>(api) %
-          alignof(ps_result_operation_plugin_api_v3) ||
+          alignof(ps_result_operation_plugin_api_v4) ||
       api->struct_size != sizeof(*api) ||
-      api->abi_version != PS_RESULT_OPERATION_ABI_VERSION_3 ||
+      api->abi_version != PS_RESULT_OPERATION_ABI_VERSION_4 ||
       !array(api->operations, api->operation_count, 1024) ||
       !api->operation_count || !api->destroy)
-    return Result<std::vector<OperationDefinition>>(
-        invalid("invalid Result ABI table"));
-  std::vector<OperationDefinition> definitions;
+    return Result<ImportedResultPlugin>(invalid("invalid Result ABI table"));
+  ImportedResultPlugin definitions;
+  if (!array(api->validators, api->validator_count, 64) ||
+      !array(api->diagnostics, api->diagnostic_count, 64))
+    return Result<ImportedResultPlugin>(invalid("invalid extension tables"));
+  for (uint32_t i = 0; i < api->validator_count; ++i) {
+    auto value = result_c::validation_definition(api->validators[i], library);
+    if (!value.ok())
+      return Result<ImportedResultPlugin>(value.status());
+    definitions.validators.push_back(value.take_value());
+  }
+  for (uint32_t i = 0; i < api->diagnostic_count; ++i) {
+    auto value = result_c::diagnostic_definition(api->diagnostics[i], library);
+    if (!value.ok())
+      return Result<ImportedResultPlugin>(value.status());
+    definitions.diagnostics.push_back(value.take_value());
+  }
   for (std::uint32_t i = 0; i < api->operation_count; ++i) {
     const auto& op = api->operations[i];
     if (op.struct_size != sizeof(op) ||
@@ -53,32 +67,37 @@ Result<std::vector<OperationDefinition>> import_result_plugin(
         !op.maximum_stages || op.maximum_stages > 1048576 ||
         op.cpu_staged_tiles > 1 || op.data_movement > 1 ||
         (op.flags &
-         ~(PS_RESULT_FLAG_DETERMINISTIC_V3 |
-           PS_RESULT_FLAG_SIDE_EFFECT_FREE_V3 | PS_RESULT_FLAG_CPU_V3 |
-           PS_RESULT_FLAG_GPU_V3 | PS_RESULT_FLAG_CPU_FALLBACK_V3 |
-           PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V3)))
-      return Result<std::vector<OperationDefinition>>(
+         ~(PS_RESULT_FLAG_DETERMINISTIC_V4 |
+           PS_RESULT_FLAG_SIDE_EFFECT_FREE_V4 | PS_RESULT_FLAG_CPU_V4 |
+           PS_RESULT_FLAG_GPU_V4 | PS_RESULT_FLAG_CPU_FALLBACK_V4 |
+           PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V4)))
+      return Result<ImportedResultPlugin>(
           invalid("invalid Result operation table"));
     auto key = text(op.key, op.key_size);
     if (!key.ok())
-      return Result<std::vector<OperationDefinition>>(key.status());
+      return Result<ImportedResultPlugin>(key.status());
     OperationDefinition definition;
     definition.key = key.take_value();
     auto& traits = definition.traits;
+    auto diagnostics =
+        result_c::extension_ids(op.diagnostics, op.diagnostic_count);
+    if (!diagnostics.ok())
+      return Result<ImportedResultPlugin>(diagnostics.status());
+    traits.diagnostics = diagnostics.take_value();
     traits.input_count = op.input_count;
     traits.repeated_minimum = op.repeated_minimum;
     traits.repeated_maximum = op.repeated_maximum;
     traits.repeated_match = !op.repeated_maximum || op.repeated_match != 0;
-    traits.supports_cpu = (op.flags & PS_RESULT_FLAG_CPU_V3) != 0;
-    traits.supports_gpu = (op.flags & PS_RESULT_FLAG_GPU_V3) != 0;
+    traits.supports_cpu = (op.flags & PS_RESULT_FLAG_CPU_V4) != 0;
+    traits.supports_gpu = (op.flags & PS_RESULT_FLAG_GPU_V4) != 0;
     traits.allows_cpu_fallback =
-        (op.flags & PS_RESULT_FLAG_CPU_FALLBACK_V3) != 0;
-    traits.deterministic = (op.flags & PS_RESULT_FLAG_DETERMINISTIC_V3) != 0;
+        (op.flags & PS_RESULT_FLAG_CPU_FALLBACK_V4) != 0;
+    traits.deterministic = (op.flags & PS_RESULT_FLAG_DETERMINISTIC_V4) != 0;
     traits.side_effect_free =
-        (op.flags & PS_RESULT_FLAG_SIDE_EFFECT_FREE_V3) != 0;
+        (op.flags & PS_RESULT_FLAG_SIDE_EFFECT_FREE_V4) != 0;
     traits.cacheable = traits.deterministic && traits.side_effect_free;
     traits.share_blocks_across_outputs =
-        (op.flags & PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V3) != 0;
+        (op.flags & PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V4) != 0;
     traits.cpu_staged_tiles = op.cpu_staged_tiles != 0;
     traits.workspace_bytes = op.workspace_bytes;
     traits.input_schema.clear();
@@ -90,52 +109,51 @@ Result<std::vector<OperationDefinition>> import_result_plugin(
           input < op.input_count ? op.inputs[input] : *op.repeated_input;
       auto copied = constraint(declared);
       if (!copied.ok())
-        return Result<std::vector<OperationDefinition>>(copied.status());
+        return Result<ImportedResultPlugin>(copied.status());
       traits.input_schema.push_back(copied.take_value());
-      if (declared.kind == PS_RESULT_OBJECT_V3 && !declared.schema) {
+      if (declared.kind == PS_RESULT_OBJECT_V4 && !declared.schema) {
         input_prototypes.emplace_back();
       } else {
         auto metadata = port(declared);
         if (!metadata.ok())
-          return Result<std::vector<OperationDefinition>>(metadata.status());
+          return Result<ImportedResultPlugin>(metadata.status());
         input_prototypes.push_back(metadata.take_value());
       }
     }
     for (std::uint32_t output = 0; output < op.output_count; ++output) {
       const auto& declared = op.outputs[output];
       if (declared.struct_size != sizeof(declared) ||
-          (declared.flags & ~(PS_RESULT_OUTPUT_PRESERVE_VIEWS_V3 |
-                              PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V3 |
-                              PS_RESULT_OUTPUT_PAYLOAD_BOUND_V3)) ||
-          (!(declared.flags & PS_RESULT_OUTPUT_PAYLOAD_BOUND_V3) &&
+          (declared.flags & ~(PS_RESULT_OUTPUT_PRESERVE_VIEWS_V4 |
+                              PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V4 |
+                              PS_RESULT_OUTPUT_PAYLOAD_BOUND_V4)) ||
+          (!(declared.flags & PS_RESULT_OUTPUT_PAYLOAD_BOUND_V4) &&
            declared.maximum_output_payload_bytes) ||
           (declared.execution != 1 && declared.execution != 2) ||
-          declared.failure_delivery != PS_RESULT_REQUEST_FAILURE_ONLY_V3 ||
+          declared.failure_delivery != PS_RESULT_REQUEST_FAILURE_ONLY_V4 ||
           (declared.input_count != UINT32_MAX &&
            !array(declared.input_indices, declared.input_count, 1024)) ||
           (declared.input_count == UINT32_MAX && declared.input_indices))
-        return Result<std::vector<OperationDefinition>>(
+        return Result<ImportedResultPlugin>(
             invalid("invalid named Result output"));
       auto name = text(declared.key, declared.key_size);
       if (!name.ok())
-        return Result<std::vector<OperationDefinition>>(name.status());
+        return Result<ImportedResultPlugin>(name.status());
       auto metadata = port(declared.port);
       if (!metadata.ok())
-        return Result<std::vector<OperationDefinition>>(metadata.status());
+        return Result<ImportedResultPlugin>(metadata.status());
       auto output_constraint = constraint(declared.port);
       if (!output_constraint.ok())
-        return Result<std::vector<OperationDefinition>>(
-            output_constraint.status());
+        return Result<ImportedResultPlugin>(output_constraint.status());
       OperationOutputTraits contract;
       contract.output_schema = output_constraint.take_value();
       contract.key = name.take_value();
       contract.failure_delivery =
           static_cast<FailureDelivery>(declared.failure_delivery);
       contract.preserve_output_views =
-          (declared.flags & PS_RESULT_OUTPUT_PRESERVE_VIEWS_V3) != 0;
+          (declared.flags & PS_RESULT_OUTPUT_PRESERVE_VIEWS_V4) != 0;
       contract.requires_input_views =
-          (declared.flags & PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V3) != 0;
-      if (declared.flags & PS_RESULT_OUTPUT_PAYLOAD_BOUND_V3)
+          (declared.flags & PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V4) != 0;
+      if (declared.flags & PS_RESULT_OUTPUT_PAYLOAD_BOUND_V4)
         contract.maximum_output_payload_bytes =
             declared.maximum_output_payload_bytes;
       contract.data_movement = op.data_movement
@@ -164,17 +182,17 @@ Result<std::vector<OperationDefinition>> import_result_plugin(
       traits.outputs.push_back(std::move(contract));
     }
     if (!array(op.parameters, op.parameter_count, 128))
-      return Result<std::vector<OperationDefinition>>(
+      return Result<ImportedResultPlugin>(
           invalid("invalid Result parameter table"));
     for (std::uint32_t p = 0; p < op.parameter_count; ++p) {
       const auto& parameter = op.parameters[p];
       if (parameter.struct_size != sizeof(parameter) ||
           parameter.required > 1 || parameter.bounded > 1)
-        return Result<std::vector<OperationDefinition>>(
+        return Result<ImportedResultPlugin>(
             invalid("invalid Result parameter"));
       auto name = text(parameter.key, parameter.key_size);
       if (!name.ok())
-        return Result<std::vector<OperationDefinition>>(name.status());
+        return Result<ImportedResultPlugin>(name.status());
       traits.parameter_schema.push_back(
           {name.take_value(),
            static_cast<OperationParameterType>(parameter.type),
@@ -249,8 +267,8 @@ Result<std::vector<OperationDefinition>> import_result_plugin(
                                       const BufferAllocator& allocator) {
       return start_c_member(owner, allocator);
     };
-    definitions.push_back(std::move(definition));
+    definitions.operations.push_back(std::move(definition));
   }
-  return Result<std::vector<OperationDefinition>>(std::move(definitions));
+  return Result<ImportedResultPlugin>(std::move(definitions));
 }
 }  // namespace ps::plugin_internal

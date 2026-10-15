@@ -1,3 +1,4 @@
+#include "photospider/ops/numeric/diagnostics.hpp"
 #pragma once
 
 #include <cstdint>
@@ -28,7 +29,7 @@ inline Result<WorkflowNode> node(std::uint64_t id, bool pchip, WorkflowInput x,
  * Float32/64, K=2..65536, N=1..2^40. x must be finite and strictly
  * increasing; y must be finite and strictly monotone in either direction.
  * The `values` Result uses schema photospider.tensor/member samples with shape
- * [N], empty facets and selected dtype (default Float64). Policy defaults to
+ * [N], ordinary data and selected dtype (default Float64). Policy defaults to
  * Reject; Clamp is also supported. Compiler checks bound input metadata; this
  * helper owns node metadata and may be used concurrently. Construction may
  * throw bad_alloc. Invalid id/profile/policy/dtype fails

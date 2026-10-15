@@ -21,19 +21,6 @@
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
-SemanticDescriptor scalar_semantic(bool signal,
-                                   const std::string& unit = "dimensionless") {
-  SemanticDescriptor result;
-  result.kind = signal ? SemanticKind::SampledSignal : SemanticKind::Scalar;
-  result.unit = unit;
-  result.channels = {{"value", "value", unit}};
-  if (signal) {
-    result.sample_origin = 10;
-    result.sample_step = .125;
-    result.sample_axis_unit = "seconds";
-  }
-  return result;
-}
 using s1_fixture::check;
 using s1_fixture::take;
 ExecutionContextConfig config(bool gpu = false) {
@@ -135,7 +122,8 @@ struct Fixture {
   std::shared_ptr<OperationRegistry> registry =
       std::make_shared<OperationRegistry>();
   std::atomic<unsigned> producers{0}, consumers{0};
-  explicit Fixture(std::shared_ptr<OperationRegistry>, unsigned semantics = 0) {
+  explicit Fixture(std::shared_ptr<OperationRegistry>,
+                   unsigned atomic_axes = 0) {
     OperationDefinition producer;
     producer.key = "coefficient.scale";
     auto& traits = producer.traits;
@@ -150,11 +138,10 @@ struct Fixture {
     traits.workspace_bytes = 16;
     traits.parameter_schema = {
         {"layout", OperationParameterType::Int64, true, true, 0, 4},
-        {"mode", OperationParameterType::Int64, true, true, 0, 3}};
+        {"mode", OperationParameterType::Int64, true, true, 0, 3},
+        {"offset", OperationParameterType::Float64, false}};
     auto schema = s1_fixture::schema({1}, false);
-    if (semantics)
-      schema.tensors[0].facets = {
-          take(encode_semantic(scalar_semantic(semantics == 2)))};
+    schema.tensors[0].atomic_trailing_axes = atomic_axes;
     auto& output = traits.outputs[0];
     output.output_schema.kind = OperationPortKind::Result;
     output.output_schema.result_schema_id = schema.id;
@@ -190,10 +177,9 @@ Result<ResultProgramPoll> Scale::poll(const ResultProgramPhase& call) {
   float input = 0;
   check(call.read_tensor(0, 0, {0}, &input, 4));
   float output = input * 2;
-  const auto& facets = call.query.inputs[0].result_schema->tensors[0].facets;
-  if (!facets.empty())
-    output +=
-        static_cast<float>(take(decode_semantic(facets[0])).sample_origin);
+  auto offset = call.query.parameters.find("offset");
+  if (offset != call.query.parameters.end())
+    output += static_cast<float>(std::get<double>(offset->second));
   const auto mode = std::get<std::int64_t>(call.query.parameters.at("mode"));
   if (mode == 1)
     output = std::numeric_limits<float>::quiet_NaN();
@@ -212,7 +198,7 @@ Result<ResultProgramPoll> Scale::poll(const ResultProgramPhase& call) {
   std::memcpy(bytes.data() + addresses[layout], &output, 4);
   auto schema = *call.query.output.result_schema;
   if (mode == 3)
-    schema.tensors[0].facets = {{"vendor.scalar", 1, {42}}};
+    schema.tensors[0].atomic_trailing_axes = 1;
   auto builder = take(
       ResultBuilder::start(call.resources, schema, call.query.semantic_key));
 
@@ -242,7 +228,7 @@ scalar_scene::Scene scene(const ResourceBudget& root, unsigned kind = 0,
   return result;
 }
 int valid_views(const std::shared_ptr<OperationRegistry>& base) {
-  for (unsigned semantic = 0; semantic < 3; ++semantic) {
+  for (unsigned semantic = 0; semantic < 2; ++semantic) {
     Fixture f(base, semantic);
     Compiler compiler(f.registry);
     ExecutionContext execution(f.registry, config());
@@ -384,19 +370,16 @@ int payload_admission(const std::shared_ptr<OperationRegistry>& base) {
   scalar_scene::check(input, retried.value().results.at("result"));
   return 0;
 }
-int semantic_binding_identity(const std::shared_ptr<OperationRegistry>& base) {
+int parameter_binding_identity(const std::shared_ptr<OperationRegistry>& base) {
   Fixture f(base);
   Compiler compiler(f.registry);
   ExecutionContext execution(f.registry, config());
   const auto root = take(execution.resource_budget());
   for (double origin : {1., 2.}) {
     auto s = scene(root);
-    auto semantic = scalar_semantic(true);
-    semantic.sample_origin = origin;
-    semantic.sample_axis_unit = origin == 1 ? "seconds" : "meters";
+    s.document.nodes[0].parameters["offset"] = origin;
     auto schema = s1_fixture::schema({1}, false);
-    schema.tensors[0].facets = {take(encode_semantic(semantic))};
-    auto builder = take(ResultBuilder::start(root, schema, "semantic.input"));
+    auto builder = take(ResultBuilder::start(root, schema, "parameter.input"));
 
     const float number = 1;
     check(builder.publish_tensor(
@@ -419,7 +402,7 @@ int semantic_binding_identity(const std::shared_ptr<OperationRegistry>& base) {
   return 0;
 }
 int metadata_rejection() {
-  for (unsigned kind = 0; kind < 6; ++kind) {
+  for (unsigned kind = 0; kind < 2; ++kind) {
     auto registry = std::make_shared<OperationRegistry>();
     check(registry->register_operation(scalar_consumer(false)));
     OperationDefinition producer;
@@ -428,18 +411,6 @@ int metadata_rejection() {
     auto schema = s1_fixture::schema({kind == 1 ? 2U : 1U}, false);
     schema.tensors[0].descriptor.element_type =
         kind == 0 ? ElementType::Float64 : ElementType::Float32;
-    if (kind >= 2) {
-      schema.tensors[0].facets =
-          kind == 5 ? std::vector<ValueFacet>{{"vendor.scalar", 1, {}}}
-                    : std::vector<ValueFacet>{take(encode_semantic(
-                          scalar_semantic(kind != 2, "seconds")))};
-      if (kind == 4) {
-        auto field = scalar_semantic(false);
-        field.kind = SemanticKind::ScalarField;
-        schema.tensors[0].facets = {take(encode_semantic(field))};
-        schema.tensors[0].descriptor.shape = {1, 1};
-      }
-    }
     auto& out = producer.traits.outputs[0];
     out.output_schema.kind = OperationPortKind::Result;
     out.output_schema.result_schema_id = schema.id;
@@ -485,7 +456,7 @@ int main(int argc, char** argv) {
     PS_CHECK(reuse_and_errors(base) == 0);
     PS_CHECK(metadata_rejection() == 0);
     PS_CHECK(payload_admission(base) == 0);
-    PS_CHECK(semantic_binding_identity(base) == 0);
+    PS_CHECK(parameter_binding_identity(base) == 0);
     std::cout << "computed scalar contracts passed\n";
     return 0;
   } catch (const std::exception& error) {

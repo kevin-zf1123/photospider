@@ -5,8 +5,8 @@
 #include <utility>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/core/numeric_diagnostics.hpp"
 #include "photospider/data/value.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
 /** @brief Explicit policy for finite queries outside the knot interval. */
@@ -50,7 +50,7 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
  * and query[N]. Each input independently accepts Float32/64. K=2..65536 and
  * positive logical products are <=2^40. The output port `values` is a Result
  * with schema photospider.tensor, member `samples`, shape [N] or [N,C]
- * (including C=1), selected dtype and empty facets. Batch dimensions are
+ * (including C=1), selected dtype and ordinary data. Batch dimensions are
  * ordinary output axes. Compiler checks actual input edges; helpers own node
  * metadata and may be used concurrently. Nonempty Whole execution requests
  * Data, Validation and Descriptor (role 13) for all three inputs, computes all

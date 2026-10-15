@@ -6,8 +6,8 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
 #include "execution/cpu_range_context.hpp"
+#include "photospider/core/checked_math.hpp"
 
 namespace ps::gpu_internal {
 std::uint64_t allocation_capacity(std::uint64_t bytes) noexcept {

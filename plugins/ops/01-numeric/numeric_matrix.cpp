@@ -13,9 +13,9 @@
 #include "01-numeric/accelerated_matrix.hpp"
 #include "01-numeric/exact_dot.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/core/resource_allocator.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "plugin/port_validation.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -125,7 +125,7 @@ struct MatrixKernel final {
         new (scratch.data()) MatrixWorkspace(profile),
         [](MatrixWorkspace* value) { value->~MatrixWorkspace(); });
     auto& block = workspace->block;
-    input_internal::Float32Environment environment;
+    plugin_internal::FloatingEnvironment environment;
     const bool fast = profile == SequenceProfile::AppleSilicon && width == 4 &&
                       environment.active();
     std::array<bool, 4> finite_matrix{};

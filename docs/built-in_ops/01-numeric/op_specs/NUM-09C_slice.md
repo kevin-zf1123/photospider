@@ -39,8 +39,8 @@ Support UInt8, Int8, UInt16, Int16, Int64, Float32 and Float64, with identical
 output dtype and bit-preserved elements including signaling NaNs. Input/output
 shapes have rank 1..8, positive extents and logical element count <=2^40. The
 output is a `photospider.tensor`/`samples` Result whose full shape is ordinary
-axes; facets and batch-axis metadata are empty. Actual-read typed input
-validation remains required. No implicit cast,
+axes; batch-axis metadata is empty and there is no domain description. Structural
+and explicitly declared port validation remains required. No implicit cast,
 rank squeezing, omitted axes, Python end-index interpretation or empty slice is
 provided. All three CPU profiles preserve identical values.
 

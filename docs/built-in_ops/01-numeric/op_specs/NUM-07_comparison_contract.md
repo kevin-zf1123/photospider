@@ -28,7 +28,7 @@ There is no comparison-mode parameter.
 
 Inputs `a` and `b` must have identical dtype and shape. Support UInt8, Int64,
 Float32 and Float64. Output `values` has the same shape and dtype UInt8,
-representing false by 0 and true by 1. Output facets are empty; comparison
+representing false by 0 and true by 1. Output carries no domain description; comparison
 results do not implicitly acquire image mask, alpha or color semantics.
 Use explicit cast/broadcast for type and shape adaptation.
 

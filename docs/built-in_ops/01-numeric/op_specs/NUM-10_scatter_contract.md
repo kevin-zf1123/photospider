@@ -32,7 +32,7 @@ rank-one tensor `[M]`; `axis` is a required static Int64 parameter in
 and extent `M` on the selected axis. Dtypes are UInt8, Int64, Float32 and
 Float64. The output port `values` is a Result with schema `photospider.tensor`
 and one `samples` member. It contains the full base shape as ordinary axes,
-with facets and batch topology removed. The operation never mutates `base`.
+with batch topology removed. The operation never mutates `base`.
 
 For update position `j`, `indices[j]` selects the base coordinate along `axis`.
 Repeated targets are valid. `scatter_replace` selects the greatest matching

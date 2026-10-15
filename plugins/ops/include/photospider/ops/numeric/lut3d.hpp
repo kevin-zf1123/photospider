@@ -1,3 +1,4 @@
+#include "photospider/ops/numeric/diagnostics.hpp"
 #pragma once
 
 #include <cstdint>
@@ -5,7 +6,7 @@
 #include <string>
 #include <utility>
 
-#include "photospider/data/color_array.hpp"
+#include "photospider/ops/color_array.hpp"
 #include "photospider/ops/numeric/curves.hpp"
 
 namespace ps::numeric {
@@ -87,14 +88,14 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* method,
  * Compiler independently validates actual Result edge metadata.
  * @param input_description Interpretation of lookup coordinates.
  * @param output_description Same supported model; no alpha/CMYK. Table and
- * output use this description, retained on the output ColorArray v1 facet.
+ * output use this explicit description for numerical validation.
  * The descriptions may differ within the same model.
  * @param options Explicit output dtype, Reject/Clamp policy and CPU profile.
  * @return Owned node metadata or InvalidArgument/InvalidDomain/Schema for
  * invalid authoring choices. Allocation may throw bad_alloc.
  * @note Pure/concurrent-safe helper. Output `values` is an immutable packed
  * Result using `photospider.tensor` v1/member `samples`, complete input shape,
- * selected Float32/64 dtype, ColorArray v1 facet and atomic_trailing_axes=1.
+ * selected Float32/64 dtype, atomic_trailing_axes=1.
  * Whole execution requests input/table/axis with Data, Validation and
  * Descriptor (role 13). Callback validates all axes, then original query colors
  * before clamp, then table mathematics. Exact positive-weight full-color
@@ -123,11 +124,11 @@ inline Result<WorkflowNode> apply_lut3d_trilinear_node(
 }
 /** @brief Main-diagonal tetrahedral LUT3D interpolation, at most four vertices.
  * Shares apply_lut3d_trilinear_node's Result inputs, schema, descriptions,
- * output facet, validation order, ownership, errors and resource contract.
- * Exact local coordinates sort descending, with axis 0/1/2 breaking ties; the
- * four vertices are 000, e_a, e_a+e_b and 111. Exact positive weights determine
- * mathematical participation; zero-weight split vertices remain covered by
- * typed/upstream validation. No method parameter/default is implied.
+ * explicit configuration, validation order, ownership, errors and resource
+ * contract. Exact local coordinates sort descending, with axis 0/1/2 breaking
+ * ties; the four vertices are 000, e_a, e_a+e_b and 111. Exact positive weights
+ * determine mathematical participation; zero-weight split vertices remain
+ * covered by typed/upstream validation. No method parameter/default is implied.
  */
 inline Result<WorkflowNode> apply_lut3d_tetrahedral_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput table,

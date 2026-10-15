@@ -45,7 +45,7 @@ provide sample reads, full output allocation and input invalidation apply, and
 numeric failures retain Run scope. Mathematical column independence remains;
 invalid undelivered queries or columns can fail the run. Empty reads no payload.
 Positions output independently forwards requested new_positions as a mapped
-Result view, preserving dtype, descriptor, facets, owner and raw special bits.
+Result view, preserving dtype, descriptor, owner and raw special bits.
 It does not allocate a copied payload, invoke the interpolator or read old
 positions/values. Normal typed/upstream validation still applies to the requested
 query region. Joint requests cannot broaden semantic dependencies.

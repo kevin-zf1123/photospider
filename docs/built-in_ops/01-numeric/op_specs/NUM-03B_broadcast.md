@@ -71,13 +71,11 @@ Unmapped output axes replicate the same source. Static validation checks every
 No multiplication/expansion arithmetic is applied to the stored values. Generic
 NaN payloads, infinities, signed zeros and integer extrema are preserved exactly.
 
-The output has empty facets. Input metadata and actually read typed fragments
-retain the existing recognized semantic validators; copying cannot strip an
-invalid input's semantic obligations to make it valid. For example, image-v2
-source reads require the relevant complete-pixel channel validation support.
-Any additional required validation region must be declared and retained in the
-witness. Opaque facets are not interpreted as a new image/array type and are
-not copied onto the reshaped generic output.
+The output has no attached domain description. Input structure and authorized
+coverage remain checked. Tuple closure is expressed by atomic_trailing_axes;
+a shape or channel count does not trigger an image/color domain validator.
+Any required operation validation support must be explicitly declared and
+retained in the dependency witness.
 
 ## Whole demand, dirty mapping and representation
 
@@ -98,8 +96,7 @@ Domain/Run scope before the callback. It does not synthesize a multi-owner outpu
 
 Dense may collect multiple input owners, then packs all target elements in
 row-major order. Partial consumers still retain full output capacity. Neither
-mode changes raw bits, dtype or generic output identity. Outputs have empty
-facets; retained upstream/resource owners remain accounted. Published owners
+mode changes raw bits, dtype or generic output identity. Outputs have no attached domain description; retained upstream/resource owners remain accounted. Published owners
 survive context destruction, and failure/cancellation releases unpublished work.
 
 ## Work, resources and numerical profiles

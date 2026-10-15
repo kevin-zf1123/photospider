@@ -15,9 +15,10 @@
 #include "01-numeric/expression_evaluator.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/sequence_profiles.hpp"
-#include "photospider/core/resource_allocator.hpp"
-#include "photospider/ops/numeric/expression.hpp"
 #include "common/registry.hpp"
+#include "photospider/core/resource_allocator.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
+#include "photospider/ops/numeric/expression.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 namespace {
@@ -240,7 +241,7 @@ struct ExpressionKernel final {
     auto status = phase.consume_work(1);
     if (!status.ok())
       return status;
-    input_internal::Float32Environment environment;
+    plugin_internal::FloatingEnvironment environment;
     if (!environment.active())
       return {ErrorCode::BackendUnavailable, "numeric environment unavailable"};
     auto allocated = phase.allocator.allocate(sizeof(SampleState<Values>));

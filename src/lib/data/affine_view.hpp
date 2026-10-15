@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/data/value_fragments.hpp"
 
 namespace ps::input_internal {
@@ -13,10 +13,10 @@ namespace ps::input_internal {
 // pieces do not prescribe a stride; neighboring logical samples infer it.
 // Caller admits rank-bounded standard-container scratch before entry.
 template <class Parts>
-Result<std::optional<Value>> join_affine_view(
-    const ValueDescriptor& descriptor, const Region& domain, const Parts& parts,
-    const FootprintLimits& limits, const std::vector<ValueFacet>& facets = {},
-    const ResourceBindings& resources = {}) {
+Result<std::optional<Value>> join_affine_view(const ValueDescriptor& descriptor,
+                                              const Region& domain,
+                                              const Parts& parts,
+                                              const FootprintLimits& limits) {
   using Answer = Result<std::optional<Value>>;
   if (parts.empty())
     return Answer(std::optional<Value>{});
@@ -103,9 +103,8 @@ Result<std::optional<Value>> join_affine_view(
     if (expected != actual.value())
       return Answer(std::optional<Value>{});
   }
-  auto joined = Value::from_storage(descriptor, domain,
-                                    {base.value(), std::move(strides), origin},
-                                    owner, facets, resources);
+  auto joined = Value::from_storage(
+      descriptor, domain, {base.value(), std::move(strides), origin}, owner);
   return joined.ok() ? Answer(std::optional<Value>{joined.take_value()})
                      : Answer(joined.status());
 }

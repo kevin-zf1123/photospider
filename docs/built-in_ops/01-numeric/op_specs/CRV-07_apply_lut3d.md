@@ -32,7 +32,7 @@ registration status, CPU target identity, floating environment, diagnostic prove
 host observation isolation, resource accounting and public/performance acceptance.
 In particular, rounding is nearest/ties-to-even with gradual underflow and the
 caller floating environment is preserved. This is limited inheritance: the ports,
-output kinds/facets, observation units, mathematical rounding boundaries and
+output structures, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
 turn a composite template or structured Result into a generic NUM Value primitive.
 
@@ -79,8 +79,8 @@ uses authorized Root windows rather than requiring a dense table copy.
 ## Confirmed color spaces
 
 Declare static input and output color descriptions, with identical model identity.
-Input metadata matches the input description; table component values match the
-output description, and the result carries it. Descriptions may differ within
+Input coordinates are interpreted using the input description; table and output
+coordinates use the output description. Results carry no description. Descriptions may differ within
 the same model: e.g. RGB primaries/transfer, CIELAB white, or polar hue unit.
 The LUT values express that transformation; OKLab/OKLCh still require fixed D65.
 Lookup uses the actual input component values directly. No implicit decoding,
@@ -116,6 +116,11 @@ the reference mathematical function.
 
 ## Confirmed table demand
 
+Required static `input_color_description` and `output_color_description` Strings
+use the SDK ColorArray parameter codec. They define the same-model input and
+table/output interpretation explicitly; no description is read from or attached
+to a Result. `dtype` and `out_of_domain` remain explicit parameters.
+
 Each input is a Result containing one tensor member under any schema id/version
 and member key. Use its complete `sample_shape()`: input [...,3] rank 2..8,
 table [N0,N1,N2,3], and axis [3,3]. The Whole Result program requests all three
@@ -130,8 +135,7 @@ upstream failure there still fails the run. Each contributing vertex is a
 complete three-component color.
 
 The output port `values` is a Result using `photospider.tensor` v1/member
-`samples`, with the complete input shape, selected Float32/Float64 dtype, the
-ColorArray v1 facet and `atomic_trailing_axes=1`. It publishes a packed immutable
+`samples`, with the complete input shape, selected Float32/Float64 dtype, `atomic_trailing_axes=1`. It publishes a packed immutable
 output with full certified coverage and global sample coordinates. The output
 association records actual source ObjectIds. Any input edit invalidates the
 recorded output demand; dirty support follows that demand. Empty reads no payload.
@@ -172,8 +176,7 @@ String parameters are input_color_description, output_color_description, dtype,
 out_of_domain. Constructors provide the documented dtype/policy defaults;
 descriptions explicitly identify the same supported model, no alpha, applicable
 white/primaries/transfer and hue/coordinate units. Generic arrays may be interpreted
-by these declarations; existing typed color descriptions must match rather than
-be silently replaced. Table has the output description. No extra interpolation
+by these declarations; table values use the output description. No extra interpolation
 mode is accepted because the methods are independent operations.
 
 Empty Q has no payload reads; static Result schemas and descriptions are still
@@ -185,8 +188,7 @@ checks precede table arithmetic. No per-output dependency or point arrays remain
 
 Any input edit invalidates the complete recorded output demand; dirty support
 follows that demand. Cache identity retains method, descriptions, grid, dtype,
-policy and complete typed/upstream support. The immutable packed Result carries
-ColorArray v1 metadata and marks the trailing extent-3 component axis atomic with
+policy and complete typed/upstream support. The immutable packed Result contains no attached domain description and marks the trailing extent-3 component axis atomic with
 `atomic_trailing_axes=1`.
 Local requests still return full certified coverage in global sample coordinates.
 Legal unaligned, offset, negative/zero-stride input/table layouts remain accepted,
@@ -271,7 +273,7 @@ The six operation keys are registered in
 [`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp),
 and [`lut3d.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/lut3d.hpp) provides the
 public trilinear and tetrahedral constructors. Both are Whole Result operations.
-Static preparation validates Result tensor schemas and ColorArray facets, then
+Static preparation validates Result tensor schemas and explicit color parameters, then
 stores reusable immutable program state. Each continuation records current
 source ObjectIds and uses authorized Root read windows for input/table samples.
 It publishes complete global-coordinate coverage atomically; escaped Results

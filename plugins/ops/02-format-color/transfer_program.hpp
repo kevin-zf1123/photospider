@@ -9,7 +9,7 @@
 
 #include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/sequence_profiles.hpp"
-#include "data/exact_numeric.hpp"
+#include "common/domain/exact_numeric.hpp"
 #include "photospider/ops/format/transfer.hpp"
 
 namespace ps::plugin_internal::transfer_ops {

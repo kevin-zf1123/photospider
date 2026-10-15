@@ -1,3 +1,4 @@
+#include "photospider/ops/contracts.hpp"
 #pragma once
 
 #include <algorithm>
@@ -683,7 +684,7 @@ struct Program final {
               ? std::vector<std::uint64_t>(phase.association->begin(),
                                            phase.association->end())
               : std::vector<std::uint64_t>{},
-          phase.query.tile_extent, phase.query.resources)));
+          phase.query.tile_extent)));
       ResultProgramNeed need;
       need.tiles.push_back(prepare_source(phase));
       stage = 2;
@@ -717,6 +718,8 @@ inline OperationDefinition operation() {
   traits.outputs[0].output_schema.result_schema_id = "photospider.image";
   traits.outputs[0].output_schema.tensor_key = "pixels";
   traits.outputs[0].result_schema = image_ops::image_schema();
+  traits.input_schema[0].validators = {rgba_contract()};
+  traits.outputs[0].output_schema.validators = {rgba_contract()};
   traits.requires_metadata_specialization = true;
   traits.cpu_staged_tiles = true;
   traits.parameter_schema = {
@@ -734,7 +737,6 @@ inline OperationDefinition operation() {
       const auto& source = inputs[0].result_schema->tensors[0];
       const auto& map = inputs[1].result_schema->tensors[0];
       if (map.descriptor.shape.size() != 3 || map.descriptor.shape[2] != 2 ||
-          !map.facets.empty() ||
           (!map.batch_axes.empty() && map.batch_axes != source.batch_axes) ||
           source.descriptor.shape[0] > coordinate_limit ||
           source.descriptor.shape[1] > coordinate_limit)

@@ -17,16 +17,14 @@
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
 std::uint64_t native_capacity = 0;
-SchemaTemplate schema(const ValueDescriptor& descriptor,
-                      std::vector<ValueFacet> facets = {}) {
+SchemaTemplate schema(const ValueDescriptor& descriptor) {
   auto result = multi_result::schema(descriptor.element_type, descriptor.shape);
   result.id = "test.native.tensor";
-  result.tensors[0].facets = std::move(facets);
   return result;
 }
 ResultRef source(const ResourceBudget& root, const Value& backing) {
   auto builder = multi_result::take(ResultBuilder::start(
-      root, schema(backing.descriptor(), backing.facets()), "native.source"));
+      root, schema(backing.descriptor()), "native.source"));
 
   multi_result::check(builder.publish_tensor(
       0, backing.region(), backing.layout(), backing.storage()));
@@ -446,12 +444,12 @@ int main() try {
                limit);
     }
   }
-  auto first_backing = multi_result::take(Value::from_storage(
-      backing.descriptor(), backing.region(), backing.layout(),
-      backing.storage(), {{"variant", 1, {1}}}));
-  auto second_backing = multi_result::take(Value::from_storage(
-      backing.descriptor(), backing.region(), backing.layout(),
-      backing.storage(), {{"variant", 1, {2}}}));
+  auto first_backing = multi_result::take(
+      Value::from_storage(backing.descriptor(), backing.region(),
+                          backing.layout(), backing.storage()));
+  auto second_backing = multi_result::take(
+      Value::from_storage(backing.descriptor(), backing.region(),
+                          backing.layout(), backing.storage()));
   auto first = source(root, first_backing),
        second = source(root, second_backing);
   doc.inputs = {multi_result::declaration(1, "first", first.schema()),
@@ -459,27 +457,19 @@ int main() try {
   doc.nodes = {{1, "native.scale", {WorkflowInputReference{1}}, {}},
                {2, "native.scale", {WorkflowInputReference{2}}, {}}};
   doc.outputs = {{"first", 1, "value"}, {"second", 2, "value"}};
-  GraphContext facets_graph(doc);
-  auto facets_plan =
-      multi_result::take(Compiler(registry).compile(facets_graph, planning));
+  GraphContext shared_graph(doc);
+  auto shared_plan =
+      multi_result::take(Compiler(registry).compile(shared_graph, planning));
   config.maximum_live_bytes = 4096;
   config.result_cache_bytes = 0;
-  ExecutionContext facets_context(registry, config);
-  first = source(facets_context.resource_budget().take_value(), first_backing);
+  ExecutionContext shared_context(registry, config);
+  first = source(shared_context.resource_budget().take_value(), first_backing);
   second =
-      source(facets_context.resource_budget().take_value(), second_backing);
-  auto facets_result = multi_result::take(facets_context.execute(
-      facets_plan.plan, {{{"first", first}, {"second", second}}}));
-  PS_CHECK(facets_result.results.at("first")
-               .schema()
-               .tensors[0]
-               .facets[0]
-               .payload[0] == 1);
-  PS_CHECK(facets_result.results.at("second")
-               .schema()
-               .tensors[0]
-               .facets[0]
-               .payload[0] == 2);
+      source(shared_context.resource_budget().take_value(), second_backing);
+  auto shared_result = multi_result::take(shared_context.execute(
+      shared_plan.plan, {{{"first", first}, {"second", second}}}));
+  PS_CHECK(numbers(shared_result.results.at("first")) ==
+           numbers(shared_result.results.at("second")));
   // Distinct rank/origin/stride layouts sharing backing must not collide.
   auto rank_five = multi_result::take(Value::from_storage(
       {ElementType::Float32, {1, 1, 1, 1, 1}}, Region::whole({1, 1, 1, 1, 1}),
@@ -487,14 +477,14 @@ int main() try {
   auto rank_four = multi_result::take(Value::from_storage(
       {ElementType::Float32, {1, 1, 1, 1}}, Region::whole({1, 1, 1, 1}),
       {0, {0, 0, 0, 1}, {1, 0, 0, 0}}, backing.storage()));
-  first = source(facets_context.resource_budget().take_value(), rank_five);
-  second = source(facets_context.resource_budget().take_value(), rank_four);
+  first = source(shared_context.resource_budget().take_value(), rank_five);
+  second = source(shared_context.resource_budget().take_value(), rank_four);
   doc.inputs = {multi_result::declaration(1, "first", first.schema()),
                 multi_result::declaration(2, "second", second.schema())};
   GraphContext ranks_graph(doc);
   auto ranks_plan =
       multi_result::take(Compiler(registry).compile(ranks_graph, planning));
-  auto ranks = multi_result::take(facets_context.execute(
+  auto ranks = multi_result::take(shared_context.execute(
       ranks_plan.plan, {{{"first", first}, {"second", second}}}));
   PS_CHECK(
       ranks.results.at("first").schema().tensors[0].descriptor.shape.size() ==
@@ -504,7 +494,7 @@ int main() try {
       4);
   PS_CHECK(ranks.diagnostics.native_dispatch_count == 2 &&
            ranks.diagnostics.fallback_reasons.empty());
-  PS_CHECK(facets_result.diagnostics.transfer_count == 1);
+  PS_CHECK(shared_result.diagnostics.transfer_count == 1);
   std::cout
       << "native Result chain: dispatches=2 uploads=1 bytes=16 oracle=passed\n";
   return 0;

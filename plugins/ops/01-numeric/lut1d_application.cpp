@@ -16,9 +16,9 @@
 #include "01-numeric/exact_sampling.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/uniform_axis.hpp"
-#include "photospider/core/resource_allocator.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "plugin/port_validation.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -145,7 +145,7 @@ struct LutState final {
         return value.status();
       axis_values[j] = value.value();
     }
-    input_internal::Float32Environment environment;
+    plugin_internal::FloatingEnvironment environment;
     axis.sampling.environment_established = environment.active();
     auto status = axis.validate(
         axis_values,

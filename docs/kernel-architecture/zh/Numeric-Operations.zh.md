@@ -1,6 +1,6 @@
 # 数值算子
 
-默认 registry 提供未带后缀的有限域算术与 clamp、分阶段标量归约、有序扫描，以及带 profile 的数值算子族。各 key 的参数、执行和输出契约不同，调用方应按完整 key 选择。Operation plugin 使用 Result operation C ABI 3。
+默认 registry 提供未带后缀的有限域算术与 clamp、分阶段标量归约、有序扫描，以及带 profile 的数值算子族。各 key 的参数、执行和输出契约不同，调用方应按完整 key 选择。这些是 `plugins/ops/01-numeric/` 中的 bundled operations，不是内核代码；内核只提供它们所用的通用 Result 执行、资源、取消和失败契约。Operation plugin 使用 Result operation C ABI 4。数值工作报告、LUT bake 报告和质量报告是算子 SDK 类型（`photospider/ops/numeric/`）；见 [Atom 错误与质量](Atom-Errors-and-Quality.zh.md)。
 
 ## 未带后缀的 Result 数值算子
 
@@ -12,7 +12,7 @@
 | `numeric.abs` | 一个 Float32/Float64 tensor Result；输出 port `value` 为 `photospider.tensor` v1/member `samples`，sample shape 与 dtype 相同 | 无参数；分阶段 Dependency |
 | `numeric.minimum`、`numeric.maximum` | 两个完整 sample shape、dtype 相同的 Float32/Float64 tensor Results；输出 port `value` 为 `photospider.tensor` v1/member `samples` | 无参数；分阶段 Dependency |
 
-每个输入 Result 恰含一个 tensor 且无 fields；接受结构有效的任意 schema id/version 与 tensor member key。rank 为 1..8，`sample_shape()` 包含 batch axes。输出将完整 shape 作为普通 tensor axes，不复制 source facets；输出 schema 自行选择 resources。各 program 从授权窗口读取输入，并按各自 region rule 通过 Result transaction 发布输出。
+每个输入 Result 恰含一个 tensor 且无 fields；接受结构有效的任意 schema id/version 与 tensor member key。rank 为 1..8，`sample_shape()` 包含 batch axes。输出将完整 shape 作为普通 tensor axes；输入的描述或解释不会带到输出。各 program 从授权窗口读取输入，并按各自 region rule 通过 Result transaction 发布输出。
 
 `numeric.add`、`numeric.subtract`、`numeric.multiply`、`numeric.divide` 和 `numeric.clamp` 在输入 dtype 中计算，并拒绝非有限输入或结果。除法拒绝正负零。Clamp 要求静态边界有限，且在不可变 preparation 中检查 `min <= max`。Clamp 在 Float32 收窄前检查所选结果；未选端点可以超出 Float32 范围。算子不广播或转换 dtype。不可变 preparation 还会检查 dense output 字节数；若 64 位计数无法表示，则在 execution 前以 `ResourceExhausted` 失败。
 
@@ -20,11 +20,11 @@
 
 `numeric.add`、`numeric.subtract`、`numeric.multiply`、`numeric.divide` 和 `numeric.clamp` 的非空 Whole 请求对每个完整输入 tensor 声明 Data、Validation 和 Descriptor needs（role 13）。程序从授权 Result 窗口读取，不收集输入 tensor，也不发布部分结果。Empty 请求只执行静态 preflight，不读取样本 payload。没有额外的 2^40 逻辑元素上限，因此只要 dense output 可表示，大型合法零步长 source 仍可使用。算术 callback 会恢复调用方的浮点环境。
 
-未带后缀的有限 `abs`、`minimum` 和 `maximum` 接受恰含一个 tensor、没有 fields 的输入 Result，schema id、version 和 member key 可以任意但必须结构有效；各端口必须具有相同 Float32/Float64 dtype 和完整 `sample_shape()`（rank 1..8，含 batch axes）。输出为通用 `photospider.tensor` v1 Result/member `samples`，保留完整 shape 并将其作为普通 axes，facets 为空。它们使用 CPU staged Dependency Needs，不采用同名 suffixed profile 的 Whole 契约。
+未带后缀的有限 `abs`、`minimum` 和 `maximum` 接受恰含一个 tensor、没有 fields 的输入 Result，schema id、version 和 member key 可以任意但必须结构有效；各端口必须具有相同 Float32/Float64 dtype 和完整 `sample_shape()`（rank 1..8，含 batch axes）。输出为通用 `photospider.tensor` v1 Result/member `samples`，保留完整 shape 并将其作为普通 axes。它们使用 CPU staged Dependency Needs，不采用同名 suffixed profile 的 Whole 契约。
 
-对非空输出 Footprint Q，算子先按 `close_samples(Q)` 对每个输入执行 validation；该范围会闭合 typed tuple 和 atomic sample group，再请求 Q 上的 Data。若 `close_samples(Q)` 等于 Q，算子将 Data/Validation roles（1 和 4）合并到一个 Need；若闭合扩大 validation，则先发 role-4 Validation Need，再发 role-1 Data Need。算术 Data 读取仅限 Q；Validation 会读取并检查 `close_samples(Q)`，其中可能包含 Q 外的 typed tuple 或 atomic-group 成员。Need 不会扩展到 `close_samples(Q)` 之外。其 relation 分别记录 Data、Validation mapping 和 input descriptor basis。Empty 请求执行静态 preflight，返回没有 tensor coverage 的 sealed Result，不发 input Needs。
+对非空输出 Footprint Q，算子先按 `close_samples(Q)` 对每个输入执行 validation；该范围会闭合输入的 atomic trailing axes，再请求 Q 上的 Data。若 `close_samples(Q)` 等于 Q，算子将 Data/Validation roles（1 和 4）合并到一个 Need；若闭合扩大 validation，则先发 role-4 Validation Need，再发 role-1 Data Need。算术 Data 读取仅限 Q；Validation 会读取并检查 `close_samples(Q)`，其中可能包含 Q 外的 atomic-group 成员。Need 不会扩展到 `close_samples(Q)` 之外。其 relation 分别记录 Data、Validation mapping 和 input descriptor basis。Empty 请求执行静态 preflight，返回没有 tensor coverage 的 sealed Result，不发 input Needs。
 
-这些有限 kernel 在算术遇到非有限输入或中间值时返回 `OperationFailed`。Typed Result source validation 可在算术前以 `ErrorCode::InvalidArgument` 和 `FailureReason::InvalidDomain` 失败，并保留来源 `input_id`。`abs(-0)` 返回 `+0`；`minimum(-0,+0)` 返回 `-0`，`maximum(-0,+0)` 返回 `+0`。Callback 会恢复调用方浮点环境。其 finite-only 错误和稀疏 Dependency 契约不同于独立注册的 suffixed Whole profile keys；suffix key 各自遵循 IEEE 规则，包括每个操作各自的 signed-zero 行为。
+这些有限 kernel 在算术遇到非有限输入或中间值时返回 `OperationFailed`。`abs(-0)` 返回 `+0`；`minimum(-0,+0)` 返回 `-0`，`maximum(-0,+0)` 返回 `+0`。Callback 会恢复调用方浮点环境。其 finite-only 错误和稀疏 Dependency 契约不同于独立注册的 suffixed Whole profile keys；suffix key 各自遵循 IEEE 规则，包括每个操作各自的 signed-zero 行为。
 
 ## 分阶段 Result 归约与有序 scan
 

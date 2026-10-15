@@ -123,7 +123,7 @@ is Float32 or Float64. Ports may use different floating dtypes.
 Float32 values widen exactly to Float64 before arithmetic. Integer inputs
 require an explicit upstream cast; there is no implicit integer conversion.
 Whole input preparation requests Data, Validation and Descriptor (role 13) for
-each active input. Facets do not participate in unit inference and are not
+each active input. Domain units are explicit configuration and no domain description is
 propagated to outputs.
 Valid immutable signed-stride, offset and unaligned `[1]` views are supported.
 
@@ -229,7 +229,7 @@ connect only `values`; sampling-aware consumers connect both outputs.
 The axis dtype is always Float64. The zero singleton step describes the lack of
 a sample interval; consumers use `count` when interpreting that tuple.
 
-Both outputs are generic numeric arrays with empty facets. The generator does
+Both outputs are generic numeric arrays with no attached domain description. The generator does
 not infer or propagate pixel, time, arc-length, color, width or other physical
 units. Interpretation belongs to the workflow author and consuming operation.
 Trigonometric function arguments are interpreted as radians. No unit labels or
@@ -354,7 +354,7 @@ to the ObjectIds of its actual active inputs. Values associates its active
 endpoint and coefficient inputs; axis associates only active endpoints. The two
 outputs have no additional identity that pairs them; workflows connect the
 intended named outputs explicitly. Consumers receive requested global Regions
-without rebasing coordinates. Both outputs have empty facets. Partial requests
+without rebasing coordinates. Both outputs have no attached domain description. Partial requests
 own count*4/8 bytes for values or 24 bytes for axis, plus fixed arithmetic
 workspace. Published storage survives invocation/context lifetime; unpublished
 output and scratch release on failure/cancellation.
@@ -424,7 +424,7 @@ failures are sticky and are never converted into an accelerated fallback success
 | Trigger | Phase and Status |
 | --- | --- |
 | Bad/missing static parameters, grammar, binding names or declared complexity limits | Compile/direct preflight; `InvalidArgument`, schema origin |
-| Unsupported numeric input dtype/shape or invalid output inference | Compile/direct preflight; `TypeMismatch`; malformed recognized facets retain their existing validation status |
+| Unsupported numeric input dtype/shape or invalid output inference | Compile/direct preflight; `TypeMismatch`; malformed structural schemas retain their validation status |
 | Nonfinite demanded input, equal N>=2 endpoints, zero/unrepresentable step or duplicate adjacent coordinate | Request; `OperationFailed`, `InvalidDomain` or `ArithmeticOverflow` as applicable |
 | Divide by ±0 or zero to a negative power | Requested AST evaluation; `OperationFailed` / `DivideByZero` |
 | sqrt negative, ln nonpositive, negative-base noninteger power | Requested AST evaluation; `OperationFailed` / `InvalidDomain` |

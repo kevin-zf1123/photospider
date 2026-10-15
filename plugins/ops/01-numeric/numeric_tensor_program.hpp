@@ -12,7 +12,6 @@
 #include <vector>
 
 #include "common/result_support.hpp"
-#include "common/typed_need_validation.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "photospider/plugin/result_program.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
@@ -140,9 +139,6 @@ struct WholeTensorProgram final {
   explicit WholeTensorProgram(Args&&... args)
       : kernel(std::forward<Args>(args)...) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     // Region/coordinate and small callback argument vectors are ordinary C++
     // scratch; admit their bounded capacity before either stage allocates.
     auto scratch =
@@ -188,7 +184,7 @@ struct WholeTensorProgram final {
         phase.association ? std::vector<uint64_t>(phase.association->begin(),
                                                   phase.association->end())
                           : std::vector<uint64_t>{},
-        phase.query.tile_extent, phase.query.resources));
+        phase.query.tile_extent));
     if (!output.empty()) {
       // The phase container expires after each poll. These owning capabilities
       // retain only captured input facts and an owning failure latch, so a

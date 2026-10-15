@@ -1,6 +1,6 @@
 # 混合模式与图层合成
 
-`LayerPixel`、`LayerResponsePixel`、`RawRgbaSumPixel`、contribution 和 weighted-sum 值类型及其纯计算 helper 保留在 C++ 数据 API，详见[Layer runtime](../../kernel-architecture/Layer-Runtime.md)。当前没有 Layer operation factory、Result 图像路径或可运行示例。`layer_schema` 可构造描述，但 `SchemaTemplate::validate` 拒绝六种 Layer Result schema ID 和 `photospider.layer` facet。本文 blend 与 group 语义保持 Proposed；不代表注册或发布能力。raw mass、coverage alpha 和 averaging weight 仍是不同的值语义，W=0 表示 OptionalLayer 无有效样本，关联下溢明确失败。
+`LayerPixel`、`LayerResponsePixel`、`RawRgbaSumPixel`、contribution 和 weighted-sum 值类型及纯计算 helper 属于 `Photospider::ops_sdk`，公共头为 `photospider/ops/composite/layer.hpp`，实现位于 `plugins/ops/09-composite/layer.cpp`，详见[Layer runtime](../../kernel-architecture/Layer-Runtime.md)。当前没有 Layer operation factory 或 Layer Result schema helper；内核不识别或拒绝 Layer 专用 schema ID。工作空间与颜色解释由使用这些值的算子显式配置，不附着到 Result。本文 blend/group 设计保持 Proposed，不代表已注册。Raw mass、coverage alpha 与 averaging weight 含义不同，W=0 表示 OptionalLayer 无有效样本，关联下溢明确失败。
 
 已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
 
@@ -54,7 +54,7 @@
 
 BLN-03..10、15的有界公式可对照W3C；扩展模式11..19为本规格明确选择的数学版本，未宣称Photoshop bit identity。Adobe官方模式说明用于功能名覆盖，不作为未公开数值算法证明。[^w3c][^adobe]
 
-soft-light定义：当S≤.5时 `B-(1-2S)B(1-B)`；否则 `B+(2S-1)(D(B)-B)`。当B≤.25时 `D(B)=((16B-12)B+4)B`，否则 `sqrt(B)`。kernel使用Scalar Float64 oracle，GPU FP32按容差比对。
+soft-light定义：当S≤.5时 `B-(1-2S)B(1-B)`；否则 `B+(2S-1)(D(B)-B)`。当B≤.25时 `D(B)=((16B-12)B+4)B`，否则 `sqrt(B)`。拟议算子应以独立 Scalar Float64 oracle 验证；GPU FP32 若实现则按明确容差比对。
 
 ## 非可分离颜色模式
 

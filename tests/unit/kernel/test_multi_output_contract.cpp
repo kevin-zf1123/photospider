@@ -94,16 +94,11 @@ int registration_and_invocation() {
   auto mixed = definition();
   mixed.key = "test.mixed";
   auto& first = mixed.traits.outputs[0];
-  first.output_schema.semantic_kind =
-      static_cast<std::uint32_t>(SemanticKind::Scalar);
-  SemanticDescriptor scalar;
-  scalar.channels = {{"value", "value", "dimensionless"}};
-  first.result_schema->tensors[0].facets = {
-      encode_semantic(scalar).take_value()};
+  first.result_schema->tensors[0].atomic_trailing_axes = 1;
   PS_CHECK(registry.register_operation(mixed).ok());
   auto generic = invoke_constant(registry, mixed.key, 1);
   PS_CHECK(generic.ok());
-  PS_CHECK(generic.value().schema().tensors[0].facets.empty());
+  PS_CHECK(generic.value().schema().tensors[0].atomic_trailing_axes == 0);
   PS_CHECK(multi_result::number(generic.value()) == 11);
   auto c_registry = std::make_shared<OperationRegistry>();
   PS_CHECK(c_registry->load_plugin(PS_MULTI_OUTPUT_FIXTURE).ok());

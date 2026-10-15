@@ -17,7 +17,7 @@ implemented_operation_keys:
 
 # FMT-02A: assemble single components along a new channel axis
 
-Runtime contract: A/B/C are registered as twelve Result operation ABI 3 CPU
+Runtime contract: A/B/C are registered as twelve Result operation ABI 4 CPU
 keys: `assemble`, `concatenate`, `assemble_mapped`, and `scalar_literal`, each
 with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
 The public authoring helpers are installed in
@@ -28,13 +28,11 @@ separately.
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md).
 The implemented keys are separate default-registry primitives.
 This member assembles ordered equal-shape, same-dtype single-component inputs.
-Inputs have no effective existing channel axis. Required static `axis` inserts
-the output channel dimension without squeezing any input dimension. Complete
-output groups are explicit; component descriptions are remapped under the
-family's metadata rules. Explicit target per-channel/group semantics authorize
-reinterpretation as a standard A capability; Gray/Black-White components do not
-require an additional source override/raw merely to serve as RGB or alpha.
-This Proposed member is not the legacy `channel.merge`.
+An input whose `input_descriptions` entry declares a channel axis is rejected.
+Required static `axis` inserts the output channel dimension without squeezing
+any input dimension. The output carries no description; Gray/Black-White
+components serve as RGB or alpha for a later consumer whose own description says
+so. This Proposed member is not the legacy `channel.merge`.
 
 For n input tensors Xi of shape S and rank r, output Y has shape insert(S,a,n)
 and rank r+1. Its coordinate-copy rule is:
@@ -53,13 +51,13 @@ not automatically form a legal zero-copy output image.
 Ordered inputs `inputs[0..n)` are single-tensor Results and produce one
 `values` tensor. The family allows 1..1024 inputs. Input cell rank is 1..7 and output cell rank is 2..8; batch plus cell rank is at most 8. The family supplies target dtypes,
 checked extent/count limits, host arity admission and the complete support matrix.
-Parameters are static `metadata_mode`, conditional `input_overrides`, optional
-`output_description`, `layout` and required cell-axis Int64 `axis` in [0,r].
+Parameters are static optional `input_descriptions`, `layout` and required
+cell-axis Int64 `axis` in [0,r].
 The axis excludes the Result batch prefix; batch plus cell rank must be at most 8. There is no
 keepdims or implicit squeeze. Same dtype and exact nonchannel sizes are required.
 
 For requested Q, input i Data is exactly erase(Q intersect channel i, a).
-Its metadata contributes to Descriptor support; there is no Control or sample
+Its descriptor contributes to Descriptor support; there is no Control or sample
 Validation payload. Dirty input coordinates insert i at axis a, intersected with
 observed output. Unrequested planes are not read or given pixel-domain validation.
 Use the family's reference algorithm, resource accounting, errors and performance
@@ -90,16 +88,17 @@ j[a], removes that axis and compares element bytes using a separate source
 address evaluator. It must not call the production assembly mapper.
 
 The conceptual workflow is `FMT-01 split -> independent component processing ->
-FMT-02A -> named tensor`. Executable commands and independently checked runtime fixtures are linked above.
+FMT-02A -> named tensor`.
 For n=1 and X0=[7,9], axis=1 yields shape [2,1] with samples [[7],[9]].
 Extracting that singleton channel with keepdims=false recovers [7,9] exactly.
-Full split/reassemble identity also requires original ordering and explicit
-original grouping. Byte identity does not guarantee view representability for
+Full split/reassemble identity also requires original ordering; any grouping is
+restated by the next consumer's description. Byte identity does not guarantee view representability for
 independently processed or copied inputs. Arbitrary source/destination mapping
 belongs to FMT-02C; A retains its ordered assembly behavior.
 
-For a semantic-assignment fixture, describe R/G/B above as three independent
-Gray planes, explicitly declare the target RGB group, and require the same
-output bytes. A Float32 Black/White plane [0,1] explicitly assigned to an alpha
-output remains [0,1]. Output semantics do not perform range conversion. Verify
-source descriptions remain unchanged and no old sample-validity proof is reused.
+For an interpretation fixture, assemble R/G/B above (which the caller regards
+as three independent Gray planes) and pass the result to a consumer whose
+`input_description` declares an RGB group on indices 0..2; require the same
+bytes as the plain assembly. A Float32 Black/White plane [0,1] assembled into a
+slot that a later consumer describes as alpha remains [0,1]; no range conversion
+occurs.

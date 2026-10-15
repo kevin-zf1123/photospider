@@ -69,7 +69,7 @@ Output values selects Float32 or Float64 through a static dtype parameter,
 defaulting to Float64. Conversion/rounding boundaries and special-value handling
 are specified separately rather than inferred from native mixed-type arithmetic.
 
-Each input Result contains one tensor member under any schema id and member key; its `sample_shape()` supplies x[K], y[K] and query[N]. Accept legal immutable zero/negative strides, nonzero offsets and unaligned storage. Output port `values` is a Result using schema `photospider.tensor`, member `samples`, shape [N] (or [N,C] for the multi-function forms), and empty facets. Batch dimensions are ordinary sample axes; no axis output or implicit physical/color units are created.
+Each input Result contains one tensor member under any schema id and member key; its `sample_shape()` supplies x[K], y[K] and query[N]. Accept legal immutable zero/negative strides, nonzero offsets and unaligned storage. Output port `values` is a Result using schema `photospider.tensor`, member `samples`, shape [N] (or [N,C] for the multi-function forms), and no attached domain description. Batch dimensions are ordinary sample axes; no axis output or implicit physical/color units are created.
 
 | Static parameter | Type and domain | Constructor default |
 | --- | --- | --- |

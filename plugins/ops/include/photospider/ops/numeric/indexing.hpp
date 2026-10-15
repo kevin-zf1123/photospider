@@ -1,3 +1,4 @@
+#include "photospider/ops/numeric/diagnostics.hpp"
 #pragma once
 
 #include <cstdint>
@@ -38,7 +39,7 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
  * Float32 or Float64 and share dtype, rank and all non-concatenated extents;
  * each has rank 1..8 and at most 2^40 elements.
  * The result is a photospider.tensor/samples Result with the full concatenated
- * shape as ordinary axes and no facets or batch metadata.
+ * shape as ordinary axes and no batch topology.
  *
  * The helper only authors node metadata. The CPU Whole program statically
  * validates shape and parameters, then requests active input tensors with
@@ -83,15 +84,15 @@ inline Result<WorkflowNode> concatenate_node(
  * [M]. Their complete sample shapes include batch axes, have rank 1..8 and at
  * most 2^40 elements. UInt8, Int64, Float32 and Float64 are supported. The
  * output `values` is a packed photospider.tensor/samples Result with the
- * selected source extent replaced by M and facets/batch metadata dropped; its
- * N*element_size bytes remain owned after context retirement. A nonempty CPU
- * Whole request uses role 13 for source and indices, validates every index and
- * computes the complete output before projection. Repeated indices retain
- * order, and an out-of-range index reports InvalidArgument/InvalidDomain with
- * diagnostic IndexOutOfBounds. Active input edits invalidate recorded output
- * observations. There is no clipping, cast or implicit broadcast. The pure,
- * concurrent-safe helper reads no payload and authors only node metadata.
- * Invalid authoring id/axis/profile returns
+ * selected source extent replaced by M and batch axes represented as ordinary
+ * axes; its N*element_size bytes remain owned after context retirement. A
+ * nonempty CPU Whole request uses role 13 for source and indices, validates
+ * every index and computes the complete output before projection. Repeated
+ * indices retain order, and an out-of-range index reports
+ * InvalidArgument/InvalidDomain with diagnostic IndexOutOfBounds. Active input
+ * edits invalidate recorded output observations. There is no clipping, cast or
+ * implicit broadcast. The pure, concurrent-safe helper reads no payload and
+ * authors only node metadata. Invalid authoring id/axis/profile returns
  * InvalidArgument/InvalidDomain/Schema; allocation may throw bad_alloc. Source,
  * typed, resource and cancellation failures retain their categories.
  */
@@ -106,7 +107,7 @@ inline Result<WorkflowNode> gather_node(
  * sample_shape() includes batch axes, has rank 1..8 and at most 2^40 elements.
  * UInt8, Int64, Float32 and Float64 are supported. The immutable `values`
  * output retains base shape/dtype as a packed photospider.tensor/samples Result
- * of N*element_size bytes; it has no facets/batch metadata and remains owned
+ * of N*element_size bytes; it has no batch topology and remains owned
  * after context retirement. Nonempty Whole work requests all three inputs with
  * role 13, validates every index and computes the complete output before
  * projection. Any active input or typed-validation failure can fail the Run.

@@ -11,7 +11,7 @@ Empty. For `select`, the condition is UInt8 and the two branches share one
 dtype.
 
 The output is a `photospider.tensor` v1 Result with tensor key `samples`, full
-`sample_shape()` and no input facets or batch-axis metadata. Predicates return
+`sample_shape()` and no input batch-axis metadata. Predicates return
 UInt8 0/1; `select` retains the branch dtype and copies selected bits. The Whole
 program requests every active input with Data, Validation and Descriptor roles
 (13), then reads through authorized Result windows. It does not collect or copy

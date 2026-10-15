@@ -89,15 +89,10 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
         validate_color_array_descriptor(color.value(), tensor.descriptor);
     if (!valid.ok())
       return Answer(valid);
-    auto facet = encode_color_array(color.value());
-    if (!facet.ok())
-      return Answer(facet.status());
-    tensor.facets = {facet.take_value()};
     tuple_axes = 1;
   }
   auto schema = numeric_ops::numeric_tensor_schema(
       tensor.descriptor.element_type, tensor.descriptor.shape);
-  schema.tensors[0].facets = std::move(tensor.facets);
   schema.tensors[0].atomic_trailing_axes = tuple_axes;
   output.metadata.result_schema =
       std::make_shared<const SchemaTemplate>(std::move(schema));

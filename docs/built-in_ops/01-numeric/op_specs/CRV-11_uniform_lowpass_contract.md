@@ -23,7 +23,7 @@ registration status, CPU target identity, floating environment, diagnostic prove
 host observation isolation, resource accounting and public/performance acceptance.
 In particular, rounding is nearest/ties-to-even with gradual underflow and the
 caller floating environment is preserved. This is limited inheritance: the ports,
-output kinds/facets, observation units, mathematical rounding boundaries and
+output structures, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
 turn a composite template or structured Result into a generic NUM Value primitive.
 A stated four-ULP final bound uses the shared FP32-scaled contract for both
@@ -110,14 +110,13 @@ Use its complete `sample_shape()`, including batch axes, for rank, axis and
 extent checks. Input rank is 1..8, Float32/64, positive extents and a product at
 most 2^40. The `values` output port is an immutable Result using
 `photospider.tensor` v1/member `samples`, with the same full shape and dtype and
-generic facets. The output schema selects its own resources rather than copying
-unrelated source facets/resources. Every nonempty Whole output has full certified
+no attached domain description. The output retains its backing owners; the schema carries no operation resource configuration. Every nonempty Whole output has full certified
 coverage and retains global coordinates and the source Result association.
 
 Input rank is 1..8 with positive extents and count <=2^40; axis is a nonnegative
 index below rank. Axis length may be one or smaller than the kernel. For N=1,
 reflect/replicate/wrap repeat the sole sample; zero retains virtual +0 padding.
-Source/output dtype is Float32 or Float64, unchanged, with generic output facets.
+Source/output dtype is Float32 or Float64, unchanged, with no attached domain description.
 
 The normalizer is the exact full tap sum. Implementations must establish its
 nonzero positive value for the admitted parameter tuple before division; inability

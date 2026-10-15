@@ -20,11 +20,11 @@ Result<InputSnapshot> import_snapshot(const InputSnapshotStore& store,
 }
 ```
 
-`InputSnapshotStore` retains immutable rank-1 through rank-8 blocks for supported built-in numeric Value types. Import preserves valid generic bit patterns and validates supported typed scalar/tensor samples. The store bounds block count, actual payload bytes across versions, and directory metadata separately. Caller-owned Values and snapshot metadata are outside the retained-payload byte limit.
+`InputSnapshotStore` retains immutable rank-1 through rank-8 blocks for supported built-in numeric Value types. Import preserves every bit pattern and checks only the Value's descriptor and coverage; it does not interpret sample values. The store bounds block count, actual payload bytes across versions, and directory metadata separately. Caller-owned Values and snapshot metadata are outside the retained-payload byte limit.
 
-Patches require matching type, shape, and facets and replace one exact nonempty Region. The store copies intersecting blocks and preserves earlier versions. Reads and patches accept cancellation and sample bounds. A cancelled read may have partially written the caller's destination; only success certifies the complete result.
+Patches require matching type and shape and replace one exact nonempty Region. The store copies intersecting blocks and preserves earlier versions. Reads and patches accept cancellation and sample bounds. A cancelled read may have partially written the caller's destination; only success certifies the complete result.
 
-`content_identity(region)` hashes dtype, shape, requested coordinates, facets, and exact sample bits with canonical framing. Block geometry, origin, stride, and allocation do not affect identity. Signed zeros and distinct NaN payloads remain distinct. Snapshot/session identifiers describe provenance; deterministic operations cannot derive sample values or dependencies from identifier spelling.
+`content_identity(region)` hashes dtype, shape, requested coordinates, and exact sample bits with canonical framing. Block geometry, origin, stride, and allocation do not affect identity. Signed zeros and distinct NaN payloads remain distinct. Snapshot/session identifiers describe provenance; deterministic operations cannot derive sample values or dependencies from identifier spelling.
 
 ## Completed Result reuse
 

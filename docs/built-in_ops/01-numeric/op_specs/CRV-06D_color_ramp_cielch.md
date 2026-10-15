@@ -126,8 +126,7 @@ unused, while their typed/upstream validation still applies. Empty reads no samp
 payload after static preparation.
 
 The `values` port publishes an immutable `photospider.tensor` v1 Result with
-`samples` shape `sample_shape(input)+[C]`, the ColorArray v1 facet and
-`atomic_trailing_axes=1`. Whole writes publish the full output transactionally;
+`samples` shape `sample_shape(input)+[C]`, `atomic_trailing_axes=1`. Whole writes publish the full output transactionally;
 the Result retains full certified coverage and global coordinates. Fragments expose
 requested regions while retaining the full output owner. Arbitrary immutable source
 strides, offsets and unaligned storage are supported. Result association records

@@ -1,3 +1,4 @@
+#include "photospider/ops/numeric/diagnostics.hpp"
 #pragma once
 
 #include <array>
@@ -45,8 +46,7 @@ inline Result<ResampledSignal> append(
                         new_positions, dtype, domain, profile);
   if (!samples.ok())
     return Answer(samples.status());
-  // This source-preserving identity retains facets and raw special values;
-  // generic numeric layout operators intentionally erase semantic facets.
+  // This identity preserves source structure and raw special values.
   WorkflowNode forwarded{ids.value()[1],
                          "core.identity",
                          {std::move(new_positions)},
@@ -65,7 +65,7 @@ inline Result<ResampledSignal> append(
  * accept Float32/64. K/N/C, finite samples, exact rounding and domain
  * rules follow interpolate_linear_node / interpolate_pchip_node. dtype selects
  * samples only (default Float64); positions retains the new_positions
- * descriptor, dtype, facets and raw bits. Default domain Reject, also
+ * descriptor, dtype, raw bits. Default domain Reject, also
  * Clamp/LinearExtrapolate.
  *
  * Appends two ordinary nodes with collision-free IDs, including forward

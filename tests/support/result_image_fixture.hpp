@@ -49,8 +49,7 @@ inline SchemaTemplate schema(bool mask = false) {
   if (mask) {
     slot.layout.channel_axis.reset();
   }
-  slot.facets = {
-      take(encode_semantic(mask ? coverage_semantics() : rgba_semantics()))};
+  slot.atomic_trailing_axes = mask ? 0 : 1;
   schema.tensors.push_back(std::move(slot));
   return schema;
 }

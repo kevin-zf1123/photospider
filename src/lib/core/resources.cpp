@@ -9,10 +9,10 @@
 #include <stdexcept>
 #include <utility>
 
-#include "core/checked_math.hpp"
 #include "core/resource_state.hpp"
-#include "core/status_helpers.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/core/status_helpers.hpp"
 
 namespace ps {
 namespace {

@@ -5,7 +5,7 @@ kind: shared_mathematical_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_2
+implementation_status: implemented_cpu_result_abi_4
 clarification_status: complete
 ---
 
@@ -119,6 +119,15 @@ hue in semantic mode and L-only requests with invalid C/h to establish support.
 ## E/F: fixed XYZ and OKLab transform
 
 The two forward matrices, in row-major notation, are:
+
+```
+M1 = [ 0.8190224379967030  0.3619062600528904 -0.1288737815209879
+       0.0329836539323885  0.9292868615863434  0.0361446663506424
+       0.0481771893596242  0.2642395317527308  0.6335478284694309 ]
+M2 = [ 0.2104542683093140  0.7936177747023054 -0.0040720430116193
+       1.9779985324311684 -2.4285922420485799  0.4505937096174110
+       0.0259040424655478  0.7827717124575296 -0.8086757549230774 ]
+```
 
 Each printed decimal is an exact rational. E is M2*cbrt(M1*XYZ), with real
 componentwise cube root, including negative LMS. F is

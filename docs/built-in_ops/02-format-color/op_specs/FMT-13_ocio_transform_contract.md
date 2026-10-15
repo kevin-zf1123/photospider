@@ -12,7 +12,7 @@ clarification_status: complete
 # FMT-13: configured OpenColorIO transforms
 
 It registers no runtime operation. Engine hooks, numerical corpus and
-public workflow validation remain implementation prerequisites. Inherit the unified tensor/metadata, planar
+public workflow validation remain implementation prerequisites. Inherit the structural tensors and explicit configuration, planar
 storage, straight internal color and explicit interpretation rules from
 [FMT-common](FMT_common_contract.md). OCIO requires its own external-engine
 contract; it does not inherit native NUM strict/four-ULP guarantees or the
@@ -40,7 +40,7 @@ specific numerical recipe chosen for [ICC](FMT-12_icc_transform_contract.md).
 The inspected CMake, public headers, kernel sources and built-in operator sources
 contain no OCIO adapter implementation. Existing NUM LUT operations do not
 implement config resolution, Looks or display/view processors. This family
-requires engine/resource and metadata integration before runtime acceptance.
+requires engine/resource and explicit configuration integration before runtime acceptance.
 
 ## Confirmed engine boundary
 
@@ -151,11 +151,12 @@ automatic bit-preserving view/copy. CPU reference does not undo config skips.
 
 ## Confirmed finite numerical domain
 
-Respect/override/raw all require consumed color inputs, narrowed Float32 values
+Description-based and finite-only raw paths require consumed color inputs, narrowed Float32 values
 and requested outputs finite. Admit finite negative/HDR coordinates without an
 adapter clamp; a configured Range/LUT/rendering transform may itself clip.
-Raw skips semantic consistency and retains applicable unverified descriptions,
-but does not feed NaN/Inf to the engine or automatically declare a target space.
+The proposed raw path omits analytic interpretation checks, but still requires
+explicit endpoint configuration and finite samples. No path attaches an output
+description.
 
 ## Confirmed file interpolation
 
@@ -175,7 +176,7 @@ concrete override that a reader cannot apply is rejected, not silently ignored.
 
 Public color-space selectors explicitly distinguish name, alias and role.
 Resolve case-sensitive exact unique matches at compilation; missing/ambiguous
-matches fail. Store canonical config identity/name in metadata and processor
+matches fail. Store canonical config identity/name in prepared configuration and processor
 identity, retaining the supplied selector for diagnostics. A cannot select a
 NamedTransform as a color space; D selects that separate object class.
 
@@ -217,7 +218,7 @@ directions, property snapshots, interpolation, execution, bypass/bridge, layout
 and interpretation. Structural changes require inference and reconstruction.
 Only pixel values vary within a compiled workflow. Preserve NUM checked-size
 and generic tensor rank rules subject to actual planar image-axis capabilities.
-Selectors resolve axes explicitly or from metadata; never guess HWC/CHW.
+Selectors resolve axes directly or from explicit input configuration; never guess HWC/CHW.
 
 Semantic mode selects one complete three-component group; raw selects three
 distinct ordered slots and explicitly supplies all numerical endpoint/config
@@ -250,28 +251,22 @@ Look syntax; do not invent escaping for a name the engine grammar cannot address
 Whole inverse reverses each sequence and flips directions while retaining
 alternative priority. A missing inverse is not silently replaced with identity.
 
-## Metadata and selected route
+## Explicit configuration and selected route
 
-Effective metadata is authoritative in respect; explicit assertions must match.
-Override replaces interpretation for this invocation only. Config identity,
-resolved context and canonical space identity determine a configured coordinate
-system. Explicit analytic/endpoint bindings are caller assertions with required
+Input and output interpretations are explicit static configuration. Config
+identity, resolved context and canonical space identity determine configured
+coordinates. Analytic/endpoint bindings are caller assertions with required
 structural/unit/reference consistency, not proof that arbitrary LUTs equal
-analytic color mathematics. Config reference-space enums control engine routing;
-they do not by themselves establish nits, a physical scene reference or [0,1].
+analytic formulas. Config reference-space enums control engine routing; they
+do not establish nits, a physical scene reference or a [0,1] sample range.
 
-Forward A/C publish the resolved destination space; B publishes the resolved
-display/view output color space and records view/Look provenance separately.
-That provenance is not a claim that the pixels retain recoverable pre-view
-information. D/E/F publish their declared exit interpretation. Inverse swaps
-effective entry/exit. Require explicit declarations whenever a configured route
-does not establish a complete endpoint. Raw retains applicable original
-unverified metadata and does not claim the semantic destination.
-
-Rebuild selected-group roles/fields as required by the target interpretation,
-keeping its three slots. Preserve unrelated fields/coordinates/opaque annotations
-under common propagation rules and reject incompatible overlapping group
-references. Retain all required output resource owners; no external alpha link.
+A/C compute coordinates for the resolved destination space. B computes the
+resolved display/view output space. D/E/F use explicit exit configuration;
+inverse swaps entry/exit. Require complete endpoint declarations whenever the
+route alone is insufficient. Preparation retains canonical route information
+and resources. Outputs contain numeric data and structure; consumers receive
+the needed configuration explicitly. View/Look provenance does not imply that
+pre-view information can be recovered from pixels.
 
 Check logical source/process/destination reference-space crossings before CPU
 optimization or config identity/equalitygroup elision. config_default authorizes
@@ -361,8 +356,9 @@ lookup may acquire new bytes from outside the snapshot. A new resource mapping
 is a new identity and requires reconstruction. This does not promise every other
 route in that config is executable with the selected resource package.
 
-Retain immutable owners through config parsing, compilation, execution and
-resource-bearing output/read-window lifetime. Charge copied streams, parsed
+Prepared state, plans and active execution retain immutable config/processor
+resources through their use. Published Results and read windows retain only
+their actual data backing owners. Charge copied streams, parsed
 curves/LUTs, inverse lookup structures, snapshots, compiled renderers, staging,
 diagnostics, output pages and all concurrently live ancestors. No arbitrary
 profile-size-to-memory estimate replaces audited actual accounting or a proven

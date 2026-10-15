@@ -5,13 +5,13 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_2
+implementation_status: implemented_cpu_result_abi_4
 clarification_status: complete
 ---
 
 # FMT-11: color-model conversions
 
-The family specification remains Proposed. Native members are registered as CPU Result ABI 3 operations; S is a public helper that lowers to the MASK threshold operation. Inherit the
+The family specification remains Proposed. Native members are registered as CPU Result ABI 4 operations; S is a public helper that lowers to the MASK threshold operation. Inherit the
 [FMT common contract](FMT_common_contract.md) and the confirmed
 [model coverage](FMT_model_conversion_coverage.md). Ordinary numerical behavior
 inherits NUM; the [model mathematics](FMT-11_model_math.md) is normative.
@@ -56,8 +56,9 @@ semantics. Members A-R and T each have strict, Apple Silicon and x86-64 CPU keys
 - Color channels retain a shared logical sample shape and canonical straight-color
   meaning. Generic and spatial tensor storage are supported. Alpha stays inside
   the tensor; it is not an external persistent link.
-- Metadata describes the values; raw/override follow the common contract.
-  Applicable metadata does not certify sample validity.
+- `input_description` is explicit static configuration. Without it, callers
+  provide raw selectors and member-specific geometry. Results carry no
+  description; supplied configuration does not certify sample validity.
 
 ## Confirmed three-component interface (A through P)
 
@@ -75,9 +76,9 @@ with changing channel counts receive separate contracts.
 
 A and B use the explicit reference white in the effective input description.
 D50, D65 and valid custom white xy are admitted under the existing exact white
-validation. Preserve that white in the output; neither direction performs
+validation. The result is interpreted on that white; callers supply it downstream explicitly, and neither direction performs
 chromatic adaptation or silently supplies a missing D50 white. Missing source
-interpretation requires assign or explicit call-local override. D65 XYZ to D50
+interpretation requires an explicit input_description. D65 XYZ to D50
 Lab composes FMT-10C before A. Raw white parameters are specified in the static interface below.
 
 A/B accept or produce relative XYZ normalized to reference-white Y=1. Under the
@@ -206,14 +207,14 @@ underflow in Float32 and lose that property; do not add an epsilon or hidden cla
 ## Confirmed Gray meanings
 
 Admit four distinct Gray interpretations: linear luminance Y, encoded-RGB
-weighted luma Y', normalized CIELAB l=L*/100 and OKLab L. Metadata explicitly distinguishes their
+weighted luma Y', normalized CIELAB l=L*/100 and OKLab L. Explicit configuration distinguishes their
 units, reference/white and applicable underlying RGB/matrix/transfer. A bare
 Gray label is insufficient. Reconstruction yields a neutral color under the
 corresponding description, never recovered source chroma. CIELAB l=0.5 is not
 linear RGB=(0.5,0.5,0.5). Arbitrary artistic channel weights remain GRD-12.
 
 Q accepts XYZ/YCbCr/CIELAB/OKLab and selects respectively Y/Y'/l/L into the
-corresponding complete Gray description. R reconstructs respectively Y*W with
+corresponding Gray coordinate. R reconstructs respectively Y*W with
 W normalized to Y=1, (Y',0,0), (l,0,0) or (L,0,0). Q/R do not accept arbitrary
 RGB and silently choose a path. RGB source and destination workflows explicitly
 compose FMT-10 and the appropriate A/B, E/F or M/N members. Transfer, white
@@ -222,7 +223,7 @@ uses the source Gray's interpretation, not an automatically selected new white.
 
 Q replaces the selected triple at its smallest physical channel index with one
 Gray channel and removes its other two slots. Other channels retain relative
-order and remap their descriptions/references. The channel axis remains even
+order; callers remap any downstream descriptions explicitly. The channel axis remains even
 when only one channel survives. R replaces the Gray slot with three consecutive
 target components in canonical model order. Other channels shift and remain
 unchanged, including internal alpha. An independent Gray tensor without a
@@ -241,7 +242,7 @@ only R's new Lab a*=0 does not read or validate its Gray l source sample.
 
 S is an explicit composition using the MASK-03 hard threshold x>=threshold.
 Threshold is required in the source Gray's native unit. Produce canonical 0/1
-Black/White samples and retain the source Gray interpretation as provenance;
+Black/White samples; callers retain the source Gray interpretation in their configuration;
 binary appearance is not an alpha/coverage declaration. T selects an explicitly
 provided black or white Gray value per sample, without recovering original tone.
 Dither/halftone remain GRD-29/30, integer encoding FMT-06 and bit packing codecs.
@@ -262,21 +263,20 @@ Each native member accepts one Result containing one tensor and no fields, then 
 
 | Static logical field | Requirement |
 | --- | --- |
-| metadata_mode | respect default; override or raw explicit |
-| group | One uniquely selected complete semantic source group; forbidden with raw selectors |
-| axis/components | Raw structural channel axis and ordered distinct triple for A-Q; single component for R/S/T, or explicit axis-free scalar-field structure |
-| metadata_override | Effective source description only in override; cannot change physical layout |
-| source assertions | Optional source descriptions must match effective metadata |
-| white | A/B resolve source white semantically; raw A/B require explicit valid xy. E/F semantic white is fixed D65. O semantic black uses source white; raw O performs ratios without a white parameter |
+| input_description | Optional explicit TensorDescription; absence selects the raw numerical path. |
+| group | Described path: optional selector when exactly one complete matching group exists; ambiguity fails. |
+| axis/components | Raw ordered distinct triple for A–Q, single component for R/S/T, or axis_free=true for R/S/T. In the described path these may assert the configuration's exact axis and indices. |
+| white_x/white_y | Raw A/B/O require explicit valid xy. Described A/B/O use input_description white and reject these raw fields. E/F described white is fixed D65. |
 | output_hue_unit | Required radian or pi_multiple for C/G/I/K; no default |
 | input_hue_unit | D/H/J/L resolve from semantic source; raw requires it explicitly |
 | ncl_matrix | M requires preset or Kr/Kb; N resolves source metadata, optional assertion must match; raw M/N require explicit coefficients/preset |
 | gray_kind | Q resolves from source model; R from Gray; raw Q/R require linear_y, encoded_luma, cielab_l or oklab_l |
-| gray_white | R linear_y resolves Gray white semantically; raw requires valid xy |
+| gray_white_x/gray_white_y | R linear_y resolves Gray white semantically; raw requires valid xy |
 | output_axis | Required only for axis-free R insertion; otherwise preserve existing axis |
 | threshold | S required finite Float64, no default, in native Gray units |
 | black_value/white_value | T required finite typed constants matching input dtype, no defaults |
-| layout | auto default, view or materialize |
+| layout | auto default, view or materialize; forced view is accepted only by Q. |
+| algorithm | auto default, scalar or reference. |
 
 Reject unknown, contradictory and inapplicable fields before samples, including
 Empty/bypass-only requests. Parameters, roles, units and output mappings are
@@ -285,16 +285,16 @@ Semantic non-native codes must be decoded explicitly; raw uses stored floats.
 R consumes native Gray, so transfer-encoded linear-Y Gray first needs explicit
 decoding. Luma's underlying RGB transfer does not imply Y' is the transfer of
 the original color's Y. T semantic output uses its binary input's declared Gray
-origin; an undescribed binary source first needs assign/override.
+origin; the caller supplies its Gray origin explicitly in input_description.
 
-Outputs preserve the source schema id, tensor key and batch prefix. Semantic output rebuilds the selected group and preserves applicable white,
-reference, observer, coordinates, units and remapped internal alpha relations. The output tensor sets `atomic_trailing_axes` to zero.
-No observer/spectral conversion occurs. Another group's conflicting references
-to edited/deleted channels cause a static error; do not silently drop that group.
-Raw keeps applicable unverified descriptions without claiming target conversion;
-on Q/R remove structurally inapplicable complete groups rather than labeling an
-incomplete/expanded tuple as the old complete group. Inputs and other consumers
-remain immutable. No premultiplied semantic input is admitted.
+Outputs preserve source schema id, tensor key and batch prefix and set
+`atomic_trailing_axes` to zero. They contain structure and samples only. The
+caller supplies the resulting model, white, reference, units and remapped alpha
+indices to later consumers. No observer or spectral conversion occurs.
+Conflicting overlapping groups in the explicit input configuration are rejected
+where the transform would invalidate their interpretation; no hidden label
+repair is performed. Inputs and other consumers remain immutable. Described
+color conversion does not admit a premultiplied source interpretation.
 
 ## Numerical and special-value contract
 

@@ -14,10 +14,10 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_aggregate.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/core/resource_allocator.hpp"
-#include "photospider/data/semantic.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "plugin/port_validation.hpp"
+#include "photospider/core/resource_allocator.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -150,8 +150,8 @@ struct ScanKernel final {
       // services may reject this final report; their original status survives.
       if (!result.ok())
         numeric_ops::math_record_failure(phase, result);
-      if (phase.report_numeric) {
-        auto reported = phase.report_numeric(report);
+      if (phase.report_diagnostic) {
+        auto reported = report_numeric(phase, report);
         if (result.ok())
           return reported;
       }
@@ -320,6 +320,7 @@ OperationDefinition scan_operation(const std::string& key, bool integral,
   OperationDefinition operation;
   operation.key = key;
   auto& traits = operation.traits;
+  traits.diagnostics = {numeric_diagnostic_identity()};
   traits.input_count = 1;
   traits.input_schema.resize(1);
   traits.input_schema[0].kind = OperationPortKind::Result;

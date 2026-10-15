@@ -1,29 +1,37 @@
 # Repository-owned operations
 
-`plugins/ops/` holds the repository's operation implementations, their public helper headers, and optional operation packages built against the installed kernel SDK. Each registered C++ operation keeps its callback and schema near its source file. `plugins/ops/registry.cpp` aggregates the built-in registration functions and contains no operation callbacks. Private algorithms and addressing helpers stay in internal headers.
+`plugins/ops/` contains bundled operations, workflow-authoring helpers and the
+shared domain SDK. `registry.cpp` aggregates registration; callbacks and schemas
+remain near their implementations. Operations and SDK code use kernel public
+interfaces, with no dependency on `src/lib` headers.
 
 | Directory | Responsibility |
 | --- | --- |
-| `01-numeric` | Array arithmetic, curves, expressions, 1D and 3D LUTs (including 3D LUT baking) and smoothstep |
-| `02-format-color` | Alpha editing, numeric conversion, transfer, RGB basis and model conversion, channel assembly/editing and metadata assignment |
-| `include/` | Public helper headers installed as `photospider/ops/` |
+| `01-numeric` | Arithmetic, curves, expressions, LUT application/baking, numeric reports and quality helpers |
+| `02-format-color` | Channel, alpha, numeric-format, transfer, RGB basis and model conversion operations |
+| `09-composite` | Layer value types and pure arithmetic implementation |
+| `common/domain` | Explicit descriptions, codecs, ICC/OCIO resource wrappers and exact domain mathematics |
+| `include/photospider/ops` | Public workflow-authoring and registry headers |
 
-## Public helper headers
+## Libraries and public interfaces
 
-`include/photospider/ops/` is exported as the header-only `Photospider::ops_headers` target. It contains:
+`Photospider::ops` implements the bundled operations and authoring functions. It
+links `Photospider::ops_sdk` and the header-only `Photospider::ops_headers` target.
+The SDK links only kernel public interfaces and may be built with ops disabled.
+Its public headers live in the repository's main `include/photospider/ops/` tree;
+both include roots use the installed `photospider/ops/` namespace.
 
-- `format/`: workflow-authoring helpers for the alpha, channel, channel assembly, channel editing, metadata, model conversion, RGB basis and transfer operations;
-- `numeric/`: workflow-authoring helpers for the numeric operation families;
+Link `Photospider::ops` to call `make_default_operation_registry` or the compiled
+authoring helpers. Link `Photospider::ops_sdk` for standalone configuration,
+resource, report, LUT bake and Layer helpers. `PHOTOSPIDER_BUILD_OPS` requires
+`PHOTOSPIDER_BUILD_OPS_SDK`; kernel-only builds may disable both.
 
-`photospider/ops.hpp` includes the kernel umbrella header, all `format/` headers, and the FFT, component and statistics headers. Numeric headers are included individually. Inside this repository, build and test targets link `Photospider::ops_headers` together with the kernel target they test.
+Results and Values carry structure, data and storage owners. Domain descriptions
+are explicit static parameters, independently supplied to every consumer.
+Description editing uses the SDK's pure `format::edit_description` function;
+there are no metadata assignment/removal workflow nodes. Domain validators and
+report codecs are registered explicitly with the generic kernel services.
 
-## Build and registration
-
-
-Built-in operations still include private kernel headers from `src/lib/core/` and `src/lib/data/`. A separate built-in operation library needs these dependencies replaced by public SDK interfaces first.
-
-## Optional packages
-
-`PixelOE/` is an optional installed-package operation plugin and is not registered by default. Its standalone CMake project finds the Photospider 0.33 `operation_sdk` and `kernel` components. It exports twelve Result ABI 3 image operations and provides a Result workflow that binds inputs, executes fragment requests and reads output tensor windows. See [PixelOE's README](PixelOE/README.md) for build and usage details.
-
-Operation behavior and examples are documented in [`docs/built-in_ops/`](../../docs/built-in_ops/README.md) and in `docs/kernel-architecture/`, including [Basic Operations](../../docs/kernel-architecture/Basic-Operations.md).
+Operation behavior and examples are documented in
+[`docs/built-in_ops/`](../../docs/built-in_ops/README.md) and the
+[kernel architecture guide](../../docs/kernel-architecture/README.md).

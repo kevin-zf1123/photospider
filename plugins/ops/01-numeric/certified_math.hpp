@@ -316,7 +316,7 @@ struct CertifiedMath final {
       CertifiedKind kind, const BinaryParts& input, std::uint64_t raw,
       std::uint64_t other, std::uint64_t numerator, std::uint64_t denominator,
       bool narrow, bool normalized_environment = false) {
-    std::optional<input_internal::Float32Environment> environment;
+    std::optional<plugin_internal::FloatingEnvironment> environment;
     if (!normalized_environment)
       environment.emplace();
     if ((!normalized_environment && !environment->active()) ||

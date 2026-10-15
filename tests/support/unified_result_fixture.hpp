@@ -112,7 +112,7 @@ struct Gather final {
               ? std::vector<std::uint64_t>(phase.association->begin(),
                                            phase.association->end())
               : std::vector<std::uint64_t>{},
-          phase.query.tile_extent, phase.query.resources);
+          phase.query.tile_extent);
     };
     if (phase.query.output_index == 1 ||
         (phase.query.tensor_outputs && phase.query.tensor_outputs->empty())) {

@@ -20,7 +20,7 @@ The strict profile defines the exact reference result below. Accelerated profile
 
 Inherit the [NUM baseline](NUM_common_contract.md) for registration and acceptance conventions. The operation has three dynamic Result inputs in order: `input`, `edge0`, and `edge1`. Each Result contains one tensor member, whose key may be any valid member key. All members must have identical `sample_shape()` and Float32 or Float64 dtype. `sample_shape()` includes batch axes; accepted rank is 1 through 8, every extent is positive, and the sample count is at most 2^40.
 
-The output port is `values`, a Result with schema `photospider.tensor` and tensor member key `samples`. Its dtype and complete shape match the input members. Every output axis is an ordinary axis; output facets and batch axes are empty. There are no static numeric parameters or implicit casts or broadcasts. Connect scalar edges through explicit broadcast operations. This operation uses the cubic smoothstep polynomial; it does not provide quintic smootherstep.
+The output port is `values`, a Result with schema `photospider.tensor` and tensor member key `samples`. Its dtype and complete shape match the input members. Every output axis is an ordinary axis; output batch axes are empty. There are no static numeric parameters or implicit casts or broadcasts. Connect scalar edges through explicit broadcast operations. This operation uses the cubic smoothstep polynomial; it does not provide quintic smootherstep.
 
 ## Numeric contract
 

@@ -27,13 +27,12 @@ The cell-axis `axis` excludes the Result batch prefix. The complete sample rank,
 including batch and cell axes, is at most 8, and full sample count is at most
 2^40. Required source assertions bind the complete schema and physical layout.
 The helper is a compile-time composition over registered Result operations; it
-does not add an alpha-specific runtime key. The separate alpha math tests cover
-numeric kernels, not a new native alpha arithmetic key. Inherit target alpha semantics
+does not add an alpha-specific runtime key. Independent alpha math oracles cover numerical kernels, not workflow execution. Inherit target alpha semantics
 from the complete [FMT-05 contract](FMT-05_alpha_editing_contract.md).
 
 ## Interface and inference
 
-Inherit group, metadata_mode, conditional metadata_override, cell-axis `axis`,
+Inherit group, required input_description, cell-axis `axis`,
 layout and profile. `axis` excludes the batch prefix. Static missing_alpha is error by default or opaque explicitly.
 Static Bool keepdims defaults to false. Optional static alpha_encoding describes
 only the missing_alpha=opaque fallback and is otherwise invalid. Validate any
@@ -63,28 +62,27 @@ or ambiguous encoding, or the absence of a legal exactly representable
 coverage-one code, fails InvalidArgument/InvalidDomain.
 Do not round to a neighboring code, pass Int64 maximum through Float64 or
 replace missing alpha with the dtype maximum despite an explicit encoding.
-The output alpha component carries the selected decoder and coverage meaning.
+The caller supplies the selected decoder and coverage interpretation to any later consumer; the output carries no description.
 The seven listed copy dtypes are supported. FMT-07 remains retired. Existing
-integer samples retain their own encoding description without normalization.
+integer samples retain their bits without normalization.
 
 ## Lowering, metadata and regional behavior
 
 For existing alpha, resolve its static index and expand FMT-01A with matching
-axis/keepdims/profile/layout and effective source metadata. For opaque, expand
+axis/keepdims/profile/layout and explicit source description. For opaque, expand
 the exact same-dtype opaque-code constant into the output shape using conforming
 image storage. Preserve static shape/group dependencies without reading input
 pixels. A generic zero-stride constant does not automatically satisfy planar
 image storage. Force view cannot generate absent opaque pixels.
 
-Output is an independent alpha component with projected axis/coordinate and
-encoding descriptions. It has no complete color-group claim or persistent
-relationship to the input image. A view can retain the normal backing owner;
+Output is an ordinary component tensor with no attached description or persistent
+alpha relationship to the input image. A view can retain the normal backing owner;
 this is storage ownership, not a semantic alpha attachment. Existing sample
 validity is not certified merely by extraction.
 
 The helper serializes a per-source `result-v1` assertion with a digest of the
 complete canonical schema plus a separate physical-layout assertion. The
-canonical schema includes semantic metadata and spatial axes; the layout
+canonical schema includes structural identity, dtype, shape, batch/atomic and spatial axes; the layout
 assertion binds physical storage order and row pitch. Compilation/direct
 preparation checks the producer descriptor, including for forward references.
 Static helper expansion is transactional.

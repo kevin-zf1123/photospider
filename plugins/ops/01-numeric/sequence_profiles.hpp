@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "core/exact_binary_sum.hpp"
+#include "common/exact_binary_sum.hpp"
 #include "photospider/core/status.hpp"
 
 namespace ps::plugin_internal::numeric_ops {

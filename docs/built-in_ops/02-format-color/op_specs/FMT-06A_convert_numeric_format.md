@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_2
+implementation_status: implemented_cpu_result_abi_4
 clarification_status: complete
 registered_operation_keys:
   - numeric.convert_format_strict
@@ -17,7 +17,7 @@ registered_operation_keys:
 
 Inherit the complete [FMT-06 contract](FMT-06_numeric_conversion_contract.md).
 The default registry provides `numeric.convert_format_strict` as a native Result
-ABI 2 operation. It takes one single-tensor Result with no fields and publishes one `values` output
+ABI 4 operation. It takes one single-tensor Result with no fields and publishes one `values` output
 Result containing one tensor. Its default scales numeric intervals while converting dtype;
 explicit `rescale=false` gives a pure numerical cast. The specification remains
 Proposed.
@@ -29,14 +29,14 @@ Supported source and target names are uint8, uint16, int8, int16, int64, float32
 and float64.
 Output rank/extents/axes/channel order equal input. One target type covers the
 whole tensor. Inherit rescale, source_range, target_range, conditional axis,
-rounding, overflow, metadata_mode/override and layout from the family. Range endpoint parameters use typed exact encodings; defaults follow NUM.
+rounding, overflow and layout from the family. Range endpoint parameters use typed exact encodings; defaults follow NUM.
 
 Choose omitted interval sides from dtype. Explicit pairs or full channel tables
 override only their side. Table selectors are static channel indices on a declared
 axis, not runtime pixel-dependent intervals or fuzzy channel roles. Equal target
 endpoints are invalid; reversed targets are allowed. Source bounds increase.
 When rescale=false, interval fields/axis tables are invalid rather than ignored.
-Respect checks explicit source encoding assertions before reading samples.
+No input description or attached encoding is read.
 
 For full sample coordinate q, determine the resolved pair from
 q[batch_prefix_length + axis] if tabulated, otherwise the shared pair. Read only
@@ -44,7 +44,7 @@ x=input[q]. In strict, compute the exact
 affine rational value (or x for pure cast), then round once to the destination.
 Reject/clip finite output overflow after rounding. Original nonfinite input with
 integer target fails; floating NaN mapping and infinity signs follow the family.
-Update target encoding rather than pretending stored codes are native values.
+The caller supplies any target encoding to later consumers explicitly.
 
 ## Mapping, resources and error specialization
 
@@ -71,7 +71,7 @@ Inherit exact arithmetic budget/work, backend/profile precision and error attrib
 
 1. UInt8 [0,128,255] -> Float32 with defaults gives
    [0,RN32(128/255),1]. With rescale=false, it gives [0,128,255].
-   These modes must have different metadata and cache identity.
+   These modes must have different explicit parameters and cache identity.
 2. Int8 [-128,-1,0,127] -> UInt8 with defaults gives [0,127,128,255]
    exactly. Int8 zero -> Float32 gives RN32(128/255), not zero.
 3. Int64 [minimum,-1,0,maximum] -> UInt8 defaults gives [0,127,128,255].
@@ -104,16 +104,16 @@ match the same exact result, including tails and exceptional lanes.
 
 A Float32 normalized-Lab+alpha tensor can use source ranges [0,1], [-128,127],
 [-128,127], [0,1] on an explicit channel axis and target UInt8 defaults.
-Samples [0.5,0,0,0.5] then become [128,128,128,128]. Model/component units remain
-Lab/coverage with the corresponding per-channel numeric decoder; the byte 128
+Samples [0.5,0,0,0.5] then become [128,128,128,128]. A later consumer may use an explicit Lab/coverage description with a
+corresponding per-channel decoder; the byte 128
 in the alpha channel is not mathematical alpha 128. This illustrates explicitly
 selected encoding ranges, not a universal Lab device encoding standard.
 
-A Float32 tensor explicitly encoded over [0,255] conflicts with default source
-[0,1] in respect mode. Supplying source_range=[0,255] and target Float64 defaults
-maps 255 to 1 and updates the decoder. Disabling scaling instead preserves code
-255 and its existing interval. Check explicit override and raw separately so
-ignored assertions never become stale validity evidence.
+For Float32 samples interpreted by the caller as codes over [0,255], an
+explicit `source_range=[0,255]` with target Float64 defaults maps 255 to 1.
+Omitting the source range uses [0,1] and leaves 255 as 255 for Float64 output.
+Disabling scaling also preserves the code 255. None of these paths propagates a
+decoder or checks a hidden source interpretation.
 
 A reversed target retains ordered code bounds and decoder orientation. An
 explicit inverse range conversion can reverse it back; source_lower must still
@@ -124,17 +124,12 @@ range from names such as alpha, normalized Lab l or red.
 ## Public workflow and current validation
 
 The public graph is `declared input Result -> numeric.convert_format_strict ->
-typed, encoded output Result`; consumers needing native color coordinates or normalized
+typed output Result`; consumers needing native color coordinates or normalized
 alpha must decode explicitly.
 
 Temporary numeric-conversion acceptance should cover all 49 dtype pairs using
 independent exact references, ROI, cold-lookup budgets, failure ordering,
-floating environments, identity views, batch/view/Empty/bit-stride cases, ICC
-resource ownership, concurrent plan reuse and payload release. Add explicit
+floating environments, identity views, batch/view/Empty/bit-stride cases, concurrent plan reuse and payload release. Add explicit
 alpha interoperability cases when changing inherited encoding behavior. An SME
 path requires an actual dispatch check on admitted hardware; CPU output agreement
 alone does not establish SME dispatch or performance.
-
-Thirteen serial Result performance smoke cases pass their bitwise output oracle.
-A debugger-confirmed SME dispatch verifies the Float32→UInt8 tiled path is reached;
-this is dispatch evidence, not a timing conclusion.

@@ -15,9 +15,9 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_curve.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/core/resource_allocator.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "plugin/port_validation.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -218,7 +218,7 @@ struct CurveState final {
     std::vector<std::uint64_t> destination(multi ? 2 : 1, 0);
     const auto columns = multi ? shape[1] : 1;
     const auto width = narrow ? 4U : 8U;
-    std::optional<input_internal::Float32Environment> environment;
+    std::optional<plugin_internal::FloatingEnvironment> environment;
     if (narrow && profile != SequenceProfile::Strict)
       environment.emplace();
     const std::function<Status(std::uint64_t)> consume = [&](auto amount) {

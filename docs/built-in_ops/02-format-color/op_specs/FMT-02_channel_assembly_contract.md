@@ -12,7 +12,7 @@ clarification_status: complete
 # FMT-02: channel assembly and concatenation family
 
 Runtime contract: A/B/C and the scalar literal provider are registered as
-twelve Result operation ABI 3 CPU keys: `assemble`, `concatenate`,
+twelve Result operation ABI 4 CPU keys: `assemble`, `concatenate`,
 `assemble_mapped`, and `scalar_literal`, each with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
 The public authoring helpers are installed in
 `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
@@ -40,25 +40,23 @@ replacement and generated constant channels retain their FMT-03 home. Associatio
 alpha editing belong to FMT-04/05. Merely joining alpha with color planes does
 not request premultiplication or color conversion.
 
-The target uses tensors and composable metadata. Image storage is planar and
-uses the one tile geometry of its DAG. Source metadata authority, call-local
-override, raw interpretation and consumer-scoped validation follow FMT-common.
-These modes cannot change physical addresses by relabeling a tensor.
-Ordinary numerical policy is inherited rather than reopened in this interview.
+The family uses tensors with explicit per-invocation interpretation (FMT-common
+C13). Image storage is planar and uses the one tile geometry of its DAG. An
+optional per-input description supplies channel axes and named selectors; it
+cannot change physical addresses. Ordinary numerical policy is inherited rather
+than reopened in this interview.
 
-## Confirmed family and metadata behavior
+## Confirmed family behavior
 
 FMT-02A stacks single-component inputs by introducing a channel axis. FMT-02B
 concatenates existing channel axes. Input-list order defines the order of the
 assembled components or concatenated channel blocks; B preserves the order
 within each block. Neither member silently reorders its inputs.
 
-FMT-02C supplies explicit source-to-destination channel mapping and optional
-per-destination-component semantic definitions. A source RGBA channel 0 may
-supply destination channel 2 described as Lab b*. Sample bytes are copied,
-not transformed from RGB to Lab or rescaled. The explicit destination definition
-authorizes reinterpretation of its specified fields without source mutation or
-global raw mode. A/B retain their confirmed ordered behavior.
+FMT-02C supplies an explicit source-to-destination channel mapping. A source
+RGBA channel 0 may supply destination channel 2, which a later consumer's
+description may call Lab b*. Sample bytes are copied, not transformed from RGB to
+Lab or rescaled. A/B retain their confirmed ordered behavior.
 
 Every destination slot must have exactly one source; all slots 0..M-1 must be
 covered, where M is the nonzero mapping-entry count. Source channels may be
@@ -70,14 +68,13 @@ Corresponding nonchannel extents must match exactly. An extent of one does not
 request broadcasting. Spatial resampling or explicit broadcast, when needed,
 precedes assembly. Axis correspondence follows the coordinate rules below.
 
-Output descriptions retain and remap applicable per-component names, roles,
-units and source interpretations. Complete output color groups must be supplied
-explicitly; three input channels do not imply RGB. A Lab color group and an
-independent alpha plane may coexist in one output tensor. Structural description
-checks ensure declared groups refer to compatible components, but do not make
-assembly a consumer of pixel-domain color or alpha constraints. A later semantic
-consumer validates the samples it actually uses. Assembly grants no new
-sample-validity certificate merely because a complete output description exists.
+The output carries no description. A later consumer that treats the assembled
+channels as a color group receives that group in its own explicit description;
+three input channels do not imply RGB. A Lab color group and an independent alpha
+plane may coexist in one output tensor when the consumer's description says so.
+Assembly does not consume pixel-domain color or alpha constraints and grants no
+sample-validity certificate. A later semantic consumer validates the samples it
+actually uses.
 
 ## Current Result interface and bounds
 
@@ -86,9 +83,8 @@ connected input contributes Descriptor support, including inputs unused by the
 selected mapping; Data support includes only mapped sources in the requested
 output footprint. Each input descriptor contains one tensor and no fields.
 The implementation supports seven native dtypes by exact bit copy, preserves
-the Result schema id, tensor key, global metadata and publication policy, and
-rebuilds tensor facets from the inferred tensor description. Unknown source
-tensor facets are not copied. Batch axes form a cell-independent prefix and must match exactly across
+the first input's Result schema id, tensor key and publication policy, sets
+`atomic_trailing_axes` to zero, and attaches no description. Batch axes form a cell-independent prefix and must match exactly across
 nonscalar sources; a scalar literal is represented by an explicit unbatched
 shape-[1] source. The full input and output sample counts are bounded by 2^40,
 and the full sample rank, including batch and cell axes, is at most 8. `axis`,
@@ -103,7 +99,7 @@ regions. Scalar row replication uses bounded batches of at most 256 samples and
 checks work and cancellation during copying.
 
 The public Result workflow and implementation details are in the
-[architecture reference](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-02-channel-assembly).
+[architecture reference](../../../kernel-architecture/Channel-and-Color-Operations.md#structural-channel-operations).
 
 ## Clarification decisions
 
@@ -111,26 +107,23 @@ The public Result workflow and implementation details are in the
 | --- | --- | --- |
 | Family members | A inserts a channel axis; B concatenates existing channel axes; C assembles explicitly selected sources into destination slots. A/B retain input-list order. | Confirmed |
 | Nonchannel dimensions | Corresponding extents must match; broadcast and resampling are explicit preceding operations. | Confirmed |
-| Output metadata | Remap applicable component descriptions; complete color/group descriptions are explicit. Validate structural compatibility without introducing sample-domain color validation. | Confirmed |
+| Output interpretation | The output carries no description; the next consumer supplies its own. No sample-domain color validation. | Confirmed; C13 replaces description remapping |
 | Axes and shape | A: explicit inserted axis, no automatic squeeze. B: separately resolved input axes and explicit output axis; corresponding remaining axes match in order. | Confirmed |
 | Arity and static structure | Allow one input, reject zero inputs; input list, axes and channel counts are static. | Confirmed |
-| Duplicate names/roles | Preserve duplicates without automatic renaming; a later named selector must still resolve uniquely. | Confirmed |
-| Metadata conflicts | Explicit target semantics are a standard A/B/C capability, including Gray/Black-White input components. Unredefined applicable fields still follow respect. | Confirmed; supersedes the earlier requirement for a separate source override |
+| Interpretation conflicts | Inputs carry no descriptions, so there is nothing to conflict. Components from Gray/Black-White or differently encoded sources are combined by index; the consumer's description defines the result. | Confirmed; C13 |
 | Regions and invalidation | Exact output-channel/region support and corresponding forward dirty mapping; unused inputs have no payload request. | Confirmed |
-| Coordinate metadata | Check compatible descriptions for corresponding nonchannel axes in respect mode; raw/override expresses deliberate index-based reinterpretation. | Confirmed |
+| Coordinate interpretation | Nonchannel axes correspond by index. No coordinate-label comparison or spatial alignment is performed. | Confirmed; C13 |
 | Output storage | auto/view/materialize with default auto; views require a legal retained mapping, otherwise auto materializes. | Confirmed |
-| Explicit destination mapping | Support explicit source component to output slot mapping and per-output-channel semantic descriptions. | Confirmed |
+| Explicit destination mapping | Support explicit source component to output slot mapping. | Confirmed |
 | Mapping member placement | C provides mapped assembly; A/B remain ordered forms. | Confirmed |
-| Explicit destination reinterpretation | Explicit target channel/group fields authorize local reinterpretation in A/B/C without separate source override/raw; C may also define them in mapping records. | Confirmed |
 | Mapping completeness and reuse | Every output slot has one source, with no holes or duplicate writes; source omissions/reuse are allowed. | Confirmed |
 | C input structure | Permit explicit component and channel-tensor sources with equal nonchannel shapes. | Confirmed |
-| C source selectors | Static index/name/role, exact unique resolution; raw permits index only. | Confirmed |
-| Standard target semantic assignment | Explicit output channel/group descriptions authorize corresponding reinterpretation in A/B/C, without an additional source override/raw and without implicit numeric conversion. | Confirmed |
+| C source selectors | Static index/name/role, exact unique resolution; name/role require that input's `input_descriptions` entry, index needs none. | Confirmed |
 
 ## Confirmed axes and coordinate rules
 
-A receives equal-shape single-component tensors with no effective channel-axis
-designation. Its required static axis a inserts a new dimension at any position
+A receives equal-shape single-component tensors; an input whose
+`input_descriptions` entry declares a channel axis is rejected. Its required static axis a inserts a new dimension at any position
 0..r in a rank-r input. It does not silently remove a singleton channel axis.
 An input such as [H,W,1] with a declared channel axis must first undergo explicit
 axis removal, or use B. The cell-rank bounds imply that A accepts cell ranks 1..7 and produces cell
@@ -144,8 +137,9 @@ coordinate and erase(j,a) removes its channel coordinate, the exact copy rule is
 Y[j] = X[j[a]][erase(j,a)]
 ```
 
-B resolves each input channel axis ai separately from effective metadata or an
-explicit assertion, with FMT-common override/raw behavior. It never guesses an
+B resolves each input channel axis ai separately from its `input_axes` entry or
+from the `channel_axis` of its `input_descriptions` entry; when both are present
+they must agree, and when neither is present the node fails. It never guesses an
 axis from shape. Removing ai from every input shape must yield the same ordered
 shape S; there is no implicit permutation of the remaining dimensions. Required
 static output_axis a inserts the combined channel extent into S. Inputs and
@@ -178,56 +172,33 @@ shape identity only when the output axis agrees. Input arity, extents, axes and
 channel order are fixed at compile time, not runtime scalar controls. Host graph,
 port and resource limits still apply to the requested static invocation.
 
-## Confirmed metadata conflict handling
+## Interpretation handling
 
-Duplicate channel names or roles are allowed and retained exactly; no suffix or
-automatic renaming is added. A subsequent FMT-01B selector still needs a unique
-match. Output channel positions remain unambiguous for index-based selection.
+`input_descriptions` maps input ordinals to descriptions for this invocation.
+An entry is validated against that input's descriptor; it supplies the input's
+channel axis (A rejects one) and, for C, the channel or component table used by
+name/role selectors. Duplicate channel names or roles in a description are
+allowed; a selector that matches more than one entry fails.
 
-Explicit target channel or complete color-group descriptions authorize the
-corresponding component reinterpretation in A/B/C. No additional source override,
-raw mode or separate assign node is required. A Gray or Black/White plane may
-supply an explicitly described RGB, alpha, Lab or other output component. Three
-Gray planes can be assembled by A with an explicit RGB group. The group defines
-the target coordinate roles and color interpretation on its declared channel
-indices; it does not imply a numerical color transform.
+Assembly attaches no description to its output. A Gray or Black/White plane may
+supply what a later consumer treats as an RGB, alpha, Lab or other component.
+Three Gray planes assembled by A become an RGB image only for a consumer whose
+explicit description declares an RGB group on those indices; this is
+interpretation, not a numerical color transform. Combining R/G/B samples from
+sources that the caller considers differently encoded is the caller's
+responsibility; the kernel and this family do not compare or reject source
+interpretations.
 
-For example, explicitly assigning one sRGB output group to copied R/G/B samples
-from different source interpretations is deliberate relabeling and is allowed.
-It is not a source-space conversion. Without such explicit target definitions,
-respect rejects incompatible applicable descriptions rather than inventing a
-common color interpretation. Source overrides remain available to change the
-effective input interpretation, including selector resolution, independently
-of destination assignment. A destination definition never rewrites the source.
-
-Untagged components may receive meaning from an explicit output description.
-All still-applicable fields not redefined by the target obey respect. Incompatible
-model-dependent source fields are removed when a new model makes them
-inapplicable. Effective output descriptions must remain internally coherent;
-target fields cannot contradict inferred shape, dtype or structural axes. A
-target group and explicit component entry defining the same field inconsistently
-fail, rather than applying an undocumented precedence.
-
-Every successful result still copies original element bits. In particular,
-UInt8 255 does not become Float32 1.0 and binary values are not automatically
-expanded to another range. Cast, interval decoding, transfer or actual gray/XYZ/
-Lab conversion are explicit preceding or subsequent operators as appropriate.
+Every successful result copies original element bits. In particular, UInt8 255
+does not become Float32 1.0 and binary values are not automatically expanded to
+another range. Cast, interval decoding, transfer or actual gray/XYZ/Lab
+conversion are explicit preceding or subsequent operators as appropriate.
 Packed one-bit file data belongs to the codec boundary, not a new tensor dtype.
 
-Where reinterpretation changes a field, an incompatible old field is replaced
-or removed rather than retained as a second authoritative output interpretation.
-Applicable per-component descriptions outside the replacement remain descriptive
-and do not certify sample validity. Referenced profiles/resources retain their
-owners. Inputs and other consumers retain their original metadata.
-
-Respect checks explicitly supplied coordinate roles, units, origins and sampling
-grids on corresponding nonchannel axes. Conflicting descriptions fail before
-payload reads even when extents agree. Missing descriptions are not invented;
-retain a common coordinate description only when supported for the output, or
-supply it explicitly. There is no automatic spatial alignment. Override changes
-the selected input interpretation before these checks; raw applies the index
-mapping without consuming semantic coordinate labels. Conflicting source labels
-are not propagated as a common output grid in raw mode.
+Nonchannel axes correspond by index only. There is no comparison of coordinate
+roles, units, origins or sampling grids and no automatic spatial alignment.
+Spatial inputs must agree on their physical height/width axes; a description
+cannot relabel physical image axes.
 
 ## Interface and support matrix
 
@@ -241,23 +212,20 @@ channel prefix sums use checked arithmetic and the inherited 2^40-element bound.
 C specializes the static mapping/selection interface in its member specification.
 
 All parameters below are static. The types specify logical authoring values;
-ordered optional axes and indexed override descriptions use the canonical v1
-String records documented in the public API guide. They are not undocumented encodings in
-the old `semantic` String parameter or new working runtime parameter kinds.
+ordered optional axes and indexed descriptions use the canonical `v1` String
+records written by the installed helpers (`v1;<ordinal>:<description hex>;...`
+for `input_descriptions`, `v1;<axis or _>;...` for `input_axes`).
 
 | Parameter | Type / range | Default and conditions |
 | --- | --- | --- |
-| `metadata_mode` | String: respect, raw, override | respect; authoring helpers serialize it explicitly. |
-| `input_overrides` | Static index-to-description map using the shared tensor metadata schema | Only for override; at least one valid input index. Replace the supplied inputs' effective descriptions for this call; other inputs retain theirs. |
-| `output_description` | Optional shared tensor metadata description, including per-channel definitions and explicit groups | Explicit channel/group fields authorize corresponding target reinterpretation in A/B/C. Match inferred shape/dtype/axes, propagate omitted applicable component fields and discard inapplicable model-dependent fields. No group or numerical conversion is guessed. |
+| `input_descriptions` | Optional sorted, unique input-ordinal-to-`TensorDescription` records | Absent means no input is described. Each entry is validated against its input and used only for axis resolution and C name/role selectors in this invocation. |
 | `layout` | String: auto, view, materialize | auto; direct nodes provide it explicitly. |
 | A: `axis` | Int64 cell-axis index in [0,input_cell_rank] | Required; insertion position, no negative shorthand; excludes batch prefix. |
-| B: `input_axes` | Optional ordered list of n optional Int64 cell-axis indices, each in [0,input_cell_rank) | Omitted entries require a unique effective metadata axis. Supplied entries assert agreement in respect/override; all entries are required in raw. |
+| B: `input_axes` | Optional ordered list of n optional Int64 cell-axis indices, each in [0,input_cell_rank) | An omitted list or `_` entry requires that input's description to supply `channel_axis`. A supplied entry must agree with a described axis. |
 | B: `output_axis` | Int64 cell-axis index in [0,input_cell_rank) | Required; no implicit channel-last default. |
 
-For A, an existing effective channel axis is an error, including extent one.
-Raw does not convert a physical image backing into another layout by clearing
-labels. Image inputs and outputs must satisfy the kernel storage contract at
+For A, a described channel axis is an error, including extent one. A
+description does not convert a physical image backing into another layout. Image inputs and outputs must satisfy the kernel storage contract at
 their actual address maps; new interpretations may require explicit conversion
 or materialization. Output image axes/groups must be structurally established,
 not inferred from rank or channel count alone. Generic tensor output remains
@@ -287,8 +255,8 @@ source support is the exact union over requested mapping entries, including
 deduplication when multiple destinations select the same source component.
 
 There is no Control payload and no additional sample Validation domain. Static
-descriptor checks cover every connected input's shape/dtype, axis and consumed
-metadata even if its payload is unrequested. Explicit output grouping does not
+descriptor checks cover every connected input's shape/dtype, axis and supplied
+description even if its payload is unrequested. Explicit output grouping does not
 add RGB/alpha read closure. Necessary upstream Whole computation or intrinsic
 producer failures retain their own scope; a raw consumer cannot manufacture a
 missing value from a failed producer.
@@ -301,7 +269,8 @@ Changing an unselected input channel dirties no observed output samples. Changes
 to arity, shape, axis, prefix counts or consumed descriptions invalidate the
 compiled descriptor/mapping; no pixel-only cache may conceal them. Coordinate
 translation occurs only through the declared index formulas, never by comparing
-physical addresses or grid origins.
+physical addresses or grid origins. Changing an `input_descriptions` entry
+changes the invocation identity.
 
 Every output element has exactly one source. C may reuse that source for several
 destinations; A/B may likewise receive aliased input ports. This is local exactness, not
@@ -328,7 +297,7 @@ sample publication. Packed ROI export is a separate read operation.
 source, metadata, cancellation or resource failure by retrying a different
 layout. `view` fails with ViewUnavailable if no legal view exists. `materialize`
 always creates separate result storage. A view retains its backing owner and
-the mapping/metadata needed to keep every authorized access valid after source
+the mapping needed to keep every authorized access valid after source
 handles or ExecutionContext retire. Complete source provenance alone is not
 enough: current byte mappings, component order, storage policy and requested
 coverage must also agree. Generic tensor views require a representable legal
@@ -370,9 +339,8 @@ untouched.
 
 ## Reference algorithm and permitted optimizations
 
-1. Validate static parameters, all input descriptors and effective descriptions;
-   infer axes, output shape, B prefix counts or C's resolved mapping table, and
-   the explicit/projected output component/group descriptions.
+1. Validate static parameters, all input descriptors and supplied descriptions;
+   infer axes, output shape, B prefix counts or C's resolved mapping table.
    This phase reads no payload and performs no color-domain validation.
 2. Partition Q by input channel ownership using the exact formulas above.
    Declare per-port Data and Descriptor support and acquire only needed windows.
@@ -381,8 +349,8 @@ untouched.
    destination pages before giving a bounded write window to the operation.
 4. Enumerate each requested input-owned region and copy d bytes per sample into
    its mapped output position, or publish the proven equivalent retained view.
-5. Check cancellation/currentness and publish the exact requested coverage and
-   coherent output metadata only after all required work succeeds.
+5. Check cancellation/currentness and publish the exact requested coverage only
+   after all required work succeeds.
 
 CPU optimizations can coalesce consecutive source and destination row runs only
 when their complete byte intervals are both authorized and contiguous. SIMD
@@ -396,7 +364,7 @@ output channels without mutating the source.
 
 | Failure | Phase | Status / scope |
 | --- | --- | --- |
-| Zero inputs, malformed mode/description, missing or out-of-range axis, illegal rank insertion, forbidden override, conflicting coordinate/component assertion | Compile/direct preflight | InvalidArgument / InvalidDomain, schema origin. |
+| Zero inputs, malformed or unsorted `input_descriptions`, missing or out-of-range axis, axis that conflicts with a description, illegal rank insertion, absent or ambiguous C selector | Compile/direct preflight | InvalidArgument / InvalidDomain, schema origin. |
 | Dtype mismatch, incompatible nonchannel extents, unsupported tensor rank/type or channel-table length | Compile/direct preflight | TypeMismatch / None. |
 | Checked shape/prefix overflow, host port/graph capacity or resource/work admission failure | Inherited validation/admission phase | Preserve the shared NUM/kernel status rather than truncate or wrap. |
 | Forced view cannot represent the requested result | Requested observation evaluation | InvalidArgument / InvalidDomain; diagnostic ViewUnavailable. |
@@ -419,28 +387,24 @@ sample bits; descriptor/discrete results are exact. Include these cases:
   and channel-axis movement; B rank-one vectors and all legal axis positions.
 - Same-dtype limits and raw bit fixtures; reject mixed dtypes, unequal extents,
   implicit broadcast, invalid axes, rank-zero and A rank-eight inputs.
-- Preserve duplicates; named extraction subsequently reports ambiguity. Reject
-  unredefined respect-mode interpretation/grid conflicts; accept explicitly
-  assigned target semantics for Gray/Black-White and mixed-source components in
-  A/B/C. Verify only declared destination fields are reinterpreted, with exact
-  bits and no implicit numerical conversion. Source override/raw affects only
-  the invocation; destination assignment does not change source selectors/grids.
+- Duplicate names in an `input_descriptions` entry make only the matching C
+  selector ambiguous. Gray/Black-White and mixed-source components assemble by
+  index with exact bits and no numerical conversion; the output carries no
+  description, and a consumer given an RGB description reads the result as RGB.
+  An `input_descriptions` entry affects only its invocation and its identity.
 - C covers mixed source structures, selector name/role/index equivalence and
   ambiguity, source omissions/reuse, duplicate/hole rejection, mapping order,
-  destination fan-out dirty support and explicit R-to-Lab-b* reinterpretation.
+  destination fan-out dirty support and an R channel copied to slot 2.
 - Full versus offset/disjoint ROI and y/x=[127,130) across four tiles for T=128;
   select one output channel and instrument that other input payloads are not
   requested. Compare Data and dirty support against the independent mapping.
 - Generic positive/negative/zero strides; continuous and tiled images; differing
   legal tile configurations across DAGs and rejection of mismatched geometry
-  within one DAG; raw cannot bypass the image import boundary.
+  within one DAG; a description cannot bypass the image import boundary.
 - View success when genuinely representable, forced-view failure for unrelated
   owners, auto materialization, repeated source aliases, resource/metadata/work
   limits, cancellation, cache-off, and surviving result/windows after context
   teardown. Verify backing charges retire with the last owner.
-
-The public assembly integration fixture exercises WorkflowDocument, Compiler,
-ExecutionContext, exact output bytes and partial channel ROIs.
 
 Benchmark correctness first, then A assembling four independent Float32
 [4096,4096] planes and B concatenating RGB plus alpha for the same spatial
@@ -456,24 +420,14 @@ metadata/staging peak and retained owners. No throughput guarantee is inferred.
 Repository contracts and source links above establish the inspected baseline.
 The byte-copy and index equations are specified directly; no external commercial
 pixel-compatibility claim is made (U: unverified under the template's convention).
-No operator-local behavior question remains open. The current implementation supplies canonical metadata and mapping encodings,
+No operator-local behavior question remains open. The current implementation supplies canonical description and mapping encodings,
 native dtypes, exact dependency/publication support, legal view checks and the
 member registrations.
 
-Documentation-level verification compared independent coordinate scatter and
-gather equations for 105 A cases, 141 B cases and 204 C cases across legal ranks
-and axis positions. C checks included mixed component/channel sources, repeated
-selection, selected-source support, dirty fan-out, and invalid destination maps.
-These 450 cases check the specified index equations only; integration execution,
-metadata projection and physical storage are verified by the current CPU test
-suite described in the architecture reference.
-
 ## Canonical image alpha constraint
 
-Under the 2026-09-23 FMT-common revision, explicit complete image descriptions
-use straight colors and internal alpha indices only. A/B/C target assignment
-can reinterpret copied values but cannot establish a persistent external alpha
-relation or declare a canonical premultiplied image. Copying a premultiplied
-boundary component does not numerically recover straight color. Preserve its
-component provenance unless explicit target reinterpretation is requested.
+Under FMT-common, complete image descriptions supplied to consumers use straight
+colors and internal alpha indices only. Assembly cannot establish a persistent
+external alpha relation or declare a canonical premultiplied image. Copying a
+premultiplied boundary component does not numerically recover straight color.
 Missing alpha companions are not resolved through another tensor's owner.

@@ -326,17 +326,20 @@ int main() {
   schema.id = "test.large_metadata";
   schema.fields = {
       {"empty", ElementType::UInt8, {ResultExtentKind::RuntimeCount}, {}}};
-  for (unsigned i = 0; i < 16; ++i) {
-    ResultFacet facet;
-    facet.key = "facet_" + std::to_string(i);
-    facet.payload.assign(65536, static_cast<std::uint8_t>(i));
-    schema.metadata.push_back(std::move(facet));
+  for (unsigned i = 0; i < 15; ++i) {
+    ResultFieldSpec field;
+    const auto key = "field_" + std::to_string(i) + std::string(100, 'x');
+    field.key.assign(key.data(), key.size());
+    field.element_type = ElementType::UInt8;
+    field.rows = {ResultExtentKind::Fixed, 1};
+    field.record_shape = {1, 1, 1, 1, 1, 1, 1};
+    schema.fields.push_back(std::move(field));
   }
   PS_CHECK(schema.validate(true).ok());
   PS_CHECK(schema.canonical_size() == schema.canonical().size());
   ResourceLimits limits;
-  limits.capacity[ResourceKind::Host] = 16384;
-  limits.capacity[ResourceKind::Metadata] = 16384;
+  limits.capacity[ResourceKind::Host] = 1024;
+  limits.capacity[ResourceKind::Metadata] = 1024;
   ResourceBudget budget(limits);
   large_allocations = 0;
   inspect_allocations = true;
@@ -356,7 +359,6 @@ int main() {
   image.key = "pixels";
   image.descriptor = {ElementType::Float32, {1, 1}};
   image.layout.channel_axis = {};
-  image.facets = {{"test.large", 1, std::vector<uint8_t>(65536, 9)}};
   image_schema.tensors.push_back(std::move(image));
   PS_CHECK(image_schema.validate(true).ok());
   large_allocations = 0;

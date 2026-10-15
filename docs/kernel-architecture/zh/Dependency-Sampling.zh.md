@@ -6,7 +6,7 @@ Registry 持有不可变 operation definition。Continuation 保留 prepared met
 
 ## STMap Result 契约
 
-`image.stmap(source, map, boundary)` 要求 source Result 使用 `photospider.image` v1 schema，含一个 `pixels` tensor 且没有 fields，语义为 canonical 线性预乘 Float32 RGBA，sample shape 为 `[F,L,Hs,Ws,4]`，`batch_axes=[F,L]`。Map 是一个恰含一个 tensor 且无 fields 的 Result，可使用任意结构有效的 schema id/version/member key，dtype 为 Float64，shape 为 `[Ho,Wo,2]`，facets 为空。其 `batch_axes` 可以为空，此时同一 map 广播到所有 source frame/layer；也可以等于 source batch axes。Source H/W 轴最大为 2^40。输出端口 `value` 是 canonical `photospider.image` v1/member `pixels` Result，Float32 shape `[F,L,Ho,Wo,4]`，并保留 source frame/layer extents。
+`image.stmap(source, map, boundary)` 要求 source Result 使用 `photospider.image` v1 schema，含一个 `pixels` tensor 且没有 fields，语义为 canonical 线性预乘 Float32 RGBA，sample shape 为 `[F,L,Hs,Ws,4]`，`batch_axes=[F,L]`。Map 是一个恰含一个 tensor 且无 fields 的 Result，可使用任意结构有效的 schema id/version/member key，dtype 为 Float64，shape 为 `[Ho,Wo,2]`。其 `batch_axes` 可以为空，此时同一 map 广播到所有 source frame/layer；也可以等于 source batch axes。Source H/W 轴最大为 2^40。输出端口 `value` 是 canonical `photospider.image` v1/member `pixels` Result，Float32 shape `[F,L,Ho,Wo,4]`，并保留 source frame/layer extents。
 
 必需 String 参数 `boundary` 没有默认值，Empty 请求也必须提供：
 
@@ -18,7 +18,7 @@ Registry 持有不可变 operation definition。Continuation 保留 prepared met
 | `reflect` | 周期 `2N`，重复端点：`p<N ? p : 2N-1-p`。 |
 | `mirror` | 周期 `2N-2`，不重复端点：`p<N ? p : 2N-2-p`。 |
 
-`N=1` 时，所有非 constant 模式都选坐标零。这些映射使用全局 source 坐标，不以 fragment 为单位分别应用边界。静态准备会检查 canonical source metadata、map tensor shape/facets/batch 兼容性、source 轴上限和 boundary 名称。Empty demand 执行这些检查，但不请求 sample payload。
+`N=1` 时，所有非 constant 模式都选坐标零。这些映射使用全局 source 坐标，不以 fragment 为单位分别应用边界。静态准备会检查 canonical source metadata、map tensor shape/batch 兼容性、source 轴上限和 boundary 名称。Empty demand 执行这些检查，但不请求 sample payload。
 
 对 map 坐标 `u` 和 `v`，操作从 `l=floor(u-0.5)`、`t=floor(v-0.5)` 确定四个邻居。小数偏移、权重和通道输出为：
 
@@ -50,6 +50,6 @@ Program 的状态、tensor windows、workspace、输出和 work 都计入 Root l
 
 ## 算法观察组与数值诊断
 
-Structured Result callback 通过 `ResultProgramPhase::report_numeric` 提交有界 `NumericDiagnostics`。报告包含实际 CPU profile、实现身份、evaluated values、strict fallback 和有界原因分类。Result callback dispatch 前，host 会从 Root 资源中准入对应 output/backend 的 `OperationTiming` 记录。每个 poll 的报告只合并一次，包括返回 Need 或失败的 poll。Callback 失败时，host 会先锁存首个错误，再合并该次报告；报告合并失败不会替换原始错误。若 `BackendUnavailable` 符合 CPU fallback 条件，host 会在 CPU 重启前记录失败的 GPU attempt。
+Structured Result callback 通过 `ps::report_numeric` 提交有界 [`NumericDiagnostics`](../../../include/photospider/ops/numeric/diagnostics.hpp)。报告包含实际 CPU profile、实现身份、evaluated values、strict fallback 和有界原因分类。Result callback dispatch 前，host 会从 Root 资源中准入对应 output/backend 的 `OperationTiming` 记录。每个 poll 的报告只合并一次，包括返回 Need 或失败的 poll。Callback 失败时，host 会先锁存首个错误，再合并该次报告；报告合并失败不会替换原始错误。若 `BackendUnavailable` 符合 CPU fallback 条件，host 会在 CPU 重启前记录失败的 GPU attempt。
 
 `NumericDiagnostics::evaluated_values` 统计已报告的算术尝试，包括之后失败的工作。`OperationTiming::computed_elements` 是另一个计数：对 Result publication，它统计新增的 field rows 和 tensor samples。后续 Result revision 只统计相较前一 revision 新增的 rows 与 coverage；cache-hit publication 不增加 computed elements。逻辑计数超出 `UINT64_MAX` 或 sample cardinality 不可表示时，计数会饱和到 `UINT64_MAX` 并设置 `computed_elements_saturated`；恰好等于 `UINT64_MAX` 的精确计数不会设置该 flag。诊断计数饱和不会使原本合法的 Result 失效。这些诊断不改变语义身份，也不能证明精度界。

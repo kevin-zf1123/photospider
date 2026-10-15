@@ -28,7 +28,7 @@ and in the named family contract take precedence.
 
 Compute elementwise `a/b`. Inputs `a` and `b` must have identical shapes
 and dtypes. Support Float32 and Float64 only; output `values` preserves
-the input dtype and shape and has empty facets. There are no static numeric
+the input dtype and shape and has no attached domain description. There are no static numeric
 parameters. Inherit the [binary contract](NUM-05_binary_contract.md), including
 exact per-input demand, validation, resources, lifetime, errors and acceptance.
 

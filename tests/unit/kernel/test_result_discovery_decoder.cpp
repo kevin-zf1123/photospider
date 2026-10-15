@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "execution/result_native.hpp"
-#include "photospider/data/color_array.hpp"
 #include "plugin/dependency_discovery.hpp"
 
 namespace {
@@ -36,7 +35,7 @@ ResultProgramMetadata metadata(unsigned mode) {
     tensor.batch_axes = {2, 2};
     tensor.descriptor.shape = {1, 2, 3};
     tensor.layout.channel_axis = 2;
-    tensor.facets = {encode_color_array(ColorArrayDescriptor{}).take_value()};
+    tensor.atomic_trailing_axes = 1;
   }
   if (mode == 22)
     tensor.descriptor.shape = {1, UINT64_C(1) << 40};

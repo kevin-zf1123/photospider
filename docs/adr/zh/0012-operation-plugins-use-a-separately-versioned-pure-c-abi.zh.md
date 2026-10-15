@@ -1,7 +1,7 @@
 # ADR 0012：Operation Plugin 使用版本化 C 契约
 
 - 状态：已接受
-- 提议中的后继：[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md) 以前缀协商取代精确大小的表规则，并让内置算子使用同一条 C 导入路径。在 ADR 0022 被接受并实现之前，本 ADR 描述 ABI 2。
+- 提议中的后继：[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md) 以前缀协商取代精确大小的表规则，并让内置算子使用同一条 C 导入路径。在 ADR 0022 被接受并实现之前，本 ADR 描述 ABI 4。
 
 ## 1. 核心摘要 (TL;DR)
 Operation plugin 和 data provider 通过独立版本化的 C 接口跨越 kernel 边界。Host 在发布 registry 记录前校验并复制 descriptor。这样 compiler 元数据不依赖 plugin 的 C++ 对象布局；native plugin 仍在 host 进程和信任域中运行。
@@ -23,18 +23,18 @@ Library 自有的表在 destroy callback 执行时仍保持映射。Host 拥有�
 ## 3. 契约规约与接口
 
 ```c
-#define PS_RESULT_OPERATION_ABI_VERSION_2 2U
-const ps_result_operation_plugin_api_v2 *
-ps_result_operation_plugin_get_api_v2(void);
+#define PS_RESULT_OPERATION_ABI_VERSION_4 4U
+const ps_result_operation_plugin_api_v4 *
+ps_result_operation_plugin_get_api_v4(void);
 #define PS_DATA_PROVIDER_ABI_VERSION_1 1U
 const ps_data_provider_api_v1 *ps_data_provider_get_api_v1(void);
 ```
 
-Operation-plugin C 契约使用 standalone Result ABI 2 table，声明 Result ports、tensor members、fields、staged callbacks、dependency relations 和 Result publication。Data-provider C table 仍单独使用 ABI 1。当前 table 布局与 callback 契约见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。
+Operation-plugin C 契约使用 standalone Result ABI 4 table，声明 Result ports、tensor members、fields、staged callbacks、dependency relations 和 Result publication。Data-provider C table 仍单独使用 ABI 1。当前 table 布局与 callback 契约见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。
 
 Result callback 借用 query 与 phase-service records。Host 校验 Needs、typed relations、publication coverage、resource limits、cancellation 和 backend fallback 后才发布 Result。GPU allocation tokens 和 owning tensor windows 在 release 或 callback retirement 前保留 backing ownership；普通 service pointers 在 callback 返回后失效。
 
-Loader 会核对准确的 Result ABI 版本和结构尺寸、自然对齐、指针与计数配对、记录数量和 key 长度上限、严格 UTF-8 key、算术溢出、封闭 enum/flag 组合、必需 callback、input/output schema 约束、parameter/facet 限额及恰好一次的 destroy 所有权。Runtime publication 会校验实际 tensor 和 field coverage。多记录更新采用 copy-then-swap，因此分配失败或后续记录无效时不会发布部分前缀。刚打开库时取得的 guard 会在可安全读取 destroy callback 后接管它，并在任何拒绝路径关闭库。Unload 前先销毁已发布的 plugin 表。
+Loader 会核对准确的 Result ABI 版本和结构尺寸、自然对齐、指针与计数配对、记录数量和 key 长度上限、严格 UTF-8 key、算术溢出、封闭 enum/flag 组合、必需 callback、input/output schema 约束、parameter 限额及恰好一次的 destroy 所有权。Runtime publication 会校验实际 tensor 和 field coverage。多记录更新采用 copy-then-swap，因此分配失败或后续记录无效时不会发布部分前缀。刚打开库时取得的 guard 会在可安全读取 destroy callback 后接管它，并在任何拒绝路径关闭库。Unload 前先销毁已发布的 plugin 表。
 
 通用 operation callback 同步执行。输入 view 和输出 sink 仅在调用期间借用；接受的通用 Value 输出会在返回前复制或冻结。Sink 第一次发布尝试就占用该 sink，即使校验失败也一样；第二次尝试会留下 sticky violation。Host 先检查 cancellation，然后依次检查 sink 分配失败、malformed image output 和重复发布。若 sink 已经尝试发布后 callback 又返回 backend unavailable，则不会触发 fallback：已接受的输出变成 `OperationFailed`，第一次发布被拒绝时则返回 sink 保留的类型化错误。未知非零返回值变为 `OperationFailed`。只有 GPU attempt 在尚未尝试发布 sink 时明确报告 backend unavailable，且复制的 trait 允许时，才可请求 CPU fallback。
 

@@ -38,7 +38,7 @@ Inherit the [scatter contract](NUM-10_scatter_contract.md) for ports, shapes,
 Whole demand, index validation, storage and shared exceptional-value rules.
 Every input is a Result with exactly one tensor member at an unrestricted key;
 its `sample_shape()` includes batch axes. The `values` output is a Result using
-`photospider.tensor` / `samples`, with full ordinary output shape and no facets
+`photospider.tensor` / `samples`, with full ordinary output shape and no attached domain description
 or batch topology. Nonempty demand reads complete `base`, `indices` and `updates`
 with data, validation and descriptor support (role 13); Empty demand reads no
 payload and performs no sample arithmetic. The kernel computes the complete

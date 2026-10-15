@@ -13,7 +13,7 @@ clarification_status: complete
 
 The default registry provides `alpha.associate_<profile>` and
 `alpha.unassociate_<profile>` for `strict`, `accelerated_apple_silicon`, and
-`accelerated_x86_64`. Each uses Result ABI 3. Semantic calls bind one Result; raw
+`accelerated_x86_64`. Each uses Result ABI 4. Semantic calls bind one Result; raw
 plane/scalar calls may bind a second Result. The family and its members remain
 Proposed; status records design acceptance separately from implementation.
 
@@ -49,15 +49,15 @@ Each call converts one explicit RGB or Gray group. Unselected groups, depth,
 normals, emission and AOVs are copied unchanged. There is no premultiplied
 Lab/CMYK semantic conversion. Multiple groups are converted by explicit nodes;
 a partially converted multi-group tensor remains a boundary payload while any
-complete color group is premultiplied. B may declare a complete canonical image
-only when all its complete color groups have straight interpretations. This is
-a structural descriptor check, not a sample-validation closure over other groups.
+complete color group is premultiplied. A downstream consumer may use a complete straight-image interpretation
+only when all required groups have been converted. This is
+a check of the explicit description, not a sample-validation closure over other groups.
 
 A requires the selected group to be straight with an internal alpha reference;
 B requires it to be explicitly premultiplied with an internal alpha reference.
 Already-target states fail preflight. A color group without alpha must first
-receive an internal alpha through an explicit assembly/edit. Override can change
-effective source interpretation, but not the operation's output representation.
+receive an internal alpha through an explicit assembly/edit. The caller supplies
+`input_description` for this invocation; it does not change the operation's arithmetic.
 The original input and its other consumers remain unchanged.
 
 The arithmetic acts on stored coordinates: P=alpha*C even when C has encoded
@@ -69,7 +69,7 @@ Alpha must be finite in [0,1] when consumed by semantic color conversion.
 ## Ports, shape and static parameters
 
 Input `input` and output `values` have the same shape and Float32/Float64 dtype. A call connects one source Result and optionally one explicit alpha Result for raw plane/scalar modes; each connected Result contains exactly one tensor and no fields. Nonscalar batch prefixes match exactly; scalar weights are unbatched shape `[1]`. The complete sample rank, including batch and cell axes, is at most 8 and full sample count is at most 2^40.
-In semantic modes the input has a declared channel axis, selected RGB indices
+With `input_description`, the input has a declared channel axis, selected RGB indices
 or a Gray index, and a distinct internal alpha index outside those color indices.
 Resolve index/name/role selectors by the FMT-01 exact unique namespace rules.
 There is no HWC assumption. A channel axis contains at most 65,536 slots. Let S
@@ -80,15 +80,14 @@ and retains its rank; no rank-zero tensor is produced.
 
 | Parameter | Definition / default |
 | --- | --- |
-| metadata_mode | respect by default; explicit override or raw. |
-| metadata_override | Call-local effective source description; only with override. No external sample binding. |
+| input_description | Optional explicit TensorDescription. Its presence selects described RGB/Gray association; its absence selects raw arithmetic with explicit structure and components. |
 | group | Required explicit unique RGB/Gray group in semantic modes. |
 | input_structure / axis | Structure/axis assertion consistent with the effective description; raw supplies structure explicitly. |
 | components | Raw-only nonempty distinct selected indices, or component 0 for a tensor without a channel axis. |
 | alpha_source | Semantic: selected group's internal alpha reference, optionally asserted by an explicit matching internal selector. Raw: required internal index, explicit plane input or explicit scalar input. |
 | alpha | Raw-only optional explicit weight port, same dtype; plane has exactly S (full input shape for a component input), scalar has exactly [1]. |
 
-Semantic use of an external alpha port fails preflight. A standalone Gray plane
+Described association with an external alpha port fails preflight. A standalone Gray plane
 must be assembled with alpha first. In raw mode, plane versus scalar is explicit;
 no implicit squeeze, broadcast or resizing occurs. Empty S uses internal/scalar
 raw weights rather than rank-zero external planes. Structure, selectors, group
@@ -122,7 +121,7 @@ unassociate:
 
 All positive alpha values, including subnormals, follow the arithmetic branch.
 Never replace a small positive value by zero or insert an epsilon denominator.
-Semantic output must remain finite: a division result rounding to infinity fails
+Described association output must remain finite: a division result rounding to infinity fails
 with ArithmeticOverflow rather than clipping. Gradual underflow to a subnormal
 or signed zero is allowed. The special a=0 branch is canonical positive zero;
 for a>0, zero signs follow NUM arithmetic. Internal alpha and other pass-through
@@ -144,32 +143,27 @@ check applies. NUM's NaN priority/payload, signed zero, division-by-zero and
 floating-overflow outputs apply; 0/0 is NaN, not the semantic +0 branch.
 This is deliberately a different formula from semantic association at zero.
 
-Raw does not change an association label, establish an external alpha relation,
-or claim completion of a boundary conversion. Retain applicable descriptive
-fields without sample-validity evidence. When raw edits an internal alpha
-channel, its descriptor still refers to that current logical channel, never an
-old snapshot. Original input samples supply every operand, including when the
+Raw output contains only structure and samples. Callers explicitly provide any
+association and alpha interpretation to downstream operations. Original input samples supply every operand, including when the
 selected component is also the raw weight. No raw operation defines canonical
 premultiplied images or semantic premultiplied Lab/CMYK.
 
-## Output metadata and partial coverage
+## Output interpretation and partial coverage
 
-A changes the selected group's boundary interpretation to premultiplied and
-removes the claim that the whole result is a canonical complete image. B changes
-the selected group to straight; it may restore canonical image interpretation
-when no other complete group remains premultiplied. Retain model, primaries,
-white, transfer, units and explicit internal alpha indices. Remove inapplicable
-sample guarantees, including binary Gray storage after multiplication. Other
-components retain their applicable meaning; no full-color sample validity is
-certified by producing only a subset.
+A computes premultiplied samples and B computes straight samples for the selected
+group. Neither writes a description into the result. A caller connecting A to B
+must supply B with an explicit premultiplied input description; unrelated groups
+and any later interpretation are likewise configured by the caller. Shape,
+channel positions, alpha bits and copied samples follow the mapping above.
+No full-color validity is certified by producing only a subset.
 
-There is no external alpha owner, snapshot or origin identity in result metadata.
+There is no external alpha owner, snapshot or origin identity in the result.
 The alpha index refers only to this output tensor's channel. A request for R may
 read input alpha without publishing output alpha. A downstream unassociate or
 other consumer needing alpha must explicitly request the alpha channel through
 the declared DAG. If only a detached partial result with missing alpha coverage
 is available, access fails under normal missing-coverage rules. It must not read
-an old input alpha via metadata or manufacture alpha=0/1. This rule preserves
+an old input alpha through hidden configuration or manufacture alpha=0/1. This rule preserves
 exact output coverage and does not force alpha production for R alone.
 
 Owners, read windows and declared DAG edges have their normal retained lifetime.
@@ -199,7 +193,7 @@ Data and Validation dependencies.
 
 ## Reference algorithm, storage and resources
 
-1. Resolve mode, effective description, source representation, axis and selectors.
+1. Resolve the explicit description or raw structure, source interpretation, axis and selectors.
    Infer unchanged shape/dtype and target interpretation; reject invalid static
    relationships without scanning samples.
 2. Compute exact Q/T input support; admit and acquire its immutable read windows.

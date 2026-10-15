@@ -2,6 +2,7 @@
 
 - 状态：Accepted
 - 英文权威文档：[ADR 0023](../0023-track-dependencies-between-fixed-tiles.md)
+- 当前边界：0.34.0 中，原 §3.5 放入生产者语义 descriptor 的 facet 和资源身份已被取代；该 descriptor 是已解析的 Result schema 加上固定的全局事实。
 - 相关：[ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)、[ADR 0017](0017-cpu-regional-execution-and-storage.zh.md)、[ADR 0018](0018-local-result-caches-and-frozen-execution.zh.md)、[ADR 0021](0021-independent-node-results.zh.md)、[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md)
 
 ## 1. 核心摘要（TL;DR）
@@ -146,7 +147,7 @@ tile 的载荷、覆盖范围和依赖记录一起提交后，该 tile 才可见
 
 ### 3.5 语义 descriptor 与生产进度
 
-生产者的语义 descriptor 包括其 schema、shape、元素类型、改变解释方式的 facet 和资源身份，以及一经确定就固定的全局结果事实。object 身份、发布 revision、当前覆盖范围和 sealed 标志记录的是生产进度。发布另一个 tile 只改变进度，不会使任何记录变为 dirty。语义 descriptor 变化时，引用该生产者的所有记录都变为 dirty。shape 或布局变化导致不再适配当前 plan 时，需要重新 prepare 和规划；旧 plan 的 tile 编号不会被复用。
+生产者的语义 descriptor 包括其已解析的 Result schema，以及一经确定就固定的全局结果事实（例如 field 行数）；该 schema 固定 schema id 和版本、fields、tensor 元素类型、shape、空间布局拓扑和 domain。该 descriptor 描述结构；Result 不附着领域标签。operation preparation 按显式身份选定的资源进入消费方 step 的物理身份（§3.8），配置留在使用它的 step 上，不随数值 Result 传递。object 身份、发布 revision、当前覆盖范围和 sealed 标志记录的是生产进度。发布另一个 tile 只改变进度，不会使任何记录变为 dirty。语义 descriptor 变化时，引用该生产者的所有记录都变为 dirty。shape 或布局变化导致不再适配当前 plan 时，需要重新 prepare 和规划；旧 plan 的 tile 编号不会被复用。
 
 ### 3.6 记录的生命周期
 

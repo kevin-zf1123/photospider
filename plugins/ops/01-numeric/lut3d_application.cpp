@@ -15,8 +15,9 @@
 #include "01-numeric/exact_lut3d.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/uniform_axis.hpp"
-#include "photospider/core/resource_allocator.hpp"
 #include "common/registry.hpp"
+#include "photospider/core/resource_allocator.hpp"
+#include "photospider/ops/color_array.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -89,21 +90,6 @@ Result<OperationPreparation> prepare(
         inputs[1].result_schema->tensors[0].sample_shape()[axis] > 256)
       return Answer(numeric_ops::array_parameter_error(
           "LUT3D axis extent must be 2..256"));
-  auto input_facet = encode_color_array(a),
-       output_facet = encode_color_array(b);
-  if (!input_facet.ok())
-    return Answer(input_facet.status());
-  if (!output_facet.ok())
-    return Answer(output_facet.status());
-  for (unsigned port = 0; port < 2; ++port) {
-    const auto& expected = port ? output_facet.value() : input_facet.value();
-    for (const auto& facet : inputs[port].result_schema->tensors[0].facets)
-      if (facet.key == "photospider.color-array" &&
-          (facet.version != expected.version ||
-           facet.payload != expected.payload))
-        return Answer(type_error(
-            "attached LUT3D colors disagree with static description"));
-  }
   auto available = numeric_ops::sequence_profile_available(profile);
   if (!available.ok())
     return Answer(available);
@@ -115,7 +101,6 @@ Result<OperationPreparation> prepare(
   auto schema = numeric_ops::numeric_tensor_schema(
       dtype == "float32" ? ElementType::Float32 : ElementType::Float64,
       inputs[0].result_schema->tensors[0].sample_shape());
-  schema.tensors[0].facets = {output_facet.take_value()};
   schema.tensors[0].atomic_trailing_axes = 1;
   output.metadata.result_schema =
       std::make_shared<const SchemaTemplate>(std::move(schema));

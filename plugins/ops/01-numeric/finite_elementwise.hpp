@@ -10,9 +10,8 @@
 #include <vector>
 
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "common/typed_need_validation.hpp"
+#include "common/floating_environment.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
-#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 enum class FiniteElementwise { Abs, Minimum, Maximum };
@@ -67,9 +66,6 @@ struct FiniteElementwiseProgram final {
         UINT64_MAX, phase.query.cancellation);
   }
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
-    auto checked_inputs = ops_validation::typed_inputs(phase);
-    if (!checked_inputs.ok())
-      return Result<ResultProgramPoll>(checked_inputs);
     auto scratch =
         math_take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));
     const auto& schema = *phase.query.output.result_schema;
@@ -119,9 +115,9 @@ struct FiniteElementwiseProgram final {
         phase.association ? std::vector<uint64_t>(phase.association->begin(),
                                                   phase.association->end())
                           : std::vector<uint64_t>{},
-        phase.query.tile_extent, phase.query.resources));
+        phase.query.tile_extent));
     if (!output.empty()) {
-      input_internal::Float32Environment environment;
+      plugin_internal::FloatingEnvironment environment;
       if (!environment.active())
         return Result<ResultProgramPoll>(Status{
             ErrorCode::OperationFailed, "numeric environment unavailable"});

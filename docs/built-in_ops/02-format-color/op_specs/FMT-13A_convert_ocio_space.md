@@ -28,14 +28,14 @@ or explicit raw slots. All common direction, execution, metadata, domain, resour
 layout and request rules apply. No transfer or unit conversion is inserted.
 
 Construct a ColorSpaceTransform with direction=forward by default; inverse swaps
-the effective endpoint interpretation. data_bypass defaults true. Respect/override
+the effective endpoint interpretation. data_bypass defaults true. Description-based calls
 reject isData entry/exit spaces; raw may use them. Keep recorded same-name and
 equalitygroup skips, including their Float64 narrowing boundary. reference_bridge
 defaults reject; config_default explicitly admits and records the configured
 scene/display bridge. Neither OPTIMIZATION_NONE nor no-op removes those checks.
 
-Semantic output publishes the effective destination's config/context identity
-and canonical space or its explicit compatible binding. Source and target names
+The effective destination is specified by explicit config/context identity
+and canonical space or a compatible binding supplied to later consumers. Source and target names
 alone do not establish native RGB primaries, normalized units or an ACES version.
 Copy alpha/AOVs outside the processor. Any requested transformed component
 consumes all three source components at the same point, including no-op cases.

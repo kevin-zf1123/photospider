@@ -31,7 +31,7 @@ batch axes. `input` is Float32/64, rank 1..8, positive extents and at most 2^40
 elements. Bounds are same-dtype scalar tensors of shape [1], finite and satisfy
 0<lower<upper. Output port `values` is an immutable Result using
 `photospider.tensor` v1/member `samples`, preserving input shape/dtype with
-empty facets. No implicit clipping occurs.
+no attached domain description. No implicit clipping occurs.
 The mathematical formula is (log2(input)-log2(lower))/(log2(upper)-log2(lower)), with whole-expression final rounding.
 The independent operation key selects the CPU profile; there is no additional static mode parameter.
 

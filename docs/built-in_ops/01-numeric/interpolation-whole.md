@@ -4,7 +4,7 @@ The six `numeric.mix_*` and `numeric.smoothstep_*` operations consume three tens
 
 ## Data and execution contract
 
-Each input Result supplies one tensor member; its member key is not fixed by these operations. Metadata specialization checks the first member of every input for equal `sample_shape()` and Float32 or Float64 dtype, rank 1 through 8, positive extents, and at most 2^40 samples. `sample_shape()` includes batch axes. The output Result uses schema `photospider.tensor`, tensor key `samples`, output port key `values`, and the full shape as ordinary axes with no facets or batch axes.
+Each input Result supplies one tensor member; its member key is not fixed by these operations. Metadata specialization checks the first member of every input for equal `sample_shape()` and Float32 or Float64 dtype, rank 1 through 8, positive extents, and at most 2^40 samples. `sample_shape()` includes batch axes. The output Result uses schema `photospider.tensor`, tensor key `samples`, output port key `values`, and the full shape as ordinary axes with no batch axes.
 
 ```text
 Input Result 0 ── Need role 13 ──┐

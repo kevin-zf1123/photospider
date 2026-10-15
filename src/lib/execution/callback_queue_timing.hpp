@@ -4,7 +4,7 @@
 #include <chrono>
 #include <cstdint>
 
-#include "core/checked_math.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/execution/execution.hpp"
 
 namespace ps::execution_internal {

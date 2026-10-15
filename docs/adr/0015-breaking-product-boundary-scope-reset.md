@@ -31,7 +31,7 @@ class Compiler final {
  public:
   explicit Compiler(std::shared_ptr<OperationRegistry> operations);
   Result<SemanticGraphIR> analyze(const GraphSnapshot& snapshot,
-                                  ResourceBindings resources = {}) const;
+                                  ResourceSet resources = {}) const;
   Result<OptimizedGraphIR> optimize(const SemanticGraphIR& semantic) const;
   Result<ExecutionPlan> plan(const OptimizedGraphIR& optimized,
                              const PlanningOptions& options = {}) const;
@@ -46,7 +46,7 @@ class PHOTOSPIDER_API ExecutionContext final {
 };
 ```
 
-These declarations reproduce the public compiler and execution method signatures; headers and unrelated declarations are omitted. `Compiler::analyze` accepts the graph snapshot and optional resource bindings. `ExecutionPlan` is a public class.
+These declarations reproduce the public compiler and execution method signatures; headers and unrelated declarations are omitted. `Compiler::analyze` accepts the graph snapshot and an optional `ResourceSet` of content-addressed `ImmutableResource` handles. Operation preparation selects resources from that set by explicit `ResourceIdentity`; prepared operations, plans, and execution state retain the selected owners, while a Result retains only the storage it actually holds. `ExecutionPlan` is a public class.
 
 The kernel owns `WorkflowDocument` interpretation, graph validation, semantic and optimized IR, operation traits, planning, `Value` and `Region` contracts, local execution, resource accounting, cancellation, backend selection, fallback, and result publication. `GraphContext` and `ExecutionContext` are independent objects; neither is a daemon session or a global registry entry. Stage digests and plan/cache keys are non-security identities for reproducibility and disposable derived data.
 

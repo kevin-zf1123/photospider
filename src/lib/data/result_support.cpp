@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <utility>
 
-#include "core/checked_math.hpp"
+#include "photospider/core/checked_math.hpp"
 
 namespace ps::data_internal {
 Status invalid_schema() {

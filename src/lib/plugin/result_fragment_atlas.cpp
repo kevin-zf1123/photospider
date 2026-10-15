@@ -3,10 +3,10 @@
 #include <utility>
 #include <vector>
 
-#include "core/checked_math.hpp"
-#include "core/status_helpers.hpp"
 #include "data/fragment_atlas_work.hpp"
 #include "data/result_window_access.hpp"
+#include "photospider/core/checked_math.hpp"
+#include "photospider/core/status_helpers.hpp"
 #include "photospider/data/fragment_atlas.hpp"
 #include "photospider/plugin/result_program.hpp"
 
