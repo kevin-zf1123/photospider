@@ -17,12 +17,12 @@
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
 std::uint64_t native_capacity = 0;
-SchemaTemplate schema(const ValueDescriptor& descriptor) {
+SchemaTemplate schema(const TensorDescriptor& descriptor) {
   auto result = multi_result::schema(descriptor.element_type, descriptor.shape);
   result.id = "test.native.tensor";
   return result;
 }
-ResultRef source(const ResourceBudget& root, const Value& backing) {
+ResultRef source(const ResourceBudget& root, const TensorSpan& backing) {
   auto builder = multi_result::take(ResultBuilder::start(
       root, schema(backing.descriptor()), "native.source"));
 
@@ -54,7 +54,11 @@ struct Scale {
     if (!requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false,
+           multi_result::take(TileSet::range(
+               phase.resources, 0,
+               phase.query.input_tile_grids[0][0].tile_count()))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     auto builder = multi_result::take(ResultBuilder::start(
@@ -166,15 +170,11 @@ OperationDefinition operation(std::string key, bool host,
   op.traits.input_count = 1;
   op.traits.input_schema.resize(1);
   auto& input = op.traits.input_schema[0];
-  input.kind = OperationPortKind::Result;
+
   input.element_type = static_cast<unsigned>(ElementType::Float32);
   auto& output = op.traits.outputs[0];
   output = multi_result::output("value", schema({ElementType::Float32, {4}}));
   output.continuation_bytes = sizeof(Scale);
-  if (host) {
-    output.region_rule = OperationRegionRule::Whole;
-    output.preserve_output_views = true;
-  }
   output.output_schema.result_schema_id.clear();
   output.output_schema.result_schema_version = 0;
   output.output_schema.element_type = input.element_type;
@@ -211,7 +211,11 @@ struct NativeFailure {
     if (mode == 5 && !requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false,
+           multi_result::take(TileSet::range(
+               phase.resources, 0,
+               phase.query.input_tile_grids[0][0].tile_count()))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     if (phase.query.backend == Backend::Gpu) {
@@ -334,8 +338,8 @@ int main() try {
   const float inputs[] = {0, .25F, .5F, 1};
   std::memcpy(bytes.data(), inputs, 16);
   auto backing = multi_result::take(
-      Value::from_storage({ElementType::Float32, {4}}, Region::whole({4}),
-                          {0, {4}}, std::move(bytes).freeze()));
+      TensorSpan::from_storage({ElementType::Float32, {4}}, Region::whole({4}),
+                               {0, {4}}, std::move(bytes).freeze()));
   auto input = source(root, backing);
   WorkflowDocument doc;
   doc.inputs = {multi_result::declaration(1, "input", input.schema())};
@@ -431,7 +435,7 @@ int main() try {
       auto changed_bytes = multi_result::take(root.allocator().allocate(16));
       const float first = static_cast<float>(repeat + 1) / 8;
       std::memcpy(changed_bytes.data(), &first, 4);
-      auto changed_backing = multi_result::take(Value::from_storage(
+      auto changed_backing = multi_result::take(TensorSpan::from_storage(
           backing.descriptor(), backing.region(), backing.layout(),
           std::move(changed_bytes).freeze()));
       auto changed =
@@ -445,11 +449,11 @@ int main() try {
     }
   }
   auto first_backing = multi_result::take(
-      Value::from_storage(backing.descriptor(), backing.region(),
-                          backing.layout(), backing.storage()));
+      TensorSpan::from_storage(backing.descriptor(), backing.region(),
+                               backing.layout(), backing.storage()));
   auto second_backing = multi_result::take(
-      Value::from_storage(backing.descriptor(), backing.region(),
-                          backing.layout(), backing.storage()));
+      TensorSpan::from_storage(backing.descriptor(), backing.region(),
+                               backing.layout(), backing.storage()));
   auto first = source(root, first_backing),
        second = source(root, second_backing);
   doc.inputs = {multi_result::declaration(1, "first", first.schema()),
@@ -471,10 +475,10 @@ int main() try {
   PS_CHECK(numbers(shared_result.results.at("first")) ==
            numbers(shared_result.results.at("second")));
   // Distinct rank/origin/stride layouts sharing backing must not collide.
-  auto rank_five = multi_result::take(Value::from_storage(
+  auto rank_five = multi_result::take(TensorSpan::from_storage(
       {ElementType::Float32, {1, 1, 1, 1, 1}}, Region::whole({1, 1, 1, 1, 1}),
       {0, {0, 0, 0, 0, 0}}, backing.storage()));
-  auto rank_four = multi_result::take(Value::from_storage(
+  auto rank_four = multi_result::take(TensorSpan::from_storage(
       {ElementType::Float32, {1, 1, 1, 1}}, Region::whole({1, 1, 1, 1}),
       {0, {0, 0, 0, 1}, {1, 0, 0, 0}}, backing.storage()));
   first = source(shared_context.resource_budget().take_value(), rank_five);

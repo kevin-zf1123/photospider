@@ -1,3 +1,5 @@
+#include <cmath>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -17,7 +19,7 @@ void repeated_tensor_shapes() {
   member.batch_axes = {2};
   schema.tensors.push_back(member);
   OperationPortConstraint constraint;
-  constraint.kind = OperationPortKind::Result;
+
   constraint.tensor_key = "samples";
   OperationTraits traits;
   traits.input_count = 0;
@@ -30,7 +32,6 @@ void repeated_tensor_shapes() {
   traits.outputs[0].continuation_bytes = 1;
   traits.outputs[0].maximum_dependency_stages = 1;
   traits.outputs[0].result_schema = schema;
-  traits.outputs[0].region_rule = OperationRegionRule::Tiled;
   auto resolved = take(resolve_operation_traits(traits, 2, {}));
   OperationMetadata first, second;
   first.result_schema = std::make_shared<SchemaTemplate>(schema);
@@ -44,6 +45,35 @@ void repeated_tensor_shapes() {
       !different.ok() && different.status().code == ErrorCode::TypeMismatch,
       "repeated Result inputs include batch axes in homogeneous logical shape");
 }
+ValidationDefinition gain_validator(bool loose) {
+  ValidationDefinition validator;
+  validator.identity = {loose ? "test.gain.loose" : "test.gain.unit", 1,
+                        "gain/1"};
+  validator.prepare = [](const ValidationPreparation& preparation)
+      -> Result<std::shared_ptr<const void>> {
+    const auto& tensors = preparation.schema.tensors;
+    if (tensors.size() != 3 || tensors[2].key != "gain" ||
+        tensors[2].descriptor.element_type != ElementType::Float32 ||
+        tensors[2].sample_shape() != std::vector<std::uint64_t>{1})
+      return Result<std::shared_ptr<const void>>(
+          Status{ErrorCode::TypeMismatch, "expected named scalar"});
+    return Result<std::shared_ptr<const void>>(std::shared_ptr<const void>{});
+  };
+  validator.validate = [loose](const void*, const ValidationContext& context) {
+    auto window = context.acquire_tensor(2, Region::whole({1}));
+    if (!window.ok())
+      return window.status();
+    auto row = window.value().row_run({0});
+    if (!row.ok())
+      return row.status();
+    float value = 0;
+    std::memcpy(&value, row.value().data, sizeof(value));
+    return std::isfinite(value) && value >= 0 && value <= (loose ? 2 : 1)
+               ? Status::success()
+               : Status{ErrorCode::InvalidArgument, "invalid gain"};
+  };
+  return validator;
+}
 void scalar_prelude_workflows() {
   SchemaTemplate source_schema;
   source_schema.id = "test.scalar.members";
@@ -56,6 +86,10 @@ void scalar_prelude_workflows() {
   auto output_schema = source_schema;
   output_schema.tensors.resize(1);
   auto registry = std::make_shared<OperationRegistry>();
+  require(registry->register_validator(gain_validator(false)).ok(),
+          "unit gain validator");
+  require(registry->register_validator(gain_validator(true)).ok(),
+          "loose gain validator");
   auto starts = std::make_shared<int>(0);
   auto producer_starts = std::make_shared<int>(0);
   for (int profile = 0; profile < 5; ++profile) {
@@ -71,19 +105,17 @@ void scalar_prelude_workflows() {
     traits.input_schema.clear();
     if (consumer) {
       OperationPortConstraint constraint;
-      constraint.kind = OperationPortKind::Result;
+
       constraint.tensor_key = "gain";
       constraint.element_type = static_cast<uint32_t>(ElementType::Float32);
-      constraint.scalar_bounds = true;
-      constraint.maximum = profile == 4 ? 2 : 1;
+      constraint.validators = {gain_validator(profile == 4).identity};
       traits.input_schema = {constraint, constraint};
     }
     auto& output = traits.outputs[0];
-    output.output_schema.kind = OperationPortKind::Result;
+
     output.output_schema.result_schema_id = "test.scalar.members";
     output.output_schema.result_schema_version = 1;
     output.result_schema = consumer ? output_schema : source_schema;
-    output.region_rule = OperationRegionRule::Tiled;
     output.input_indices =
         consumer ? std::vector<uint32_t>{0} : std::vector<uint32_t>{};
     output.continuation_bytes = sizeof(ScalarPreludeState);
@@ -150,10 +182,13 @@ void scalar_prelude_workflows() {
       "selected named scalar is ready before consumer data poll and excluded "
       "NaN is not read");
   auto record = take(success.value().dependencies.tile_record({0, 0, 0}));
-  require(record && record->inputs.size() == 1 && record->inputs[0].whole &&
-              std::get<PlanWorkflowInput>(record->inputs[0].producer)
-                      .declaration_index == 0,
-          "selected scalar records Whole input and excludes the unused port");
+  require(
+      record && record->inputs.size() == 1 &&
+          record->inputs[0].tensor_slot == 2 &&
+          record->inputs[0].tiles.size() == 1 &&
+          std::get<PlanWorkflowInput>(record->inputs[0].producer)
+                  .declaration_index == 0,
+      "selected scalar records its named member and excludes the unused port");
   {
     auto cached_config = config;
     cached_config.result_cache_bytes = 4096;
@@ -260,13 +295,14 @@ void scalar_prelude_workflows() {
   auto shared_graph = std::make_shared<GraphContext>(shared);
   auto shared_plan = take(Compiler(registry).compile(*shared_graph)).plan;
   auto frozen = take(context.freeze(shared_plan, {{ignored}}));
-  auto warm_source =
-      context.execute_fragments(frozen, {{"loose", TileRequest{true, {}}}});
+  auto warm_source = context.execute_fragments(
+      frozen,
+      {{"loose", TileRequest{{{0, take(TileSet::range(root, 0, 1))}}}}});
   require(warm_source.ok(),
           "unbounded producer can publish a value valid for a looser consumer");
   const auto produced = *producer_starts, consumed = *starts;
-  auto restricted =
-      context.execute_fragments(frozen, {{"out", TileRequest{true, {}}}});
+  auto restricted = context.execute_fragments(
+      frozen, {{"out", TileRequest{{{0, take(TileSet::range(root, 0, 1))}}}}});
   require(!restricted.ok() &&
               restricted.status().code == ErrorCode::OperationFailed &&
               restricted.status().detail.node_id == 70 &&
@@ -325,16 +361,21 @@ void foundation_tensor_workflows() {
     binding.result = take(builder.seal());
     auto run = driver.prepare("core.identity", {binding});
     ResultRef identity;
-    auto result = driver.context->execute(run.plan, run.bindings);
+    const auto& grid = run.plan.steps()[0].tile_grids[0];
+    const auto tile = grid.tile_count() - 1;
+    const auto selected_region = take(grid.region(tile));
+    auto selected_plan = take(run.plan.tile_plan(
+        "out", {{{0, take(TileSet::range(driver.root, tile, tile + 1))}}}));
+    auto result = driver.context->execute(selected_plan, run.bindings);
     require(result.ok(), result.status().message.c_str());
     identity = result.value().results.at("out");
-    auto window =
-        take(identity.acquire_tensor(take(identity.descriptor()), 0, region));
+    auto window = take(identity.acquire_tensor(take(identity.descriptor()), 0,
+                                               selected_region));
     require(
         *take(window.row_run({UINT64_MAX - 2})).data == 0x72 &&
             window.storage_owner_token() == storage.get() &&
             take(identity.descriptor()).tensor_coverage(0) ==
-                take(Footprint::from_regions({UINT64_MAX}, {region})),
+                take(Footprint::from_regions({UINT64_MAX}, {selected_region})),
         "Result identity preserves huge broadcast owner and exact sparse ROI");
   }
   SchemaTemplate huge;
@@ -356,9 +397,12 @@ void foundation_tensor_workflows() {
   binding.name = "samples";
   binding.result = take(builder.seal());
   auto prepared = driver.prepare("core.identity", {binding});
+  const auto last_tile =
+      prepared.plan.steps()[0].tile_grids[0].tile_count() - 1;
   auto huge_output = driver.context->execute_fragments(
       take(driver.context->freeze(prepared.plan, prepared.bindings)),
-      {{"out", TileRequest{true, {}}}});
+      {{"out", TileRequest{{{0, take(TileSet::range(driver.root, last_tile,
+                                                    last_tile + 1))}}}}});
   require(huge_output.ok(), huge_output.status().message.c_str());
   auto result = huge_output.value().results.at("out");
   uint8_t byte = 0;
@@ -367,9 +411,12 @@ void foundation_tensor_workflows() {
                   .ok() &&
               byte == 0x5a,
           "huge rank2 Result identity reads a representable source span");
-  auto record = take(huge_output.value().dependencies.tile_record({0, 0, 0}));
-  require(record && record->inputs.size() == 1 && record->inputs[0].whole,
-          "nonspatial huge tensor records its Whole input dependency");
+  auto record =
+      take(huge_output.value().dependencies.tile_record({0, 0, 0, last_tile}));
+  require(record && record->inputs.size() == 1 &&
+              record->inputs[0].tiles.size() == 1 &&
+              record->inputs[0].tiles.contains(last_tile),
+          "nonspatial huge tensor records its selected tile dependency");
 }
 }  // namespace
 int main() {

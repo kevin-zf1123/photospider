@@ -10,7 +10,7 @@
 namespace ps::execution_internal {
 struct TileCacheSource final {
   ResourceString name;
-  bool whole = false;
+  std::uint32_t tensor_slot = 0;
   TileSet tiles;
 };
 // Each dependency keeps all matching active input ports. If an old shared
@@ -24,6 +24,7 @@ struct TileCacheRecord final {
   std::shared_ptr<const TileRecord> record;
   ResourceString contract;
   ResourceVector<TileCacheRoute> routes;
+  std::shared_ptr<const TileEvidence> evidence;
 };
 struct ReboundTileCache final {
   explicit ReboundTileCache(const ResourceBudget& root)

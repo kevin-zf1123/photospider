@@ -280,8 +280,6 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
           overlay(&effective, *channel.interpretation);
       }
     }
-    typed(effective.association.empty() || effective.association == "straight",
-          "premultiplied semantic boundary is unsupported");
     if (effective.profile || effective.configured) {
       typed(effective.analytic_binding.has_value(),
             "profile/configured source needs explicit analytic binding");
@@ -948,7 +946,7 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
   traits.diagnostics = {numeric_diagnostic_identity()};
   traits.input_count = 1;
   OperationPortConstraint port;
-  port.kind = OperationPortKind::Result;
+
   port.element_type_mask = 127;
   traits.input_schema = {port};
   traits.requires_metadata_specialization = true;
@@ -982,7 +980,6 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
   output.key = "values";
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
-  output.region_rule = OperationRegionRule::Tiled;
   output.continuation_bytes = sizeof(Continuation);
   output.maximum_dependency_stages = 2;
   op.prepare_static = [member, profile](const auto& inputs,

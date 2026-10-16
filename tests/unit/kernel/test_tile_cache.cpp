@@ -26,8 +26,10 @@ struct CacheProgram {
       ResultProgramNeed need;
       need.tiles.push_back(
           {0, false, false,
-           consumer ? take(TileSet::from_indices(phase.resources, {0, 1}))
-                    : phase.query.output_request.tiles});
+           consumer
+               ? take(TileSet::from_indices(phase.resources, {0, 1}))
+               : take(TileSet::range(phase.resources, phase.query.tile_unit,
+                                     phase.query.tile_unit + 1))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     const auto region = phase.query.tensor_outputs->boxes()[0];
@@ -59,13 +61,13 @@ struct Fixture {
   std::atomic<unsigned> consumer_starts{0};
   Fixture() {
     image.tensors[0].layout.spatial = true;
+    image.tensors[0].atomic_trailing_axes = 1;
     for (bool consumer : {false, true}) {
       OperationDefinition operation;
       operation.key = consumer ? "test.cache_consumer" : "test.cache_source";
       operation.traits.input_count = consumer ? 2 : 1;
       operation.traits.input_schema.resize(operation.traits.input_count);
       for (auto& input : operation.traits.input_schema) {
-        input.kind = OperationPortKind::Result;
         input.tensor_key = "number";
       }
       operation.traits.outputs = {multi_result::output(
@@ -144,7 +146,7 @@ int portable_routes() {
   auto payload = multi_result::binding(root, "payload", 4).result;
   for (TileIndex tile : {0, 1}) {
     TileRecord record(root);
-    record.unit = {first_producer, 0, tile};
+    record.unit = {first_producer, 0, 0, tile};
     PS_CHECK(record
                  .include({PlanWorkflowInput{first_input}, 0, false,
                            TileSet::from_indices(root, {tile}).take_value()},
@@ -184,7 +186,7 @@ int portable_routes() {
   PS_CHECK(restored.restore_ancestry(0, rebound.value().ancestry).ok());
   PS_CHECK(restored.install(0, rebound.value().task, payload).ok());
   ResourceVector<TileChange> edits{ResourceAllocator<TileChange>(root)};
-  edits.push_back({PlanWorkflowInput{next_input}, 0,
+  edits.push_back({PlanWorkflowInput{next_input}, 0, 0,
                    TileSet::from_indices(root, {1}).take_value(), false});
   auto dirty = restored.dirty(edits);
   PS_REQUIRE_OK(dirty);
@@ -229,8 +231,9 @@ int portable_routes() {
            shared.value().ancestry.size() == 1);
   TileRecords shared_records(root);
   PS_CHECK(shared_records.restore_ancestry(0, shared.value().ancestry).ok());
-  auto wrong_unit = captured.value()->rebind(
-      root, changed, changed.structured_templates(), {next_root, 0, 1}, charge);
+  auto wrong_unit =
+      captured.value()->rebind(root, changed, changed.structured_templates(),
+                               {next_root, 0, 0, 1}, charge);
   PS_CHECK(wrong_unit.status().code == ErrorCode::NotFound);
   auto refused = TileCacheSnapshot::capture(root, original,
                                             original.structured_templates(),
@@ -246,7 +249,7 @@ ExecutionBinding input_image(const Fixture& fixture, const ResourceBudget& root,
                              bool padded, bool edit_unused) {
   auto schema = fixture.image;
   if (padded) {
-    schema.tensors[0].layout.order = ImagePlaneOrder::Continuous;
+    schema.tensors[0].layout.order = TensorStorageOrder::Continuous;
     schema.tensors[0].layout.row_pitch_bytes = 64;
   }
   auto builder =
@@ -262,7 +265,6 @@ ExecutionBinding input_image(const Fixture& fixture, const ResourceBudget& root,
 }
 int semantic_tile_proof() {
   Fixture fixture;
-  fixture.image.publication = PublishPolicy::IndependentChunks;
   const auto plan = fixture.plan(false);
   ResourceBudget root;
   const std::function<Status(std::uint64_t)> work = [&](std::uint64_t n) {
@@ -320,7 +322,8 @@ int binding_changes() {
   const ExecutionBindings edited{{input_image(fixture, root, true, true)}};
   ResourceVector<TileDependency> observed{
       ResourceAllocator<TileDependency>(root)};
-  observed.push_back({PlanWorkflowInput{0}, 0, true, {}});
+  observed.push_back(
+      {PlanWorkflowInput{0}, 0, 0, TileSet::range(root, 0, 2).take_value()});
   auto equal = execution_internal::tile_binding_changes(plan, original, padded,
                                                         observed, root, {});
   PS_REQUIRE_OK(equal);
@@ -365,7 +368,8 @@ int binding_changes() {
   auto invalid = execution_internal::tile_binding_changes(
       plan, original, original, observed, root, {});
   PS_CHECK(invalid.status().code == ErrorCode::InvalidArgument);
-  observed.insert(observed.begin(), {PlanWorkflowInput{0}, 0, true, {}});
+  observed.insert(observed.begin(), {PlanWorkflowInput{0}, 0, 0,
+                                     TileSet::range(root, 0, 2).take_value()});
   invalid = execution_internal::tile_binding_changes(plan, original, original,
                                                      observed, root, {});
   PS_CHECK(invalid.status().code == ErrorCode::InvalidArgument);
@@ -374,75 +378,24 @@ int binding_changes() {
   const auto whole_plan = fixture.plan(false);
   const ExecutionBindings a{{input_image(fixture, root, false, false)}};
   const ExecutionBindings b{{input_image(fixture, root, false, true)}};
-  observed[0] = {PlanWorkflowInput{0}, 0, true, {}};
+  observed[0] = {PlanWorkflowInput{0}, 0, 0,
+                 TileSet::range(root, 0, 2).take_value()};
   auto whole = execution_internal::tile_binding_changes(whole_plan, a, b,
                                                         observed, root, {});
   PS_REQUIRE_OK(whole);
   PS_CHECK(whole.value().size() == 1 &&
            whole.value()[0].tiles == TileSet::from_indices(root, {0}).value());
-  fixture.image.tensors[0].layout.spatial = true;
-  fixture.image.fields.push_back(
-      {"rows", ElementType::Float64, {ResultExtentKind::RuntimeCount, 0}, {}});
-  WorkflowDocument field_document;
-  field_document.inputs = {
-      multi_result::declaration(1, "image", fixture.image)};
-  field_document.nodes = {
-      {1, "test.cache_source", {WorkflowInputReference{1}}, {}}};
-  field_document.outputs = {{"result", 1, "value"}};
-  GraphContext field_graph(std::move(field_document));
-  PlanningOptions field_options;
-  field_options.tile_extent = 2;
-  auto field_compiled =
-      Compiler(fixture.operations).compile(field_graph, field_options);
-  PS_REQUIRE_OK(field_compiled);
-  const auto& field_plan = field_compiled.value().plan;
-  const auto field_binding = [&](std::uint64_t rows, double value) {
-    auto builder =
-        multi_result::take(ResultBuilder::start(root, fixture.image, "fields"));
-    if (rows) {
-      multi_result::check(
-          builder.append(0, 1,
-                         ByteView(reinterpret_cast<const std::uint8_t*>(&value),
-                                  sizeof(value))));
-      multi_result::check(builder.publish(0, 1));
-    }
-    if (!rows)
-      multi_result::check(builder.publish(0, 0));
-    const std::vector<double> image(8, 1);
-    multi_result::check(builder.publish_tensor(
-        0, Region::whole({1, 4, 2}),
-        ByteView(reinterpret_cast<const std::uint8_t*>(image.data()),
-                 8 * sizeof(double))));
-    return ExecutionBindings{{{"image", multi_result::take(builder.seal())}}};
-  };
-  const auto no_rows = field_binding(0, 0);
-  const auto one_row = field_binding(1, 4);
-  const auto edited_row = field_binding(1, 5);
-  observed[0] = {PlanWorkflowInput{0}, 0, false, {}};
-  auto facts = execution_internal::tile_binding_changes(
-      field_plan, no_rows, one_row, observed, root, {});
-  PS_REQUIRE_OK(facts);
-  PS_CHECK(facts.value().size() == 1 && facts.value()[0].descriptor_changed &&
-           facts.value()[0].tiles.empty());
-  auto row_bytes = execution_internal::tile_binding_changes(
-      field_plan, one_row, edited_row, observed, root, {});
-  PS_REQUIRE_OK(row_bytes);
-  PS_CHECK(row_bytes.value().empty());
-  observed[0].whole = true;
-  row_bytes = execution_internal::tile_binding_changes(
-      field_plan, one_row, edited_row, observed, root, {});
-  PS_REQUIRE_OK(row_bytes);
-  PS_CHECK(row_bytes.value().size() == 1 &&
-           !row_bytes.value()[0].descriptor_changed &&
-           row_bytes.value()[0].tiles ==
-               TileSet::from_indices(root, {0}).value());
   return 0;
 }
 int cached_execution() {
   Fixture fixture;
   auto original = fixture.plan(false);
   auto changed =
-      fixture.plan(true).tile_plan("result", {true, {}}).take_value();
+      fixture.plan(true)
+          .tile_plan(
+              "result",
+              {{{0, TileSet::range(ResourceBudget{}, 0, 1).take_value()}}})
+          .take_value();
   ExecutionContextConfig config;
   config.result_cache_bytes = 16 * 1024 * 1024;
   ExecutionContext context(fixture.operations, config);
@@ -483,7 +436,7 @@ int cached_execution() {
       std::get<PlanStepInput>(record.value()->inputs[0].producer).step_index ==
           next_producer);
   ResourceVector<TileChange> edits{ResourceAllocator<TileChange>(root)};
-  edits.push_back({PlanWorkflowInput{next_input}, 0,
+  edits.push_back({PlanWorkflowInput{next_input}, 0, 0,
                    TileSet::from_indices(root, {0}).take_value(), false});
   auto dirty = reused.value().dependencies.dirty_units(edits);
   PS_REQUIRE_OK(dirty);
@@ -567,8 +520,59 @@ int cached_execution() {
   }
   return 0;
 }
+// Regression: a cached consumer used to omit its inherited stage evidence,
+// so reusing its payload could lose invalidation from original inputs.
+int shared_cache_evidence() {
+  Fixture fixture;
+  auto plan = fixture.plan(false);
+  ResourceBudget source, target;
+  TileRecords records(source);
+  const auto consumer = plan.outputs().at("result");
+  const auto producer =
+      std::get<PlanStepInput>(plan.steps()[consumer].inputs[0]).step_index;
+  const auto input =
+      std::get<PlanWorkflowInput>(plan.steps()[producer].inputs[0])
+          .declaration_index;
+  TileRecord stage(source);
+  stage.unit = {producer, 0, 0, 0};
+  PS_CHECK(stage
+               .include({PlanWorkflowInput{input}, 0, 0,
+                         multi_result::take(TileSet::range(source, 0, 2))},
+                        source)
+               .ok());
+  TileRecord task(source);
+  task.unit = {producer, 0, 0, 0};
+  PS_CHECK(task.inherit(multi_result::take(stage.freeze(source)), source).ok());
+  auto captured = TileCacheSnapshot::capture(
+      source, plan, plan.structured_templates(), records, task, 65536,
+      [&](auto n) { return source.consume({n}); });
+  PS_REQUIRE_OK(captured);
+  PS_CHECK(captured.value()->sources.size() == 1 &&
+           captured.value()->sources[0].name == "image");
+  auto rebound = captured.value()->rebind(
+      target, plan, plan.structured_templates(), task.unit,
+      [&](auto n) { return target.consume({n}); });
+  PS_REQUIRE_OK(rebound);
+  PS_CHECK(rebound.value().task.shared.size() == 1 &&
+           rebound.value().task.shared[0]->inputs[0].tiles.owned_by(target));
+  TileRecords restored(target);
+  auto payload = multi_result::binding(target, "value", 1).result;
+  PS_CHECK(restored.install(0, rebound.value().task, payload).ok());
+  ResourceVector<TileChange> edits{ResourceAllocator<TileChange>(target)};
+  edits.push_back({PlanWorkflowInput{input}, 0, 0,
+                   multi_result::take(TileSet::range(target, 1, 2)), false});
+  auto dirty = restored.dirty(edits);
+  PS_REQUIRE_OK(dirty);
+  PS_CHECK(dirty.value().size() == 1 && dirty.value()[0] == task.unit);
+  auto refused =
+      TileCacheSnapshot::capture(source, plan, plan.structured_templates(),
+                                 records, task, captured.value()->metadata - 1,
+                                 [&](auto n) { return source.consume({n}); });
+  PS_CHECK(refused.status().code == ErrorCode::ResourceExhausted);
+  return 0;
+}
 }  // namespace
 int main() {
   return portable_routes() || semantic_tile_proof() || binding_changes() ||
-         cached_execution();
+         cached_execution() || shared_cache_evidence();
 }

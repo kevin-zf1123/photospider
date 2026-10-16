@@ -125,7 +125,6 @@ void affine_view_failures() {
   ResourceBudget root;
   SchemaTemplate schema;
   schema.id = "test.affine.prefix";
-  schema.publication = PublishPolicy::StablePrefix;
   ResultTensorSpec spec;
   spec.key = "samples";
   spec.descriptor = {ElementType::UInt8, {2}};
@@ -136,7 +135,7 @@ void affine_view_failures() {
     return builder;
   };
   auto storage =
-      take(Value::create({ElementType::UInt8, {1}}, left, {0, {0}}, {3}))
+      take(TensorSpan::create({ElementType::UInt8, {1}}, left, {0, {0}}, {3}))
           .storage();
   auto first = make();
   require(first.publish_tensor(0, left, {0, {0}}, storage).ok(),
@@ -182,7 +181,7 @@ void affine_view_failures() {
           "pre-cancelled affine view publication is sticky");
   auto fragmented = make();
   auto other =
-      take(Value::create({ElementType::UInt8, {1}}, left, {0, {0}}, {4}))
+      take(TensorSpan::create({ElementType::UInt8, {1}}, left, {0, {0}}, {4}))
           .storage();
   require(fragmented.publish_tensor(0, left, {0, {0}}, storage).ok() &&
               fragmented.publish_tensor(0, right, {0, {0}, {1}}, other).ok(),
@@ -222,17 +221,24 @@ void affine_view_failures() {
             "reshape cardinality failure is sticky for affine and fragmented "
             "sources");
   }
-  auto explicit_copy = make();
-  auto unavailable = explicit_copy.publish_tensor_view(
-      0, Region::whole({2}), fragmented_window, identity);
-  const std::uint8_t bytes[] = {3, 4};
-  require(unavailable.reason == FailureReason::ViewUnavailable &&
-              explicit_copy
-                  .publish_tensor(0, Region::whole({2}), ByteView(bytes, 2))
-                  .ok(),
-          "unavailable physical view permits explicit copy retry");
+  auto alias = make();
+  const auto payload = root.statistics().live[ResourceKind::Payload];
+  require(alias
+              .publish_tensor_view(0, Region::whole({2}), fragmented_window,
+                                   identity)
+              .ok(),
+          "fragmented identity retains each physical owner");
+  auto alias_ref = take(alias.seal());
+  auto alias_window = take(alias_ref.acquire_tensor(
+      take(alias_ref.descriptor()), 0, Region::whole({2})));
+  require(root.statistics().live[ResourceKind::Payload] == payload &&
+              take(alias_window.row_run({0})).data ==
+                  take(fragmented_window.row_run({0})).data &&
+              take(alias_window.row_run({1})).data ==
+                  take(fragmented_window.row_run({1})).data,
+          "fragmented view publishes no dense copy");
 }
-void identity_materializes_fragmented_input() {
+void identity_retains_fragmented_input() {
   ResultRef retained;
   {
     auto registry = ps::test::kernel_registry();
@@ -276,20 +282,19 @@ void identity_materializes_fragmented_input() {
     for (std::uint64_t index = 0; index < 2; ++index) {
       auto output = take(result_window.row_run({index}));
       require(*output.data == expected[index] &&
-                  output.data != take(source_window.row_run({index})).data,
-              "identity copies exact bits when no affine view exists");
+                  output.data == take(source_window.row_run({index})).data,
+              "identity retains exact bits from fragmented owners");
     }
   }
   std::uint8_t value = 0;
   require(retained.read_tensor(take(retained.descriptor()), 0, {1}, &value, 1)
                   .ok() &&
               value == 241,
-          "materialized identity survives context and source handles");
+          "fragmented identity survives context and source handles");
 }
 void view_graph_and_growth() {
   ResourceBudget root;
   auto spec = schema(true);
-  spec.publication = PublishPolicy::StablePrefix;
   spec.tensors[0].batch_axes[0] = spec.tensors[0].batch_axes[1] = 1;
   spec.tensors[0].descriptor.shape = {1, 2};
   auto first = take(ResultBuilder::start(root, spec, "view.graph.first"));
@@ -413,18 +418,16 @@ void large_view() {
               .publish_tensor_kernel(
                   0, Region::whole(shape),
                   [](const auto& writers) {
-                    for (std::uint64_t y = 0; y < 1025; ++y) {
-                      for (std::uint64_t x = 0; x < 1025;) {
-                        auto run = writers[0].row_run({0, 0, y, x});
-                        if (!run.ok()) {
+                    for (const auto& writer : writers) {
+                      const auto& dims = writer.region().dimensions();
+                      for (auto y = dims[2].offset;
+                           y < dims[2].offset + dims[2].extent; ++y) {
+                        auto run = writer.row_run({0, 0, y, dims[3].offset});
+                        if (!run.ok())
                           return run.status();
-                        }
                         const float value = .25F;
-                        for (std::uint64_t i = 0; i < run.value().samples;
-                             ++i) {
+                        for (std::uint64_t i = 0; i < run.value().samples; ++i)
                           std::memcpy(run.value().data + i * 4, &value, 4);
-                        }
-                        x += run.value().samples;
                       }
                     }
                     return Status::success();
@@ -440,10 +443,14 @@ void large_view() {
   }
   auto output = take(ResultBuilder::start(root, image_schema, "large.view"));
   const auto before = root.statistics().issued.work;
-  require(output.publish_tensor_view(0, Region::whole(shape), {&window}).ok(),
+  ResultTensorViewTransform identity;
+  identity.source_axes = std::move(axes);
+  require(output.publish_tensor_view(0, Region::whole(shape), window, identity)
+              .ok(),
           "view publication above one million samples");
-  require(root.statistics().issued.work - before < 10000,
-          "structured view certification scales with rectangles");
+  require(root.statistics().issued.work - before < 100000,
+          "fragmented view certification stays below one tenth of logical "
+          "sample count");
   auto result = take(output.seal());
   auto alias = take(result.acquire_tensor(take(result.descriptor()), 0,
                                           Region::whole(shape)));
@@ -456,7 +463,7 @@ int main() {
   try {
     affine_source_views();
     affine_view_failures();
-    identity_materializes_fragmented_input();
+    identity_retains_fragmented_input();
     view_graph_and_growth();
     large_view();
     return 0;

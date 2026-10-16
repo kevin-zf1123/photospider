@@ -49,7 +49,7 @@ ps_gpu_dispatch_v1 command(const ps_gpu_buffer_binding_v1* binding,
 }
 struct DependencyCompute {
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    auto made = MutableValue::allocate(
+    auto made = TensorWriter::allocate(
         phase.query.output.result_schema->tensors[0].descriptor,
         phase.query.tensor_outputs->boxes()[0], phase.allocator);
     if (!made.ok())

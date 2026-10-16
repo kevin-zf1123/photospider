@@ -11,13 +11,15 @@
 namespace {
 struct Coverage {
   std::vector<std::pair<std::uint64_t, std::uint64_t>> blocks;
+  int rounding = FE_DOWNWARD;
 };
 int record(void* user, std::uint64_t begin, std::uint64_t end,
            std::uint32_t slot) {
-  if (slot != 0 || begin >= end || std::fegetround() != FE_TONEAREST)
+  if (slot != 0 || begin >= end ||
+      std::fegetround() != static_cast<Coverage*>(user)->rounding)
     return 1;
   static_cast<Coverage*>(user)->blocks.emplace_back(begin, end);
-  return 0;
+  return std::fesetround(FE_UPWARD);
 }
 }  // namespace
 
@@ -37,6 +39,7 @@ int main() {
                .ok());
   PS_CHECK(std::fegetround() == FE_DOWNWARD);
   PS_CHECK(std::fesetround(before) == 0);
+  coverage.rounding = before;
   PS_CHECK(coverage.blocks.size() == 2);
   PS_CHECK(coverage.blocks[0].first == 0);
   PS_CHECK(coverage.blocks[0].second == UINT64_MAX - 1);

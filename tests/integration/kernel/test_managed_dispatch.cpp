@@ -24,7 +24,8 @@ struct State {
     if (input && !requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false, take(TileSet::range(phase.resources, 0, 1))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     if (input) {
@@ -55,11 +56,9 @@ OperationDefinition operation(Counts* counts, bool input) {
   op.traits.input_count = input ? 1 : 0;
   op.traits.input_schema.resize(op.traits.input_count);
   if (input) {
-    op.traits.input_schema[0].kind = OperationPortKind::Result;
     op.traits.input_schema[0].tensor_key = "number";
   }
   op.traits.outputs = {multi_result::output("value")};
-  op.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   op.traits.outputs[0].continuation_bytes = sizeof(State);
   op.start_result = [counts, input](const auto&, const auto& allocator) {
     ++counts->start;
@@ -71,8 +70,6 @@ int stages(unsigned mode, std::uint64_t maximum, std::uint64_t queue) {
   Counts count;
   auto registry = std::make_shared<OperationRegistry>();
   auto op = operation(&count, mode == 1 || mode == 3);
-  if (mode == 1)
-    op.traits.outputs[0].region_rule = OperationRegionRule::Tiled;
   check(registry->register_operation(std::move(op)));
   if (mode == 3) {
     auto source = operation(&count, false);
@@ -167,11 +164,12 @@ int source_failure() {
       struct Need {
         unsigned* callbacks;
         bool requested = false;
-        Result<ResultProgramPoll> poll(const ResultProgramPhase&) {
+        Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
           if (!requested) {
             requested = true;
             ResultProgramNeed need;
-            need.tiles.push_back({0, true, false, {}});
+            need.tiles.push_back(
+                {0, 0, false, take(TileSet::range(phase.resources, 0, 1))});
             return Result<ResultProgramPoll>(std::move(need));
           }
           ++*callbacks;

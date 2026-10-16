@@ -34,24 +34,21 @@ inline SchemaTemplate scalar_schema() {
 }
 inline OperationPortConstraint port() {
   OperationPortConstraint constraint;
-  constraint.kind = OperationPortKind::Result;
+
   constraint.result_schema_id = "photospider.tensor";
   constraint.result_schema_version = 1;
   constraint.tensor_key = "samples";
   return constraint;
 }
 inline Status check_tensor(const OperationMetadata& metadata) {
-  if (!metadata.result_schema || metadata.result_schema->tensors.size() != 1 ||
-      !metadata.result_schema->fields.empty())
+  if (!metadata.result_schema || metadata.result_schema->tensors.size() != 1)
     return {ErrorCode::TypeMismatch,
             "operation requires one tensor member and no scalar fields"};
   return metadata.result_schema->validate(true);
 }
 struct Identity final {
-  bool whole = false;
   bool started = false;
   Footprint output;
-  explicit Identity(bool whole = false) : whole(whole) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
     auto scratch =
         take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));
@@ -59,8 +56,7 @@ struct Identity final {
     const auto& tensor = schema.tensors[0];
     const auto shape = tensor.sample_shape();
     if (!started) {
-      output = phase.query.tensor_outputs &&
-                       (!whole || phase.query.tensor_outputs->empty())
+      output = phase.query.tensor_outputs.has_value()
                    ? *phase.query.tensor_outputs
                    : take(Footprint::all(shape));
       started = true;
@@ -99,7 +95,8 @@ struct Identity final {
                                                 phase.query.cancellation);
       if (!published.ok() &&
           published.reason == FailureReason::ViewUnavailable) {
-        const auto width = Value::element_size(tensor.descriptor.element_type);
+        const auto width =
+            TensorSpan::element_size(tensor.descriptor.element_type);
         published = builder.publish_tensor_kernel(
             0, box,
             [&](const auto& writers) {
@@ -202,24 +199,20 @@ inline OperationTraits traits(std::uint32_t inputs, std::uint64_t state,
   auto& output = traits.outputs[0];
   output.output_schema = port();
   output.result_schema = scalar_schema();
-  output.region_rule = OperationRegionRule::Tiled;
   output.continuation_bytes = state;
   output.maximum_dependency_stages = stages;
   return traits;
 }
-inline OperationDefinition identity(const char* key, bool whole = false) {
+inline OperationDefinition identity(const char* key) {
   OperationDefinition operation;
   operation.key = key;
   operation.traits = traits(1, sizeof(Identity));
-  if (whole)
-    operation.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   OperationPortConstraint tensor;
-  tensor.kind = OperationPortKind::Result;
+
   tensor.element_type_mask = 127;
   operation.traits.input_schema[0] = tensor;
   operation.traits.outputs[0].output_schema = tensor;
   operation.traits.requires_metadata_specialization = true;
-  operation.traits.outputs[0].data_movement = DataMovementKind::BitwiseMapped;
   operation.specialize_metadata =
       [](const auto& inputs,
          const auto&) -> Result<std::vector<OperationOutputSpecialization>> {
@@ -231,9 +224,9 @@ inline OperationDefinition identity(const char* key, bool whole = false) {
     return Result<std::vector<OperationOutputSpecialization>>(
         std::vector<OperationOutputSpecialization>{std::move(output)});
   };
-  operation.start_result = [whole](const ResultProgramQuery&,
-                                   const BufferAllocator& allocator) {
-    return ResultContinuation::make<Identity>(allocator, whole);
+  operation.start_result = [](const ResultProgramQuery&,
+                              const BufferAllocator& allocator) {
+    return ResultContinuation::make<Identity>(allocator);
   };
   return operation;
 }

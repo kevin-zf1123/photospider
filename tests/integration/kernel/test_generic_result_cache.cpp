@@ -79,7 +79,9 @@ struct CacheProgram {
       requested = true;
       ResultProgramNeed need;
       for (std::uint32_t i = 0; i < phase.query.inputs.size(); ++i)
-        need.tiles.push_back({i, true, false, {}});
+        need.tiles.push_back(
+            {i, 0, false,
+             ps::TileSet::range(phase.resources, 0, 1).take_value()});
       return Result<ResultProgramPoll>(std::move(need));
     }
     if (calls)
@@ -133,12 +135,10 @@ ps::OperationDefinition cache_operation(
   operation.traits.input_count = inputs;
   operation.traits.input_schema.resize(inputs);
   for (auto& port : operation.traits.input_schema) {
-    port.kind = ps::OperationPortKind::Result;
     port.element_type = static_cast<std::uint32_t>(input_type);
     port.rank = 1;
   }
   auto result = multi_result::output("value", output);
-  result.region_rule = ps::OperationRegionRule::Whole;
   result.continuation_bytes = sizeof(CacheProgram);
   operation.traits.outputs = {std::move(result)};
   operation.traits.workspace_bytes = 8;
@@ -208,7 +208,7 @@ int result_content_bits() {
   using namespace ps;  // NOLINT(build/namespaces)
   for (auto type : {ElementType::UInt8, ElementType::Int64,
                     ElementType::Float32, ElementType::Float64}) {
-    const auto width = Value::element_size(type);
+    const auto width = TensorSpan::element_size(type);
     auto schema = multi_result::schema(type, {3});
     auto registry = std::make_shared<OperationRegistry>();
     auto calls = std::make_shared<std::atomic<unsigned>>(0);
@@ -232,10 +232,11 @@ int result_content_bits() {
       std::memcpy(logical.data() + i * width, backing.data() + (2 - i) * width,
                   width);
     auto reversed =
-        Value::create({type, {3}}, Region::whole({3}),
-                      {2 * width, {-static_cast<std::int64_t>(width)}}, backing)
+        TensorSpan::create({type, {3}}, Region::whole({3}),
+                           {2 * width, {-static_cast<std::int64_t>(width)}},
+                           backing)
             .take_value();
-    const auto bind = [&](const Value& value) {
+    const auto bind = [&](const TensorSpan& value) {
       return ExecutionBindings{
           {{"x", result_input_fixture::source(root, value, &schema)}}};
     };
@@ -243,17 +244,18 @@ int result_content_bits() {
     PS_CHECK(first.ok() && *calls == 1 &&
              result_input_fixture::bytes(first.value().results.at("y")) ==
                  logical);
-    auto dense = Value::create({type, {3}}, Region::whole({3}),
-                               {0, {static_cast<std::int64_t>(width)}}, logical)
-                     .take_value();
+    auto dense =
+        TensorSpan::create({type, {3}}, Region::whole({3}),
+                           {0, {static_cast<std::int64_t>(width)}}, logical)
+            .take_value();
     auto equivalent = context.execute(plan, bind(dense));
     PS_CHECK(equivalent.ok() && *calls == 1 &&
              result_input_fixture::bytes(equivalent.value().results.at("y")) ==
                  logical);
     logical[width] ^= 1;
     auto edited =
-        Value::create({type, {3}}, Region::whole({3}),
-                      {0, {static_cast<std::int64_t>(width)}}, logical)
+        TensorSpan::create({type, {3}}, Region::whole({3}),
+                           {0, {static_cast<std::int64_t>(width)}}, logical)
             .take_value();
     auto changed = context.execute(plan, bind(edited));
     PS_CHECK(changed.ok() && *calls == 2 &&
@@ -274,12 +276,12 @@ int fragment_lru_storage() {
   using namespace ps::execution_internal;  // NOLINT(build/namespaces)
   auto budget = std::make_shared<data_internal::MemoryBudget>(256);
   ResultCache cache(24, budget);
-  const ValueDescriptor descriptor{ElementType::Float32, {4}};
+  const TensorDescriptor descriptor{ElementType::Float32, {4}};
   const auto make = [&](Region region) {
     auto reservation =
         budget->reserve(region.element_count().value() * 4).take_value();
     auto writer =
-        MutableValue::allocate(descriptor, region, reservation->allocator())
+        TensorWriter::allocate(descriptor, region, reservation->allocator())
             .take_value();
     for (std::uint64_t i = 0; i < region.dimensions()[0].extent; ++i) {
       const float value =
@@ -291,8 +293,8 @@ int fragment_lru_storage() {
   };
   // First fragment retains 16 backing bytes despite its 8-byte logical region.
   auto large = make(Region::whole({4}));
-  const std::vector<Value> old{large.view(Region({{0, 2}})).take_value(),
-                               make(Region({{2, 2}}))};
+  const std::vector<TensorSpan> old{large.view(Region({{0, 2}})).take_value(),
+                                    make(Region({{2, 2}}))};
   const auto epoch = cache.epoch();
   cache.put("old-head", old[0], epoch);
   cache.put("old-tail", old[1], epoch);
@@ -303,12 +305,14 @@ int fragment_lru_storage() {
   PS_CHECK(!cache.get("old-head").valid());
   PS_CHECK(cache.get("old-tail").valid());
   // Only old [2,4) survives. Recompute with [0,3)+[3,4), same logical result.
-  const std::vector<Value> next{make(Region({{0, 3}})), make(Region({{3, 1}}))};
+  const std::vector<TensorSpan> next{make(Region({{0, 3}})),
+                                     make(Region({{3, 1}}))};
   cache.put("new-head", next[0], epoch);
   cache.put("new-tail", next[1], epoch);
-  std::vector<Value> retained{cache.get("new-head"), cache.get("new-tail")};
-  auto result = ValueFragments::create(
-      descriptor, Footprint::all({4}).take_value(), retained);
+  std::vector<TensorSpan> retained{cache.get("new-head"),
+                                   cache.get("new-tail")};
+  auto result =
+      Tensor::create(descriptor, Footprint::all({4}).take_value(), retained);
   PS_CHECK(result.ok());
   for (std::uint64_t i = 0; i < 4; ++i) {
     float value = 0;
@@ -354,9 +358,11 @@ int cache_shared_route_budget() {
           .freeze(plan,
                   {{multi_result::binding(resource_root, "x", 7, schema)}})
           .take_value();
-  const DemandQuery query{{"y", TileRequest{true, {}}}};
+  const DemandQuery query{
+      {"y",
+       TileRequest{{{0, TileSet::range(resource_root, 0, 1).take_value()}}}}};
   PS_CHECK(execution.execute_fragments(frozen, query).ok() && *calls == 1);
-  // Split the old shared Whole owner into two equivalent new source nodes.
+  // Split the old shared producer into two equivalent new source nodes.
   // Ambiguous shared-to-cloned ancestry must recompute the merge. Each
   // resulting route still participates in dirty propagation.
   document.nodes = {
@@ -388,7 +394,7 @@ int cache_shared_route_budget() {
   PS_CHECK(*calls == 2);
   ResourceVector<TileChange> changes{
       ResourceAllocator<TileChange>(resource_root)};
-  changes.push_back({PlanWorkflowInput{0}, 0,
+  changes.push_back({PlanWorkflowInput{0}, 0, 0,
                      TileSet::from_indices(resource_root, {0}).take_value(),
                      false});
   auto dirty = warm.value().dependencies.dirty_units(changes);
@@ -422,7 +428,8 @@ int diamond_cache_support() {
   document.outputs = {{"y", 6, "value"}};
   GraphContext graph(document);
   auto plan = Compiler(registry).compile(graph).take_value().plan;
-  const TileRequest q{true, {}};
+  const TileRequest q{
+      {{0, TileSet::range(ResourceBudget{}, 0, 1).take_value()}}};
   // Public execution and retained-result replay must preserve diamond ancestry.
   ExecutionContext context(registry, configuration());
   auto frozen =
@@ -443,7 +450,7 @@ int diamond_cache_support() {
   PS_CHECK(replayed && replayed->inputs.size() == 4);
   auto root = context.resource_budget().take_value();
   ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
-  changes.push_back({PlanWorkflowInput{0}, 0,
+  changes.push_back({PlanWorkflowInput{0}, 0, 0,
                      TileSet::from_indices(root, {0}).take_value(), false});
   auto dirty = reused.value().dependencies.dirty_units(changes).take_value();
   PS_CHECK(std::find(dirty.begin(), dirty.end(), unit) != dirty.end());
@@ -460,7 +467,7 @@ int concurrent_reclamation() {
   auto budget = std::make_shared<data_internal::MemoryBudget>(16);
   auto a_work = budget->reserve(8).take_value();
   auto make_value = [](const BufferAllocator& allocator) {
-    return MutableValue::allocate({ElementType::Float32, {1, 1}},
+    return TensorWriter::allocate({ElementType::Float32, {1, 1}},
                                   Region::whole({1, 1}), allocator)
         .take_value();
   };

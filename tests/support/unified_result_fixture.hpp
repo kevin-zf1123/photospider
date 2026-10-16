@@ -58,7 +58,6 @@ inline ps::OperationTraits traits(std::uint32_t inputs, std::uint64_t state) {
   traits.input_count = inputs;
   traits.input_schema.resize(inputs);
   auto& output = traits.outputs[0];
-  output.region_rule = ps::OperationRegionRule::Tiled;
   output.continuation_bytes = state;
   output.maximum_dependency_stages = 128;
   traits.workspace_bytes = 65536;
@@ -66,7 +65,6 @@ inline ps::OperationTraits traits(std::uint32_t inputs, std::uint64_t state) {
 }
 inline void result_port(ps::OperationPortConstraint* port,
                         const ps::SchemaTemplate& schema) {
-  port->kind = ps::OperationPortKind::Result;
   port->result_schema_id = std::string(schema.id);
   port->result_schema_version = schema.version;
 }
@@ -144,7 +142,11 @@ struct Gather final {
                     .take_value();
       stage = 1;
       ps::ResultProgramNeed need;
-      need.tiles.push_back({2, true, false, {}});
+      need.tiles.push_back(
+          {2, 0, false,
+           ps::TileSet::range(phase.resources, 0,
+                              phase.query.input_tile_grids[2][0].tile_count())
+               .take_value()});
       return Poll(std::move(need));
     }
     if (stage == 1) {

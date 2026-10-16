@@ -20,9 +20,9 @@
 #include <utility>
 #include <vector>
 
-#include "benchmark/raw_benchmark_test_hooks.hpp"
 #include "execution/execution_test_hooks.hpp"
 #include "photospider/execution/execution.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 #include "support/execution_probe_fixture.hpp"
 #include "support/execution_sync_fixture.hpp"
 #include "support/operation_result_fixture.hpp"
@@ -82,22 +82,6 @@ constexpr std::uint32_t kFixtureDuplicateThenUnknown = 10U;
 constexpr std::uint32_t kFixtureDuplicateThenCancellation = 12U;
 /** @brief Fixture mode for duplicate output then callback cancellation. */
 constexpr std::uint32_t kFixtureDuplicateThenCallbackCancelled = 13U;
-
-/**
- * @brief Standard exception whose borrowed diagnostic pointer is null.
- *
- * @note Benchmark oracle regressions use this allocation-free exception to
- * prove that an absent diagnostic cannot escape or outrank cancellation.
- */
-class NullDiagnosticException final : public std::exception {
- public:
-  /**
-   * @brief Returns no diagnostic bytes for the injected oracle failure.
-   * @return Null, intentionally.
-   * @throws Nothing.
-   */
-  [[nodiscard]] const char* what() const noexcept override { return nullptr; }
-};
 
 /**
  * @brief Keeps the real operation fixture mapped for invocation observation.
@@ -229,7 +213,7 @@ ps::Footprint fixture_outputs(const ps::ResultProgramPhase& phase) {
           phase.query.output.result_schema->tensors[0].sample_shape())));
 }
 FixturePoll publish_backing(const ps::ResultProgramPhase& phase,
-                            const ps::Value& backing) {
+                            const ps::TensorSpan& backing) {
   const auto shape =
       phase.query.output.result_schema->tensors[0].sample_shape();
   auto builder = multi_result::take(ps::ResultBuilder::start(
@@ -239,7 +223,8 @@ FixturePoll publish_backing(const ps::ResultProgramPhase& phase,
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
       phase.query.tile_extent));
-  for (const auto& region : fixture_outputs(phase).boxes()) {
+  const auto output_samples = fixture_outputs(phase);
+  for (const auto& region : output_samples.boxes()) {
     multi_result::check(builder.publish_tensor(
         0, region, backing.layout(),
         multi_result::take(phase.resources.reference(backing.storage()))));
@@ -250,7 +235,7 @@ FixturePoll publish_backing(const ps::ResultProgramPhase& phase,
 FixturePoll publish_number(const ps::ResultProgramPhase& phase, double number) {
   auto bytes = multi_result::take(phase.allocator.allocate(sizeof(number)));
   std::memcpy(bytes.data(), &number, sizeof(number));
-  auto value = multi_result::take(ps::Value::from_storage(
+  auto value = multi_result::take(ps::TensorSpan::from_storage(
       {ps::ElementType::Float64, {1}}, ps::Region::whole({1}), {0, {8}},
       std::move(bytes).freeze()));
   return publish_backing(phase, value);
@@ -265,7 +250,7 @@ FixturePoll large_result(const ps::ResultProgramPhase& phase) {
   auto bytes = allocated.take_value();
   const double value = 1;
   std::memcpy(bytes.data(), &value, 8);
-  auto backing = multi_result::take(ps::Value::from_storage(
+  auto backing = multi_result::take(ps::TensorSpan::from_storage(
       {ps::ElementType::Float64, {1}}, ps::Region::whole({1}), {0, {8}},
       std::move(bytes).freeze()));
   return publish_backing(phase, backing);
@@ -285,8 +270,9 @@ FixturePoll publish_input(const ps::ResultProgramPhase& phase,
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{}));
   const auto width =
-      ps::Value::element_size(schema.tensors[0].descriptor.element_type);
-  for (const auto& region : fixture_outputs(phase).boxes()) {
+      ps::TensorSpan::element_size(schema.tensors[0].descriptor.element_type);
+  const auto output_samples = fixture_outputs(phase);
+  for (const auto& region : output_samples.boxes()) {
     auto bytes = multi_result::take(phase.allocator.allocate(
         multi_result::take(region.element_count()) * width));
     auto samples =
@@ -308,10 +294,9 @@ FixturePoll publish_input(const ps::ResultProgramPhase& phase,
 }
 struct FixtureProgram {
   FixtureCallback compute;
-  ps::OperationRegionRule rule;
   bool requested = false;
-  FixtureProgram(FixtureCallback compute, ps::OperationRegionRule rule)
-      : compute(std::move(compute)), rule(rule) {}
+  explicit FixtureProgram(FixtureCallback compute)
+      : compute(std::move(compute)) {}
   FixturePoll poll(const ps::ResultProgramPhase& phase) {
     if (!requested && !phase.query.inputs.empty() &&
         !fixture_outputs(phase).empty()) {
@@ -319,11 +304,7 @@ struct FixtureProgram {
       ps::ResultProgramNeed need;
       const auto output = fixture_outputs(phase);
       for (unsigned port = 0; port < phase.query.inputs.size(); ++port) {
-        const auto shape =
-            phase.query.inputs[port].result_schema->tensors[0].sample_shape();
         auto samples = output;
-        if (rule == ps::OperationRegionRule::Whole)
-          samples = multi_result::take(ps::Footprint::all(shape));
         need.tiles.push_back(multi_result::take(ps::sdk::tile_need_for_samples(
             phase.resources, phase.query, port, 0, samples)));
       }
@@ -336,24 +317,20 @@ ps::OperationDefinition fixture_operation(std::string key,
                                           ps::OperationTraits traits,
                                           FixtureCallback compute) {
   const auto prior = traits.outputs[0];
-  const auto rule = prior.region_rule;
   auto schema = prior.result_schema.value_or(
       multi_result::schema(ps::ElementType::Float64, {1}));
   schema.id = "test.execution.fixture";
   for (auto& input : traits.input_schema) {
-    input.kind = ps::OperationPortKind::Result;
     input.rank = 1;
   }
   traits.outputs[0] = multi_result::output("value", schema);
-  traits.outputs[0].region_rule = rule == ps::OperationRegionRule::Whole
-                                      ? ps::OperationRegionRule::Whole
-                                      : ps::OperationRegionRule::Tiled;
   traits.outputs[0].continuation_bytes = sizeof(FixtureProgram);
   traits.outputs[0].maximum_dependency_stages = 4;
   traits.workspace_bytes = std::max<std::uint64_t>(
       traits.workspace_bytes,
       multi_result::take(schema.tensors[0].sample_count()) *
-          ps::Value::element_size(schema.tensors[0].descriptor.element_type));
+          ps::TensorSpan::element_size(
+              schema.tensors[0].descriptor.element_type));
   ps::OperationDefinition definition;
   definition.key = std::move(key);
   if (traits.requires_metadata_specialization) {
@@ -374,12 +351,13 @@ ps::OperationDefinition fixture_operation(std::string key,
         std::max<std::uint64_t>(traits.workspace_bytes, 4096);
   }
   definition.traits = std::move(traits);
-  definition.start_result = [compute = std::move(compute), rule](
+  definition.start_result = [compute = std::move(compute)](
                                 const ps::ResultProgramQuery&,
                                 const ps::BufferAllocator& allocator) {
-    return ps::ResultContinuation::make<FixtureProgram>(allocator, compute,
-                                                        rule);
+    return ps::ResultContinuation::make<FixtureProgram>(allocator, compute);
   };
+  if (!definition.traits.side_effect_free)
+    return ps::sdk::with_whole_stage(std::move(definition), 1000000);
   return definition;
 }
 
@@ -426,18 +404,18 @@ ps::WorkflowDocument single_operation_document(const std::string& operation) {
 }
 
 /**
- * @brief Builds one dense rank-one Float64 Value of the requested extent.
+ * @brief Builds one dense rank-one Float64 TensorSpan of the requested extent.
  * @param extent Positive logical element count.
- * @return Whole-Region immutable zero-filled Value.
- * @throws std::bad_alloc If Value storage allocation fails.
+ * @return Whole-Region immutable zero-filled TensorSpan.
+ * @throws std::bad_alloc If TensorSpan storage allocation fails.
  * @throws std::invalid_argument If extent is zero.
  */
-ps::Value vector_value(std::uint64_t extent) {
+ps::TensorSpan vector_value(std::uint64_t extent) {
   if (extent == 0U) {
     throw std::invalid_argument("vector fixture extent must be positive");
   }
-  auto value = ps::Value::create(
-      ps::ValueDescriptor{ps::ElementType::Float64, {extent}},
+  auto value = ps::TensorSpan::create(
+      ps::TensorDescriptor{ps::ElementType::Float64, {extent}},
       ps::Region::whole({extent}), ps::StridedLayout{0U, {8}},
       std::vector<std::uint8_t>(
           static_cast<std::size_t>(extent) * sizeof(double), 0U));
@@ -909,64 +887,6 @@ class ExternalStopRaceController final {
 };
 
 /**
- * @brief Deterministically holds a successful raw-benchmark oracle.
- *
- * @note The oracle owns no cancellation source. A separate test thread wins
- * cancellation while the callback is held, matching the non-preemptible
- * caller-oracle boundary.
- */
-class BenchmarkOracleGate final {
- public:
-  /**
-   * @brief Blocks the oracle until the test explicitly releases it.
-   * @return No value.
-   * @throws std::system_error If test synchronization fails.
-   * @note The gate signals entry before waiting so cancellation can occur
-   * while the oracle is executing.
-   */
-  void hold() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    entered_ = true;
-    changed_.notify_all();
-    changed_.wait(lock, [this] { return released_; });
-  }
-
-  /**
-   * @brief Waits for the oracle to enter the held callback boundary.
-   * @param timeout Maximum bounded wait.
-   * @return True when entry was observed before the deadline.
-   * @throws std::system_error If test synchronization fails.
-   */
-  bool wait_until_entered(std::chrono::milliseconds timeout) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, timeout, [this] { return entered_; });
-  }
-
-  /**
-   * @brief Releases the held oracle callback.
-   * @return No value.
-   * @throws std::system_error If mutex locking fails.
-   */
-  void release() {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      released_ = true;
-    }
-    changed_.notify_all();
-  }
-
- private:
-  /** @brief Serializes gate state. */
-  std::mutex mutex_;
-  /** @brief Wakes the test and held oracle after state changes. */
-  std::condition_variable changed_;
-  /** @brief Whether the oracle entered the held boundary. */
-  bool entered_ = false;
-  /** @brief Whether the held oracle may return. */
-  bool released_ = false;
-};
-
-/**
  * @brief Holds one fully assembled ExecutionResult before success publication.
  *
  * @note The execution thread signals entry and waits on a condition variable;
@@ -1295,7 +1215,7 @@ void hold_post_submit_observation() noexcept {
 }
 
 /**
- * @brief Builds a frozen Whole-vector source and consumer registry.
+ * @brief Builds a frozen vector source and consumer registry.
  * @param observed Callback-owned location receiving the executed input demand.
  * @return Frozen registry with fixed-shape source and `test.region` consumer.
  * @throws std::bad_alloc If registry/callback storage allocation fails.
@@ -1309,7 +1229,6 @@ std::shared_ptr<ps::OperationRegistry> make_region_registry(
   ps::OperationTraits source_traits;
   source_traits.outputs[0].result_schema =
       multi_result::schema(ps::ElementType::Float64, {10});
-  source_traits.outputs[0].region_rule = ps::OperationRegionRule::Whole;
   ps::Status status = registry->register_operation(
       fixture_operation("test.region_source", source_traits,
                         [](const ps::ResultProgramPhase& phase) -> FixturePoll {
@@ -1322,7 +1241,6 @@ std::shared_ptr<ps::OperationRegistry> make_region_registry(
   consumer_traits.input_count = 1U;
   consumer_traits.input_schema.resize(1);
   consumer_traits.requires_metadata_specialization = true;
-  consumer_traits.outputs[0].region_rule = ps::OperationRegionRule::Whole;
   status = registry->register_operation(fixture_operation(
       "test.region", consumer_traits,
       [observed](const ps::ResultProgramPhase& invocation) -> FixturePoll {
@@ -1375,115 +1293,6 @@ ps::WorkflowDocument external_stop_document() {
       ps::WorkflowOutput{"cpu", 2U, "value"},
   };
   return document;
-}
-
-/** @brief Number of completed-compilation hook invocations in this test. */
-std::uint32_t g_compilation_diagnostics_hook_calls = 0U;
-
-/** @brief Number of completed-execution hook invocations in this test. */
-std::uint32_t g_execution_diagnostics_hook_calls = 0U;
-
-/**
- * @brief Borrowed cancellation source used by one completed-execution hook.
- *
- * @note The source remains alive until the scoped test clears the installed
- * hook and this pointer; no competing benchmark test runs concurrently.
- */
-ps::CancellationSource* g_completed_execution_cancellation = nullptr;
-
-/**
- * @brief Returns legal deterministic compiler timing sentinels.
- * @return Immutable diagnostics with one legitimate zero-microsecond stage.
- * @throws Nothing.
- * @note Zero is valid because a stage may complete within clock resolution.
- */
-const ps::CompilationDiagnostics& sentinel_compilation_diagnostics() noexcept {
-  static const ps::CompilationDiagnostics diagnostics{0U, 11U, 13U};
-  return diagnostics;
-}
-
-/**
- * @brief Builds internally coherent successful execution sentinels.
- * @return Diagnostics containing fallback, transfer, backend, timing, and
- * digest observations distinct from defaults.
- * @throws std::bad_alloc If sentinel container allocation fails.
- * @note The unavailable GPU attempt legitimately has zero duration and the
- * later CPU attempt is the selected backend for that node.
- */
-ps::ExecutionDiagnostics make_sentinel_execution_diagnostics() {
-  ps::ExecutionDiagnostics diagnostics;
-  diagnostics.execute_us = 29U;
-  diagnostics.selected_backends = {
-      {{1U, 0}, ps::Backend::Cpu},
-      {{2U, 0}, ps::Backend::Gpu},
-      {{3U, 0}, ps::Backend::Cpu},
-  };
-  diagnostics.transfer_count = 1U;
-  diagnostics.transfer_bytes = sizeof(double);
-  diagnostics.peak_live_bytes = 24U;
-  diagnostics.fallback_reasons = {"node 1 sentinel GPU fallback"};
-  diagnostics.operation_timings = {
-      {{1U, 0}, ps::Backend::Gpu, 0U, ps::ErrorCode::BackendUnavailable},
-      {{1U, 0}, ps::Backend::Cpu, 3U, ps::ErrorCode::Ok},
-      {{2U, 0}, ps::Backend::Gpu, 5U, ps::ErrorCode::Ok},
-      {{3U, 0}, ps::Backend::Cpu, 7U, ps::ErrorCode::Ok},
-  };
-  diagnostics.plan_digest = std::string(64U, 'a');
-  diagnostics.result_digest = std::string(64U, 'b');
-  return diagnostics;
-}
-
-/**
- * @brief Returns legal deterministic execution diagnostic sentinels.
- * @return Immutable diagnostics shared by both oracle-failure paths.
- * @throws std::bad_alloc On first-call sentinel construction failure.
- * @note The returned object remains alive until process shutdown.
- */
-const ps::ExecutionDiagnostics& sentinel_execution_diagnostics() {
-  static const ps::ExecutionDiagnostics diagnostics =
-      make_sentinel_execution_diagnostics();
-  return diagnostics;
-}
-
-/**
- * @brief Replaces completed compiler diagnostics with deterministic sentinels.
- * @param diagnostics Mutable successful compiler output.
- * @return No value.
- * @throws Nothing.
- * @note The call count proves that the test seam executed before sample copy.
- */
-void inject_compilation_diagnostics(
-    ps::CompilationDiagnostics& diagnostics) noexcept {
-  ++g_compilation_diagnostics_hook_calls;
-  diagnostics = sentinel_compilation_diagnostics();
-}
-
-/**
- * @brief Replaces completed executor diagnostics with deterministic sentinels.
- * @param diagnostics Mutable successful executor output.
- * @return No value.
- * @throws std::bad_alloc If copying sentinel containers fails.
- * @note The call count proves that the test seam executed before sample copy.
- */
-void inject_execution_diagnostics(ps::ExecutionDiagnostics& diagnostics) {
-  ++g_execution_diagnostics_hook_calls;
-  diagnostics = sentinel_execution_diagnostics();
-}
-
-/**
- * @brief Cancels one benchmark after execution but before sample publication.
- * @param diagnostics Completed diagnostics left unchanged.
- * @return No value.
- * @throws Nothing.
- * @note This hook exists only in the noninstalled test-kernel variant and
- * creates the otherwise unobservable no-oracle post-execute window.
- */
-void cancel_after_completed_execution(
-    ps::ExecutionDiagnostics& diagnostics) noexcept {
-  static_cast<void>(diagnostics);
-  if (g_completed_execution_cancellation) {
-    static_cast<void>(g_completed_execution_cancellation->cancel());
-  }
 }
 
 int result_dso_contracts(bool require_gpu) {
@@ -1630,7 +1439,7 @@ int result_dso_contracts(bool require_gpu) {
 
 /**
  * @brief Exercises local execution, concurrency, cancellation, stale rejection,
- * GPU fallback, transfers, accounting cleanup, and raw benchmark observations.
+ * GPU fallback, transfers, and accounting cleanup.
  * @return Zero when all checks pass.
  * @throws std::bad_alloc If test setup allocation fails.
  * @throws std::runtime_error If an expected compilation cannot complete.
@@ -1643,7 +1452,6 @@ int main(int argc, char** argv) {
   using ps::CancellationSource;
   using ps::CompiledWorkflow;
   using ps::Compiler;
-  using ps::CorrectnessObservation;
   using ps::ElementType;
   using ps::ErrorCode;
   using ps::ExecutionContext;
@@ -1652,20 +1460,16 @@ int main(int argc, char** argv) {
   using ps::ExecutionResult;
   using ps::GraphContext;
   using ps::OperationDefinition;
-  using ps::OperationRegionRule;
   using ps::OperationRegistry;
   using ps::OperationTraits;
   using ps::PlanningOptions;
-  using ps::RawBenchmarkOptions;
-  using ps::RawBenchmarkRunner;
-  using ps::RawBenchmarkSample;
   using ps::Region;
   using ps::RegionDimension;
   using ps::Result;
   using ps::ResultProgramPhase;
   using ps::StridedLayout;
-  using ps::Value;
-  using ps::ValueDescriptor;
+  using ps::TensorDescriptor;
+  using ps::TensorSpan;
   using ps::WorkflowDocument;
   using ps::WorkflowNode;
   using ps::WorkflowNodeOutput;
@@ -1835,16 +1639,16 @@ int main(int argc, char** argv) {
       effect_execution.execute(effect_workflow.plan, {}, {}, serial_execution);
   auto second_effect_result =
       effect_execution.execute(effect_workflow.plan, {}, {}, serial_execution);
-  PS_CHECK(first_effect_result.ok());
-  PS_CHECK(second_effect_result.ok());
+  PS_REQUIRE_OK(first_effect_result);
+  PS_REQUIRE_OK(second_effect_result);
   PS_CHECK(ps::test::named_scalar(first_effect_result.value(), "effect") ==
            1.0);
   PS_CHECK(ps::test::named_scalar(second_effect_result.value(), "effect") ==
            2.0);
   PS_CHECK(first_effect_result.value().diagnostics.operation_timings.size() ==
-           2U);
+           4U);
   PS_CHECK(second_effect_result.value().diagnostics.operation_timings.size() ==
-           2U);
+           4U);
   PS_CHECK(
       std::string_view(first_effect_result.value().diagnostics.plan_digest) ==
       effect_workflow.plan.digest().value);
@@ -2639,8 +2443,8 @@ int main(int argc, char** argv) {
               [](const ResultProgramPhase& invocation) -> FixturePoll {
                 return publish_backing(
                     invocation,
-                    multi_result::take(Value::create(
-                        ValueDescriptor{ElementType::UInt8, {1U}},
+                    multi_result::take(TensorSpan::create(
+                        TensorDescriptor{ElementType::UInt8, {1U}},
                         Region::whole({1U}), StridedLayout{0U, {1}}, {7U})));
               }))
           .ok());
@@ -2651,7 +2455,6 @@ int main(int argc, char** argv) {
   atomic_identity_traits.supports_gpu = true;
   atomic_identity_traits.outputs[0].result_schema =
       multi_result::schema(ElementType::UInt8, {1});
-  atomic_identity_traits.outputs[0].region_rule = OperationRegionRule::Tiled;
   PS_CHECK(atomic_operations
                ->register_operation(fixture_operation(
                    "test.atomic_identity", atomic_identity_traits,
@@ -2697,7 +2500,9 @@ int main(int argc, char** argv) {
   Compiler whole_compiler(whole_operations);
   GraphContext whole_graph(region_document());
   PlanningOptions region_options;
-  region_options.output_requests.emplace("value", ps::TileRequest{true, {}});
+  region_options.output_requests.emplace(
+      "value", ps::TileRequest{{{0, multi_result::take(ps::TileSet::range(
+                                        ps::ResourceBudget{}, 0, 1))}}});
   auto whole_workflow = whole_compiler.compile(whole_graph, region_options);
   PS_CHECK(whole_workflow.ok());
   ExecutionContext whole_execution(whole_operations);
@@ -2705,8 +2510,9 @@ int main(int argc, char** argv) {
   PS_CHECK(region_equals(*whole_observed, 0U, 10U));
 
   PlanningOptions unknown_region_options;
-  unknown_region_options.output_requests.emplace("missing",
-                                                 ps::TileRequest{true, {}});
+  unknown_region_options.output_requests.emplace(
+      "missing", ps::TileRequest{{{0, multi_result::take(ps::TileSet::range(
+                                          ps::ResourceBudget{}, 0, 1))}}});
   PS_CHECK(!whole_compiler.compile(whole_graph, unknown_region_options).ok());
 
   auto resource_operations = std::make_shared<OperationRegistry>();
@@ -2714,7 +2520,6 @@ int main(int argc, char** argv) {
   auto source_schema = multi_result::schema();
   source_schema.id = "test.execution.fixture";
   large_traits.outputs[0] = multi_result::output("value", source_schema);
-  large_traits.outputs[0].region_rule = OperationRegionRule::Whole;
   large_traits.outputs[0].continuation_bytes = 1;
   large_traits.outputs[0].maximum_dependency_stages = 1;
   large_traits.workspace_bytes = 16;
@@ -2760,433 +2565,5 @@ int main(int argc, char** argv) {
            ps::test::named_scalar(large_success.value(), "value") == 1.0);
   PS_CHECK(large_success.value().diagnostics.peak_live_bytes == 16U);
 
-  RawBenchmarkRunner benchmark(&compiler, &execution);
-  RawBenchmarkOptions benchmark_options;
-  benchmark_options.iterations = 2U;
-  benchmark_options.correctness_oracle = [](const ExecutionResult& observed) {
-    const bool accepted = ps::test::named_scalar(observed, "sum") == 6.5;
-    return CorrectnessObservation{accepted,
-                                  accepted ? std::string() : "wrong sum"};
-  };
-  benchmark_options.oracle_name = "sum-equals-6.5";
-  auto report = benchmark.run(graph, benchmark_options);
-  PS_CHECK(report.ok());
-  PS_CHECK(report.value().oracle_name == "sum-equals-6.5");
-  PS_CHECK(report.value().samples.size() == 2U);
-  for (const RawBenchmarkSample& sample : report.value().samples) {
-    PS_CHECK(sample.outcome == ErrorCode::Ok);
-    PS_CHECK(sample.correctness_checked);
-    PS_CHECK(sample.correctness_accepted);
-    PS_CHECK(sample.oracle_name == "sum-equals-6.5");
-    PS_CHECK(!sample.execution.plan_digest.empty());
-  }
-
-  auto benchmark_cancellation_operations =
-      std::make_shared<OperationRegistry>();
-  CancellationSource* active_benchmark_cancellation = nullptr;
-  std::uint32_t benchmark_callback_count = 0U;
-  std::uint32_t cancel_on_callback = 0U;
-  PS_CHECK(benchmark_cancellation_operations
-               ->register_operation(fixture_operation(
-                   "test.benchmark_cancel", OperationTraits{},
-                   [&active_benchmark_cancellation, &benchmark_callback_count,
-                    &cancel_on_callback](
-                       const ResultProgramPhase& invocation) -> FixturePoll {
-                     ++benchmark_callback_count;
-                     if (active_benchmark_cancellation != nullptr &&
-                         benchmark_callback_count == cancel_on_callback) {
-                       static_cast<void>(
-                           active_benchmark_cancellation->cancel());
-                     }
-                     return publish_number(invocation, 1.0);
-                   }))
-               .ok());
-  benchmark_cancellation_operations->freeze();
-  Compiler benchmark_cancellation_compiler(benchmark_cancellation_operations);
-  ExecutionContext benchmark_cancellation_execution(
-      benchmark_cancellation_operations,
-      ExecutionContextConfig{1U, false, 4U, 65536U});
-  GraphContext benchmark_cancellation_graph(
-      single_operation_document("test.benchmark_cancel"));
-  RawBenchmarkRunner cancellation_benchmark(&benchmark_cancellation_compiler,
-                                            &benchmark_cancellation_execution);
-
-  for (const auto& cancellation_case :
-       std::vector<std::pair<std::uint32_t, std::uint32_t>>{{1U, 1U},
-                                                            {2U, 2U},
-                                                            {2U, 1U}}) {
-    CancellationSource callback_cancellation;
-    active_benchmark_cancellation = &callback_cancellation;
-    benchmark_callback_count = 0U;
-    cancel_on_callback = cancellation_case.second;
-    RawBenchmarkOptions cancellation_options;
-    cancellation_options.iterations = cancellation_case.first;
-    auto cancelled_report = cancellation_benchmark.run(
-        benchmark_cancellation_graph, cancellation_options,
-        callback_cancellation.token());
-    PS_CHECK(!cancelled_report.ok());
-    PS_CHECK(cancelled_report.status().code == ErrorCode::Cancelled);
-    PS_CHECK(benchmark_callback_count == cancellation_case.second);
-  }
-  active_benchmark_cancellation = nullptr;
-
-  BenchmarkOracleGate benchmark_oracle_gate;
-  CancellationSource barrier_cancellation;
-  RawBenchmarkOptions barrier_oracle_options;
-  barrier_oracle_options.correctness_oracle =
-      [&benchmark_oracle_gate](
-          const ExecutionResult&) -> CorrectnessObservation {
-    benchmark_oracle_gate.hold();
-    return CorrectnessObservation{true, {}};
-  };
-  barrier_oracle_options.oracle_name = "barrier-accepts";
-  auto barrier_oracle_future = std::async(std::launch::async, [&] {
-    return benchmark.run(graph, barrier_oracle_options,
-                         barrier_cancellation.token());
-  });
-  const bool oracle_was_running =
-      benchmark_oracle_gate.wait_until_entered(std::chrono::seconds(2));
-  const bool barrier_cancel_won = barrier_cancellation.cancel();
-  benchmark_oracle_gate.release();
-  auto barrier_oracle_report = barrier_oracle_future.get();
-  PS_CHECK(oracle_was_running);
-  PS_CHECK(barrier_cancel_won);
-  PS_CHECK(!barrier_oracle_report.ok());
-  PS_CHECK(barrier_oracle_report.status().code == ErrorCode::Cancelled);
-
-  for (const std::uint32_t oracle_outcome : {0U, 1U, 2U}) {
-    CancellationSource oracle_cancellation;
-    RawBenchmarkOptions cancelled_oracle_options;
-    cancelled_oracle_options.correctness_oracle =
-        [&oracle_cancellation,
-         oracle_outcome](const ExecutionResult&) -> CorrectnessObservation {
-      static_cast<void>(oracle_cancellation.cancel());
-      if (oracle_outcome == 2U) {
-        throw std::runtime_error("cancelled oracle exception");
-      }
-      return CorrectnessObservation{oracle_outcome == 0U,
-                                    "cancelled oracle result"};
-    };
-    cancelled_oracle_options.oracle_name = "self-cancelling-oracle";
-    auto cancelled_oracle_report = benchmark.run(
-        graph, cancelled_oracle_options, oracle_cancellation.token());
-    PS_CHECK(!cancelled_oracle_report.ok());
-    PS_CHECK(cancelled_oracle_report.status().code == ErrorCode::Cancelled);
-  }
-
-  CancellationSource post_execute_cancellation;
-  g_completed_execution_cancellation = &post_execute_cancellation;
-  const ps::benchmark_testing::RawBenchmarkTestHooks cancellation_test_hooks{
-      nullptr,
-      &cancel_after_completed_execution,
-  };
-  ps::benchmark_testing::install_raw_benchmark_test_hooks(
-      &cancellation_test_hooks);
-  RawBenchmarkOptions post_execute_options;
-  auto post_execute_report = benchmark.run(graph, post_execute_options,
-                                           post_execute_cancellation.token());
-  ps::benchmark_testing::install_raw_benchmark_test_hooks(nullptr);
-  g_completed_execution_cancellation = nullptr;
-  PS_CHECK(!post_execute_report.ok());
-  PS_CHECK(post_execute_report.status().code == ErrorCode::Cancelled);
-
-  auto benchmark_failure_operations = std::make_shared<OperationRegistry>();
-  std::uint32_t benchmark_failure_callback_count = 0U;
-  PS_CHECK(benchmark_failure_operations
-               ->register_operation(fixture_operation(
-                   "test.benchmark_failure", OperationTraits{},
-                   [&benchmark_failure_callback_count](
-                       const ResultProgramPhase& invocation) -> FixturePoll {
-                     ++benchmark_failure_callback_count;
-                     if (benchmark_failure_callback_count == 1U) {
-                       return FixturePoll(ps::Status::failure(
-                           ErrorCode::OperationFailed,
-                           "intentional ordinary benchmark failure"));
-                     }
-                     return publish_number(invocation, 2.0);
-                   }))
-               .ok());
-  benchmark_failure_operations->freeze();
-  Compiler benchmark_failure_compiler(benchmark_failure_operations);
-  ExecutionContext benchmark_failure_execution(
-      benchmark_failure_operations,
-      ExecutionContextConfig{1U, false, 4U, 65536U});
-  GraphContext benchmark_failure_graph(
-      single_operation_document("test.benchmark_failure"));
-  RawBenchmarkRunner failure_benchmark(&benchmark_failure_compiler,
-                                       &benchmark_failure_execution);
-  RawBenchmarkOptions failure_options;
-  failure_options.iterations = 2U;
-  auto ordinary_failure_report =
-      failure_benchmark.run(benchmark_failure_graph, failure_options);
-  PS_CHECK(ordinary_failure_report.ok());
-  PS_CHECK(ordinary_failure_report.value().samples.size() == 2U);
-  PS_CHECK(ordinary_failure_report.value().samples[0U].outcome ==
-           ErrorCode::OperationFailed);
-  PS_CHECK(ordinary_failure_report.value().samples[1U].outcome ==
-           ErrorCode::Ok);
-  PS_CHECK(benchmark_failure_callback_count == 2U);
-
-  RawBenchmarkOptions rejected_oracle_options;
-  rejected_oracle_options.execution.maximum_parallelism = 1U;
-  rejected_oracle_options.correctness_oracle =
-      [](const ExecutionResult&) -> CorrectnessObservation {
-    return CorrectnessObservation{false, "intentional mismatch"};
-  };
-  rejected_oracle_options.oracle_name = "always-rejects";
-  const auto& expected_compilation = sentinel_compilation_diagnostics();
-  const auto& expected_execution = sentinel_execution_diagnostics();
-  const ps::benchmark_testing::RawBenchmarkTestHooks benchmark_test_hooks{
-      &inject_compilation_diagnostics,
-      &inject_execution_diagnostics,
-  };
-  ps::benchmark_testing::install_raw_benchmark_test_hooks(
-      &benchmark_test_hooks);
-  auto rejected_oracle_report = benchmark.run(graph, rejected_oracle_options);
-  PS_CHECK(rejected_oracle_report.ok());
-  PS_CHECK(g_compilation_diagnostics_hook_calls == 1U);
-  PS_CHECK(g_execution_diagnostics_hook_calls == 1U);
-  PS_CHECK(rejected_oracle_report.value().oracle_name == "always-rejects");
-  PS_CHECK(rejected_oracle_report.value().samples.size() == 1U);
-  const RawBenchmarkSample& rejected_sample =
-      rejected_oracle_report.value().samples.front();
-  PS_CHECK(rejected_sample.iteration == 0U);
-  PS_CHECK(rejected_sample.oracle_name == "always-rejects");
-  PS_CHECK(rejected_sample.correctness_checked);
-  PS_CHECK(!rejected_sample.correctness_accepted);
-  PS_CHECK(rejected_sample.outcome == ErrorCode::OperationFailed);
-  PS_CHECK(rejected_sample.reason == "intentional mismatch");
-  PS_CHECK(rejected_sample.compilation.analyze_us ==
-           expected_compilation.analyze_us);
-  PS_CHECK(rejected_sample.compilation.optimize_us ==
-           expected_compilation.optimize_us);
-  PS_CHECK(rejected_sample.compilation.plan_us == expected_compilation.plan_us);
-  PS_CHECK(rejected_sample.execution.execute_us ==
-           expected_execution.execute_us);
-  PS_CHECK(rejected_sample.execution.selected_backends ==
-           expected_execution.selected_backends);
-  PS_CHECK(rejected_sample.execution.transfer_count ==
-           expected_execution.transfer_count);
-  PS_CHECK(rejected_sample.execution.transfer_bytes ==
-           expected_execution.transfer_bytes);
-  PS_CHECK(rejected_sample.execution.peak_live_bytes ==
-           expected_execution.peak_live_bytes);
-  PS_CHECK(rejected_sample.execution.fallback_reasons ==
-           expected_execution.fallback_reasons);
-  PS_CHECK(rejected_sample.execution.plan_digest ==
-           expected_execution.plan_digest);
-  PS_CHECK(rejected_sample.execution.result_digest ==
-           expected_execution.result_digest);
-  PS_CHECK(rejected_sample.execution.operation_timings.size() ==
-           expected_execution.operation_timings.size());
-  for (std::size_t index = 0U;
-       index < rejected_sample.execution.operation_timings.size(); ++index) {
-    const auto& actual = rejected_sample.execution.operation_timings[index];
-    const auto& expected = expected_execution.operation_timings[index];
-    PS_CHECK(actual.output == expected.output);
-    PS_CHECK(actual.backend == expected.backend);
-    PS_CHECK(actual.duration_us == expected.duration_us);
-    PS_CHECK(actual.outcome == expected.outcome);
-  }
-
-  RawBenchmarkOptions throwing_oracle_options = rejected_oracle_options;
-  throwing_oracle_options.correctness_oracle =
-      [](const ExecutionResult&) -> CorrectnessObservation {
-    throw std::runtime_error("intentional oracle exception");
-  };
-  throwing_oracle_options.oracle_name = "always-throws";
-  auto throwing_oracle_report = benchmark.run(graph, throwing_oracle_options);
-  PS_CHECK(throwing_oracle_report.ok());
-  PS_CHECK(g_compilation_diagnostics_hook_calls == 2U);
-  PS_CHECK(g_execution_diagnostics_hook_calls == 2U);
-  PS_CHECK(throwing_oracle_report.value().oracle_name == "always-throws");
-  PS_CHECK(throwing_oracle_report.value().samples.size() == 1U);
-  const RawBenchmarkSample& throwing_sample =
-      throwing_oracle_report.value().samples.front();
-  PS_CHECK(throwing_sample.iteration == 0U);
-  PS_CHECK(throwing_sample.oracle_name == "always-throws");
-  PS_CHECK(throwing_sample.correctness_checked);
-  PS_CHECK(!throwing_sample.correctness_accepted);
-  PS_CHECK(throwing_sample.outcome == ErrorCode::OperationFailed);
-  PS_CHECK(throwing_sample.reason == "intentional oracle exception");
-  PS_CHECK(throwing_sample.compilation.analyze_us ==
-           expected_compilation.analyze_us);
-  PS_CHECK(throwing_sample.compilation.optimize_us ==
-           expected_compilation.optimize_us);
-  PS_CHECK(throwing_sample.compilation.plan_us == expected_compilation.plan_us);
-  PS_CHECK(throwing_sample.execution.execute_us ==
-           expected_execution.execute_us);
-  PS_CHECK(throwing_sample.execution.selected_backends ==
-           expected_execution.selected_backends);
-  PS_CHECK(throwing_sample.execution.transfer_count ==
-           expected_execution.transfer_count);
-  PS_CHECK(throwing_sample.execution.transfer_bytes ==
-           expected_execution.transfer_bytes);
-  PS_CHECK(throwing_sample.execution.peak_live_bytes ==
-           expected_execution.peak_live_bytes);
-  PS_CHECK(throwing_sample.execution.fallback_reasons ==
-           expected_execution.fallback_reasons);
-  PS_CHECK(throwing_sample.execution.plan_digest ==
-           expected_execution.plan_digest);
-  PS_CHECK(throwing_sample.execution.result_digest ==
-           expected_execution.result_digest);
-  PS_CHECK(throwing_sample.execution.operation_timings.size() ==
-           expected_execution.operation_timings.size());
-  for (std::size_t index = 0U;
-       index < throwing_sample.execution.operation_timings.size(); ++index) {
-    const auto& actual = throwing_sample.execution.operation_timings[index];
-    const auto& expected = expected_execution.operation_timings[index];
-    PS_CHECK(actual.output == expected.output);
-    PS_CHECK(actual.backend == expected.backend);
-    PS_CHECK(actual.duration_us == expected.duration_us);
-    PS_CHECK(actual.outcome == expected.outcome);
-  }
-
-  std::uint32_t null_oracle_calls = 0U;
-  RawBenchmarkOptions null_oracle_options = rejected_oracle_options;
-  null_oracle_options.iterations = 2U;
-  null_oracle_options.correctness_oracle =
-      [&null_oracle_calls](const ExecutionResult&) -> CorrectnessObservation {
-    ++null_oracle_calls;
-    if (null_oracle_calls == 1U) {
-      throw NullDiagnosticException();
-    }
-    return CorrectnessObservation{true, "accepted after null diagnostic"};
-  };
-  null_oracle_options.oracle_name = "null-then-accepts";
-  bool null_oracle_escaped = false;
-  std::optional<ps::Result<ps::RawBenchmarkReport>> null_oracle_report;
-  try {
-    null_oracle_report.emplace(benchmark.run(graph, null_oracle_options));
-  } catch (...) {
-    null_oracle_escaped = true;
-  }
-  PS_CHECK(!null_oracle_escaped);
-  PS_CHECK(null_oracle_report.has_value());
-  PS_CHECK(null_oracle_report->ok());
-  PS_CHECK(null_oracle_calls == 2U);
-  PS_CHECK(g_compilation_diagnostics_hook_calls == 4U);
-  PS_CHECK(g_execution_diagnostics_hook_calls == 4U);
-  PS_CHECK(null_oracle_report->value().oracle_name == "null-then-accepts");
-  PS_CHECK(null_oracle_report->value().samples.size() == 2U);
-  const RawBenchmarkSample& null_diagnostic_sample =
-      null_oracle_report->value().samples[0U];
-  const RawBenchmarkSample& recovered_oracle_sample =
-      null_oracle_report->value().samples[1U];
-  PS_CHECK(null_diagnostic_sample.iteration == 0U);
-  PS_CHECK(null_diagnostic_sample.oracle_name == "null-then-accepts");
-  PS_CHECK(null_diagnostic_sample.correctness_checked);
-  PS_CHECK(!null_diagnostic_sample.correctness_accepted);
-  PS_CHECK(null_diagnostic_sample.outcome == ErrorCode::OperationFailed);
-  PS_CHECK(null_diagnostic_sample.reason.empty());
-  PS_CHECK(recovered_oracle_sample.iteration == 1U);
-  PS_CHECK(recovered_oracle_sample.oracle_name == "null-then-accepts");
-  PS_CHECK(recovered_oracle_sample.correctness_checked);
-  PS_CHECK(recovered_oracle_sample.correctness_accepted);
-  PS_CHECK(recovered_oracle_sample.outcome == ErrorCode::Ok);
-  PS_CHECK(recovered_oracle_sample.reason == "accepted after null diagnostic");
-  for (const RawBenchmarkSample* sample :
-       {&null_diagnostic_sample, &recovered_oracle_sample}) {
-    PS_CHECK(sample->compilation.analyze_us == expected_compilation.analyze_us);
-    PS_CHECK(sample->compilation.optimize_us ==
-             expected_compilation.optimize_us);
-    PS_CHECK(sample->compilation.plan_us == expected_compilation.plan_us);
-    PS_CHECK(sample->execution.execute_us == expected_execution.execute_us);
-    PS_CHECK(sample->execution.selected_backends ==
-             expected_execution.selected_backends);
-    PS_CHECK(sample->execution.transfer_count ==
-             expected_execution.transfer_count);
-    PS_CHECK(sample->execution.transfer_bytes ==
-             expected_execution.transfer_bytes);
-    PS_CHECK(sample->execution.peak_live_bytes ==
-             expected_execution.peak_live_bytes);
-    PS_CHECK(sample->execution.fallback_reasons ==
-             expected_execution.fallback_reasons);
-    PS_CHECK(sample->execution.plan_digest == expected_execution.plan_digest);
-    PS_CHECK(sample->execution.result_digest ==
-             expected_execution.result_digest);
-    PS_CHECK(sample->execution.operation_timings.size() ==
-             expected_execution.operation_timings.size());
-    for (std::size_t index = 0U;
-         index < sample->execution.operation_timings.size(); ++index) {
-      const auto& actual = sample->execution.operation_timings[index];
-      const auto& expected = expected_execution.operation_timings[index];
-      PS_CHECK(actual.output == expected.output);
-      PS_CHECK(actual.backend == expected.backend);
-      PS_CHECK(actual.duration_us == expected.duration_us);
-      PS_CHECK(actual.outcome == expected.outcome);
-    }
-  }
-
-  CancellationSource null_oracle_cancellation;
-  RawBenchmarkOptions cancelled_null_oracle_options = rejected_oracle_options;
-  cancelled_null_oracle_options.correctness_oracle =
-      [&null_oracle_cancellation](
-          const ExecutionResult&) -> CorrectnessObservation {
-    static_cast<void>(null_oracle_cancellation.cancel());
-    throw NullDiagnosticException();
-  };
-  cancelled_null_oracle_options.oracle_name = "cancelled-null-oracle";
-  bool cancelled_null_oracle_escaped = false;
-  std::optional<ps::Result<ps::RawBenchmarkReport>>
-      cancelled_null_oracle_report;
-  try {
-    cancelled_null_oracle_report.emplace(
-        benchmark.run(graph, cancelled_null_oracle_options,
-                      null_oracle_cancellation.token()));
-  } catch (...) {
-    cancelled_null_oracle_escaped = true;
-  }
-  PS_CHECK(!cancelled_null_oracle_escaped);
-  PS_CHECK(cancelled_null_oracle_report.has_value());
-  PS_CHECK(!cancelled_null_oracle_report->ok());
-  PS_CHECK(cancelled_null_oracle_report->status().code == ErrorCode::Cancelled);
-  PS_CHECK(g_compilation_diagnostics_hook_calls == 5U);
-  PS_CHECK(g_execution_diagnostics_hook_calls == 5U);
-  ps::benchmark_testing::install_raw_benchmark_test_hooks(nullptr);
-
-  RawBenchmarkOptions unchecked_options;
-  auto unchecked_report = benchmark.run(graph, unchecked_options);
-  PS_CHECK(unchecked_report.ok());
-  PS_CHECK(unchecked_report.value().oracle_name == "unchecked");
-  PS_CHECK(unchecked_report.value().samples.size() == 1U);
-  PS_CHECK(!unchecked_report.value().samples.front().correctness_checked);
-  PS_CHECK(!unchecked_report.value().samples.front().correctness_accepted);
-  PS_CHECK(unchecked_report.value().samples.front().oracle_name == "unchecked");
-
-  RawBenchmarkOptions missing_oracle_name = benchmark_options;
-  missing_oracle_name.oracle_name.clear();
-  auto missing_oracle_name_result = benchmark.run(graph, missing_oracle_name);
-  PS_CHECK(!missing_oracle_name_result.ok());
-  PS_CHECK(missing_oracle_name_result.status().code ==
-           ErrorCode::InvalidArgument);
-
-  RawBenchmarkOptions reserved_oracle_name = benchmark_options;
-  reserved_oracle_name.oracle_name = "unchecked";
-  auto reserved_oracle_name_result = benchmark.run(graph, reserved_oracle_name);
-  PS_CHECK(!reserved_oracle_name_result.ok());
-  PS_CHECK(reserved_oracle_name_result.status().code ==
-           ErrorCode::InvalidArgument);
-
-  RawBenchmarkOptions conflicting_oracle_name;
-  conflicting_oracle_name.oracle_name = "named-but-unchecked";
-  auto conflicting_oracle_name_result =
-      benchmark.run(graph, conflicting_oracle_name);
-  PS_CHECK(!conflicting_oracle_name_result.ok());
-  PS_CHECK(conflicting_oracle_name_result.status().code ==
-           ErrorCode::InvalidArgument);
-
-  RawBenchmarkOptions invalid_utf8_oracle = benchmark_options;
-  invalid_utf8_oracle.oracle_name = std::string("bad\xc3\x28", 5U);
-  auto invalid_utf8_oracle_result = benchmark.run(graph, invalid_utf8_oracle);
-  PS_CHECK(!invalid_utf8_oracle_result.ok());
-  PS_CHECK(invalid_utf8_oracle_result.status().code ==
-           ErrorCode::InvalidArgument);
-
-  RawBenchmarkOptions oversized_oracle = benchmark_options;
-  oversized_oracle.oracle_name.assign(129U, 'x');
-  auto oversized_oracle_result = benchmark.run(graph, oversized_oracle);
-  PS_CHECK(!oversized_oracle_result.ok());
-  PS_CHECK(oversized_oracle_result.status().code == ErrorCode::InvalidArgument);
   return 0;
 }

@@ -150,16 +150,16 @@ int referenced_owner() {
   auto l = limits(8192);
   l.capacity[ResourceKind::Referenced] = 8;
   ResourceBudget root(l);
-  auto value = Value::from_float64(7);
+  auto value = TensorSpan::from_float64(7);
   auto first = root.reference(value.storage()).take_value();
   auto second = root.reference(value.storage()).take_value();
   PS_CHECK(root.statistics().live[ResourceKind::Referenced] == 8);
-  PS_CHECK(!root.reference(Value::from_float64(9).storage()).ok());
+  PS_CHECK(!root.reference(TensorSpan::from_float64(9).storage()).ok());
   first.reset();
   PS_CHECK(root.statistics().live[ResourceKind::Referenced] == 8);
   second.reset();
   PS_CHECK(root.statistics().live[ResourceKind::Referenced] == 0);
-  auto third = root.reference(Value::from_float64(9).storage());
+  auto third = root.reference(TensorSpan::from_float64(9).storage());
   PS_CHECK(third.ok());
   return 0;
 }
@@ -175,7 +175,7 @@ SchemaTemplate resource_schema() {
 OperationOutputTraits result_output(const SchemaTemplate& schema,
                                     std::uint64_t state = 0) {
   OperationOutputTraits output;
-  output.output_schema.kind = OperationPortKind::Result;
+
   output.output_schema.result_schema_id = schema.id;
   output.output_schema.result_schema_version = schema.version;
   output.result_schema = schema;
@@ -351,7 +351,7 @@ int concurrent() {
 int concurrent_references() {
   auto l = limits(16384);
   l.capacity[ResourceKind::Referenced] = 8;
-  auto value = Value::from_float64(7);
+  auto value = TensorSpan::from_float64(7);
   ResourceBudget root(l);
   for (unsigned round = 0; round < 64; ++round) {
     std::array<std::shared_ptr<const CpuStorage>, 16> aliases;
@@ -396,7 +396,8 @@ struct RegionalMetadataProbe {
     if (!requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false, TileSet::range(phase.resources, 0, 1).take_value()});
       return Result<ResultProgramPoll>(std::move(need));
     }
     return Result<ResultProgramPoll>(
@@ -406,14 +407,14 @@ struct RegionalMetadataProbe {
 int regional_scope_retention() {
   auto registry = std::make_shared<OperationRegistry>();
   auto schema = resource_schema();
-  schema.tensors.clear();
-  schema.fields = {{"first", ElementType::Int64, {}, {}},
-                   {"second", ElementType::Int64, {}, {}}};
+  schema.tensors[0].key = "first";
+  schema.tensors.push_back(schema.tensors[0]);
+  schema.tensors[1].key = "second";
   OperationDefinition definition;
   definition.key = "test.regional_metadata";
   definition.traits.input_count = 1;
   definition.traits.input_schema.resize(1);
-  definition.traits.input_schema[0].kind = OperationPortKind::Result;
+
   definition.traits.input_schema[0].result_schema_id = schema.id;
   definition.traits.input_schema[0].result_schema_version = schema.version;
   definition.traits.outputs[0] =
@@ -462,15 +463,13 @@ int regional_scope_retention() {
     auto builder =
         ResultBuilder::start(root, schema, query.semantic_key).take_value();
     const std::int64_t number = 7;
-    for (unsigned field = 0; field < 2; ++field) {
+    for (unsigned slot = 0; slot < 2; ++slot)
       PS_CHECK(
           builder
-              .append(
-                  field, 1,
+              .publish_tensor(
+                  slot, Region::whole({1}),
                   ByteView(reinterpret_cast<const std::uint8_t*>(&number), 8))
               .ok());
-      PS_CHECK(builder.publish(field, 1).ok());
-    }
     objects.emplace(0, builder.seal().take_value());
     auto done = continuation.poll(phase).take_value();
     retained = std::get<ResultPublication>(done).result;

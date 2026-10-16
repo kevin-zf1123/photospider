@@ -51,18 +51,22 @@ struct State {
             }
             if (mode == 16)
               throw std::runtime_error("discovery callback exception");
-            std::array<std::uint8_t, 48> records{};
+            std::array<std::uint8_t, 80> records{};
             auto* bytes = records.data();
             word(bytes, mode == 18 ? 0 : 2);
             for (unsigned i = 0; i < 2; ++i) {
-              auto* row = bytes + 16 + i * 16;
+              auto* row = bytes + 16 + i * 32;
               word(row, (mode == 20 || mode == 23) ? i : 0);
-              word(row + 8,
+              word(row + 16,
                    mode == 24   ? 0
                    : mode == 27 ? 1
                    : mode == 25 ? (i ? UINT64_C(1) << 39 : 0)
                                 : (i ? 9 : 1),
                    8);
+              std::uint64_t begin = 0;
+              for (unsigned b = 0; b < 8; ++b)
+                begin |= static_cast<std::uint64_t>(row[16 + b]) << (8 * b);
+              word(row + 24, begin + 1, 8);
             }
             if (mode == 1) {
               word(bytes, 3);
@@ -79,7 +83,7 @@ struct State {
             if (mode == 6)
               word(bytes + 16, 9);
             if (mode == 7)
-              word(bytes + 16 + 8, 16, 8);
+              word(bytes + 16 + 24, 17, 8);
             if (mode == 8)
               word(bytes + 8, 1);
             if (mode == 9)
@@ -91,7 +95,7 @@ struct State {
                 "kernel void emit(device uint* t [[buffer(0)]],"
                 "constant uint* r [[buffer(1)]], uint i "
                 "[[thread_position_in_grid]])"
-                "{if(i<12)t[i]=r[i];}";
+                "{if(i<20)t[i]=r[i];}";
             const auto* api = phase.gpu;
             std::uint64_t token = 0;
             if (api->buffer(api->context, table.bytes, table.byte_size, 1,
@@ -110,7 +114,7 @@ struct State {
             dispatch.constants = records.data();
             dispatch.constant_size = records.size();
             dispatch.constant_index = 1;
-            dispatch.grid[0] = 12;
+            dispatch.grid[0] = 20;
             dispatch.grid[1] = dispatch.grid[2] = 1;
             if (api->execute(api->context, &dispatch, 1))
               return phase.gpu_status();
@@ -123,7 +127,7 @@ struct State {
       if (mode == 22) {
         ResultProgramNeed oversized;
         for (unsigned i = 0; i < 256; ++i)
-          oversized.tiles.push_back({0, false, false,
+          oversized.tiles.push_back({0, 0, false,
                                      multi_result::take(TileSet::from_indices(
                                          phase.resources, {1}))});
         return Result<ResultProgramPoll>(std::move(oversized));
@@ -166,7 +170,8 @@ struct State {
         phase.query.tile_extent));
 
     const auto box = multi_result::take(
-        phase.query.output_tile_grid->region(phase.query.tile_unit));
+        phase.query.output_tile_grids.at(phase.query.tensor_slot)
+            .region(phase.query.tile_unit));
     multi_result::check(builder.publish_tensor(
         0, box, {reinterpret_cast<const std::uint8_t*>(&sum), 4}));
     return Result<ResultProgramPoll>(
@@ -283,7 +288,7 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
   definition.traits.input_count = two_inputs ? 2 : 1;
   definition.traits.input_schema.resize(definition.traits.input_count);
   auto& input = definition.traits.input_schema[0];
-  input.kind = OperationPortKind::Result;
+
   input.result_schema_id = input_schema.id;
   input.result_schema_version = input_schema.version;
   if (two_inputs)
@@ -348,10 +353,10 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
     options.dependencies.sets.maximum_boxes = 32;
   if (mode == 23)
     options.dependencies.sets.maximum_boxes = 4;
-  const TileRequest demand{false,
-                           multi_result::take(TileSet::from_indices(
-                               root, mode == 28 ? std::vector<TileIndex>{0, 1}
-                                                : std::vector<TileIndex>{0}))};
+  const TileRequest demand{
+      {{0, multi_result::take(TileSet::from_indices(
+               root, mode == 28 ? std::vector<TileIndex>{0, 1}
+                                : std::vector<TileIndex>{0}))}}};
   const auto before = root.statistics().live[ResourceKind::Payload];
   {
     auto progress = context.execute_fragments(frozen, {{"out", demand}},
@@ -374,7 +379,7 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
               .read_tensor(result.descriptor().take_value(), 0, {0, 0}, &sum, 4)
               .ok());
       PS_CHECK(sum == (mode == 18 ? 0 : 42));
-      for (TileIndex tile : demand.tiles) {
+      for (TileIndex tile : demand.members.at(0)) {
         PS_CHECK(result
                      .read_tensor(multi_result::take(result.descriptor()), 0,
                                   {0, tile}, &sum, 4)
@@ -382,7 +387,7 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
         PS_CHECK(sum == (mode == 18 ? 0 : 42));
         auto record =
             multi_result::take(progress.value().dependencies.tile_record(
-                {compiled.plan.outputs().at("out"), 0, tile}));
+                {compiled.plan.outputs().at("out"), 0, 0, tile}));
         PS_CHECK(record && record->inputs.size() == (mode == 18   ? 0
                                                      : two_inputs ? 2
                                                                   : 1));
@@ -395,7 +400,7 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
               : two_inputs
                   ? std::vector<TileIndex>{source->declaration_index ? 9U : 1U}
                   : std::vector<TileIndex>{1, 9};
-          PS_CHECK(!need.whole && need.producer_output == 0 &&
+          PS_CHECK(need.producer_output == 0 &&
                    need.tiles == multi_result::take(TileSet::from_indices(
                                      root, expected_tiles)));
         }
@@ -406,7 +411,7 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
         auto observed = multi_result::take(handle.request({{"out", demand}}));
         auto updated = multi_result::take(handle.replace_bindings(
             {{{"input", sparse_input(root, input_schema, 22)}}}));
-        PS_CHECK(updated.potential_dirty.at("out") == demand.tiles);
+        PS_CHECK(updated.potential_dirty.at("out") == demand);
         auto changed = multi_result::take(handle.request({{"out", demand}}));
         float new_sum = 0;
         PS_CHECK(changed.results.at("out")
@@ -467,7 +472,7 @@ int main(int argc, char** argv) try {
   PS_CHECK(run(20, ErrorCode::Ok) == 0);
   // Three candidates, two table passes, and record/group normalization all
   // consume the same actor work grant; the second input cannot reset it.
-  PS_CHECK(run(20, ErrorCode::ResourceExhausted, 104) == 0);
+  PS_CHECK(run(20, ErrorCode::ResourceExhausted, 168) == 0);
   PS_CHECK(run(0, ErrorCode::ResourceExhausted, 1048576, 0) == 0);
   std::cout
       << "Native Result discovery with GPU-emitted fixture records passed\n";

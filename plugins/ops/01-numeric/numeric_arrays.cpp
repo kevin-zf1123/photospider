@@ -12,6 +12,7 @@
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "common/registry.hpp"
 #include "photospider/ops/numeric/diagnostics.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -26,7 +27,7 @@ struct ArrayKernel final {
     const auto shape = target.sample_shape();
     const auto& input = phase.tensors->at({0, 0});
     const auto source_shape = input.spec().sample_shape();
-    const auto width = Value::element_size(target.descriptor.element_type);
+    const auto width = TensorSpan::element_size(target.descriptor.element_type);
     const bool view =
         std::get<std::string>(phase.query.parameters.at("layout")) == "view";
     std::vector<uint64_t> axes;
@@ -60,8 +61,8 @@ struct ArrayKernel final {
                 {FailureOrigin::Domain, FailureScope::Run}};
     } else {
       MathTensorReader reader(input, phase.query.cancellation);
-      status = builder.publish_tensor_kernel(
-          0, Region::whole(shape),
+      status = sdk::publish_dense_tensor(
+          phase, builder, 0, Region::whole(shape),
           [&](const auto& writers) -> Status {
             return math_callback(phase, [&]() -> Status {
               if (writers.size() != 1)
@@ -173,7 +174,7 @@ OperationDefinition array_operation(const std::string& key, bool constant,
   traits.requires_metadata_specialization = true;
   traits.input_count = 1;
   traits.input_schema.resize(1);
-  traits.input_schema[0].kind = OperationPortKind::Result;
+
   traits.input_schema[0].element_type_mask = 127;
   traits.parameter_schema = {{"layout", OperationParameterType::String},
                              {"shape", OperationParameterType::String}};
@@ -242,7 +243,7 @@ OperationDefinition array_operation(const std::string& key, bool constant,
                                                const auto& allocator) {
     return ResultContinuation::make<ArrayProgram>(allocator, constant, profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_numeric_arrays(OperationRegistry* registry) {

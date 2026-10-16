@@ -113,16 +113,14 @@ inline Result<WorkflowNode> transpose_node(
 }
 /** @brief Authors a dynamic slice with static positive per-axis counts.
  * starts and steps are Int64[rank] Result inputs. For nonempty demand the
- * operation requests each active input through a full Tensor Need with Data,
- * Validation and Descriptor roles (role 13), triggering typed-payload
- * validation. It checks full slice endpoints using widened integer arithmetic.
- * Starts are absolute
- * nonnegative indices; used steps are nonzero. Counts of one ignore their step
- * numerically; the whole step port is
- * excluded from runtime Need and association only when all counts are one;
- * static schema and parameter checks still apply. Otherwise all step entries
- * are requested and validated, so even an unused entry can cause an upstream
- * failure. Empty reads no controls or data. Invalid controls report
+ * operation requests complete tile intervals of each active input, triggering
+ * its declared validators. It checks full slice endpoints using widened integer
+ * arithmetic. Starts are absolute nonnegative indices; used steps are nonzero.
+ * Counts of one ignore their step numerically; the whole step port is excluded
+ * from runtime Need and association only when all counts are one; static schema
+ * and parameter checks still apply. Otherwise all step entries are requested
+ * and validated, so even an unused entry can cause an upstream failure. Empty
+ * reads no controls or data. Invalid controls report
  * InvalidArgument/InvalidDomain and InvalidSlice with axis/values.
  * Layout/lifetime rules match reshape_node.
  */

@@ -96,11 +96,10 @@ inline ps::OperationOutputTraits output(
     const ps::SchemaTemplate& schema = multi_result::schema()) {
   ps::OperationOutputTraits output;
   output.key = std::move(key);
-  output.output_schema.kind = ps::OperationPortKind::Result;
+
   output.output_schema.result_schema_id = std::string(schema.id);
   output.output_schema.result_schema_version = schema.version;
   output.result_schema = schema;
-  output.region_rule = ps::OperationRegionRule::Tiled;
   output.maximum_dependency_stages = 2;
   output.continuation_bytes = 256;
   return output;

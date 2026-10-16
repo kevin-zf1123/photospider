@@ -24,12 +24,15 @@ void require(bool condition, std::string_view message) {
 }
 void require_dirty_unit(const ExecutionDependencies& dependencies,
                         const ResourceBudget& root, TileUnit unit,
-                        std::size_t input, TileIndex tile = 0) {
+                        std::size_t input, TileIndex tile = 0,
+                        std::size_t count = 1) {
   auto dirty = dependencies.dirty_units(
-      {{PlanWorkflowInput{input}, 0,
+      {{PlanWorkflowInput{input}, 0, 0,
         TileSet::from_indices(root, {tile}).take_value(), false}});
   require(dirty.ok(), dirty.status().message);
-  require(dirty.value().size() == 1 && dirty.value()[0] == unit,
+  require(dirty.value().size() == count &&
+              std::find(dirty.value().begin(), dirty.value().end(), unit) !=
+                  dirty.value().end(),
           "source edit reaches exactly the recorded computation unit");
 }
 void require_whole_input(const ExecutionDependencies& dependencies,
@@ -40,7 +43,8 @@ void require_whole_input(const ExecutionDependencies& dependencies,
           "Whole output records its single input Need");
   const auto& input = record.value()->inputs[0];
   require(
-      input.whole && input.tiles.empty() && input.producer_output == 0 &&
+      input.tensor_slot == 0 && !input.tiles.empty() &&
+          input.producer_output == 0 &&
           std::holds_alternative<PlanWorkflowInput>(input.producer) &&
           std::get<PlanWorkflowInput>(input.producer).declaration_index == 0,
       "Whole Need identifies workflow input zero");
@@ -111,56 +115,43 @@ void continuation_owns_library() {
   ResourceBudget root;
   ResourceAllocationScope scope(root);
   auto registry = std::make_shared<OperationRegistry>();
-  auto loaded_fixture = registry->load_plugin(PS_RESULT_FIXTURE);
-  require(loaded_fixture.ok(), loaded_fixture.message);
-  auto schema = std::make_shared<const SchemaTemplate>(
-      *registry->find_traits("fixture.result.rows")
-           .value()
-           .outputs[0]
-           .result_schema);
-  auto builder = ResultBuilder::start(root, *schema, "empty.rows").take_value();
-
-  require(builder.publish(0, 0).ok(), "empty rows publication");
-  auto source = builder.seal().take_value();
-  OperationMetadata input;
-  input.result_schema = schema;
+  auto loaded = registry->load_plugin(PS_RESULT_FIXTURE);
+  require(loaded.ok(), loaded.message);
   const std::map<std::string, ParameterValue> parameters;
-  std::vector<OperationMetadata> inputs{input};
   auto prepared =
-      registry->prepare_operation("fixture.result.rows_sum", inputs, parameters)
+      registry->prepare_operation("fixture.result.scalar", {}, parameters)
           .take_value();
-  auto outputs = infer_operation_outputs(prepared->traits(), inputs, parameters)
-                     .take_value();
-  ResultProgramMetadata metadata{inputs, outputs[0]};
+  auto outputs =
+      infer_operation_outputs(prepared->traits(), {}, parameters).take_value();
+  ResultProgramMetadata metadata{{}, outputs[0]};
+  metadata.output_tile_grids =
+      TileGrid::members(*outputs[0].result_schema).take_value();
   ResultProgramQuery query(metadata, parameters);
   query.semantic_key = "library.lifetime";
   query.prepared = prepared;
   auto continuation =
-      registry->start_result("fixture.result.rows_sum", query, root.allocator())
+      registry->start_result("fixture.result.scalar", query, root.allocator())
           .take_value();
   ResultObjectInputs objects;
-  auto allocator = root.allocator();
+  const auto allocator = root.allocator();
   ResultProgramPhase phase{query,
                            objects,
                            allocator,
                            root,
                            [&](uint64_t work) { return root.consume({work}); },
                            {}};
-  auto need = continuation.poll(phase).take_value();
-  require(std::holds_alternative<ResultProgramNeed>(need) &&
-              std::get<ResultProgramNeed>(need).tiles.size() == 1 &&
-              std::get<ResultProgramNeed>(need).tiles[0].whole,
-          "active C continuation requests the Result object");
   registry.reset();
-  objects.emplace(0, source);
-  auto published = continuation.poll(phase).take_value();
+  auto polled = continuation.poll(phase);
+  require(polled.ok(), polled.status().message);
+  auto published = polled.take_value();
   require(std::holds_alternative<ResultPublication>(published),
           "C continuation publishes after registry retirement");
   auto result = std::get<ResultPublication>(published).result;
   continuation = {};
-  require(read_number(result) == 0,
+  require(read_number(result, 127) == 127,
           "published Result remains readable after continuation destruction");
 }
+
 WorkflowDocument document(const std::string& key, std::int64_t mode = 0) {
   WorkflowDocument doc;
   auto schema =
@@ -187,11 +178,11 @@ void impure_c_whole() {
   require(registry->load_plugin(PS_RESULT_FIXTURE).ok(),
           "impure C fixture load");
   auto traits = registry->find_traits("fixture.result.impure");
-  require(
-      traits.ok() && !traits.value().deterministic &&
-          !traits.value().side_effect_free && !traits.value().cacheable &&
-          traits.value().outputs[0].region_rule == OperationRegionRule::Whole,
-      "C flags preserve non-pure uncached Whole execution");
+  require(traits.ok() && !traits.value().deterministic &&
+              !traits.value().side_effect_free && !traits.value().cacheable &&
+              traits.value().shared_stages.size() == 1 &&
+              traits.value().shared_stages[0].mandatory,
+          "C flags preserve non-pure uncached Whole execution");
   require(registry->freeze().ok(), "impure C registry freeze");
   void* library = dlopen(PS_RESULT_FIXTURE, RTLD_NOW | RTLD_LOCAL);
   require(library != nullptr, "impure C fixture observer");
@@ -506,22 +497,14 @@ void sole_member_contracts() {
               pixel == 1,
           "schema-less sole predicate preserves actual metadata and borrowed "
           "predicate fields");
-  for (bool empty : {false, true}) {
+  {
     auto ambiguous = document("fixture.result.sole");
     auto schema =
         std::make_shared<SchemaTemplate>(*ambiguous.inputs[0].result_schema);
-    if (empty) {
-      schema->tensors.clear();
-      ResultFieldSpec field;
-      field.key = "rows";
-      field.rows.value = 1;
-      schema->fields.push_back(field);
-    } else {
-      auto second = schema->tensors[0];
-      second.key = "different";
-      second.descriptor.element_type = ElementType::Float64;
-      schema->tensors.push_back(second);
-    }
+    auto second = schema->tensors[0];
+    second.key = "different";
+    second.descriptor.element_type = ElementType::Float64;
+    schema->tensors.push_back(second);
     ambiguous.inputs[0].result_schema = schema;
     require(schema->validate(true).ok(),
             "sole rejected source is structurally valid");
@@ -568,11 +551,8 @@ void run() {
                {7, "missing GPU lane", 1},
                {8, "missing CPU lane", 1},
                {9, "unknown output flags", 1},
-               {10, "require without preserve", 1},
-               {11, "regional required view", 1},
-               {12, "GPU preserving view", 1},
-               {13, "payload bound with view", 1},
-               {14, "output size", 1}}),
+               {10, "payload bound without flag", 1},
+               {11, "output size", 1}}),
           "bad C Result table rejection or destruction");
   auto registry = std::make_shared<OperationRegistry>();
   auto loaded = registry->load_plugin(PS_RESULT_FIXTURE);
@@ -592,7 +572,7 @@ void run() {
   PlanningOptions tile_planning;
   tile_planning.tile_extent = 2;
   const TileRequest selected_tile{
-      false, TileSet::from_indices(root, {5}).take_value()};
+      {{0, TileSet::from_indices(root, {5}).take_value()}}};
   for (const auto& key : {"fixture.result.copy", "fixture.result.whole",
                           "fixture.result.tiles"}) {
     GraphContext graph(document(key));
@@ -600,8 +580,10 @@ void run() {
     require(compiled.ok(), compiled.status().message);
     auto frozen = context.freeze(compiled.value().plan, {{a, c}}).take_value();
     const bool whole = std::string(key) != "fixture.result.copy";
-    const auto q = whole ? TileRequest{true, {}} : selected_tile;
-    const TileUnit unit{0, 0, whole ? 0U : 5U};
+    const auto q =
+        whole ? TileRequest{{{0, TileSet::range(root, 0, 8).take_value()}}}
+              : selected_tile;
+    const TileUnit unit{0, 0, 0, whole ? 0U : 5U};
     auto output = context.execute_fragments(frozen, {{"out", q}});
     require(output.ok(), output.status().message);
     auto result = output.value().results.at("out");
@@ -614,7 +596,7 @@ void run() {
             "read C Result sample");
     require(pixel == (std::string(key) == "fixture.result.copy" ? 1013 : 1014),
             "C host/parallel/tile image result");
-    require_dirty_unit(output.value().dependencies, root, unit, 1);
+    require_dirty_unit(output.value().dependencies, root, unit, 1, 0, q.size());
     if (std::string(key) == "fixture.result.tiles")
       require(output.value().diagnostics.cpu_stage_count > 0 &&
                   output.value().diagnostics.cpu_tile_callback_count > 0,
@@ -651,8 +633,10 @@ void run() {
         Compiler(registry).compile(graph, tile_planning).take_value();
     auto frozen = context.freeze(compiled.plan, {{a, c}}).take_value();
     const bool whole = std::string(key).find("whole") != std::string::npos;
-    const auto q = whole ? TileRequest{true, {}} : selected_tile;
-    const TileUnit unit{0, 0, whole ? 0U : 5U};
+    const auto q =
+        whole ? TileRequest{{{0, TileSet::range(root, 0, 8).take_value()}}}
+              : selected_tile;
+    const TileUnit unit{0, 0, 0, whole ? 0U : 5U};
     auto output = context.execute_fragments(frozen, {{"out", q}});
     require(output.ok(), output.status().message);
     const Region selected({{1, 1}, {0, 1}, {1, 1}, {2, 1}});
@@ -719,12 +703,12 @@ void run() {
                                            : ErrorCode::InvalidArgument),
             "C sticky failure/cancel");
   }
-  for (auto mode : {4, 9, 17}) {
+  for (auto mode : {4, 9}) {
     GraphContext malformed(document("fixture.result.copy", mode));
     auto compiled = Compiler(registry).compile(malformed);
     require(
         !compiled.ok() && compiled.status().code == ErrorCode::InvalidArgument,
-        "metadata sink rejects malformed records and changed signed-zero seal");
+        "metadata sink rejects malformed records");
   }
   for (auto mode : {6, 10, 11}) {
     GraphContext stale(document("fixture.result.whole", mode));
@@ -732,54 +716,6 @@ void run() {
     auto output = context.execute(compiled.plan, {{a, c}});
     require(!output.ok() && output.status().code == ErrorCode::InvalidArgument,
             "stale start CPU service lease");
-  }
-  {
-    float table[] = {0, 1, 2, 3};
-    const auto lut_schema =
-        numeric_schema("fixture.lut", ElementType::Float32, 4);
-    const auto scalar_schema =
-        numeric_schema("fixture.typed_number", ElementType::Float32, 1);
-    auto value = numeric_source(
-        root, lut_schema,
-        ByteView(reinterpret_cast<const std::uint8_t*>(table), sizeof(table)));
-    WorkflowDocument typed;
-    WorkflowInputDeclaration lut;
-    lut.id = 1;
-    lut.name = "lut";
-    lut.result_schema = std::make_shared<SchemaTemplate>(lut_schema);
-    WorkflowInputDeclaration factor;
-    factor.id = 2;
-    factor.name = "factor";
-    factor.result_schema = std::make_shared<SchemaTemplate>(scalar_schema);
-    typed.inputs = {lut, factor};
-    typed.nodes = {{1,
-                    "fixture.result.typed",
-                    {WorkflowInputReference{1}, WorkflowInputReference{2}},
-                    {}}};
-    typed.outputs = {{"out", 1, "number"}};
-    GraphContext graph(typed);
-    auto plan = Compiler(registry).compile(graph);
-    require(plan.ok(), plan.status().message);
-    for (float number : {.5F, 2.0F, std::numeric_limits<float>::quiet_NaN()}) {
-      ExecutionBinding input;
-      input.name = "lut";
-      input.result = value;
-      ExecutionBinding scalar;
-      scalar.name = "factor";
-      scalar.result = numeric_source(
-          root, scalar_schema,
-          ByteView(reinterpret_cast<const std::uint8_t*>(&number),
-                   sizeof(number)));
-      auto output = context.execute(plan.value().plan, {{input, scalar}});
-      if (number == .5F) {
-        require(output.ok(), output.status().message);
-        const auto& object = output.value().results.at("out");
-        const float result = read_number(object);
-        require(result == 3, "C Typed LUT/Scalar input and Typed output");
-      } else {
-        require(!output.ok(), "C scalar bounds/nonfinite validation");
-      }
-    }
   }
   {
     auto projected = document("fixture.result.mixed", 12);
@@ -795,18 +731,14 @@ void run() {
   mixed_doc.nodes[0].parameters.clear();
   mixed_doc.outputs = {{"image", 1, "image"},
                        {"count", 1, "number"},
-                       {"lut", 1, "lut"},
-                       {"metadata", 1, "metadata"}};
+                       {"lut", 1, "lut"}};
   GraphContext mixed_graph(mixed_doc);
   auto mixed_plan = Compiler(registry).compile(mixed_graph);
   require(mixed_plan.ok(), mixed_plan.status().message);
   auto mixed = context.execute(mixed_plan.value().plan, {{a, c}});
   require(mixed.ok(), "C mixed: " + std::string(mixed.status().message));
-  require(mixed.value().results.size() == 4,
-          "C same-node image, numeric, typed and field Result outputs");
-  require(
-      mixed.value().results.at("metadata").descriptor().value().rows(0) == 1,
-      "C mixed runtime Result field");
+  require(mixed.value().results.size() == 3,
+          "C same-node image and numeric Tensor outputs");
   require(read_number(mixed.value().results.at("count")) == 32,
           "C numeric Result count preserves full image cardinality");
   const auto& lut_result = mixed.value().results.at("lut");
@@ -816,16 +748,11 @@ void run() {
   for (std::uint64_t i = 0; i < 4; ++i)
     require(read_number(lut_result, i) == static_cast<float>(i),
             "C LUT Result samples");
-  for (bool multiple : {false, true}) {
+  {
     auto unsupported = unified_result_fixture::image_schema();
-    if (multiple) {
-      auto other = unsupported.tensors[0];
-      other.key = "depth";
-      unsupported.tensors.push_back(other);
-    } else {
-      unsupported.tensors.clear();
-      unsupported.fields = {{"rows", ElementType::UInt8, {}, {}}};
-    }
+    auto other = unsupported.tensors[0];
+    other.key = "depth";
+    unsupported.tensors.push_back(other);
     auto doc = document("fixture.result.copy");
     doc.inputs[0].result_schema = std::make_shared<SchemaTemplate>(unsupported);
     GraphContext graph(doc);
@@ -869,113 +796,15 @@ void run() {
                   .ok() &&
               pixel == 40,
           "C resolved query and new image dimensions");
-  // Prefix producer and Whole consumers read immutable Root-memory fields.
-  auto control = [&](const ResourceBudget& budget, int64_t count) {
-    ExecutionBinding binding = c;
-    binding.result = control_source(budget, count);
-    return binding;
-  };
-  WorkflowDocument rows;
-  rows.inputs = {document("fixture.result.copy").inputs[1]};
-  rows.nodes = {
-      {1, "fixture.result.rows", {WorkflowInputReference{2}}, {}},
-      {2, "fixture.result.rows_sum", {WorkflowNodeOutput{1, "rows"}}, {}},
-      {3, "fixture.result.rows_first", {WorkflowNodeOutput{1, "rows"}}, {}}};
-  rows.outputs = {{"rows", 1, "rows"},
-                  {"sum", 2, "number"},
-                  {"first", 3, "number"}};
-  GraphContext rows_graph(rows);
-  auto rows_plan = Compiler(registry).compile(rows_graph).take_value().plan;
-  ResultRef three, none;
-  for (int64_t count : {3, 0}) {
-    auto result = context.execute(rows_plan, {{control(root, count)}});
-    require(result.ok(), "C rows: " + std::string(result.status().message));
-    require(result.value().results.at("rows").descriptor().value().rows(0) ==
-                static_cast<uint64_t>(count),
-            "C RuntimeCount zero/nonzero");
-    const float sum = read_number(result.value().results.at("sum"));
-    require(sum == (count ? 6 : 0), "C field consumer I/O");
-    if (count)
-      three = result.value().results.at("rows");
-    else
-      none = result.value().results.at("rows");
-  }
-  {
-    auto cached_config = config;
-    cached_config.result_cache_bytes = 8192;
-    ExecutionContext cached_context(registry, cached_config);
-    auto only_rows = rows;
-    only_rows.outputs = {{"rows", 1, "rows"}};
-    GraphContext cached_graph(only_rows);
-    auto plan = Compiler(registry).compile(cached_graph).take_value().plan;
-    auto cold = cached_context.execute(
-        plan, {{control(cached_context.resource_budget().value(), 3)}});
-    require(cold.ok(), cold.status().message);
-    auto warm = cached_context.execute(
-        plan, {{control(cached_context.resource_budget().value(), 3)}});
-    require(warm.ok(), warm.status().message);
-    const auto& object = warm.value().results.at("rows");
-    require(
-        warm.value().diagnostics.cache_hits > 0 &&
-            warm.value().diagnostics.operation_timings.empty() &&
-            object.object_id() != cold.value().results.at("rows").object_id() &&
-            object.descriptor().value().rows(0) == 3,
-        "completed C field Result content reuse");
-    cached_context.clear_result_cache();
-    auto read = object.prepare_read(object.descriptor().value(), 0, 0, 3)
-                    .take_value()
-                    .load(128)
-                    .take_value();
-    const std::int64_t expected[] = {1, 2, 3};
-    require(
-        read->bytes().size() == sizeof(expected) &&
-            std::memcmp(read->bytes().data(), expected, sizeof(expected)) == 0,
-        "cached field backing survives clear");
-  }
-  auto row_schema = std::make_shared<SchemaTemplate>(
-      registry->find_traits("fixture.result.rows")
-          .value()
-          .outputs[0]
-          .result_schema.value());
-  WorkflowDocument bound_rows;
-  WorkflowInputDeclaration source;
-  source.id = 1;
-  source.name = "rows";
-  source.result_schema = row_schema;
-  bound_rows.inputs = {source};
-  bound_rows.nodes = {
-      {1, "fixture.result.rows_sum", {WorkflowInputReference{1}}, {}}};
-  bound_rows.outputs = {{"sum", 1, "number"}};
-  GraphContext bound_graph(bound_rows);
-  auto bound_plan = Compiler(registry).compile(bound_graph).take_value().plan;
-  ExecutionBinding bound;
-  bound.name = "rows";
-  bound.result = three;
-  auto demand = context.open_demand(bound_plan, {{bound}}).take_value();
-  const TileRequest one{true, {}};
-  require(demand.request({{"sum", one}}).ok(), "field demand");
-  bound.result = none;
-  auto changed = demand.replace_bindings({{bound}});
-  require(changed.ok(), changed.status().message);
-  auto zero = demand.request({{"sum", one}});
-  require(zero.ok(), zero.status().message);
-  require(read_number(zero.value().results.at("sum")) == 0,
-          "C rebind to empty rows sums to zero");
-  bound.result = three;
-  changed = demand.replace_bindings({{bound}});
-  require(changed.ok(), changed.status().message);
-  auto again = demand.request({{"sum", one}});
-  require(again.ok(), again.status().message);
-  require(read_number(again.value().results.at("sum")) == 6,
-          "C rebind restores row sum");
   WorkflowDocument scalar;
   scalar.nodes = {{1, "fixture.result.scalar", {}, {}}};
   scalar.outputs = {{"out", 1, "number"}};
   GraphContext graph(scalar);
   auto plan = Compiler(registry).compile(graph).take_value().plan;
   auto frozen = context.freeze(plan).take_value();
-  auto result =
-      context.execute_fragments(frozen, {{"out", TileRequest{true, {}}}});
+  auto result = context.execute_fragments(
+      frozen,
+      {{"out", TileRequest{{{0, TileSet::range(root, 0, 1).take_value()}}}}});
   require(result.ok(), result.status().message);
   const auto& sequence = result.value().results.at("out");
   for (std::uint64_t i = 0; i < 128; ++i)
@@ -983,11 +812,6 @@ void run() {
   require(sequence.descriptor().value().tensor_coverage(0) ==
               Footprint::all({128}).take_value(),
           "C non-spatial Result completes its Whole unit");
-  const TileRequest invalid_tiles{
-      false, TileSet::from_indices(root, {1, 30, 126}).take_value()};
-  auto refused = context.execute_fragments(frozen, {{"out", invalid_tiles}});
-  require(!refused.ok() && refused.status().code == ErrorCode::InvalidArgument,
-          "nonspatial C output rejects explicit tile indices");
   auto empty = context.execute_fragments(frozen, {{"out", TileRequest{}}});
   require(empty.ok(), empty.status().message);
   require(empty.value()
@@ -1087,193 +911,7 @@ void c_affine_tensor_view() {
       alias.row_run({1, 0, 1, 2}).value().data == pointer,
       "C11 affine view survives source binding and continuation retirement");
 }
-void c_whole_view_policies() {
-  auto registry = std::make_shared<OperationRegistry>();
-  require(
-      registry->load_plugin(PS_RESULT_FIXTURE).ok() && registry->freeze().ok(),
-      "Whole C view policy registry");
-  for (const auto& entry : std::vector<std::pair<std::string, std::uint64_t>>{
-           {"fixture.result.whole_auto", 0},
-           {"fixture.result.whole_strict", 0},
-           {"fixture.result.whole_copy", 32}}) {
-    const auto traits = registry->find_traits(entry.first).value();
-    const auto& output = traits.outputs[0];
-    require(output.maximum_output_payload_bytes &&
-                *output.maximum_output_payload_bytes == entry.second &&
-                output.preserve_output_views == (entry.second == 0) &&
-                output.requires_input_views ==
-                    (entry.first == "fixture.result.whole_strict"),
-            "C output policy and zero payload bound survive import");
-  }
-  void* library = dlopen(PS_RESULT_FIXTURE, RTLD_NOW | RTLD_LOCAL);
-  require(library != nullptr, "Whole C view observer");
-  const auto counts = reinterpret_cast<uint32_t (*)(uint32_t)>(
-      dlsym(library, "fixture_result_whole_view_counts"));
-  require(counts != nullptr, "Whole C policy counter export");
-  const auto schema = [] {
-    SchemaTemplate result;
-    result.id = "fixture.whole.tensor";
-    ResultTensorSpec tensor;
-    tensor.key = "samples";
-    tensor.descriptor = {ElementType::Float64, {4}};
-    result.tensors.push_back(std::move(tensor));
-    return result;
-  }();
-  for (unsigned layout : {0u, 1u, 2u, 3u}) {
-    ResourceBudget root;
-    ResultRef held;
-    WeakResultRef source_owner;
-    const void* token = nullptr;
-    const auto starts = counts(0), computations = counts(1),
-               destroys = counts(2);
-    {
-      ExecutionContextConfig config;
-      config.cpu_workers = 1;
-      config.maximum_live_bytes = 65536;
-      config.result_cache_bytes = 0;
-      config.managed_resources = ResourceLimits{};
-      ExecutionContext context(registry, config);
-      root = context.resource_budget().take_value();
-      auto builder =
-          ResultBuilder::start(root, schema, "whole.c.source").take_value();
 
-      std::shared_ptr<const CpuStorage> storage;
-      if (layout) {
-        auto buffer =
-            root.allocator().allocate(layout == 3 ? 8 : 32).take_value();
-        for (std::uint64_t at = 0; at < (layout == 3 ? 1u : 4u); ++at) {
-          const double number = layout == 3 ? 7 : static_cast<double>(at);
-          std::memcpy(buffer.data() + 8 * at, &number, 8);
-        }
-        storage = std::move(buffer).freeze();
-        token = storage.get();
-      }
-      if (layout >= 2) {
-        require(
-            builder
-                .publish_tensor(
-                    0, Region::whole({4}),
-                    {layout == 2 ? 24u : 0u, {layout == 2 ? -8 : 0}}, storage)
-                .ok(),
-            "Whole C signed/zero source");
-      } else {
-        for (std::uint64_t at = 0; at < 4; ++at) {
-          auto owner = storage;
-          if (!owner) {
-            auto buffer = root.allocator().allocate(8).take_value();
-            const double number = static_cast<double>(at);
-            std::memcpy(buffer.data(), &number, 8);
-            owner = std::move(buffer).freeze();
-          }
-          require(builder
-                      .publish_tensor(0, Region({{at, 1}}),
-                                      {layout ? 8 * at : 0, {0}, {at}}, owner)
-                      .ok(),
-                  "Whole C fragmented source");
-        }
-      }
-      auto source = builder.seal().take_value();
-      source_owner = source.weak();
-      WorkflowDocument document;
-      WorkflowInputDeclaration input;
-      input.id = 1;
-      input.name = "input";
-      input.result_schema = std::make_shared<const SchemaTemplate>(schema);
-      document.inputs = {input};
-      document.nodes = {
-          {1,
-           layout ? "fixture.result.whole_strict" : "fixture.result.whole_auto",
-           {WorkflowInputReference{1}},
-           {{"mode", std::int64_t{0}}}}};
-      document.outputs = {{"out", 1, "value"}};
-      ExecutionBinding binding;
-      binding.name = "input";
-      binding.result = source;
-      auto run = [&]() {
-        GraphContext graph(document);
-        auto compiled = Compiler(registry).compile(graph);
-        require(compiled.ok(), compiled.status().message);
-        return context.execute(compiled.value().plan, {{binding}});
-      };
-      auto output = run();
-      require(output.ok(), output.status().message);
-      held = output.value().results.at("out");
-      require(counts(0) == starts + 1 && counts(1) == computations + 1 &&
-                  counts(2) == destroys + 1 && held.association().size() == 1 &&
-                  held.association()[0] == source.object_id(),
-              "C Whole compute and destruction preserve source association");
-      auto window =
-          held.acquire_tensor(held.descriptor().value(), 0, Region::whole({4}))
-              .take_value();
-      if (layout) {
-        require(window.storage_owner_token() == token &&
-                    window.row_run({0}).value().sample_stride_bytes ==
-                        (layout == 2   ? -8
-                         : layout == 3 ? 0
-                                       : 8),
-                "C strict Whole preserves compatible/signed/zero storage");
-      } else {
-        auto original = source
-                            .acquire_tensor(source.descriptor().value(), 0,
-                                            Region::whole({4}))
-                            .take_value();
-        require(original.storage_owner_token() == nullptr &&
-                    window.storage_owner_token() != nullptr &&
-                    root.statistics().live[ResourceKind::Payload] == 64,
-                "C Auto input collection adds Root backing at zero output cap");
-        document.nodes[0].operation = "fixture.result.whole_strict";
-        const auto before = counts(1);
-        auto rejected = run();
-        require(!rejected.ok() &&
-                    rejected.status().code == ErrorCode::InvalidArgument &&
-                    rejected.status().reason == FailureReason::InvalidDomain &&
-                    rejected.status().detail.origin == FailureOrigin::Domain &&
-                    rejected.status().detail.scope == FailureScope::Group &&
-                    counts(1) == before,
-                "C RequireView rejects multi-owner input before computation");
-        document.nodes[0].operation = "fixture.result.whole_auto";
-        document.nodes[0].parameters["mode"] = std::int64_t{1};
-        auto bounded = run();
-        require(!bounded.ok() &&
-                    bounded.status().code == ErrorCode::ResourceExhausted &&
-                    bounded.status().reason == FailureReason::CapacityLimit,
-                "C zero cap rejects newly published output backing");
-        document.nodes[0].operation = "fixture.result.whole_copy";
-        auto copied = run();
-        require(copied.ok(), copied.status().message);
-        double last = -1;
-        require(
-            copied.value()
-                    .results.at("out")
-                    .read_tensor(
-                        copied.value().results.at("out").descriptor().value(),
-                        0, {3}, &last, 8)
-                    .ok() &&
-                last == 3,
-            "C explicit 32-byte cap permits materialized output");
-      }
-    }
-    {
-      const auto facts = held.descriptor().take_value();
-      for (std::uint64_t at = 0; at < 4; ++at) {
-        double number = -1;
-        require(held.read_tensor(facts, 0, {at}, &number, 8).ok() &&
-                    number == (layout == 2   ? 3 - at
-                               : layout == 3 ? 7
-                                             : at),
-                "C Whole Result remains readable after context retirement");
-      }
-    }
-    require(source_owner.lock().valid(),
-            "C Whole view retains original source owner");
-    held = {};
-    require(!source_owner.lock().valid(),
-            "C Whole last view retires source owner");
-    for (const auto live : root.statistics().live.values)
-      require(live == 0, "C Whole view releases every Root resource");
-  }
-  dlclose(library);
-}
 void c_sparse_wide_output() {
   const std::uint64_t extent = UINT64_C(1) << 61;
   const auto take = [](auto result) {
@@ -1310,7 +948,7 @@ void c_sparse_wide_output() {
       auto point = take(Footprint::from_regions(
           {1, extent}, {Region({{0, 1}, {coordinate, 1}})}));
       const TileRequest request{
-          false, take(TileSet::from_indices(root, {coordinate}))};
+          {{0, take(TileSet::from_indices(root, {coordinate}))}}};
       auto result = take(context.execute_fragments(frozen, {{"out", request}}));
       const auto& output = result.results.at("out");
       auto descriptor = take(output.descriptor());
@@ -1360,14 +998,13 @@ void c_payload_bounds() {
                .value()
                .outputs[slot]
                .result_schema);
-      metadata.output_tile_grid =
-          TileGrid::from_schema(*metadata.output.result_schema, 1).take_value();
+      metadata.output_tile_grids =
+          TileGrid::members(*metadata.output.result_schema, 1).take_value();
       const std::map<std::string, ParameterValue> parameters;
       ResultProgramQuery query(metadata, parameters);
       query.output_index = slot;
       query.tile_extent = 1;
-      query.output_request = {false,
-                              TileSet::from_indices(root, {0}).take_value()};
+
       query.semantic_key = slot ? "c.bound.right" : "c.bound.left";
       auto session = registry
                          ->start_result("fixture.result.bounded_output", query,
@@ -1639,7 +1276,12 @@ void fragmented_window_work() {
                     executed.status().reason == FailureReason::WorkLimit,
                 "C fragmented window lookup respects Root work limit");
       } else {
-        require(executed.ok(), executed.status().message);
+        require(executed.ok(),
+                "mode=" + std::to_string(mode) + " code=" +
+                    std::to_string(static_cast<int>(executed.status().code)) +
+                    " reason=" +
+                    std::to_string(static_cast<int>(executed.status().reason)) +
+                    " " + executed.status().message);
         require(root.statistics().issued.work - before >=
                     (mode == 10 ? 32000U : 60000U),
                 "C row and rectangle lookup charge backing-search work");
@@ -1670,7 +1312,7 @@ void window_work_failure() {
           "ignored owning-window work failure preserves first reason");
 }
 void many_view_windows() {
-  constexpr std::uint64_t layers = 2;
+  constexpr std::uint64_t layers = 1;
   auto registry = std::make_shared<OperationRegistry>();
   require(
       registry->load_plugin(PS_RESULT_FIXTURE).ok() && registry->freeze().ok(),
@@ -1682,16 +1324,16 @@ void many_view_windows() {
   ExecutionContext context(registry, config);
   auto root = context.resource_budget().take_value();
   auto schema = unified_result_fixture::image_schema();
-  schema.tensors[0].batch_axes[0] = 1024;
+  schema.tensors[0].batch_axes[0] = 1;
   schema.tensors[0].batch_axes[1] = layers;
   schema.tensors[0].descriptor.shape = {1, 1};
   auto builder = ResultBuilder::start(root, schema, "many.frames").take_value();
 
-  std::vector<float> samples(1024 * layers, 3);
+  std::vector<float> samples(1 * layers, 3);
   require(
       builder
           .publish_tensor(
-              0, Region::whole({1024, layers, 1, 1}),
+              0, Region::whole({1, layers, 1, 1}),
               ByteView(reinterpret_cast<const std::uint8_t*>(samples.data()),
                        samples.size() * 4))
           .ok(),
@@ -1701,7 +1343,7 @@ void many_view_windows() {
   source.result = builder.seal().take_value();
   control.name = "control";
   control.result = control_source(root, 0);
-  auto doc = document("fixture.result.view_whole");
+  auto doc = document("fixture.result.view_whole", 18);
   doc.inputs[0].result_schema = std::make_shared<SchemaTemplate>(schema);
   GraphContext graph(doc);
   auto compiled = Compiler(registry).compile(graph);
@@ -1711,10 +1353,10 @@ void many_view_windows() {
   auto output = result.value().results.at("out");
   float value = 0;
   require(output.read_tensor(output.descriptor().value(), 0,
-                             {1023, layers - 1, 0, 0}, &value, 4)
+                             {0, layers - 1, 0, 0}, &value, 4)
                   .ok() &&
               value == 3,
-          "many frames view supports more than 1024 acquired/released windows");
+          "one tile supports more than 1024 acquired/released windows");
 }
 struct NativeFailure {
   Status status;
@@ -1743,7 +1385,11 @@ struct ScalarImage {
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
     if (!stage++) {
       ResultProgramNeed need;
-      need.tiles = {{0, true, false, {}}};
+      need.tiles = {native_take(sdk::tile_need_for_samples(
+          phase.resources, phase.query, 0, 0,
+          Footprint::all(
+              phase.query.inputs[0].result_schema->tensors[0].sample_shape())
+              .take_value()))};
       return Result<ResultProgramPoll>(std::move(need));
     }
     float number = 0;
@@ -1769,7 +1415,11 @@ struct NativeScalar {
     const auto shape = input_schema.tensors[0].sample_shape();
     if (!stage++) {
       ResultProgramNeed need;
-      need.tiles = {{0, true, false, {}}};
+      need.tiles = {native_take(sdk::tile_need_for_samples(
+          phase.resources, phase.query, 0, 0,
+          Footprint::all(
+              phase.query.inputs[0].result_schema->tensors[0].sample_shape())
+              .take_value()))};
       return Result<ResultProgramPoll>(std::move(need));
     }
     auto input =
@@ -1859,12 +1509,13 @@ struct AffineScalar {
         const float reversed[] = {2, 4, 6, 8};
         std::memcpy(buffer.data(), reversed, sizeof(reversed));
       }
-      native_check(builder.publish_tensor(0, Region::whole({count}),
-                                          {layout == 2 ? 12U : 0U,
-                                           {layout == 1   ? 0
-                                            : layout == 2 ? -4
-                                                          : 4}},
-                                          std::move(buffer).freeze()));
+      native_check(
+          builder.publish_tensor(0, phase.query.tensor_outputs->boxes().front(),
+                                 {layout == 2 ? 12U : 0U,
+                                  {layout == 1   ? 0
+                                   : layout == 2 ? -4
+                                                 : 4}},
+                                 std::move(buffer).freeze()));
     }
     return Result<ResultProgramPoll>(
         ResultPublication{native_take(builder.seal()), true});
@@ -1882,13 +1533,12 @@ void native_ancestors(OperationRegistry* registry,
   OperationDefinition numeric;
   numeric.key = "fixture.native.scalar";
   numeric.traits = unified_result_fixture::traits(1, sizeof(NativeScalar));
-  numeric.traits.input_schema[0].kind = OperationPortKind::Result;
+
   numeric.traits.input_schema[0].element_type =
       static_cast<uint32_t>(ElementType::Float32);
   numeric.traits.input_schema[0].rank = 1;
   numeric.traits.supports_cpu = false;
   numeric.traits.supports_gpu = true;
-  numeric.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   unified_result_fixture::result_output(
       &numeric.traits.outputs[0],
       numeric_schema("fixture.number", ElementType::Float32, 1));
@@ -1901,7 +1551,6 @@ void native_ancestors(OperationRegistry* registry,
     OperationDefinition source;
     source.key = layout_key(layout);
     source.traits = unified_result_fixture::traits(0, sizeof(AffineScalar));
-    source.traits.outputs[0].region_rule = OperationRegionRule::Whole;
     unified_result_fixture::result_output(
         &source.traits.outputs[0],
         numeric_schema("fixture.number", ElementType::Float32,
@@ -1940,12 +1589,21 @@ void impure_start_fallback() {
     unified_result_fixture::result_output(
         &operation.traits.outputs[0],
         numeric_schema("test.impure.start", ElementType::Float32, 1));
-    operation.traits.outputs[0].region_rule = OperationRegionRule::Whole;
     operation.traits.deterministic = mode == 1;
     operation.traits.side_effect_free = mode == 0;
     operation.traits.cacheable = false;
     operation.traits.supports_gpu = true;
     operation.traits.allows_cpu_fallback = true;
+    OperationSharedStage stage;
+    stage.key = "effect";
+    stage.result_schema = *operation.traits.outputs[0].result_schema;
+    stage.backend = Backend::Gpu;
+    stage.mandatory = true;
+    stage.continuation_bytes = 1;
+    stage.maximum_work = 10000;
+    stage.maximum_output_payload_bytes = 4;
+    stage.maximum_dependency_stages = 1;
+    operation.traits.shared_stages = {stage};
     operation.start_result = [attempts](const ResultProgramQuery& query,
                                         const auto&) {
       ++(*attempts)[query.backend == Backend::Gpu ? 1 : 0];
@@ -2282,28 +1940,42 @@ int native_gpu() {
 }
 }  // namespace
 int main(int argc, char** argv) {
+  const char* phase = "native GPU";
   try {
     if (argc == 2 && std::string(argv[1]) == "--gpu-only")
       return native_gpu();
+    phase = "continuation_owns_library";
     continuation_owns_library();
+    phase = "run";
     run();
+    phase = "backend_contracts";
     backend_contracts();
+    phase = "impure_c_whole";
     impure_c_whole();
+    phase = "member_contracts";
     member_contracts();
+    phase = "sole_member_contracts";
     sole_member_contracts();
+    phase = "window_work_failure";
     window_work_failure();
+    phase = "fragmented_window_work";
     fragmented_window_work();
+    phase = "c_affine_tensor_view";
     c_affine_tensor_view();
+    phase = "c_reshape_views";
     c_reshape_views();
-    c_whole_view_policies();
+    phase = "c_payload_bounds";
     c_payload_bounds();
+    phase = "c_sparse_wide_output";
     c_sparse_wide_output();
+    phase = "c_whole_tensor_programs";
     c_whole_tensor_programs();
+    phase = "many_view_windows";
     many_view_windows();
     std::cout << "C11 unified Result fixture passed\n";
     return 0;
   } catch (const std::exception& e) {
-    std::cerr << e.what() << '\n';
+    std::cerr << phase << ": " << e.what() << '\n';
     return 1;
   }
 }

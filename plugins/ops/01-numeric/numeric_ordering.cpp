@@ -17,7 +17,9 @@
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/stable_order.hpp"
 #include "common/floating_environment.hpp"
+#include "common/joint_result.hpp"
 #include "common/registry.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -30,7 +32,7 @@ Status shape_error(const char* message) {
 }
 
 Result<std::uint32_t> ordering_axis(
-    const ValueDescriptor& descriptor,
+    const TensorDescriptor& descriptor,
     const std::map<std::string, ParameterValue>& parameters) {
   using Answer = Result<std::uint32_t>;
   if (descriptor.shape.empty() || descriptor.shape.size() > 8)
@@ -58,7 +60,8 @@ struct OrderingKernel final {
   OrderingKernel(bool quantile, SequenceProfile profile)
       : quantile(quantile), profile(profile) {}
   Status write(const ResultProgramPhase& phase,
-               const ResourceVector<ResultTensorWriteWindow>& writers) {
+               const ResourceVector<ResultTensorWriteWindow>& writers,
+               const ResultTensorWriteWindow* indices_output = nullptr) {
     using namespace numeric_ops;  // NOLINT(build/namespaces)
     if (writers.size() != 1)
       return {ErrorCode::OperationFailed,
@@ -98,6 +101,9 @@ struct OrderingKernel final {
         [](OrderingState* item) { item->~OrderingState(); });
     MathTensorReader reader(input, phase.query.cancellation);
     MathTensorWriter writer(writers[0]);
+    std::optional<MathTensorWriter> index_writer;
+    if (indices_output)
+      index_writer.emplace(*indices_output);
     std::vector<uint64_t> coordinate(shape.size(), 0), source(shape.size(), 0);
     uint64_t lines = 1;
     for (size_t axis_index = 0; axis_index < shape.size(); ++axis_index)
@@ -126,19 +132,24 @@ struct OrderingKernel final {
         std::array<std::uint64_t, 4> replicas{};
         numeric_ops::select_words(replicas.data(), bits, bits, 1, profile);
         std::memcpy(writer.address(coordinate), replicas.data(),
-                    Value::element_size(target));
+                    TensorSpan::element_size(target));
         return work(1);
       };
       if (!quantile) {
         for (std::uint64_t j = 0; j < count; ++j) {
           coordinate[axis] = j;
           std::uint64_t bits = indices[j];
-          if (phase.query.output_index == 0) {
+          if (indices_output || phase.query.output_index == 0) {
             status = read(indices[j], &bits);
             if (!status.ok())
               return (status);
           }
           status = store(bits);
+          if (status.ok() && index_writer) {
+            std::memcpy(index_writer->address(coordinate), &indices[j],
+                        sizeof(std::uint64_t));
+            status = work(1);
+          }
           if (!status.ok())
             return (status);
         }
@@ -194,6 +205,23 @@ struct OrderingKernel final {
     }
     return work(1);
   }
+  Status publish(const ResultProgramPhase& phase, ResultBuilder& builder) {
+    const auto& schema = *phase.query.output.result_schema;
+    return sdk::publish_dense_tensor(
+        phase, builder, 0, Region::whole(schema.tensors[0].sample_shape()),
+        [&](const auto& values) {
+          if (quantile)
+            return numeric_ops::math_callback(
+                phase, [&] { return write(phase, values); });
+          return sdk::publish_dense_tensor(
+              phase, builder, 1,
+              Region::whole(schema.tensors[1].sample_shape()),
+              [&](const auto& indices) {
+                return numeric_ops::math_callback(
+                    phase, [&] { return write(phase, values, &indices[0]); });
+              });
+        });
+  }
 };
 using OrderingProgram = numeric_ops::WholeTensorProgram<OrderingKernel>;
 OperationDefinition ordering_operation(const std::string& key, bool quantile,
@@ -204,7 +232,6 @@ OperationDefinition ordering_operation(const std::string& key, bool quantile,
   traits.input_count = quantile ? 2 : 1;
   traits.input_schema.resize(traits.input_count);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = 15;
   }
   if (quantile) {
@@ -229,8 +256,8 @@ OperationDefinition ordering_operation(const std::string& key, bool quantile,
       -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
     const auto& source = inputs[0].result_schema->tensors[0];
-    const ValueDescriptor descriptor{source.descriptor.element_type,
-                                     source.sample_shape()};
+    const TensorDescriptor descriptor{source.descriptor.element_type,
+                                      source.sample_shape()};
     auto axis = ordering_axis(descriptor, parameters);
     if (!axis.ok())
       return Answer(axis.status());
@@ -266,7 +293,9 @@ OperationDefinition ordering_operation(const std::string& key, bool quantile,
     return ResultContinuation::make<OrderingProgram>(allocator, quantile,
                                                      profile);
   };
-  return operation;
+  if (quantile)
+    return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
+  return joint_result(std::move(operation));
 }
 }  // namespace
 Status register_numeric_ordering(OperationRegistry* registry) {

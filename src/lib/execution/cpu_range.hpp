@@ -11,6 +11,7 @@
 #include <thread>
 #include <utility>
 
+#include "core/callback_environment.hpp"
 #include "core/resource_observation.hpp"
 #include "data/result_host_access.hpp"
 #include "execution/cpu_range_context.hpp"
@@ -23,8 +24,9 @@ namespace ps::execution_internal {
 
 /** @brief Intrusive synchronous range jobs serviced by the existing CPU pool.
  * All queue/claim fields use the pool mutex. No helper closure retains a job
- * after its active claim retires. Whole callers participate; staged callers
- * coordinate outside the pool so occupied workers cannot wait on themselves.
+ * after its active claim retires. Synchronous callers participate;
+ * continuations coordinate outside the pool so occupied workers cannot wait on
+ * themselves.
  */
 class CpuRangeQueue final {
  public:
@@ -34,7 +36,7 @@ class CpuRangeQueue final {
     std::uint32_t workers = 1, active = 0, helpers = 0;
     std::uint32_t peak = 0;
     bool caller_participates = true;
-    ps_cpu_range_callback_v1 callback = nullptr;
+    ps_cpu_range_callback_v2 callback = nullptr;
     data_internal::ResultHostAccessScope::Observer host_access;
     core_internal::PayloadCapture payload_capture;
     void* user = nullptr;
@@ -97,7 +99,7 @@ class CpuRangeQueue final {
         payload.emplace(*job.resources, job.payload_capture);
       }
       data_internal::ResultHostAccessScope host_access(job.host_access);
-      input_internal::Float32Environment environment;
+      core_internal::CallbackEnvironment environment;
       if (job.cancellation->cancelled()) {
         status.code = ErrorCode::Cancelled;
       } else if (job.current && *job.current && !(*job.current)()) {
@@ -162,7 +164,7 @@ class CpuRangeQueue final {
       changed_.notify_one();
   }
   Status run(std::uint64_t count, std::uint64_t grain, std::uint32_t workers,
-             ps_cpu_range_callback_v1 callback, void* user,
+             ps_cpu_range_callback_v2 callback, void* user,
              const CancellationToken& cancellation,
              const ResourceBudget* resources,
              const std::function<bool()>& current) {
@@ -250,7 +252,7 @@ class CpuRangeQueue final {
    * coordinator path.
    */
   Status run_external(std::uint64_t count, std::uint32_t workers,
-                      ps_cpu_range_callback_v1 callback, void* user,
+                      ps_cpu_range_callback_v2 callback, void* user,
                       const CancellationToken& cancellation,
                       const ResourceBudget* resources,
                       const std::function<bool()>& current,
@@ -398,9 +400,9 @@ class CpuRangeScope final {
         resources_(resources),
         current_(std::move(current)),
         owner_(std::this_thread::get_id()),
-        service_{sizeof(service_), PS_CPU_PARALLEL_ABI_VERSION_1,
+        service_{sizeof(service_), PS_CPU_PARALLEL_ABI_VERSION_2,
                  queue.workers(), this, invoke} {}
-  const ps_cpu_parallel_service_v1* service() const noexcept {
+  const ps_cpu_parallel_service_v2* service() const noexcept {
     return &service_;
   }
   Status status() const {
@@ -411,7 +413,7 @@ class CpuRangeScope final {
 
  private:
   static int invoke(void* context, std::uint64_t count, std::uint64_t grain,
-                    std::uint32_t workers, ps_cpu_range_callback_v1 callback,
+                    std::uint32_t workers, ps_cpu_range_callback_v2 callback,
                     void* user) noexcept {
     auto& self = *static_cast<CpuRangeScope*>(context);
     // A worker's invalid nested call cannot mutate caller-owned sticky state.
@@ -441,7 +443,7 @@ class CpuRangeScope final {
   const ResourceBudget* resources_;
   std::function<bool()> current_;
   const std::thread::id owner_;
-  ps_cpu_parallel_service_v1 service_;
+  ps_cpu_parallel_service_v2 service_;
   Status failure_;
   std::atomic<bool> violation_{false};
 };

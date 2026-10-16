@@ -10,6 +10,7 @@
 #include <mutex>
 #include <utility>
 
+#include "core/callback_environment.hpp"
 #include "photospider/execution/execution.hpp"
 
 namespace ps::execution_internal {
@@ -82,7 +83,8 @@ class ResultSubscription final {
     lock.unlock();
     Status delivered;
     try {
-      delivered = callback_(output, result);
+      delivered = core_internal::invoke_callback(
+          [&] { return callback_(output, result); });
     } catch (const std::bad_alloc&) {
       delivered = Status{ErrorCode::ResourceExhausted, {}};
     } catch (...) {

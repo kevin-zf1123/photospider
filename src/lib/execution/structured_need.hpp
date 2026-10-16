@@ -17,17 +17,24 @@ struct StructuredTensorGrant {
   bool descriptor_only = false;
   TileRequest producer_request;
 };
-// Whole field access or computed descriptor metadata, derived only from an
-// admitted TileNeed. Descriptor-only grants never expose the Result payload.
-struct StructuredObjectGrant {
-  std::uint32_t input = 0;
-  bool descriptor_only = false;
-};
 struct StructuredNeedGrants {
   ResourceVector<TileDependency> dependencies;
-  ResourceVector<StructuredObjectGrant> objects;
+  ResourceVector<ResultSharedNeed> shared_stages;
   ResourceVector<std::pair<std::uint32_t, ResultDescriptor>> static_descriptors;
   ResourceVector<StructuredTensorGrant> tiles;
+};
+// Identical input acquisitions share their tile directory and progress within
+// one Run. The coordinator owns this state until the producer step retires;
+// consumers retain their exact grants independently.
+template <class Producer>
+struct StructuredInputAcquisition {
+  explicit StructuredInputAcquisition(const ResourceBudget& root)
+      : units(ResourceAllocator<ResultRef>(root)) {}
+  std::uint64_t position = 0;
+  ResourceVector<ResultRef> units;
+  std::shared_ptr<Producer> producer;
+  ResultRef result;
+  bool fallback_taint = false;
 };
 // Cursor capabilities own producer lifetimes until the exact grant arrives.
 // Supply and Root are borrowed synchronously; failures never mark a child as
@@ -48,8 +55,7 @@ struct StructuredNeedCursor {
   std::optional<Footprint> tensor_supply_samples;
   bool tensor_payload = false;
   TileRequest tensor_request;
-  std::uint64_t unit_position = 0;
-  ResourceVector<ResultRef> unit_results;
+  std::shared_ptr<StructuredInputAcquisition<Producer>> acquisition;
   std::shared_ptr<Producer> producer;
   ResourceVector<std::shared_ptr<StructuredNeedCursor>> requests;
   std::size_t supplied = 0, turn = 0;

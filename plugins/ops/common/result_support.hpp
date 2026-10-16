@@ -33,11 +33,10 @@ inline void set_whole_tensor_output(OperationTraits& traits, ElementType type,
                                     uint64_t continuation, uint32_t index = 0) {
   auto& output = traits.outputs[index];
   output.key = "values";
-  output.output_schema.kind = OperationPortKind::Result;
+
   output.output_schema.result_schema_id = "photospider.tensor";
   output.output_schema.result_schema_version = 1;
   output.result_schema = numeric_tensor_schema(type, {1});
-  output.region_rule = OperationRegionRule::Whole;
   output.continuation_bytes = continuation;
   output.maximum_dependency_stages = 2;
 }

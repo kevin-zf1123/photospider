@@ -16,6 +16,7 @@
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -223,7 +224,6 @@ OperationDefinition operation(const std::string& name, bool pchip,
   traits.input_count = 3;
   traits.input_schema.resize(3);
   for (auto& port : traits.input_schema) {
-    port.kind = OperationPortKind::Result;
     port.element_type_mask = 12;
   }
   traits.parameter_schema = {{"dtype", OperationParameterType::String},
@@ -243,7 +243,7 @@ OperationDefinition operation(const std::string& name, bool pchip,
     };
     if (inputs.size() != 3)
       return Answer(mismatch("inverse port count"));
-    std::array<ValueDescriptor, 3> descriptors;
+    std::array<TensorDescriptor, 3> descriptors;
     for (unsigned i = 0; i < inputs.size(); ++i) {
       const auto& tensor = inputs[i].result_schema->tensors[0];
       descriptors[i] = {tensor.descriptor.element_type, tensor.sample_shape()};
@@ -279,7 +279,7 @@ OperationDefinition operation(const std::string& name, bool pchip,
                                              const auto& allocator) {
     return ResultContinuation::make<InverseProgram>(allocator, pchip, profile);
   };
-  return definition;
+  return sdk::with_whole_stage(std::move(definition), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_curve_inverse(OperationRegistry* registry) {

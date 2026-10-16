@@ -42,7 +42,7 @@ Status visit_typed_samples(const Region& region,
 }
 template <class Read>
 Status validate_color_samples(const ColorArrayDescriptor& color,
-                              const ValueDescriptor& descriptor,
+                              const TensorDescriptor& descriptor,
                               const Region& region, Read read,
                               ErrorCode failure,
                               const std::function<ErrorCode()>& stop) {

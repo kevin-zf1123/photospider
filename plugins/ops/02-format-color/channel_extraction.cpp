@@ -202,15 +202,7 @@ Result<OperationPreparation> prepare_extraction(
         original.channel_axis && selected.axis == *original.channel_axis;
     if (structural || selected.keepdims) {
       auto layout = original;
-      layout.groups.clear();
-      if (!structural) {
-        layout.groups = original.groups;
-      } else if (selected.keepdims) {
-        for (const auto& group : original.groups)
-          if (selected.index >= group.first_channel &&
-              selected.index - group.first_channel < group.channel_count)
-            layout.groups.push_back({group.role, 0, 1});
-      } else {
+      if (structural && !selected.keepdims) {
         if (layout.height_axis > selected.axis)
           --layout.height_axis;
         if (layout.width_axis > selected.axis)
@@ -307,7 +299,7 @@ OperationDefinition extraction(const std::string& key, bool named,
   auto& traits = definition.traits;
   traits.input_count = 1;
   OperationPortConstraint port;
-  port.kind = OperationPortKind::Result;
+
   port.element_type_mask = 127;
   traits.input_schema = {port};
   traits.cacheable = false;
@@ -334,7 +326,6 @@ OperationDefinition extraction(const std::string& key, bool named,
   output.key = "values";
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
-  output.region_rule = OperationRegionRule::Tiled;
   output.continuation_bytes = sizeof(ChannelState);
   output.maximum_dependency_stages = 2;
   definition.prepare_static = [named, profile](const auto& inputs,

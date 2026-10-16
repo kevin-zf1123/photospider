@@ -72,8 +72,8 @@ struct OrderedReductionState final {
       return Result<ResultProgramPoll>(Status{
           ErrorCode::InvalidArgument, "numeric environment unavailable"});
     const auto& spec = phase.query.inputs[0].result_schema->tensors[0];
-    const ValueDescriptor input{spec.descriptor.element_type,
-                                spec.sample_shape()};
+    const TensorDescriptor input{spec.descriptor.element_type,
+                                 spec.sample_shape()};
     if (ready) {
       // Supply has already validated each declared typed fragment. Validation
       // pass needs no extra sample read and retains no payload after this poll.
@@ -137,8 +137,8 @@ struct OrderedReductionState final {
   }
   Result<ResultRef> advance(const ResultProgramPhase& phase) const {
     const auto& spec = phase.query.inputs[0].result_schema->tensors[0];
-    const ValueDescriptor input{spec.descriptor.element_type,
-                                spec.sample_shape()};
+    const TensorDescriptor input{spec.descriptor.element_type,
+                                 spec.sample_shape()};
     const auto state = [&](double value) {
       return ordered_state(phase, {value, mean});
     };
@@ -195,13 +195,12 @@ inline OperationDefinition ordered_reduction(const char* key, bool variance) {
   auto& traits = operation.traits;
   traits.input_count = 1;
   traits.input_schema.resize(1);
-  traits.input_schema[0].kind = OperationPortKind::Result;
+
   traits.input_schema[0].element_type_mask = 12;
   traits.requires_metadata_specialization = true;
   set_whole_tensor_output(traits, ElementType::Float64,
                           sizeof(OrderedReductionState));
   traits.outputs[0].key = "value";
-  traits.outputs[0].region_rule = OperationRegionRule::Tiled;
   traits.outputs[0].continuation_bytes = sizeof(OrderedReductionState);
   traits.workspace_bytes = 24;
   traits.outputs[0].maximum_dependency_stages = 1048576;
@@ -210,9 +209,6 @@ inline OperationDefinition ordered_reduction(const char* key, bool variance) {
   operation.specialize_metadata =
       [](const auto& inputs,
          const auto&) -> Result<std::vector<OperationOutputSpecialization>> {
-    if (!inputs[0].result_schema->fields.empty())
-      return Result<std::vector<OperationOutputSpecialization>>(Status{
-          ErrorCode::TypeMismatch, "ordered reduction requires one tensor"});
     auto count = inputs[0].result_schema->tensors[0].sample_count();
     if (!count.ok())
       return Result<std::vector<OperationOutputSpecialization>>(count.status());

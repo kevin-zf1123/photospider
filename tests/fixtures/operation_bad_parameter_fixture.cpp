@@ -17,9 +17,9 @@ void destroy_fixture(void*) {}
  * @return Case-specific malformed parameter descriptor.
  * @throws Nothing.
  */
-ps_result_parameter_descriptor_v4 make_parameter() noexcept {
-  return {sizeof(ps_result_parameter_descriptor_v4) - 1U, "value", 5U,
-          PS_RESULT_PARAMETER_FLOAT64_V4, 1U};
+ps_result_parameter_descriptor_v5 make_parameter() noexcept {
+  return {sizeof(ps_result_parameter_descriptor_v5) - 1U, "value", 5U,
+          PS_RESULT_PARAMETER_FLOAT64_V5, 1U};
 }
 #elif PS_BAD_PARAMETER_CASE == 4
 /**
@@ -27,9 +27,9 @@ ps_result_parameter_descriptor_v4 make_parameter() noexcept {
  * @return Case-specific malformed parameter descriptor.
  * @throws Nothing.
  */
-ps_result_parameter_descriptor_v4 make_parameter() noexcept {
-  return {sizeof(ps_result_parameter_descriptor_v4), "x", 1025U,
-          PS_RESULT_PARAMETER_FLOAT64_V4, 1U};
+ps_result_parameter_descriptor_v5 make_parameter() noexcept {
+  return {sizeof(ps_result_parameter_descriptor_v5), "x", 1025U,
+          PS_RESULT_PARAMETER_FLOAT64_V5, 1U};
 }
 #else
 /**
@@ -37,25 +37,25 @@ ps_result_parameter_descriptor_v4 make_parameter() noexcept {
  * @return Structurally valid parameter descriptor.
  * @throws Nothing.
  */
-ps_result_parameter_descriptor_v4 make_parameter() noexcept {
-  return {sizeof(ps_result_parameter_descriptor_v4), "value", 5U,
-          PS_RESULT_PARAMETER_FLOAT64_V4, 1U};
+ps_result_parameter_descriptor_v5 make_parameter() noexcept {
+  return {sizeof(ps_result_parameter_descriptor_v5), "value", 5U,
+          PS_RESULT_PARAMETER_FLOAT64_V5, 1U};
 }
 #endif
 
 /** @brief Case-specific parameter record. */
-const ps_result_parameter_descriptor_v4 parameter = make_parameter();
+const ps_result_parameter_descriptor_v5 parameter = make_parameter();
 
 #if PS_BAD_PARAMETER_CASE == 5
 /** @brief Exact byte count required for one deliberately misaligned record. */
 // NOLINTBEGIN(whitespace/indent_namespace)
 constexpr std::size_t kStorageSize =
-    sizeof(ps_result_parameter_descriptor_v4) + 1U;
+    sizeof(ps_result_parameter_descriptor_v5) + 1U;
 // NOLINTEND
 /** @brief Byte storage used to provide a deliberately misaligned pointer. */
 // NOLINTBEGIN(whitespace/indent_namespace)
 alignas(
-    ps_result_parameter_descriptor_v4) unsigned char storage[kStorageSize]{};
+    ps_result_parameter_descriptor_v5) unsigned char storage[kStorageSize]{};
 // NOLINTEND
 #endif
 
@@ -65,11 +65,11 @@ alignas(
  * @throws Nothing.
  * @note The host must validate pointer/count/alignment before dereference.
  */
-const ps_result_parameter_descriptor_v4* parameter_pointer() noexcept {
+const ps_result_parameter_descriptor_v5* parameter_pointer() noexcept {
 #if PS_BAD_PARAMETER_CASE == 1
   return nullptr;
 #elif PS_BAD_PARAMETER_CASE == 5
-  return reinterpret_cast<const ps_result_parameter_descriptor_v4*>(storage +
+  return reinterpret_cast<const ps_result_parameter_descriptor_v5*>(storage +
                                                                     1U);
 #else
   return &parameter;
@@ -98,7 +98,7 @@ const auto api =
 
 }  // namespace
 
-extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v4*
-ps_result_operation_plugin_get_api_v4(void) {
+extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v5*
+ps_result_operation_plugin_get_api_v5(void) {
   return &api;
 }

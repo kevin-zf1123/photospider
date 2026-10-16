@@ -16,6 +16,7 @@
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -192,7 +193,6 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
   traits.input_count = 2;
   traits.input_schema.resize(2);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = kind == Comparison::IsClose ? 12 : 15;
   }
   if (kind == Comparison::IsClose)
@@ -248,7 +248,7 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
     return ResultContinuation::make<ComparisonProgram>(allocator, kind,
                                                        profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 struct SelectionKernel final {
   explicit SelectionKernel(SequenceProfile) {}
@@ -258,7 +258,7 @@ struct SelectionKernel final {
     const auto& output = phase.query.output.result_schema->tensors[0];
     const auto& shape = output.descriptor.shape;
     const auto count = math_take(output.sample_count());
-    const auto width = Value::element_size(output.descriptor.element_type);
+    const auto width = TensorSpan::element_size(output.descriptor.element_type);
     std::array<MathTensorReader, 3> inputs{
         MathTensorReader(phase.tensors->at({0, 0}), phase.query.cancellation),
         MathTensorReader(phase.tensors->at({1, 0}), phase.query.cancellation),
@@ -296,7 +296,6 @@ OperationDefinition selection(const std::string& key, SequenceProfile profile) {
   traits.input_count = 3;
   traits.input_schema.resize(3);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = 15;
   }
   traits.input_schema[0].element_type_mask = 1;
@@ -339,7 +338,7 @@ OperationDefinition selection(const std::string& key, SequenceProfile profile) {
   operation.start_result = [profile](const auto&, const auto& allocator) {
     return ResultContinuation::make<SelectionProgram>(allocator, profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_numeric_comparisons(OperationRegistry* registry) {

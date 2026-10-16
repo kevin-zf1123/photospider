@@ -163,23 +163,29 @@ Result<SchemaTemplate> lut3d_bake_schema(const Lut3dBakeDescription& spec) {
     return Result<SchemaTemplate>(checked);
   SchemaTemplate schema;
   schema.id = "curve.bake_lut3d.report";
+  schema.version = 2;
   schema.domain = {{ResultExtentKind::Fixed, 1}};
-  schema.fields = {
-      {"passed", ElementType::UInt8, {}, {}},
-      {"axis", ElementType::Float64, {ResultExtentKind::Fixed, 3}, {3}},
-      {"validation_count", ElementType::Int64, {}, {}},
-      {"failed_count", ElementType::Int64, {}, {}},
-      {"max_abs_error", ElementType::Float64, {}, {3}},
-      {"max_error_point",
-       ElementType::Float64,
-       {ResultExtentKind::Fixed, 3},
-       {3}},
-      {"max_error_index", ElementType::Int64, {}, {3}},
-      {"first_failure_index", ElementType::Int64, {}, {}},
-      {"first_failure_input", ElementType::Float64, {}, {3}},
-      {"first_failure_reference", ElementType::Float64, {}, {3}},
-      {"first_failure_lut", ElementType::Float64, {}, {3}},
-      {"configuration_id", ElementType::UInt8, {}, {64}}};
+  const auto add = [&](const char* key, ElementType dtype,
+                       std::vector<std::uint64_t> shape, unsigned atomic) {
+    ResultTensorSpec member;
+    member.key = key;
+    member.descriptor = {dtype, std::move(shape)};
+    member.atomic_trailing_axes = atomic;
+    schema.tensors.push_back(std::move(member));
+  };
+  add("passed", ElementType::UInt8, {1}, 0);
+  add("axis", ElementType::Float64, {3, 3}, 1);
+  add("validation_count", ElementType::Int64, {1}, 0);
+  add("failed_count", ElementType::Int64, {1}, 0);
+  add("max_abs_error", ElementType::Float64, {1, 3}, 1);
+  add("max_error_point", ElementType::Float64, {3, 3}, 1);
+  add("max_error_index", ElementType::Int64, {1, 3}, 1);
+  add("first_failure_index", ElementType::Int64, {1}, 0);
+  add("first_failure_input", ElementType::Float64, {1, 3}, 1);
+  add("first_failure_reference", ElementType::Float64, {1, 3}, 1);
+  add("first_failure_lut", ElementType::Float64, {1, 3}, 1);
+  add("configuration_id", ElementType::UInt8, {1, 64}, 1);
+  add("measured_table_id", ElementType::UInt8, {1, 8}, 1);
   return Result<SchemaTemplate>(std::move(schema));
 }
 Result<SchemaTemplate> lut3d_bake_table_schema(
@@ -193,7 +199,7 @@ Result<SchemaTemplate> lut3d_bake_table_schema(
   schema.version = 2;
   for (auto n : spec.shape)
     schema.domain.push_back({ResultExtentKind::Fixed, n});
-  schema.fields.clear();
+  schema.tensors.clear();
   ResultTensorSpec tensor;
   tensor.key = "colors";
   tensor.descriptor = {spec.table_dtype,
@@ -232,25 +238,42 @@ Result<Lut3dBakeReport> read_lut3d_bake_report(
       return Status{ErrorCode::Cancelled, {}};
     return consume_work ? consume_work(count) : Status::success();
   };
-  auto charged = work(result.schema().canonical_size() + 353);
+  auto charged = work(result.schema().canonical_size() + 361);
   if (!charged.ok())
     return Answer(charged);
   auto identity = lut3d_bake_configuration_id(description);
   if (!identity.ok())
     return Answer(identity.status());
-  auto identity_read = result.prepare_read(descriptor.value(), 11, 0, 1);
-  if (!identity_read.ok())
-    return Answer(identity_read.status());
-  auto identity_bytes =
-      identity_read.value().load(maximum_window, cancellation);
-  if (!identity_bytes.ok())
-    return Answer(identity_bytes.status());
-  if (identity_bytes.value()->bytes().size() != 64 ||
-      std::memcmp(identity_bytes.value()->bytes().data(),
-                  identity.value().data(), 64))
+  const auto read = [&](std::uint32_t slot, void* destination,
+                        std::uint64_t bytes) {
+    if (bytes > maximum_window)
+      return Status{ErrorCode::ResourceExhausted, {}};
+    auto window = result.acquire_tensor(
+        descriptor.value(), slot,
+        Region::whole(result.schema().tensors[slot].sample_shape()),
+        cancellation);
+    return window.ok() ? window.value().copy_to(
+                             static_cast<std::uint8_t*>(destination), bytes)
+                       : window.status();
+  };
+  std::array<std::uint8_t, 64> stored_identity{};
+  auto copied_identity =
+      read(11, stored_identity.data(), stored_identity.size());
+  if (!copied_identity.ok())
+    return Answer(copied_identity);
+  if (std::memcmp(stored_identity.data(), identity.value().data(), 64))
     return Answer(
         core_internal::invalid_domain("bake report configuration mismatch"));
   Lut3dBakeReport report;
+  std::array<std::uint8_t, 8> measured{};
+  auto copied_measured = read(12, measured.data(), measured.size());
+  if (!copied_measured.ok())
+    return Answer(copied_measured);
+  for (unsigned i = 0; i < measured.size(); ++i)
+    report.measured_table_id |= std::uint64_t{measured[i]} << (8 * i);
+  if (!report.measured_table_id)
+    return Answer(
+        core_internal::invalid_domain("missing measured table identity"));
   std::uint8_t passed = 0;
   const std::array<void*, 11> fields{&passed,
                                      report.axis.data(),
@@ -266,17 +289,9 @@ Result<Lut3dBakeReport> read_lut3d_bake_report(
   const std::array<std::uint64_t, 11> sizes{1,  72, 8,  8,  24, 72,
                                             24, 8,  24, 24, 24};
   for (unsigned field = 0; field < fields.size(); ++field) {
-    auto plan = result.prepare_read(descriptor.value(), field, 0,
-                                    (field == 1 || field == 5) ? 3 : 1);
-    if (!plan.ok())
-      return Answer(plan.status());
-    auto window = plan.value().load(maximum_window, cancellation);
-    if (!window.ok())
-      return Answer(window.status());
-    if (window.value()->bytes().size() != sizes[field])
-      return Answer(core_internal::invalid_schema_domain(
-          "invalid LUT3D bake report schema"));
-    std::memcpy(fields[field], window.value()->bytes().data(), sizes[field]);
+    auto copied = read(field, fields[field], sizes[field]);
+    if (!copied.ok())
+      return Answer(copied);
   }
   auto validated = input_internal::validate_lut3d_bake_report_values(
       description, &report, passed, work);

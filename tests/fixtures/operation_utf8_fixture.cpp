@@ -109,16 +109,16 @@ void destroy_fixture(void*) {
  * @return Structurally complete parameter record carrying selected key bytes.
  * @throws Nothing.
  */
-ps_result_parameter_descriptor_v4 make_parameter() noexcept {
+ps_result_parameter_descriptor_v5 make_parameter() noexcept {
   const KeyBytes key = parameter_key();
-  return {sizeof(ps_result_parameter_descriptor_v4), key.data, key.size,
-          PS_RESULT_PARAMETER_FLOAT64_V4, 0U};
+  return {sizeof(ps_result_parameter_descriptor_v5), key.data, key.size,
+          PS_RESULT_PARAMETER_FLOAT64_V5, 0U};
 }
 
 /** @brief Static parameter declaration for the selected UTF-8 case. */
-const ps_result_parameter_descriptor_v4 parameter = make_parameter();
+const ps_result_parameter_descriptor_v5 parameter = make_parameter();
 
-ps_result_operation_v4 make_descriptor() noexcept {
+ps_result_operation_v5 make_descriptor() noexcept {
   const KeyBytes key = operation_key();
   return result_registry_fixture::make_operation(key.data, key.size, &parameter,
                                                  1);
@@ -131,8 +131,8 @@ const auto api =
 
 }  // namespace
 
-extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v4*
-ps_result_operation_plugin_get_api_v4(void) {
+extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v5*
+ps_result_operation_plugin_get_api_v5(void) {
   return &api;
 }
 

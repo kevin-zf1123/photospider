@@ -32,6 +32,7 @@ struct PublicationValidationView final {
   const ResourceBudget& resources;
   std::uint64_t maximum_window;
   PublicationValidationServices& services;
+  bool defer_contract = false;
 };
 class ResultPublicationValidator final {
  public:

@@ -46,7 +46,7 @@ ExecutionBindings inputs(const ResourceBudget& root,
   return bindings;
 }
 TileRequest point(std::uint64_t at) {
-  return {false, take(TileSet::from_indices(ResourceBudget{}, {at}))};
+  return {{{0, take(TileSet::from_indices(ResourceBudget{}, {at}))}}};
 }
 float number(const ResultRef& result, std::uint64_t at) {
   float value = 0;
@@ -74,12 +74,16 @@ bool unit_query(const OperationRegistry& registry, const ResourceBudget& root) {
   metadata.output.result_schema =
       std::make_shared<const SchemaTemplate>(schema());
   metadata.inputs.push_back(metadata.output);
+  metadata.output_tile_grids = {
+      take(TileGrid::from_tensor(schema().tensors[0], 1))};
+  metadata.input_tile_grids = {metadata.output_tile_grids};
   const std::map<std::string, ParameterValue> parameters{
       {"mode", std::int64_t{0}}};
   ResultProgramQuery query(metadata, parameters);
   query.tile_extent = 1;
   query.tile_unit = 0;
-  query.output_request = point(0);
+  query.tensor_outputs =
+      take(metadata.output_tile_grids[0].coverage(point(0).members.at(0)));
   query.semantic_key = "example.c_native_sum";
   auto continuation = take(registry.start_result(
       std::string(query.semantic_key), query, root.allocator()));
@@ -96,8 +100,8 @@ bool unit_query(const OperationRegistry& registry, const ResourceBudget& root) {
   auto polled = take(continuation.poll(phase));
   const auto* need = std::get_if<ResultProgramNeed>(&polled);
   return need && need->tiles.size() == 1 && need->tiles[0].input == 0 &&
-         !need->tiles[0].whole && !need->tiles[0].descriptor_only &&
-         need->tiles[0].tiles == point(0).tiles;
+         need->tiles[0].tensor_slot == 0 && !need->tiles[0].descriptor_only &&
+         need->tiles[0].tiles == point(0).members.at(0);
 }
 struct HostCalls {
   unsigned buffers = 0, executions = 0, releases = 0;
@@ -139,12 +143,16 @@ bool bridge_rejections(const OperationRegistry& registry) {
       metadata.output.result_schema =
           std::make_shared<const SchemaTemplate>(schema());
       metadata.inputs.push_back(metadata.output);
+      metadata.output_tile_grids = {
+          take(TileGrid::from_tensor(schema().tensors[0], 1))};
+      metadata.input_tile_grids = {metadata.output_tile_grids};
       const std::map<std::string, ParameterValue> parameters{{"mode", mode}};
       ResultProgramQuery query(metadata, parameters);
       query.backend = Backend::Gpu;
       query.tile_extent = 1;
       query.tile_unit = 0;
-      query.output_request = point(0);
+      query.tensor_outputs =
+          take(metadata.output_tile_grids[0].coverage(point(0).members.at(0)));
       query.semantic_key = "example.c_native_sum";
       auto continuation = take(registry.start_result(
           std::string(query.semantic_key), query, root.allocator()));
@@ -223,8 +231,8 @@ int main(int argc, char** argv) try {
       return 1;
     auto frozen = context.freeze(compiled.value().plan, bindings).take_value();
     auto result = context.execute_fragments(
-        frozen, {{"sum", TileRequest{false, take(TileSet::from_indices(
-                                                ResourceBudget{}, {0, 1}))}}});
+        frozen, {{"sum", TileRequest{{{0, take(TileSet::from_indices(
+                                              ResourceBudget{}, {0, 1}))}}}}});
     if (!result.ok())
       std::cerr << result.status().message << '\n';
     if (check(result.ok(), "C workflow failed"))
@@ -234,12 +242,12 @@ int main(int argc, char** argv) try {
                 "C independent sum failed"))
         return 1;
     }
-    auto evidence = take(result.value().dependencies.tile_record({0, 0, 1}));
+    auto evidence = take(result.value().dependencies.tile_record({0, 0, 0, 1}));
     std::vector<TileIndex> expected{1};
     for (TileIndex i = 1; i <= 65; ++i)
       expected.push_back(i * 64);
     if (check(evidence && evidence->inputs.size() == 1 &&
-                  !evidence->inputs[0].whole &&
+                  evidence->inputs[0].tensor_slot == 0 &&
                   evidence->inputs[0].tiles ==
                       take(TileSet::from_indices(
                           ResourceBudget{}, expected.data(), expected.size())),

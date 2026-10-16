@@ -311,10 +311,7 @@ void native_metadata(const TensorInterpretation& interpretation,
   const auto kind = out.math.kind;
   if (interpretation.model != source_model(kind, out.math.gray) ||
       interpretation.convention != "relative-v1" || interpretation.profile ||
-      interpretation.configured ||
-      (!interpretation.association.empty() &&
-       interpretation.association != "straight") ||
-      (description.association == "premultiplied"))
+      interpretation.configured)
     throw mismatch(
         "FMT-11 requires the stated native model in canonical straight "
         "relative-v1 coordinates");
@@ -890,7 +887,6 @@ Result<OperationPreparation> prepare(
           ++image.width_axis;
       }
       image.channel_axis = out.output_axis;
-      image.groups.clear();
       if (kind != Kind::ColorToGray || out.layout == Layout::Materialize)
         image.row_pitch_bytes = 0;
       output_tensor.layout = image;
@@ -1357,7 +1353,7 @@ OperationDefinition definition(Kind kind, SequenceProfile profile,
   traits.diagnostics = {numeric_diagnostic_identity()};
   traits.input_count = 1;
   OperationPortConstraint port;
-  port.kind = OperationPortKind::Result;
+
   port.element_type_mask = 127;
   traits.input_schema = {port};
   traits.cacheable = false;
@@ -1386,7 +1382,6 @@ OperationDefinition definition(Kind kind, SequenceProfile profile,
   output.key = "values";
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
-  output.region_rule = OperationRegionRule::Tiled;
   output.continuation_bytes = sizeof(State);
   output.maximum_dependency_stages = 2;
   def.prepare_static = [kind, profile](const auto& inputs, const auto& params) {

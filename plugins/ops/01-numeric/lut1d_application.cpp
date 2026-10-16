@@ -19,6 +19,7 @@
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -237,9 +238,9 @@ OperationDefinition lut_operation(const std::string& key, bool channels,
   traits.input_count = 3;
   traits.input_schema.resize(3);
   for (auto& input : traits.input_schema)
-    input.kind = OperationPortKind::Result;
-  traits.input_schema[0].element_type_mask =
-      traits.input_schema[1].element_type_mask = 12;
+
+    traits.input_schema[0].element_type_mask =
+        traits.input_schema[1].element_type_mask = 12;
   traits.input_schema[2].element_type =
       static_cast<std::uint32_t>(ElementType::Float64);
   traits.requires_metadata_specialization = true;
@@ -294,7 +295,7 @@ OperationDefinition lut_operation(const std::string& key, bool channels,
                                                const auto& allocator) {
     return ResultContinuation::make<LutProgram>(allocator, profile, channels);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_lut1d_application(OperationRegistry* registry) {

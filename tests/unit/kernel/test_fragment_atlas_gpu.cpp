@@ -39,9 +39,9 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
         const std::vector<std::vector<std::uint64_t>>& sources,
         const std::vector<std::vector<std::uint64_t>>& queries,
         ElementType type = ElementType::Float32) {
-  const ValueDescriptor descriptor{type, shape};
-  const auto width = Value::element_size(type);
-  std::vector<Value> values;
+  const TensorDescriptor descriptor{type, shape};
+  const auto width = TensorSpan::element_size(type);
+  std::vector<TensorSpan> values;
   std::vector<Region> boxes;
   std::map<std::vector<std::uint64_t>, std::uint64_t> oracle;
   for (std::size_t i = 0; i < sources.size(); ++i) {
@@ -49,7 +49,7 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
     for (auto at : sources[i])
       dimensions.push_back({at, 1});
     Region region(dimensions);
-    auto writer = MutableValue::allocate(descriptor, region, BufferAllocator{})
+    auto writer = TensorWriter::allocate(descriptor, region, BufferAllocator{})
                       .take_value();
     const std::uint64_t bits =
         (width == 8 ? UINT64_C(0xdeadbeef00000000) : 0) + 100 + i;
@@ -59,8 +59,7 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
     oracle[sources[i]] = bits;
   }
   auto coverage = Footprint::from_regions(shape, boxes).take_value();
-  auto input =
-      ValueFragments::create(descriptor, coverage, values).take_value();
+  auto input = Tensor::create(descriptor, coverage, values).take_value();
   auto plan = FragmentAtlasPlan::prepare(input, geometry).take_value();
   std::vector<std::uint64_t> coordinates;
   for (const auto& at : queries)

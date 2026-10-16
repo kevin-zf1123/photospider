@@ -12,16 +12,15 @@
 inline int native_atlas_budget(
     const std::shared_ptr<ps::gpu_internal::Device>& device) {
   using namespace ps;  // NOLINT(build/namespaces)
-  const ValueDescriptor descriptor{ElementType::Float32, {8}};
+  const TensorDescriptor descriptor{ElementType::Float32, {8}};
   const Region region({{2, 1}});
-  auto writer = MutableValue::allocate(descriptor, region, BufferAllocator{})
+  auto writer = TensorWriter::allocate(descriptor, region, BufferAllocator{})
                     .take_value();
   const std::uint32_t expected = 0x12345678;
   std::memcpy(writer.data(), &expected, sizeof(expected));
   auto value = std::move(writer).publish().take_value();
   auto coverage = Footprint::from_regions({8}, {region}).take_value();
-  auto input =
-      ValueFragments::create(descriptor, coverage, {value}).take_value();
+  auto input = Tensor::create(descriptor, coverage, {value}).take_value();
   auto plan = FragmentAtlasPlan::prepare(input, {4}).take_value();
   const auto payload =
       device->allocation_capacity(plan.payload_allocation_bytes()).take_value();

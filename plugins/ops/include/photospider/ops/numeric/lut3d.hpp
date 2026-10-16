@@ -96,14 +96,13 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* method,
  * @note Pure/concurrent-safe helper. Output `values` is an immutable packed
  * Result using `photospider.tensor` v1/member `samples`, complete input shape,
  * selected Float32/64 dtype, atomic_trailing_axes=1.
- * Whole execution requests input/table/axis with Data, Validation and
- * Descriptor (role 13). Callback validates all axes, then original query colors
- * before clamp, then table mathematics. Exact positive-weight full-color
- * vertices alone enter the formula, at most eight; typed/upstream validation
- * still covers zero-weight values. The output carries source ObjectId
- * association and full certified coverage in global coordinates. Dirty mapping
- * follows recorded demand; Empty reads no payload. The output transaction is
- * all-or-nothing.
+ * A Run-shared stage acquires complete input/table/axis tensors. Callback
+ * validates all axes, then original query colors before clamp, then table
+ * mathematics. Exact positive-weight full-color vertices alone enter the
+ * formula, at most eight; typed/upstream validation still covers zero-weight
+ * values. The output carries source ObjectId association and requested tile
+ * coverage in global coordinates. Dirty mapping follows recorded demand; Empty
+ * reads no payload. The output transaction is all-or-nothing.
  *
  * `UniformAxis` stores Root-owned Float64 grids costing 8*sum(Ni) bytes.
  * Input/table access uses authorized zero-copy Root windows; no dense table

@@ -8,7 +8,7 @@
 #include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/exact_root.hpp"
 #include "01-numeric/numeric_nan.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 enum class ElementaryKind {

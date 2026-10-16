@@ -20,16 +20,16 @@ struct StructuredServices final {
   // A CPU start phase uses this fact to admit a GPU-targeted factory. It does
   // not grant native services to the CPU callback.
   bool native_gpu_available = false;
-  const ps_cpu_parallel_service_v1* cpu_parallel = nullptr;
-  const ps_cpu_tiles_service_v1* cpu_tiles = nullptr;
+  const ps_cpu_parallel_service_v2* cpu_parallel = nullptr;
+  const ps_cpu_tiles_service_v2* cpu_tiles = nullptr;
   const ps_gpu_service_v1* gpu = nullptr;
   std::function<Status()> gpu_status;
   std::function<std::uint64_t()> gpu_dispatches;
   BufferAllocator allocator;
   std::function<bool(const CpuStorage&)> native_storage;
   std::function<void(ExecutionDiagnostics&)> observe;
-  std::function<Result<std::pair<Value, std::uint64_t>>(
-      const Value&, const std::function<Status(std::uint64_t)>&)>
+  std::function<Result<std::pair<TensorSpan, std::uint64_t>>(
+      const TensorSpan&, const std::function<Status(std::uint64_t)>&)>
       native_input;
 };
 /** @brief Observes one structured submission through task retirement.
@@ -71,7 +71,7 @@ struct StructuredSubmission final {
  * copies options and borrows `plan` unless `plan_owner` pins it.
  */
 using StructuredDispatch = std::function<Result<StructuredSubmission>(
-    Backend, bool, bool, CancellationToken,
+    Backend, bool, CancellationToken,
     std::function<Status(const StructuredServices&)>)>;
 /** @brief Runs one structured coordinator with captured run inputs.
  * @details The coordinator is allocated with the supplied execution Root,

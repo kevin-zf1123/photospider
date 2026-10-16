@@ -36,7 +36,11 @@ struct State {
     if (!supplied) {
       supplied = true;
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false,
+           multi_result::take(TileSet::range(
+               phase.resources, 0,
+               phase.query.input_tile_grids[0][0].tile_count()))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     float sample = 0;
@@ -115,7 +119,7 @@ int capacity_failure(ErrorCode error) {
   traits.supports_gpu = true;
   traits.allows_cpu_fallback = true;
   const auto schema = multi_result::schema(ElementType::Float32);
-  traits.input_schema[0].kind = OperationPortKind::Result;
+
   traits.input_schema[0].result_schema_id = schema.id;
   traits.input_schema[0].result_schema_version = schema.version;
   traits.outputs[0] = multi_result::output("value", schema);

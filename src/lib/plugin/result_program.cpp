@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/callback_environment.hpp"
 #include "data/affine_view.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_window_access.hpp"
@@ -15,6 +16,7 @@
 #include "plugin/failure_latch.hpp"
 #include "plugin/operation_exception.hpp"
 #include "plugin/port_validation.hpp"
+#include "plugin/publication_visibility.hpp"
 #include "plugin/result_payload_bound.hpp"
 #include "plugin/validation_dispatch.hpp"
 
@@ -30,7 +32,10 @@ void ResultProgramPhase::record_failure(const Status& status) const {
   }
   if (failure_observer) {
     try {
-      failure_observer(status);
+      static_cast<void>(core_internal::invoke_callback([&] {
+        failure_observer(status);
+        return Status::success();
+      }));
     } catch (...) {
       // An observer failure makes this attempt unsafe to replay, even when
       // the original cause was a retryable backend error.
@@ -66,38 +71,7 @@ Status ResultTensorInput::read_granted(
                   "unauthorized tensor Need read",
                   FailureReason::UnauthorizedRead,
                   {FailureOrigin::Protocol, FailureScope::Group}};
-  if (!input_backing_.empty()) {
-    if (cancellation.cancelled())
-      return Status{ErrorCode::Cancelled, {}};
-    auto charged =
-        resources_->consume({input_backing_.size() * (1 + coordinate.size())});
-    if (!charged.ok())
-      return charged;
-    for (const auto& stored : input_backing_) {
-      const auto& backing = stored->value;
-      bool contains = true;
-      for (std::size_t axis = 0; axis < coordinate.size(); ++axis) {
-        const auto dimension = backing.region().dimensions()[axis];
-        contains = contains && coordinate[axis] >= dimension.offset &&
-                   coordinate[axis] - dimension.offset < dimension.extent;
-      }
-      if (!contains)
-        continue;
-      if (!destination ||
-          bytes != Value::element_size(spec().descriptor.element_type))
-        return Status{ErrorCode::InvalidArgument, "invalid tensor read size"};
-      auto address = backing.byte_address(coordinate);
-      if (!address.ok())
-        return address.status();
-      auto observed =
-          data_internal::ResultHostAccessScope::observe(backing.storage());
-      if (!observed.ok())
-        return observed;
-      std::memcpy(destination, backing.bytes().data() + address.value(), bytes);
-      return Status::success();
-    }
-    return Status{ErrorCode::Internal, "prepared input backing has a hole"};
-  }
+
   return result_.read_tensor(descriptor_, slot_, coordinate, destination, bytes,
                              cancellation);
 }
@@ -163,63 +137,6 @@ Result<ResultTensorReadWindow> ResultTensorInput::acquire(
     return result_.acquire_tensor(descriptor_, slot_, region, cancellation);
   };
   auto result = acquire();
-  if (result.ok() && !input_backing_.empty()) {
-    auto prepared_window = [&]() -> Answer {
-      auto scratch = resources_->reserve(ResourceCapacity::host(4096, 4096));
-      if (!scratch.ok())
-        return Answer(scratch.status());
-      ResourceVector<ResourceLease> metadata{
-          ResourceAllocator<ResourceLease>(*resources_)};
-      ResourceVector<Value> parts{ResourceAllocator<Value>(*resources_)};
-      for (const auto& stored : input_backing_) {
-        auto charged = resources_->consume({region.rank() + 1});
-        if (!charged.ok())
-          return Answer(charged);
-        const auto& backing = stored->value;
-        std::vector<RegionDimension> dimensions;
-        for (std::size_t axis = 0; axis < region.rank(); ++axis) {
-          const auto a = region.dimensions()[axis];
-          const auto b = backing.region().dimensions()[axis];
-          const auto start = std::max(a.offset, b.offset);
-          const auto end = std::min(a.offset + a.extent, b.offset + b.extent);
-          dimensions.push_back({start, end > start ? end - start : 0});
-        }
-        Region intersection(std::move(dimensions));
-        if (intersection.empty())
-          continue;
-        const auto bytes =
-            2 * region.rank() *
-            (3 * sizeof(std::uint64_t) + sizeof(RegionDimension));
-        auto lease = resources_->reserve(ResourceCapacity::host(bytes, bytes));
-        if (!lease.ok())
-          return Answer(lease.status());
-        metadata.push_back(lease.take_value());
-        auto part = backing.view(intersection);
-        if (!part.ok())
-          return Answer(part.status());
-        parts.push_back(part.take_value());
-      }
-      const auto bytes = 2 * region.rank() *
-                         (3 * sizeof(std::uint64_t) + sizeof(RegionDimension));
-      auto window_metadata =
-          resources_->reserve(ResourceCapacity::host(bytes, bytes));
-      if (!window_metadata.ok())
-        return Answer(window_metadata.status());
-      auto joined = input_internal::join_affine_view(
-          {spec().descriptor.element_type, spec().sample_shape()}, region,
-          parts, limits);
-      if (!joined.ok())
-        return Answer(joined.status());
-      // A rectangle can span independently prepared boxes. Preserve its
-      // authorized original compound window when no common mapping exists.
-      return joined.value()
-                 ? execution_internal::ResultWindowAccess::replace_backing(
-                       result.take_value(), std::move(*joined.value()),
-                       window_metadata.take_value())
-                 : Answer(result.take_value());
-    };
-    result = prepared_window();
-  }
   if (!result.ok()) {
     if (observer_)
       observer_->record(result.status());
@@ -247,110 +164,6 @@ Result<ResultTensorReadWindow> ResultTensorInput::acquire(
     failure_->compare_exchange_strong(expected, status.code);
   }
   return Result<ResultTensorReadWindow>(status);
-}
-Status ResultTensorInput::prepare_whole_view(
-    bool require_view, const CancellationToken& cancellation,
-    const std::function<Status(std::uint64_t)>& consume_work) try {
-  if (!payload_authorized_ || samples_.empty() || !input_backing_.empty())
-    return Status::success();
-  if (!resources_ || !consume_work)
-    return Status{ErrorCode::Internal, "missing input preparation Root"};
-  ResourceAllocationScope scope(*resources_);
-  auto scratch = resources_->reserve(ResourceCapacity::host(4096, 4096));
-  if (!scratch.ok())
-    return scratch.status();
-  FootprintLimits limits;
-  limits.cancellation = cancellation;
-  limits.consume_work = consume_work;
-  ResourceVector<std::shared_ptr<const InputBacking>> prepared{
-      ResourceAllocator<std::shared_ptr<const InputBacking>>(*resources_)};
-  prepared.reserve(samples_.boxes().size());
-  const ValueDescriptor descriptor{spec().descriptor.element_type,
-                                   spec().sample_shape()};
-  const auto width = Value::element_size(descriptor.element_type);
-  for (const auto& box : samples_.boxes()) {
-    auto charged = consume_work(1);
-    if (!charged.ok())
-      return charged;
-    // Retain capacity for Value's standard-container metadata independently of
-    // the temporary coordinate scratch. Copies of the grant share this owner.
-    const auto metadata_bytes =
-        2 * box.rank() * (3 * sizeof(std::uint64_t) + sizeof(RegionDimension));
-    auto metadata = resources_->reserve(
-        ResourceCapacity::host(metadata_bytes, metadata_bytes));
-    if (!metadata.ok())
-      return metadata.status();
-    const auto retain = [&](Value value) {
-      return std::allocate_shared<const InputBacking>(
-          ResourceAllocator<InputBacking>(*resources_), metadata.take_value(),
-          std::move(value));
-    };
-    auto acquired = acquire(box, cancellation);
-    if (!acquired.ok())
-      return acquired.status();
-    auto window = acquired.take_value();
-    auto view =
-        execution_internal::ResultWindowAccess::input_view(window, limits);
-    if (!view.ok())
-      return view.status();
-    if (view.value()) {
-      prepared.push_back(retain(std::move(*view.value())));
-      continue;
-    }
-    if (require_view)
-      return Status{ErrorCode::InvalidArgument,
-                    "ViewUnavailable: Whole input needs collection",
-                    FailureReason::InvalidDomain,
-                    {FailureOrigin::Domain, FailureScope::Group}};
-    auto count = box.element_count();
-    if (!count.ok() || !core_internal::can_multiply(count.value(), width))
-      return Status{ErrorCode::ResourceExhausted, {}};
-    auto lookup = execution_internal::ResultWindowAccess::read_work(window);
-    if (!lookup.ok())
-      return lookup.status();
-    std::uint64_t per_sample = 0;
-    if (!core_internal::checked_add(lookup.value(), width + box.rank(),
-                                    &per_sample) ||
-        !core_internal::can_multiply(count.value(), per_sample))
-      return Status{ErrorCode::ResourceExhausted, {}};
-    charged = consume_work(count.value() * per_sample);
-    if (!charged.ok())
-      return charged;
-    auto allocated =
-        MutableValue::allocate(descriptor, box, resources_->allocator());
-    if (!allocated.ok())
-      return allocated.status();
-    auto writer = allocated.take_value();
-    auto footprint = Footprint::from_regions(descriptor.shape, {box}, limits);
-    if (!footprint.ok())
-      return footprint.status();
-    std::uint64_t offset = 0;
-    auto copied = footprint.value().visit(
-        [&](const auto& at) {
-          auto active = consume_work(0);
-          if (!active.ok())
-            return active;
-          auto row = window.row_run(at);
-          if (!row.ok())
-            return row.status();
-          std::memcpy(writer.data() + offset, row.value().data, width);
-          offset += width;
-          return Status::success();
-        },
-        count.value(), cancellation);
-    if (!copied.ok())
-      return copied;
-    auto frozen = std::move(writer).publish();
-    if (!frozen.ok())
-      return frozen.status();
-    prepared.push_back(retain(frozen.take_value()));
-  }
-  if (cancellation.cancelled())
-    return Status{ErrorCode::Cancelled, {}};
-  input_backing_ = std::move(prepared);
-  return Status::success();
-} catch (const std::bad_alloc&) {
-  return Status{ErrorCode::ResourceExhausted, {}};
 }
 Result<ResultTensorReadWindow> ResultProgramPhase::acquire_native_tensor(
     std::uint32_t input, std::uint32_t slot, const Region& region) const {
@@ -383,8 +196,12 @@ Result<ResultTensorReadWindow> ResultProgramPhase::acquire_native_tensor(
     }
   }();
   if (!answer.ok()) {
-    if (failure_observer)
-      failure_observer(answer.status());
+    if (failure_observer) {
+      static_cast<void>(core_internal::invoke_callback([&] {
+        failure_observer(answer.status());
+        return Status::success();
+      }));
+    }
     if (failure) {
       auto expected = ErrorCode::Ok;
       failure->compare_exchange_strong(expected, answer.status().code);
@@ -423,8 +240,12 @@ ResultProgramPhase::acquire_native_atlas(std::uint32_t input,
     }
   }();
   if (!answer.ok()) {
-    if (failure_observer)
-      failure_observer(answer.status());
+    if (failure_observer) {
+      static_cast<void>(core_internal::invoke_callback([&] {
+        failure_observer(answer.status());
+        return Status::success();
+      }));
+    }
     if (failure) {
       auto expected = ErrorCode::Ok;
       failure->compare_exchange_strong(expected, answer.status().code);
@@ -454,8 +275,12 @@ Status ResultProgramPhase::read_tensor(
       status.reason = FailureReason::UnauthorizedRead;
       status.detail = {FailureOrigin::Protocol, FailureScope::Group};
     }
-    if (failure_observer)
-      failure_observer(status);
+    if (failure_observer) {
+      static_cast<void>(core_internal::invoke_callback([&] {
+        failure_observer(status);
+        return Status::success();
+      }));
+    }
     if (failure) {
       auto expected = ErrorCode::Ok;
       failure->compare_exchange_strong(expected, status.code);
@@ -464,8 +289,11 @@ Status ResultProgramPhase::read_tensor(
   return status;
 }
 void ResultContinuation::reset() noexcept {
-  if (destroy_)
+  core_internal::CallbackEnvironment reset_environment;
+  if (destroy_) {
+    core_internal::CallbackEnvironment environment;
     destroy_(storage_.data());
+  }
   destroy_ = nullptr;
   poll_ = nullptr;
   storage_ = {};
@@ -477,7 +305,10 @@ void ResultContinuation::reset() noexcept {
   payload_bound_.reset();
   payload_limit_.reset();
   validated_publication_.reset();
+  visible_publication_.reset();
+  visible_tiles_ = {};
   output_index_ = 0;
+  shared_stage_ = UINT32_MAX;
   host_validates_ = false;
 }
 ResultContinuation::~ResultContinuation() noexcept {
@@ -494,8 +325,11 @@ ResultContinuation& ResultContinuation::operator=(
     definition_ = std::move(other.definition_);
     prepared_ = std::move(other.prepared_);
     output_index_ = other.output_index_;
+    shared_stage_ = other.shared_stage_;
     host_validates_ = other.host_validates_;
     validated_publication_ = std::move(other.validated_publication_);
+    visible_publication_ = std::move(other.visible_publication_);
+    visible_tiles_ = std::move(other.visible_tiles_);
     resources_ = std::move(other.resources_);
     output_schema_ = std::move(other.output_schema_);
     semantic_key_ = std::move(other.semantic_key_);
@@ -526,7 +360,10 @@ Result<ResultProgramPoll> ResultContinuation::poll(
   } reset{active_};
   // Keep admission until the callback's exception and publication fences
   // retire.
-  return poll_guarded(phase);
+  auto result = poll_guarded(phase);
+  if (!result.ok() && visible_publication_)
+    visible_publication_->reference().retire_producer(result.status());
+  return result;
 }
 Result<ResultProgramPoll> ResultContinuation::poll_guarded(
     const ResultProgramPhase& phase) try {
@@ -566,7 +403,8 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
     }
   };
   if (!prepared_ && !resources_.size() && !phase.query.resources.size()) {
-    auto answer = poll_(storage_.data(), phase);
+    auto answer = core_internal::invoke_callback(
+        [&] { return poll_(storage_.data(), phase); });
     if (!answer.ok())
       record_returned_failure(answer.status());
     return answer;
@@ -576,7 +414,8 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
     auto checked = prepared_->validate_inputs(query.inputs, query.parameters);
     if (!checked.ok())
       return Result<ResultProgramPoll>(checked);
-    if (query.output_index != output_index_ || !query.output.result_schema ||
+    if (query.output_index != output_index_ ||
+        query.shared_stage != shared_stage_ || !query.output.result_schema ||
         !output_schema_ ||
         !query.output.result_schema->same_schema(*output_schema_) ||
         query.semantic_key != semantic_key_)
@@ -594,6 +433,7 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
                                 phase.failure_observer};
   normalized.failure_latch = phase.failure_latch;
   normalized.tensors = phase.tensors;
+  normalized.shared_stages = phase.shared_stages;
   normalized.descriptors = phase.descriptors;
   normalized.cpu_parallel = phase.cpu_parallel;
   normalized.cpu_tiles = phase.cpu_tiles;
@@ -637,7 +477,10 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
     }
     if (normalized.failure_observer) {
       try {
-        normalized.failure_observer(status);
+        static_cast<void>(core_internal::invoke_callback([&] {
+          normalized.failure_observer(status);
+          return Status::success();
+        }));
       } catch (...) {
         if (normalized.failure_latch)
           normalized.failure_latch->veto_backend_retry();
@@ -708,10 +551,17 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
                                        "direct tensor coverage mismatch"});
           continue;  // The same object's authorized coverage is checked below.
         }
-        auto checked = plugin_internal::validate_tensor_contract(
-            *prepared_, port, *query.inputs[port].result_schema, slot,
-            entry.second, entry.second.coverage(), normalized.resources,
-            query.cancellation, work, ErrorCode::InvalidArgument);
+      }
+      std::uint32_t previous = UINT32_MAX;
+      for (const auto& entry : *normalized.tensors) {
+        const auto port = entry.first.first;
+        if (port == previous || normalized.results.count(port))
+          continue;
+        previous = port;
+        auto checked = plugin_internal::validate_tensor_contracts(
+            *prepared_, port, *query.inputs[port].result_schema,
+            *normalized.tensors, normalized.resources, query.cancellation, work,
+            ErrorCode::InvalidArgument);
         if (!checked.ok())
           return reject_bound(checked);
       }
@@ -736,7 +586,8 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
   }
   auto answer = [&]() -> Result<ResultProgramPoll> {
     try {
-      return poll_(storage_.data(), normalized);
+      return core_internal::invoke_callback(
+          [&] { return poll_(storage_.data(), normalized); });
     } catch (...) {
       return reject_bound(plugin_internal::current_operation_exception());
     }
@@ -791,12 +642,106 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
                    "direct publication identity/revision changed",
                    FailureReason::MalformedEnvelope,
                    {FailureOrigin::Protocol, FailureScope::Group}});
+      if (shared_stage_ != UINT32_MAX) {
+        FootprintLimits limits;
+        limits.cancellation = query.cancellation;
+        limits.consume_work = normalized.consume_work;
+        auto produced = plugin_internal::published_tiles(
+            *output_schema_, descriptor.value(), query.tile_extent,
+            normalized.resources, limits);
+        if (!produced.ok())
+          return reject_bound(produced.status());
+        auto visible = plugin_internal::visible_tiles(
+            *output_schema_, produced.value(), query.tile_extent,
+            normalized.resources);
+        if (!visible.ok())
+          return reject_bound(visible.status());
+        auto grids = TileGrid::members(*output_schema_, query.tile_extent);
+        if (!grids.ok())
+          return reject_bound(grids.status());
+        auto all = TileRequest::all(grids.value(), normalized.resources);
+        if (!all.ok())
+          return reject_bound(all.status());
+        if (prepared_->requires_complete_stage_validation(shared_stage_) &&
+            !produced.value().contains(all.value())) {
+          if (publication->complete)
+            return reject_bound(Status{ErrorCode::InvalidArgument,
+                                       "incomplete shared validator coverage"});
+          visible = Result<TileRequest>(TileRequest{});
+        }
+        if (publication->complete && visible.value() != produced.value())
+          return reject_bound(Status{ErrorCode::InvalidArgument,
+                                     "incomplete shared publication scope"});
+        TileRequest delta;
+        for (const auto& member : visible.value().members) {
+          auto previous = visible_tiles_.members.find(member.first);
+          auto added = previous == visible_tiles_.members.end()
+                           ? Result<TileSet>(member.second)
+                           : member.second.subtract(previous->second,
+                                                    normalized.resources);
+          if (!added.ok())
+            return reject_bound(added.status());
+          if (!added.value().empty())
+            delta.members.emplace(member.first, added.take_value());
+        }
+        if (!visible_publication_) {
+          auto sources = publication->result.association();
+          auto builder = ResultBuilder::start(
+              normalized.resources, *output_schema_, semantic_key_, {},
+              std::vector<std::uint64_t>(sources.begin(), sources.end()),
+              query.tile_extent);
+          if (!builder.ok())
+            return reject_bound(builder.status());
+          visible_publication_ = builder.take_value();
+        }
+        auto previous = visible_publication_->reference().descriptor(false);
+        if (!previous.ok())
+          return reject_bound(previous.status());
+        for (const auto& member : delta.members) {
+          auto samples =
+              grids.value()[member.first].coverage(member.second, limits);
+          if (!samples.ok())
+            return reject_bound(samples.status());
+          for (const auto& region : samples.value().boxes()) {
+            auto appended = plugin_internal::append_publication_view(
+                *visible_publication_, publication->result, descriptor.value(),
+                member.first, region, normalized.resources, query.cancellation,
+                normalized.consume_work);
+            if (!appended.ok())
+              return reject_bound(appended);
+          }
+        }
+        if (!delta.empty()) {
+          auto exposed = visible_publication_->reference();
+          auto facts = exposed.descriptor(false);
+          if (!facts.ok())
+            return reject_bound(facts.status());
+          auto checked = plugin_internal::validate_result_contract(
+              *prepared_, true, output_index_, exposed, facts.value(),
+              &previous.value(), normalized.resources, query.cancellation,
+              normalized.consume_work, query.page_bytes,
+              ErrorCode::OperationFailed, shared_stage_);
+          if (!checked.ok())
+            return reject_bound(checked);
+        }
+        validated_publication_ = descriptor.take_value();
+        visible_tiles_ = visible.take_value();
+        const bool complete = publication->complete;
+        if (delta.empty() && !complete)
+          return Result<ResultProgramPoll>(ResultProgramNeed{});
+        auto exposed = complete ? visible_publication_->seal()
+                                : visible_publication_->reference().capture();
+        if (!exposed.ok())
+          return reject_bound(exposed.status());
+        return Result<ResultProgramPoll>(
+            ResultPublication{exposed.take_value(), complete});
+      }
       auto checked = plugin_internal::validate_result_contract(
           *prepared_, true, output_index_, publication->result,
           descriptor.value(),
           validated_publication_ ? &*validated_publication_ : nullptr,
           normalized.resources, query.cancellation, normalized.consume_work,
-          query.page_bytes, ErrorCode::OperationFailed);
+          query.page_bytes, ErrorCode::OperationFailed, shared_stage_);
       if (!checked.ok())
         return reject_bound(checked);
       validated_publication_ = descriptor.take_value();
@@ -816,7 +761,10 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
   // Observers belong to the host; their exceptions must not escape a fence.
   if (phase.failure_observer) {
     try {
-      phase.failure_observer(status);
+      static_cast<void>(core_internal::invoke_callback([&] {
+        phase.failure_observer(status);
+        return Status::success();
+      }));
     } catch (...) {
       if (phase.failure_latch) {
         try {

@@ -176,7 +176,7 @@ class Result final {
  public:
   /**
    * @brief Constructs a successful result from an owned value.
-   * @param value Value moved into this result.
+   * @param value TensorSpan moved into this result.
    * @throws Any exception thrown by T's move construction.
    * @note The result becomes the sole owner of the moved value where T is
    * move-only.
@@ -238,7 +238,7 @@ class Result final {
   }
 
  private:
-  /** @brief Value storage engaged only for successful results. */
+  /** @brief TensorSpan storage engaged only for successful results. */
   std::optional<T> value_;
   /** @brief Canonical success or the sole failure diagnostic. */
   Status status_{};

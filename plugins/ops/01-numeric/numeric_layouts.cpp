@@ -18,6 +18,7 @@
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/ops/numeric/diagnostics.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -145,8 +146,8 @@ struct LayoutProgram final {
     if (!viewed) {
       MathTensorReader reader(phase.tensors->at({0, 0}),
                               phase.query.cancellation);
-      math_require(builder.publish_tensor_kernel(
-          0, Region::whole(target_shape),
+      math_require(sdk::publish_dense_tensor(
+          phase, builder, 0, Region::whole(target_shape),
           [&](const auto& writers) {
             return math_callback(phase, [&]() -> Status {
               if (writers.size() != 1)
@@ -156,7 +157,7 @@ struct LayoutProgram final {
               std::vector<uint64_t> coordinate(target_shape.size(), 0),
                   source_coordinate(source_shape.size(), 0);
               const auto width =
-                  Value::element_size(source.descriptor.element_type);
+                  TensorSpan::element_size(source.descriptor.element_type);
               std::array<uint8_t, 32> block{};
               std::array<uint8_t*, 32> destinations{};
               size_t buffered = 0;
@@ -255,7 +256,6 @@ OperationDefinition layout_operation(const std::string& key, LayoutKind kind,
   traits.input_count = kind == LayoutKind::Slice ? 3 : 1;
   traits.input_schema.resize(traits.input_count);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = 127;
   }
   for (unsigned port = 1; port < traits.input_count; ++port) {
@@ -282,8 +282,8 @@ OperationDefinition layout_operation(const std::string& key, LayoutKind kind,
                            {FailureOrigin::Schema, FailureScope::Unspecified}});
     };
     const auto& member = inputs[0].result_schema->tensors[0];
-    const ValueDescriptor input{member.descriptor.element_type,
-                                member.sample_shape()};
+    const TensorDescriptor input{member.descriptor.element_type,
+                                 member.sample_shape()};
     std::uint64_t source_count = 1;
     for (auto size : input.shape) {
       if (!size || size > (UINT64_C(1) << 40) / source_count)
@@ -343,7 +343,7 @@ OperationDefinition layout_operation(const std::string& key, LayoutKind kind,
   operation.start_result = [kind, profile](const auto&, const auto& allocator) {
     return ResultContinuation::make<LayoutProgram>(allocator, kind, profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_numeric_layouts(OperationRegistry* registry) {

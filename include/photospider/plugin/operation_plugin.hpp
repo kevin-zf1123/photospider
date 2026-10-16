@@ -14,7 +14,7 @@ namespace ps::plugin {
  * @note This header-only helper adds no second ABI.
  */
 constexpr std::uint32_t element_type_value(
-    ps_result_element_type_v4 value) noexcept {
+    ps_result_element_type_v5 value) noexcept {
   return static_cast<std::uint32_t>(value);
 }
 

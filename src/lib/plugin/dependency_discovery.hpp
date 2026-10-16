@@ -8,8 +8,8 @@
 
 namespace ps::plugin_internal {
 struct GpuDiscoveryRecord final {
-  std::uint32_t input = 0, kind = 0;
-  TileIndex tile = 0;
+  std::uint32_t input = 0, kind = 0, tensor_slot = 0;
+  TileIndex begin = 0, end = 0;
 };
 Status visit_discovery_records(
     const CpuStorage& table, std::uint32_t capacity, std::uint32_t candidates,

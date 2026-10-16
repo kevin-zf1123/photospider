@@ -22,13 +22,13 @@ using result_c::prepare_metadata;
 using result_c::start_c_member;
 using result_c::text;
 Result<ImportedResultPlugin> import_result_plugin(
-    const ps_result_operation_plugin_api_v4* api,
+    const ps_result_operation_plugin_api_v5* api,
     std::shared_ptr<void> library) {
   if (!api ||
       reinterpret_cast<std::uintptr_t>(api) %
-          alignof(ps_result_operation_plugin_api_v4) ||
+          alignof(ps_result_operation_plugin_api_v5) ||
       api->struct_size != sizeof(*api) ||
-      api->abi_version != PS_RESULT_OPERATION_ABI_VERSION_4 ||
+      api->abi_version != PS_RESULT_OPERATION_ABI_VERSION_5 ||
       !array(api->operations, api->operation_count, 1024) ||
       !api->operation_count || !api->destroy)
     return Result<ImportedResultPlugin>(invalid("invalid Result ABI table"));
@@ -65,12 +65,12 @@ Result<ImportedResultPlugin> import_result_plugin(
         !array(op.outputs, op.output_count, 64) || !op.output_count ||
         !op.start || !op.poll || !op.destroy || op.state_bytes > 1048576 ||
         !op.maximum_stages || op.maximum_stages > 1048576 ||
-        op.cpu_staged_tiles > 1 || op.data_movement > 1 ||
+        op.cpu_staged_tiles > 1 ||
         (op.flags &
-         ~(PS_RESULT_FLAG_DETERMINISTIC_V4 |
-           PS_RESULT_FLAG_SIDE_EFFECT_FREE_V4 | PS_RESULT_FLAG_CPU_V4 |
-           PS_RESULT_FLAG_GPU_V4 | PS_RESULT_FLAG_CPU_FALLBACK_V4 |
-           PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V4)))
+         ~(PS_RESULT_FLAG_DETERMINISTIC_V5 |
+           PS_RESULT_FLAG_SIDE_EFFECT_FREE_V5 | PS_RESULT_FLAG_CPU_V5 |
+           PS_RESULT_FLAG_GPU_V5 | PS_RESULT_FLAG_CPU_FALLBACK_V5 |
+           PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V5)))
       return Result<ImportedResultPlugin>(
           invalid("invalid Result operation table"));
     auto key = text(op.key, op.key_size);
@@ -88,16 +88,16 @@ Result<ImportedResultPlugin> import_result_plugin(
     traits.repeated_minimum = op.repeated_minimum;
     traits.repeated_maximum = op.repeated_maximum;
     traits.repeated_match = !op.repeated_maximum || op.repeated_match != 0;
-    traits.supports_cpu = (op.flags & PS_RESULT_FLAG_CPU_V4) != 0;
-    traits.supports_gpu = (op.flags & PS_RESULT_FLAG_GPU_V4) != 0;
+    traits.supports_cpu = (op.flags & PS_RESULT_FLAG_CPU_V5) != 0;
+    traits.supports_gpu = (op.flags & PS_RESULT_FLAG_GPU_V5) != 0;
     traits.allows_cpu_fallback =
-        (op.flags & PS_RESULT_FLAG_CPU_FALLBACK_V4) != 0;
-    traits.deterministic = (op.flags & PS_RESULT_FLAG_DETERMINISTIC_V4) != 0;
+        (op.flags & PS_RESULT_FLAG_CPU_FALLBACK_V5) != 0;
+    traits.deterministic = (op.flags & PS_RESULT_FLAG_DETERMINISTIC_V5) != 0;
     traits.side_effect_free =
-        (op.flags & PS_RESULT_FLAG_SIDE_EFFECT_FREE_V4) != 0;
+        (op.flags & PS_RESULT_FLAG_SIDE_EFFECT_FREE_V5) != 0;
     traits.cacheable = traits.deterministic && traits.side_effect_free;
     traits.share_blocks_across_outputs =
-        (op.flags & PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V4) != 0;
+        (op.flags & PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V5) != 0;
     traits.cpu_staged_tiles = op.cpu_staged_tiles != 0;
     traits.workspace_bytes = op.workspace_bytes;
     traits.input_schema.clear();
@@ -111,7 +111,7 @@ Result<ImportedResultPlugin> import_result_plugin(
       if (!copied.ok())
         return Result<ImportedResultPlugin>(copied.status());
       traits.input_schema.push_back(copied.take_value());
-      if (declared.kind == PS_RESULT_OBJECT_V4 && !declared.schema) {
+      if (!declared.schema) {
         input_prototypes.emplace_back();
       } else {
         auto metadata = port(declared);
@@ -123,13 +123,9 @@ Result<ImportedResultPlugin> import_result_plugin(
     for (std::uint32_t output = 0; output < op.output_count; ++output) {
       const auto& declared = op.outputs[output];
       if (declared.struct_size != sizeof(declared) ||
-          (declared.flags & ~(PS_RESULT_OUTPUT_PRESERVE_VIEWS_V4 |
-                              PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V4 |
-                              PS_RESULT_OUTPUT_PAYLOAD_BOUND_V4)) ||
-          (!(declared.flags & PS_RESULT_OUTPUT_PAYLOAD_BOUND_V4) &&
+          (declared.flags & ~(PS_RESULT_OUTPUT_PAYLOAD_BOUND_V5)) ||
+          (!(declared.flags & PS_RESULT_OUTPUT_PAYLOAD_BOUND_V5) &&
            declared.maximum_output_payload_bytes) ||
-          (declared.execution != 1 && declared.execution != 2) ||
-          declared.failure_delivery != PS_RESULT_REQUEST_FAILURE_ONLY_V4 ||
           (declared.input_count != UINT32_MAX &&
            !array(declared.input_indices, declared.input_count, 1024)) ||
           (declared.input_count == UINT32_MAX && declared.input_indices))
@@ -147,21 +143,9 @@ Result<ImportedResultPlugin> import_result_plugin(
       OperationOutputTraits contract;
       contract.output_schema = output_constraint.take_value();
       contract.key = name.take_value();
-      contract.failure_delivery =
-          static_cast<FailureDelivery>(declared.failure_delivery);
-      contract.preserve_output_views =
-          (declared.flags & PS_RESULT_OUTPUT_PRESERVE_VIEWS_V4) != 0;
-      contract.requires_input_views =
-          (declared.flags & PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V4) != 0;
-      if (declared.flags & PS_RESULT_OUTPUT_PAYLOAD_BOUND_V4)
+      if (declared.flags & PS_RESULT_OUTPUT_PAYLOAD_BOUND_V5)
         contract.maximum_output_payload_bytes =
             declared.maximum_output_payload_bytes;
-      contract.data_movement = op.data_movement
-                                   ? DataMovementKind::BitwiseMapped
-                                   : DataMovementKind::None;
-      contract.region_rule = declared.execution == 1
-                                 ? OperationRegionRule::Whole
-                                 : OperationRegionRule::Tiled;
       contract.continuation_bytes =
           c_member_storage_bytes() + std::max<std::uint64_t>(1, op.state_bytes);
       contract.maximum_dependency_stages = op.maximum_stages;
@@ -173,13 +157,22 @@ Result<ImportedResultPlugin> import_result_plugin(
               declared.input_indices + declared.input_count);
       }
       contract.result_schema = *metadata.value().result_schema;
-      contract.output_schema.kind = OperationPortKind::Result;
+
       contract.output_schema.result_schema_id =
           std::string(metadata.value().result_schema->id);
       contract.output_schema.result_schema_version =
           metadata.value().result_schema->version;
       output_prototypes.push_back(metadata.take_value());
       traits.outputs.push_back(std::move(contract));
+    }
+    if (!array(op.shared_stages, op.shared_stage_count, 64))
+      return Result<ImportedResultPlugin>(
+          invalid("invalid shared stage table"));
+    for (std::uint32_t i = 0; i < op.shared_stage_count; ++i) {
+      auto stage = result_c::shared_stage(op.shared_stages[i]);
+      if (!stage.ok())
+        return Result<ImportedResultPlugin>(stage.status());
+      traits.shared_stages.push_back(stage.take_value());
     }
     if (!array(op.parameters, op.parameter_count, 128))
       return Result<ImportedResultPlugin>(
@@ -263,9 +256,15 @@ Result<ImportedResultPlugin> import_result_plugin(
             std::move(outputs));
       };
     }
-    definition.start_result = [owner](const ResultProgramQuery&,
+    definition.start_result = [owner](const ResultProgramQuery& query,
                                       const BufferAllocator& allocator) {
-      return start_c_member(owner, allocator);
+      const auto bytes = query.shared_stage == UINT32_MAX
+                             ? owner->api.state_bytes
+                             : query.prepared->traits()
+                                       .shared_stages.at(query.shared_stage)
+                                       .continuation_bytes -
+                                   c_member_storage_bytes();
+      return start_c_member(owner, allocator, bytes);
     };
     definitions.operations.push_back(std::move(definition));
   }

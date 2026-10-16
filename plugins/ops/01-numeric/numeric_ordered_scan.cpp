@@ -11,133 +11,93 @@
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
-/** @brief One requested scan output; only successful prefix checkpoints share.
- * @note A checkpoint's sequence is its last processed logical index; the
- * algorithm identity fixes positive-zero start, binary64 nearest/gradual mode
- * and strict left-fold arithmetic. A final block never reads beyond this atom.
+/** @brief One Run-shared inclusive scan over complete authorized input.
+ * Input acquisition may suspend; the numerical pass runs once and writes each
+ * prefix into host windows. block bounds each cancellation/work checkpoint.
+ * Optional completed-result reuse remains a host concern.
  */
 struct ScanState final {
-  std::uint64_t block = 64, cursor = 0, end = 0;
-  double carry = 0;
-  bool started = false, ready = false;
-  std::uint64_t target = 0;
-  std::size_t box = 0;
-  std::optional<ResultBuilder> builder;
+  std::uint64_t block;
   explicit ScanState(std::uint64_t block) : block(block) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    if (phase.query.tensor_outputs && phase.query.tensor_outputs->empty())
-      return numeric_ops::ordered_empty_output(phase);
-    plugin_internal::FloatingEnvironment environment;
+    auto acquired = sdk::to_whole(phase, 0, 0);
+    if (!acquired.ok())
+      return Result<ResultProgramPoll>(acquired.status());
+    auto step = acquired.take_value();
+    if (auto* need = std::get_if<ResultProgramNeed>(&step))
+      return Result<ResultProgramPoll>(std::move(*need));
+    const auto& windows = std::get<sdk::WholeTensorWindows>(step);
+    if (windows.size() != 1)
+      return Result<ResultProgramPoll>(
+          Status{ErrorCode::InvalidArgument, "invalid ordered scan input"});
+    FloatingEnvironment environment;
     if (!environment.active())
       return Result<ResultProgramPoll>(Status{
           ErrorCode::InvalidArgument, "numeric environment unavailable"});
-    if (!started) {
-      started = true;
-      if (!phase.query.tensor_outputs || phase.query.tensor_outputs->empty())
-        return Result<ResultProgramPoll>(
-            Status{ErrorCode::InvalidArgument, "empty ordered scan demand"});
-      target = phase.query.tensor_outputs->boxes()[0].dimensions()[0].offset;
-      auto made = ResultBuilder::start(phase.resources,
-                                       *phase.query.output.result_schema,
-                                       phase.query.semantic_key);
-      if (!made.ok())
-        return Result<ResultProgramPoll>(made.status());
-      builder = made.take_value();
-      auto prior = phase.checkpoint_before(1, target);
-      if (!prior.ok())
-        return Result<ResultProgramPoll>(prior.status());
-      if (prior.value()) {
-        const auto& checkpoint = *prior.value();
-        auto value = numeric_ops::ordered_read_state(checkpoint.state(), 0);
-        if (!value.ok() || !std::isfinite(value.value()))
-          return Result<ResultProgramPoll>(Status{
-              ErrorCode::OperationFailed, "invalid ordered scan checkpoint"});
-        carry = value.value();
-        cursor = checkpoint.sequence() + 1;
-      }
-    }
-    if (ready) {
-      auto outgoing = advance(phase);
-      if (!outgoing.ok())
-        return Result<ResultProgramPoll>(outgoing.status());
-      carry = numeric_ops::ordered_read_state(outgoing.value(), 0).value();
-      cursor = end;
-      ready = false;
-      auto status = phase.checkpoint_publish(1, cursor - 1, outgoing.value());
-      if (!status.ok())
-        return Result<ResultProgramPoll>(status);
-    }
-    while (cursor > target) {
-      auto status = builder->publish_tensor(
-          0, Region({{target, 1}}),
-          {reinterpret_cast<const std::uint8_t*>(&carry), 8},
-          phase.query.cancellation);
-      if (!status.ok())
-        return Result<ResultProgramPoll>(status);
-      const auto& boxes = phase.query.tensor_outputs->boxes();
-      const auto& range = boxes[box].dimensions()[0];
-      if (++target == range.offset + range.extent) {
-        if (++box == boxes.size()) {
-          auto sealed = builder->seal();
-          if (!sealed.ok())
-            return Result<ResultProgramPoll>(sealed.status());
-          return Result<ResultProgramPoll>(
-              ResultPublication{sealed.take_value(), true});
-        }
-        target = boxes[box].dimensions()[0].offset;
-      }
-    }
-
-    end = cursor + std::min(block, target + 1 - cursor);
-    auto samples = Footprint::from_regions(
-        phase.query.inputs[0].result_schema->tensors[0].sample_shape(),
-        {Region({{cursor, end - cursor}})}, numeric_ops::ordered_limits(phase));
-    if (!samples.ok())
-      return Result<ResultProgramPoll>(samples.status());
-    ready = true;
-    ResultProgramNeed need;
-    {
-      auto tile_need_0 = sdk::tile_need_for_samples(
-          phase.resources, phase.query, 0, 0, samples.take_value());
-      if (!tile_need_0.ok())
-        return Result<ResultProgramPoll>(tile_need_0.status());
-      need.tiles.push_back(tile_need_0.take_value());
-    }
-    return Result<ResultProgramPoll>(std::move(need));
-  }
-  Result<ResultRef> advance(const ResultProgramPhase& phase) const {
-    const auto state = [&](double value) {
-      return numeric_ops::ordered_state(phase, {value});
-    };
-    auto incoming = state(carry);
-    if (!incoming.ok())
-      return incoming;
-    return phase.block(
-        1, cursor, end, 1, incoming.value(), [&]() -> Result<ResultRef> {
-          double outgoing = carry;
-          for (auto i = cursor; i < end; ++i) {
-            double value = 0;
-            auto status = phase.consume_work(1);
-            if (!status.ok())
-              return Result<ResultRef>(status);
-            status = phase.read_tensor(0, 0, {i}, &value, 8);
-            if (!status.ok())
-              return Result<ResultRef>(status);
-            if (!std::isfinite(value))
-              return Result<ResultRef>(
-                  Status{ErrorCode::OperationFailed,
-                         "nonfinite scan input " + std::to_string(i)});
-            outgoing += value;
-            if (!std::isfinite(outgoing))
-              return Result<ResultRef>(
-                  Status{ErrorCode::OperationFailed,
-                         "scan overflow " + std::to_string(i)});
+    auto made = ResultBuilder::start(
+        phase.resources, *phase.query.output.result_schema,
+        phase.query.semantic_key, {}, {}, phase.query.tile_extent);
+    if (!made.ok())
+      return Result<ResultProgramPoll>(made.status());
+    auto builder = made.take_value();
+    const auto region = Region::whole(
+        phase.query.output.result_schema->tensors[0].sample_shape());
+    double carry = 0;
+    auto status = builder.publish_tensor_kernel(
+        0, region,
+        [&](const auto& outputs) {
+          for (const auto& output : outputs) {
+            const auto d = output.region().dimensions()[0];
+            for (auto cursor = d.offset; cursor < d.offset + d.extent;) {
+              if (phase.query.cancellation.cancelled())
+                return Status{ErrorCode::Cancelled, {}};
+              auto source = windows[0].row_run({cursor});
+              auto target = output.row_run({cursor});
+              if (!source.ok() || !target.ok())
+                return source.ok() ? target.status() : source.status();
+              const auto count = std::min(
+                  block,
+                  std::min(source.value().samples, target.value().samples));
+              auto work = phase.consume_work(count);
+              if (!work.ok())
+                return work;
+              for (std::uint64_t i = 0; i < count; ++i) {
+                double value;
+                std::memcpy(&value,
+                            source.value().data +
+                                static_cast<std::int64_t>(i) *
+                                    source.value().sample_stride_bytes,
+                            sizeof(value));
+                if (!std::isfinite(value))
+                  return Status{
+                      ErrorCode::OperationFailed,
+                      "nonfinite scan input " + std::to_string(cursor + i)};
+                carry += value;
+                if (!std::isfinite(carry))
+                  return Status{ErrorCode::OperationFailed,
+                                "scan overflow " + std::to_string(cursor + i)};
+                std::memcpy(target.value().data +
+                                static_cast<std::int64_t>(i) *
+                                    target.value().sample_stride_bytes,
+                            &carry, sizeof(carry));
+              }
+              cursor += count;
+            }
           }
-          return state(outgoing);
-        });
+          return Status::success();
+        },
+        phase.query.cancellation);
+    if (!status.ok())
+      return Result<ResultProgramPoll>(status);
+    auto sealed = builder.seal();
+    if (!sealed.ok())
+      return Result<ResultProgramPoll>(sealed.status());
+    return Result<ResultProgramPoll>(
+        ResultPublication{sealed.take_value(), true});
   }
 };
 }  // namespace
@@ -147,7 +107,7 @@ Status register_numeric_ordered_scan(OperationRegistry* registry) {
   auto& traits = operation.traits;
   traits.input_count = 1;
   traits.input_schema.resize(1);
-  traits.input_schema[0].kind = OperationPortKind::Result;
+
   traits.input_schema[0].element_type =
       static_cast<std::uint32_t>(ElementType::Float64);
   traits.input_schema[0].rank = 1;
@@ -155,7 +115,6 @@ Status register_numeric_ordered_scan(OperationRegistry* registry) {
   numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
                                        sizeof(ScanState));
   traits.outputs[0].key = "value";
-  traits.outputs[0].region_rule = OperationRegionRule::Tiled;
   traits.outputs[0].maximum_dependency_stages = 1048576;
   traits.workspace_bytes = 16;
   traits.parameter_schema = {
@@ -164,7 +123,7 @@ Status register_numeric_ordered_scan(OperationRegistry* registry) {
       [](const auto& inputs,
          const auto&) -> Result<std::vector<OperationOutputSpecialization>> {
     const auto shape = inputs[0].result_schema->tensors[0].sample_shape();
-    if (!inputs[0].result_schema->fields.empty() || shape.size() != 1)
+    if (shape.size() != 1)
       return Result<std::vector<OperationOutputSpecialization>>(
           Status{ErrorCode::TypeMismatch, "ordered scan requires rank one"});
     OperationOutputSpecialization output;
@@ -182,6 +141,7 @@ Status register_numeric_ordered_scan(OperationRegistry* registry) {
             : static_cast<std::uint64_t>(std::get<std::int64_t>(found->second));
     return ResultContinuation::make<ScanState>(allocator, block);
   };
-  return registry->register_operation(std::move(operation));
+  return registry->register_operation(
+      sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48));
 }
 }  // namespace ps::plugin_internal

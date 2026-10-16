@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstring>
 #include <future>
@@ -37,6 +38,41 @@ ExecutionContextConfig config(bool gpu = false) {
   result.maximum_dependency_cache_metadata = 262144;
   return result;
 }
+ValidationDefinition scalar_validator(unsigned kind) {
+  ValidationDefinition validator;
+  validator.identity = {kind == 0   ? "fixture.scalar.unit"
+                        : kind == 1 ? "fixture.scalar.wide"
+                                    : "fixture.scalar.finite",
+                        1, "fixture-scalar/1"};
+  validator.requires_complete = true;
+  validator.prepare = [](const ValidationPreparation& preparation)
+      -> Result<std::shared_ptr<const void>> {
+    const auto& tensors = preparation.schema.tensors;
+    if (tensors.size() != 1 ||
+        tensors[0].descriptor.element_type != ElementType::Float32 ||
+        tensors[0].sample_shape() != std::vector<std::uint64_t>{1})
+      return Result<std::shared_ptr<const void>>(
+          Status{ErrorCode::TypeMismatch, "expected scalar"});
+    return Result<std::shared_ptr<const void>>(std::shared_ptr<const void>{});
+  };
+  validator.validate = [kind](const void*, const ValidationContext& context) {
+    auto window = context.acquire_tensor(0, Region::whole({1}));
+    if (!window.ok())
+      return window.status();
+    auto row = window.value().row_run({0});
+    if (!row.ok())
+      return row.status();
+    float value = 0;
+    std::memcpy(&value, row.value().data, sizeof(value));
+    if (!std::isfinite(value) ||
+        (kind < 2 && (value < 0 || value > (kind ? 16 : 1))))
+      return Status{
+          kind == 2 ? ErrorCode::InvalidArgument : ErrorCode::OperationFailed,
+          "invalid fixture scalar"};
+    return Status::success();
+  };
+  return validator;
+}
 struct ScalarConsumer {
   bool requested = false;
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
@@ -73,18 +109,15 @@ OperationDefinition scalar_consumer(bool unit,
   auto& traits = operation.traits;
   traits.input_count = 1;
   OperationPortConstraint port;
-  port.kind = OperationPortKind::Result;
+
   port.element_type = static_cast<std::uint32_t>(ElementType::Float32);
-  port.scalar_bounds = true;
-  port.minimum = 0;
-  port.maximum = unit ? 1 : 16;
+  port.validators = {scalar_validator(unit ? 0 : 1).identity};
   traits.input_schema = {port};
   auto& output = traits.outputs[0];
-  output.output_schema.kind = OperationPortKind::Result;
+
   output.result_schema = s1_fixture::schema({1}, false);
   output.output_schema.result_schema_id = output.result_schema->id;
   output.output_schema.result_schema_version = output.result_schema->version;
-  output.region_rule = OperationRegionRule::Whole;
   output.maximum_dependency_stages = 2;
   output.continuation_bytes = sizeof(ScalarConsumer);
   operation.start_result = [starts](const auto&, const auto& allocator) {
@@ -124,16 +157,16 @@ struct Fixture {
   std::atomic<unsigned> producers{0}, consumers{0};
   explicit Fixture(std::shared_ptr<OperationRegistry>,
                    unsigned atomic_axes = 0) {
+    for (unsigned kind = 0; kind < 3; ++kind)
+      check(registry->register_validator(scalar_validator(kind)));
     OperationDefinition producer;
     producer.key = "coefficient.scale";
     auto& traits = producer.traits;
     traits.input_count = 1;
     OperationPortConstraint port;
-    port.kind = OperationPortKind::Result;
+
     port.element_type = static_cast<std::uint32_t>(ElementType::Float32);
-    port.scalar_bounds = true;
-    port.minimum = -std::numeric_limits<float>::max();
-    port.maximum = std::numeric_limits<float>::max();
+    port.validators = {scalar_validator(2).identity};
     traits.input_schema = {port};
     traits.workspace_bytes = 16;
     traits.parameter_schema = {
@@ -143,11 +176,10 @@ struct Fixture {
     auto schema = s1_fixture::schema({1}, false);
     schema.tensors[0].atomic_trailing_axes = atomic_axes;
     auto& output = traits.outputs[0];
-    output.output_schema.kind = OperationPortKind::Result;
+
     output.output_schema.result_schema_id = schema.id;
     output.output_schema.result_schema_version = schema.version;
     output.result_schema = schema;
-    output.region_rule = OperationRegionRule::Tiled;
     output.maximum_dependency_stages = 2;
     output.continuation_bytes = sizeof(Scale);
     producer.start_result = [this](const auto&, const auto& allocator) {
@@ -404,6 +436,7 @@ int parameter_binding_identity(const std::shared_ptr<OperationRegistry>& base) {
 int metadata_rejection() {
   for (unsigned kind = 0; kind < 2; ++kind) {
     auto registry = std::make_shared<OperationRegistry>();
+    check(registry->register_validator(scalar_validator(1)));
     check(registry->register_operation(scalar_consumer(false)));
     OperationDefinition producer;
     producer.key = "bad";
@@ -412,11 +445,10 @@ int metadata_rejection() {
     schema.tensors[0].descriptor.element_type =
         kind == 0 ? ElementType::Float64 : ElementType::Float32;
     auto& out = producer.traits.outputs[0];
-    out.output_schema.kind = OperationPortKind::Result;
+
     out.output_schema.result_schema_id = schema.id;
     out.output_schema.result_schema_version = 1;
     out.result_schema = schema;
-    out.region_rule = OperationRegionRule::Whole;
     out.maximum_dependency_stages = 1;
     out.continuation_bytes = sizeof(Scale);
     unsigned starts = 0;

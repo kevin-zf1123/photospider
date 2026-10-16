@@ -151,7 +151,7 @@ int compilation() {
   identity.key = "test.identity";
   identity.traits.input_count = 1;
   identity.traits.input_schema.resize(1);
-  identity.traits.input_schema[0].kind = OperationPortKind::Result;
+
   identity.traits.input_schema[0].tensor_key = "number";
   identity.traits.outputs[0] = multi_result::output("value");
   identity.traits.requires_metadata_specialization = true;
@@ -219,7 +219,7 @@ int inference() {
   traits.parameter_schema = {
       {"radius", OperationParameterType::Float64, true, true, 0, 64},
       {"split", OperationParameterType::Int64, true, true, 1, 100}};
-  traits.input_schema[0].kind = OperationPortKind::Result;
+
   traits.input_schema[0].tensor_key = "number";
   traits.outputs[1].input_indices = std::vector<std::uint32_t>{};
   traits.requires_metadata_specialization = true;

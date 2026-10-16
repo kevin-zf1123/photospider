@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "photospider/benchmark/export.hpp"
 #include "photospider/compiler/compiler.hpp"
 #include "photospider/execution/execution.hpp"
 
@@ -15,7 +16,7 @@ namespace ps {
  *
  * @note This is a local test observation, not an attestation or release gate.
  */
-struct PHOTOSPIDER_API CorrectnessObservation final {
+struct PHOTOSPIDER_BENCHMARK_API CorrectnessObservation final {
   /** @brief Whether the produced named Values satisfy the caller oracle. */
   bool accepted = false;
   /** @brief Optional human-readable mismatch detail. */
@@ -39,7 +40,7 @@ using CorrectnessOracle = std::function<OracleSignature>;
  *
  * @note The type contains no performance threshold or deployment decision.
  */
-struct PHOTOSPIDER_API RawBenchmarkOptions final {
+struct PHOTOSPIDER_BENCHMARK_API RawBenchmarkOptions final {
   /** @brief Positive number of independently compiled/executed samples. */
   std::uint32_t iterations = 1U;
   /** @brief Physical planning options repeated for every sample. */
@@ -70,7 +71,7 @@ struct PHOTOSPIDER_API RawBenchmarkOptions final {
  * typed error reason. Cancellation observed before final report publication
  * aborts the complete run instead of publishing any sample sequence.
  */
-struct PHOTOSPIDER_API RawBenchmarkSample final {
+struct PHOTOSPIDER_BENCHMARK_API RawBenchmarkSample final {
   /** @brief Zero-based iteration index. */
   std::uint32_t iteration = 0U;
   /** @brief Raw typed-compiler stage timings. */
@@ -98,7 +99,7 @@ struct PHOTOSPIDER_API RawBenchmarkSample final {
  *
  * @note Reports are ordinary in-memory diagnostics with no durable identity.
  */
-struct PHOTOSPIDER_API RawBenchmarkReport final {
+struct PHOTOSPIDER_BENCHMARK_API RawBenchmarkReport final {
   /** @brief Canonical oracle identity or `unchecked`, shared by every sample.
    */
   std::string oracle_name;
@@ -116,7 +117,7 @@ struct PHOTOSPIDER_API RawBenchmarkReport final {
  * @note Compiler and ExecutionContext ownership remains with the caller and
  * must outlive this runner plus every `run` call.
  */
-class PHOTOSPIDER_API RawBenchmarkRunner final {
+class PHOTOSPIDER_BENCHMARK_API RawBenchmarkRunner final {
  public:
   /**
    * @brief Binds one compiler and local execution context.

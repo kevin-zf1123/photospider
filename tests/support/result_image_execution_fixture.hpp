@@ -15,7 +15,8 @@ struct ScalarPreludeState {
     if (consumer && !requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 2, false, take(TileSet::range(phase.resources, 0, 1))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     if (consumer) {
@@ -32,8 +33,8 @@ struct ScalarPreludeState {
       return Result<ResultProgramPoll>(started.status());
     auto builder = started.take_value();
     Status status;
-    for (uint32_t slot = 0;
-         slot < phase.query.output.result_schema->tensors.size(); ++slot) {
+    for (uint32_t slot = phase.query.tensor_slot;
+         slot == phase.query.tensor_slot; ++slot) {
       if (consumer) {
         // The output view retains its completed producer backing.
         auto window = phase.tensors->at({0, 2}).acquire(

@@ -7,7 +7,7 @@
 #include <utility>
 
 #include "photospider/core/resource_allocator.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 
 namespace ps::execution_internal {
 class NativeRunUploads;

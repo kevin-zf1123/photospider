@@ -19,14 +19,14 @@ Status validate_lut3d_bake_table(
     return descriptor.status();
   if (descriptor.value().tensor_coverage(0).empty())
     return Status::success();
-  const auto width = Value::element_size(spec.table_dtype);
+  const auto width = TensorSpan::element_size(spec.table_dtype);
   if (maximum_window < width * 3)
     return {ErrorCode::ResourceExhausted,
             "bake table color exceeds validation window",
             FailureReason::CapacityLimit};
   const auto& tensor = result.schema().tensors[0];
-  const ValueDescriptor logical{tensor.descriptor.element_type,
-                                tensor.sample_shape()};
+  const TensorDescriptor logical{tensor.descriptor.element_type,
+                                 tensor.sample_shape()};
   auto acquired = result.acquire_tensor(
       descriptor.value(), 0, Region::whole(logical.shape), cancellation);
   if (!acquired.ok())

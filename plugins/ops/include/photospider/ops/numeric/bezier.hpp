@@ -5,7 +5,7 @@
 #include <utility>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 #include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
@@ -35,24 +35,23 @@ enum class BezierDomain { Reject, Clamp };
  * Output `values` is `photospider.tensor` v1/member `samples`, [count],
  * selected dtype, ordinary data. Output `axis` uses the same schema/member,
  * Float64 [3], atomic_trailing_axes=1, ordinary data. The Result associations
- * record active source ObjectIds. Whole execution requests active inputs with
- * Data, Validation and Descriptor (role 13). Values validates global x topology
- * and all generated coordinates, computes every value and returns full
- * certified coverage with global sample coordinates. A mathematical knot or
- * clamp reads only that anchor's y and preserves its signed zero; generic y
- * outside every evaluated stencil is numerically unused. Axis reads no
- * controls. Count=1 excludes end: values reads anchors/handles/start; axis
- * reads only start. Empty reads no payload. Each output publishes through its
- * own all-or-nothing Result transaction. Complete typed validation and upstream
- * failures apply to active inputs. Numeric domain/overflow failures have Run
- * scope; other categories are preserved. Active input edits dirty values;
- * controls never dirty axis. Output owners survive context lifetime. Sampling
- * uses exact weighted endpoints rounded to Float64. Interior results correctly
- * round the mathematical inverse Bx(t)=x and By(t) after RN64 control
- * reconstruction. Exact solving can exhaust work/capacity; failure publishes no
- * partial result. Caller fenv is preserved; no y clipping or implicit handle
- * repair is applied. Interior exact zero is +0. Whole exposes no per-value
- * numeric counters.
+ * record active source ObjectIds. Independent Run-shared stages acquire their
+ * active input tensors. Values validates global x topology and all generated
+ * coordinates, computes every value once per Run and publishes requested tiles
+ * in global sample coordinates. A mathematical knot or clamp reads only that
+ * anchor's y and preserves its signed zero; generic y outside every evaluated
+ * stencil is numerically unused. Axis reads no controls. Count=1 excludes end:
+ * values reads anchors/handles/start; axis reads only start. Empty reads no
+ * payload. Each output publishes through its own all-or-nothing Result
+ * transaction. Complete typed validation and upstream failures apply to active
+ * inputs. Numeric domain/overflow failures have Run scope; other categories are
+ * preserved. Active input edits dirty values; controls never dirty axis. Output
+ * owners survive context lifetime. Sampling uses exact weighted endpoints
+ * rounded to Float64. Interior results correctly round the mathematical inverse
+ * Bx(t)=x and By(t) after RN64 control reconstruction. Exact solving can
+ * exhaust work/capacity; failure publishes no partial result. Caller fenv is
+ * preserved; no y clipping or implicit handle repair is applied. Interior exact
+ * zero is +0. Whole exposes no per-value numeric counters.
  */
 inline Result<WorkflowNode> sample_bezier_function_node(
     std::uint64_t id, WorkflowInput anchors, WorkflowInput handles,
@@ -103,19 +102,18 @@ inline Result<WorkflowNode> sample_bezier_function_node(
  * input shapes/types and all logical products <=2^40 without reading payload.
  * @note Pure/concurrent-safe authoring. Output `values` is a Result using
  * schema photospider.tensor v1/member samples, shape [N,D], selected dtype and
- * ordinary data. Whole execution requests all inputs with Data, Validation and
- * Descriptor (role 13), validates all query rows before arithmetic, and
- * evaluates every row/component even for a local request. Nonempty output
- * returns full certified coverage in global coordinates; the association
- * records source ObjectIds. Empty reads no payload. Mathematical endpoints use
- * one anchor; interiors use their full local control stencil. Generic controls
- * outside evaluated stencils are numerically unused. Controls reconstruct with
- * RN64; the exact polynomial rounds once to dtype. Interior exact zero is -0
- * only if every reconstructed control is -0; nonzero underflow keeps its sign.
- * Caller fenv is preserved. Invalid segment/t fails
- * InvalidArgument/InvalidDomain; used nonfinite controls fail
- * OperationFailed/InvalidDomain; actual reconstruction/output overflow fails
- * ArithmeticOverflow. Numeric failures have Run scope.
+ * ordinary data. A Run-shared stage acquires all input tensors, validates all
+ * query rows before arithmetic, and evaluates every row/component even for a
+ * local request. Requested tiles borrow the complete stage result in global
+ * coordinates; the association records source ObjectIds. Empty reads no
+ * payload. Mathematical endpoints use one anchor; interiors use their full
+ * local control stencil. Generic controls outside evaluated stencils are
+ * numerically unused. Controls reconstruct with RN64; the exact polynomial
+ * rounds once to dtype. Interior exact zero is -0 only if every reconstructed
+ * control is -0; nonzero underflow keeps its sign. Caller fenv is preserved.
+ * Invalid segment/t fails InvalidArgument/InvalidDomain; used nonfinite
+ * controls fail OperationFailed/InvalidDomain; actual reconstruction/output
+ * overflow fails ArithmeticOverflow. Numeric failures have Run scope.
  * Typed/upstream/resource/cancellation errors retain categories. Any input edit
  * invalidates output demand. Output owner survives context teardown. Complete
  * output/workspace is admitted even for one requested cell; work/capacity

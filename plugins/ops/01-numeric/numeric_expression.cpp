@@ -15,6 +15,7 @@
 #include "01-numeric/expression_evaluator.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/sequence_profiles.hpp"
+#include "common/independent_results.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/ops/numeric/diagnostics.hpp"
@@ -191,7 +192,7 @@ struct SampleState final {
       for (std::uint64_t i = 0; i < axis.size(); ++i)
         std::memcpy(writer.address({i}), &axis[i], sizeof(axis[i]));
     } else {
-      const auto width = Value::element_size(program->dtype);
+      const auto width = TensorSpan::element_size(program->dtype);
       for (std::uint64_t offset = 0; offset < program->count;) {
         auto status = consume(1);
         if (!status.ok())
@@ -275,7 +276,6 @@ OperationDefinition expression_operation(const std::string& key,
   traits.repeated_match = false;
   traits.input_schema.resize(2);
   for (auto& port : traits.input_schema) {
-    port.kind = OperationPortKind::Result;
     port.rank = 1;
     port.element_type_mask = 12;
   }
@@ -355,7 +355,7 @@ OperationDefinition expression_operation(const std::string& key,
                : ResultContinuation::make<ExpressionTensorProgram<false>>(
                      allocator, profile);
   };
-  return operation;
+  return independent_results(std::move(operation));
 }
 }  // namespace
 }  // namespace ps::plugin_internal::numeric_ops

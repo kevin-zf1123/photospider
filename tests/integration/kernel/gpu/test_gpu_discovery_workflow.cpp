@@ -61,10 +61,10 @@ ExecutionBindings bind(const ResultRef& data, const ResultRef& control) {
   return bindings;
 }
 TileRequest point(const ResourceBudget& root, std::uint64_t at) {
-  return {false, take(TileSet::from_indices(root, {at}))};
+  return {{{0, take(TileSet::from_indices(root, {at}))}}};
 }
 TileRequest pair(const ResourceBudget& root) {
-  return {false, take(TileSet::from_indices(root, {0, 1}))};
+  return {{{0, take(TileSet::from_indices(root, {0, 1}))}}};
 }
 float number(const ResultRef& result, std::uint64_t at) {
   float value = 0;
@@ -74,13 +74,13 @@ float number(const ResultRef& result, std::uint64_t at) {
 }
 bool input_tiles(const DemandResult& result, std::size_t step, TileIndex output,
                  std::size_t input, const TileSet& expected) {
-  auto record = take(result.dependencies.tile_record({step, 0, output}));
+  auto record = take(result.dependencies.tile_record({step, 0, 0, output}));
   if (!record)
     return false;
   for (const auto& need : record->inputs) {
     const auto* source = std::get_if<PlanWorkflowInput>(&need.producer);
     if (source && source->declaration_index == input)
-      return !need.whole && need.producer_output == 0 && need.tiles == expected;
+      return need.producer_output == 0 && need.tiles == expected;
   }
   return false;
 }
@@ -199,7 +199,7 @@ void thread_probes(const std::shared_ptr<OperationRegistry>& registry,
     document.outputs = {{"empty", 1, "value"}};
     GraphContext graph(document);
     const auto compiled = take(Compiler(registry).compile(graph, options));
-    for (auto budget : {8256, 8257}) {
+    for (auto budget : {8288, 8289}) {
       ExecutionContextConfig config;
       config.gpu_enabled = true;
       ExecutionContext context(registry, config);
@@ -207,11 +207,11 @@ void thread_probes(const std::shared_ptr<OperationRegistry>& registry,
       ExecutionOptions bounds;
       bounds.dependencies.maximum_work = budget;
       entered->store(false);
-      auto run = context.execute_fragments(take(context.freeze(compiled.plan)),
-                                           {{"empty", TileRequest{true, {}}}},
-                                           {}, bounds);
+      auto run =
+          context.execute_fragments(take(context.freeze(compiled.plan)),
+                                    {{"empty", point(root, 0)}}, {}, bounds);
       const auto expected = wrong            ? ErrorCode::InvalidArgument
-                            : budget == 8256 ? ErrorCode::ResourceExhausted
+                            : budget == 8288 ? ErrorCode::ResourceExhausted
                                              : ErrorCode::Ok;
       if (run.status().code != expected || entered->load() == wrong) {
         std::cerr << "thread discovery wrong=" << wrong << " budget=" << budget
@@ -226,7 +226,7 @@ void thread_probes(const std::shared_ptr<OperationRegistry>& registry,
     }
   }
   std::cout << "Metal discovery: wrong thread rejected; concurrent work "
-               "8256 rejected, 8257 passed\n";
+               "8288 rejected, 8289 passed\n";
 }
 }  // namespace
 int main(int argc, char** argv) try {
@@ -318,7 +318,7 @@ int main(int argc, char** argv) try {
     auto dirty = take(demand.replace_bindings(
         bind(edit(1), source(root, ElementType::Int64, 1))));
     if (check(clean.potential_dirty.at("sum").empty() &&
-                  dirty.potential_dirty.at("sum") == point(root, 0).tiles,
+                  dirty.potential_dirty.at("sum") == point(root, 0),
               "discovery dirty transpose retained old edge"))
       return 1;
     auto bad_control =
@@ -404,9 +404,8 @@ int main(int argc, char** argv) try {
                                 take(TileSet::from_indices(root, {0, 4096}))),
                 "unordered discovery tile normalization failed"))
         return 1;
-      auto empty = take(
-          context.execute_fragments(take(context.freeze(plan.plan, bindings)),
-                                    {{"sum", TileRequest{false, {}}}}));
+      auto empty = take(context.execute_fragments(
+          take(context.freeze(plan.plan, bindings)), {{"sum", TileRequest{}}}));
       if (check(empty.diagnostics.native_dispatch_count == 0,
                 "empty discovery dispatched native work"))
         return 1;
@@ -420,18 +419,19 @@ int main(int argc, char** argv) try {
       if (check(
               number(run.results.at("sum"), 0) == 8 &&
                   run.diagnostics.native_dispatch_count == (mode == 17 ? 3 : 2),
-              "repeated or Whole discovery failed"))
+              "repeated or full interval discovery failed"))
         return 1;
       if (mode == 18) {
         auto record = take(run.dependencies.tile_record(
-            {plan.plan.outputs().at("sum"), 0, 0}));
+            {plan.plan.outputs().at("sum"), 0, 0, 0}));
         bool whole = false;
         for (const auto& need : record->inputs) {
           const auto* source = std::get_if<PlanWorkflowInput>(&need.producer);
-          whole |= source && source->declaration_index == 0 && need.whole &&
-                   need.tiles.empty();
+          whole |= source && source->declaration_index == 0 &&
+                   need.tensor_slot == 0 &&
+                   need.tiles == take(TileSet::range(root, 0, 8192));
         }
-        if (check(whole, "Whole receipt lost producer dependency"))
+        if (check(whole, "full interval receipt lost producer dependency"))
           return 1;
       }
     }
@@ -475,13 +475,13 @@ int main(int argc, char** argv) try {
     thread_probes(registry, &entered);
     GraphContext large(document(128));
     auto large_plan = Compiler(registry).compile(large, options).take_value();
-    // Table: 2064 logical bytes and exact native capacity. Control atlas:
+    // Table: 4112 logical bytes and exact native capacity. Control atlas:
     // 8+160. Discovery allocates neither the output nor the declared scratch;
     // those allocations occur in the later compute phase after its table
     // retires.
     const auto minimum =
         source_bytes +
-        large_plan.plan.steps()[0].traits.outputs[0].continuation_bytes + 2064 +
+        large_plan.plan.steps()[0].traits.outputs[0].continuation_bytes + 4112 +
         168;
     for (auto bytes : {minimum - 1, minimum}) {
       ExecutionContextConfig tight;

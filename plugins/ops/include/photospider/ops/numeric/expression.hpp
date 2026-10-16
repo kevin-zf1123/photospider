@@ -5,12 +5,13 @@
 #include <string>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 #include "photospider/ops/export.hpp"
 #include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
-/** @brief Authors a Whole Result sampler for a bounded expression.
+/** @brief Authors a sampler backed by independent Run-shared stages for a
+ * bounded expression.
  * @param id Nonzero node id.
  * @param expression Nonempty ASCII mathematical source, <=4096 bytes, <=256
  * AST nodes and height <=32. See NUM-01 for grammar and evaluation order.
@@ -37,7 +38,7 @@ namespace ps::numeric {
  * InvalidArgument/InvalidDomain/Schema. Allocation can throw std::bad_alloc.
  * The helper is pure and safe for concurrent use.
  * @note Each input Result has exactly one tensor member under any key; schema
- * IDs may differ and fields may coexist. Compilation validates every declared
+ * IDs may differ. Compilation validates every declared
  * input schema, member shape and dtype, then shares one immutable AST across
  * both output programs and dynamic runs. Runtime computes RN64 coordinates. A
  * values request checks adjacent coordinate separation over the full grid and

@@ -31,14 +31,15 @@ int verify_source(const ExecutionDependencies& dependencies, TileUnit unit,
   PS_CHECK(std::holds_alternative<PlanWorkflowInput>(input.producer));
   PS_CHECK(std::get<PlanWorkflowInput>(input.producer).declaration_index ==
            declaration);
-  PS_CHECK(input.whole && input.tiles.empty());
+  PS_CHECK(input.tensor_slot == 0 && input.tiles.size() == 1 &&
+           input.tiles.contains(0));
   return 0;
 }
 int verify_dirty(const ExecutionDependencies& dependencies,
                  const ResourceBudget& root, std::size_t declaration,
                  const std::vector<TileUnit>& expected) {
   ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
-  changes.push_back({PlanWorkflowInput{declaration}, 0,
+  changes.push_back({PlanWorkflowInput{declaration}, 0, 0,
                      multi_result::take(TileSet::from_indices(root, {0})),
                      false});
   auto dirty = dependencies.dirty_units(changes);
@@ -56,7 +57,6 @@ int staged_outputs() {
   op.traits.input_count = 2;
   op.traits.input_schema.resize(2);
   for (auto& input : op.traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.tensor_key = "number";
   }
   op.traits.outputs.resize(2);
@@ -89,14 +89,18 @@ int staged_outputs() {
                               multi_result::binding(root, "b", 11)}};
   auto frozen = execution.freeze(compiled.value().plan, bindings);
   PS_CHECK(frozen.ok());
-  const DemandQuery query{{"left", TileRequest{true, {}}},
-                          {"right", TileRequest{true, {}}}};
+  const DemandQuery query{
+      {"left",
+       TileRequest{{{0, multi_result::take(TileSet::range(root, 0, 1))}}}},
+      {"right",
+       TileRequest{{{0, multi_result::take(TileSet::range(root, 0, 1))}}}}};
   auto first = execution.execute_fragments(frozen.value(), query);
   PS_CHECK(first.ok());
   PS_CHECK(number(first.value(), "left") == 7);
   PS_CHECK(number(first.value(), "right") == 11);
   PS_CHECK((*counts)[0] == 1 && (*counts)[1] == 1);
-  auto point = TileRequest{true, {}};
+  auto point =
+      TileRequest{{{0, multi_result::take(TileSet::range(root, 0, 1))}}};
   PS_CHECK(verify_source(first.value().dependencies, {0, 0, 0}, 0) == 0);
   PS_CHECK(verify_source(first.value().dependencies, {1, 1, 0}, 1) == 0);
   PS_CHECK(verify_dirty(first.value().dependencies, root, 0, {{0, 0, 0}}) == 0);
@@ -194,7 +198,6 @@ int projected_sync_inputs() {
   unwanted.traits.deterministic = false;
   unwanted.traits.cacheable = false;
   unwanted.traits.outputs[0] = multi_result::output("value");
-  unwanted.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   unwanted.start_result = [unwanted_calls](const ResultProgramQuery&,
                                            const BufferAllocator&) {
     ++*unwanted_calls;
@@ -208,7 +211,6 @@ int projected_sync_inputs() {
   projected.traits.input_count = 2;
   projected.traits.input_schema.resize(2);
   for (auto& input : projected.traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.tensor_key = "number";
   }
   projected.traits.outputs = {multi_result::output("pass"),
@@ -258,7 +260,9 @@ int projected_sync_inputs() {
                          .freeze(compiled.value().plan,
                                  {{multi_result::binding(root, "a", 23)}})
                          .take_value();
-  const DemandQuery only_constant{{"constant", TileRequest{true, {}}}};
+  const DemandQuery only_constant{
+      {"constant",
+       TileRequest{{{0, multi_result::take(TileSet::range(root, 0, 1))}}}}};
   const auto before = (*projected_calls)[1].load();
   auto first = execution.execute_fragments(frozen, only_constant);
   auto cached = execution.execute_fragments(independent, only_constant);
@@ -276,7 +280,6 @@ int projected_shapes_and_permutation() {
   op.traits.input_count = 2;
   op.traits.input_schema.resize(2);
   for (auto& input : op.traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.tensor_key = "number";
   }
   op.traits.outputs.resize(2);
@@ -304,12 +307,17 @@ int projected_shapes_and_permutation() {
   ResourceBudget direct_root;
   auto allocator = direct_root.allocator();
 
+  metadata.input_tile_grids = {
+      {multi_result::take(TileGrid::from_tensor(left_schema.tensors[0], 1))},
+      {multi_result::take(TileGrid::from_tensor(right_schema.tensors[0], 1))}};
   ResultObjectInputs objects;
   for (unsigned output = 0; output < 2; ++output) {
     metadata.output.result_schema = std::make_shared<const SchemaTemplate>(
         output ? right_schema : left_schema);
     ResultProgramQuery query(metadata, parameters);
     query.output_index = output;
+    query.tile_extent = 1;
+    query.tile_unit = 1 + output;
     query.semantic_key = op.key;
     query.tensor_outputs =
         Footprint::from_regions({2U + output}, {Region({{1U + output, 1}})})
@@ -329,8 +337,9 @@ int projected_shapes_and_permutation() {
              std::holds_alternative<ResultProgramNeed>(polled.value()));
     const auto& need = std::get<ResultProgramNeed>(polled.value());
     PS_CHECK(need.tiles.size() == 1 && need.tiles[0].input == output);
-    PS_CHECK(need.tiles[0].whole && !need.tiles[0].descriptor_only &&
-             need.tiles[0].tiles.empty());
+    PS_CHECK(need.tiles[0].tensor_slot == 0 && !need.tiles[0].descriptor_only &&
+             need.tiles[0].tiles.size() == 1 &&
+             need.tiles[0].tiles.contains(1 + output));
   }
   ResultProgramQuery bad_query(metadata, parameters);
   bad_query.semantic_key = op.key;
@@ -352,7 +361,9 @@ int projected_shapes_and_permutation() {
   document.outputs = {{"left", 1, "left"}, {"right", 1, "right"}};
   GraphContext graph(document);
   PlanningOptions planning;
-  planning.output_requests = {{"left", {true, {}}}, {"right", {true, {}}}};
+  const auto all_scalar =
+      TileRequest{{{0, multi_result::take(TileSet::range(direct_root, 0, 1))}}};
+  planning.output_requests = {{"left", all_scalar}, {"right", all_scalar}};
   auto compiled = Compiler(registry).compile(graph, planning);
   if (!compiled.ok())
     std::cerr << compiled.status().message << '\n';
@@ -413,7 +424,6 @@ int projected_result_programs() {
       projected.traits.input_count = 2;
       projected.traits.input_schema.resize(2);
       for (auto& input : projected.traits.input_schema) {
-        input.kind = OperationPortKind::Result;
         input.tensor_key = "number";
       }
       projected.traits.cacheable = false;
@@ -421,7 +431,6 @@ int projected_result_programs() {
       for (unsigned i = 0; i < outputs; ++i) {
         auto& output = projected.traits.outputs[i];
         output = multi_result::output(i ? "constant" : "pass");
-        output.region_rule = OperationRegionRule::Whole;
         output.input_indices =
             i ? std::vector<std::uint32_t>{} : std::vector<std::uint32_t>{0};
       }

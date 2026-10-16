@@ -178,7 +178,7 @@ Result<OperationPreparation> prepare_channel_literal_like(
     return R(core_internal::invalid_schema_domain(
         "logical count is outside [1,2^40]"));
   LiteralPreparation s;
-  s.width = Value::element_size(input.descriptor.element_type);
+  s.width = TensorSpan::element_size(input.descriptor.element_type);
   const auto bits = text(p, "bits");
   const auto hex = [](char c) -> int {
     if (c >= '0' && c <= '9') {
@@ -244,9 +244,6 @@ Result<OperationPreparation> prepare_channel_literal_like(
       }
     }
   }
-  if (tensor.layout.spatial) {
-    tensor.layout.groups.clear();
-  }
   output.metadata.result_schema =
       std::make_shared<const SchemaTemplate>(std::move(schema));
   OperationPreparation result;
@@ -268,7 +265,7 @@ Status register_channel_literal_like(OperationRegistry* registry) {
     auto& t = d.traits;
     t.input_count = 1;
     OperationPortConstraint port;
-    port.kind = OperationPortKind::Result;
+
     port.element_type_mask = 127;
     t.input_schema = {port};
     t.cacheable = false;
@@ -284,7 +281,6 @@ Status register_channel_literal_like(OperationRegistry* registry) {
     output.key = "values";
     output.output_schema = port;
     output.result_schema = tensor_ops::scalar_schema();
-    output.region_rule = OperationRegionRule::Tiled;
     output.continuation_bytes = sizeof(LiteralState);
     output.maximum_dependency_stages = 2;
     d.prepare_static = [kind = profile.second](const auto& inputs,

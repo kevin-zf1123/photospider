@@ -24,7 +24,11 @@ struct ConditionalSum {
     if (!output.empty() && stage == 0) {
       ++stage;
       ResultProgramNeed need;
-      need.tiles.push_back({1, true, false, {}});
+      need.tiles.push_back(
+          {1, 0, false,
+           take(TileSet::range(
+               phase.resources, 0,
+               phase.query.input_tile_grids[1][0].tile_count()))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     if (!output.empty() && stage == 1) {
@@ -89,20 +93,17 @@ inline std::shared_ptr<OperationRegistry> conditional_sum_registry() {
   traits.input_count = 2;
   traits.workspace_bytes = 5 * sizeof(double);
   traits.input_schema.resize(2);
-  for (auto& port : traits.input_schema)
-    port.kind = OperationPortKind::Result;
   traits.input_schema[0].element_type =
       static_cast<std::uint32_t>(ElementType::Float64);
   traits.input_schema[1].element_type =
       static_cast<std::uint32_t>(ElementType::Int64);
   auto& output = traits.outputs[0];
-  output.output_schema.kind = OperationPortKind::Result;
+
   output.result_schema = multi_result::schema(ElementType::Float64, {1, 5});
   output.result_schema->tensors[0].layout.spatial = true;
   output.result_schema->tensors[0].layout.channel_axis.reset();
   output.output_schema.result_schema_id = output.result_schema->id;
   output.output_schema.result_schema_version = output.result_schema->version;
-  output.region_rule = OperationRegionRule::Tiled;
   output.continuation_bytes = sizeof(ConditionalSum);
   output.maximum_dependency_stages = 3;
   operation.start_result = [](const auto&, const auto& allocator) {

@@ -5,9 +5,9 @@
 #include <utility>
 #include <vector>
 
-#include "support/unified_result_fixture.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
+#include "support/unified_result_fixture.hpp"
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
 void require(bool condition, std::string_view message) {
@@ -80,7 +80,7 @@ std::pair<ResultRef, ResultRef> run() {
   auto frozen = context.freeze(planned.value().plan, {{a, b, c}});
   require(frozen.ok(), "freeze typed Result bindings");
   const auto wanted_tiles = TileSet::from_indices(budget, {22}).take_value();
-  const TileRequest wanted{false, wanted_tiles};
+  const TileRequest wanted{{{0, wanted_tiles}}};
   auto sparse = context.execute_fragments(frozen.value(), {{"out", wanted}});
   require(sparse.ok(), sparse.status().message);
   auto sparse_result = sparse.value().results.at("out");
@@ -93,11 +93,11 @@ std::pair<ResultRef, ResultRef> run() {
           "hole is unauthorized");
   ResourceVector<TileChange> control_change{
       ResourceAllocator<TileChange>(budget)};
-  control_change.push_back({PlanWorkflowInput{2}, 0, {}, true});
+  control_change.push_back({PlanWorkflowInput{2}, 0, 0, {}, true});
   auto dirty = sparse.value().dependencies.dirty_units(control_change);
   require(dirty.ok() && dirty.value().size() == 1 &&
-              dirty.value()[0] == TileUnit{0, 0, 22},
-          "Whole control changes invalidate the subscribed output tile");
+              dirty.value()[0] == TileUnit{0, 0, 0, 22},
+          "Full control changes invalidate the subscribed output tile");
   auto handle =
       context.open_demand(planned.value().plan, {{a, b, c}}).take_value();
   auto initial = handle.request({{"out", wanted}});
@@ -106,8 +106,9 @@ std::pair<ResultRef, ResultRef> run() {
   c.result = unified_result_fixture::input_control(budget, selectors);
   auto changed = handle.replace_bindings({{a, b, c}});
   require(changed.ok(), changed.status().message);
-  require(changed.value().potential_dirty.at("out") == wanted_tiles,
-          "consumed Control changes are dirty");
+  require(
+      changed.value().potential_dirty.at("out").members.at(0) == wanted_tiles,
+      "consumed Control changes are dirty");
   auto updated = handle.request({{"out", wanted}});
   require(updated.ok(), updated.status().message);
   auto updated_result = updated.value().results.at("out");
@@ -125,12 +126,12 @@ std::pair<ResultRef, ResultRef> run() {
           "constant count has no source association");
   ResourceVector<TileChange> source_change{
       ResourceAllocator<TileChange>(budget)};
-  source_change.push_back({PlanWorkflowInput{1}, 0,
+  source_change.push_back({PlanWorkflowInput{1}, 0, 0,
                            TileSet::from_indices(budget, {23}).take_value(),
                            false});
   auto new_dirty = updated.value().dependencies.dirty_units(source_change);
   require(new_dirty.ok() && new_dirty.value().size() == 1 &&
-              new_dirty.value()[0] == TileUnit{0, 0, 22},
+              new_dirty.value()[0] == TileUnit{0, 0, 0, 22},
           "new branch replaces old tile dependency");
   auto old_dirty = initial.value().dependencies.dirty_units(source_change);
   require(old_dirty.ok() && old_dirty.value().empty(),
@@ -138,11 +139,11 @@ std::pair<ResultRef, ResultRef> run() {
   selectors[0] = 7;
   c.result = unified_result_fixture::input_control(budget, selectors);
   auto unrelated =
-      handle.replace_bindings({{a, b, c}}, SnapshotAccessOptions{2, {}});
+      handle.replace_bindings({{a, b, c}}, SnapshotAccessOptions{33, {}});
   require(unrelated.ok(), unrelated.status().message);
   require(
-      unrelated.value().potential_dirty.at("out") == wanted_tiles,
-      "Whole control payload edits conservatively invalidate subscribed tiles");
+      unrelated.value().potential_dirty.at("out").members.at(0) == wanted_tiles,
+      "Full control payload edits conservatively invalidate subscribed tiles");
   const auto evaluate = [&](const DemandQuery& query) {
     auto current = context.freeze(planned.value().plan, {{a, b, c}});
     require(current.ok(), current.status().message);
@@ -152,7 +153,7 @@ std::pair<ResultRef, ResultRef> run() {
   c.result = unified_result_fixture::input_control(budget, selectors);
   auto bounded = evaluate({{"out", wanted}});
   require(bounded.ok(), bounded.status().message);
-  const TileRequest scalar{true, {}};
+  const TileRequest scalar{{{0, TileSet::range(budget, 0, 1).take_value()}}};
   auto count_only = evaluate({{"count", scalar}});
   require(count_only.ok(), count_only.status().message);
   const auto& independent = count_only.value().results.at("count");
@@ -167,8 +168,8 @@ std::pair<ResultRef, ResultRef> run() {
   for (const auto& entry : empty.value().results)
     require(entry.second.descriptor().value().tensor_coverage(0).empty(),
             "empty Result demand publishes no samples");
-  const TileRequest invalid_at{false,
-                               TileSet::from_indices(budget, {0}).take_value()};
+  const TileRequest invalid_at{
+      {{0, TileSet::from_indices(budget, {0}).take_value()}}};
   for (auto invalid : {-1, 8}) {
     selectors[0] = invalid;
     c.result = unified_result_fixture::input_control(budget, selectors);

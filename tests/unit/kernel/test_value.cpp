@@ -3,7 +3,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 #include "support/test_support.hpp"
 
 /**
@@ -18,8 +18,8 @@ int main() {
   using ps::Region;
   using ps::RegionDimension;
   using ps::StridedLayout;
-  using ps::Value;
-  using ps::ValueDescriptor;
+  using ps::TensorDescriptor;
+  using ps::TensorSpan;
 
   const Region whole = Region::whole({2U, 3U});
   PS_CHECK(whole.rank() == 2U);
@@ -42,65 +42,66 @@ int main() {
   PS_CHECK(overflow_rejected);
 
   std::vector<std::uint8_t> bytes(6U, 9U);
-  auto value = Value::create(ValueDescriptor{ElementType::UInt8, {2U, 3U}},
-                             whole, StridedLayout{0U, {3, 1}}, bytes);
+  auto value =
+      TensorSpan::create(TensorDescriptor{ElementType::UInt8, {2U, 3U}}, whole,
+                         StridedLayout{0U, {3, 1}}, bytes);
   PS_CHECK(value.ok());
   PS_CHECK(value.value().bytes().size() == 6U);
-  auto outside =
-      Value::create(ValueDescriptor{ElementType::UInt8, {2U, 3U}}, whole,
-                    StridedLayout{0U, {4, 1}}, std::vector<std::uint8_t>(6U));
+  auto outside = TensorSpan::create(
+      TensorDescriptor{ElementType::UInt8, {2U, 3U}}, whole,
+      StridedLayout{0U, {4, 1}}, std::vector<std::uint8_t>(6U));
   PS_CHECK(!outside.ok());
   PS_CHECK(outside.status().code == ErrorCode::InvalidArgument);
 
   auto rank_mismatch =
-      Value::create(ValueDescriptor{ElementType::UInt8, {2U, 3U}}, whole,
-                    StridedLayout{0U, {1}}, std::vector<std::uint8_t>(6U));
+      TensorSpan::create(TensorDescriptor{ElementType::UInt8, {2U, 3U}}, whole,
+                         StridedLayout{0U, {1}}, std::vector<std::uint8_t>(6U));
   PS_CHECK(!rank_mismatch.ok());
 
-  auto reverse = Value::create(ValueDescriptor{ElementType::UInt8, {3U}},
-                               Region::whole({3U}), StridedLayout{2U, {-1}},
-                               std::vector<std::uint8_t>{1U, 2U, 3U});
+  auto reverse = TensorSpan::create(
+      TensorDescriptor{ElementType::UInt8, {3U}}, Region::whole({3U}),
+      StridedLayout{2U, {-1}}, std::vector<std::uint8_t>{1U, 2U, 3U});
   PS_CHECK(reverse.ok());
 
   const std::uint64_t huge_extent =
       static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 2U;
-  auto huge_broadcast =
-      Value::create(ValueDescriptor{ElementType::UInt8, {huge_extent}},
-                    Region::whole({huge_extent}), StridedLayout{0U, {0}}, {7U});
+  auto huge_broadcast = TensorSpan::create(
+      TensorDescriptor{ElementType::UInt8, {huge_extent}},
+      Region::whole({huge_extent}), StridedLayout{0U, {0}}, {7U});
   PS_CHECK(huge_broadcast.ok());
-  auto maximum_broadcast = Value::create(
-      ValueDescriptor{ElementType::UInt8,
-                      {std::numeric_limits<std::uint64_t>::max()}},
+  auto maximum_broadcast = TensorSpan::create(
+      TensorDescriptor{ElementType::UInt8,
+                       {std::numeric_limits<std::uint64_t>::max()}},
       Region::whole({std::numeric_limits<std::uint64_t>::max()}),
       StridedLayout{0U, {0}}, {8U});
   PS_CHECK(maximum_broadcast.ok());
 
   for (const std::int64_t nonzero_stride : {1, -1}) {
     auto huge_nonbroadcast =
-        Value::create(ValueDescriptor{ElementType::UInt8, {huge_extent}},
-                      Region::whole({huge_extent}),
-                      StridedLayout{0U, {nonzero_stride}}, {9U});
+        TensorSpan::create(TensorDescriptor{ElementType::UInt8, {huge_extent}},
+                           Region::whole({huge_extent}),
+                           StridedLayout{0U, {nonzero_stride}}, {9U});
     PS_CHECK(!huge_nonbroadcast.ok());
     PS_CHECK(huge_nonbroadcast.status().code == ErrorCode::InvalidArgument);
   }
 
-  auto mixed_positive =
-      Value::create(ValueDescriptor{ElementType::UInt8, {huge_extent, 3U}},
-                    Region::whole({huge_extent, 3U}), StridedLayout{0U, {0, 1}},
-                    {1U, 2U, 3U});
+  auto mixed_positive = TensorSpan::create(
+      TensorDescriptor{ElementType::UInt8, {huge_extent, 3U}},
+      Region::whole({huge_extent, 3U}), StridedLayout{0U, {0, 1}},
+      {1U, 2U, 3U});
   PS_CHECK(mixed_positive.ok());
-  auto mixed_negative =
-      Value::create(ValueDescriptor{ElementType::UInt8, {huge_extent, 3U}},
-                    Region::whole({huge_extent, 3U}),
-                    StridedLayout{2U, {0, -1}}, {1U, 2U, 3U});
+  auto mixed_negative = TensorSpan::create(
+      TensorDescriptor{ElementType::UInt8, {huge_extent, 3U}},
+      Region::whole({huge_extent, 3U}), StridedLayout{2U, {0, -1}},
+      {1U, 2U, 3U});
   PS_CHECK(mixed_negative.ok());
 
-  auto singleton_minimum_stride = Value::create(
-      ValueDescriptor{ElementType::UInt8, {1U}}, Region::whole({1U}),
+  auto singleton_minimum_stride = TensorSpan::create(
+      TensorDescriptor{ElementType::UInt8, {1U}}, Region::whole({1U}),
       StridedLayout{0U, {std::numeric_limits<std::int64_t>::min()}}, {10U});
   PS_CHECK(singleton_minimum_stride.ok());
-  auto repeated_minimum_stride = Value::create(
-      ValueDescriptor{ElementType::UInt8, {2U}}, Region::whole({2U}),
+  auto repeated_minimum_stride = TensorSpan::create(
+      TensorDescriptor{ElementType::UInt8, {2U}}, Region::whole({2U}),
       StridedLayout{0U, {std::numeric_limits<std::int64_t>::min()}}, {10U});
   PS_CHECK(!repeated_minimum_stride.ok());
   PS_CHECK(repeated_minimum_stride.status().code == ErrorCode::InvalidArgument);
@@ -121,21 +122,21 @@ int main() {
            ErrorCode::InvalidArgument);
   PS_CHECK(reverse.value().byte_address({3}).status().code ==
            ErrorCode::InvalidArgument);
-  PS_CHECK(Value{}.byte_address(last, 1).status().code ==
+  PS_CHECK(TensorSpan{}.byte_address(last, 1).status().code ==
            ErrorCode::InvalidArgument);
   auto origin_relative =
-      Value::create({ElementType::UInt8, {10}}, Region({{7, 3}}),
-                    {2, {-1}, {7}}, {11, 12, 13});
+      TensorSpan::create({ElementType::UInt8, {10}}, Region({{7, 3}}),
+                         {2, {-1}, {7}}, {11, 12, 13});
   PS_CHECK(origin_relative.ok());
   const std::uint64_t origin_end[] = {9};
-  ps::ValueView view(origin_relative.value());
+  ps::TensorSpanView view(origin_relative.value());
   PS_CHECK(view.byte_address(origin_end, 1).value() == 0);
   PS_CHECK(view.byte_address({8}).value() == 1);
   PS_CHECK(view.byte_address(std::vector<std::uint64_t>{7}).value() == 2);
   const auto high_origin = UINT64_MAX - 3;
-  auto high_relative = Value::create({ElementType::UInt8, {UINT64_MAX}},
-                                     Region({{high_origin, 3}}),
-                                     {2, {-1}, {high_origin}}, {21, 22, 23});
+  auto high_relative = TensorSpan::create(
+      {ElementType::UInt8, {UINT64_MAX}}, Region({{high_origin, 3}}),
+      {2, {-1}, {high_origin}}, {21, 22, 23});
   PS_CHECK(high_relative.ok());
   const std::uint64_t high_end[] = {UINT64_MAX - 1};
   PS_CHECK(high_relative.value().byte_address(high_end, 1).value() == 0);
@@ -148,7 +149,7 @@ int main() {
   PS_CHECK(overflowing_element_count.status().code ==
            ErrorCode::ResourceExhausted);
 
-  const Value scalar = Value::from_float64(42.5);
+  const TensorSpan scalar = TensorSpan::from_float64(42.5);
   PS_CHECK(scalar.valid());
   PS_CHECK(scalar.region().rank() == 1U);
   PS_CHECK(scalar.region().dimensions().front().offset == 0U);
@@ -157,27 +158,27 @@ int main() {
   PS_CHECK(scalar.as_float64().value() == 42.5);
 
   auto empty_scalar =
-      Value::create(ValueDescriptor{ElementType::Float64, {1U}},
-                    Region({RegionDimension{0U, 0U}}), StridedLayout{0U, {8}},
-                    scalar.copy_bytes());
+      TensorSpan::create(TensorDescriptor{ElementType::Float64, {1U}},
+                         Region({RegionDimension{0U, 0U}}),
+                         StridedLayout{0U, {8}}, scalar.copy_bytes());
   PS_CHECK(empty_scalar.ok());
   PS_CHECK(!empty_scalar.value().as_float64().ok());
   PS_CHECK(empty_scalar.value().as_float64().status().code ==
            ErrorCode::TypeMismatch);
 
   auto offset_scalar =
-      Value::create(ValueDescriptor{ElementType::Float64, {1U}},
-                    Region({RegionDimension{1U, 0U}}), StridedLayout{0U, {8}},
-                    scalar.copy_bytes());
+      TensorSpan::create(TensorDescriptor{ElementType::Float64, {1U}},
+                         Region({RegionDimension{1U, 0U}}),
+                         StridedLayout{0U, {8}}, scalar.copy_bytes());
   PS_CHECK(offset_scalar.ok());
   PS_CHECK(!offset_scalar.value().as_float64().ok());
   PS_CHECK(offset_scalar.value().as_float64().status().code ==
            ErrorCode::TypeMismatch);
 
-  auto partial_vector =
-      Value::create(ValueDescriptor{ElementType::Float64, {2U}},
-                    Region({RegionDimension{0U, 1U}}), StridedLayout{0U, {8}},
-                    std::vector<std::uint8_t>(2U * sizeof(double)));
+  auto partial_vector = TensorSpan::create(
+      TensorDescriptor{ElementType::Float64, {2U}},
+      Region({RegionDimension{0U, 1U}}), StridedLayout{0U, {8}},
+      std::vector<std::uint8_t>(2U * sizeof(double)));
   PS_CHECK(partial_vector.ok());
   PS_CHECK(!partial_vector.value().as_float64().ok());
   PS_CHECK(partial_vector.value().as_float64().status().code ==

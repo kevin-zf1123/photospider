@@ -15,14 +15,14 @@ namespace {
 using namespace ps;  // NOLINT(build/namespaces)
 using multi_result::take;
 namespace cache_fixture {
-SchemaTemplate source_schema(const Value& value) {
+SchemaTemplate source_schema(const TensorSpan& value) {
   auto schema = multi_result::schema(value.descriptor().element_type,
                                      value.descriptor().shape);
   schema.tensors[0].key = "data";
   return schema;
 }
 ExecutionBindings bind_sources(const ResourceBudget& root,
-                               const std::vector<Value>& values) {
+                               const std::vector<TensorSpan>& values) {
   ExecutionBindings bindings;
   for (std::size_t i = 0; i < values.size(); ++i) {
     auto buffer = take(root.allocator().allocate(values[i].bytes().size()));
@@ -46,18 +46,18 @@ std::vector<std::uint8_t> bytes(const ResultRef& result) {
 }  // namespace cache_fixture
 
 template <class T>
-Value array(const std::vector<T>& samples,
-            std::vector<std::uint64_t> shape = {}) {
+TensorSpan array(const std::vector<T>& samples,
+                 std::vector<std::uint64_t> shape = {}) {
   if (shape.empty())
     shape = {samples.size()};
   const auto type =
       std::is_same_v<T, double> ? ElementType::Float64 : ElementType::Float32;
-  auto value = take(MutableValue::allocate({type, shape}, Region::whole(shape),
+  auto value = take(TensorWriter::allocate({type, shape}, Region::whole(shape),
                                            BufferAllocator{}));
   std::memcpy(value.data(), samples.data(), samples.size() * sizeof(T));
   return take(std::move(value).publish());
 }
-WorkflowDocument document(const std::vector<Value>& inputs,
+WorkflowDocument document(const std::vector<TensorSpan>& inputs,
                           const std::vector<WorkflowNode>& nodes) {
   WorkflowDocument result;
   for (std::size_t i = 0; i < inputs.size(); ++i)
@@ -83,7 +83,11 @@ struct MetadataIdentityProgram {
     if (!empty && !requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false,
+           take(TileSet::range(
+               phase.resources, 0,
+               phase.query.input_tile_grids[0][0].tile_count()))});
       return Poll(std::move(need));
     }
     auto builder = take(ResultBuilder::start(
@@ -125,10 +129,9 @@ int compact_identity() {
       {"offset", OperationParameterType::Float64}};
   metadata.traits.input_count = 1;
   metadata.traits.input_schema.resize(1);
-  metadata.traits.input_schema[0].kind = OperationPortKind::Result;
+
   metadata.traits.input_schema[0].tensor_key = "data";
   metadata.traits.outputs[0] = multi_result::output("value");
-  metadata.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   metadata.start_result = [&](const ResultProgramQuery&,
                               const BufferAllocator& allocator) {
     ++calls;
@@ -157,7 +160,7 @@ int compact_identity() {
   PS_CHECK(registry->freeze().ok());
   ExecutionContext execution(registry, {2, false, 16, 1024 * 1024, 65536});
   auto root = execution.resource_budget().take_value();
-  auto check = [&](const Value& v, double expected, bool cacheable = true,
+  auto check = [&](const TensorSpan& v, double expected, bool cacheable = true,
                    std::uint64_t cache_work = 0, double offset = 0) {
     GraphContext graph(document({v}, {{1,
                                        "fixture.metadata",
@@ -192,8 +195,13 @@ int compact_identity() {
       return false;
     const auto& dependency = record.value()->inputs[0];
     const auto* source = std::get_if<PlanWorkflowInput>(&dependency.producer);
-    return source && source->declaration_index == 0 && dependency.whole &&
-           dependency.tiles.empty() &&
+    return source && source->declaration_index == 0 &&
+           dependency.tensor_slot == 0 &&
+           dependency.tiles == take(TileSet::range(root, 0,
+                                                   plan.steps()[0]
+                                                       .structured_metadata
+                                                       ->input_tile_grids[0][0]
+                                                       .tile_count())) &&
            a.value().diagnostics.dependency_cache_work <=
                options.maximum_dependency_cache_work &&
            b.value().diagnostics.dependency_cache_work <=
@@ -214,8 +222,8 @@ int compact_identity() {
   PS_CHECK(check(array<double>(std::vector<double>(256)), 359));
   PS_CHECK(check(array<double>(std::vector<double>(257)), 360));
   const auto integers =
-      Value::create({ElementType::Int64, {256}}, Region::whole({256}), {0, {8}},
-                    std::vector<std::uint8_t>(2048))
+      TensorSpan::create({ElementType::Int64, {256}}, Region::whole({256}),
+                         {0, {8}}, std::vector<std::uint8_t>(2048))
           .take_value();
   PS_CHECK(check(integers, 358));
   PS_CHECK(check(array<float>({0}), 105));
@@ -225,13 +233,13 @@ int compact_identity() {
   PS_CHECK(check(array<double>({0.}), 105, true, 0, 1));
   PS_CHECK(check(array<double>({0.}), 106, true, 0, 2));
   auto bytes =
-      Value::create({ElementType::UInt8, {2048}}, Region::whole({2048}),
-                    {0, {1}}, std::vector<std::uint8_t>(2048))
+      TensorSpan::create({ElementType::UInt8, {2048}}, Region::whole({2048}),
+                         {0, {1}}, std::vector<std::uint8_t>(2048))
           .take_value();
   PS_CHECK(check(bytes, 2149));
   auto oversized =
-      Value::create({ElementType::UInt8, {2049}}, Region::whole({2049}),
-                    {0, {1}}, std::vector<std::uint8_t>(2049))
+      TensorSpan::create({ElementType::UInt8, {2049}}, Region::whole({2049}),
+                         {0, {1}}, std::vector<std::uint8_t>(2049))
           .take_value();
   PS_CHECK(check(oversized, 2150));
   PS_CHECK(check(array<double>(std::vector<double>(257)), 360, false));
@@ -241,7 +249,7 @@ int compact_identity() {
   GraphContext graph(document(
       {input}, {{1, "fixture.partial", {WorkflowInputReference{1}}, {}}}));
   PlanningOptions options;
-  options.output_requests["result"] = {true, {}};
+  options.output_requests["result"] = {{{0, take(TileSet::range(root, 0, 1))}}};
   auto partial = Compiler(registry).compile(graph, options).take_value().plan;
   const auto before = calls.load();
   auto first =
@@ -259,7 +267,7 @@ int compact_identity() {
           .ok() &&
       inaccessible == 1);
   const auto dirty = second.value().dependencies.dirty_units(
-      {{PlanWorkflowInput{0}, 0, take(TileSet::from_indices(root, {0})),
+      {{PlanWorkflowInput{0}, 0, 0, take(TileSet::from_indices(root, {0})),
         false}});
   PS_REQUIRE_OK(dirty);
   PS_CHECK(dirty.value().size() == 1 &&

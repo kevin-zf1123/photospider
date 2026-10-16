@@ -37,7 +37,7 @@ SchemaTemplate spatial_schema(ElementType type) {
   return schema;
 }
 TileRequest request(std::initializer_list<TileIndex> indices) {
-  return {false, take(TileSet::from_indices(ResourceBudget{}, indices))};
+  return {{{0, take(TileSet::from_indices(ResourceBudget{}, indices))}}};
 }
 float number(const ResultRef& result, std::uint64_t at) {
   float value = 0;
@@ -156,10 +156,10 @@ struct SparseState {
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
     if (mode >= 8 && mode <= 11) {
       if (phase.gpu->buffer(nullptr, nullptr, 1, 0, nullptr) !=
-              PS_RESULT_STATUS_FAILURE_V4 ||
+              PS_RESULT_STATUS_FAILURE_V5 ||
           phase.gpu->execute(nullptr, nullptr, 0) !=
-              PS_RESULT_STATUS_FAILURE_V4 ||
-          phase.gpu->release(nullptr, 0) != PS_RESULT_STATUS_FAILURE_V4)
+              PS_RESULT_STATUS_FAILURE_V5 ||
+          phase.gpu->release(nullptr, 0) != PS_RESULT_STATUS_FAILURE_V5)
         throw std::runtime_error("null native service context accepted");
       if (mode == 9)
         static_cast<void>(phase.consume_work(UINT64_MAX));
@@ -360,7 +360,7 @@ int spatial_owner() {
     op.key = "example.atlas_batch";
     op.traits.input_count = 1;
     op.traits.input_schema.resize(1);
-    op.traits.input_schema[0].kind = OperationPortKind::Result;
+
     op.traits.input_schema[0].result_schema_id = input_schema.id;
     op.traits.input_schema[0].result_schema_version = 1;
     op.traits.outputs = {
@@ -499,7 +499,6 @@ int main() try {
   traits.input_count = 2;
   traits.input_schema.resize(2);
   for (auto& port : traits.input_schema) {
-    port.kind = OperationPortKind::Result;
     port.result_schema_id = "example.gpu.tensor";
     port.result_schema_version = 1;
   }
@@ -577,7 +576,7 @@ int main() try {
     for (TileIndex i = 0; i < 65; ++i)
       data.push_back(i * 64);
     for (TileIndex output : {0u, 2u}) {
-      auto record = take(result.dependencies.tile_record({0, 0, output}));
+      auto record = take(result.dependencies.tile_record({0, 0, 0, output}));
       if (require(record && record->inputs.size() == 2, "sparse tile record"))
         return 1;
       for (const auto& input : record->inputs) {
@@ -586,8 +585,8 @@ int main() try {
         const auto expected =
             source == 0 ? take(TileSet::from_indices(ResourceBudget{},
                                                      data.data(), data.size()))
-                        : request({output}).tiles;
-        if (require(!input.whole && input.tiles == expected,
+                        : request({output}).members.at(0);
+        if (require(input.tensor_slot == 0 && input.tiles == expected,
                     "sparse dependency or current block witness"))
           return 1;
       }
@@ -687,10 +686,23 @@ int main() try {
     for (unsigned attempt = 0; attempt < 2; ++attempt) {
       const auto frozen = take(isolated.freeze(bad_plan, bound));
       auto failed = isolated.execute_fragments(frozen, {{"sum", request({0})}});
-      const auto expected = mode == 9 ? ErrorCode::ResourceExhausted
-                            : mode == 1 || mode == 6
-                                ? ErrorCode::OperationFailed
-                                : ErrorCode::InvalidArgument;
+      if (mode == 6) {
+        if (require(failed.ok() &&
+                        number(failed.value().results.at("sum"), 0) == 2145 &&
+                        failed.value().diagnostics.native_dispatch_count == 0,
+                    "valid native result without a dispatch"))
+          return 1;
+        failed = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
+        isolated.clear_result_cache();
+        if (require(
+                root.statistics().live[ResourceKind::Payload] == source_bytes,
+                "zero-dispatch result retires its owners"))
+          return 1;
+        continue;
+      }
+      const auto expected = mode == 9   ? ErrorCode::ResourceExhausted
+                            : mode == 1 ? ErrorCode::OperationFailed
+                                        : ErrorCode::InvalidArgument;
       if (require(
               failed.status().code == expected &&
                   (mode < 8 || mode == 9 ||

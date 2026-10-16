@@ -41,32 +41,29 @@ struct Computation final {
 }  // namespace
 int main() {
   auto registry = std::make_shared<OperationRegistry>();
-  unsigned completed_whole = 0;
+  unsigned completed = 0;
   unsigned preparations = 0;
   auto schema = multi_result::schema(ElementType::UInt8, {1, 1});
   schema.tensors[0].layout.spatial = true;
   schema.tensors[0].layout.channel_axis.reset();
-  for (bool tiled : {false, true}) {
+  {
     OperationDefinition operation;
-    operation.key = tiled ? "test.prepared_tile" : "test.prepared_whole";
+    operation.key = "test.prepared_tile";
     operation.traits.cacheable = false;
     operation.traits.workspace_bytes = 16;
     operation.traits.requires_metadata_specialization = true;
     operation.traits.parameter_schema = {
         {"bytes", OperationParameterType::Int64, true}};
     auto& output = operation.traits.outputs[0];
-    output.output_schema.kind = OperationPortKind::Result;
+
     output.output_schema.result_schema_id = std::string(schema.id);
     output.output_schema.result_schema_version = schema.version;
     output.result_schema = schema;
-    output.region_rule =
-        tiled ? OperationRegionRule::Tiled : OperationRegionRule::Whole;
     output.continuation_bytes = sizeof(Computation);
     output.maximum_dependency_stages = 1;
-    operation.start_result = [&, tiled](const ResultProgramQuery&,
-                                        const BufferAllocator& allocator) {
-      return ResultContinuation::make<Computation>(
-          allocator, tiled ? nullptr : &completed_whole);
+    operation.start_result = [&](const ResultProgramQuery&,
+                                 const BufferAllocator& allocator) {
+      return ResultContinuation::make<Computation>(allocator, &completed);
     };
     operation.prepare_static = [&](const auto&, const auto& parameters) {
       ++preparations;
@@ -88,7 +85,7 @@ int main() {
   ExecutionContext context(registry, config);
   auto root = context.resource_budget();
   PS_CHECK(root.ok());
-  for (const auto* key : {"test.prepared_whole", "test.prepared_tile"}) {
+  for (const auto* key : {"test.prepared_tile"}) {
     for (std::int64_t bytes : {0, 4096}) {
       auto prepared = registry->prepare_operation(key, {}, {{"bytes", bytes}});
       PS_CHECK(prepared.ok());
@@ -100,8 +97,6 @@ int main() {
       GraphContext graph(document);
       auto compiled = Compiler(registry).compile(graph);
       PS_CHECK(compiled.ok());
-      PS_CHECK(compiled.value().plan.steps()[0].tiled ==
-               (std::string(key) == "test.prepared_tile"));
       const auto preparations_before_execution = preparations;
       for (unsigned repeat = 0; repeat < 2; ++repeat) {
         auto result = context.execute(compiled.value().plan);
@@ -138,6 +133,6 @@ int main() {
     PS_CHECK(!overflow.ok() &&
              overflow.status().code == ErrorCode::ResourceExhausted);
   }
-  PS_CHECK(completed_whole == 4);
+  PS_CHECK(completed == 4);
   return 0;
 }

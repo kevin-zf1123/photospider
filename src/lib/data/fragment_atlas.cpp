@@ -48,22 +48,22 @@ unsigned population(std::uint64_t mask) {
   return count;
 }
 using Work = data_internal::FragmentAtlasWork;
-Result<MutableValue> allocate(std::uint64_t bytes,
+Result<TensorWriter> allocate(std::uint64_t bytes,
                               const BufferAllocator& allocator) {
-  return MutableValue::allocate({ElementType::UInt8, {bytes}},
+  return TensorWriter::allocate({ElementType::UInt8, {bytes}},
                                 Region::whole({bytes}), allocator);
 }
 }  // namespace
 struct FragmentAtlasPlan::Impl {
   ResourceLease metadata;
-  ValueDescriptor descriptor;
+  TensorDescriptor descriptor;
   Footprint coverage;
   std::vector<std::uint64_t> tile_shape;
   ResourceVector<Tile> tiles;
   std::uint64_t bytes = 0, slots = 2, prepared_work = 0, packing_work = 0;
 };
 Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare(
-    const ValueFragments& input, std::vector<std::uint64_t> geometry,
+    const Tensor& input, std::vector<std::uint64_t> geometry,
     const FootprintLimits& limits) {
   if (!input.valid())
     return Result<FragmentAtlasPlan>(data_internal::invalid_fragment_atlas());
@@ -73,7 +73,7 @@ Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare(
                          std::move(geometry), local);
 }
 Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare_regions(
-    const ValueDescriptor& descriptor, const Footprint& coverage,
+    const TensorDescriptor& descriptor, const Footprint& coverage,
     std::vector<std::uint64_t> geometry, const FootprintLimits& limits) {
   Work work{limits.maximum_work, limits.cancellation, limits.consume_work};
   auto status = work.consume(0);
@@ -117,7 +117,7 @@ Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare_regions(
     volume *= size;
   }
   auto count = coverage.element_count();
-  const auto width = Value::element_size(descriptor.element_type);
+  const auto width = TensorSpan::element_size(descriptor.element_type);
   if (!count.ok() || !core_internal::can_multiply(count.value(), width))
     return Result<FragmentAtlasPlan>(core_internal::resource_exhausted());
   status = work.consume(count.value());
@@ -231,7 +231,7 @@ std::uint64_t FragmentAtlasPlan::materialization_work() const {
   return impl_->packing_work;
 }
 Result<FragmentAtlas> FragmentAtlasPlan::materialize(
-    const ValueFragments& input, const BufferAllocator& allocator,
+    const Tensor& input, const BufferAllocator& allocator,
     const FootprintLimits& limits) const {
   if (!input.valid())
     return Result<FragmentAtlas>(data_internal::invalid_fragment_atlas());
@@ -245,7 +245,7 @@ Result<FragmentAtlas> FragmentAtlasPlan::materialize(
       allocator, local);
 }
 Result<FragmentAtlas> FragmentAtlasPlan::materialize_regions(
-    const ValueDescriptor& descriptor, const Footprint& coverage,
+    const TensorDescriptor& descriptor, const Footprint& coverage,
     const std::function<Status(const std::vector<std::uint64_t>&, void*,
                                std::size_t)>& read,
     const BufferAllocator& allocator, const FootprintLimits& limits) const {
@@ -268,7 +268,7 @@ Result<FragmentAtlas> FragmentAtlasPlan::materialize_regions(
       descriptor.element_type != impl_->descriptor.element_type ||
       coverage != impl_->coverage)
     return Result<FragmentAtlas>(data_internal::invalid_fragment_atlas());
-  const auto width = Value::element_size(impl_->descriptor.element_type);
+  const auto width = TensorSpan::element_size(impl_->descriptor.element_type);
   const auto metadata_work = 1 + rank + (left + right) * (1 + 2 * rank);
   status = work.consume(impl_->packing_work - metadata_work);
   if (!status.ok() || impl_->tiles.size() > limits.maximum_boxes)
@@ -367,7 +367,7 @@ Result<std::uint64_t> FragmentAtlas::address(
       if (!(mask & (UINT64_C(1) << bit)))
         break;
       const auto offset = load(entry + 72);
-      const auto width = Value::element_size(descriptor.element_type);
+      const auto width = TensorSpan::element_size(descriptor.element_type);
       const auto prior = population(mask & ((UINT64_C(1) << bit) - 1));
       if (!core_internal::can_multiply_add(prior + 1, width, offset,
                                            payload_bytes))

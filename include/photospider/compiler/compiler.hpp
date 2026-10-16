@@ -306,11 +306,10 @@ struct PHOTOSPIDER_API PlanningOptions final {
    * changes physical identity, not source parameters or input bits.
    */
   ExecutionMode execution_mode = ExecutionMode::CpuExact;
-  /** @brief Explicit tile indices or complete output for each named output.
-   * Missing names default to Whole. Unknown names, Whole plus indices,
-   * indices without a grid and out-of-grid indices fail before publication.
-   * Nonempty requests for Whole producers normalize to complete output;
-   * empty tile sets remain empty. Coordinates are converted by the caller.
+  /** @brief Explicit member tile intervals for each named output.
+   * Missing names select all members through compact intervals. Unknown names,
+   * member indices and out-of-grid intervals fail before publication.
+   * Empty requests remain empty. Coordinates are converted by the caller.
    */
   std::map<std::string, TileRequest> output_requests;
   /** @brief Plan-wide square tile extent, a positive power of two including 1.
@@ -357,20 +356,17 @@ struct PHOTOSPIDER_API PlanStep final {
   std::shared_ptr<const PreparedOperation> prepared = {};
   /** @brief Selected local physical backend. */
   Backend backend = Backend::Cpu;
-  /** @brief Resolved fixed schema for a paged output; no Value shape is
+  /** @brief Resolved fixed schema for a paged output; no TensorSpan shape is
    * invented. */
   std::shared_ptr<const SchemaTemplate> output_result_schema = {};
   /** @brief Immutable staged metadata owned by compilation, borrowed by Runs.
    */
   std::shared_ptr<const ResultProgramMetadata> structured_metadata = {};
-  /** @brief Spatial storage grid when this Result has one spatial tensor only.
-   */
-  std::optional<TileGrid> tile_grid;
-  /** @brief True only for a declared Tiled output with a resolved tile grid.
-   * Whole outputs use dependency/computation unit zero even when grid is
-   * present.
-   */
-  bool tiled = false;
+  /** @brief Member-local fixed tile grids in schema order. */
+  std::vector<TileGrid> tile_grids;
+  /** @brief Prepared stage contracts shared by all outputs of the original
+   * node. */
+  std::vector<std::shared_ptr<const PlanStep>> shared_stages;
 };
 
 /**
@@ -470,15 +466,15 @@ class PHOTOSPIDER_API ExecutionPlan final {
     return current_check_ && current_check_();
   }
 
-  /** @brief Normalized requests, including default Whole for omitted names. */
+  /** @brief Normalized requests, including all member tiles for omitted names.
+   */
   const std::map<std::string, TileRequest>& output_requests() const noexcept {
     return output_requests_;
   }
   /** @brief Returns positive spatial tile geometry fixed by planning. */
   std::uint64_t tile_extent() const noexcept { return tile_extent_; }
   /** @brief Workflow input grids in declaration order; storage-independent. */
-  const std::vector<std::optional<TileGrid>>& input_tile_grids()
-      const noexcept {
+  const std::vector<std::vector<TileGrid>>& input_tile_grids() const noexcept {
     return input_tile_grids_;
   }
   /** @brief Explicit placement permission retained when deriving tile plans. */
@@ -491,7 +487,6 @@ class PHOTOSPIDER_API ExecutionPlan final {
    * @return A named-output plan or Stale/InvalidArgument for an invalid subset.
    * @throws std::bad_alloc For graph metadata allocation.
    * @note No coordinates are converted and no pixel storage is allocated.
-   * Whole producers normalize nonempty requests before subset validation.
    */
   Result<ExecutionPlan> tile_plan(const std::string& output_name,
                                   const TileRequest& request) const;
@@ -504,7 +499,7 @@ class PHOTOSPIDER_API ExecutionPlan final {
   std::map<std::string, TileRequest> output_requests_;
   ExecutionMode execution_mode_ = ExecutionMode::CpuExact;
   std::uint64_t tile_extent_ = 128;
-  std::vector<std::optional<TileGrid>> input_tile_grids_;
+  std::vector<std::vector<TileGrid>> input_tile_grids_;
   /** @brief Immutable resources explicitly selected by operation preparation.
    */
   ResourceSet resources_;

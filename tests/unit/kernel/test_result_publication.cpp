@@ -2,6 +2,7 @@
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "support/multi_output_result_fixture.hpp"
@@ -14,46 +15,12 @@ using multi_result::take;
 ByteView bytes(const double& value) {
   return {reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)};
 }
-int field_prefix() {
-  ResourceBudget root;
-  SchemaTemplate schema;
-  schema.id = "test.publication.fields";
-  schema.publication = PublishPolicy::StablePrefix;
-  schema.fields.push_back(
-      {"rows", ElementType::Float64, {ResultExtentKind::RuntimeCount, 0}, {}});
-  auto builder = take(ResultBuilder::start(root, schema, "prefix"));
-  const double first = 7, second = 11;
-  check(builder.append(0, 1, bytes(first)));
-  check(builder.publish(0, 1));
-  auto captured = take(builder.reference().capture());
-  const auto facts = take(captured.descriptor(false));
-  check(builder.append(0, 1, bytes(second)));
-  check(builder.publish(0, 2));
-  PS_CHECK(take(captured.descriptor(false)).rows(0) == 1);
-  PS_CHECK(!captured.prepare_read(facts, 0, 0, 2).ok());
-  PS_CHECK(builder.publish(0, 3).code == ErrorCode::TypeMismatch);
-  PS_CHECK(builder.seal().status().code == ErrorCode::TypeMismatch);
-  builder = {};
-  auto storage = take(take(captured.prepare_read(facts, 0, 0, 1)).load(8));
-  double value = 0;
-  std::memcpy(&value, storage->bytes().data(), sizeof(value));
-  PS_CHECK(value == first);
-
-  schema.publication = PublishPolicy::CompleteBundle;
-  schema.fields[0].rows = {ResultExtentKind::Fixed, 2};
-  auto incomplete = take(ResultBuilder::start(root, schema, "fixed"));
-  check(incomplete.append(0, 1, bytes(first)));
-  check(incomplete.publish(0, 1));
-  PS_CHECK(!incomplete.reference().descriptor(false).ok());
-  PS_CHECK(incomplete.seal().status().code == ErrorCode::TypeMismatch);
-  return 0;
-}
 int tensor_transaction() {
   for (bool spatial : {false, true}) {
     for (unsigned mode = 0; mode < 4; ++mode) {
       ResourceBudget root;
       auto schema = multi_result::schema(ElementType::Float64, {1, 4});
-      schema.publication = PublishPolicy::StablePrefix;
+
       schema.tensors[0].layout.spatial = spatial;
       schema.tensors[0].layout.channel_axis.reset();
       auto builder =
@@ -115,6 +82,91 @@ int tensor_transaction() {
   }
   return 0;
 }
+int irregular_partition() {
+  ResourceBudget root;
+  auto schema = multi_result::schema(ElementType::Float64, {2, 2});
+  auto builder = take(ResultBuilder::start(root, schema, "partition"));
+  const double left[] = {3, 3};
+  const double upper = 5, lower = 7;
+  check(builder.publish_tensor(
+      0, Region({{0, 2}, {0, 1}}),
+      ByteView(reinterpret_cast<const std::uint8_t*>(left), sizeof(left))));
+  check(builder.publish_tensor(0, Region({{0, 1}, {1, 1}}), bytes(upper)));
+  check(builder.publish_tensor(0, Region({{1, 1}, {1, 1}}), bytes(lower)));
+  auto result = take(builder.seal());
+  auto window = take(result.acquire_tensor(take(result.descriptor()), 0,
+                                           Region::whole({2, 2})));
+  for (unsigned y = 0; y < 2; ++y)
+    for (unsigned x = 0; x < 2; ++x) {
+      double value = 0;
+      std::memcpy(&value, take(window.row_run({y, x})).data, sizeof(value));
+      PS_CHECK(value == (x ? (y ? lower : upper) : 3));
+    }
+  return 0;
+}
+int incremental_owners() {
+  ResourceLimits limits;
+  limits.maximum_work = 400000;
+  ResourceBudget root(limits);
+  constexpr std::uint64_t count = 2048;
+  auto schema = multi_result::schema(ElementType::Float64, {count});
+  auto builder =
+      take(ResultBuilder::start(root, schema, "incremental", {}, {}, 1));
+  std::vector<TensorSpan> spans;
+  for (std::uint64_t i = 0; i < count; ++i) {
+    auto buffer = take(root.allocator().allocate(sizeof(double)));
+    const double value = i;
+    std::memcpy(buffer.data(), &value, sizeof(value));
+    auto storage = std::move(buffer).freeze();
+    spans.push_back(take(
+        TensorSpan::from_storage({ElementType::Float64, {count}},
+                                 Region({{i, 1}}), {0, {8}, {i}}, storage)));
+    check(builder.publish_tensor(0, Region({{i, 1}}), {0, {8}, {i}}, storage));
+  }
+  auto result = take(builder.seal());
+  {
+    ResourceAllocationScope scope(root);
+    FootprintLimits work;
+    work.consume_work = [&](auto count) { return root.consume({count}); };
+    auto fragmented =
+        take(Tensor::create({ElementType::Float64, {count}},
+                            take(Footprint::all({count})), spans, work));
+    PS_CHECK(take(fragmented.retained_bytes(work)) == count * sizeof(double));
+    FootprintLimits bounded;
+    bounded.maximum_work = 1;
+    PS_CHECK(fragmented.retained_bytes(bounded).status().reason ==
+             FailureReason::WorkLimit);
+    CancellationSource cancellation;
+    cancellation.cancel();
+    bounded.cancellation = cancellation.token();
+    PS_CHECK(fragmented.retained_bytes(bounded).status().code ==
+             ErrorCode::Cancelled);
+  }
+  double last = 0;
+  check(
+      result.read_tensor(take(result.descriptor()), 0, {count - 1}, &last, 8));
+  PS_CHECK(last == count - 1);
+  PS_CHECK(root.statistics().live[ResourceKind::Payload] ==
+           count * sizeof(double));
+  // One physical owner reused across members consumes the growth allowance
+  // once.
+  auto shared = take(root.allocator().allocate(4096));
+  const double value = 17;
+  std::memcpy(shared.data(), &value, sizeof(value));
+  auto storage = std::move(shared).freeze();
+  auto pair = multi_result::schema();
+  pair.tensors.push_back(pair.tensors[0]);
+  pair.tensors[1].key = "other";
+  auto aliases = take(ResultBuilder::start(root, pair, "aliases", {4608}));
+  for (unsigned slot = 0; slot < 2; ++slot)
+    check(aliases.publish_tensor(slot, Region::whole({1}), {0, {8}}, storage));
+  auto aliased = take(aliases.seal());
+  for (unsigned slot = 0; slot < 2; ++slot) {
+    check(aliased.read_tensor(take(aliased.descriptor()), slot, {0}, &last, 8));
+    PS_CHECK(last == value);
+  }
+  return 0;
+}
 int affine_views() {
   ResourceBudget root;
   auto schema = multi_result::schema(ElementType::Float64, {4});
@@ -153,7 +205,6 @@ int affine_views() {
   PS_CHECK(take(axis.source_coordinate(1)) == UINT64_MAX / 2);
   PS_CHECK(!axis.source_coordinate(2).ok());
 
-  schema.publication = PublishPolicy::StablePrefix;
   auto first = take(ResultBuilder::start(root, schema, "cycle.first"));
   const double value = 13;
   const Region left({{0, 1}}), right({{1, 1}});
@@ -187,7 +238,8 @@ int affine_views() {
 }  // namespace
 int main() {
   try {
-    return field_prefix() || tensor_transaction() || affine_views();
+    return tensor_transaction() || affine_views() || irregular_partition() ||
+           incremental_owners();
   } catch (const std::exception& failure) {
     std::cerr << failure.what() << '\n';
     return 1;

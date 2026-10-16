@@ -20,10 +20,6 @@ Result<std::uint64_t> scaled(const ResultExtent& extent, std::uint64_t count) {
         Status{ErrorCode::ResourceExhausted, "result extent overflow"});
   return Result<std::uint64_t>(count + extent.offset);
 }
-PlanarImageLayout planar_layout(const ResultTensorLayout& layout) {
-  return {layout.order,        layout.height_axis,     layout.width_axis,
-          layout.channel_axis, layout.row_pitch_bytes, layout.groups};
-}
 Status tensor_topology(const ResultTensorSpec& spec) {
   const auto rank = spec.descriptor.shape.size();
   if (!rank || !core_internal::can_add(rank, spec.batch_axes.size(), 8) ||
@@ -37,11 +33,16 @@ Status tensor_topology(const ResultTensorSpec& spec) {
   if (dtype < 1 || dtype > 7)
     return invalid_schema();
   if (spec.layout.spatial) {
-    return PlanarImage::validate_layout(spec.descriptor,
-                                        planar_layout(spec.layout), false);
+    const auto& layout = spec.layout;
+    const auto free_axes = rank - spec.atomic_trailing_axes;
+    if (rank < 2 || layout.height_axis >= free_axes ||
+        layout.width_axis >= free_axes ||
+        layout.height_axis == layout.width_axis ||
+        (layout.channel_axis && (*layout.channel_axis >= rank ||
+                                 *layout.channel_axis == layout.height_axis ||
+                                 *layout.channel_axis == layout.width_axis)))
+      return invalid_schema();
   }
-  if (!spec.layout.groups.empty())
-    return invalid_schema();
   return Status::success();
 }
 }  // namespace ps::data_internal

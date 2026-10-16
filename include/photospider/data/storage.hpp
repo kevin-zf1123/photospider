@@ -58,7 +58,8 @@ class ByteView final {
  * @note The owner can outlive its allocator or ExecutionContext. Capacity is
  * exact for host allocations; adopted caller vectors retain their capacity.
  */
-class PHOTOSPIDER_API CpuStorage final {
+class PHOTOSPIDER_API CpuStorage final
+    : public std::enable_shared_from_this<CpuStorage> {
  public:
   /** @brief Returns borrowed immutable bytes, valid while this owner lives. */
   ByteView bytes() const noexcept;
@@ -73,7 +74,7 @@ class PHOTOSPIDER_API CpuStorage final {
   friend class gpu_internal::Device;
   friend class BufferAllocator;
   friend class MutableBuffer;
-  friend class Value;
+  friend class TensorSpan;
   friend class ResultRef;
   std::shared_ptr<const void> domain_;
   std::vector<std::shared_ptr<const void>> allocation_scopes_;
@@ -150,8 +151,9 @@ class PHOTOSPIDER_API BufferAllocator final {
    * returning, so a callback cannot catch an exception and recover publication.
    */
   Result<MutableBuffer> allocate(std::uint64_t size) const;
-  /** @brief Allocation-failure notification; observer exceptions are fenced. */
-  using FailureObserver = std::function<void(ErrorCode)>;
+  /** @brief Allocation-failure notification with the original reason and
+   * detail. Status is borrowed for the call; observer exceptions are fenced. */
+  using FailureObserver = std::function<void(const Status&)>;
   /** @brief Creates an aggregate live-capacity sublimit retaining this domain.
    * @note Copies of the returned allocator share its quota. Parent reservation
    * and native allocation policies remain active; last-owner release returns

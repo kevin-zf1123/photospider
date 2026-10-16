@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
@@ -39,7 +40,6 @@ int main() {
   operation.traits.supports_gpu = true;
   const auto schema = multi_result::schema(ElementType::UInt8);
   operation.traits.outputs = {multi_result::output("value", schema)};
-  operation.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   operation.start_result =
       [&](const ResultProgramQuery&,
           const BufferAllocator&) -> Result<ResultContinuation> {
@@ -51,6 +51,16 @@ int main() {
   gpu_effect.key = "test.gpu_effect";
   gpu_effect.traits.side_effect_free = false;
   gpu_effect.traits.cacheable = false;
+  OperationSharedStage effect_stage;
+  effect_stage.key = "effect";
+  effect_stage.result_schema = schema;
+  effect_stage.backend = Backend::Gpu;
+  effect_stage.continuation_bytes = 1;
+  effect_stage.maximum_dependency_stages = 1;
+  effect_stage.maximum_work = 1000;
+  effect_stage.maximum_output_payload_bytes = 1;
+  effect_stage.mandatory = true;
+  gpu_effect.traits.shared_stages = {effect_stage};
   PS_REQUIRE_OK(registry->register_operation(std::move(gpu_effect)));
   auto invalid = operation;
   invalid.key = "test.no_backend";
@@ -83,12 +93,11 @@ int main() {
   metadata_consumer.key = "test.metadata_consumer";
   metadata_consumer.traits.input_count = 1;
   metadata_consumer.traits.input_schema.resize(1);
-  metadata_consumer.traits.input_schema[0].kind = OperationPortKind::Result;
+
   metadata_consumer.traits.input_schema[0].tensor_key = "number";
   metadata_consumer.traits.input_schema[0].element_type =
       static_cast<std::uint32_t>(ElementType::UInt8);
   metadata_consumer.traits.outputs = {multi_result::output("value", schema)};
-  metadata_consumer.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   metadata_consumer.traits.outputs[0].input_indices =
       std::vector<std::uint32_t>{};
   metadata_consumer.start_result = [](const ResultProgramQuery&,
@@ -105,7 +114,8 @@ int main() {
     ++effect_calls;
     return ResultContinuation::make<Constant>(allocator);
   };
-  PS_REQUIRE_OK(registry->register_operation(std::move(effect_consumer)));
+  PS_REQUIRE_OK(registry->register_operation(
+      sdk::with_whole_stage(std::move(effect_consumer), 10000)));
   PS_REQUIRE_OK(registry->register_operation(std::move(metadata_consumer)));
   PS_CHECK(registry->freeze().ok());
   const std::map<std::string, ParameterValue> parameters;
@@ -157,7 +167,8 @@ int main() {
   PS_REQUIRE_OK(effect_cpu);
   PS_REQUIRE_OK(context.execute(effect_cpu.value().plan));
   PS_CHECK(calls == 0 && effect_calls == 1);
-  auto tile = effect_cpu.value().plan.tile_plan("value", TileRequest{true, {}});
+  auto tile = effect_cpu.value().plan.tile_plan(
+      "value", TileRequest{{{0, TileSet::range(root, 0, 1).take_value()}}});
   PS_REQUIRE_OK(tile);
   PS_REQUIRE_OK(context.execute(tile.value()));
   PS_CHECK(calls == 0 && effect_calls == 2);

@@ -60,11 +60,10 @@ class ResultPayloadBound;
 struct ResultProgramMetadata final {
   std::vector<OperationMetadata> inputs;
   OperationMetadata output;
-  /** @brief Compiled input grids in port order; empty for direct preparation.
-   * A grid describes addressable spatial tiles even for a Whole producer.
+  /** @brief Compiled member grids in input-port order; empty for direct hosts.
    */
-  std::vector<std::optional<TileGrid>> input_tile_grids = {};
-  std::optional<TileGrid> output_tile_grid = {};
+  std::vector<std::vector<TileGrid>> input_tile_grids = {};
+  std::vector<TileGrid> output_tile_grids = {};
 };
 /** @brief Borrowed static query for one structured Result continuation.
  * It identifies the selected Result output and optional tensor-slot demand.
@@ -78,32 +77,22 @@ struct ResultProgramQuery final {
         output(metadata.output),
         parameters(static_parameters),
         input_tile_grids(metadata.input_tile_grids),
-        output_tile_grid(metadata.output_tile_grid) {}
+        output_tile_grids(metadata.output_tile_grids) {}
   const std::vector<OperationMetadata>& inputs;
   const OperationMetadata& output;
   const std::map<std::string, ParameterValue>& parameters;
   /** @brief Borrowed compiled grids for SDK coordinate conversion. */
-  const std::vector<std::optional<TileGrid>>& input_tile_grids;
-  const std::optional<TileGrid>& output_tile_grid;
-  /** @brief Captured demand for the selected named output tensor slot.
-   * `tensor_slot` selects the member; an absent footprint requests its full
-   * sample domain. This footprint participates in producer identity. Result
-   * checkpoint scope is separate and excludes the requested footprint. Tile
-   * dimensions are physical scheduling choices. A nonempty Whole query is
-   * expanded to the complete output, including non-spatial outputs whose
-   * operation declaration permits tiled execution.
+  const std::vector<std::vector<TileGrid>>& input_tile_grids;
+  const std::vector<TileGrid>& output_tile_grids;
+  /** @brief Exact complete selected member tile; absent for a shared stage.
+   * The executor supplies this footprint from its static member grid. It does
+   * not authorize input reads. Tile identity includes member and local index.
    */
   std::optional<Footprint> tensor_outputs;
   std::uint32_t tensor_slot = 0;
   std::uint64_t tile_extent = 128;
-  /** @brief Selected computation unit; Whole producers always use zero. */
+  /** @brief Selected local tile index; ignored by shared-stage factories. */
   TileIndex tile_unit = 0;
-  /** @brief Explicit computation-unit request, defaulting to Whole.
-   * Compiled Tiled invocations select exactly one index equal to tile_unit.
-   * Direct C invocations follow that same rule; a Tiled Whole request must be
-   * split by the executor before callback entry. Empty is explicit {false,{}}.
-   */
-  TileRequest output_request{true, {}};
   Backend backend = Backend::Cpu;
   std::string_view semantic_key;
   /** @brief Routing identity for the captured execution snapshot.
@@ -111,6 +100,10 @@ struct ResultProgramQuery final {
    */
   std::string_view snapshot_identity;
   std::uint32_t output_index = 0;
+  /** @brief UINT32_MAX for a tile; otherwise the prepared shared stage index.
+   * Stage factories use this identity and ignore output_index, tensor_slot and
+   * tile_unit. The output_index value is routing metadata only for a stage. */
+  std::uint32_t shared_stage = UINT32_MAX;
   std::uint64_t page_bytes = 4096;
   CancellationToken cancellation;
   /** @brief Immutable resources explicitly selected by static operation
@@ -127,17 +120,15 @@ struct ResultProgramQuery final {
 /** @brief Owning capability restricted to the explicit tensor Need.
  * The capability retains its source Result, descriptor and granted samples.
  * Reads and acquired windows remain restricted to those grants.
- * For compiled structured CPU Whole view execution, the coordinator may prepare
- * each authorized Need box as an affine view before the next computation poll.
- * Auto may instead retain an immutable, Root-accounted private backing when a
- * source box has no compatible view. Copies of the capability share that
- * backing and its metadata lease. This preparation does not change the Result
- * schema or grant access beyond the Need; direct phases do not synthesize it.
  */
 class PHOTOSPIDER_API ResultTensorInput final {
  public:
   ResultTensorInput() = default;
   std::uint64_t object_id() const noexcept { return result_.object_id(); }
+  /** @brief Owning copy of provenance identifiers; grants no payload reads. */
+  ResourceVector<std::uint64_t> association() const {
+    return result_.association();
+  }
   const ResultTensorSpec& spec() const {
     return (static_schema_ ? *static_schema_ : result_.schema())
         .tensors.at(slot_);
@@ -147,11 +138,10 @@ class PHOTOSPIDER_API ResultTensorInput final {
               std::size_t bytes,
               const CancellationToken& cancellation = {}) const;
 
-  /** @brief Acquire an exact Need-authorized frame/layer rectangle.
-   * Acquisition does not copy samples; a compiled Whole coordinator may have
-   * prepared private affine backing earlier when its Auto view proof failed.
-   * Unauthorized access records a sticky protocol failure. The returned window
-   * owns immutable backing independently of this phase.
+  /** @brief Acquire an exact Need-authorized tensor rectangle.
+   * Acquisition retains the authorized immutable fragments without copying
+   * samples. Unauthorized access records a sticky protocol failure. The
+   * returned window owns immutable backing independently of this phase.
    */
   Result<ResultTensorReadWindow> acquire(
       const Region& region, const CancellationToken& cancellation = {}) const;
@@ -164,22 +154,12 @@ class PHOTOSPIDER_API ResultTensorInput final {
   friend class FragmentAtlasPlan;
   friend struct ResultProgramPhase;
   friend class plugin_internal::ResultPayloadBound;
-  struct InputBacking {
-    ResourceLease metadata_owner;
-    Value value;
-    InputBacking(ResourceLease metadata, Value backing)
-        : metadata_owner(std::move(metadata)), value(std::move(backing)) {}
-  };
   Status read_granted(const std::vector<std::uint64_t>& coordinate,
                       void* destination, std::size_t bytes,
                       const CancellationToken& cancellation) const;
-  Status prepare_whole_view(
-      bool require_view, const CancellationToken& cancellation,
-      const std::function<Status(std::uint64_t)>& consume_work);
   ResultRef result_;
   std::shared_ptr<const SchemaTemplate> static_schema_;
   ResultDescriptor descriptor_;
-  ResourceVector<std::shared_ptr<const InputBacking>> input_backing_;
   std::optional<ResourceBudget> resources_;
   std::uint32_t slot_ = 0;
   bool payload_authorized_ = false;
@@ -187,20 +167,33 @@ class PHOTOSPIDER_API ResultTensorInput final {
   std::shared_ptr<std::atomic<ErrorCode>> failure_;
   std::shared_ptr<plugin_internal::FailureLatch> observer_;
 };
-/** @brief Requests explicit producer tiles, Whole or descriptor access.
+/** @brief Nonblocking request for a prepared stage's immutable tile commits.
+ * An absent selection requests all static members. An explicit empty selection
+ * grants no payload and does not start a producer. Only selected tiles are
+ * exposed; inherited evidence grants no original-input access.
+ */
+struct ResultSharedNeed final {
+  ResultSharedNeed(std::uint32_t stage = 0,
+                   std::optional<TileRequest> tiles = {})
+      : stage(stage), tiles(std::move(tiles)) {}  // NOLINT(runtime/explicit)
+  std::uint32_t stage;
+  std::optional<TileRequest> tiles;
+};
+/** @brief Requests explicit producer member intervals, stages or descriptors.
  * The input entry count is bounded by the execution limits.
  * The complete envelope is validated before any upstream work begins. Each
  * TileNeed has exactly one request kind and addresses the compiled input grid.
  */
 struct ResultProgramNeed final {
   ResourceVector<TileNeed> tiles = {};
+  /** @brief Prepared stages requested by this poll; no blocking invocation. */
+  ResourceVector<ResultSharedNeed> shared_stages = {};
 };
-/** @brief Mutable table borrowed only during a synchronous GPU discovery call.
- * `bytes` points to a zero-initialized Root allocation with 16 header bytes
- * and `capacity` 16-byte records (uint32 input, uint32 kind, uint64 tile).
- * Kinds are Tile=0, Whole=1 and Descriptor=2; the latter two require tile 0.
- * The host freezes and decodes it after the callback and submitted GPU work
- * have drained; it is separate from operation workspace.
+/** @brief Bounded table borrowed only during synchronous GPU discovery.
+ * Layout is a 16-byte header and capacity 32-byte records containing uint32
+ * input/kind/tensor_slot/reserved and uint64 begin/end. Kind 0 requests a
+ * half-open interval; kind 1 requests a descriptor and has slot/bounds zero.
+ * Reserved fields are zero. The host decodes after submitted work drains.
  */
 struct ResultGpuRequestTable final {
   std::uint8_t* bytes = nullptr;
@@ -258,15 +251,16 @@ class PHOTOSPIDER_API ResultCheckpoint final {
   std::shared_ptr<const void> witness_;
 };
 /** @brief Ready inputs/windows borrowed only until this poll returns.
- * Root resource operations are explicit admission. Field append/read accesses
- * immutable Root-memory backing directly. `read_tensor()` and `consume_work()`
+ * Root resource operations are explicit admission. Tensor publication and reads
+ * use immutable Root-memory backing. `read_tensor()` and `consume_work()`
  * failures cannot be ignored into success.
  */
 struct PHOTOSPIDER_API ResultProgramPhase final {
   const ResultProgramQuery& query;
-  /** @brief Field-bearing or tensorless Results admitted by Whole input Needs.
-   * Pure tensor payloads use tensors. Descriptor-only requests expose metadata
-   * through descriptors and never add a payload capability to this map.
+  /** @brief Direct invocation objects; bounded tensor capabilities authorize
+   * reads. Pure tensor payloads use tensors. Descriptor-only requests expose
+   * metadata through descriptors and never add a payload capability to this
+   * map.
    */
   const ResultObjectInputs& results;
   const BufferAllocator& allocator;
@@ -288,13 +282,17 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
    */
   void record_failure(const Status& status) const;
   const ResultTensorInputs* tensors = nullptr;
-  /** @brief Captured global facts for descriptor-only field inputs.
-   * Entries own metadata only. They cannot be used to read fields or tensors;
-   * payload access requires an independent Whole or tile Need.
+  /** @brief Completed shared-stage publications, keyed by prepared stage index.
+   * Owning Results authorize their own bytes only. Frozen producer dependencies
+   * are inherited by this publication without granting original input reads. */
+  const ResultObjectInputs* shared_stages = nullptr;
+  /** @brief Captured static facts for descriptor-only inputs.
+   * Entries own metadata only. They cannot be used to read tensors;
+   * payload access requires an independent member tile Need.
    */
   const ResultDescriptorInputs* descriptors = nullptr;
-  const ps_cpu_parallel_service_v1* cpu_parallel = nullptr;
-  const ps_cpu_tiles_service_v1* cpu_tiles = nullptr;
+  const ps_cpu_parallel_service_v2* cpu_parallel = nullptr;
+  const ps_cpu_tiles_service_v2* cpu_tiles = nullptr;
   const ps_gpu_service_v1* gpu = nullptr;
   /** @brief Borrowed host status reader for the current native invocation.
    * Read on the entry thread after a GPU service call to preserve specific
@@ -339,22 +337,21 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
   /** @brief Evaluate a Result block from an explicit incoming state.
    * `kind`, `[begin,end)`, and `mode` identify the operation phase and range.
    * The incoming and computed states must share a schema and Root, and each
-   * must be a sealed CompleteBundle with one fully covered tensor and no
-   * fields. Carry every control needed by a later block in that tensor.
-   * Content caching is optional and applies only to cacheable operations with
-   * a pure selected-input producer closure. Its key uses the operation
-   * contract, range, mode, incoming state schema/coverage/raw bits, and
-   * currently supplied Tensor coverage, metadata, and raw bits; it excludes
-   * output demand, execution snapshot, and ObjectIds. When the operation opts
-   * into cross-output sharing, its namespace also includes all resolved output
-   * contracts, backend, execution mode, static parameters and actual input
-   * metadata. The selected output index and output-specific metadata are not
-   * added separately, so a shared computation must be output independent or
-   * encode the difference in state or mode.
+   * must be a sealed Result with one fully covered tensor. Carry every control
+   * needed by a later block in that tensor. Content caching is optional and
+   * applies only to cacheable operations with a pure selected-input producer
+   * closure. Its key uses the operation contract, range, mode, incoming state
+   * schema/coverage/raw bits, and currently supplied Tensor coverage, metadata,
+   * and raw bits; it excludes output demand, execution snapshot, and ObjectIds.
+   * When the operation opts into cross-output sharing, its namespace also
+   * includes all resolved output contracts, backend, execution mode, static
+   * parameters and actual input metadata. The selected output index and
+   * output-specific metadata are not added separately, so a shared computation
+   * must be output independent or encode the difference in state or mode.
    * Optional content caching skips resource-bearing incoming states, supplied
    * Tensor inputs, and computed states. Those states remain valid for
    * computation; computed states with resources are not packed into the
-   * internal Value-backed block-state LRU.
+   * internal TensorSpan-backed block-state LRU.
    * The compute callback may depend only on key-covered logical schemas,
    * coverage, raw bits, and static metadata/parameters plus phase, range, and
    * mode. It must not depend on Result ObjectIds, `semantic_key`, association,
@@ -489,6 +486,9 @@ class PHOTOSPIDER_API ResultContinuation final {
    * diagnostic; allocation exceptions return ResourceExhausted. A previously
    * recorded phase failure takes precedence, and failed/cancelled phases do
    * not enter the callback. These rules also apply to direct registry hosts.
+   * Direct shared-stage polls expose only certified publication scopes. A
+   * hidden intermediate commit returns an empty Need so the host can poll
+   * again; complete validators defer visibility until full static coverage.
    * If the output declares `maximum_output_payload_bytes`, the host compares
    * the publication's unique physical backing against that cap. It excludes
    * owners still live through exposed Result inputs or authorized tensor
@@ -513,11 +513,13 @@ class PHOTOSPIDER_API ResultContinuation final {
   Result<ResultProgramPoll> poll_guarded(const ResultProgramPhase& phase);
   std::shared_ptr<const void> definition_;
   std::shared_ptr<const PreparedOperation> prepared_;
-  std::uint32_t output_index_ = 0;
+  std::uint32_t output_index_ = 0, shared_stage_ = UINT32_MAX;
   std::shared_ptr<const SchemaTemplate> output_schema_;
   std::string semantic_key_;
   bool host_validates_ = false;
   std::optional<ResultDescriptor> validated_publication_;
+  std::optional<ResultBuilder> visible_publication_;
+  TileRequest visible_tiles_;
   ResourceSet resources_;
   std::shared_ptr<plugin_internal::ResultPayloadBound> payload_bound_;
   std::optional<std::uint64_t> payload_limit_;

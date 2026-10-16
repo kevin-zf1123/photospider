@@ -256,7 +256,7 @@ Result<std::string> opaque_bits(ElementType type,
     }
     // The literal codec describes native stored bytes, like scalar_literal.
     return R(format::detail::assembly_hex(std::string(
-        reinterpret_cast<const char*>(&bits), Value::element_size(type))));
+        reinterpret_cast<const char*>(&bits), TensorSpan::element_size(type))));
   } catch (const data_internal::format_numeric::ExactWorkFailure& e) {
     return R(e.status);
   } catch (const std::overflow_error&) {

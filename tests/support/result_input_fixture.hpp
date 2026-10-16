@@ -21,7 +21,7 @@ inline void require(bool condition, const char* message) {
   if (!condition)
     throw std::runtime_error(message);
 }
-inline ps::SchemaTemplate source_schema(const ps::Value& value) {
+inline ps::SchemaTemplate source_schema(const ps::TensorSpan& value) {
   ps::SchemaTemplate schema;
   schema.id = "test.result.input";
   ps::ResultTensorSpec member;
@@ -31,7 +31,7 @@ inline ps::SchemaTemplate source_schema(const ps::Value& value) {
   return schema;
 }
 inline ps::ResultRef source(
-    const ps::ResourceBudget& root, const ps::Value& value,
+    const ps::ResourceBudget& root, const ps::TensorSpan& value,
     const ps::SchemaTemplate* override_schema = nullptr) {
   auto schema = override_schema ? *override_schema : source_schema(value);
   auto bytes = take(root.allocator().allocate(value.bytes().size()));
@@ -46,7 +46,7 @@ inline ps::ResultRef source(
   return take(builder.seal());
 }
 inline void declare_sources(ps::WorkflowDocument* document,
-                            const std::vector<ps::Value>& values) {
+                            const std::vector<ps::TensorSpan>& values) {
   for (std::size_t i = 0; i < values.size(); ++i) {
     ps::WorkflowInputDeclaration input;
     input.id = i + 1;
@@ -57,7 +57,7 @@ inline void declare_sources(ps::WorkflowDocument* document,
   }
 }
 inline ps::ExecutionBindings bind_sources(
-    const ps::ResourceBudget& root, const std::vector<ps::Value>& values,
+    const ps::ResourceBudget& root, const std::vector<ps::TensorSpan>& values,
     const ps::WorkflowDocument* document = nullptr) {
   ps::ExecutionBindings bindings;
   for (std::size_t i = 0; i < values.size(); ++i)
@@ -81,7 +81,7 @@ inline std::vector<std::uint8_t> bytes(const ps::ResultRef& result) {
   const auto& spec = result.schema().tensors[0];
   const auto count =
       result_input_fixture::take(facts.tensor_coverage(0).element_count());
-  const auto width = ps::Value::element_size(spec.descriptor.element_type);
+  const auto width = ps::TensorSpan::element_size(spec.descriptor.element_type);
   std::vector<std::uint8_t> output(count * width);
   std::uint64_t next = 0;
   for (const auto& box : facts.tensor_coverage(0).boxes()) {

@@ -16,6 +16,7 @@
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -34,8 +35,9 @@ void matrix_candidates(numeric_ops::MatrixBlock* block, unsigned rows,
   numeric_ops::scalar_matrix_candidates(block, rows, input_components,
                                         output_components);
 }
-Result<ValueDescriptor> metadata(const std::vector<OperationMetadata>& inputs) {
-  using Answer = Result<ValueDescriptor>;
+Result<TensorDescriptor> metadata(
+    const std::vector<OperationMetadata>& inputs) {
+  using Answer = Result<TensorDescriptor>;
   const auto mismatch = [](const char* message) {
     return Answer(Status{ErrorCode::TypeMismatch,
                          message,
@@ -44,8 +46,8 @@ Result<ValueDescriptor> metadata(const std::vector<OperationMetadata>& inputs) {
   };
   const auto descriptor = [](const OperationMetadata& input) {
     const auto& tensor = input.result_schema->tensors[0];
-    return ValueDescriptor{tensor.descriptor.element_type,
-                           tensor.sample_shape()};
+    return TensorDescriptor{tensor.descriptor.element_type,
+                            tensor.sample_shape()};
   };
   const auto vectors = descriptor(inputs[0]);
   const auto matrix = descriptor(inputs[1]);
@@ -64,7 +66,7 @@ Result<ValueDescriptor> metadata(const std::vector<OperationMetadata>& inputs) {
       output_components > 4 || matrix.shape[1] != input_components ||
       bias.shape[0] != output_components)
     return mismatch("matrix transform requires matching Cin/Cout in 2..4");
-  ValueDescriptor output = vectors;
+  TensorDescriptor output = vectors;
   output.shape.back() = output_components;
   std::uint64_t source_count = 1, target_count = 1;
   for (std::size_t j = 0; j < vectors.shape.size(); ++j) {
@@ -101,9 +103,9 @@ struct MatrixKernel final {
     const auto input_components = static_cast<unsigned>(shape.back());
     const auto output_components = static_cast<unsigned>(
         phase.tensors->at({1, 0}).spec().sample_shape()[0]);
-    ValueDescriptor descriptor{vectors.spec().descriptor.element_type, shape};
+    TensorDescriptor descriptor{vectors.spec().descriptor.element_type, shape};
     descriptor.shape.back() = output_components;
-    const auto width = Value::element_size(descriptor.element_type);
+    const auto width = TensorSpan::element_size(descriptor.element_type);
     const auto count = numeric_ops::math_take(vectors.spec().sample_count()) /
                        input_components;
     std::array<numeric_ops::MathTensorReader, 3> readers{
@@ -222,7 +224,6 @@ OperationDefinition matrix_operation(const std::string& key,
   traits.input_count = 3;
   traits.input_schema.resize(3);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = 12;
   }
   traits.requires_metadata_specialization = true;
@@ -248,7 +249,7 @@ OperationDefinition matrix_operation(const std::string& key,
   operation.start_result = [profile](const auto&, const auto& allocator) {
     return ResultContinuation::make<MatrixProgram>(allocator, profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_numeric_matrix(OperationRegistry* registry) {

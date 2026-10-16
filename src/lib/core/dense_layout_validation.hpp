@@ -7,7 +7,7 @@
 namespace ps::core_internal {
 
 /**
- * @brief Largest signed last-byte offset accepted by a dense Value layout.
+ * @brief Largest signed last-byte offset accepted by a dense TensorSpan layout.
  *
  * @note The unsigned literal avoids overflowing signed arithmetic when a legal
  * dense byte count is exactly one greater than `INT64_MAX`.

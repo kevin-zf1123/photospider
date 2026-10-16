@@ -18,6 +18,7 @@
 
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/utf8_validation.hpp"
+#include "plugin/failure_latch.hpp"
 #include "plugin/operation_exception.hpp"
 #include "plugin/operation_resources.hpp"
 #include "plugin/port_validation.hpp"
@@ -82,8 +83,10 @@ class OperationLibrary final {
    * plugin remains outside the correctness guarantee of the host process.
    */
   ~OperationLibrary() noexcept {
+    core_internal::CallbackEnvironment environment;
     if (result_api_ && result_api_->destroy) {
       try {
+        core_internal::CallbackEnvironment environment;
         result_api_->destroy(result_api_->context);
       } catch (...) {
       }
@@ -138,7 +141,7 @@ class OperationLibrary final {
   [[nodiscard]] void* handle() const noexcept { return handle_; }
 
   void attach_result_api(
-      const ps_result_operation_plugin_api_v4* api) noexcept {
+      const ps_result_operation_plugin_api_v5* api) noexcept {
     result_api_ = api;
   }
 
@@ -146,7 +149,7 @@ class OperationLibrary final {
   /** @brief Platform native library handle. */
   void* handle_ = nullptr;
   /** @brief Mapped immutable plugin API table. */
-  const ps_result_operation_plugin_api_v4* result_api_ = nullptr;
+  const ps_result_operation_plugin_api_v5* result_api_ = nullptr;
 };
 
 /**
@@ -159,6 +162,9 @@ class OperationLibrary final {
  * function performs no path trust/signature/admission operation.
  */
 Result<void*> open_library(const std::string& path) {
+  core_internal::CallbackEnvironment environment;
+  if (!environment.active())
+    return Result<void*>(Status{ErrorCode::OperationFailed, {}});
   if (path.empty() || path.size() > 4096U ||
       path.find('\0') != std::string::npos) {
     return Result<void*>(
@@ -289,17 +295,10 @@ bool parameter_type_matches(const ParameterValue& value,
  * actual callback backing is validated at publication.
  */
 Status validate_selected_traits(const OperationTraits& traits) {
-  bool known_region = false;
-  switch (traits.outputs[0].region_rule) {
-    case OperationRegionRule::Whole:
-    case OperationRegionRule::Tiled:
-      known_region = true;
-      break;
-  }
   const Status schema_status =
       validate_parameter_schema(traits.parameter_schema);
-  if (traits.workspace_input_multiplier > 16 || traits.version != 26U ||
-      (!traits.supports_cpu && !traits.supports_gpu) || !known_region ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 27U ||
+      (!traits.supports_cpu && !traits.supports_gpu) ||
       (traits.share_blocks_across_outputs &&
        (!traits.deterministic || !traits.side_effect_free)) ||
       (traits.allows_cpu_fallback &&
@@ -316,9 +315,7 @@ Status validate_selected_traits(const OperationTraits& traits) {
 }
 
 Status validate_traits(const OperationTraits& traits) {
-  if (traits.outputs.empty() || traits.outputs.size() > 64 ||
-      (traits.outputs.size() > 1 &&
-       (!traits.deterministic || !traits.side_effect_free)))
+  if (traits.outputs.empty() || traits.outputs.size() > 64)
     return Status::failure(ErrorCode::InvalidArgument,
                            "invalid multi-output contract");
   std::vector<std::string> names;
@@ -489,7 +486,8 @@ struct PreparedOperation::Impl final {
   std::shared_ptr<const void> state;
   std::vector<ResourceIdentity> resource_ids;
   ResourceSet resources;
-  std::vector<std::vector<Validation>> input_validators, output_validators;
+  std::vector<std::vector<Validation>> input_validators, output_validators,
+      stage_validators;
   std::vector<std::shared_ptr<const DiagnosticDefinition>> diagnostics;
 };
 PreparedOperation::PreparedOperation(std::shared_ptr<const Impl> impl)
@@ -526,14 +524,13 @@ bool PreparedOperation::requires_complete_validation(
                               static_cast<bool>(bound.definition->validate);
                      });
 }
-Status PreparedOperation::validate_port(bool output, std::uint32_t port,
-                                        const ValidationContext& context) const
-    try {  // NOLINT(whitespace/indent_namespace)
-  const auto& ports =
-      output ? impl_->output_validators : impl_->input_validators;
-  if (port >= ports.size() || !context.consume)
-    return {ErrorCode::InvalidArgument, "invalid validator port/context"};
-  for (const auto& bound : ports[port]) {
+namespace {
+template <class Bindings>
+Status validate_bound_contract(const Bindings& bindings,
+                               const ValidationContext& context) try {
+  if (!context.consume)
+    return {ErrorCode::InvalidArgument, "invalid validator context"};
+  for (const auto& bound : bindings) {
     const auto& definition = *bound.definition;
     if (!definition.validate)
       continue;
@@ -548,7 +545,8 @@ Status PreparedOperation::validate_port(bool output, std::uint32_t port,
         definition.scratch_bytes, definition.scratch_bytes));
     if (!scratch.ok())
       return scratch.status();
-    status = definition.validate(bound.state.get(), context);
+    status = core_internal::invoke_callback(
+        [&] { return definition.validate(bound.state.get(), context); });
     if (context.cancellation.cancelled())
       return {ErrorCode::Cancelled, {}};
     if (!status.ok())
@@ -557,6 +555,37 @@ Status PreparedOperation::validate_port(bool output, std::uint32_t port,
   return Status::success();
 } catch (...) {
   return plugin_internal::current_operation_exception();
+}
+}  // namespace
+Status PreparedOperation::validate_port(
+    bool output, std::uint32_t port, const ValidationContext& context) const {
+  const auto& ports =
+      output ? impl_->output_validators : impl_->input_validators;
+  if (port >= ports.size())
+    return {ErrorCode::InvalidArgument, "invalid validator port"};
+  return validate_bound_contract(ports[port], context);
+}
+bool PreparedOperation::has_stage_validators(
+    std::uint32_t stage) const noexcept {
+  return stage < impl_->stage_validators.size() &&
+         !impl_->stage_validators[stage].empty();
+}
+bool PreparedOperation::requires_complete_stage_validation(
+    std::uint32_t stage) const noexcept {
+  if (stage >= impl_->stage_validators.size())
+    return false;
+  return std::any_of(impl_->stage_validators[stage].begin(),
+                     impl_->stage_validators[stage].end(),
+                     [](const auto& bound) {
+                       return bound.definition->requires_complete &&
+                              static_cast<bool>(bound.definition->validate);
+                     });
+}
+Status PreparedOperation::validate_stage(
+    std::uint32_t stage, const ValidationContext& context) const {
+  if (stage >= impl_->stage_validators.size())
+    return {ErrorCode::InvalidArgument, "invalid validator stage"};
+  return validate_bound_contract(impl_->stage_validators[stage], context);
 }
 
 /**
@@ -571,26 +600,26 @@ OperationRegistry::OperationRegistry() : impl_(std::make_unique<Impl>()) {}
  */
 OperationRegistry::~OperationRegistry() noexcept = default;
 
-Status OperationRegistry::register_validator(ValidationDefinition definition) {
+Status OperationRegistry::register_validator(ValidationDefinition incoming) {
+  auto owned = core_internal::own_callbacks(std::move(incoming));
+  auto& definition = *owned;
   if (!valid_key(definition.identity.key) || !definition.identity.version ||
       !valid_key(definition.identity.implementation) || !definition.prepare)
     return {ErrorCode::InvalidArgument, "invalid validator definition"};
-  auto owned =
-      std::make_shared<const ValidationDefinition>(std::move(definition));
   std::lock_guard<std::mutex> lock(impl_->mutex);
   if (impl_->frozen || impl_->validators.count(owned->identity.key))
     return {ErrorCode::InvalidArgument, "duplicate or frozen validator"};
   impl_->validators.emplace(owned->identity.key, owned);
   return Status::success();
 }
-Status OperationRegistry::register_diagnostic(DiagnosticDefinition definition) {
+Status OperationRegistry::register_diagnostic(DiagnosticDefinition incoming) {
+  auto owned = core_internal::own_callbacks(std::move(incoming));
+  auto& definition = *owned;
   if (!valid_key(definition.identity.key) || !definition.identity.version ||
       !valid_key(definition.identity.implementation) ||
       !definition.payload_bytes || definition.payload_bytes > 65536 ||
       !definition.validate || !definition.merge)
     return {ErrorCode::InvalidArgument, "invalid diagnostic definition"};
-  auto owned =
-      std::make_shared<const DiagnosticDefinition>(std::move(definition));
   std::lock_guard<std::mutex> lock(impl_->mutex);
   if (impl_->frozen || impl_->diagnostics.count(owned->identity.key))
     return {ErrorCode::InvalidArgument, "duplicate or frozen diagnostic"};
@@ -602,7 +631,9 @@ Status OperationRegistry::register_diagnostic(DiagnosticDefinition definition) {
  * @brief Implements atomic built-in/embedding operation registration.
  * @copydetails OperationRegistry::register_operation
  */
-Status OperationRegistry::register_operation(OperationDefinition definition) {
+Status OperationRegistry::register_operation(OperationDefinition incoming) {
+  auto immutable_definition = core_internal::own_callbacks(std::move(incoming));
+  auto& definition = *immutable_definition;
   std::sort(
       definition.traits.parameter_schema.begin(),
       definition.traits.parameter_schema.end(),
@@ -616,13 +647,9 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
           (static_cast<bool>(definition.specialize_metadata) ||
            static_cast<bool>(definition.prepare_static)) ||
       (definition.specialize_metadata && definition.prepare_static) ||
-      (definition.prepare_static && (!definition.traits.deterministic ||
-                                     !definition.traits.side_effect_free)) ||
       !definition.start_result)
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation definition is malformed");
-  auto immutable_definition =
-      std::make_shared<const OperationDefinition>(std::move(definition));
   std::lock_guard<std::mutex> lock(impl_->mutex);
   if (impl_->frozen) {
     return Status::failure(ErrorCode::InvalidArgument,
@@ -663,27 +690,31 @@ Status OperationRegistry::load_plugin(const std::string& path) {
                     "image plugins require the Result ABI"};
   for (const auto* symbol : {"ps_result_operation_plugin_get_api_v1",
                              "ps_result_operation_plugin_get_api_v2",
-                             "ps_result_operation_plugin_get_api_v3"})
+                             "ps_result_operation_plugin_get_api_v3",
+                             "ps_result_operation_plugin_get_api_v4"})
     if (find_symbol(pending_library.handle(), symbol))
-      return Status{ErrorCode::TypeMismatch, "Result plugins require ABI 4"};
-  using ResultApiFunction = const ps_result_operation_plugin_api_v4* (*)();
+      return Status{ErrorCode::TypeMismatch, "Result plugins require ABI 5"};
+  using ResultApiFunction = const ps_result_operation_plugin_api_v5* (*)();
   ResultApiFunction result_api_function = nullptr;
   void* result_symbol = find_symbol(pending_library.handle(),
-                                    "ps_result_operation_plugin_get_api_v4");
+                                    "ps_result_operation_plugin_get_api_v5");
   std::memcpy(&result_api_function, &result_symbol,
               sizeof(result_api_function));
   if (result_api_function) {
-    const ps_result_operation_plugin_api_v4* table = nullptr;
+    const ps_result_operation_plugin_api_v5* table = nullptr;
     try {
+      core_internal::CallbackEnvironment environment;
+      if (!environment.active())
+        return Status{ErrorCode::OperationFailed, {}};
       table = result_api_function();
     } catch (...) {
       return Status{ErrorCode::OperationFailed, "Result API entry threw"};
     }
     if (!table ||
         reinterpret_cast<std::uintptr_t>(table) %
-            alignof(ps_result_operation_plugin_api_v4) ||
+            alignof(ps_result_operation_plugin_api_v5) ||
         table->struct_size != sizeof(*table) ||
-        table->abi_version != PS_RESULT_OPERATION_ABI_VERSION_4)
+        table->abi_version != PS_RESULT_OPERATION_ABI_VERSION_5)
       return Status{ErrorCode::InvalidArgument,
                     "unsupported Result API version or size"};
     pending_library.attach_result_api(table);
@@ -736,6 +767,10 @@ Status OperationRegistry::load_plugin(const std::string& path) {
                         "duplicate module diagnostic"};
       for (const auto& item : candidate.impl_->definitions) {
         const auto& traits = item.second->traits;
+        for (const auto& stage : traits.shared_stages)
+          if (!valid_extension_references(stage.validators, validators))
+            return Status{ErrorCode::InvalidArgument,
+                          "unresolved shared stage validators"};
         if (!valid_extension_references(traits.diagnostics, diagnostics))
           return Status{ErrorCode::InvalidArgument,
                         "unresolved module diagnostic"};
@@ -757,7 +792,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
 
   return Status{ErrorCode::InvalidArgument,
-                "operation plugin must expose Result ABI 4"};
+                "operation plugin must expose Result ABI 5"};
 }
 
 /**
@@ -768,6 +803,10 @@ Status OperationRegistry::freeze() {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   for (const auto& entry : impl_->definitions) {
     const auto& traits = entry.second->traits;
+    for (const auto& stage : traits.shared_stages)
+      if (!valid_extension_references(stage.validators, impl_->validators))
+        return Status{ErrorCode::InvalidArgument,
+                      "unresolved shared stage validators"};
     if (!valid_extension_references(traits.diagnostics, impl_->diagnostics))
       return {ErrorCode::InvalidArgument, "unresolved diagnostic contract"};
     for (const auto& port : traits.input_schema)
@@ -827,6 +866,12 @@ OperationRegistry::prepare_operation(
     const std::map<std::string, ParameterValue>& parameters,
     const ResourceSet& resources) const {
   using PreparedAnswer = Result<std::shared_ptr<const PreparedOperation>>;
+  // Returned schema/state owners may run plugin deleters after callback return.
+  // Keep restoration outside every local owner on both success and rejection.
+  core_internal::CallbackEnvironment environment;
+  if (!environment.active())
+    return PreparedAnswer(
+        Status{ErrorCode::OperationFailed, "cannot save floating environment"});
   Impl::DefinitionHandle definition;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -866,10 +911,15 @@ OperationRegistry::prepare_operation(
       Result<std::vector<OperationOutputSpecialization>> specialized(
           Status{ErrorCode::Internal, "uninitialized preparation"});
       if (definition->prepare_static) {
-        auto prepared = definition->prepare_static(inputs, parameters);
+        auto prepared = core_internal::invoke_callback(
+            [&] { return definition->prepare_static(inputs, parameters); });
         if (!prepared.ok())
           return Answer(prepared.status());
         auto result = prepared.take_value();
+        result.state =
+            core_internal::protect_callback_state(std::move(result.state));
+        if (result.shared_stages)
+          traits.shared_stages = std::move(*result.shared_stages);
         if (!core_internal::can_add(result.additional_workspace_bytes,
                                     traits.workspace_bytes))
           return Answer(Status{ErrorCode::ResourceExhausted,
@@ -881,7 +931,9 @@ OperationRegistry::prepare_operation(
         specialized = Result<std::vector<OperationOutputSpecialization>>(
             std::move(result.outputs));
       } else {
-        specialized = definition->specialize_metadata(inputs, parameters);
+        specialized = core_internal::invoke_callback([&] {
+          return definition->specialize_metadata(inputs, parameters);
+        });
       }
       if (!specialized.ok())
         return Answer(specialized.status());
@@ -896,11 +948,9 @@ OperationRegistry::prepare_operation(
         auto& specialization = specialized.value()[i];
         auto& metadata = specialization.metadata;
         if (specialization.input_indices) {
-          if (output.region_rule != OperationRegionRule::Whole ||
-              traits.supports_gpu)
-            return Answer(
-                Status{ErrorCode::InvalidArgument,
-                       "specialized input projection requires CPU Whole"});
+          if (traits.supports_gpu)
+            return Answer(Status{ErrorCode::InvalidArgument,
+                                 "specialized input projection requires CPU"});
           if (output.input_indices)
             for (auto port : *specialization.input_indices)
               if (std::find(output.input_indices->begin(),
@@ -912,13 +962,10 @@ OperationRegistry::prepare_operation(
         }
 
         if (!metadata.result_schema ||
-            output.output_schema.kind != OperationPortKind::Result ||
             (!output.output_schema.result_schema_id.empty() &&
              (output.result_schema->id != metadata.result_schema->id ||
               output.result_schema->version !=
-                  metadata.result_schema->version)) ||
-            (specialization.data_movement != DataMovementKind::None &&
-             specialization.data_movement != DataMovementKind::BitwiseMapped))
+                  metadata.result_schema->version)))
           return Answer(
               Status{ErrorCode::TypeMismatch,
                      "Result specialization must preserve its registered "
@@ -934,8 +981,6 @@ OperationRegistry::prepare_operation(
             std::string(metadata.result_schema->id);
         output.output_schema.result_schema_version =
             metadata.result_schema->version;
-        if (specialization.data_movement != DataMovementKind::None)
-          output.data_movement = specialization.data_movement;
       }
       traits.requires_metadata_specialization = false;
       auto expanded_validation = traits;
@@ -985,7 +1030,8 @@ OperationRegistry::prepare_operation(
     const auto bind =
         [&](const OperationPortConstraint& port, const SchemaTemplate& schema,
             bool output, std::uint32_t index,
-            std::vector<PreparedOperation::Impl::Validation>* bound) -> Status {
+            std::vector<PreparedOperation::Impl::Validation>* bound,
+            std::uint32_t stage = UINT32_MAX) -> Status {
       if (port.validators.size() > 64)
         return {ErrorCode::InvalidArgument, "too many port validators"};
       for (const auto& identity : port.validators) {
@@ -999,19 +1045,20 @@ OperationRegistry::prepare_operation(
                     "unresolved validation contract"};
           validator = found->second;
         }
-        if (std::any_of(bound->begin(), bound->end(),
-                        [&](const auto& b) {
-                          return b.definition->identity.key == identity.key;
-                        }) ||
-            (validator->requires_complete &&
-             schema.publication != PublishPolicy::CompleteBundle))
+        if (std::any_of(bound->begin(), bound->end(), [&](const auto& b) {
+              return b.definition->identity.key == identity.key;
+            }))
           return {ErrorCode::InvalidArgument,
                   "duplicate or incompatible validator"};
-        auto state = validator->prepare(
-            {schema, parameters, prepared->resources, output, index});
+        auto state = core_internal::invoke_callback([&] {
+          return validator->prepare(
+              {schema, parameters, prepared->resources, output, index, stage});
+        });
         if (!state.ok())
           return state.status();
-        bound->push_back({std::move(validator), state.take_value()});
+        bound->push_back(
+            {std::move(validator),
+             core_internal::protect_callback_state(state.take_value())});
       }
       return Status::success();
     };
@@ -1032,6 +1079,16 @@ OperationRegistry::prepare_operation(
       auto status = bind(prepared->traits.outputs[i].output_schema,
                          *outputs.value()[i].result_schema, true, i,
                          &prepared->output_validators[i]);
+      if (!status.ok())
+        return PreparedAnswer(status);
+    }
+    prepared->stage_validators.resize(prepared->traits.shared_stages.size());
+    for (std::uint32_t i = 0; i < prepared->traits.shared_stages.size(); ++i) {
+      const auto& stage = prepared->traits.shared_stages[i];
+      OperationPortConstraint contract;
+      contract.validators = stage.validators;
+      auto status = bind(contract, stage.result_schema, true, UINT32_MAX,
+                         &prepared->stage_validators[i], i);
       if (!status.ok())
         return PreparedAnswer(status);
     }
@@ -1165,15 +1222,24 @@ Result<ResultProgramQuery> OperationRegistry::prepare_result_query(
         return Answer(status);
     }
     const auto& resolved = prepared->traits();
-    auto selected =
-        select_operation_output(resolved, query.output_index).take_value();
-    auto expected =
-        infer_operation_output(selected, query.inputs, query.parameters);
-    if (!expected.ok())
-      return Answer(expected.status());
-    const auto& metadata = expected.value();
-    if (!metadata.result_schema || !query.output.result_schema ||
-        !metadata.result_schema->same_schema(*query.output.result_schema))
+    std::shared_ptr<const SchemaTemplate> expected;
+    if (query.shared_stage != UINT32_MAX) {
+      if (query.shared_stage >= resolved.shared_stages.size())
+        return Answer(
+            Status{ErrorCode::InvalidArgument, "unknown shared stage"});
+      expected = std::shared_ptr<const SchemaTemplate>(
+          prepared, &resolved.shared_stages[query.shared_stage].result_schema);
+    } else {
+      auto selected =
+          select_operation_output(resolved, query.output_index).take_value();
+      auto metadata =
+          infer_operation_output(selected, query.inputs, query.parameters);
+      if (!metadata.ok())
+        return Answer(metadata.status());
+      expected = metadata.value().result_schema;
+    }
+    if (!expected || !query.output.result_schema ||
+        !expected->same_schema(*query.output.result_schema))
       return Answer(Status{ErrorCode::TypeMismatch,
                            "structured start metadata mismatch"});
     if (query.cancellation.cancelled())
@@ -1204,24 +1270,28 @@ Result<ResultContinuation> OperationRegistry::start_result(
       return Answer(Status{ErrorCode::NotFound, {}});
     definition = found->second;
   }
+  std::shared_ptr<plugin_internal::FailureLatch> failure;
   try {
+    failure = std::make_shared<plugin_internal::FailureLatch>();
     auto checked = prepare_result_query(key, query);
     if (!checked.ok())
       return Answer(checked.status());
     auto normalized = checked.take_value();
     const auto& selected =
         normalized.prepared->traits().outputs[query.output_index];
-    auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
+    const auto* stage =
+        query.shared_stage == UINT32_MAX
+            ? nullptr
+            : &normalized.prepared->traits().shared_stages[query.shared_stage];
     auto scoped = allocator.limited(
-        selected.continuation_bytes, [failure](ErrorCode code) {
-          auto expected = ErrorCode::Ok;
-          failure->compare_exchange_strong(expected, code);
-        });
+        stage ? stage->continuation_bytes : selected.continuation_bytes,
+        [failure](const Status& status) { failure->record(status); });
     if (query.cancellation.cancelled())
       return Answer(Status{ErrorCode::Cancelled, {}});
     auto started = [&]() -> Answer {
       try {
-        return definition->start_result(normalized, scoped);
+        return core_internal::invoke_callback(
+            [&] { return definition->start_result(normalized, scoped); });
       } catch (...) {
         return Answer(plugin_internal::current_operation_exception());
       }
@@ -1229,7 +1299,7 @@ Result<ResultContinuation> OperationRegistry::start_result(
     if (query.cancellation.cancelled())
       return Answer(Status{ErrorCode::Cancelled, {}});
     if (failure->load() != ErrorCode::Ok)
-      return Answer(Status{failure->load(), {}});
+      return Answer(failure->snapshot());
     if (!started.ok())
       return started;
     auto state = started.take_value();
@@ -1240,12 +1310,18 @@ Result<ResultContinuation> OperationRegistry::start_result(
     state.definition_ = definition;
     state.prepared_ = normalized.prepared;
     state.output_index_ = query.output_index;
+    state.shared_stage_ = query.shared_stage;
     state.output_schema_ = query.output.result_schema;
     state.semantic_key_ = query.semantic_key;
     state.resources_ = normalized.resources;
-    state.payload_limit_ = selected.maximum_output_payload_bytes;
+    state.payload_limit_ =
+        stage
+            ? std::optional<std::uint64_t>(stage->maximum_output_payload_bytes)
+            : selected.maximum_output_payload_bytes;
     return Answer(std::move(state));
   } catch (...) {
+    if (failure && failure->load() != ErrorCode::Ok)
+      return Answer(failure->snapshot());
     return Answer(plugin_internal::current_operation_exception());
   }
 }
@@ -1263,7 +1339,9 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
       return Answer(Status{ErrorCode::NotFound, {}});
     definition = found->second;
   }
+  std::shared_ptr<plugin_internal::FailureLatch> allocation_failure;
   try {
+    allocation_failure = std::make_shared<plugin_internal::FailureLatch>();
     if (!definition->start_result ||
         query.output_index >= definition->traits.outputs.size() || !failure ||
         query.semantic_key.empty() || query.semantic_key.size() > 4096 ||
@@ -1286,11 +1364,24 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
     // verifies the plan belongs to this frozen registry before entering here.
     if (query.cancellation.cancelled())
       return Answer(Status{ErrorCode::Cancelled, {}});
+    const OperationSharedStage* shared = nullptr;
+    if (query.shared_stage != UINT32_MAX) {
+      if (query.shared_stage >= resolved.shared_stages.size())
+        return Answer(
+            Status{ErrorCode::InvalidArgument, "unknown shared stage"});
+      shared = &resolved.shared_stages[query.shared_stage];
+      if (!query.output.result_schema ||
+          !query.output.result_schema->same_schema(shared->result_schema))
+        return Answer(
+            Status{ErrorCode::TypeMismatch, "shared stage schema mismatch"});
+    }
     auto scoped = allocator.limited(
-        resolved.outputs[query.output_index].continuation_bytes,
-        [failure](ErrorCode code) {
+        shared ? shared->continuation_bytes
+               : resolved.outputs[query.output_index].continuation_bytes,
+        [failure, allocation_failure](const Status& status) {
+          allocation_failure->record(status);
           auto expected = ErrorCode::Ok;
-          failure->compare_exchange_strong(expected, code);
+          failure->compare_exchange_strong(expected, status.code);
         });
     auto admitted_resources = plugin_internal::admit_operation_resources(
         query.resources, query.prepared->resource_ids());
@@ -1302,13 +1393,16 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
       return Answer(Status{ErrorCode::Cancelled, {}});
     auto started = [&]() -> Answer {
       try {
-        return definition->start_result(normalized, scoped);
+        return core_internal::invoke_callback(
+            [&] { return definition->start_result(normalized, scoped); });
       } catch (...) {
         return Answer(plugin_internal::current_operation_exception());
       }
     }();
     if (query.cancellation.cancelled())
       return Answer(Status{ErrorCode::Cancelled, {}});
+    if (allocation_failure->load() != ErrorCode::Ok)
+      return Answer(allocation_failure->snapshot());
     if (failure->load() != ErrorCode::Ok)
       return Answer(Status{failure->load(), {}});
     if (!started.ok())
@@ -1321,14 +1415,20 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
     state.definition_ = definition;
     state.prepared_ = normalized.prepared;
     state.output_index_ = query.output_index;
+    state.shared_stage_ = query.shared_stage;
     state.output_schema_ = query.output.result_schema;
     state.semantic_key_ = query.semantic_key;
     state.host_validates_ = true;
     state.resources_ = normalized.resources;
     const auto& output = resolved.outputs[query.output_index];
-    state.payload_limit_ = output.maximum_output_payload_bytes;
+    state.payload_limit_ =
+        shared
+            ? std::optional<std::uint64_t>(shared->maximum_output_payload_bytes)
+            : output.maximum_output_payload_bytes;
     return Answer(std::move(state));
   } catch (...) {
+    if (allocation_failure && allocation_failure->load() != ErrorCode::Ok)
+      return Answer(allocation_failure->snapshot());
     return Answer(plugin_internal::current_operation_exception());
   }
 }

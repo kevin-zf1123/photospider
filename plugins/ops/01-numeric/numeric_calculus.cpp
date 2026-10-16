@@ -13,15 +13,16 @@
 
 #include "01-numeric/exact_calculus.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/core/resource_allocator.hpp"
 #include "common/registry.hpp"
+#include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
 using numeric_ops::SequenceProfile;
-Result<ValueDescriptor> metadata(bool integral,
-                                 const std::vector<OperationMetadata>& inputs) {
-  using Answer = Result<ValueDescriptor>;
+Result<TensorDescriptor> metadata(
+    bool integral, const std::vector<OperationMetadata>& inputs) {
+  using Answer = Result<TensorDescriptor>;
   const auto mismatch = [](const char* message) {
     return Answer(Status{ErrorCode::TypeMismatch,
                          message,
@@ -29,8 +30,8 @@ Result<ValueDescriptor> metadata(bool integral,
                          {FailureOrigin::Schema, FailureScope::Unspecified}});
   };
   const auto& member = inputs[0].result_schema->tensors[0];
-  const ValueDescriptor source{member.descriptor.element_type,
-                               member.sample_shape()};
+  const TensorDescriptor source{member.descriptor.element_type,
+                                member.sample_shape()};
   if ((source.element_type != ElementType::Float32 &&
        source.element_type != ElementType::Float64) ||
       source.shape.size() != 1 || source.shape[0] < (integral ? 1U : 2U) ||
@@ -63,7 +64,7 @@ struct CalculusKernel final {
     const auto count = shape[0];
     const auto type =
         phase.query.output.result_schema->tensors[0].descriptor.element_type;
-    const auto width = Value::element_size(type);
+    const auto width = TensorSpan::element_size(type);
     std::vector<std::uint64_t> coordinate(1, 0);
     std::array<std::optional<numeric_ops::MathTensorReader>, 3> readers;
     for (const auto& input : *phase.tensors)
@@ -163,7 +164,6 @@ OperationDefinition calculus_operation(const std::string& key, bool integral,
   traits.input_count = integral ? 3 : 2;
   traits.input_schema.resize(traits.input_count);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = 12;
   }
   traits.requires_metadata_specialization = true;
@@ -195,7 +195,7 @@ OperationDefinition calculus_operation(const std::string& key, bool integral,
     return ResultContinuation::make<CalculusProgram>(allocator, integral,
                                                      profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_numeric_calculus(OperationRegistry* registry) {

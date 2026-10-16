@@ -304,7 +304,8 @@ class ResultCache final {
       lock.lock();
     }
   }
-  Value get(const std::string& key, std::uint64_t expected_epoch = UINT64_MAX) {
+  TensorSpan get(const std::string& key,
+                 std::uint64_t expected_epoch = UINT64_MAX) {
     if (key.empty())
       return {};
     std::lock_guard<std::mutex> lock(mutex_);
@@ -320,7 +321,7 @@ class ResultCache final {
   }
   /** @brief Optional retention is fenced; allocation failure cannot fail work.
    */
-  void put(const std::string& key, const Value& value, std::uint64_t epoch,
+  void put(const std::string& key, const TensorSpan& value, std::uint64_t epoch,
            bool native = false) noexcept {
     if (key.empty() || !value.valid())
       return;
@@ -382,7 +383,7 @@ class ResultCache final {
 
  private:
   struct Entry {
-    Value value;
+    TensorSpan value;
     std::list<std::string>::iterator order;
     bool native = false;
     std::shared_ptr<const StructuredCacheManifest> structured;

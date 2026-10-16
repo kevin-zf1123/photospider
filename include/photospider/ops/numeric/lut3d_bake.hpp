@@ -42,6 +42,12 @@ struct Lut3dBakeDescription {
  */
 struct Lut3dBakeReport {
   bool passed = false;
+  /** @brief ObjectId of the complete table acquired during measurement.
+   * Encoded as eight little-endian bytes in the report. Valid only for this
+   * process object; equal contents do not authorize a different table object.
+   * Equal frozen inputs may produce a different identity on each Run.
+   */
+  std::uint64_t measured_table_id = 0;
   std::array<double, 9> axis{};
   std::int64_t validation_count = 0, failed_count = 0;
   std::array<double, 3> max_abs_error{};
@@ -58,8 +64,8 @@ struct Lut3dBakeReport {
  */
 PHOTOSPIDER_OPS_SDK_API Result<std::string> lut3d_bake_configuration_id(
     const Lut3dBakeDescription& description);
-/** @brief Creates the SDK LUT3D bake report v1 CompleteBundle schema.
- * It has 12 fixed fields, domain [1] and 353 data bytes.
+/** @brief Creates the SDK LUT3D bake report v2 static Tensor schema.
+ * It has 13 fixed tensor members, domain [1] and 361 data bytes.
  * Pure/thread-safe, no runtime input; allocation may throw bad_alloc. Invalid
  * configuration fails InvalidArgument/InvalidDomain. Acceptance remains
  * measured only at the recorded centers/extras for this method/table dtype.
@@ -79,23 +85,20 @@ PHOTOSPIDER_OPS_SDK_API Result<SchemaTemplate> lut3d_bake_table_schema(
 PHOTOSPIDER_OPS_SDK_API Status validate_lut3d_bake_schema(
     const SchemaTemplate& schema, const Lut3dBakeDescription& description);
 /** @brief Reads a sealed report through explicit owned Result read windows.
- * Obtain the report Result from `ExecutionContext::execute()`; its fixed fields
- * are not requested with generic tensor footprints by `execute_fragments()`.
+ * Obtain complete report coverage from `ExecutionContext::execute()` or request
+ * all report members with `execute_fragments()`.
  * description must be the explicit configuration used to generate the report;
  * its canonical identity must match the configuration_id field. Configuration
  * is never inferred from the schema. Does not start a producer.
- * The report association records observed input
- * ObjectIds in port order; its first entries identify axis, grid and owned
- * table Results, with owners observed from later source batches following.
- * Entry 2 identifies the owned table. Result and windows own backing after
- * context teardown. maximum_window must admit a complete field (at most 72
- * bytes); a smaller field window fails with ResourceExhausted/CapacityLimit.
- * The helper applies the same pure field validation as the gate. It always
- * reads the report's 12 fixed fields, including for a Result with no tensor
- * coverage. Empty coverage skips payload validation for the owned-table tensor,
- * not report field reads. Optional consume_work accounts bounded
- * schema/axis/field validation.
- * Cancellation/I/O/capacity errors propagate; malformed fields fail
+ * The measured_table_id member identifies the complete table object acquired
+ * by measurement, independently of Result association and member projection.
+ * Result and windows own backing after
+ * context teardown. maximum_window must admit a complete member (at most 72
+ * bytes); a smaller window fails with ResourceExhausted.
+ * The helper applies the same validation as the gate and requires complete
+ * coverage of all 13 report tensors. Optional consume_work accounts bounded
+ * schema, axis and report validation.
+ * Cancellation/I/O/capacity errors propagate; malformed report members fail
  * OperationFailed/InvalidDomain. Thread-safe for an immutable sealed Result.
  * Caller-owned returned arrays require no retained context or callback.
  */

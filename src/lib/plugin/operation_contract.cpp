@@ -35,11 +35,7 @@ Result<OperationTraits> resolve_operation_traits(
   auto result = traits;
   if (std::any_of(traits.outputs.begin(), traits.outputs.end(),
                   [](const auto& output) { return !output.result_schema; }) ||
-      std::any_of(traits.input_schema.begin(), traits.input_schema.end(),
-                  [](const auto& input) {
-                    return input.kind != OperationPortKind::Result;
-                  }) ||
-      count > 1024 || traits.version != 26)
+      count > 1024 || traits.version != 27)
     return Result<OperationTraits>(core_internal::invalid_schema_domain(
         "invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
@@ -67,7 +63,7 @@ Result<OperationMetadata> infer_operation_output(
   if (t.requires_metadata_specialization)
     return Result<OperationMetadata>(core_internal::invalid_schema_domain(
         "operation template requires registry metadata specialization"));
-  if (t.version != 26 || t.outputs.size() != 1 || !t.outputs[0].result_schema)
+  if (t.version != 27 || t.outputs.size() != 1 || !t.outputs[0].result_schema)
     return Result<OperationMetadata>(core_internal::invalid_schema_domain(
         "select one output for singleton inference"));
   const auto mismatch = [](const char* message) {
@@ -98,13 +94,13 @@ Result<OperationMetadata> infer_operation_output(
     if (t.repeated_resolved > inputs.size())
       return mismatch("invalid resolved repetition");
     const auto first = inputs.size() - t.repeated_resolved;
-    const auto descriptor = [&](std::size_t i) -> Result<ValueDescriptor> {
+    const auto descriptor = [&](std::size_t i) -> Result<TensorDescriptor> {
       auto slot =
           input_internal::resolve_tensor_member(t.input_schema[i], inputs[i]);
       if (!slot.ok())
-        return Result<ValueDescriptor>(slot.status());
+        return Result<TensorDescriptor>(slot.status());
       const auto& tensor = inputs[i].result_schema->tensors[slot.value()];
-      return Result<ValueDescriptor>(ValueDescriptor{
+      return Result<TensorDescriptor>(TensorDescriptor{
           tensor.descriptor.element_type, tensor.sample_shape()});
     };
     auto expected = descriptor(first);
@@ -182,51 +178,53 @@ Status validate_operation_contract(const OperationTraits& t) {
   if (t.outputs.size() != 1)
     return core_internal::invalid_schema_domain("select one output contract");
   const auto& selected = t.outputs[0];
-  if (!selected.result_schema ||
-      std::any_of(t.input_schema.begin(), t.input_schema.end(),
-                  [](const auto& input) {
-                    return input.kind != OperationPortKind::Result;
-                  }))
+  if (!selected.result_schema)
     return core_internal::invalid_schema_domain(
         "Result programs require Result input and output schemas");
-  if (selected.data_movement != DataMovementKind::None &&
-      selected.data_movement != DataMovementKind::BitwiseMapped)
-    return core_internal::invalid_schema_domain("unknown data movement kind");
-  const bool tiled = selected.region_rule == OperationRegionRule::Tiled;
-  const bool whole = selected.region_rule == OperationRegionRule::Whole;
-  if (t.cpu_staged_tiles &&
-      (!t.supports_cpu || t.supports_gpu ||
-       (selected.region_rule != OperationRegionRule::Whole &&
-        selected.region_rule != OperationRegionRule::Tiled)))
+  if (t.cpu_staged_tiles && (!t.supports_cpu || t.supports_gpu))
     return core_internal::invalid_schema_domain(
-        "CPU stages require a CPU-only Result continuation");
-  if (selected.preserve_output_views &&
-      (!t.supports_cpu || t.supports_gpu || !(tiled || whole)))
-    return core_internal::invalid_schema_domain(
-        "view output requires CPU execution");
-  if (selected.requires_input_views &&
-      (!whole || !selected.preserve_output_views))
-    return core_internal::invalid_schema_domain(
-        "original input views require CPU Whole view output");
-  if (t.outputs[0].maximum_output_payload_bytes &&
-      (!t.supports_cpu || t.supports_gpu || !(tiled || whole)))
-    return core_internal::invalid_schema_domain(
-        "explicit output payload bound requires a CPU Whole or staged view");
-
-  const bool whole_result =
-      whole && selected.failure_delivery == FailureDelivery::RequestFailureOnly;
-  if (!whole_result && (!t.deterministic || !t.side_effect_free))
-    return core_internal::invalid_schema_domain(
-        "regional programs require deterministic side-effect-free behavior");
-  if (t.outputs[0].failure_delivery != FailureDelivery::RequestFailureOnly ||
-      (!whole && !tiled) || !selected.continuation_bytes ||
-      !selected.maximum_dependency_stages ||
+        "CPU stages require a CPU-only continuation");
+  if (!selected.continuation_bytes || !selected.maximum_dependency_stages ||
       selected.maximum_dependency_stages > 1048576)
     return core_internal::invalid_schema_domain(
         "invalid dependency phase contract");
+  if (t.shared_stages.size() > 64)
+    return core_internal::invalid_schema_domain("too many shared stages");
+  bool mandatory = false;
+  for (std::size_t i = 0; i < t.shared_stages.size(); ++i) {
+    const auto& stage = t.shared_stages[i];
+    if (stage.key.empty() || stage.key.size() > 128 ||
+        !stage.result_schema.validate(true).ok() || !stage.continuation_bytes ||
+        !stage.maximum_work || !stage.maximum_dependency_stages ||
+        stage.maximum_dependency_stages > 1048576 ||
+        stage.input_indices.size() > t.input_count ||
+        (stage.backend != Backend::Cpu && stage.backend != Backend::Gpu) ||
+        (stage.backend == Backend::Cpu && !t.supports_cpu) ||
+        (stage.backend == Backend::Gpu && !t.supports_gpu))
+      return core_internal::invalid_schema_domain(
+          "invalid shared stage contract");
+    mandatory |= stage.mandatory;
+    for (std::size_t j = 0; j < i; ++j)
+      if (t.shared_stages[j].key == stage.key)
+        return core_internal::invalid_schema_domain(
+            "duplicate shared stage key");
+    for (std::size_t j = 0; j < stage.input_indices.size(); ++j) {
+      const auto port = stage.input_indices[j];
+      if (port >= t.input_count || (j && stage.input_indices[j - 1] >= port) ||
+          (stage.mandatory && selected.input_indices &&
+           std::find(selected.input_indices->begin(),
+                     selected.input_indices->end(),
+                     port) == selected.input_indices->end()))
+        return core_internal::invalid_schema_domain(
+            "invalid stage projection or mandatory stage outside output "
+            "declaration");
+    }
+  }
+  if (!t.side_effect_free && !mandatory && !t.requires_metadata_specialization)
+    return core_internal::invalid_schema_domain(
+        "nonpure operations require a mandatory shared stage");
   const auto& output = t.outputs[0];
-  if (output.result_schema.has_value() !=
-      (output.output_schema.kind == OperationPortKind::Result))
+  if (!output.result_schema)
     return core_internal::invalid_schema_domain(
         "structured output requires a complete schema template");
   if (output.result_schema &&

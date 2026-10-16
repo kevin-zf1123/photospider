@@ -18,6 +18,7 @@
 #include "common/basic_common.hpp"
 #include "common/floating_environment.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal::basic_result {
 using namespace numeric_ops;  // NOLINT(build/namespaces)
@@ -396,24 +397,29 @@ struct Program final {
       require(environment.active(), ErrorCode::OperationFailed,
               "numeric environment unavailable");
       for (const auto& box : output.boxes()) {
-        math_require(builder.publish_tensor_kernel(
-            0, box,
-            [&](const auto& writers) {
-              return math_callback(phase, [&] {
-                try {
-                  for (const auto& writer : writers) {
-                    auto status = write(phase, writer, limits);
-                    if (!status.ok()) {
-                      return status;
-                    }
-                  }
-                  return phase.consume_work(0);
-                } catch (const basic_internal::Failure& failure) {
-                  return failure.status;
+        const auto write_windows = [&](const auto& writers) {
+          return math_callback(phase, [&] {
+            try {
+              for (const auto& writer : writers) {
+                auto status = write(phase, writer, limits);
+                if (!status.ok()) {
+                  return status;
                 }
-              });
-            },
-            phase.query.cancellation));
+              }
+              return phase.consume_work(0);
+            } catch (const basic_internal::Failure& failure) {
+              return failure.status;
+            }
+          });
+        };
+        auto written =
+            (kind == Kind::Linear || kind == Kind::Monotone)
+                ? sdk::publish_dense_tensor(phase, builder, 0, box,
+                                            write_windows,
+                                            phase.query.cancellation)
+                : builder.publish_tensor_kernel(0, box, write_windows,
+                                                phase.query.cancellation);
+        math_require(written);
       }
     }
     return Result<ResultProgramPoll>(
@@ -439,7 +445,6 @@ inline OperationDefinition operation(const char* key, Kind kind) {
   traits.input_count = kind == Kind::Lut ? 2 : 1;
   traits.input_schema.resize(traits.input_count);
   for (auto& port : traits.input_schema) {
-    port.kind = OperationPortKind::Result;
     port.element_type_mask = 12;
   }
   set_whole_tensor_output(traits, ElementType::Float64, sizeof(Program));
@@ -456,9 +461,6 @@ inline OperationDefinition operation(const char* key, Kind kind) {
     image.layout.channel_axis.reset();
   }
   traits.outputs[0].maximum_dependency_stages = 3;
-  if (elementwise(kind)) {
-    traits.outputs[0].region_rule = OperationRegionRule::Tiled;
-  }
   traits.requires_metadata_specialization = true;
   if (kind == Kind::Smoothstep) {
     traits.parameter_schema = {real("edge0"), real("edge1")};
@@ -480,9 +482,7 @@ inline OperationDefinition operation(const char* key, Kind kind) {
     try {
       check_parameters(kind, parameters);
       for (const auto& input : inputs) {
-        require(input.result_schema &&
-                    input.result_schema->tensors.size() == 1 &&
-                    input.result_schema->fields.empty(),
+        require(input.result_schema && input.result_schema->tensors.size() == 1,
                 ErrorCode::TypeMismatch,
                 "basic operation requires one tensor and no fields");
       }
@@ -542,6 +542,8 @@ inline OperationDefinition operation(const char* key, Kind kind) {
                                    const BufferAllocator& allocator) {
     return ResultContinuation::make<Program>(allocator, kind);
   };
+  if (kind == Kind::Linear || kind == Kind::Monotone)
+    return sdk::with_whole_stage(std::move(definition), UINT64_C(1) << 48);
   return definition;
 }
 }  // namespace ps::plugin_internal::basic_result

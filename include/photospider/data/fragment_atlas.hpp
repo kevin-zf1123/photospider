@@ -5,7 +5,7 @@
 #include <memory>
 #include <vector>
 
-#include "photospider/data/value_fragments.hpp"
+#include "photospider/data/tensor.hpp"
 
 namespace ps {
 class ResultTensorInput;
@@ -24,10 +24,10 @@ inline constexpr std::uint64_t kFragmentAtlasSlotBytes = 80;
  * NotFound; it is never a zero sample or a per-fragment clamp.
  */
 struct PHOTOSPIDER_API FragmentAtlas final {
-  ValueDescriptor descriptor;
+  TensorDescriptor descriptor;
   std::vector<std::uint64_t> tile_shape;
   std::uint64_t slot_count = 0, payload_bytes = 0;
-  Value payload, directory;
+  TensorSpan payload, directory;
   /** @brief Exact byte offset of a valid sample in payload, or a typed failure.
    */
   Result<std::uint64_t> address(
@@ -35,9 +35,10 @@ struct PHOTOSPIDER_API FragmentAtlas final {
 };
 /** @brief Immutable transport plan with exact allocation sizes and no pixels.
  * @note Prepare and materialize are separately bounded. The plan stores only
- * domain/coverage and occupied tiles, never source Value or allocator owners.
- * GPU hosts can round the two exact payload sizes to their device allocation
- * capacities before admitting materialization. Copies share immutable metadata.
+ * domain/coverage and occupied tiles, never source TensorSpan or allocator
+ * owners. GPU hosts can round the two exact payload sizes to their device
+ * allocation capacities before admitting materialization. Copies share
+ * immutable metadata.
  */
 class PHOTOSPIDER_API FragmentAtlasPlan final {
  public:
@@ -50,7 +51,7 @@ class PHOTOSPIDER_API FragmentAtlasPlan final {
    * checked during traversal. No bounding-box samples are added.
    */
   static Result<FragmentAtlasPlan> prepare(
-      const ValueFragments& input, std::vector<std::uint64_t> tile_shape = {},
+      const Tensor& input, std::vector<std::uint64_t> tile_shape = {},
       const FootprintLimits& limits = {});
   /** @brief Builds a plan from a Result tensor capability's sample coverage.
    * @details This overload uses the capability's schema and coverage but does
@@ -76,7 +77,7 @@ class PHOTOSPIDER_API FragmentAtlasPlan final {
   std::uint64_t directory_allocation_bytes() const;
   std::uint64_t occupied_tiles() const;
   /** @brief Reports generic geometry-planning work.
-   * @note For the ValueFragments overload, callers retain their existing
+   * @note For the Tensor overload, callers retain their existing
    * convention of charging this report externally. The ResultTensorInput
    * prepare overload also calls FootprintLimits::consume_work directly.
    * @throws std::logic_error If this plan is invalid.
@@ -85,7 +86,7 @@ class PHOTOSPIDER_API FragmentAtlasPlan final {
   /** @brief Reports generic packing work for the matching input coverage.
    * @note The ResultTensorInput materialize overload additionally charges
    * window acquisition and read-bound work through consume_work; this report
-   * is not its complete charge. ValueFragments keeps its caller-charged work
+   * is not its complete charge. Tensor keeps its caller-charged work
    * convention.
    * @throws std::logic_error If this plan is invalid.
    */
@@ -96,7 +97,7 @@ class PHOTOSPIDER_API FragmentAtlasPlan final {
    * Batch topology is not retained. Limits bound packing work; errors publish
    * nothing.
    */
-  Result<FragmentAtlas> materialize(const ValueFragments& input,
+  Result<FragmentAtlas> materialize(const Tensor& input,
                                     const BufferAllocator& allocator,
                                     const FootprintLimits& limits = {}) const;
   /** @brief Packs the exact samples authorized by a Result tensor Need.
@@ -121,10 +122,10 @@ class PHOTOSPIDER_API FragmentAtlasPlan final {
 
  private:
   static Result<FragmentAtlasPlan> prepare_regions(
-      const ValueDescriptor& descriptor, const Footprint& coverage,
+      const TensorDescriptor& descriptor, const Footprint& coverage,
       std::vector<std::uint64_t> geometry, const FootprintLimits& limits);
   Result<FragmentAtlas> materialize_regions(
-      const ValueDescriptor& descriptor, const Footprint& coverage,
+      const TensorDescriptor& descriptor, const Footprint& coverage,
       const std::function<Status(const std::vector<std::uint64_t>&, void*,
                                  std::size_t)>& read,
       const BufferAllocator& allocator, const FootprintLimits& limits) const;

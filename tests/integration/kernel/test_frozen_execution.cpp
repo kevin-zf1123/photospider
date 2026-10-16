@@ -52,10 +52,12 @@ int main() {
   PS_CHECK(result.ok() && result.value().results.size() == 2 &&
            test::named_scalar(result.value(), "sum") == 5);
   frozen = retained;
-  auto tile = frozen.for_tiles("sum", TileRequest{true, {}});
+  auto tile = frozen.for_tiles(
+      "sum", TileRequest{{{0, TileSet::range(root, 0, 1).take_value()}}});
   PS_CHECK(tile.ok());
   PS_CHECK(execution.execute(tile.value()).ok());
-  auto left = frozen.for_tiles("left", TileRequest{true, {}});
+  auto left = frozen.for_tiles(
+      "left", TileRequest{{{0, TileSet::range(root, 0, 1).take_value()}}});
   PS_CHECK(left.ok() && frozen.plan().outputs().size() == 2 &&
            tile.value().plan().outputs().count("sum") == 1 &&
            tile.value().plan().outputs().count("left") == 0);
@@ -70,10 +72,15 @@ int main() {
            ErrorCode::Stale);
   ExecutionContext foreign(test::kernel_registry());
   PS_CHECK(foreign.execute(frozen).status().code == ErrorCode::Stale);
-  PS_CHECK(!frozen.for_tiles("missing", TileRequest{true, {}}).ok());
+  PS_CHECK(!frozen
+                .for_tiles(
+                    "missing",
+                    TileRequest{{{0, TileSet::range(root, 0, 1).take_value()}}})
+                .ok());
   auto handle = execution.open_demand(frozen.plan(), {}).take_value();
   auto pinned = handle.freeze().take_value();
-  DemandQuery query{{"sum", TileRequest{true, {}}}};
+  DemandQuery query{
+      {"sum", TileRequest{{{0, TileSet::range(root, 0, 1).take_value()}}}}};
   auto first = handle.request(query);
   PS_CHECK(first.ok() && first.value().generation == 1);
   auto replaced = handle.replace_bindings({});

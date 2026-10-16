@@ -595,7 +595,7 @@ OperationDefinition operation(bool encode, SequenceProfile profile,
   t.diagnostics = {numeric_diagnostic_identity()};
   t.input_count = 1;
   OperationPortConstraint port;
-  port.kind = OperationPortKind::Result;
+
   port.element_type_mask = 127;
   t.input_schema = {port};
   t.cacheable = false;
@@ -618,7 +618,6 @@ OperationDefinition operation(bool encode, SequenceProfile profile,
   out.key = "values";
   out.output_schema = port;
   out.result_schema = tensor_ops::scalar_schema();
-  out.region_rule = OperationRegionRule::Tiled;
   out.continuation_bytes = sizeof(Continuation);
   out.maximum_dependency_stages = 2;
   d.prepare_static = [encode, profile](const auto& inputs, const auto& params) {

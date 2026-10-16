@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "photospider/data/immutable_resource.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 #include "photospider/ops/export.hpp"
 
 namespace ps {
@@ -151,9 +151,9 @@ struct PHOTOSPIDER_OPS_SDK_API TensorColorGroup final {
  *
  * All text is strict UTF-8 of at most 128 bytes. Encoding is bounded to
  * 4096 bytes so the invocation-local replacement fits a String parameter.
- * Descriptions are passed as static operation parameters; Result/Value do not
- * retain them. Owned profile resources remain in a separate
- * ResourceSet; these fields cannot manufacture resource ownership.
+ * Descriptions are passed as static operation parameters; Result/TensorSpan do
+ * not retain them. Owned profile resources remain in a separate ResourceSet;
+ * these fields cannot manufacture resource ownership.
  */
 struct PHOTOSPIDER_OPS_SDK_API TensorDescription final {
   /** @brief Retires after all admitted decoder containers. */
@@ -199,6 +199,6 @@ PHOTOSPIDER_OPS_SDK_API Result<TensorDescription>
 tensor_description_from_parameter(const std::string& parameter);
 /** @brief Validate rank/axis/table alignment without reading tensor samples. */
 PHOTOSPIDER_OPS_SDK_API Status validate_tensor_description(
-    const TensorDescription& description, const ValueDescriptor& descriptor);
+    const TensorDescription& description, const TensorDescriptor& descriptor);
 
 }  // namespace ps

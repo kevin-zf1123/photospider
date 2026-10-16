@@ -181,7 +181,7 @@ inline Status publish(const ResultProgramPhase& phase, ResultBuilder* builder,
       counts->viewed += take(box.element_count());
     return status;
   }
-  const auto width = Value::element_size(tensor.descriptor.element_type);
+  const auto width = TensorSpan::element_size(tensor.descriptor.element_type);
   auto work = window.read_work();
   if (!work.ok())
     return work.status();

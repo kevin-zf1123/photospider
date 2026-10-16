@@ -21,6 +21,7 @@
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "photospider/plugin/result_program.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 struct FloatMathWorkspace final {
@@ -47,7 +48,7 @@ Status compute_math_batch(Arithmetic& arithmetic, Kind kind,
                           std::size_t size,
                           const std::function<Status(std::uint64_t)>& consume,
                           const plugin_internal::FloatingEnvironment& env) {
-  const auto width = Value::element_size(dtype);
+  const auto width = TensorSpan::element_size(dtype);
   const auto store = [&](std::size_t lane, std::uint64_t bits) {
     std::memcpy(block.destination[lane], &bits, width);
   };
@@ -237,7 +238,6 @@ OperationDefinition point_math_operation(const std::string& key, Kind kind,
   traits.input_count = ports;
   traits.input_schema.resize(ports);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = dtype_mask;
   }
   traits.requires_metadata_specialization = true;
@@ -299,6 +299,6 @@ OperationDefinition point_math_operation(const std::string& key, Kind kind,
                                            const BufferAllocator& allocator) {
     return ResultContinuation::make<Program>(allocator, kind, profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace ps::plugin_internal::numeric_ops

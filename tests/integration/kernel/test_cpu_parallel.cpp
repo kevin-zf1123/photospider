@@ -5,6 +5,7 @@
 #include <cstring>
 #include <future>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -30,8 +31,9 @@ struct Shared {
 struct Work {
   Shared* shared;
   std::uint64_t* output;
-  const ps_cpu_parallel_service_v1* service;
+  const ps_cpu_parallel_service_v2* service;
   std::uint64_t count;
+  std::map<std::thread::id, int> rounding;
 };
 int block(void* user, std::uint64_t begin, std::uint64_t end,
           std::uint32_t slot) {
@@ -47,8 +49,15 @@ int block(void* user, std::uint64_t begin, std::uint64_t end,
     shared.changed.notify_all();
   }
   int code = 0;
-  if (std::fegetround() != FE_TONEAREST ||
-      slot >= (shared.grant ? shared.grant : work.service->maximum_workers))
+  {
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    const int current = std::fegetround();
+    const auto saved =
+        work.rounding.emplace(std::this_thread::get_id(), current);
+    if (saved.first->second != current || (slot == 0 && current != FE_DOWNWARD))
+      code = 1;
+  }
+  if (slot >= (shared.grant ? shared.grant : work.service->maximum_workers))
     code = 1;
   if (shared.mode == 1) {
     std::unique_lock<std::mutex> lock(shared.mutex);
@@ -72,6 +81,8 @@ int block(void* user, std::uint64_t begin, std::uint64_t end,
     for (auto i = begin; i < end; ++i)
       work.output[i] = i * 17 + 3;
   }
+  if (std::fesetround(FE_UPWARD))
+    code = 1;
   ++shared.blocks;
   --shared.active;
   return code;
@@ -84,7 +95,6 @@ std::shared_ptr<OperationRegistry> registry(Shared* shared) {
   operation.traits.workspace_bytes = 257 * 8;
   auto output = multi_result::output(
       "value", multi_result::schema(ElementType::Int64, {1}));
-  output.region_rule = OperationRegionRule::Whole;
   operation.traits.outputs = {output};
   struct Program {
     Shared* shared;
@@ -117,8 +127,11 @@ std::shared_ptr<OperationRegistry> registry(Shared* shared) {
         // Leave fuel for sealing and publishing after the synchronous range.
         count = shared->mode == 7 ? UINT64_MAX : UINT64_MAX - issued - 4096;
       }
-      Work work{shared, reinterpret_cast<std::uint64_t*>(scratch.data()),
-                service, count};
+      Work work{shared,
+                reinterpret_cast<std::uint64_t*>(scratch.data()),
+                service,
+                count,
+                {}};
       const int before = std::fegetround();
       std::fesetround(FE_DOWNWARD);
       const int code =
@@ -269,7 +282,6 @@ int cancel_during_cpu_loop() {
   operation.traits.cacheable = false;
   auto output = multi_result::output(
       "value", multi_result::schema(ElementType::Int64, {1}));
-  output.region_rule = OperationRegionRule::Whole;
   struct Program {
     MidloopProbe* probe;
     explicit Program(MidloopProbe* state) : probe(state) {}

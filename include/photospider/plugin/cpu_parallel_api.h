@@ -6,7 +6,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-#define PS_CPU_PARALLEL_ABI_VERSION_1 1U
+#define PS_CPU_PARALLEL_ABI_VERSION_2 2U
 /** @brief One finite host-assigned block [begin,end), with a unique live slot.
  * slot is below the granted maximum_workers. Blocks may execute concurrently
  * and out of order. Write disjoint output ranges and use slot-private scratch.
@@ -15,37 +15,39 @@ extern "C" {
  * Return 0=success, 1=failure, 2=cancelled, 4=resource exhaustion, 6=invalid
  * argument. Exceptions must not cross a C module boundary.
  */
-typedef int (*ps_cpu_range_callback_v1)(void* user, uint64_t begin,
+typedef int (*ps_cpu_range_callback_v2)(void* user, uint64_t begin,
                                         uint64_t end, uint32_t slot);
-/** @brief Borrowed Whole CPU service, independently versioned and exact-sized.
- * run is synchronous: all active blocks retire before return, including failure
- * and cancellation. Inputs, user and scratch must remain alive until then.
- * Call run only on the owning callback thread. Nested calls reject. Workers
- * use nearest-even/gradual underflow and restore their floating environments.
- * Host errors are sticky and override enclosing callback success. No output is
- * published by this service. CPU tiled callbacks and GPU callbacks lack it.
- * run partitions [0,count) in grain-sized blocks; grain must be positive.
- * workers=0 uses maximum_workers; otherwise require 1..maximum_workers. A
- * smaller grant limits concurrency, not arithmetic order. count=0 does no work.
- * Before a nonempty run, the host reserves its job record in Host/Metadata and
- * one Entries unit, then charges the existing Root `work=count` and
- * `stages=ceil(count/grain)`. Prior Root work counts toward the limit; failure
- * is returned before block callbacks start. A zero count creates no job and
- * charges neither work nor stages. Structured CPU Result Whole polls receive
- * this borrowed service as `ResultProgramPhase::cpu_parallel`; it schedules
- * blocks inside that poll, not an independent Result dependency graph.
- * The host may execute fewer simultaneous blocks than the grant. No private
- * pool is created. Cancellation is cooperative between blocks; each block must
- * remain finite and poll its supplied invocation cancellation for long work.
+/** @brief Borrowed CPU callback service, independently versioned and
+ * exact-sized. run is synchronous: all active blocks retire before return,
+ * including failure and cancellation. Inputs, user and scratch must remain
+ * alive until then. Call run only on the owning callback thread. Nested calls
+ * reject. Workers inherit their thread floating environment and restore it
+ * after each callback. Each callback must establish any numerical mode required
+ * by its algorithm. Host errors are sticky and override enclosing callback
+ * success. No output is published by this service. CPU tile-worker callbacks
+ * and GPU callbacks lack it. run partitions [0,count) in grain-sized blocks;
+ * grain must be positive. workers=0 uses maximum_workers; otherwise
+ * require 1..maximum_workers. A smaller grant limits concurrency, not
+ * arithmetic order. count=0 does no work. Before a nonempty run, the host
+ * reserves its job record in Host/Metadata and one Entries unit, then charges
+ * the existing Root `work=count` and `stages=ceil(count/grain)`. Prior Root
+ * work counts toward the limit; failure is returned before block callbacks
+ * start. A zero count creates no job and charges neither work nor stages. CPU
+ * Result polls receive this borrowed service as
+ * `ResultProgramPhase::cpu_parallel`; it schedules blocks inside that poll, not
+ * an independent Result dependency graph. The host may execute fewer
+ * simultaneous blocks than the grant. No private pool is created. Cancellation
+ * is cooperative between blocks; each block must remain finite and poll its
+ * supplied invocation cancellation for long work.
  */
-typedef struct ps_cpu_parallel_service_v1 {
+typedef struct ps_cpu_parallel_service_v2 {
   uint32_t struct_size;
   uint32_t abi_version;
   uint32_t maximum_workers;
   void* context;
   int (*run)(void* context, uint64_t count, uint64_t grain, uint32_t workers,
-             ps_cpu_range_callback_v1 callback, void* user);
-} ps_cpu_parallel_service_v1;
+             ps_cpu_range_callback_v2 callback, void* user);
+} ps_cpu_parallel_service_v2;
 #ifdef __cplusplus
 }
 #endif

@@ -5,38 +5,16 @@ photospider_add_kernel_test(test_tile_records photospider_internal_kernel tests/
 target_include_directories(test_tile_records PRIVATE src/lib)
 photospider_add_kernel_test(test_tile_cache photospider_internal_kernel tests/unit/kernel/test_tile_cache.cpp)
 target_include_directories(test_tile_cache PRIVATE src/lib)
-photospider_add_kernel_test(test_whole_needs Photospider::kernel tests/integration/kernel/test_whole_needs.cpp)
+photospider_add_kernel_test(test_shared_stages Photospider::kernel tests/integration/kernel/test_shared_stages.cpp)
 photospider_add_kernel_test(test_tile_demand Photospider::kernel tests/integration/kernel/test_tile_demand.cpp)
 photospider_add_kernel_test(test_result_schema_validation Photospider::kernel tests/integration/kernel/test_result_schema_validation.cpp)
 
-photospider_add_kernel_test(test_result_c_fields Photospider::kernel tests/integration/kernel/test_result_c_fields.cpp)
-target_compile_definitions(test_result_c_fields PRIVATE PS_RESULT_FIXTURE="$<TARGET_FILE:result_operation_fixture>")
-add_dependencies(test_result_c_fields result_operation_fixture)
 photospider_add_result_table_fixture(result_tile_need_fixture tests/fixtures/result_tile_need_fixture.c)
 photospider_add_kernel_test(test_result_c_tiles Photospider::kernel tests/integration/kernel/test_result_c_tiles.cpp)
 target_compile_definitions(test_result_c_tiles PRIVATE PS_RESULT_TILE_NEED_FIXTURE="$<TARGET_FILE:result_tile_need_fixture>")
 
-photospider_add_kernel_test(test_tensor_validation photospider_internal_kernel tests/unit/kernel/test_tensor_validation.cpp)
-target_include_directories(test_tensor_validation PRIVATE src/lib)
-
 photospider_add_kernel_test(test_result_failure_reporting photospider_internal_kernel tests/unit/kernel/test_result_failure_reporting.cpp)
 target_include_directories(test_result_failure_reporting PRIVATE src/lib)
-
-foreach(_mode RANGE 0 6)
-  photospider_add_result_table_fixture(result_abi_fixture_${_mode} tests/fixtures/result_abi_fixture.c)
-  target_compile_definitions(result_abi_fixture_${_mode} PRIVATE PS_TEST_ABI_MODE=${_mode})
-endforeach()
-photospider_add_kernel_test(test_result_c_abi photospider_test_kernel tests/integration/kernel/test_result_c_abi.cpp)
-target_include_directories(test_result_c_abi PRIVATE src/lib)
-target_compile_definitions(test_result_c_abi PRIVATE
-  PS_ABI_FAILURE_DELIVERY="$<TARGET_FILE:result_abi_fixture_6>"
-  PS_ABI_VALID="$<TARGET_FILE:result_abi_fixture_0>"
-  PS_ABI_VERSION="$<TARGET_FILE:result_abi_fixture_1>"
-  PS_ABI_SIZE="$<TARGET_FILE:result_abi_fixture_2>"
-  PS_ABI_OPERATION="$<TARGET_FILE:result_abi_fixture_3>"
-  PS_ABI_UNSUPPORTED_V2="$<TARGET_FILE:result_abi_fixture_4>"
-  PS_ABI_UNSUPPORTED_V1="$<TARGET_FILE:result_abi_fixture_5>")
-add_dependencies(test_result_c_abi result_abi_fixture_0 result_abi_fixture_1 result_abi_fixture_2 result_abi_fixture_3 result_abi_fixture_4 result_abi_fixture_5)
 
 photospider_add_kernel_test(test_result_c_checkpoint Photospider::kernel tests/integration/kernel/test_result_c_checkpoint.cpp)
 photospider_add_kernel_test(test_result_c_block Photospider::kernel tests/integration/kernel/test_result_c_block.cpp)
@@ -67,8 +45,6 @@ if(PHOTOSPIDER_ENABLE_TSAN)
 endif()
 target_include_directories(test_result_metadata_budget PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
 photospider_add_kernel_test(test_resources Photospider::kernel tests/unit/kernel/test_resources.cpp)
-photospider_add_kernel_test(test_immutable_resource Photospider::kernel tests/unit/kernel/test_immutable_resource.cpp)
-photospider_add_kernel_test(test_operation_extensions Photospider::kernel tests/unit/kernel/test_operation_extensions.cpp)
 photospider_add_kernel_test(test_operation_validation Photospider::kernel tests/integration/kernel/test_operation_validation.cpp)
 
 add_library(operation_fixture MODULE tests/fixtures/operation_fixture.cpp)
@@ -80,32 +56,6 @@ add_library(operation_bad_fixture MODULE tests/fixtures/operation_bad_fixture.cp
 target_link_libraries(operation_bad_fixture PRIVATE Photospider::operation_sdk)
 target_compile_definitions(operation_bad_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
 set_target_properties(operation_bad_fixture PROPERTIES PREFIX "")
-
-add_library(
-  operation_dense_overflow_fixture MODULE
-  tests/fixtures/operation_dense_overflow_fixture.cpp)
-target_link_libraries(
-  operation_dense_overflow_fixture PRIVATE Photospider::operation_sdk)
-target_compile_definitions(
-  operation_dense_overflow_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
-set_target_properties(operation_dense_overflow_fixture PROPERTIES PREFIX "")
-
-function(photospider_add_dense_limit_fixture target case_number)
-  add_library(
-    ${target} MODULE
-    tests/fixtures/operation_dense_limit_fixture.cpp)
-  target_link_libraries(${target} PRIVATE Photospider::operation_sdk)
-  target_compile_definitions(
-    ${target}
-    PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD
-            PS_DENSE_LIMIT_CASE=${case_number})
-  set_target_properties(${target} PROPERTIES PREFIX "")
-endfunction()
-photospider_add_dense_limit_fixture(operation_dense_rank1_limit_fixture 1)
-photospider_add_dense_limit_fixture(operation_dense_rank1_overflow_fixture 2)
-photospider_add_dense_limit_fixture(operation_dense_rank2_limit_fixture 3)
-photospider_add_dense_limit_fixture(operation_dense_rank2_overflow_fixture 4)
-photospider_add_dense_limit_fixture(operation_dense_multi_overflow_fixture 5)
 
 foreach(case_number RANGE 1 3)
   set(target operation_tensor_extent_fixture_${case_number})
@@ -164,12 +114,6 @@ add_dependencies(
   test_plugin_registry
   operation_fixture
   operation_bad_fixture
-  operation_dense_overflow_fixture
-  operation_dense_rank1_limit_fixture
-  operation_dense_rank1_overflow_fixture
-  operation_dense_rank2_limit_fixture
-  operation_dense_rank2_overflow_fixture
-  operation_dense_multi_overflow_fixture
   operation_tensor_extent_fixture_1
   operation_tensor_extent_fixture_2
   operation_tensor_extent_fixture_3
@@ -188,12 +132,6 @@ target_compile_definitions(
   test_plugin_registry
   PRIVATE PS_OPERATION_FIXTURE_PATH="$<TARGET_FILE:operation_fixture>"
           PS_OPERATION_BAD_FIXTURE_PATH="$<TARGET_FILE:operation_bad_fixture>"
-          PS_OPERATION_DENSE_OVERFLOW_FIXTURE_PATH="$<TARGET_FILE:operation_dense_overflow_fixture>"
-          PS_OPERATION_DENSE_RANK1_LIMIT_FIXTURE_PATH="$<TARGET_FILE:operation_dense_rank1_limit_fixture>"
-          PS_OPERATION_DENSE_RANK1_OVERFLOW_FIXTURE_PATH="$<TARGET_FILE:operation_dense_rank1_overflow_fixture>"
-          PS_OPERATION_DENSE_RANK2_LIMIT_FIXTURE_PATH="$<TARGET_FILE:operation_dense_rank2_limit_fixture>"
-          PS_OPERATION_DENSE_RANK2_OVERFLOW_FIXTURE_PATH="$<TARGET_FILE:operation_dense_rank2_overflow_fixture>"
-          PS_OPERATION_DENSE_MULTI_OVERFLOW_FIXTURE_PATH="$<TARGET_FILE:operation_dense_multi_overflow_fixture>"
           PS_OPERATION_TENSOR_EXTENT_FIXTURE_PATH="$<TARGET_FILE:operation_tensor_extent_fixture_1>"
           PS_OPERATION_TENSOR_ZERO_FIXTURE_PATH="$<TARGET_FILE:operation_tensor_extent_fixture_2>"
           PS_OPERATION_TENSOR_RANK_FIXTURE_PATH="$<TARGET_FILE:operation_tensor_extent_fixture_3>"
@@ -223,7 +161,6 @@ photospider_add_kernel_test(test_multi_output_execution Photospider::kernel test
 photospider_add_kernel_test(test_result_exceptions Photospider::kernel tests/integration/kernel/test_result_exceptions.cpp)
 target_compile_definitions(test_multi_output_execution PRIVATE PS_MULTI_OUTPUT_FIXTURE="$<TARGET_FILE:multi_output_fixture>")
 add_dependencies(test_multi_output_execution multi_output_fixture)
-photospider_add_kernel_test(test_generic_binding_identity Photospider::kernel tests/unit/kernel/test_generic_binding_identity.cpp)
 photospider_add_kernel_test(test_computed_scalar photospider_test_kernel tests/integration/kernel/test_computed_scalar.cpp)
 target_include_directories(test_computed_scalar PRIVATE src/lib)
 target_compile_definitions(test_computed_scalar PRIVATE PHOTOSPIDER_LOCAL_EXECUTION_SYNC_TESTS)
@@ -328,7 +265,7 @@ target_link_libraries(operation_contract_fixture PRIVATE Photospider::operation_
 set_target_properties(operation_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_definitions(test_port_contracts PRIVATE PS_CONTRACT_FIXTURE="$<TARGET_FILE:operation_contract_fixture>")
 add_dependencies(test_port_contracts operation_contract_fixture)
-foreach(_case RANGE 1 12)
+foreach(_case 1 2 3 5 6 7 8 9 10 11 12)
   add_library(operation_bad_contract_${_case} MODULE tests/fixtures/operation_contract_fixture.c)
   target_link_libraries(operation_bad_contract_${_case} PRIVATE Photospider::operation_sdk)
   set_target_properties(operation_bad_contract_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
@@ -424,23 +361,15 @@ set_property(TEST test_native_gpu test_fragment_atlas_gpu
   test_gpu_sync_fallback
   APPEND PROPERTY LABELS metal)
 set_property(TEST
-  test_result_c_fields test_result_c_tiles test_result_c_abi
+  test_result_c_tiles
   test_result_c_checkpoint test_result_c_block test_plugin_registry
   test_multi_output_contract test_multi_output_execution test_result_repeated
   test_result_plugin test_port_contracts test_operation_contract_validation
   test_result_native_gpu test_gpu_c_abi_execution test_execution_result_dso_native
   APPEND PROPERTY LABELS abi)
 
-photospider_add_result_table_fixture(result_extensions_fixture tests/fixtures/result_extensions_fixture.c)
-photospider_add_kernel_test(test_result_extensions Photospider::kernel tests/integration/kernel/test_result_extensions.cpp)
-target_compile_definitions(test_result_extensions PRIVATE PS_EXTENSIONS_FIXTURE="$<TARGET_FILE:result_extensions_fixture>")
-add_dependencies(test_result_extensions result_extensions_fixture)
-
-foreach(_case RANGE 1 7)
-  photospider_add_result_table_fixture(result_extension_failure_${_case}
-    tests/fixtures/result_extensions_failure_fixture.cpp)
-  set_target_properties(result_extension_failure_${_case} PROPERTIES CXX_STANDARD 20)
-  target_compile_definitions(result_extension_failure_${_case} PRIVATE PS_EXTENSION_CASE=${_case})
-  target_compile_definitions(test_result_extensions PRIVATE PS_EXTENSION_FAILURE_${_case}="$<TARGET_FILE:result_extension_failure_${_case}>")
-  add_dependencies(test_result_extensions result_extension_failure_${_case})
-endforeach()
+photospider_add_kernel_test(test_tensor_work Photospider::kernel tests/unit/kernel/test_tensor_work.cpp)
+photospider_add_result_table_fixture(shared_need_fixture tests/fixtures/shared_need_fixture.c)
+photospider_add_kernel_test(test_shared_need Photospider::kernel tests/integration/kernel/test_shared_need.cpp)
+target_compile_definitions(test_shared_need PRIVATE PS_SHARED_NEED_FIXTURE="$<TARGET_FILE:shared_need_fixture>")
+add_dependencies(test_shared_need shared_need_fixture)

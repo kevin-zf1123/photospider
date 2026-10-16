@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 #include "support/conditional_sum_fixture.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/result_input_fixture.hpp"
@@ -41,7 +42,7 @@ TileSet dirty_tiles(const ExecutionDependencies& dependencies,
                     std::size_t step = 0) {
   ResourceBudget root;
   ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
-  changes.push_back({PlanWorkflowInput{input}, 0, changed, false});
+  changes.push_back({PlanWorkflowInput{input}, 0, 0, changed, false});
   auto dirty = multi_result::take(dependencies.dirty_units(changes));
   std::vector<TileIndex> tiles;
   for (const auto& unit : dirty)
@@ -51,15 +52,15 @@ TileSet dirty_tiles(const ExecutionDependencies& dependencies,
       TileSet::from_indices(root, tiles.data(), tiles.size()));
 }
 template <class T>
-Value values(ElementType type, const std::vector<T>& numbers) {
-  auto writer = MutableValue::allocate({type, {1, numbers.size()}},
+TensorSpan values(ElementType type, const std::vector<T>& numbers) {
+  auto writer = TensorWriter::allocate({type, {1, numbers.size()}},
                                        Region::whole({1, numbers.size()}),
                                        BufferAllocator{})
                     .take_value();
   std::memcpy(writer.data(), numbers.data(), writer.size());
   return std::move(writer).publish().take_value();
 }
-ResultRef source(const ResourceBudget& root, const Value& backing) {
+ResultRef source(const ResourceBudget& root, const TensorSpan& backing) {
   // Immutable caller backing stays in Root Referenced accounting.
   auto schema = result_input_fixture::source_schema(backing);
   schema.tensors[0].layout.spatial = true;
@@ -112,7 +113,7 @@ int generations() {
   auto demand = opened.take_value();
   PS_CHECK(demand.generation().value() == 1);
   const auto q = point(0).unite(point(4), ResourceBudget{}).take_value();
-  DemandQuery query{{"sum", TileRequest{false, q}}};
+  DemandQuery query{{"sum", TileRequest{{{0, q}}}}};
   auto before = demand.request(query);
   PS_REQUIRE_OK(before);
   PS_CHECK(before.ok() && before.value().generation == 1);
@@ -146,8 +147,8 @@ int generations() {
   if (!edit.ok())
     std::cerr << edit.status().message << '\n';
   PS_CHECK(edit.ok() && edit.value().generation == 2 &&
-           edit.value().coverage.at("sum") == q);
-  PS_CHECK(edit.value().potential_dirty.at("sum") == q);
+           edit.value().coverage.at("sum").members.at(0) == q);
+  PS_CHECK(edit.value().potential_dirty.at("sum").members.at(0) == q);
   auto same_value = demand.request(query);
   PS_CHECK(same_value.ok() &&
            result_input_fixture::read(same_value.value().results.at("sum"),
@@ -161,7 +162,8 @@ int generations() {
   bindings.inputs[0].result =
       source(root, values<double>(ElementType::Float64, {1, 2, 3, 9, 5}));
   auto changed = demand.replace_bindings(bindings);
-  PS_CHECK(changed.ok() && changed.value().potential_dirty.at("sum") == q);
+  PS_CHECK(changed.ok() &&
+           changed.value().potential_dirty.at("sum").members.at(0) == q);
   auto fresh = demand.request(query);
   PS_CHECK(fresh.ok() &&
            result_input_fixture::read(fresh.value().results.at("sum"), {0, 4},
@@ -193,7 +195,7 @@ int generations() {
   PS_CHECK(demand.release(query).code == ErrorCode::NotFound);
   auto no_subscriptions = demand.replace_bindings(bindings);
   PS_CHECK(no_subscriptions.ok() && no_subscriptions.value().coverage.empty());
-  auto empty = demand.request({{"sum", TileRequest{false, TileSet{}}}});
+  auto empty = demand.request({{"sum", TileRequest{}}});
   PS_CHECK(empty.ok() && empty.value()
                              .results.at("sum")
                              .descriptor()
@@ -243,23 +245,23 @@ SchemaTemplate tensor_schema(ElementType type = ElementType::Float64,
   return schema;
 }
 ExecutionBinding binding(const ExecutionContext& context, std::string name,
-                         const Value& backing) {
+                         const TensorSpan& backing) {
   return {std::move(name),
           source(multi_result::take(context.resource_budget()), backing)};
 }
 ExecutionBinding snapshot_binding(const ExecutionContext& context,
                                   std::string name,
                                   const InputSnapshot& snapshot,
-                                  const Value& prototype) {
+                                  const TensorSpan& prototype) {
   std::vector<std::uint8_t> bytes(prototype.bytes().size());
   multi_result::check(
       snapshot.read(prototype.region(), bytes.data(), bytes.size()));
   auto backing = multi_result::take(
-      Value::create(prototype.descriptor(), prototype.region(),
-                    prototype.layout(), std::move(bytes)));
+      TensorSpan::create(prototype.descriptor(), prototype.region(),
+                         prototype.layout(), std::move(bytes)));
   return binding(context, std::move(name), backing);
 }
-WorkflowDocument identity_document(const Value& value) {
+WorkflowDocument identity_document(const TensorSpan& value) {
   WorkflowDocument document;
   result_input_fixture::declare_sources(&document, {value});
   for (auto& input : document.inputs) {
@@ -361,7 +363,7 @@ OperationDefinition copy_definition(const std::string& key,
   op.key = key;
   op.traits.input_count = 1;
   op.traits.input_schema.resize(1);
-  op.traits.input_schema[0].kind = OperationPortKind::Result;
+
   op.traits.input_schema[0].rank = 2;
   op.traits.outputs[0] = multi_result::output("value", tensor_schema());
   op.traits.outputs[0].continuation_bytes = state;
@@ -388,8 +390,18 @@ std::shared_ptr<OperationRegistry> gated_registry(
   auto op = copy_definition("wait", sizeof(GatedProgram));
   op.traits.supports_gpu = gpu_fallback;
   op.traits.allows_cpu_fallback = gpu_fallback;
-  op.traits.outputs[0].region_rule =
-      whole ? OperationRegionRule::Whole : OperationRegionRule::Tiled;
+  if (whole) {
+    op.specialize_metadata = [](const std::vector<OperationMetadata>& inputs,
+                                const std::map<std::string, ParameterValue>&) {
+      auto schema = std::make_shared<SchemaTemplate>(*inputs[0].result_schema);
+      schema->tensors[0].layout.spatial = false;
+      schema->tensors[0].atomic_trailing_axes = 2;
+      OperationOutputSpecialization output;
+      output.metadata.result_schema = std::move(schema);
+      return Result<std::vector<OperationOutputSpecialization>>(
+          std::vector<OperationOutputSpecialization>{std::move(output)});
+    };
+  }
   op.start_result = [gate, whole, staged](const ResultProgramQuery& query,
                                           const BufferAllocator& allocator) {
     if (gate && query.tensor_outputs) {
@@ -412,13 +424,13 @@ std::shared_ptr<OperationRegistry> gated_registry(
     effect.traits.workspace_bytes = 32;
     effect.traits.outputs[0] = multi_result::output("value", tensor_schema());
     effect.traits.outputs[0].continuation_bytes = sizeof(GatedProgram);
-    effect.traits.outputs[0].region_rule = OperationRegionRule::Whole;
     effect.start_result = [effects](const ResultProgramQuery&,
                                     const BufferAllocator& allocator) {
       return ResultContinuation::make<GatedProgram>(allocator, nullptr, false,
                                                     false, effects);
     };
-    multi_result::check(registry->register_operation(std::move(effect)));
+    multi_result::check(registry->register_operation(
+        sdk::with_whole_stage(std::move(effect), 1000000)));
   }
   multi_result::check(registry->register_operation(std::move(op)));
   multi_result::check(registry->freeze());
@@ -446,14 +458,14 @@ int edit_and_cancel() {
       {binding(*context, "x", values<double>(ElementType::Float64, {1, 2}))}};
   auto demand = multi_result::take(context->open_demand(plan, bindings));
   gate->open();
-  PS_CHECK(demand.request({{"y", TileRequest{false, point(0, 2)}}}).ok());
+  PS_CHECK(demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}}).ok());
   {
     std::lock_guard<std::mutex> lock(gate->mutex);
     gate->entered = 0;
     gate->release = false;
   }
   auto old = std::async(std::launch::async, [&] {
-    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+    return demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}});
   });
   PS_CHECK(gate->await(1));
   bindings.inputs[0].result =
@@ -462,10 +474,11 @@ int edit_and_cancel() {
           .result;
   auto replaced = demand.replace_bindings(bindings);
   PS_CHECK(replaced.ok() && replaced.value().generation == 2);
-  PS_CHECK(replaced.value().potential_dirty.at("y") == point(0, 2));
+  PS_CHECK(replaced.value().potential_dirty.at("y").members.at(0) ==
+           point(0, 2));
   gate->open();
   PS_CHECK(old.get().status().code == ErrorCode::Stale && gate->active == 0);
-  auto next = demand.request({{"y", TileRequest{false, point(0, 2)}}});
+  auto next = demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}});
   PS_CHECK(next.ok() && next.value().generation == 2);
   double value = 0;
   PS_CHECK(result_input_fixture::read(next.value().results.at("y"), {0, 0},
@@ -481,10 +494,10 @@ int edit_and_cancel() {
   }
   CancellationSource cancel;
   auto a = std::async(std::launch::async, [&] {
-    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+    return demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}});
   });
   auto b = std::async(std::launch::async, [&] {
-    return demand.request({{"y", TileRequest{false, point(1, 2)}}},
+    return demand.request({{"y", TileRequest{{{0, point(1, 2)}}}}},
                           cancel.token());
   });
   PS_CHECK(gate->await(2));
@@ -500,14 +513,14 @@ int edit_and_cancel() {
     gate->release = false;
   }
   auto pending = std::async(std::launch::async, [&] {
-    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+    return demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}});
   });
   PS_CHECK(gate->await(1));
   context.reset();
   PS_CHECK(pending.get().status().code == ErrorCode::Cancelled &&
            gate->active == 0);
   PS_CHECK(
-      demand.request({{"y", TileRequest{false, point(0, 2)}}}).status().code ==
+      demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}}).status().code ==
       ErrorCode::Cancelled);
   return 0;
 }
@@ -564,22 +577,22 @@ int isolation_and_limits() {
   auto demand = context.open_demand(plan, bindings).take_value();
   PS_CHECK(context.open_demand(plan, bindings).status().code ==
            ErrorCode::ResourceExhausted);
-  PS_CHECK(demand.request({{"y", TileRequest{false, point(0, 2)}}}).ok());
+  PS_CHECK(demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}}).ok());
   PS_CHECK(
-      demand.request({{"y", TileRequest{false, point(1, 2)}}}).status().code ==
+      demand.request({{"y", TileRequest{{{0, point(1, 2)}}}}}).status().code ==
       ErrorCode::OperationFailed);
   PS_CHECK(
-      demand.request({{"y", TileRequest{false, all_tiles(2)}}}).status().code ==
+      demand.request({{"y", TileRequest{{{0, all_tiles(2)}}}}}).status().code ==
       ErrorCode::OperationFailed);
-  PS_CHECK(demand.request({{"y", TileRequest{false, point(0, 2)}}}).ok());
+  PS_CHECK(demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}}).ok());
   auto frozen = demand.freeze().take_value();
   PS_CHECK(graph.replace(gate_document()) > 0);
-  PS_CHECK(demand.request({{"y", TileRequest{false, point(0, 2)}}}).ok());
+  PS_CHECK(demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}}).ok());
   PS_CHECK(demand.cancel());
   auto fresh = context.open_demand(frozen.plan(), bindings, DemandConfig{1});
   PS_CHECK(fresh.ok());
   PS_CHECK(fresh.value()
-               .request({{"y", TileRequest{false, point(0, 2)}}})
+               .request({{"y", TileRequest{{{0, point(0, 2)}}}}})
                .status()
                .code == ErrorCode::ResourceExhausted);
   return 0;
@@ -622,13 +635,22 @@ int snapshot_replacement() {
   ExecutionContext context(registry, {1, false, 8, 16384});
   for (auto type : {ElementType::UInt8, ElementType::Int64,
                     ElementType::Float32, ElementType::Float64}) {
-    auto writer = MutableValue::allocate({type, {1, 3}}, Region::whole({1, 3}),
+    auto writer = TensorWriter::allocate({type, {1, 3}}, Region::whole({1, 3}),
                                          BufferAllocator{})
                       .take_value();
     std::memset(writer.data(), 0, writer.size());
     auto initial = std::move(writer).publish().take_value();
     InputSnapshotStore store({256, 1});
-    auto snapshot = store.import_value(initial).take_value();
+    auto snapshot =
+        store
+            .import_tensor(Tensor::create(initial.descriptor(),
+                                          Footprint::from_regions(
+                                              initial.descriptor().shape,
+                                              {initial.region()})
+                                              .take_value(),
+                                          {initial})
+                               .take_value())
+            .take_value();
     auto document = identity_document(initial);
     document.nodes[0].operation = "test.snapshot_identity";
     GraphContext graph(document);
@@ -642,35 +664,45 @@ int snapshot_replacement() {
     auto demand = context.open_demand(plan, bindings).take_value();
     const auto q =
         point(0, 3).unite(point(2, 3), ResourceBudget{}).take_value();
-    PS_CHECK(demand.request({{"result", TileRequest{false, q}}}).ok());
+    PS_CHECK(demand.request({{"result", TileRequest{{{0, q}}}}}).ok());
     auto frozen = demand.freeze().take_value();
     for (auto at : {0U, 2U}) {
       auto patch =
-          MutableValue::allocate(initial.descriptor(),
+          TensorWriter::allocate(initial.descriptor(),
                                  Region({{0, 1}, {at, 1}}), BufferAllocator{})
               .take_value();
       // Includes nonfinite generic float payloads; dirty compares bits.
       std::memset(patch.data(), 0xff, patch.size());
-      snapshot = store.patch(snapshot, std::move(patch).publish().take_value())
-                     .take_value();
+      auto published_patch = std::move(patch).publish().take_value();
+      snapshot =
+          store
+              .patch(snapshot,
+                     Tensor::create(published_patch.descriptor(),
+                                    Footprint::from_regions(
+                                        published_patch.descriptor().shape,
+                                        {published_patch.region()})
+                                        .take_value(),
+                                    {published_patch})
+                         .take_value())
+              .take_value();
       bindings.inputs[0] =
           snapshot_binding(context, "image", snapshot, initial);
       auto changed = demand.replace_bindings(bindings, {2, {}});
       PS_CHECK(changed.ok());
-      PS_CHECK(changed.value().potential_dirty.at("result") ==
+      PS_CHECK(changed.value().potential_dirty.at("result").members.at(0) ==
                (at == 0 ? point(0, 3) : q));
     }
-    auto final = demand.request({{"result", TileRequest{false, q}}});
+    auto final = demand.request({{"result", TileRequest{{{0, q}}}}});
     PS_CHECK(final.ok());
     std::uint8_t bytes[8]{};
-    const auto width = Value::element_size(type);
+    const auto width = TensorSpan::element_size(type);
     PS_CHECK(result_input_fixture::read(final.value().results.at("result"),
                                         {0, 2}, bytes, width)
                  .ok());
     for (unsigned i = 0; i < width; ++i)
       PS_CHECK(bytes[i] == 0xff);
     auto old =
-        context.execute_fragments(frozen, {{"result", TileRequest{false, q}}});
+        context.execute_fragments(frozen, {{"result", TileRequest{{{0, q}}}}});
     PS_CHECK(old.ok() &&
              result_input_fixture::read(old.value().results.at("result"),
                                         {0, 2}, bytes, width)
@@ -680,11 +712,6 @@ int snapshot_replacement() {
     auto same = demand.replace_bindings(bindings, {2, {}});
     PS_CHECK(same.ok() && same.value().potential_dirty.at("result").empty());
   }
-  auto image =
-      Value::create({ElementType::Float32, {1, 1, 4}}, Region::whole({1, 1, 4}),
-                    {0, {16, 16, 4}}, std::vector<std::uint8_t>(16),
-                    {encode_semantic(rgba_semantics()).take_value()});
-  PS_CHECK(image.status().code == ErrorCode::TypeMismatch);
   return 0;
 }
 int concurrent_ancestors() {
@@ -710,12 +737,12 @@ int concurrent_ancestors() {
             .take_value();
     CancellationSource stop_outer, stop_inner;
     auto outer = std::async(std::launch::async, [&] {
-      return demand.request({{"outer", TileRequest{false, point(0, 2)}}},
+      return demand.request({{"outer", TileRequest{{{0, point(0, 2)}}}}},
                             stop_outer.token());
     });
     PS_CHECK(gate->await(1));
     auto inner = std::async(std::launch::async, [&] {
-      return demand.request({{"inner", TileRequest{false, point(0, 2)}}},
+      return demand.request({{"inner", TileRequest{{{0, point(0, 2)}}}}},
                             stop_inner.token());
     });
     // Both independent runs reach their input callback before cancellation.
@@ -795,12 +822,12 @@ int auxiliary_cancellation() {
   ExecutionOptions options;
   options.dependencies.sets.cancellation = auxiliary.token();
   auto a = std::async(std::launch::async, [&] {
-    return demand.request({{"y", TileRequest{false, point(0, 2)}}}, {},
+    return demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}}, {},
                           options);
   });
   PS_CHECK(gate->await(1));
   auto b = std::async(std::launch::async, [&] {
-    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+    return demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}});
   });
   PS_CHECK(gate->await(2));
   auxiliary.cancel();
@@ -828,11 +855,11 @@ int impure_ancestor() {
   ExecutionContext context(registry, {2, false, 8, 4096});
   auto demand = context.open_demand(plan, {}).take_value();
   auto a = std::async(std::launch::async, [&] {
-    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+    return demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}});
   });
   PS_CHECK(gate->await(1));
   auto b = std::async(std::launch::async, [&] {
-    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+    return demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}});
   });
   PS_CHECK(gate->await(2));
   // Both callbacks overlap; serialize publication because the handle
@@ -879,11 +906,12 @@ int concurrent_fallback() {
           .take_value();
   CancellationSource stop;
   auto owner = std::async(std::launch::async, [&] {
-    return demand.request({{"y", TileRequest{true, {}}}}, stop.token());
+    return demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}},
+                          stop.token());
   });
   PS_CHECK(gate->await(1));
   auto other = std::async(std::launch::async, [&] {
-    return demand.request({{"y", TileRequest{true, {}}}});
+    return demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}});
   });
   PS_CHECK(gate->await(2));
   stop.cancel();
@@ -900,7 +928,7 @@ int concurrent_fallback() {
   PS_CHECK(completed.value().diagnostics.selected_backends.at({2, 0}) ==
            Backend::Cpu);
   PS_CHECK(context.cache_statistics().retained_bytes == 0);
-  PS_CHECK(demand.request({{"y", TileRequest{true, {}}}})
+  PS_CHECK(demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}})
                .value()
                .diagnostics.cache_hits == 0);
   return 0;
@@ -952,7 +980,7 @@ int protocol_first_cause() {
               plan, {{binding(context, "x",
                               values<double>(ElementType::Float64, {7, 9}))}})
           .take_value();
-  auto failed = demand.request({{"y", TileRequest{false, point(0, 2)}}},
+  auto failed = demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}},
                                probe->cancellation.token());
   PS_CHECK(!failed.ok() && failed.status().code == ErrorCode::InvalidArgument &&
            failed.status().reason == FailureReason::UnauthorizedRead &&
@@ -980,7 +1008,7 @@ int cancelled_run_and_frozen() {
       {binding(context, "x", values<double>(ElementType::Float64, {7, 9}))}};
   auto demand = context.open_demand(plan, bindings).take_value();
   CancellationSource stop;
-  DemandQuery query{{"y", TileRequest{false, point(0, 2)}}};
+  DemandQuery query{{"y", TileRequest{{{0, point(0, 2)}}}}};
   auto p0 = std::async(std::launch::async,
                        [&] { return demand.request(query, stop.token()); });
   PS_CHECK(gate->await(1));
@@ -1075,7 +1103,7 @@ int cache_work_and_epoch() {
   options.maximum_dependency_work = 16 * 1048576;
   options.maximum_dependency_cache_work = 1;
   auto bounded =
-      demand.request({{"y", TileRequest{false, point(0, 2)}}}, {}, options);
+      demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}}, {}, options);
   PS_CHECK(bounded.ok() && gate->entered == 64);
   PS_CHECK(bounded.value().diagnostics.dependency_cache_records_visited == 0 &&
            bounded.value().diagnostics.dependency_cache_work == 0);
@@ -1098,21 +1126,21 @@ int cache_work_and_epoch() {
     gate->entered = 0;
   }
   auto pending = std::async(std::launch::async, [&] {
-    return short_demand.request({{"y", TileRequest{false, point(0, 2)}}});
+    return short_demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}});
   });
   PS_CHECK(gate->await(1));
   context.clear_result_cache();
   gate->open();
   PS_CHECK(pending.get().ok() &&
            context.cache_statistics().retained_bytes == 0);
-  PS_CHECK(short_demand.request({{"y", TileRequest{false, point(0, 2)}}}).ok());
+  PS_CHECK(short_demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}}).ok());
   PS_CHECK(gate->entered == 2);
   PS_CHECK(short_demand.replace_bindings(short_bindings).ok());
-  PS_CHECK(short_demand.request({{"y", TileRequest{false, point(0, 2)}}}).ok());
+  PS_CHECK(short_demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}}).ok());
   PS_CHECK(gate->entered == 2);
   return 0;
 }
-int cached_whole_ancestor() {
+int cached_atomic_ancestor() {
   auto gate = std::make_shared<Gate>();
   gate->open();
   auto registry = gated_registry(gate, false, {}, true);
@@ -1129,13 +1157,13 @@ int cached_whole_ancestor() {
   ExecutionBindings bindings{
       {binding(context, "x", values<double>(ElementType::Float64, {7, 9}))}};
   auto demand = context.open_demand(plan, bindings).take_value();
-  auto first = demand.request({{"y", TileRequest{true, {}}}});
+  auto first = demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}});
   PS_CHECK(first.ok() && gate->entered == 2);
-  auto reused = demand.request({{"y", TileRequest{true, {}}}});
+  auto reused = demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}});
   PS_CHECK(reused.ok() && gate->entered == 2 &&
            reused.value().diagnostics.operation_timings.empty());
   PS_CHECK(demand.replace_bindings(bindings).ok());
-  auto warm = demand.request({{"y", TileRequest{true, {}}}});
+  auto warm = demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}});
   PS_CHECK(warm.ok() && gate->entered == 2);
   PS_CHECK(warm.value().diagnostics.operation_timings.empty());
   PS_CHECK(multi_result::take(warm.value().dependencies.tile_record({0, 0, 0}))
@@ -1146,7 +1174,7 @@ int cached_whole_ancestor() {
                                       &value, 8)
                .ok() &&
            value == 7);
-  // The root's 16-byte result survives while its Whole ancestor's pixels
+  // The root's 16-byte result survives while its atomic ancestor's pixels
   // are evicted. Importing its evidence must not block a later actual read.
   document.outputs = {{"a_desc", 2, "value"}, {"z_ancestor", 1, "value"}};
   GraphContext named_graph(document);
@@ -1159,7 +1187,7 @@ int cached_whole_ancestor() {
   ExecutionBindings tight_bindings{
       {binding(tight, "x", values<double>(ElementType::Float64, {7, 9}))}};
   auto query = tight.open_demand(named_plan, tight_bindings).take_value();
-  PS_CHECK(query.request({{"a_desc", TileRequest{true, {}}}}).ok());
+  PS_CHECK(query.request({{"a_desc", TileRequest{{{0, point(0, 2)}}}}}).ok());
   // A -> B -> C: the 16-byte LRU retains C and evicts B pixels. The
   // active C subscription must still transpose an A edit through B evidence.
   const auto old_bundle = query.freeze().take_value();
@@ -1167,15 +1195,16 @@ int cached_whole_ancestor() {
       binding(tight, "x", values<double>(ElementType::Float64, {11, 9}));
   auto change = query.replace_bindings(tight_bindings);
   PS_CHECK(change.ok() &&
-           change.value().potential_dirty.at("a_desc") == point(0, 2));
-  auto updated = query.request({{"a_desc", TileRequest{true, {}}}});
+           change.value().potential_dirty.at("a_desc").members.at(0) ==
+               point(0, 2));
+  auto updated = query.request({{"a_desc", TileRequest{{{0, point(0, 2)}}}}});
   PS_CHECK(updated.ok() &&
            result_input_fixture::read(updated.value().results.at("a_desc"),
                                       {0, 0}, &value, 8)
                .ok() &&
            value == 11);
-  auto pinned =
-      tight.execute_fragments(old_bundle, {{"a_desc", TileRequest{true, {}}}});
+  auto pinned = tight.execute_fragments(
+      old_bundle, {{"a_desc", TileRequest{{{0, point(0, 2)}}}}});
   PS_CHECK(pinned.ok() &&
            result_input_fixture::read(pinned.value().results.at("a_desc"),
                                       {0, 0}, &value, 8)
@@ -1184,11 +1213,11 @@ int cached_whole_ancestor() {
   // Restore the current descendant to the single-entry LRU before asking for
   // both nodes; the old frozen computation must not replace current evidence.
   PS_CHECK(query.replace_bindings(tight_bindings).ok());
-  PS_CHECK(query.request({{"a_desc", TileRequest{true, {}}}}).ok());
+  PS_CHECK(query.request({{"a_desc", TileRequest{{{0, point(0, 2)}}}}}).ok());
   const auto previous = gate->entered;
   PS_CHECK(query.replace_bindings(tight_bindings).ok());
-  auto both = query.request({{"a_desc", TileRequest{true, {}}},
-                             {"z_ancestor", TileRequest{true, {}}}});
+  auto both = query.request({{"a_desc", TileRequest{{{0, point(0, 2)}}}},
+                             {"z_ancestor", TileRequest{{{0, point(0, 2)}}}}});
   PS_CHECK(both.ok() && gate->entered == previous + 1);
   PS_CHECK(result_input_fixture::read(both.value().results.at("z_ancestor"),
                                       {0, 1}, &value, 8)
@@ -1200,7 +1229,7 @@ int cached_whole_ancestor() {
   // A clear invalidates even an owning candidate whose verification is active.
   // Restore C to the single-entry LRU, then block its mandatory cold B replay.
   PS_CHECK(query.replace_bindings(tight_bindings).ok());
-  PS_CHECK(query.request({{"a_desc", TileRequest{true, {}}}}).ok());
+  PS_CHECK(query.request({{"a_desc", TileRequest{{{0, point(0, 2)}}}}}).ok());
   PS_CHECK(tight.cache_statistics().retained_bytes == 16);
   {
     std::lock_guard<std::mutex> lock(gate->mutex);
@@ -1211,7 +1240,7 @@ int cached_whole_ancestor() {
   PS_CHECK(query.replace_bindings(tight_bindings).ok());
   const auto starts_before = gate->wide_starts.load();
   auto verifying = std::async(std::launch::async, [&] {
-    return query.request({{"a_desc", TileRequest{true, {}}}});
+    return query.request({{"a_desc", TileRequest{{{0, point(0, 2)}}}}});
   });
   PS_CHECK(gate->await(1));
   // Only B has entered its factory: C is still verifying its cached candidate.
@@ -1241,17 +1270,17 @@ int cache_snapshot_bits() {
   auto registry = snapshot_registry();
   for (auto type : {ElementType::UInt8, ElementType::Int64,
                     ElementType::Float32, ElementType::Float64}) {
-    const auto width = Value::element_size(type);
+    const auto width = TensorSpan::element_size(type);
     std::vector<std::uint8_t> bytes(width * 3);
     for (std::size_t i = 0; i < bytes.size(); ++i)
       bytes[i] = static_cast<std::uint8_t>(255 - i);
-    auto reversed = Value::create({type, {1, 3}}, Region::whole({1, 3}),
-                                  {width * 2,
-                                   {static_cast<std::int64_t>(width * 3),
-                                    -static_cast<std::int64_t>(width)}},
-                                  bytes)
+    auto reversed = TensorSpan::create({type, {1, 3}}, Region::whole({1, 3}),
+                                       {width * 2,
+                                        {static_cast<std::int64_t>(width * 3),
+                                         -static_cast<std::int64_t>(width)}},
+                                       bytes)
                         .take_value();
-    auto writer = MutableValue::allocate({type, {1, 3}}, Region::whole({1, 3}),
+    auto writer = TensorWriter::allocate({type, {1, 3}}, Region::whole({1, 3}),
                                          BufferAllocator{})
                       .take_value();
     for (std::size_t i = 0; i < 3; ++i)
@@ -1272,16 +1301,24 @@ int cache_snapshot_bits() {
             .take_value();
     const auto q =
         point(0, 3).unite(point(2, 3), ResourceBudget{}).take_value();
-    auto initial = demand.request({{"result", TileRequest{false, q}}});
+    auto initial = demand.request({{"result", TileRequest{{{0, q}}}}});
     PS_CHECK(initial.ok() && initial.value().diagnostics.cache_hits == 0);
     InputSnapshotStore store({1024, 1});
     auto snapshot = std::make_shared<const InputSnapshot>(
-        store.import_value(reversed).take_value());
+        store
+            .import_tensor(Tensor::create(reversed.descriptor(),
+                                          Footprint::from_regions(
+                                              reversed.descriptor().shape,
+                                              {reversed.region()})
+                                              .take_value(),
+                                          {reversed})
+                               .take_value())
+            .take_value());
     auto edited = demand.replace_bindings(
         {{snapshot_binding(context, "image", *snapshot, packed)}});
     PS_CHECK(edited.ok() &&
              edited.value().potential_dirty.at("result").empty());
-    auto same = demand.request({{"result", TileRequest{false, q}}});
+    auto same = demand.request({{"result", TileRequest{{{0, q}}}}});
     PS_CHECK(same.ok() && same.value().diagnostics.cache_hits > 0);
     for (auto at : {0U, 2U}) {
       std::uint8_t observed[8]{};
@@ -1319,7 +1356,7 @@ int content_cache() {
                values<std::int64_t>(ElementType::Int64, {0, 0, 0, 0, 0}))}};
   auto demand = context.open_demand(plan, bindings).take_value();
   const auto q = point(0).unite(point(4), ResourceBudget{}).take_value();
-  DemandQuery query{{"sum", TileRequest{false, q}}};
+  DemandQuery query{{"sum", TileRequest{{{0, q}}}}};
   auto first = demand.request(query);
   PS_CHECK(first.ok() && first.value().diagnostics.cache_hits == 0);
   auto frozen = context.freeze(plan, bindings).take_value();
@@ -1345,8 +1382,8 @@ int content_cache() {
   // Cached and freshly computed rows must merge under the current identity.
   auto mixed = demand.request(
       {{"sum",
-        TileRequest{false,
-                    point(0).unite(point(1), ResourceBudget{}).take_value()}}});
+        TileRequest{
+            {{0, point(0).unite(point(1), ResourceBudget{}).take_value()}}}}});
   PS_CHECK(mixed.ok() && mixed.value().diagnostics.cache_hits > 0);
   bindings.inputs[1].result =
       binding(context, bindings.inputs[1].name,
@@ -1391,10 +1428,10 @@ int content_cache() {
        binding(small, "control",
                values<std::int64_t>(ElementType::Int64, {0, 0, 0, 1, 0}))}};
   auto limited = small.open_demand(plan, small_bindings).take_value();
-  PS_CHECK(limited.request({{"sum", TileRequest{false, point(0)}}}).ok());
-  PS_CHECK(limited.request({{"sum", TileRequest{false, point(1)}}}).ok());
-  PS_CHECK(limited.request({{"sum", TileRequest{false, point(2)}}}).ok());
-  auto all = limited.request({{"sum", TileRequest{false, all_tiles(5)}}});
+  PS_CHECK(limited.request({{"sum", TileRequest{{{0, point(0)}}}}}).ok());
+  PS_CHECK(limited.request({{"sum", TileRequest{{{0, point(1)}}}}}).ok());
+  PS_CHECK(limited.request({{"sum", TileRequest{{{0, point(2)}}}}}).ok());
+  auto all = limited.request({{"sum", TileRequest{{{0, all_tiles(5)}}}}});
   PS_CHECK(all.ok() && small.cache_statistics().evictions > 0);
   PS_CHECK(dirty_tiles(all.value().dependencies, 1, point(3), 0) ==
            all_tiles(5));
@@ -1405,7 +1442,8 @@ int content_cache() {
   small_bindings.inputs[0] = binding(
       small, "data", values<double>(ElementType::Float64, {1, 2, 777, 10, 5}));
   auto edit = limited.replace_bindings(small_bindings);
-  PS_CHECK(edit.ok() && edit.value().potential_dirty.at("sum") == all_tiles(5));
+  PS_CHECK(edit.ok() && edit.value().potential_dirty.at("sum").members.at(0) ==
+                            all_tiles(5));
   return 0;
 }
 int structured_content_cache() {
@@ -1430,7 +1468,7 @@ int structured_content_cache() {
       {{"data", data({1, 2, 3, 0, 5})}, {"control", control({0, 0, 0, 0, 0})}}};
   auto demand = context.open_demand(plan, bindings).take_value();
   const auto q = point(0).unite(point(4), ResourceBudget{}).take_value();
-  DemandQuery query{{"sum", TileRequest{false, q}}};
+  DemandQuery query{{"sum", TileRequest{{{0, q}}}}};
   std::uint64_t first_id = 0;
   const void* first_storage = nullptr;
   {
@@ -1585,7 +1623,7 @@ int concurrent_failure_isolation() {
                values<double>(ElementType::Float64,
                               {1, std::numeric_limits<double>::infinity()}))}};
   auto demand = context.open_demand(plan, bindings).take_value();
-  const DemandQuery wide{{"y", TileRequest{false, all_tiles(2)}}};
+  const DemandQuery wide{{"y", TileRequest{{{0, all_tiles(2)}}}}};
   auto producer =
       std::async(std::launch::async, [&] { return demand.request(wide); });
   PS_CHECK(gate->await(1));
@@ -1593,7 +1631,7 @@ int concurrent_failure_isolation() {
       std::async(std::launch::async, [&] { return demand.request(wide); });
   PS_CHECK(gate->await(2));
   auto narrow = std::async(std::launch::async, [&] {
-    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+    return demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}});
   });
   PS_CHECK(gate->await(3));
   gate->open();
@@ -1625,11 +1663,11 @@ int concurrent_failure_isolation() {
           .result;
   PS_CHECK(demand.replace_bindings(bindings).ok());
   auto later_atom = std::async(std::launch::async, [&] {
-    return demand.request({{"y", TileRequest{false, point(1, 2)}}});
+    return demand.request({{"y", TileRequest{{{0, point(1, 2)}}}}});
   });
   PS_CHECK(gate->await(1));
   auto ordered = std::async(std::launch::async, [&] {
-    return demand.request({{"y", TileRequest{false, all_tiles(2)}}});
+    return demand.request({{"y", TileRequest{{{0, all_tiles(2)}}}}});
   });
   PS_CHECK(gate->await(2));
   gate->allow(1);
@@ -1657,6 +1695,6 @@ int main() {
   PS_CHECK(cache_work_and_epoch() == 0);
   PS_CHECK(cache_snapshot_bits() == 0);
   PS_CHECK(cancelled_run_and_frozen() == 0);
-  PS_CHECK(cached_whole_ancestor() == 0);
+  PS_CHECK(cached_atomic_ancestor() == 0);
   return 0;
 }

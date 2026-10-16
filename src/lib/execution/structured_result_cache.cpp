@@ -61,6 +61,7 @@ std::string StructuredResultCache::completed_key(
   hash.integer(query.output_index);
   hash.integer(static_cast<std::uint32_t>(ctx.plan.steps()[index].backend));
   hash.integer(query.tile_extent);
+  hash.integer(query.tensor_slot);
   hash.integer(query.tile_unit);
   return hash.finish();
 }

@@ -249,7 +249,6 @@ Result<OperationPreparation> prepare(
           --structural.width_axis;
       }
       structural.channel_axis.reset();
-      structural.groups.clear();
       if (image_layout &&
           (image_layout->height_axis != structural.height_axis ||
            image_layout->width_axis != structural.width_axis))
@@ -692,7 +691,7 @@ OperationDefinition definition(const std::string& key, int member,
   op.key = key;
   auto& t = op.traits;
   OperationPortConstraint port;
-  port.kind = OperationPortKind::Result;
+
   port.element_type_mask = 127;
   t.input_schema = {port};
   t.repeated_minimum = 1;
@@ -722,7 +721,6 @@ OperationDefinition definition(const std::string& key, int member,
   out.key = "values";
   out.output_schema = port;
   out.result_schema = tensor_ops::scalar_schema();
-  out.region_rule = OperationRegionRule::Tiled;
   out.continuation_bytes = sizeof(State);
   out.maximum_dependency_stages = 17;
   op.prepare_static = [member, profile](const auto& inputs,
@@ -751,7 +749,7 @@ Result<std::vector<std::uint8_t>> literal_bytes(const Params& params) {
       type != ElementType::Float64)
     return Answer(core_internal::invalid_schema_domain(
         "unsupported typed literal dtype"));
-  const auto width = Value::element_size(type);
+  const auto width = TensorSpan::element_size(type);
   const auto& bits = std::get<std::string>(params.at("bits"));
   if (!width || bits.size() != width * 2)
     return Answer(core_internal::invalid_schema_domain(
@@ -782,10 +780,9 @@ OperationDefinition scalar_literal(const std::string& key,
                         {"bits", OperationParameterType::String}};
   auto& out = t.outputs[0];
   out.key = "values";
-  out.output_schema.kind = OperationPortKind::Result;
+
   out.output_schema.element_type_mask = 127;
   out.result_schema = tensor_ops::scalar_schema();
-  out.region_rule = OperationRegionRule::Whole;
   out.continuation_bytes = sizeof(ScalarState);
   out.maximum_dependency_stages = 1;
   op.prepare_static =
@@ -957,7 +954,7 @@ Result<WorkflowNodeOutput> edit_channels(
     const auto& literal = *e.literal;
     if (literal.dtype != base.descriptor.element_type)
       return Answer(mismatch("FMT-03 literal dtype differs from base"));
-    const auto width = Value::element_size(literal.dtype);
+    const auto width = TensorSpan::element_size(literal.dtype);
     if (!width || literal.bytes.size() != width)
       return Answer(core_internal::invalid_schema_domain(
           "FMT-03 malformed typed literal"));

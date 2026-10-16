@@ -85,15 +85,15 @@ inline Result<WorkflowNode> uniform(std::uint64_t id, const char* kernel,
  * retain their bits, including -0. Other exact zero is +0; nonzero underflow
  * keeps its sign. Caller fenv is preserved.
  *
- * `input` is a Result with exactly one tensor member and no fields under any
+ * `input` is a Result with exactly one tensor member under any
  * structurally valid schema id/version/member key. Use its complete
  * `sample_shape()`, including batch axes: Float32/64, rank 1..8, positive
  * extents and logical count <=2^40. Output port `values` is an immutable
  * `photospider.tensor` v1/member `samples` Result with the same shape/dtype and
  * ordinary data. Results retain their sample storage owners.
  *
- * All formal profiles use Whole. A nonempty request declares Data, Validation
- * and Descriptor (role 13) for the complete input tensor. Typed/upstream
+ * All formal profiles use a Run-shared stage. A nonempty request acquires
+ * the complete input tensor. Typed/upstream
  * validation can fail outside requested delivery. The callback reads
  * authorized windows without collecting or copying the complete input. Empty
  * reads no sample payload after static preflight. Any input edit invalidates
@@ -197,7 +197,7 @@ inline Result<WorkflowNode> nonuniform(std::uint64_t id, const char* kernel,
 }
 }  // namespace lowpass_detail
 /** @brief Convolves the continuous piecewise-linear signal with a Hann sinc.
- * `positions` and `values` are Results with one tensor member and no fields
+ * `positions` and `values` are Results with one tensor member
  * under any structurally valid schema id/version/member key. Use complete
  * `sample_shape()` values, including batch axes. `positions` is [K], finite
  * strictly increasing Float32/64, K=2..1048576. `values` independently accepts
@@ -228,8 +228,8 @@ inline Result<WorkflowNode> nonuniform(std::uint64_t id, const char* kernel,
  * OperationFailed/InvalidDomain; final overflow fails ArithmeticOverflow.
  * Caller floating state is preserved.
  *
- * All formal profiles use Whole. A nonempty request declares Data, Validation
- * and Descriptor (role 13) for both complete input tensors. Typed/upstream
+ * All formal profiles use a Run-shared stage. A nonempty request acquires
+ * both complete input tensors. Typed/upstream
  * validation covers every input element. The callback reads positions through
  * authorized windows into Root-owned promoted geometry state. It reads values
  * through authorized windows without collecting or copying the complete values

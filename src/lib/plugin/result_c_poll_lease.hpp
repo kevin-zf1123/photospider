@@ -21,8 +21,8 @@ struct CResultPollLease {
       ResourceAllocator<std::pair<const std::uint64_t, std::uint64_t>>>;
   using AtlasKey = std::pair<std::uint32_t, std::uint32_t>;
   using Atlases = std::map<
-      AtlasKey, ps_result_native_atlas_v4, std::less<AtlasKey>,
-      ResourceAllocator<std::pair<const AtlasKey, ps_result_native_atlas_v4>>>;
+      AtlasKey, ps_result_native_atlas_v5, std::less<AtlasKey>,
+      ResourceAllocator<std::pair<const AtlasKey, ps_result_native_atlas_v5>>>;
   using Checkpoints = std::map<
       std::uint64_t, ResultCheckpoint, std::less<std::uint64_t>,
       ResourceAllocator<std::pair<const std::uint64_t, ResultCheckpoint>>>;
@@ -32,11 +32,11 @@ struct CResultPollLease {
   CResultMemberBridge* owner;
   CancellationToken cancellation;
   std::atomic<bool> active{true};
-  ps_cpu_parallel_service_v1 parallel{};
-  ps_cpu_tiles_service_v1 tiles{};
+  ps_cpu_parallel_service_v2 parallel{};
+  ps_cpu_tiles_service_v2 tiles{};
   ps_gpu_service_v1 gpu{};
-  const ps_cpu_parallel_service_v1* host_parallel = nullptr;
-  const ps_cpu_tiles_service_v1* host_tiles = nullptr;
+  const ps_cpu_parallel_service_v2* host_parallel = nullptr;
+  const ps_cpu_tiles_service_v2* host_tiles = nullptr;
   const ps_gpu_service_v1* host_gpu = nullptr;
   void retire() noexcept;
 };

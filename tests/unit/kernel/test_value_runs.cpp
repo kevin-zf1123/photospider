@@ -26,7 +26,7 @@ void take(Status status) {
     throw std::runtime_error(status.message);
 }
 void generic_runs() {
-  const ValueDescriptor descriptor{ElementType::UInt16, {5, 6, 7}};
+  const TensorDescriptor descriptor{ElementType::UInt16, {5, 6, 7}};
   const Region source_region({{1, 3}, {1, 4}, {1, 5}});
   const Region subregion({{1, 3}, {2, 2}, {2, 3}});
   std::array<unsigned, 3> order{0, 1, 2};
@@ -57,7 +57,7 @@ void generic_runs() {
             static_cast<std::size_t>(max - min + 18));
         for (std::size_t i = 0; i < bytes.size(); ++i)
           bytes[i] = static_cast<std::uint8_t>(i * 37 + 11);
-        auto source = take(Value::create(
+        auto source = take(TensorSpan::create(
             descriptor, source_region,
             {static_cast<std::uint64_t>(8 - min), strides, {1, 1, 1}}, bytes));
         for (unsigned fixed = 0; fixed <= 3; ++fixed) {
@@ -118,9 +118,10 @@ void generic_runs() {
   } while (std::next_permutation(order.begin(), order.end()));
 }
 void contiguous_runs() {
-  const ValueDescriptor d{ElementType::UInt8, {2, 3, 5}};
-  auto source = take(Value::create(d, Region::whole(d.shape), {0, {15, 5, 1}},
-                                   std::vector<std::uint8_t>(30, 9)));
+  const TensorDescriptor d{ElementType::UInt8, {2, 3, 5}};
+  auto source =
+      take(TensorSpan::create(d, Region::whole(d.shape), {0, {15, 5, 1}},
+                              std::vector<std::uint8_t>(30, 9)));
   unsigned callbacks = 0;
   take(visit_value_runs(source, source.region(), source.region(), 64, {},
                         [&](const ValueReadRun& run) {
@@ -141,9 +142,9 @@ void contiguous_runs() {
   require(callbacks == 6, "fixed-axis partition lost rows");
 }
 void boundaries() {
-  const ValueDescriptor d{ElementType::UInt8, {4097}};
-  auto source = take(Value::create(d, Region::whole(d.shape), {0, {1}},
-                                   std::vector<std::uint8_t>(4097, 3)));
+  const TensorDescriptor d{ElementType::UInt8, {4097}};
+  auto source = take(TensorSpan::create(d, Region::whole(d.shape), {0, {1}},
+                                        std::vector<std::uint8_t>(4097, 3)));
   std::vector<std::uint8_t> output(4097, 0xa5);
   CancellationSource stop;
   stop.cancel();
@@ -184,10 +185,10 @@ void boundaries() {
   require(!invalid.ok() && callbacks == 0, "invalid region reached visitor");
 }
 void singleton_and_partial_destination() {
-  const ValueDescriptor d{ElementType::UInt8, {2, 5, 3}};
+  const TensorDescriptor d{ElementType::UInt8, {2, 5, 3}};
   const Region region({{0, 2}, {2, 1}, {0, 3}});
-  auto source = take(Value::create(d, region, {0, {3, -77, 1}, {0, 2, 0}},
-                                   {1, 2, 3, 4, 5, 6}));
+  auto source = take(TensorSpan::create(d, region, {0, {3, -77, 1}, {0, 2, 0}},
+                                        {1, 2, 3, 4, 5, 6}));
   const auto destination = Region::whole(d.shape);
   for (auto fixed :
        {std::optional<std::uint32_t>{}, std::optional<std::uint32_t>{1}}) {

@@ -6,25 +6,30 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/footprint.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 
 namespace ps {
+namespace data_internal {
+class TensorAccess;
+}
 /** @brief Owned immutable fragments with exact authorized logical coverage.
- * @note Each Value is a complete rectangle. Holes never become valid pixels.
- * Copies retain shared storage owners; concurrent const reads are safe. This
- * carrier conveys bytes/metadata only: execution records must separately retain
- * producer and snapshot provenance.
- * Allocating methods may throw bad_alloc; no failed method publishes a result.
+ * @note Each TensorSpan is a complete rectangle. Holes never become valid
+ * pixels. Copies retain shared storage owners; concurrent const reads are safe.
+ * This carrier conveys bytes/metadata only: execution records must separately
+ * retain producer and snapshot provenance. Allocating methods may throw
+ * bad_alloc; no failed method publishes a result.
  */
-class PHOTOSPIDER_API ValueFragments final {
+class PHOTOSPIDER_API Tensor final {
  public:
-  ValueFragments() = default;
-  ValueFragments(const ValueFragments&) = default;
-  ValueFragments(ValueFragments&&) noexcept = default;
-  ValueFragments& operator=(const ValueFragments&);
-  ValueFragments& operator=(ValueFragments&&) noexcept;
-  /** @brief Clips supplied Values to authorization, checks exact completeness.
+  Tensor() = default;
+  Tensor(const Tensor&) = default;
+  Tensor(Tensor&&) noexcept = default;
+  Tensor& operator=(const Tensor&);
+  Tensor& operator=(Tensor&&) noexcept;
+  /** @brief Clips supplied Tensor spans to authorization, checks exact
+   * completeness.
    * @param descriptor Full domain and dtype, independent of stored rectangles.
    * @param authorized Exact permitted set, in the descriptor domain.
    * @param fragments Immutable owners; metadata must match. Overlaps are legal
@@ -35,25 +40,31 @@ class PHOTOSPIDER_API ValueFragments final {
    * @return Complete fragments or InvalidArgument/TypeMismatch/NotFound (hole),
    * ResourceExhausted/Cancelled.
    */
-  static Result<ValueFragments> create(ValueDescriptor descriptor,
-                                       Footprint authorized,
-                                       const std::vector<Value>& fragments,
-                                       const FootprintLimits& limits = {});
+  static Result<Tensor> create(TensorDescriptor descriptor,
+                               Footprint authorized,
+                               const std::vector<TensorSpan>& fragments,
+                               const FootprintLimits& limits = {});
   /** @brief Same validation from a borrowed contiguous array, without a
    * temporary std::vector. A null pointer is valid only for count zero.
    * The array is borrowed for this call; returned fragments retain owners.
    * metadata_lifetime optionally retains a trusted host's publication capacity
    * until owned metadata storage is destroyed. It must not own this result or
-   * its Values. This lifetime token does not account arbitrary caller copies.
+   * its spans. This lifetime token does not account arbitrary caller copies.
    */
-  static Result<ValueFragments> create_view(
-      ValueDescriptor descriptor, Footprint authorized, const Value* fragments,
-      std::size_t count, const FootprintLimits& limits = {},
+  static Result<Tensor> create_view(
+      TensorDescriptor descriptor, Footprint authorized,
+      const TensorSpan* fragments, std::size_t count,
+      const FootprintLimits& limits = {},
       std::shared_ptr<const void> metadata_lifetime = {});
   bool valid() const noexcept { return authorized_.valid(); }
-  const ValueDescriptor& descriptor() const noexcept { return descriptor_; }
+  const TensorDescriptor& descriptor() const noexcept { return descriptor_; }
   const Footprint& coverage() const noexcept { return authorized_; }
-  const std::vector<Value>& fragments() const noexcept { return fragments_; }
+  /** @brief Immutable directory; invalid and moved-from tensors return empty.
+   */
+  const ResourceVector<TensorSpan>& fragments() const {
+    static const ResourceVector<TensorSpan> empty;
+    return storage_ ? storage_->fragments : empty;
+  }
   /** @brief Copies one authorized sample, with checked logical addressing.
    * @param coordinate Full rank logical coordinate.
    * @param destination Writable size-byte span, borrowed until return.
@@ -79,8 +90,8 @@ class PHOTOSPIDER_API ValueFragments final {
   /** @brief Restricts owners and authorization together; outside coverage
    * fails.
    */
-  Result<ValueFragments> restrict(const Footprint& subset,
-                                  const FootprintLimits& limits = {}) const;
+  Result<Tensor> restrict(const Footprint& subset,
+                          const FootprintLimits& limits = {}) const;
   /** @brief Collects a complete authorized rectangle into host-allocated bytes.
    * @note Missing coverage fails before allocation; no hole filling. Copies
    * samples in logical order and observes cancellation before publication.
@@ -88,18 +99,26 @@ class PHOTOSPIDER_API ValueFragments final {
    * layouts use checked sample reads. Both retain logical-sample work limits,
    * fresh allocator-owned storage.
    */
-  Result<Value> collect(const Region& region, const BufferAllocator& allocator,
-                        const FootprintLimits& limits = {}) const;
+  Result<TensorSpan> collect(const Region& region,
+                             const BufferAllocator& allocator,
+                             const FootprintLimits& limits = {}) const;
   /** @brief Unique owner capacities, not just valid sample bytes.
-   * @return Checked total; ResourceExhausted if capacities cannot be summed.
+   * Temporary owner metadata uses the fragment directory allocator.
+   * Limits bound candidate traversal and cancellation; callbacks are borrowed
+   * for this call. Returns ResourceExhausted on work, capacity or sum overflow.
    */
-  Result<std::uint64_t> retained_bytes() const;
+  Result<std::uint64_t> retained_bytes(
+      const FootprintLimits& limits = {}) const;
 
  private:
-  void swap(ValueFragments&) noexcept;
+  void swap(Tensor&) noexcept;
   std::shared_ptr<const void> metadata_lifetime_;
-  ValueDescriptor descriptor_;
+  TensorDescriptor descriptor_;
   Footprint authorized_;
-  std::vector<Value> fragments_;
+  friend class data_internal::TensorAccess;
+  struct Storage {
+    ResourceVector<TensorSpan> fragments;
+  };
+  std::shared_ptr<Storage> storage_;
 };
 }  // namespace ps

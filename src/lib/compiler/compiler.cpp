@@ -163,7 +163,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v21");
+  digest.text("semantic-graph-ir-v22");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -246,16 +246,21 @@ std::string physical_digest(
     const std::map<std::string, TileRequest>& output_requests,
     std::uint64_t tile_extent, ExecutionMode execution_mode) {
   DigestBuilder digest;
-  digest.text("physical-plan-v21");
+  digest.text("physical-plan-v22");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
   digest.integer(tile_extent);
   digest.integer(output_requests.size());
   for (const auto& requested : output_requests) {
     digest.text(requested.first);
-    digest.integer(requested.second.whole);
-    digest.integer(requested.second.tiles.size());
-    for (auto tile : requested.second.tiles)
-      digest.integer(tile);
+    digest.integer(requested.second.members.size());
+    for (const auto& member : requested.second.members) {
+      digest.integer(member.first);
+      digest.integer(member.second.intervals().size());
+      for (const auto interval : member.second.intervals()) {
+        digest.integer(interval.begin);
+        digest.integer(interval.end);
+      }
+    }
   }
   const auto image_storage = [&](const SchemaTemplate& schema) {
     for (const auto& image : schema.tensors) {
@@ -313,7 +318,7 @@ std::string physical_digest(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v17");
+  digest.text("plan-cache-key-v18");
   digest.text(plan);
   return digest.finish();
 }
@@ -347,7 +352,7 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(
     return Result<ExecutionPlan>(
         Status{ErrorCode::InvalidArgument, "unknown tile output"});
   const auto& step = steps_[named->second];
-  auto resolved = request.resolve(step.tile_grid, step.tiled);
+  auto resolved = request.resolve(step.tile_grids);
   if (!resolved.ok())
     return Result<ExecutionPlan>(resolved.status());
   if (!output_requests_.at(name).contains(resolved.value()))
@@ -390,7 +395,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
         Status::failure(ErrorCode::Stale, "graph snapshot is stale"));
   }
   const WorkflowDocument& document = snapshot.document();
-  if (document.schema_version != 6U || document.nodes.empty() ||
+  if (document.schema_version != 7U || document.nodes.empty() ||
       document.nodes.size() > 65536U || document.outputs.empty() ||
       document.outputs.size() > 4096U || document.inputs.size() > 4096U) {
     return Result<SemanticGraphIR>(
@@ -398,10 +403,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
                         "WorkflowDocument version/count bounds are invalid"));
   }
 
-  input_internal::Float32Environment float_environment;
-  if (!float_environment.active())
-    return Result<SemanticGraphIR>(Status::failure(
-        ErrorCode::OperationFailed, "cannot set binary32 environment"));
   auto declarations = document.inputs;
   ResourceSet retained_resources;
   std::sort(declarations.begin(), declarations.end(),
@@ -517,8 +518,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
   SemanticGraphIR semantic;
   semantic.revision_ = snapshot.revision();
   semantic.input_declarations_ = declarations;
-  std::map<std::pair<std::uint64_t, std::string>, std::pair<float, float>>
-      scalar_intervals;
   semantic.nodes_.reserve(document.nodes.size());
   std::map<ValueRef, std::shared_ptr<const SchemaTemplate>> result_schemas;
   while (!ready.empty()) {
@@ -555,19 +554,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
         const auto id = std::get<WorkflowInputReference>(input).input_id;
         const auto& declaration = declarations[declaration_by_id.at(id)];
         result_schema = declaration.result_schema;
-        if (port.scalar_bounds) {
-          auto inserted = scalar_intervals.emplace(
-              std::make_pair(id, port.tensor_key),
-              std::make_pair(port.minimum, port.maximum));
-          auto& interval = inserted.first->second;
-          interval.first = std::max(interval.first, port.minimum);
-          interval.second = std::min(interval.second, port.maximum);
-          if (interval.first > interval.second) {
-            return Result<SemanticGraphIR>(Status::failure(
-                ErrorCode::InvalidArgument,
-                "scalar consumer intervals have empty intersection"));
-          }
-        }
       }
       auto status = input_internal::validate_port_metadata(
           port, OperationMetadata{result_schema});
@@ -716,7 +702,10 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   for (auto it = optimized.nodes().rbegin(); it != optimized.nodes().rend();
        ++it) {
     const auto& node = *it;
-    if (!node.traits.side_effect_free) {
+    if (!node.traits.side_effect_free ||
+        std::any_of(node.traits.shared_stages.begin(),
+                    node.traits.shared_stages.end(),
+                    [](const auto& stage) { return stage.mandatory; })) {
       needed.insert({node.id, 0});
       executable.insert({node.id, 0});
     }
@@ -750,10 +739,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   plan.input_declarations_ = optimized.input_declarations();
   plan.resources_ = optimized.resources();
   for (const auto& input : plan.input_declarations_) {
-    auto grid =
-        input.result_schema
-            ? TileGrid::from_schema(*input.result_schema, options.tile_extent)
-            : Result<std::optional<TileGrid>>(std::optional<TileGrid>{});
+    auto grid = TileGrid::members(*input.result_schema, options.tile_extent);
     if (!grid.ok())
       return Result<ExecutionPlan>(grid.status());
     plan.input_tile_grids_.push_back(grid.take_value());
@@ -776,15 +762,12 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       step.traits = select_operation_output(node.traits, oi).take_value();
       step.output_result_schema = output.result_schema;
       if (step.output_result_schema) {
-        auto grid = TileGrid::from_schema(*step.output_result_schema,
-                                          options.tile_extent);
+        auto grid =
+            TileGrid::members(*step.output_result_schema, options.tile_extent);
         if (!grid.ok())
           return Result<ExecutionPlan>(grid.status());
-        step.tile_grid = grid.take_value();
+        step.tile_grids = grid.take_value();
       }
-      step.tiled =
-          step.traits.outputs[0].region_rule == OperationRegionRule::Tiled &&
-          step.tile_grid.has_value();
       step.backend =
           executable.count({node.id, oi}) &&
                   options.execution_mode == ExecutionMode::NativeGpu &&
@@ -838,10 +821,9 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   for (const auto& output : plan.outputs_) {
     const auto& step = plan.steps_[output.second];
     const auto requested = options.output_requests.find(output.first);
-    const auto request = requested == options.output_requests.end()
-                             ? TileRequest{true, {}}
-                             : requested->second;
-    auto resolved = request.resolve(step.tile_grid, step.tiled);
+    auto resolved = requested == options.output_requests.end()
+                        ? TileRequest::all(step.tile_grids, ResourceBudget{})
+                        : requested->second.resolve(step.tile_grids);
     if (!resolved.ok())
       return Result<ExecutionPlan>(resolved.status());
     plan.output_requests_.emplace(output.first, resolved.take_value());
@@ -857,11 +839,11 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   for (auto& step : plan.steps_) {
     auto metadata = std::make_shared<ResultProgramMetadata>();
     metadata->output = {step.output_result_schema};
-    metadata->output_tile_grid = step.tile_grid;
+    metadata->output_tile_grids = step.tile_grids;
     for (const auto& input : step.inputs) {
       if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
         const auto& source = plan.steps_[producer->step_index];
-        metadata->input_tile_grids.push_back(source.tile_grid);
+        metadata->input_tile_grids.push_back(source.tile_grids);
         metadata->inputs.push_back({source.output_result_schema});
       } else {
         metadata->input_tile_grids.push_back(
@@ -874,6 +856,48 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       }
     }
     step.structured_metadata = std::move(metadata);
+  }
+  std::map<std::uint64_t, std::vector<std::shared_ptr<const PlanStep>>>
+      stage_plans;
+  for (auto& step : plan.steps_) {
+    auto found = stage_plans.find(step.node_id);
+    if (found == stage_plans.end()) {
+      std::vector<std::shared_ptr<const PlanStep>> stages;
+      for (const auto& declared : step.prepared->traits().shared_stages) {
+        auto stage = std::make_shared<PlanStep>(step);
+        stage->shared_stages.clear();
+        stage->output_result_schema =
+            std::make_shared<const SchemaTemplate>(declared.result_schema);
+        auto grids =
+            TileGrid::members(declared.result_schema, plan.tile_extent_);
+        if (!grids.ok())
+          return Result<ExecutionPlan>(grids.status());
+        stage->tile_grids = grids.take_value();
+        stage->backend = declared.backend;
+        stage->traits.cacheable = false;
+        stage->traits.workspace_bytes = declared.workspace_bytes;
+        stage->traits.workspace_input_multiplier = 0;
+        auto& output = stage->traits.outputs[0];
+        output.result_schema = declared.result_schema;
+        output.output_schema = {};
+        output.output_schema.result_schema_id = declared.result_schema.id;
+        output.output_schema.result_schema_version =
+            declared.result_schema.version;
+        output.input_indices = declared.input_indices;
+        output.continuation_bytes = declared.continuation_bytes;
+        output.maximum_dependency_stages = declared.maximum_dependency_stages;
+        output.maximum_output_payload_bytes =
+            declared.maximum_output_payload_bytes;
+        auto metadata =
+            std::make_shared<ResultProgramMetadata>(*step.structured_metadata);
+        metadata->output = {stage->output_result_schema};
+        metadata->output_tile_grids = stage->tile_grids;
+        stage->structured_metadata = std::move(metadata);
+        stages.push_back(std::move(stage));
+      }
+      found = stage_plans.emplace(step.node_id, std::move(stages)).first;
+    }
+    step.shared_stages = found->second;
   }
   auto work = UINT64_MAX;
   plan.structured_templates_ =

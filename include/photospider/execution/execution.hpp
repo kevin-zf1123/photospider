@@ -14,7 +14,7 @@
 #include "photospider/core/resources.hpp"
 #include "photospider/core/status.hpp"
 #include "photospider/data/input_snapshot.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 #include "photospider/execution/dependencies.hpp"
 
 namespace ps {
@@ -160,7 +160,7 @@ struct PHOTOSPIDER_API ExecutionOptions final {
    */
   std::function<Status(ValueRef, const ResultRef&)> result_publication = {};
   /** @brief Maximum logical samples scanned for the optional Result digest.
-   * Counts field elements and certified tensor samples. Zero disables the
+   * Counts certified tensor samples. Zero disables the
    * digest; failed admission preflight omits it without failing execution.
    */
   std::uint64_t maximum_result_digest_samples = 65536;
@@ -184,7 +184,7 @@ struct PHOTOSPIDER_API OperationTiming final {
    * execution. */
   std::uint64_t invocation_count = 1;
   /** @brief Total logical output elements computed by these attempts.
-   * Result publication counts newly certified field rows and tensor samples;
+   * Result publication counts newly certified tensor samples;
    * cache-hit publication contributes zero. Saturates at UINT64_MAX when the
    * cardinality or accumulated count exceeds uint64, with
    * computed_elements_saturated set. Diagnostic overflow does not invalidate
@@ -202,6 +202,10 @@ struct PHOTOSPIDER_API OperationTiming final {
    * False remains valid for an exact count equal to UINT64_MAX.
    */
   bool computed_elements_saturated = false;
+  /** @brief Run-shared stage ordinal, or UINT32_MAX for public output tiles.
+   * Stage records use output.node_id for identity; output port is routing only.
+   */
+  std::uint32_t shared_stage = UINT32_MAX;
 };
 
 /** @brief Context-local aggregate of cache observations, synchronized on read.
@@ -296,7 +300,7 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   /** @brief Non-security digest of the executed physical plan. */
   ResourceString plan_digest;
   /** @brief Optional non-security content digest of named structured Results.
-   * Structured execution hashes canonical schemas, field contents, and
+   * Structured execution hashes canonical schemas and
    * certified logical tensor coverage and sample bytes in ExecutionResult's
    * results map. It excludes object identity, associations, and physical
    * layout; it is not authentication. Fragment execution leaves it empty.
@@ -356,8 +360,8 @@ class PHOTOSPIDER_API FrozenExecution final {
 };
 
 /** @brief Named tile subsets or complete outputs of the compiled plan.
- * Empty tile sets request no computation. Bounds are checked before a
- * spatial Whole producer is normalized to its complete logical unit.
+ * Empty tile sets request no computation. Each member interval is checked
+ * against its compiled grid before starting any requested producer.
  */
 using DemandQuery = std::map<std::string, TileRequest>;
 /** @brief Complete sparse result; holes remain unauthorized and unallocated. */
@@ -376,13 +380,13 @@ struct DemandConfig final {
 /** @brief Atomic binding replacement and potential change in recorded outputs.
  * @note Coverage excludes never-requested outputs. Dirty sets accumulate until
  * their units are successfully recomputed. All subscriptions share the latest
- * record of each unit. Whole outputs use unit 0. Hints do not authorize reads;
+ * record of each member tile. Hints do not authorize reads;
  * byte comparisons use immutable input owners.
  */
 struct PHOTOSPIDER_API DemandUpdate final {
   std::uint64_t generation = 0;
-  std::map<std::string, TileSet> coverage;
-  std::map<std::string, TileSet> potential_dirty;
+  std::map<std::string, TileRequest> coverage;
+  std::map<std::string, TileRequest> potential_dirty;
 };
 /** @brief Context-managed immutable binding bundle with explicit replacement.
  * @note Copies share one handle. Requests are independently cancellable and

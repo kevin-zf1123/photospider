@@ -11,9 +11,11 @@
 #include <utility>
 #include <vector>
 
+#include "common/floating_environment.hpp"
 #include "common/result_support.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "photospider/plugin/result_program.hpp"
+#include "photospider/plugin/tensor_helpers.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
@@ -46,7 +48,7 @@ class MathTensorReader final {
                         row.run.sample_stride_bytes;
     std::uint64_t word = 0;
     std::memcpy(&word, row.run.data + static_cast<std::ptrdiff_t>(offset),
-                Value::element_size(spec.descriptor.element_type));
+                TensorSpan::element_size(spec.descriptor.element_type));
     return word;
   }
 
@@ -109,8 +111,8 @@ Status publish_whole_tensor(Kernel& kernel, const ResultProgramPhase& phase,
                             ResultBuilder& builder, int64_t) {
   const auto shape =
       phase.query.output.result_schema->tensors[0].sample_shape();
-  return builder.publish_tensor_kernel(
-      0, Region::whole(shape),
+  return sdk::publish_dense_tensor(
+      phase, builder, 0, Region::whole(shape),
       [&](const auto& writers) {
         return math_callback(phase,
                              [&] { return kernel.write(phase, writers); });
@@ -121,13 +123,21 @@ inline bool whole_tensor_port_selected(const ResultProgramQuery& query,
                                        uint32_t port) {
   if (!query.prepared)
     return true;
+  if (query.shared_stage != UINT32_MAX) {
+    const auto& projection = query.prepared->traits()
+                                 .shared_stages.at(query.shared_stage)
+                                 .input_indices;
+    return std::find(projection.begin(), projection.end(), port) !=
+           projection.end();
+  }
   const auto& selected =
       query.prepared->traits().outputs.at(query.output_index).input_indices;
   return !selected ||
          std::find(selected->begin(), selected->end(), port) != selected->end();
 }
 // Shared private Whole protocol. Numerical kernels receive authorized input
-// capabilities and one borrowed packed writer; no Value operation is invoked.
+// capabilities and one borrowed packed writer; no TensorSpan operation is
+// invoked.
 template <class Kernel>
 struct WholeTensorProgram final {
   Kernel kernel;
@@ -139,6 +149,10 @@ struct WholeTensorProgram final {
   explicit WholeTensorProgram(Args&&... args)
       : kernel(std::forward<Args>(args)...) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
+    FloatingEnvironment environment;
+    if (!environment.active())
+      return Result<ResultProgramPoll>(Status{
+          ErrorCode::OperationFailed, "numeric environment unavailable"});
     // Region/coordinate and small callback argument vectors are ordinary C++
     // scratch; admit their bounded capacity before either stage allocates.
     auto scratch =

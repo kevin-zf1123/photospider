@@ -1,4 +1,4 @@
-#include "data/value_validation.hpp"
+#include "data/tensor_validation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -22,15 +22,6 @@ Status failure(ErrorCode code, const char* message) {
   return Status::failure(code, message);
 }
 }  // namespace
-Float32Environment::Float32Environment() noexcept {
-  saved_ = std::fegetenv(&previous_) == 0;
-  active_ = saved_ && std::fesetenv(FE_DFL_ENV) == 0;
-}
-Float32Environment::~Float32Environment() noexcept {
-  if (saved_)
-    std::fesetenv(&previous_);
-}
-
 bool valid_input_name(const std::string& name) noexcept {
   return !name.empty() && name.size() <= 128 &&
          std::none_of(name.begin(), name.end(), [](unsigned char byte) {
@@ -38,7 +29,7 @@ bool valid_input_name(const std::string& name) noexcept {
          });
 }
 
-Result<DenseMetadata> dense_metadata(const ValueDescriptor& descriptor) {
+Result<DenseMetadata> dense_metadata(const TensorDescriptor& descriptor) {
   if (descriptor.shape.empty() || descriptor.shape.size() > 8 ||
       std::any_of(descriptor.shape.begin(), descriptor.shape.end(),
                   [](std::uint64_t extent) { return extent == 0; })) {
@@ -47,7 +38,7 @@ Result<DenseMetadata> dense_metadata(const ValueDescriptor& descriptor) {
   }
   std::uint64_t stride = 0;
   try {
-    stride = Value::element_size(descriptor.element_type);
+    stride = TensorSpan::element_size(descriptor.element_type);
   } catch (const std::invalid_argument&) {
     return Result<DenseMetadata>(
         failure(ErrorCode::InvalidArgument, "unknown dense element type"));
@@ -84,7 +75,7 @@ bool whole_region(const Region& region,
   return true;
 }
 
-Status validate_value_structure(const ValueDescriptor& descriptor) {
+Status validate_value_structure(const TensorDescriptor& descriptor) {
   const auto element = static_cast<std::uint32_t>(descriptor.element_type);
   if (element < 1 || element > 7 || descriptor.shape.empty() ||
       descriptor.shape.size() > 8 ||

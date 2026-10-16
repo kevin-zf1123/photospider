@@ -21,7 +21,8 @@ ResourceVector<TileChange> edits(const ResourceBudget& root,
                                  TileSet changed = {},
                                  bool descriptor = false) {
   ResourceVector<TileChange> result{ResourceAllocator<TileChange>(root)};
-  result.push_back({PlanWorkflowInput{0}, 0, std::move(changed), descriptor});
+  result.push_back(
+      {PlanWorkflowInput{0}, 0, 0, std::move(changed), descriptor});
   return result;
 }
 bool equal(const ResourceVector<TileUnit>& actual,
@@ -35,55 +36,55 @@ int graph() {
     TileRecords records(root, 1);
     auto payload = multi_result::binding(root, "value", 1).result;
     TileRecord first(root);
-    first.unit = {0, 0, 2};
-    PS_CHECK(first.include({PlanWorkflowInput{0}, 0, false, {}}, root).ok());
-    PS_CHECK(first
-                 .include({PlanWorkflowInput{0}, 0, false, tiles(root, {1, 4})},
-                          root)
-                 .ok());
-    PS_CHECK(first
-                 .include({PlanWorkflowInput{0}, 0, false, tiles(root, {4, 7})},
-                          root)
-                 .ok());
+    first.unit = {0, 0, 0, 2};
+    PS_CHECK(first.include({PlanWorkflowInput{0}, 0, 0, {}}, root).ok());
+    PS_CHECK(
+        first.include({PlanWorkflowInput{0}, 0, 0, tiles(root, {1, 4})}, root)
+            .ok());
+    PS_CHECK(
+        first.include({PlanWorkflowInput{0}, 0, 0, tiles(root, {4, 7})}, root)
+            .ok());
     PS_CHECK(first.inputs.size() == 1 && first.inputs[0].tiles.size() == 3);
     PS_CHECK(records.install(1, first, payload).ok());
     TileRecord second(root);
-    second.unit = {1, 3, 8};
+    second.unit = {1, 3, 0, 8};
     PS_CHECK(
-        second.include({PlanStepInput{0}, 0, false, tiles(root, {2})}, root)
-            .ok());
+        second.include({PlanStepInput{0}, 0, 0, tiles(root, {2})}, root).ok());
     // A second path to the same unit exercises reachable-once propagation.
     PS_CHECK(
-        second.include({PlanWorkflowInput{0}, 0, false, tiles(root, {1})}, root)
+        second.include({PlanWorkflowInput{0}, 0, 0, tiles(root, {1})}, root)
             .ok());
     PS_CHECK(records.install(1, second, payload).ok());
     TileRecord whole(root);
-    whole.unit = {2, 0, 0};
-    PS_CHECK(whole.include({PlanWorkflowInput{0}, 0, true, {}}, root).ok());
+    whole.unit = {2, 0, 0, 0};
+    PS_CHECK(whole
+                 .include({PlanWorkflowInput{0}, 0, 0,
+                           TileSet::range(root, 0, 128).take_value()},
+                          root)
+                 .ok());
     PS_CHECK(records.install(1, whole, payload).ok());
     TileRecord metadata(root);
-    metadata.unit = {3, 0, 0};
-    PS_CHECK(metadata.include({PlanWorkflowInput{0}, 0, false, {}}, root).ok());
+    metadata.unit = {3, 0, 0, 0};
+    PS_CHECK(metadata.include({PlanWorkflowInput{0}, 0, 0, {}}, root).ok());
     PS_CHECK(records.install(1, metadata, payload).ok());
     auto dirty = records.dirty(edits(root, tiles(root, {4})));
     PS_REQUIRE_OK(dirty);
-    PS_CHECK(equal(dirty.value(), {{0, 0, 2}, {1, 3, 8}, {2, 0, 0}}));
+    PS_CHECK(equal(dirty.value(), {{0, 0, 0, 2}, {1, 3, 0, 8}, {2, 0, 0, 0}}));
     PS_CHECK(equal(records.dirty(edits(root, tiles(root, {99}))).value(),
-                   {{2, 0, 0}}));
+                   {{2, 0, 0, 0}}));
     PS_CHECK(equal(records.dirty(edits(root, {}, true)).value(),
-                   {{0, 0, 2}, {1, 3, 8}, {2, 0, 0}, {3, 0, 0}}));
+                   {{0, 0, 0, 2}, {1, 3, 0, 8}, {2, 0, 0, 0}, {3, 0, 0, 0}}));
     PS_CHECK(records.dirty(edits(root)).value().empty());
     auto old = records.find(first.unit).take_value();
     first.inputs.clear();
-    PS_CHECK(
-        first.include({PlanWorkflowInput{0}, 0, false, tiles(root, {9})}, root)
-            .ok());
+    PS_CHECK(first.include({PlanWorkflowInput{0}, 0, 0, tiles(root, {9})}, root)
+                 .ok());
     auto replacement = multi_result::binding(root, "value", 2).result;
     PS_CHECK(records.install(1, first, replacement).ok());
     PS_CHECK(equal(records.dirty(edits(root, tiles(root, {4}))).value(),
-                   {{2, 0, 0}}));
+                   {{2, 0, 0, 0}}));
     PS_CHECK(equal(records.dirty(edits(root, tiles(root, {9}))).value(),
-                   {{0, 0, 2}, {1, 3, 8}, {2, 0, 0}}));
+                   {{0, 0, 0, 2}, {1, 3, 0, 8}, {2, 0, 0, 0}}));
     PS_CHECK(multi_result::number(old->payload) == 1 &&
              old->record->inputs[0].tiles.contains(4));
     PS_CHECK(multi_result::number(records.find(first.unit).value()->payload) ==
@@ -93,10 +94,9 @@ int graph() {
              ErrorCode::InvalidArgument);
     PS_CHECK(multi_result::number(records.find(first.unit).value()->payload) ==
              2);
-    PS_CHECK(
-        first.include({PlanWorkflowInput{0}, 0, true, tiles(root, {2})}, root)
-            .code == ErrorCode::InvalidArgument);
-    PS_CHECK(first.include({PlanWorkflowInput{0}, 1, false, {}}, root).code ==
+    PS_CHECK(first.include({PlanWorkflowInput{0}, 1, 0, tiles(root, {2})}, root)
+                 .code == ErrorCode::InvalidArgument);
+    PS_CHECK(first.include({PlanWorkflowInput{0}, 1, 0, {}}, root).code ==
              ErrorCode::InvalidArgument);
   }
   for (auto live : root.statistics().live.values)
@@ -114,18 +114,16 @@ int admission() {
     TileRecord record(root);
     std::vector<TileIndex> original(512);
     for (std::size_t i = 0; i < original.size(); ++i)
-      original[i] = i;
+      original[i] = i * 2;
     PS_CHECK(
         record
-            .include({PlanWorkflowInput{0}, 0, false, tiles(root, original)},
-                     root)
+            .include({PlanWorkflowInput{0}, 0, 0, tiles(root, original)}, root)
             .ok());
     PS_CHECK(records.install(0, record, payload).ok());
     auto previous = records.find(record.unit).take_value();
     record.inputs.clear();
     PS_CHECK(
-        record
-            .include({PlanWorkflowInput{0}, 0, false, tiles(root, {999})}, root)
+        record.include({PlanWorkflowInput{0}, 0, 0, tiles(root, {999})}, root)
             .ok());
     const auto available = root.available_capacity();
     const auto remaining = std::min(available[ResourceKind::Host],
@@ -151,8 +149,8 @@ int admission() {
       PS_CHECK(root.statistics().issued.work - before_work >= original.size());
     }
     PS_CHECK(records.find(record.unit).value() == previous);
-    PS_CHECK(equal(records.dirty(edits(root, tiles(root, {1}))).value(),
-                   {{0, 0, 0}}));
+    PS_CHECK(equal(records.dirty(edits(root, tiles(root, {2}))).value(),
+                   {{0, 0, 0, 0}}));
     PS_CHECK(records.dirty(edits(root, tiles(root, {999}))).value().empty());
   }
   for (auto live : root.statistics().live.values)
@@ -167,13 +165,11 @@ int generation() {
     TileRecords records(root, 1);
     TileRecord old_record(root);
     PS_CHECK(
-        old_record
-            .include({PlanWorkflowInput{0}, 0, false, tiles(root, {1})}, root)
+        old_record.include({PlanWorkflowInput{0}, 0, 0, tiles(root, {1})}, root)
             .ok());
     TileRecord new_record(root);
     PS_CHECK(
-        new_record
-            .include({PlanWorkflowInput{0}, 0, false, tiles(root, {2})}, root)
+        new_record.include({PlanWorkflowInput{0}, 0, 0, tiles(root, {2})}, root)
             .ok());
     std::mutex mutex;
     std::condition_variable condition;
@@ -208,7 +204,7 @@ int generation() {
              multi_result::number(current->payload) == 2);
     PS_CHECK(records.dirty(edits(root, tiles(root, {1}))).value().empty());
     PS_CHECK(equal(records.dirty(edits(root, tiles(root, {2}))).value(),
-                   {{0, 0, 0}}));
+                   {{0, 0, 0, 0}}));
   }
   for (auto live : root.statistics().live.values)
     PS_CHECK(live == 0);
@@ -220,9 +216,12 @@ int reachable_work() {
   const auto payload = multi_result::binding(root, "value", 1).result;
   for (std::size_t index = 0; index < 512; ++index) {
     TileRecord record(root);
-    record.unit = {index, 0, 0};
-    PS_CHECK(
-        record.include({PlanWorkflowInput{index}, 0, true, {}}, root).ok());
+    record.unit = {index, 0, 0, 0};
+    PS_CHECK(record
+                 .include({PlanWorkflowInput{index}, 0, 0,
+                           TileSet::range(root, 0, 128).take_value()},
+                          root)
+                 .ok());
     PS_CHECK(records.install(0, record, payload).ok());
   }
   const auto changed = edits(root, tiles(root, {100}));
@@ -230,7 +229,7 @@ int reachable_work() {
   auto dirty = records.dirty(changed);
   const auto work = root.statistics().issued.work - before;
   PS_REQUIRE_OK(dirty);
-  PS_CHECK(equal(dirty.value(), {{0, 0, 0}}));
+  PS_CHECK(equal(dirty.value(), {{0, 0, 0, 0}}));
   // A sparse edit must not scan the other 511 records or their dependencies.
   PS_CHECK(work < 64);
   return 0;
@@ -243,35 +242,38 @@ int checkpoint_ancestry() {
     TileRecords source(source_root, 3);
     for (TileIndex tile : {2, 3}) {
       TileRecord record(source_root);
-      record.unit = {0, 0, tile};
+      record.unit = {0, 0, 0, tile};
       PS_CHECK(record
-                   .include({PlanWorkflowInput{0}, 0, false,
+                   .include({PlanWorkflowInput{0}, 0, 0,
                              tiles(source_root, {tile + 5})},
                             source_root)
                    .ok());
       PS_CHECK(source.install(3, record, payload).ok());
     }
     TileRecord middle(source_root);
-    middle.unit = {1, 0, 0};
+    middle.unit = {1, 0, 0, 0};
     PS_CHECK(middle
-                 .include({PlanStepInput{0}, 0, false, tiles(source_root, {2})},
+                 .include({PlanStepInput{0}, 0, 0, tiles(source_root, {2})},
                           source_root)
                  .ok());
     PS_CHECK(source.install(3, middle, payload).ok());
     TileRecord unrelated(source_root);
-    unrelated.unit = {9, 0, 0};
+    unrelated.unit = {9, 0, 0, 0};
     PS_CHECK(source.install(3, unrelated, payload).ok());
     TileRecord draft(source_root);
-    draft.unit = {2, 0, 0};
-    PS_CHECK(draft.include({PlanStepInput{1}, 0, true, {}}, source_root).ok());
+    draft.unit = {2, 0, 0, 0};
     PS_CHECK(draft
-                 .include({PlanStepInput{0}, 0, false, tiles(source_root, {3})},
+                 .include({PlanStepInput{1}, 0, 0, tiles(source_root, {0})},
+                          source_root)
+                 .ok());
+    PS_CHECK(draft
+                 .include({PlanStepInput{0}, 0, 0, tiles(source_root, {3})},
                           source_root)
                  .ok());
     auto captured = source.capture_ancestry(
-        draft, [](const PlanStepInput& step, std::uint32_t) {
-          return Result<TileRecords::ProducerUnits>(TileRecords::ProducerUnits{
-              step.step_index == 0 ? 4U : 1U, false});
+        draft, [](const PlanStepInput& step, std::uint32_t, std::uint32_t) {
+          return Result<TileRecords::ProducerUnits>(
+              TileRecords::ProducerUnits{step.step_index == 0 ? 4U : 1U});
         });
     PS_REQUIRE_OK(captured);
     snapshot = captured.take_value();
@@ -301,7 +303,7 @@ int checkpoint_ancestry() {
   }
   auto dirty = restored.dirty(edits(restored_root, tiles(restored_root, {7})));
   PS_REQUIRE_OK(dirty);
-  PS_CHECK(equal(dirty.value(), {{0, 0, 2}, {1, 0, 0}}));
+  PS_CHECK(equal(dirty.value(), {{0, 0, 0, 2}, {1, 0, 0, 0}}));
   PS_CHECK(restored.restore_ancestry(3, snapshot).ok() && restored.size() == 3);
   return 0;
 }
@@ -310,27 +312,28 @@ int checkpoint_capture_boundaries() {
   TileRecords table(root);
   auto payload = multi_result::binding(root, "value", 1).result;
   TileRecord source(root);
-  source.unit = {0, 0, 0};
-  PS_CHECK(source.include({PlanWorkflowInput{0}, 0, true, {}}, root).ok());
+  source.unit = {0, 0, 0, 0};
+  PS_CHECK(source
+               .include({PlanWorkflowInput{0}, 0, 0,
+                         TileSet::range(root, 0, 128).take_value()},
+                        root)
+               .ok());
   PS_CHECK(table.install(0, source, payload).ok());
   TileRecord consumer(root);
-  consumer.unit = {1, 0, 0};
-  PS_CHECK(consumer.include({PlanStepInput{0}, 0, false, {}}, root).ok());
-  const auto static_grid = [](const PlanStepInput&, std::uint32_t) {
-    return Result<TileRecords::ProducerUnits>(
-        TileRecords::ProducerUnits{3, false});
+  consumer.unit = {1, 0, 0, 0};
+  PS_CHECK(consumer.include({PlanStepInput{0}, 0, 0, {}}, root).ok());
+  const auto static_grid = [](const PlanStepInput&, std::uint32_t,
+                              std::uint32_t) {
+    return Result<TileRecords::ProducerUnits>(TileRecords::ProducerUnits{3});
   };
   auto static_facts = table.capture_ancestry(consumer, static_grid);
   PS_REQUIRE_OK(static_facts);
   PS_CHECK(static_facts.value().empty());
-  auto dynamic_facts =
-      table.capture_ancestry(consumer, [](const PlanStepInput&, std::uint32_t) {
-        return Result<TileRecords::ProducerUnits>(
-            TileRecords::ProducerUnits{1, true});
-      });
-  PS_REQUIRE_OK(dynamic_facts);
-  PS_CHECK(dynamic_facts.value().size() == 1);
-  PS_CHECK(consumer.include({PlanStepInput{0}, 0, true, {}}, root).ok());
+  PS_CHECK(consumer
+               .include({PlanStepInput{0}, 0, 0,
+                         TileSet::range(root, 0, 3).take_value()},
+                        root)
+               .ok());
   PS_CHECK(table.capture_ancestry(consumer, static_grid).status().code ==
            ErrorCode::NotFound);
   source.unit.tile = 2;
@@ -355,15 +358,15 @@ int checkpoint_admission() {
   for (unsigned index : {0, 1}) {
     auto record = std::allocate_shared<TileRecord>(
         ResourceAllocator<TileRecord>(source_root), source_root);
-    record->unit = {index, 0, 0};
+    record->unit = {index, 0, 0, 0};
     std::vector<TileIndex> indices(index ? 512 : 1);
     for (std::size_t i = 0; i < indices.size(); ++i)
-      indices[i] = i;
-    PS_CHECK(record
-                 ->include({PlanWorkflowInput{0}, 0, false,
-                            tiles(source_root, indices)},
-                           source_root)
-                 .ok());
+      indices[i] = i * 2;
+    PS_CHECK(
+        record
+            ->include({PlanWorkflowInput{0}, 0, 0, tiles(source_root, indices)},
+                      source_root)
+            .ok());
     snapshot.push_back(std::move(record));
   }
   ResourceLimits limits;
@@ -417,22 +420,19 @@ int atomic_cached_publication() {
   const auto old_payload = multi_result::binding(root, "old", 1).result;
   const auto new_payload = multi_result::binding(root, "new", 2).result;
   TileRecord old_record(root), replacement(root);
-  old_record.unit = replacement.unit = {2, 0, 0};
+  old_record.unit = replacement.unit = {2, 0, 0, 0};
   PS_CHECK(
-      old_record
-          .include({PlanWorkflowInput{0}, 0, false, tiles(root, {9})}, root)
+      old_record.include({PlanWorkflowInput{0}, 0, 0, tiles(root, {9})}, root)
           .ok());
-  PS_CHECK(
-      replacement.include({PlanStepInput{0}, 0, false, tiles(root, {0})}, root)
-          .ok());
+  PS_CHECK(replacement.include({PlanStepInput{0}, 0, 0, tiles(root, {0})}, root)
+               .ok());
   TileRecords::Snapshot ancestry{
       ResourceAllocator<std::shared_ptr<const TileRecord>>(root)};
   auto source = std::allocate_shared<TileRecord>(
       ResourceAllocator<TileRecord>(root), root);
-  source->unit = {0, 0, 0};
-  PS_CHECK(
-      source->include({PlanWorkflowInput{0}, 0, false, tiles(root, {1})}, root)
-          .ok());
+  source->unit = {0, 0, 0, 0};
+  PS_CHECK(source->include({PlanWorkflowInput{0}, 0, 0, tiles(root, {1})}, root)
+               .ok());
   ancestry.push_back(source);
   std::uint64_t total = 0;
   {
@@ -449,7 +449,7 @@ int atomic_cached_publication() {
     PS_CHECK(multi_result::number(
                  counted.find(replacement.unit).value()->payload) == 2);
     PS_CHECK(equal(counted.dirty(edits(root, tiles(root, {1}))).value(),
-                   {{0, 0, 0}, {2, 0, 0}}));
+                   {{0, 0, 0, 0}, {2, 0, 0, 0}}));
     PS_CHECK(counted.dirty(edits(root, tiles(root, {9}))).value().empty());
   }
   PS_CHECK(total > 1);
@@ -472,7 +472,7 @@ int atomic_cached_publication() {
     PS_CHECK(refused.find(old_record.unit).value() == previous);
     PS_CHECK(refused.dirty(edits(root, tiles(root, {1}))).value().empty());
     PS_CHECK(equal(refused.dirty(edits(root, tiles(root, {9}))).value(),
-                   {{2, 0, 0}}));
+                   {{2, 0, 0, 0}}));
   }
   return 0;
 }
@@ -481,26 +481,25 @@ int demand_replacement() {
   TileRecords table(root, 1);
   const auto payload = multi_result::binding(root, "value", 1).result;
   TileRecord source(root), consumer(root), roots(root);
-  source.unit = {0, 0, 0};
+  source.unit = {0, 0, 0, 0};
+  PS_CHECK(source.include({PlanWorkflowInput{0}, 0, 0, tiles(root, {1})}, root)
+               .ok());
+  consumer.unit = {1, 0, 0, 0};
   PS_CHECK(
-      source.include({PlanWorkflowInput{0}, 0, false, tiles(root, {1})}, root)
-          .ok());
-  consumer.unit = {1, 0, 0};
-  PS_CHECK(consumer.include({PlanStepInput{0}, 0, true, {}}, root).ok());
+      consumer.include({PlanStepInput{0}, 0, 0, tiles(root, {0})}, root).ok());
   PS_CHECK(table.install(1, source, payload).ok());
   PS_CHECK(table.install(1, consumer, payload).ok());
-  PS_CHECK(roots.include({PlanStepInput{1}, 0, true, {}}, root).ok());
+  PS_CHECK(
+      roots.include({PlanStepInput{1}, 0, 0, tiles(root, {0})}, root).ok());
   const TileRecords::ProducerQuery units = [](const PlanStepInput&,
-                                              std::uint32_t) {
-    return Result<TileRecords::ProducerUnits>(
-        TileRecords::ProducerUnits{1, false});
+                                              std::uint32_t, std::uint32_t) {
+    return Result<TileRecords::ProducerUnits>(TileRecords::ProducerUnits{1});
   };
   auto fresh = std::allocate_shared<TileRecord>(
       ResourceAllocator<TileRecord>(root), root);
   fresh->unit = consumer.unit;
-  PS_CHECK(
-      fresh->include({PlanWorkflowInput{0}, 0, false, tiles(root, {2})}, root)
-          .ok());
+  PS_CHECK(fresh->include({PlanWorkflowInput{0}, 0, 0, tiles(root, {2})}, root)
+               .ok());
   TileRecords::Snapshot updates{
       ResourceAllocator<std::shared_ptr<const TileRecord>>(root)};
   updates.push_back(fresh);
@@ -511,9 +510,9 @@ int demand_replacement() {
   PS_CHECK(
       replaced.value()->dirty(edits(root, tiles(root, {1}))).value().empty());
   PS_CHECK(equal(replaced.value()->dirty(edits(root, tiles(root, {2}))).value(),
-                 {{1, 0, 0}}));
+                 {{1, 0, 0, 0}}));
   PS_CHECK(equal(table.dirty(edits(root, tiles(root, {1}))).value(),
-                 {{0, 0, 0}, {1, 0, 0}}));
+                 {{0, 0, 0, 0}, {1, 0, 0, 0}}));
   auto sources = replaced.value()->workflow_dependencies();
   PS_REQUIRE_OK(sources);
   PS_CHECK(sources.value().size() == 1 &&
@@ -528,17 +527,74 @@ int demand_replacement() {
     PS_CHECK(refused.status().code == code && table.size() == 2);
   }
   roots.inputs.clear();
-  PS_CHECK(roots.include({PlanStepInput{0}, 0, true, {}}, root).ok());
+  PS_CHECK(
+      roots.include({PlanStepInput{0}, 0, 0, tiles(root, {0})}, root).ok());
   auto root_zero = table.replaced(1, {}, roots, units);
   PS_REQUIRE_OK(root_zero);
   PS_CHECK(
       root_zero.value()->size() == 1 &&
       equal(root_zero.value()->dirty(edits(root, tiles(root, {1}))).value(),
-            {{0, 0, 0}}));
+            {{0, 0, 0, 0}}));
   roots.inputs.clear();
   auto released = replaced.value()->replaced(2, {}, roots, units);
   PS_REQUIRE_OK(released);
   PS_CHECK(released.value()->size() == 0);
+  return 0;
+}
+// Regression: cross-Root DAG imports retained foreign storage and duplicated
+// identities could make replacing the last consumer fail during retirement.
+int shared_evidence_retirement() {
+  ResourceBudget source, middle, root;
+  TileRecords imported(middle), records(root);
+  auto payload = multi_result::binding(root, "value", 1).result;
+  std::weak_ptr<const TileEvidence> foreign;
+  {
+    TileRecord inputs(source);
+    inputs.unit = {0, 0, 0, 0};
+    std::vector<TileIndex> sparse;
+    for (TileIndex i = 0; i < 64; ++i)
+      sparse.push_back(i * 2);
+    PS_CHECK(inputs
+                 .include({PlanWorkflowInput{0}, 0, 0, tiles(source, sparse)},
+                          source)
+                 .ok());
+    auto evidence = multi_result::take(inputs.freeze(source));
+    foreign = evidence;
+    TileRecord consumer(source);
+    consumer.unit = {1, 0, 0, 0};
+    PS_CHECK(consumer.inherit(evidence, source).ok());
+    TileRecords::Snapshot snapshot{
+        ResourceAllocator<std::shared_ptr<const TileRecord>>(source)};
+    snapshot.push_back(std::allocate_shared<TileRecord>(
+        ResourceAllocator<TileRecord>(source), consumer));
+    PS_CHECK(imported.restore_ancestry(0, snapshot).ok());
+    auto copied = imported.find_record(consumer.unit).take_value();
+    PS_CHECK(copied->shared[0]->inputs[0].tiles.owned_by(middle));
+    PS_CHECK(copied->shared[0] != evidence);
+    PS_CHECK(consumer.inherit(copied->shared[0], source).ok());
+    PS_CHECK(consumer.shared.size() == 1);
+    for (TileIndex i = 0; i < 64; ++i) {
+      consumer.unit.tile = i;
+      PS_CHECK(records.install(0, consumer, payload).ok());
+    }
+  }
+  PS_CHECK(foreign.expired());
+  foreign.reset();
+  PS_CHECK(source.statistics().live[ResourceKind::Metadata] == 0);
+  auto dependencies = records.workflow_dependencies();
+  PS_REQUIRE_OK(dependencies);
+  PS_CHECK(dependencies.value().size() == 1 &&
+           dependencies.value()[0].tiles.intervals().size() == 64);
+  // P disjoint intervals and Q consumers retain one proof plus Q references.
+  PS_CHECK(records.metadata_size().value() < 2048);
+  PS_CHECK(records.dirty(edits(root, tiles(root, {8}))).value().size() == 64);
+  for (TileIndex i = 0; i < 64; ++i) {
+    TileRecord replacement(root);
+    replacement.unit = {1, 0, 0, i};
+    PS_CHECK(records.install(0, replacement, payload).ok());
+  }
+  PS_CHECK(records.workflow_dependencies().value().empty());
+  PS_CHECK(records.dirty(edits(root, tiles(root, {8}))).value().empty());
   return 0;
 }
 int retirement() {
@@ -546,7 +602,11 @@ int retirement() {
   {
     TileRecords records(root, 1);
     TileRecord record(root);
-    PS_CHECK(record.include({PlanWorkflowInput{0}, 0, true, {}}, root).ok());
+    PS_CHECK(record
+                 .include({PlanWorkflowInput{0}, 0, 0,
+                           TileSet::range(root, 0, 128).take_value()},
+                          root)
+                 .ok());
     auto payload = multi_result::binding(root, "value", 7).result;
     auto weak = payload.weak();
     PS_CHECK(records.install(1, record, payload).ok());
@@ -568,7 +628,7 @@ int retirement() {
     PS_CHECK(!weak.lock().valid());
     PS_CHECK(root.statistics().live[ResourceKind::Payload] == 0);
     PS_CHECK(equal(records.dirty(edits(root, tiles(root, {3}))).value(),
-                   {{0, 0, 0}}));
+                   {{0, 0, 0, 0}}));
   }
   for (auto live : root.statistics().live.values)
     PS_CHECK(live == 0);
@@ -579,5 +639,5 @@ int main() {
   return graph() || admission() || generation() || reachable_work() ||
          checkpoint_ancestry() || checkpoint_capture_boundaries() ||
          checkpoint_admission() || atomic_cached_publication() ||
-         demand_replacement() || retirement();
+         demand_replacement() || shared_evidence_retirement() || retirement();
 }

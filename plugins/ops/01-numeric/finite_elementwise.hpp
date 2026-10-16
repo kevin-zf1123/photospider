@@ -153,13 +153,11 @@ inline OperationDefinition finite_elementwise(const char* key,
   traits.input_count = kind == FiniteElementwise::Abs ? 1 : 2;
   traits.input_schema.resize(traits.input_count);
   for (auto& port : traits.input_schema) {
-    port.kind = OperationPortKind::Result;
     port.element_type_mask = 12;
   }
   set_whole_tensor_output(traits, ElementType::Float64,
                           sizeof(FiniteElementwiseProgram));
   traits.outputs[0].key = "value";
-  traits.outputs[0].region_rule = OperationRegionRule::Tiled;
   traits.outputs[0].maximum_dependency_stages = 3;
   traits.requires_metadata_specialization = true;
   operation.specialize_metadata =
@@ -167,8 +165,7 @@ inline OperationDefinition finite_elementwise(const char* key,
          const auto&) -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
     for (const auto& input : inputs)
-      if (!input.result_schema || !input.result_schema->fields.empty() ||
-          input.result_schema->tensors.size() != 1)
+      if (!input.result_schema || input.result_schema->tensors.size() != 1)
         return Answer(
             Status{ErrorCode::TypeMismatch,
                    "finite elementwise requires one tensor per Result"});

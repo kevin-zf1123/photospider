@@ -17,7 +17,7 @@
 
 namespace ps::data_internal {
 class MemoryReservation;
-/** @brief Per-Run observations shared by collector, Whole boundaries and tiles.
+/** @brief Per-Run observations shared by collector, shared stages and tiles.
  */
 struct MemoryObservation final {
   std::uint64_t live = 0, peak = 0, reserved = 0, peak_reserved = 0;

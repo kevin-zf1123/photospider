@@ -16,13 +16,10 @@ namespace ps::execution_internal {
 // work, and failures leave the caller's replay state untouched.
 class ResultCacheProof final {
  public:
-  ResultCacheProof(const ResourceBudget& root, std::uint64_t maximum_window,
+  ResultCacheProof(const ResourceBudget& root, std::uint64_t,
                    const std::function<Status(std::uint64_t)>& work,
                    const std::function<CancellationToken()>& cancellation)
-      : root_(root),
-        maximum_window_(maximum_window),
-        work_(work),
-        cancellation_(cancellation) {}
+      : root_(root), work_(work), cancellation_(cancellation) {}
   Result<ResourceString> supplied_facts(const ResultObjectInputs&,
                                         const ResultTensorInputs&);
   Result<ResourceString> tile_source_digest(
@@ -37,7 +34,6 @@ class ResultCacheProof final {
   Status hash_facts(content_internal::Sha256&, const ResultRef&,
                     const ResultDescriptor&);
   const ResourceBudget& root_;
-  std::uint64_t maximum_window_;
   const std::function<Status(std::uint64_t)>& work_;
   const std::function<CancellationToken()>& cancellation_;
 };

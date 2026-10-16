@@ -21,7 +21,7 @@
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
-#include "data/value_validation.hpp"
+#include "data/tensor_validation.hpp"
 #include "photospider/data/result.hpp"
 
 namespace ps {
@@ -31,9 +31,6 @@ Result<ResultRef> ResultRef::capture() const {
   if (captured_)
     return Result<ResultRef>(*this);
   std::lock_guard<std::timed_mutex> lock(impl_->mutex);
-  if (!impl_->complete &&
-      impl_->schema.publication == PublishPolicy::CompleteBundle)
-    return Result<ResultRef>(data_internal::unavailable());
   auto admitted = impl_->budget.reserve(
       ResourceCapacity::host(sizeof(Capture), sizeof(Capture)));
   if (!admitted.ok())
@@ -45,13 +42,10 @@ Result<ResultRef> ResultRef::capture() const {
     facts.object_ = impl_->object;
     facts.revision_ = impl_->revision;
     facts.sealed_ = impl_->complete;
-    facts.field_count_ = impl_->schema.fields.size();
     facts.tensor_count_ = impl_->schema.tensors.size();
-    for (uint32_t i = 0; i < facts.field_count_; ++i) {
-      facts.rows_[i] = impl_->fields[i].certified;
-    }
+
     for (uint32_t i = 0; i < facts.tensor_count_; ++i) {
-      facts.tensors_[i] = impl_->tensors[i].coverage;
+      facts.tensors_[i] = impl_->tensors[i].tensor.coverage();
     }
     ResultRef result = *this;
     result.captured_ = std::move(capture);
@@ -85,22 +79,17 @@ Result<ResultDescriptor> ResultRef::descriptor(bool require_complete) const {
   if (!impl_)
     return Result<ResultDescriptor>(Status{ErrorCode::Stale, {}});
   std::lock_guard<std::timed_mutex> lock(impl_->mutex);
-  if (!impl_->complete &&
-      (require_complete ||
-       impl_->schema.publication == PublishPolicy::CompleteBundle))
+  if (!impl_->complete && require_complete)
     return Result<ResultDescriptor>(
         impl_->status().ok() ? data_internal::unavailable() : impl_->status());
   ResultDescriptor facts;
   facts.object_ = impl_->object;
   facts.revision_ = impl_->revision;
   facts.sealed_ = impl_->complete;
-  facts.field_count_ = static_cast<std::uint32_t>(impl_->schema.fields.size());
-  for (std::uint32_t i = 0; i < facts.field_count_; ++i)
-    facts.rows_[i] = impl_->fields[i].certified;
   facts.tensor_count_ =
       static_cast<std::uint32_t>(impl_->schema.tensors.size());
   for (std::uint32_t i = 0; i < facts.tensor_count_; ++i)
-    facts.tensors_[i] = impl_->tensors[i].coverage;
+    facts.tensors_[i] = impl_->tensors[i].tensor.coverage();
   return Result<ResultDescriptor>(facts);
 }
 }  // namespace ps

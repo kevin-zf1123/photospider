@@ -48,7 +48,7 @@ int observe(bool enabled) {
   operation.traits.input_schema.resize(1);
   operation.traits.cacheable = false;
   const auto schema = multi_result::schema(ElementType::Int64, {1});
-  operation.traits.input_schema[0].kind = OperationPortKind::Result;
+
   operation.traits.input_schema[0].result_schema_id = std::string(schema.id);
   operation.traits.input_schema[0].result_schema_version = schema.version;
   operation.traits.outputs = {multi_result::output("value", schema)};

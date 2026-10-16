@@ -30,7 +30,7 @@ inline Status invalid(const char* message) {
 }
 inline Result<WorkflowNodeOutput> linear(
     WorkflowDocument& document, WorkflowInput input, WorkflowInput lower,
-    WorkflowInput upper, const ValueDescriptor& descriptor,
+    WorkflowInput upper, const TensorDescriptor& descriptor,
     CpuNumericProfile profile, bool inverse) {
   using Answer = Result<WorkflowNodeOutput>;
   const auto* selected = suffix(profile);
@@ -175,7 +175,7 @@ inline Result<WorkflowNode> logarithmic(std::uint64_t id, bool inverse,
  */
 inline Result<WorkflowNodeOutput> linear_shaper(
     WorkflowDocument& document, WorkflowInput input, WorkflowInput lower,
-    WorkflowInput upper, const ValueDescriptor& descriptor,
+    WorkflowInput upper, const TensorDescriptor& descriptor,
     CpuNumericProfile profile = CpuNumericProfile::Strict) {
   return shaper_detail::linear(document, std::move(input), std::move(lower),
                                std::move(upper), descriptor, profile, false);
@@ -184,12 +184,12 @@ inline Result<WorkflowNodeOutput> linear_shaper(
  * `input`, `lower` and `upper` are single-tensor Results with arbitrary schema
  * ids/member keys and the same Float32/64 dtype. Output is a
  * `photospider.tensor` v1 `samples` Result. Shares linear_shaper's authoring,
- * IEEE, Whole role-13 validation, demand and ownership contract.
+ * IEEE, shared-stage validation, demand and ownership contract.
  * Finite coordinates outside [0,1] extrapolate; infinities retain their signs.
  */
 inline Result<WorkflowNodeOutput> linear_shaper_inverse(
     WorkflowDocument& document, WorkflowInput input, WorkflowInput lower,
-    WorkflowInput upper, const ValueDescriptor& descriptor,
+    WorkflowInput upper, const TensorDescriptor& descriptor,
     CpuNumericProfile profile = CpuNumericProfile::Strict) {
   return shaper_detail::linear(document, std::move(input), std::move(lower),
                                std::move(upper), descriptor, profile, true);
@@ -215,12 +215,12 @@ inline Result<WorkflowNodeOutput> linear_shaper_inverse(
  * independently of request order. Refinement uses 128..4096 fraction bits;
  * unresolved rounding fails ResourceExhausted/CapacityLimit. Work/cancellation
  * can interrupt refinement and retain their original failure categories.
- * @note Every nonempty request uses Whole Result with Data, Validation and
- * Descriptor (role 13) for all three inputs. Authorized windows feed the math
- * directly; the callback does not collect or copy the full input through Value.
- * Bounds precede IEEE evaluation inside the callback; typed/upstream failures
- * can occur first. Invalid bounds fail InvalidArgument/InvalidDomain with port
- * and Run scope. Empty reads no payload. Any input edit dirties all recorded
+ * @note Every nonempty request uses a Run-shared stage with complete input
+ * tensors for all three inputs. Authorized windows feed the math directly; the
+ * callback does not collect or copy the full input through TensorSpan. Bounds
+ * precede IEEE evaluation inside the callback; typed/upstream failures can
+ * occur first. Invalid bounds fail InvalidArgument/InvalidDomain with port and
+ * Run scope. Empty reads no payload. Any input edit dirties all recorded
  * demand. The complete immutable output backs sparse fragments and outlives
  * context. Arbitrary legal input strides remain supported. Output and fixed
  * exact workspace use host budgets; provenance is retained and cancellation
@@ -234,7 +234,7 @@ inline Result<WorkflowNode> log2_shaper_node(
       id, false, std::move(input), std::move(lower), std::move(upper), profile);
 }
 /** @brief Whole-expression lower*(upper/lower)^input, with exact t=0/1
- * endpoints. Shares log2_shaper_node's Result schema, Whole role-13 input
+ * endpoints. Shares log2_shaper_node's Result schema, shared-stage input
  * validation, interface and authoring contract.
  * Positive finite bounds precede NaN propagation; inverse -Inf maps to +0, +Inf
  * to +Inf.

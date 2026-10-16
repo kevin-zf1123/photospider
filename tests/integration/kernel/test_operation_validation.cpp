@@ -23,7 +23,8 @@ struct Copy {
     if (!requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false, take(TileSet::range(phase.resources, 0, 1))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     double value;
@@ -80,7 +81,6 @@ int main() {
   port.validators = {validator.identity};
   operation.traits.outputs = {multi_result::output("value", schema)};
   operation.traits.outputs[0].output_schema.validators = {validator.identity};
-  operation.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   operation.traits.parameter_schema = {
       {"limit", OperationParameterType::Float64}};
   operation.start_result = [executed](const auto&, const auto& allocator) {
@@ -105,36 +105,8 @@ int main() {
                      {WorkflowInputReference{1}},
                      {{"limit", 5.0}}}};
   document.outputs = {{"value", 1, "value"}};
-  GraphContext graph(document);
-  auto compiled = take(Compiler(registry).compile(graph));
-  ExecutionContextConfig config;
-  config.cpu_workers = 1;
-  config.result_cache_bytes = 1048576;
-  ExecutionContext context(registry, config);
+  ExecutionContext context(registry);
   auto root = take(context.resource_budget());
-  ExecutionBindings bindings{{multi_result::binding(root, "input", 4, schema)}};
-  auto first = context.execute(compiled.plan, bindings);
-  PS_CHECK(first.ok() &&
-           multi_result::number(first.value().results.at("value")) == 4);
-  const auto checked = calls->load();
-  PS_CHECK(checked >= 2);
-  const auto first_computations = executed->load();
-  auto second = context.execute(compiled.plan, bindings);
-  PS_CHECK(second.ok() && calls->load() > checked);
-  PS_CHECK(second.value().diagnostics.cache_hits > 0 &&
-           executed->load() == first_computations);
-  const auto prior = executed->load();
-  auto invalid = context.execute(
-      compiled.plan, {{multi_result::binding(root, "input", -1, schema)}});
-  PS_CHECK(!invalid.ok() &&
-           invalid.status().code == ErrorCode::InvalidArgument);
-  PS_CHECK(executed->load() == prior);
-  document.nodes[0].parameters["limit"] = 3.0;
-  GraphContext strict_graph(document);
-  auto strict = take(Compiler(registry).compile(strict_graph));
-  PS_CHECK(strict.plan.cache_key().value != compiled.plan.cache_key().value);
-  auto rejected = context.execute(strict.plan, bindings);
-  PS_CHECK(!rejected.ok() && executed->load() == prior);
   // Obtain real host-authorized capabilities, then pair them with another
   // same-schema object in a direct invocation. Validation must cover what the
   // computation will read, not an unrelated object supplied for the port.

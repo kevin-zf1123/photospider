@@ -9,8 +9,8 @@
 
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/footprint.hpp"
-#include "photospider/data/planar_image.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_layout.hpp"
+#include "photospider/data/tensor_span.hpp"
 
 namespace ps {
 namespace plugin_internal {
@@ -23,36 +23,17 @@ class ResultCache;
 class StructuredResultCache;
 class ResultWindowAccess;
 }  // namespace execution_internal
-/** @brief Finality contract for immutable field ranges. */
-enum class PublishPolicy : std::uint32_t {
-  CompleteBundle = 1,
-  IndependentChunks = 2,
-  StablePrefix = 3
-};
-/** @brief Compile-time extent expression; RuntimeCount is resolved at seal. */
+/** @brief Compile-time extent expression, resolved before execution. */
 enum class ResultExtentKind : std::uint32_t {
   Fixed = 1,
   InputAxis = 2,
-  InputElements = 3,
-  FieldRows = 4,
-  RuntimeCount = 5
+  InputElements = 3
 };
 struct ResultExtent final {
   ResultExtentKind kind = ResultExtentKind::Fixed;
   std::uint64_t value = 1;
-  std::uint32_t input = 0, axis = 0, field = 0;
+  std::uint32_t input = 0, axis = 0;
   std::uint64_t divisor = 1, offset = 0;
-};
-/** @brief Packed primitive records with a potentially dynamic row count.
- * A row is one complete observation for this field. record_shape has rank 0..7
- * and positive extents; the empty shape is one scalar per row. Zero rows do not
- * create a zero-extent Value or a data page.
- */
-struct ResultFieldSpec final {
-  ResourceString key;
-  ElementType element_type = ElementType::Float64;
-  ResultExtent rows;
-  ResourceVector<std::uint64_t> record_shape;
 };
 /** @brief Tensor topology and optional physical storage preferences.
  * Spatial axes are cell-local and meaningful only when spatial is true.
@@ -60,11 +41,10 @@ struct ResultFieldSpec final {
  */
 struct ResultTensorLayout final {
   bool spatial = false;
-  ImagePlaneOrder order = ImagePlaneOrder::Tiled;
+  TensorStorageOrder order = TensorStorageOrder::Tiled;
   std::uint32_t height_axis = 0, width_axis = 1;
   std::optional<std::uint32_t> channel_axis = 2;
   std::uint64_t row_pitch_bytes = 0;
-  std::vector<ImageComponentGroup> groups;
 };
 /** @brief One typed tensor member, independent of its backing strategy.
  * descriptor describes the cell axes. batch_axes prefixes logical samples;
@@ -77,7 +57,7 @@ struct PHOTOSPIDER_API ResultTensorSpec final {
   ResourceString key;
   ResourceVector<std::uint64_t> batch_axes;
   std::uint32_t atomic_trailing_axes = 0;
-  ValueDescriptor descriptor;
+  TensorDescriptor descriptor;
   ResultTensorLayout layout;
 
   std::vector<std::uint64_t> sample_shape() const;
@@ -86,20 +66,36 @@ struct PHOTOSPIDER_API ResultTensorSpec final {
   Result<Footprint> close_samples(const Footprint& samples,
                                   const FootprintLimits& limits = {}) const;
 };
-/** @brief Fixed compiler-visible fields, domain and structural layout. At most
- * 16 fields, rank-1..8 domain (or empty for a collection), with explicit
- * structural contracts identified by id/version. RuntimeCount and FieldRows
- * constraints survive compilation; input-axis expressions resolve without
- * reading input samples. Physical page geometry, object generations and
- * descriptor revisions are excluded from this schema.
+/** @brief Visibility rule, independent of callback scheduling. */
+enum class ResultPublicationPolicy : std::uint32_t {
+  CompleteBundle = 1,
+  IndependentChunks = 2,
+  StablePrefix = 3
+};
+/** @brief Fixed publication scope over complete static members.
+ * CompleteBundle exposes its listed members together after full coverage.
+ * StablePrefix lists one member and exposes complete tiles in local index
+ * order. IndependentChunks exposes each completed tile independently.
+ * Member slots and scopes are strictly sorted, disjoint and bounded by 16.
+ * Unlisted members use IndependentChunks. No policy changes read authority.
+ */
+struct ResultPublicationScope final {
+  ResultPublicationPolicy policy = ResultPublicationPolicy::IndependentChunks;
+  ResourceVector<std::uint32_t> members;
+};
+/** @brief Static compiler-visible directory of 1..16 tensor members.
+ * Each member has a fixed positive shape and structural layout. Input-axis
+ * expressions in the domain resolve without reading samples. Physical storage,
+ * object generations and descriptor revisions do not affect schema identity.
  */
 struct PHOTOSPIDER_API SchemaTemplate final {
   ResourceString id;
   std::uint32_t version = 1;
-  PublishPolicy publication = PublishPolicy::CompleteBundle;
-  ResourceVector<ResultFieldSpec> fields;
   ResourceVector<ResultTensorSpec> tensors;
   ResourceVector<ResultExtent> domain;
+  ResourceVector<ResultPublicationScope> publication_scopes;
+  const ResultPublicationScope* publication_scope(
+      std::uint32_t slot) const noexcept;
   /** @brief Checks the closed bounded structural vocabulary, with no I/O. */
   Status validate(bool resolved = false) const;
   /** @brief Resolves input-derived extents from immutable static domains. */
@@ -115,16 +111,13 @@ struct PHOTOSPIDER_API SchemaTemplate final {
   Result<SchemaTemplate> managed_copy(const ResourceBudget& budget) const;
   Result<ResourceString> managed_canonical(const ResourceBudget& budget) const;
   bool same_schema(const SchemaTemplate& other) const noexcept;
-  Result<std::uint64_t> row_bytes(std::uint32_t field) const;
 };
 /** @brief Bounded growth policy for one producer object, not semantic count. */
 struct ResultGrowthLimits final {
-  std::uint64_t maximum_rows = 1048576;
   std::uint64_t maximum_bytes = 1024ULL * 1024 * 1024;
 };
 class ResultTensorReadWindow;
 class ResultBuilder;
-class ResultReadPlan;
 class WeakResultRef;
 /** @brief Immutable prefix/sealed facts for exactly one construction object.
  * Copies contain fixed-size facts and never gain authorization as production
@@ -137,23 +130,17 @@ class PHOTOSPIDER_API ResultDescriptor final {
   bool sealed() const noexcept { return sealed_; }
   std::uint32_t tensor_count() const noexcept { return tensor_count_; }
   const Footprint& tensor_coverage(std::uint32_t slot) const;
-  std::uint32_t field_count() const noexcept { return field_count_; }
-  std::uint64_t rows(std::uint32_t field) const noexcept {
-    return field < field_count_ ? rows_[field] : 0;
-  }
 
  private:
   friend class ResultRef;
   friend class execution_internal::StructuredExecution;
   std::uint64_t object_ = 0, revision_ = 0;
-  std::uint32_t field_count_ = 0;
   std::uint32_t tensor_count_ = 0;
   std::array<Footprint, 16> tensors_{};
   bool sealed_ = false;
-  std::array<std::uint64_t, 16> rows_{};
 };
 /** @brief Owning immutable-result reference with monotone published coverage.
- * The object id is assigned once, before count discovery. Copies share schema,
+ * The object id is assigned once, at construction. Copies share schema,
  * descriptors and mandatory backing. No method starts production.
  * Access after producer/context retirement is limited to certified ranges.
  */
@@ -191,13 +178,6 @@ class PHOTOSPIDER_API ResultRef final {
    */
   Result<ResultDescriptor> descriptor(bool require_complete = true) const;
   Status production_status() const;
-  /** @brief Prepares exactly one authorized field interval using captured
-   * facts. No I/O takes place. Empty intervals are valid descriptors but cannot
-   * be pinned; callers handle zero rows without manufacturing a Value.
-   */
-  Result<ResultReadPlan> prepare_read(const ResultDescriptor& descriptor,
-                                      std::uint32_t field, std::uint64_t first,
-                                      std::uint64_t rows) const;
   /** @brief Reads one certified sample from a captured descriptor. The owning
    * descriptor and Result retain coverage/backing; no production is started.
    */
@@ -224,8 +204,8 @@ class PHOTOSPIDER_API ResultRef final {
   friend class ResultBuilder;
   friend class ResultContinuation;
   friend class plugin_internal::ResultPayloadBound;
-  friend class ResultReadPlan;
   friend class ResultTensorReadWindow;
+  friend class execution_internal::ResultWindowAccess;
   friend class WeakResultRef;
   friend class execution_internal::StructuredExecution;
   friend class execution_internal::ResultPublicationValidator;
@@ -235,6 +215,7 @@ class PHOTOSPIDER_API ResultRef final {
     const void* owner = nullptr;
     std::uint64_t bytes = 0;
     bool native = false;
+    std::weak_ptr<const CpuStorage> lifetime;
   };
   Result<ResourceVector<CacheStorage>> cache_storage(
       const std::function<Status(std::uint64_t)>& work,
@@ -268,28 +249,6 @@ class PHOTOSPIDER_API WeakResultRef final {
   std::weak_ptr<ResultRef::Impl> impl_;
   std::weak_ptr<const ResultRef::Capture> captured_;
   bool captured_view_ = false;
-};
-/** @brief Authorized bounded field-memory read retaining its Result owner.
- * Copies share Root-accounted metadata. load() copies the captured certified
- * range into a Root-accounted immutable window. The window retains both the
- * field backing and its Result after this plan or context is destroyed.
- * Appending later rows does not change the authorized range or existing bytes.
- */
-class PHOTOSPIDER_API ResultReadPlan final {
- public:
-  ResultReadPlan() = default;
-  bool valid() const noexcept { return impl_ != nullptr; }
-  /** @brief Capacity provenance, independent of semantic identity. */
-  bool owned_by(const ResourceBudget& budget) const noexcept;
-  std::uint64_t byte_size() const noexcept;
-  Result<std::shared_ptr<const CpuStorage>> load(
-      std::uint64_t maximum_window,
-      const CancellationToken& cancellation = {}) const;
-
- private:
-  friend class ResultRef;
-  struct Impl;
-  std::shared_ptr<const Impl> impl_;
 };
 /** @brief Authorized affine samples beginning at data. A sample advances by
  * sample_stride_bytes, which may be negative or zero. bytes is the checked
@@ -344,7 +303,7 @@ class PHOTOSPIDER_API ResultTensorReadWindow final {
   Result<std::uint64_t> read_work() const;
   /** @brief Own the exact authorized affine backing, or NotFound if fragmented.
    */
-  Result<Value> affine_view() const;
+  Result<TensorSpan> affine_view() const;
   /** @brief Visits disjoint authorized backing regions without sample reads.
    * False means no finer partition. Visitor borrows each Region synchronously;
    * returned views retain their own storage. Work is charged to budget.
@@ -352,6 +311,11 @@ class PHOTOSPIDER_API ResultTensorReadWindow final {
   Result<bool> visit_backing_regions(
       const ResourceBudget& budget,
       const std::function<Status(const Region&)>& visitor) const;
+  /** @brief Copy this authorized window in logical row-major order.
+   * The caller owns exactly bytes writable bytes. No payload allocation occurs;
+   * cancellation and Root work limits apply. Failure may leave a partial copy.
+   */
+  Status copy_to(std::uint8_t* destination, std::uint64_t bytes) const;
   Result<ResultTensorRun> row_run(const std::vector<std::uint64_t>& at) const;
   Result<ResultTensorRectangle> rectangle_run(
       const std::vector<std::uint64_t>& at) const;
@@ -370,12 +334,8 @@ class PHOTOSPIDER_API ResultTensorReadWindow final {
   std::uint32_t slot_ = 0;
   Region region_;
   ResourceLease lease_;
-  ResourceVector<PlanarImageReadWindow> pieces_;
-  ResourceVector<std::array<std::uint64_t, 8>> piece_batches_;
-  ResourceVector<std::size_t> piece_order_;
   CancellationToken cancellation_;
-  Result<std::size_t> find_piece(const std::vector<std::uint64_t>& at) const;
-  ResourceVector<Value> affine_;
+  ResourceVector<TensorSpan> affine_;
   bool affine_canonical_ = false;
 };
 /** @brief Anchored affine coordinate map for a physical tensor view.
@@ -422,6 +382,13 @@ struct ResultTensorMutableRectangle final {
 class PHOTOSPIDER_API ResultTensorWriteWindow final {
  public:
   ResultTensorWriteWindow() = default;
+  /** @brief Borrow an explicit row-major writer without allocation or copying.
+   * spec and writer must remain alive and unchanged until the window and all
+   * borrowed runs retire. Freeze the writer only after all writes complete.
+   * Returns TypeMismatch when dtype or full sample shape differs.
+   */
+  static Result<ResultTensorWriteWindow> borrow_dense(
+      const ResultTensorSpec& spec, TensorWriter& writer);
   ResultTensorWriteWindow(ResultTensorWriteWindow&&) noexcept = default;
   ResultTensorWriteWindow& operator=(ResultTensorWriteWindow&&) noexcept =
       default;
@@ -440,7 +407,6 @@ class PHOTOSPIDER_API ResultTensorWriteWindow final {
   friend class ResultBuilder;
   const ResultTensorSpec* spec_ = nullptr;
   Region region_;
-  const PlanarImageWriteWindow* planar_ = nullptr;
   std::uint8_t* affine_data_ = nullptr;
   std::vector<std::uint64_t> affine_strides_;
 };
@@ -472,22 +438,6 @@ class PHOTOSPIDER_API ResultBuilder final {
       std::vector<std::uint64_t> association = {},
       std::uint64_t tile_extent = 128);
   ResultRef reference() const noexcept;
-  /** @brief Copies complete rows into immutable Root-budgeted memory chunks.
-   * @note Publication remains explicit. A failed or cancelled append preserves
-   * certified prefixes and records a sticky producer failure. Payload and
-   * Metadata capacity are admitted before the logical row count changes.
-   */
-  Status append(std::uint32_t field, std::uint64_t rows, ByteView bytes,
-                const CancellationToken& cancellation = {});
-  /** @brief Certifies an immutable ordered prefix of a field.
-   * IndependentChunks publishes independent ordered field chunks; StablePrefix
-   * additionally permits an unknown final count. CompleteBundle defers public
-   * visibility until seal. Certified rows remain readable after a later
-   * producer failure. Future validation must finish before certification.
-   * Invalid field or prefix bounds return sticky TypeMismatch; a retired
-   * producer returns Stale. Calls serialize with append under the Result lock.
-   */
-  Status publish(std::uint32_t field, std::uint64_t end);
   /** @brief Adopt an immutable affine tensor block without copying payload.
    * Only the supplied region is certified. Signed/zero strides are checked
    * against the actual retained storage span; cell and batch axes share this
@@ -504,13 +454,12 @@ class PHOTOSPIDER_API ResultBuilder final {
                         const CancellationToken& cancellation = {});
   /** @brief Publish ordered authorized planes as an immutable zero-copy view.
    * Sources cover one physical batch and exactly the output spatial rectangle;
-   * ordered channel ranges must prove consecutive physical planes of one root.
-   * Reordered, duplicated or unrelated mappings return InvalidArgument with
-   * ViewUnavailable and leave the builder unchanged, allowing explicit auto
-   * materialization. Sources and their schema/association/profile owners remain
-   * retained. Coverage is exact; no sample pages are copied or provisioned.
-   * Other failures are sticky. Overlap fails as for publish_tensor.
-   * Source-to-output cycles are rejected.
+   * ordered channel ranges are concatenated through checked affine maps.
+   * Fragmented backing and distinct source owners are retained. Input and
+   * output axes must match; explicit transforms support other axis mappings.
+   * Coverage is exact; no sample pages are copied or provisioned. Other
+   * failures are sticky. Overlap fails as for publish_tensor. Source-to-output
+   * cycles are rejected.
    */
   Status publish_tensor_view(
       std::uint32_t slot, const Region& region,
@@ -532,10 +481,10 @@ class PHOTOSPIDER_API ResultBuilder final {
                              const ResultTensorViewTransform& transform,
                              const CancellationToken& cancellation = {});
   /** @brief Write directly into unpublished authorized tensor windows.
-   * Spatial windows use planar rectangles when full-domain spatial byte
-   * geometry is representable; otherwise the builder can use affine backing
-   * allocated for the requested region. The callback receives windows in
-   * batch-axis order, borrowed only until it returns. Use each window's spec,
+   * Windows partition the requested coverage at member tile and batch
+   * boundaries, with tile-local planar bytes for spatial axes. No full-domain
+   * backing is reserved. The callback receives windows in logical order,
+   * borrowed only until it returns. Use each window's spec,
    * region, sample_axis and row/rectangle run strides; do not assume planar or
    * contiguous storage. Failure or cancellation rolls back all new pages;
    * existing samples stay immutable. Callers synchronize concurrent writes.
@@ -563,7 +512,7 @@ class PHOTOSPIDER_API ResultBuilder final {
           Status(const ResourceVector<ResultTensorWriteWindow>&)>& write,
       const CancellationToken& cancellation = {});
   /** @brief Closes all row constraints after the producer's association checks.
-   * Fixed/FieldRows counts and complete certification are checked by the host.
+   * The host checks member coverage against the current execution contract.
    * Domain-specific numeric/association validation precedes this call.
    */
   Result<ResultRef> seal();
@@ -571,18 +520,18 @@ class PHOTOSPIDER_API ResultBuilder final {
 
  private:
   friend class execution_internal::StructuredExecution;
-  // Only the coordinator may seal an unstarted Empty request. Fixed field
-  // domains stay in the schema while their returned coverage contains no rows.
+  // Only the coordinator may seal an unstarted empty request. Static member
+  // domains stay in the schema while their returned coverage remains empty.
   Result<ResultRef> seal_empty();
   Status publish_tensor_storage(std::uint32_t slot, const Region& region,
                                 StridedLayout layout,
                                 std::shared_ptr<const CpuStorage> storage,
                                 const CancellationToken& cancellation,
                                 ResourceVector<ResultRef> sources);
-  static Status append_to(const std::shared_ptr<ResultRef::Impl>& impl,
-                          std::uint32_t field, std::uint64_t rows,
-                          ByteView bytes,
-                          const CancellationToken& cancellation);
+  Status publish_tensor_spans(std::uint32_t slot, const Region& region,
+                              const ResourceVector<TensorSpan>& spans,
+                              const CancellationToken& cancellation,
+                              ResourceVector<ResultRef> sources);
   std::shared_ptr<ResultRef::Impl> impl_;
 };
 }  // namespace ps

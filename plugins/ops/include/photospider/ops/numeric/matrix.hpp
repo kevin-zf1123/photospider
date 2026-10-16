@@ -8,7 +8,7 @@
 #include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
-/** @brief Authors a Whole Result operation for y=M*x+b.
+/** @brief Authors a Run-shared full-tensor operation for y=M*x+b.
  * The `vectors`, `matrix`, and `bias` input edges each reference one Result
  * tensor member under any member key. Their sample shapes are [...,Cin],
  * [Cout,Cin], and [Cout]; all dtypes match and are Float32 or Float64, Cin/Cout

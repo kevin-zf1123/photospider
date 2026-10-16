@@ -11,10 +11,9 @@
 
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/core/cancellation.hpp"
-#include "photospider/core/data_movement.hpp"
 #include "photospider/core/status.hpp"
-#include "photospider/data/planar_image.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_layout.hpp"
+#include "photospider/data/tensor_span.hpp"
 #include "photospider/plugin/cpu_parallel_api.h"
 #include "photospider/plugin/cpu_tiles_api.h"
 #include "photospider/plugin/native_gpu_api.h"
@@ -22,14 +21,6 @@
 #include "photospider/plugin/result_program.hpp"
 
 namespace ps {
-
-/** @brief Computation units selected from the resolved output schema. */
-enum class OperationRegionRule : std::uint32_t {
-  /** @brief One task publishes the complete output. Inputs remain lazy. */
-  Whole = 1U,
-  /** @brief One task per tile when the resolved output has a spatial grid. */
-  Tiled = 2U,
-};
 
 /** @brief Closed source-parameter type vocabulary published by an operation. */
 enum class OperationParameterType : std::uint32_t {
@@ -65,25 +56,16 @@ struct PHOTOSPIDER_API OperationParameterSpec final {
   double maximum = 0;
 };
 
-/** @brief Operation ports carry complete Result schemas. */
-enum class OperationPortKind : std::uint32_t { Result = 6 };
 /**
  * @brief Copied compile-time port contract included in stage identities.
  * @note The Result schema is the port value. These predicates validate its
  * tensor descriptor and explicitly bound contracts before callback entry.
- * Tensor predicates constrain kind, dtype, rank and explicit validators; scalar
- * constraints also apply their finite inclusive interval. The compiler includes
- * the resolved schema in stage identity.
+ * Tensor predicates constrain dtype, rank and explicit validators. The compiler
+ * includes the resolved schema in stage identity.
  */
 struct PHOTOSPIDER_API OperationPortConstraint final {
   /** @brief Explicit validators; order is significant and enters identity. */
   std::vector<ExtensionIdentity> validators;
-  /** @brief Port schema kind; registered operations must select `Result`. */
-  OperationPortKind kind = OperationPortKind::Result;
-  /** @brief Finite inclusive binary32 lower bound for scalar ports. */
-  float minimum = 0.0F;
-  /** @brief Finite inclusive binary32 upper bound for scalar ports. */
-  float maximum = 0.0F;
   /** @brief Required dtype when nonzero; zero accepts any valid dtype. */
   std::uint32_t element_type = 0;
   /** @brief Required rank when nonzero. */
@@ -112,11 +94,6 @@ struct PHOTOSPIDER_API OperationPortConstraint final {
    * input schema.
    */
   std::string tensor_key = {};
-  /** @brief Require a complete Float32 scalar tensor with full
-   * sample shape {1}; finite samples must satisfy [minimum,maximum] before
-   * consumer entry, including cached producers. Signed/zero strides are valid.
-   */
-  bool scalar_bounds = false;
 };
 
 /** @brief Static contract for one named result, independent of sibling outputs.
@@ -130,51 +107,19 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
   std::string key = "value";
   /** @brief Optional ordered original input-port projection for evaluation. */
   std::optional<std::vector<std::uint32_t>> input_indices;
-  /** @brief Whole or per-tile computation; Needs select all inputs. */
-  OperationRegionRule region_rule = OperationRegionRule::Whole;
   /** @brief Result port and tensor-member constraints. */
   OperationPortConstraint output_schema;
-  /** @brief All relevant stages must implement the declared error delivery. */
-  FailureDelivery failure_delivery = FailureDelivery::RequestFailureOnly;
   /** @brief Optional bound on newly owned output payload.
    * For Result publications, the host checks the complete Result's physical
    * owners, deduplicates them, and excludes backing still owned by exposed
-   * inputs or authorized tensor grants, including private backing prepared for
-   * a structured Whole view. The bound keeps weak source references and does
-   * not retain input payload. Each prefix publication is checked as a whole
-   * Result. Workspace, metadata, and referenced resources remain separately
-   * accounted. Exceeding the bound returns ResourceExhausted/CapacityLimit.
-   * This publication check does not prevent a trusted callback from allocating
-   * against the Root before publication.
+   * inputs or authorized tensor grants. The bound keeps weak source references
+   * and does not retain input payload. Each prefix publication is checked as a
+   * whole Result. Workspace, metadata, and referenced resources remain
+   * separately accounted. Exceeding the bound returns
+   * ResourceExhausted/CapacityLimit. This publication check does not prevent a
+   * trusted callback from allocating against the Root before publication.
    */
   std::optional<std::uint64_t> maximum_output_payload_bytes = {};
-  /** @brief Allows publication to preserve a compatible immutable input view.
-   * Ordinary/direct collectors retain their existing view behavior. In
-   * compiled structured CPU Whole Result execution, the coordinator prepares
-   * each payload-authorized Tensor Need after validation and before the next
-   * computation poll. It proves an affine view for each authorized box; Auto
-   * may collect only when that view is unavailable. Collection uses
-   * Root-accounted private input backing retained by the ResultTensorInput.
-   * Borrowed owners remain charged independently, and the output payload cap
-   * does not prevent Root allocations before publication. This property does
-   * not make direct ResultProgramPhase calls fulfill Needs automatically.
-   * GPU view preparation are outside this path. The C Result ABI
-   * exposes corresponding output policy flags, and its compiled structured
-   * CPU Whole path uses this preparation. It permits view/copy choices without
-   * dense precharge.
-   */
-  bool preserve_output_views = false;
-  /** @brief Requires affine input views for the selected Whole view path.
-   * Requires preserve_output_views. For structured Result execution, every
-   * authorized Need box must map to one compatible affine owner; compatible
-   * fragments from that owner may form one view. If a box cannot be represented
-   * as a view, the coordinator returns InvalidArgument/InvalidDomain
-   * ViewUnavailable before the computation callback. With this flag unset,
-   * Auto may collect only for that unavailable-view case. Direct Result phases
-   * do not automatically prepare Need-backed views. This property is part of
-   * compiled identity; it does not limit typed validation.
-   */
-  bool requires_input_views = false;
   /** @brief Host-allocated state bound and finite poll limit for staged code.
    */
   std::uint64_t continuation_bytes = 0;
@@ -189,11 +134,28 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
    * retain their id/version.
    */
   std::optional<SchemaTemplate> result_schema = {};
-  /** @brief Explicit bitwise value relation; never inferred from read needs.
-   * V1 is CPU planar, with complete static pieces and spatial identity maps.
-   * The registry validates shape/dtype/maps before compiler publication.
-   */
-  DataMovementKind data_movement = DataMovementKind::None;
+};
+
+/** @brief Static contract for one Run-shared continuation stage.
+ * key is unique within the original node instance. Every Run starts a fresh
+ * producer and retains its success/failure until Run end. Input projection is
+ * a potential dependency declaration, not read authority. The stage issues
+ * ordinary member Needs before reading. Result schema and bounds are fixed
+ * during preparation and enter operation identity; no spill or recomputation.
+ */
+struct OperationSharedStage final {
+  std::string key;
+  /** @brief Validators certify each newly visible tile commit before supply.
+   * A requires_complete validator delays visibility until the static full
+   * stage is available; it never expands an input Need. */
+  std::vector<ExtensionIdentity> validators;
+  SchemaTemplate result_schema;
+  std::vector<std::uint32_t> input_indices;
+  Backend backend = Backend::Cpu;
+  std::uint64_t continuation_bytes = 0, workspace_bytes = 0;
+  std::uint64_t maximum_work = 0, maximum_output_payload_bytes = 0;
+  std::uint32_t maximum_dependency_stages = 0;
+  bool mandatory = false;
 };
 
 /**
@@ -205,9 +167,8 @@ struct PHOTOSPIDER_API OperationTraits final {
   /** @brief Bounded report types that this operation may emit. */
   std::vector<ExtensionIdentity> diagnostics;
   /** @brief CPU Result orchestration submits bounded computation stages to
-   * the host tile service for Whole or protocol-2 Result execution. Coordinator
-   * and tile callbacks have separate service permissions. Host range
-   * parallelism remains available to Whole calls.
+   * the host CPU tile service. Coordinator and tile callbacks have separate
+   * service permissions. Host range parallelism is also available to CPU polls.
    */
   bool cpu_staged_tiles = false;
   /** @brief Opts pure staged outputs into a shared internal block namespace.
@@ -230,13 +191,12 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint32_t input_count = 0;
   /** @brief Equal inputs/parameters produce equal output bytes.
-   * @note Dependency-v2 Result programs require both purity traits except for
-   * Whole outputs with RequestFailureOnly delivery. That
-   * Whole case may be non-pure only when `cacheable` is false.
+   * @note Nonpure operations require mandatory Run-shared stages and must
+   * disable completed-result caching.
    */
   bool deterministic = true;
   /** @brief Callback has no externally visible side effect.
-   * The non-pure Whole Result exception is documented on `deterministic`.
+   * Externally visible work belongs to a declared mandatory shared stage.
    */
   bool side_effect_free = true;
   /** @brief CPU implementation is available. At least one backend is required.
@@ -251,7 +211,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    * `BackendUnavailable` with reason None, origin unspecified or Backend, and
    * scope unspecified or Group. Poll retry also requires a retry-safe attempt
    * with no published output, mandatory I/O, checkpoint or block callback,
-   * native dispatch, or field I/O, and clear cancellation, stale-plan, and
+   * native dispatch, or tensor I/O, and clear cancellation, stale-plan, and
    * host-stop checks. A separate host-service retry veto rejects replay after
    * later typed resource, protocol, callback, observer, or other nonretryable
    * failures while preserving the first reported status. Other errors do not
@@ -261,7 +221,8 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   bool allows_cpu_fallback = false;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 26U;
+  std::uint32_t version = 27U;
+  std::vector<OperationSharedStage> shared_stages;
   /** @brief Registered template requires pure per-node metadata resolution.
    * Free inference rejects templates. OperationRegistry::resolve_traits
    * clears this flag only after validated specialization.
@@ -360,26 +321,24 @@ PHOTOSPIDER_API Result<OperationMetadata> infer_operation_output(
  * a nonempty tensor-member predicate. The predicate may name a member or omit
  * tensor_key to require a sole tensor. Inference returns the concrete schema,
  * which the registry validates before compiler publication. C ABI output
- * schemas remain fixed. Specialization may resolve fields/domain/semantic
- * metadata via the closed SchemaTemplate vocabulary. Input and output metadata
- * carry Result schemas. Specialization
- * cannot alter inputs, parameters, output names, callback kinds, failure
- * delivery or workspaces.
+ * schemas remain fixed. Specialization resolves static tensor shapes and
+ * domains through the closed SchemaTemplate vocabulary. Input and output
+ * metadata carry Result schemas. Specialization cannot alter inputs,
+ * parameters, output names, callback kinds or workspaces.
  */
 struct OperationOutputSpecialization final {
   OperationMetadata metadata;
-  /** @brief Optional static-parameter-derived input projection for CPU Whole.
+  /** @brief Optional static-parameter-derived executable input projection.
    * Absent preserves the registered projection; an empty vector excludes all
    * runtime inputs. Indices are unique original ports in complete metadata.
    * Only registration-declared inputs may be retained. Resolved projections
    * enter existing compiler identities and drive demand and typed validation.
    */
   std::optional<std::vector<std::uint32_t>> input_indices;
-  DataMovementKind data_movement = DataMovementKind::None;
 };
-/** @brief Pure, deterministic metadata inference with no Value or I/O access.
- * Input descriptors and static parameters are validated first. Return one
- * record per declared output, in registry order. Exceptions are fenced;
+/** @brief Pure, deterministic metadata inference with no TensorSpan or I/O
+ * access. Input descriptors and static parameters are validated first. Return
+ * one record per declared output, in registry order. Exceptions are fenced;
  * independent calls may execute concurrently. Returned metadata is owned.
  */
 using OperationMetadataSpecializer = std::function<Result<std::vector<
@@ -389,14 +348,17 @@ using OperationMetadataSpecializer = std::function<Result<std::vector<
 
 /** @brief Deterministic static specialization and optional immutable program.
  * Returned state owns only data derived from input metadata/static parameters.
- * It must not contain mutable Run data, Value payloads, I/O state or private
- * caches. Its destructor is noexcept and may run on any thread. Compilation
- * owns preparation storage separately from runtime continuation budgets.
+ * It must not contain mutable Run data, TensorSpan payloads, I/O state or
+ * private caches. Its destructor is noexcept and may run on any thread.
+ * Compilation owns preparation storage separately from runtime continuation
+ * budgets.
  */
 struct OperationPreparation final {
   /** @brief Explicit resource identities required by this prepared program. */
   std::vector<ResourceIdentity> resources;
   std::vector<OperationOutputSpecialization> outputs;
+  /** @brief Optional complete replacement of registered stage prototypes. */
+  std::optional<std::vector<OperationSharedStage>> shared_stages;
   std::shared_ptr<const void> state;
   /** @brief Additional runtime scratch bound derived only from static metadata
    * and parameter sizes. The host checked-adds this to workspace_bytes before
@@ -452,7 +414,12 @@ class PHOTOSPIDER_API PreparedOperation final {
   Status validate_port(bool output, std::uint32_t port,
                        const ValidationContext& context) const;
   bool has_validators(bool output, std::uint32_t port) const noexcept;
-  /** @brief Whether this port requires a Whole authorized CompleteBundle. */
+  /** @brief Whether validation requires complete coverage of all tensor
+   * members. */
+  bool has_stage_validators(std::uint32_t stage) const noexcept;
+  bool requires_complete_stage_validation(std::uint32_t stage) const noexcept;
+  Status validate_stage(std::uint32_t stage,
+                        const ValidationContext& context) const;
   bool requires_complete_validation(bool output,
                                     std::uint32_t port) const noexcept;
 
@@ -573,9 +540,9 @@ class PHOTOSPIDER_API OperationRegistry final {
    * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
    * @note Path rejection precedes the platform loader. The loader accepts
-   * only the exact Result operation ABI 4 entry point and full table layout;
+   * only the exact Result operation ABI 5 entry point and full table layout;
    * missing, older, and planar-only C entries are rejected. Result modules
-   * publish validated tensor/field coverage through the structured contract.
+   * publish validated tensor coverage through the structured contract.
    * No signature, trust-store, sandbox, or process isolation is applied.
    */
   [[nodiscard]] Status load_plugin(const std::string& path);
@@ -617,13 +584,13 @@ class PHOTOSPIDER_API OperationRegistry final {
       const std::map<std::string, ParameterValue>& parameters) const;
 
   /** @brief Validates complete static inputs and prepares an owning program.
-   * No Value reads or registry mutation occur. The callback runs once outside
-   * the registry lock; metadata-only definitions receive an empty program.
-   * Allocation failure is ResourceExhausted; callback exceptions are fenced as
-   * OperationFailed. Returned state and copied static metadata are plan/direct
-   * preparation storage, outside per-observation runtime scratch admission.
-   * Reuse requires this exact registry/definition and bit-identical static
-   * parameters/metadata; dynamic payloads, ROI and selected output are
+   * No TensorSpan reads or registry mutation occur. The callback runs once
+   * outside the registry lock; metadata-only definitions receive an empty
+   * program. Allocation failure is ResourceExhausted; callback exceptions are
+   * fenced as OperationFailed. Returned state and copied static metadata are
+   * plan/direct preparation storage, outside per-observation runtime scratch
+   * admission. Reuse requires this exact registry/definition and bit-identical
+   * static parameters/metadata; dynamic payloads, ROI and selected output are
    * excluded.
    */
   [[nodiscard]] Result<std::shared_ptr<const PreparedOperation>>

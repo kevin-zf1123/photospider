@@ -37,7 +37,7 @@ struct Work {
   const ResultTensorInput* input;
   std::uint8_t* output;
   std::array<std::atomic<unsigned>, 12> visited{};
-  static int compute(void* raw, const ps_cpu_tile_v1* tile) {
+  static int compute(void* raw, const ps_cpu_tile_v2* tile) {
     auto& self = *static_cast<Work*>(raw);
     auto& probe = *self.probe;
     struct Retire {
@@ -103,9 +103,10 @@ struct Tile {
       ++requests;
       ResultProgramNeed need;
       if (probe->dynamic && requests == 1)
-        need.tiles.push_back({0, false, true, {}});
+        need.tiles.push_back({0, 0, true, {}});
       else
-        need.tiles.push_back({0, true, false, {}});
+        need.tiles.push_back(
+            {0, 0, false, take(TileSet::range(phase.resources, 0, 1))});
       return Answer(std::move(need));
     }
     if (!phase.cpu_tiles || phase.cpu_tiles->maximum_workers == 0)
@@ -114,7 +115,7 @@ struct Tile {
     auto buffer =
         take(phase.resources.allocator().allocate(12 * probe->components * 8));
     Work work{probe, &phase.tensors->at({0, 0}), buffer.data(), {}};
-    ps_cpu_tile_stage_v1 stage{};
+    ps_cpu_tile_stage_v2 stage{};
     stage.struct_size = sizeof(stage);
     stage.extent[0] = 12;
     stage.extent[1] = stage.extent[2] = 1;
@@ -167,7 +168,7 @@ int run(unsigned grant, unsigned mode, unsigned layers = 1,
   operation.traits.cpu_staged_tiles = true;
   operation.traits.input_count = 1;
   operation.traits.input_schema.resize(1);
-  operation.traits.input_schema[0].kind = OperationPortKind::Result;
+
   operation.traits.input_schema[0].tensor_key = "number";
   operation.traits.outputs = {multi_result::output("value", schema)};
   operation.traits.outputs[0].continuation_bytes = sizeof(Tile);
@@ -181,10 +182,9 @@ int run(unsigned grant, unsigned mode, unsigned layers = 1,
   whole.traits.cacheable = false;
   whole.traits.input_count = 1;
   whole.traits.input_schema.resize(1);
-  whole.traits.input_schema[0].kind = OperationPortKind::Result;
+
   whole.traits.input_schema[0].tensor_key = "number";
   whole.traits.outputs = {multi_result::output("value", schema)};
-  whole.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   whole.start_result = [](const auto&, const auto& allocator) {
     return ResultContinuation::make<multi_result::Program>(allocator, 0);
   };
@@ -200,7 +200,7 @@ int run(unsigned grant, unsigned mode, unsigned layers = 1,
   GraphContext graph(document);
   probe.invalidate = [&] { graph.replace(document); };
   PlanningOptions planning;
-  planning.tile_extent = 1;
+  planning.tile_extent = 128;
   auto plan = take(Compiler(registry).compile(graph, planning));
   ExecutionContextConfig config;
   config.cpu_workers = 4;

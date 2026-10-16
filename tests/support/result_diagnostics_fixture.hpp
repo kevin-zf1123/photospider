@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -8,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/plugin/whole_stage.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
@@ -41,18 +43,21 @@ inline int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape,
   ps::OperationDefinition operation;
   operation.key = "fixture.fixed_broadcast";
   auto schema = multi_result::schema(ps::ElementType::Float64, shape);
+  schema.tensors[0].atomic_trailing_axes = shape.size();
   if (extra_tensor) {
     auto extra = multi_result::schema().tensors[0];
     extra.key = "extra";
     schema.tensors.push_back(std::move(extra));
   }
   operation.traits.outputs = {multi_result::output("value", schema)};
-  operation.traits.outputs[0].region_rule = ps::OperationRegionRule::Whole;
   operation.traits.outputs[0].maximum_output_payload_bytes = sizeof(double);
   operation.start_result = [](const auto&, const auto&) {
     return ps::ResultContinuation::stateless<BroadcastResult::poll>();
   };
-  PS_CHECK(registry->register_operation(std::move(operation)).ok());
+  PS_CHECK(registry
+               ->register_operation(
+                   ps::sdk::with_whole_stage(std::move(operation), 100000))
+               .ok());
   auto copied_traits = registry->find_traits("fixture.fixed_broadcast");
   PS_CHECK(copied_traits.ok());
   PS_CHECK(copied_traits.value()
@@ -108,8 +113,13 @@ inline int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape,
            2 * sizeof(double));
   for (const auto* completed :
        {&first_result.value(), &second_result.value()}) {
-    PS_CHECK(completed->diagnostics.operation_timings.size() == 1);
-    const auto& timing = completed->diagnostics.operation_timings[0];
+    PS_CHECK(completed->diagnostics.operation_timings.size() == 2);
+    const auto found = std::find_if(
+        completed->diagnostics.operation_timings.begin(),
+        completed->diagnostics.operation_timings.end(),
+        [](const auto& timing) { return timing.shared_stage == 0; });
+    PS_CHECK(found != completed->diagnostics.operation_timings.end());
+    const auto& timing = *found;
     const auto count = ps::Region::whole(shape).element_count();
     const bool saturated =
         !count.ok() || (extra_tensor && count.value() == UINT64_MAX);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <vector>
 
 #include "photospider/data/result.hpp"
 
@@ -17,6 +18,9 @@ class ResultWindowAccess final {
       const ResourceBudget& budget, const Region& region,
       ResourceVector<ResultTensorReadWindow> windows,
       const CancellationToken& cancellation);
+  static Status index(ResultTensorReadWindow& window);
+  static Result<std::size_t> find(const ResultTensorReadWindow& window,
+                                  const std::vector<std::uint64_t>& at);
   static Result<std::uint64_t> read_work(const ResultTensorReadWindow& window);
   // Visits disjoint Need-authorized pieces without reading samples. False
   // means there is no smaller backing partition; borrowed regions cannot
@@ -25,10 +29,10 @@ class ResultWindowAccess final {
       const ResultTensorReadWindow& window, const ResourceBudget& budget,
       const std::function<Status(const Region&)>& visitor);
   static Result<ResultTensorReadWindow> replace_backing(
-      ResultTensorReadWindow window, Value backing,
+      ResultTensorReadWindow window, TensorSpan backing,
       ResourceLease metadata = {});
-  static Result<Value> affine(const ResultTensorReadWindow& window);
-  static Result<std::optional<Value>> input_view(
+  static Result<TensorSpan> affine(const ResultTensorReadWindow& window);
+  static Result<std::optional<TensorSpan>> input_view(
       const ResultTensorReadWindow& window, const FootprintLimits& limits);
 };
 }  // namespace ps::execution_internal

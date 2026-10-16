@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/unified_result_fixture.hpp"
 
@@ -49,48 +50,6 @@ ResultRef image(const ResourceBudget& root, const SchemaTemplate& schema,
   }
   return builder.seal().take_value();
 }
-void captured_prefix() {
-  ResourceBudget root;
-  {
-    SchemaTemplate schema;
-    schema.id = "test.prefix.capture";
-    schema.publication = PublishPolicy::StablePrefix;
-    schema.fields = {
-        {"rows", ElementType::Int64, {ResultExtentKind::RuntimeCount}, {}}};
-    auto builder = ResultBuilder::start(root, schema, "scope").take_value();
-
-    const int64_t first = 1, second = 2;
-    require(
-        builder
-            .append(0, 1, ByteView(reinterpret_cast<const uint8_t*>(&first), 8))
-            .ok(),
-        "append first");
-    require(builder.publish(0, 1).ok(), "publish first");
-    auto old = builder.reference().capture().take_value();
-    auto weak = old.weak();
-    auto facts = old.descriptor(false).take_value();
-    require(builder
-                .append(0, 1,
-                        ByteView(reinterpret_cast<const uint8_t*>(&second), 8))
-                .ok(),
-            "append second");
-    require(builder.publish(0, 2).ok(), "publish second");
-    auto complete = builder.seal().take_value();
-    auto locked = weak.lock();
-    require(locked.valid() && locked.descriptor(false).value().rows(0) == 1,
-            "weak capture revision");
-    require(!locked.descriptor().ok() && !locked.production_status().ok(),
-            "captured prefix stays incomplete");
-    require(!locked.prepare_read(complete.descriptor().value(), 0, 1, 1).ok(),
-            "captured view refuses future descriptor");
-    auto plan = locked.prepare_read(facts, 0, 0, 1).take_value();
-    auto storage = plan.load(8).take_value();
-    int64_t value = 0;
-    std::memcpy(&value, storage->bytes().data(), 8);
-    require(value == 1, "old prefix remains readable");
-  }
-  zero(root);
-}
 void resource_admission() {
   std::vector<Region> boxes;
   for (uint64_t i = 0; i < 128; ++i)
@@ -121,11 +80,9 @@ void resource_admission() {
   }
   zero(roomy);
   auto schema = unified_result_fixture::image_schema();
-  schema.fields.resize(15);
-  for (unsigned i = 0; i < schema.fields.size(); ++i) {
-    schema.fields[i].key = std::string(120, 'x') + std::to_string(i);
-    schema.fields[i].element_type = ElementType::Int64;
-  }
+  schema.tensors.resize(16, schema.tensors[0]);
+  for (unsigned i = 0; i < schema.tensors.size(); ++i)
+    schema.tensors[i].key = std::string(120, 'x') + std::to_string(i);
   limits.capacity[ResourceKind::Host] = 1024;
   limits.capacity[ResourceKind::Metadata] = 1024;
   ResourceBudget low(limits);
@@ -142,7 +99,6 @@ void resource_admission() {
     schema.tensors[0].batch_axes[0] = 3;
     schema.tensors[0].batch_axes[1] = 1;
     schema.tensors[0].descriptor.shape = {1, 1};
-    schema.publication = PublishPolicy::StablePrefix;
     auto builder = ResultBuilder::start(pages, schema, "transaction", {}, {}, 1)
                        .take_value();
 
@@ -284,12 +240,12 @@ Status join(OperationRegistry* registry, const SchemaTemplate& schema) {
 ResourceVector<TileUnit> dirty(const ExecutionDependencies& dependencies,
                                const ResourceBudget& root, TileIndex tile) {
   ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
-  changes.push_back({PlanWorkflowInput{0}, 0,
+  changes.push_back({PlanWorkflowInput{0}, 0, 0,
                      take(TileSet::from_indices(root, {tile})), false});
   return take(dependencies.dirty_units(changes));
 }
 TileRequest request(std::initializer_list<TileIndex> tiles) {
-  return {false, take(TileSet::from_indices(ResourceBudget{}, tiles))};
+  return {{{0, take(TileSet::from_indices(ResourceBudget{}, tiles))}}};
 }
 void alias_diamond() {
   auto schema = unified_result_fixture::image_schema();
@@ -338,7 +294,7 @@ void alias_diamond() {
         context.execute_fragments(frozen, {{"left", q}, {"right", q}});
     require(result.ok(), result.status().message);
     ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
-    changes.push_back({PlanWorkflowInput{0}, 0, q.tiles, false});
+    changes.push_back({PlanWorkflowInput{0}, 0, 0, q.members.at(0), false});
     {
       const auto available = root.available_capacity();
       const auto bytes = std::min(available[ResourceKind::Host],
@@ -355,7 +311,8 @@ void alias_diamond() {
       auto units = dirty(result.value().dependencies, root, 7);
       require(units.size() == 4, "diamond includes all four computation units");
       for (std::size_t step = 0; step < 4; ++step)
-        require(units[step] == TileUnit{step, 0, 7}, "diamond unit identity");
+        require(units[step] == TileUnit{step, 0, 0, 7},
+                "diamond unit identity");
       require(root.statistics().live[ResourceKind::Metadata] > before_maps,
               "returned dirty units own root capacity");
     }
@@ -383,15 +340,15 @@ void alias_diamond() {
       {{"out", request({1})}});
   require(result.ok(), result.status().message);
   require(dirty(result.value().dependencies, root, 5) ==
-              ResourceVector<TileUnit>({TileUnit{0, 0, 1}},
+              ResourceVector<TileUnit>({TileUnit{0, 0, 0, 1}},
                                        ResourceAllocator<TileUnit>(root)),
           "cross-frame tile dependency");
   require(dirty(result.value().dependencies, root, 4).empty(),
           "unrequested neighboring tile stays clean");
   // Width coordinates 2 and 3 are in the same square tile and dirty together.
-  auto grid = take(TileGrid::from_schema(schema, 2));
+  auto grid = take(TileGrid::from_tensor(schema.tensors[0], 2));
   const uint64_t at[] = {1, 0, 1, 3};
-  require(take(sdk::tile_for_coordinate(*grid, at, 4)) == 5 &&
+  require(take(sdk::tile_for_coordinate(grid, at, 4)) == 5 &&
               dirty(result.value().dependencies, root, 5).size() == 1,
           "same-tile edit dirties consumer");
 }
@@ -413,8 +370,11 @@ struct Probe {
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     if (!requested) {
       requested = true;
+      auto acquisition = sdk::to_whole(phase, 0);
+      if (!acquisition.ok())
+        return Result<ResultProgramPoll>(acquisition.status());
       return Result<ResultProgramPoll>(
-          ResultProgramNeed{{{0, true, false, {}}}});
+          std::get<ResultProgramNeed>(acquisition.take_value()));
     }
     float value = 0;
     if (bad)
@@ -430,11 +390,15 @@ struct Probe {
   }
 };
 struct Escaped {
-  Result<ResultProgramPoll> poll(const ResultProgramPhase&) {
-    return Result<ResultProgramPoll>(ResultProgramNeed{{{0, true, false, {}}}});
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    auto acquisition = sdk::to_whole(phase, 0);
+    if (!acquisition.ok())
+      return Result<ResultProgramPoll>(acquisition.status());
+    return Result<ResultProgramPoll>(
+        std::get<ResultProgramNeed>(acquisition.take_value()));
   }
 };
-void slots_whole_contract() {
+void all_member_acquisition() {
   auto schema = unified_result_fixture::image_schema();
   auto depth = schema.tensors[0];
   depth.key = "depth";
@@ -476,11 +440,18 @@ void slots_whole_contract() {
                        graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
                   .plan;
   auto handle = take(context.open_demand(plan, {{binding}}));
-  const DemandQuery query{{"out", TileRequest{true, {}}}};
+  const DemandQuery query{{"out", request({0})}};
   auto result = take(handle.request(query));
   auto record = take(result.dependencies.tile_record({0, 0, 0}));
-  require(record && record->inputs.size() == 1 && record->inputs[0].whole,
-          "multi-tensor producer has Whole authorization");
+  require(record && record->inputs.size() == 2,
+          "explicit acquisition records both tensor members");
+  for (unsigned slot = 0; slot < 2; ++slot) {
+    const auto grid = take(TileGrid::from_tensor(schema.tensors[slot], 1));
+    require(record->inputs[slot].tensor_slot == slot &&
+                record->inputs[slot].tiles ==
+                    take(TileSet::range(root, 0, grid.tile_count())),
+            "member acquisition covers its complete local grid");
+  }
   float value = 0;
   check(result.results.at("out").read_tensor(
       take(result.results.at("out").descriptor()), 0, {0}, &value, 4));
@@ -488,9 +459,9 @@ void slots_whole_contract() {
   for (auto slot : {0u, 1u}) {
     binding.result = image(root, schema, slot ? 100 : 50, slot);
     auto update = take(handle.replace_bindings({{binding}}));
-    require(update.potential_dirty.at("out") ==
+    require(update.potential_dirty.at("out").members.at(0) ==
                 take(TileSet::from_indices(root, {0})),
-            "any member edit dirties Whole producer");
+            "any acquired member edit dirties consumer");
     auto changed = take(handle.request(query));
     check(changed.results.at("out").read_tensor(
         take(changed.results.at("out").descriptor()), 0, {0}, &value, 4));
@@ -779,7 +750,7 @@ struct BlockProgram {
     if (!stage++) {
       ResultProgramNeed need;
       need.tiles = {
-          {0, false, false, take(TileSet::from_indices(phase.resources, {0}))}};
+          {0, 0, false, take(TileSet::from_indices(phase.resources, {0}))}};
       return Answer(std::move(need));
     }
     const auto state = [&](double number) {
@@ -985,9 +956,9 @@ void result_blocks() {
           require(!observer->previous.lock().valid(),
                   "block cache retains no prior Result state owner");
           auto record =
-              take(second.value().dependencies.tile_record({0, 0, 1}));
+              take(second.value().dependencies.tile_record({0, 0, 0, 1}));
           require(record && record->inputs.size() == 1 &&
-                      record->inputs[0].tiles == request({0}).tiles,
+                      record->inputs[0].tiles == request({0}).members.at(0),
                   "block hit keeps current tile Need");
         } else if (mode == 12) {
           require(
@@ -1166,41 +1137,35 @@ struct DynamicCheckpointSource {
         ResultPublication{builder.seal().take_value(), true});
   }
 };
-void impure_whole_results() {
+void impure_shared_results() {
   for (unsigned mode = 0; mode < 3; ++mode) {
     auto calls = std::make_shared<std::atomic<unsigned>>(0);
     auto chunks = std::make_shared<ChunkObserver>();
-    auto schema = chunk_schema(8, ElementType::Float64, "test.impure.whole");
+    auto schema = chunk_schema(8, ElementType::Float64, "test.impure.shared");
     auto registry = std::make_shared<OperationRegistry>();
     OperationDefinition dynamic;
-    dynamic.key = "test.impure.whole";
+    dynamic.key = "test.impure.shared";
     dynamic.traits =
         unified_result_fixture::traits(0, sizeof(DynamicCheckpointSource));
     unified_result_fixture::result_output(&dynamic.traits.outputs[0], schema);
     dynamic.traits.deterministic = mode == 1;
     dynamic.traits.side_effect_free = mode == 0;
     dynamic.traits.cacheable = false;
-    dynamic.traits.outputs[0].region_rule = OperationRegionRule::Whole;
     dynamic.start_result = [calls](const auto&, const auto& allocator) {
       return ResultContinuation::make<DynamicCheckpointSource>(allocator,
                                                                calls);
     };
-    for (unsigned invalid_mode = 0; invalid_mode < 3; ++invalid_mode) {
-      auto invalid = dynamic;
-      invalid.key += ".invalid" + std::to_string(invalid_mode);
-      if (invalid_mode == 0)
-        invalid.traits.outputs[0].region_rule = OperationRegionRule::Tiled;
-      else if (invalid_mode == 1)
-        invalid.traits.outputs[0].failure_delivery =
-            static_cast<FailureDelivery>(1);
-      else
-        invalid.traits.cacheable = true;
-      require(registry->register_operation(std::move(invalid)).code ==
-                  ErrorCode::InvalidArgument,
-              "non-pure execution requires Whole Atomic uncached behavior");
-    }
-    require(registry->register_operation(std::move(dynamic)).ok(),
-            "non-pure Whole Result registration");
+    auto invalid = dynamic;
+    invalid.key += ".cached";
+    invalid.traits.cacheable = true;
+    require(registry->register_operation(std::move(invalid)).code ==
+                ErrorCode::InvalidArgument,
+            "non-pure operations cannot declare cacheable outputs");
+    require(registry
+                ->register_operation(
+                    sdk::with_whole_stage(std::move(dynamic), 1000000))
+                .ok(),
+            "non-pure shared-stage registration");
     OperationDefinition copy;
     copy.key = "test.impure.copy";
     copy.traits = unified_result_fixture::traits(1, sizeof(ChunkCopy));
@@ -1211,7 +1176,7 @@ void impure_whole_results() {
     };
     require(registry->register_operation(std::move(copy)).ok() &&
                 registry->freeze().ok(),
-            "pure consumer of non-pure Whole Result registration");
+            "pure consumer of non-pure shared Result registration");
     ExecutionContextConfig config;
     config.managed_resources = ResourceLimits{};
     auto context = std::make_unique<ExecutionContext>(registry, config);
@@ -1219,8 +1184,8 @@ void impure_whole_results() {
     {
       WorkflowDocument doc;
       doc.nodes = {
-          {1, "test.impure.whole", {}, {}},
-          {2, "test.impure.whole", {}, {}},
+          {1, "test.impure.shared", {}, {}},
+          {2, "test.impure.shared", {}, {}},
           {3, "test.impure.copy", {WorkflowNodeOutput{1, "value"}}, {}},
           {4, "test.impure.copy", {WorkflowNodeOutput{2, "value"}}, {}}};
       doc.outputs = {{"a", 1, "value"},
@@ -1238,8 +1203,8 @@ void impure_whole_results() {
       ExecutionOptions options;
       options.maximum_parallelism = 1;
       options.maximum_dependency_cache_work = 0;
-      const DemandQuery demand{{"a", TileRequest{true, {}}},
-                               {"b", TileRequest{true, {}}},
+      const DemandQuery demand{{"a", request({0, 1, 2, 3, 4, 5, 6, 7})},
+                               {"b", request({0, 1, 2, 3, 4, 5, 6, 7})},
                                {"c", point},
                                {"d", point}};
       auto first = context->execute_fragments(frozen, demand, {}, options);
@@ -1257,7 +1222,7 @@ void impure_whole_results() {
                     .read_tensor(output.descriptor().take_value(), 0, {0, 0},
                                  &value, sizeof(value))
                     .ok(),
-                "non-pure Whole Result payload read");
+                "non-pure shared Result payload read");
         return value;
       };
       for (const auto* execution : {&first.value(), &second.value()}) {
@@ -1300,13 +1265,15 @@ void result_checkpoints() {
       unified_result_fixture::result_output(&dynamic.traits.outputs[0], schema);
       dynamic.traits.deterministic = dynamic.traits.side_effect_free =
           dynamic.traits.cacheable = false;
-      dynamic.traits.outputs[0].region_rule = OperationRegionRule::Whole;
       dynamic.start_result = [dynamic_calls](const auto&,
                                              const auto& allocator) {
         return ResultContinuation::make<DynamicCheckpointSource>(allocator,
                                                                  dynamic_calls);
       };
-      require(registry->register_operation(std::move(dynamic)).ok(),
+      require(registry
+                  ->register_operation(
+                      sdk::with_whole_stage(std::move(dynamic), 1000000))
+                  .ok(),
               "dynamic Result producer registration");
     }
     OperationDefinition sum;
@@ -1526,7 +1493,7 @@ void result_checkpoints() {
             auto units = dirty(result.value().dependencies, root, edited);
             const auto is_dirty = [&](const char* name, TileIndex tile) {
               return std::find(units.begin(), units.end(),
-                               TileUnit{plan.outputs().at(name), 0, tile}) !=
+                               TileUnit{plan.outputs().at(name), 0, 0, tile}) !=
                      units.end();
             };
             require(is_dirty("a", 2) == (edited <= 2) &&
@@ -1607,7 +1574,8 @@ void storage_owner() {
     ExecutionContextConfig config;
     config.managed_resources = ResourceLimits{};
     ExecutionContext context(registry, config);
-    auto destination = context.resource_budget().take_value();
+    root = context.resource_budget().take_value();
+    auto destination = root;
     auto input = image(destination, schema);
     WorkflowDocument doc;
     WorkflowInputDeclaration declaration;
@@ -1642,15 +1610,14 @@ void storage_owner() {
 }  // namespace
 int main() {
   try {
-    captured_prefix();
     resource_admission();
     staged_input_retirement();
     result_blocks();
     result_checkpoints();
-    impure_whole_results();
+    impure_shared_results();
     tuple_structure();
     alias_diamond();
-    slots_whole_contract();
+    all_member_acquisition();
     storage_owner();
     std::cout << "Result image contracts passed\n";
     return 0;

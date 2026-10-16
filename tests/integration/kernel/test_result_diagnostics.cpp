@@ -1,6 +1,8 @@
 #include <array>
+#include <cfenv>  // NOLINT(build/c++11)
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 #include <memory>
 #include <utility>
 
@@ -11,13 +13,60 @@ namespace {
 using namespace ps;  // NOLINT(build/namespaces)
 using multi_result::check;
 using multi_result::take;
+int diagnostic_owner_restoration() {
+  struct Restore {
+    std::fenv_t saved{};
+    Restore() { std::fegetenv(&saved); }
+    ~Restore() { std::fesetenv(&saved); }
+  } restore;
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    unsigned definitions_destroyed = 0, owners_destroyed = 0;
+    PS_CHECK(std::fesetround(FE_DOWNWARD) == 0);
+    std::feclearexcept(FE_ALL_EXCEPT);
+    std::feraiseexcept(FE_DIVBYZERO);
+    ResourceBudget root;
+    {
+      DiagnosticAccumulator accumulator(root);
+      auto type = std::shared_ptr<DiagnosticDefinition>(
+          new DiagnosticDefinition(diagnostic_fixture::definition()),
+          [&](DiagnosticDefinition* definition) {
+            delete definition;
+            ++definitions_destroyed;
+            std::fesetround(FE_UPWARD);
+            std::feraiseexcept(FE_INVALID);
+          });
+      type->owner =
+          std::shared_ptr<const void>(new int(1), [&](const void* owner) {
+            delete static_cast<const int*>(owner);
+            ++owners_destroyed;
+            std::fesetround(FE_TOWARDZERO);
+            std::feraiseexcept(FE_OVERFLOW);
+          });
+      check(accumulator.initialize({type}));
+      type.reset();
+      if (mode == 1)
+        check(accumulator.initialize({}));
+      if (mode == 2)
+        accumulator = DiagnosticAccumulator(root);
+      PS_CHECK(std::fegetround() == FE_DOWNWARD &&
+               std::fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO);
+    }
+    PS_CHECK(definitions_destroyed == 1 && owners_destroyed == 1);
+    PS_CHECK(std::fegetround() == FE_DOWNWARD &&
+             std::fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO);
+    for (auto live : root.statistics().live.values)
+      PS_CHECK(live == 0);
+  }
+  return 0;
+}
 struct ReportProgram {
   bool requested = false;
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     if (!requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false, take(TileSet::range(phase.resources, 0, 1))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     std::array<double, 5> samples{};
@@ -65,7 +114,6 @@ int poll_reports() {
   operation.traits.input_schema[0].result_schema_id = schema.id;
   operation.traits.input_schema[0].result_schema_version = schema.version;
   operation.traits.outputs = {multi_result::output("value", schema)};
-  operation.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   operation.traits.outputs[0].continuation_bytes = sizeof(ReportProgram);
   operation.start_result = [](const auto&, const auto& allocator) {
     return ResultContinuation::make<ReportProgram>(allocator);
@@ -116,6 +164,10 @@ int poll_reports() {
   GraphContext failure_graph(document);
   auto failure_plan = take(Compiler(registry).compile(failure_graph));
   auto failure = context.execute(failure_plan.plan);
+  if (failure.ok() || failure.status().code != ErrorCode::OperationFailed)
+    std::cerr << "report failure: "
+              << static_cast<unsigned>(failure.status().code) << " "
+              << failure.status().message << "\n";
   PS_CHECK(!failure.ok() &&
            failure.status().code == ErrorCode::OperationFailed);
   PS_CHECK(failure.status().reason == FailureReason::ShortIo &&
@@ -128,6 +180,7 @@ int poll_reports() {
 }  // namespace
 
 int main() {
+  PS_CHECK(diagnostic_owner_restoration() == 0);
   PS_CHECK(poll_reports() == 0);
   using result_diagnostics::verify_cpp_fixed_broadcast;
   PS_CHECK(verify_cpp_fixed_broadcast({4}) == 0);

@@ -13,6 +13,7 @@
 
 #include "photospider/photospider.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
@@ -86,7 +87,7 @@ struct FailedScalar {
                {FailureOrigin::Io, FailureScope::Group}});
   }
 };
-int empty_scalar_guard() {
+int empty_input_request() {
   auto source_counts = std::make_shared<WorkflowCounts>();
   auto output_counts = std::make_shared<WorkflowCounts>();
   auto registry = std::make_shared<OperationRegistry>();
@@ -100,22 +101,19 @@ int empty_scalar_guard() {
   };
   check(registry->register_operation(std::move(source)));
   auto output = workflow_source(output_counts, 0, 4);
-  output.key = "test.empty_scalar_guard";
+  output.key = "test.empty_input_request";
   output.traits.input_count = 1;
   output.traits.input_schema.resize(1);
   auto& input = output.traits.input_schema[0];
-  input.kind = OperationPortKind::Result;
+
   input.result_schema_id = "test.multi_output";
   input.result_schema_version = 1;
-  input.scalar_bounds = true;
-  input.minimum = 0;
-  input.maximum = 1;
   check(registry->register_operation(std::move(output)));
   check(registry->freeze());
   WorkflowDocument document;
   document.nodes = {
       {10, "test.failed_scalar", {}, {}},
-      {20, "test.empty_scalar_guard", {WorkflowNodeOutput{10, "value"}}, {}}};
+      {20, "test.empty_input_request", {WorkflowNodeOutput{10, "value"}}, {}}};
   document.outputs = {{"out", 20, "value"}};
   GraphContext graph(document);
   auto plan = take(Compiler(registry).compile(
@@ -143,24 +141,30 @@ struct MetadataConsumer {
         take(Footprint::from_regions({1, 4}, {Region({{0, 1}, {2, 1}})}));
     if (!round++) {
       ResultProgramNeed need;
-      need.tiles.push_back({0, false, true, {}});
+      need.tiles.push_back({0, 0, true, {}});
       if (mode == 2)
         need.tiles.push_back(take(sdk::tile_need_for_samples(
             phase.resources, phase.query, 0, 0, point)));
       return Answer(std::move(need));
     }
-    const auto& input = phase.tensors->at({0, 0});
-    if (input.spec().sample_shape() != std::vector<std::uint64_t>{1, 4} ||
-        input.coverage() !=
-            (mode == 2 || round > 2 ? point : take(Footprint::none({1, 4}))) ||
-        (input.object_id() != 0) != (mode == 2 || round > 2) ||
-        !phase.results.empty())
-      return Answer(Status{ErrorCode::OperationFailed,
-                           "metadata-only tensor capability facts"});
-    *retained = input;
+    const bool payload = mode == 2 || round > 2;
+    const auto& facts = phase.descriptors->at(0);
+    if (facts.tensor_count() != 1 || facts.object_id() ||
+        !facts.tensor_coverage(0).empty() || !phase.results.empty() ||
+        phase.tensors->size() != (payload ? 1U : 0U))
+      return Answer(
+          Status{ErrorCode::OperationFailed, "metadata-only descriptor facts"});
+    if (payload) {
+      const auto& input = phase.tensors->at({0, 0});
+      if (input.spec().sample_shape() != std::vector<std::uint64_t>{1, 4} ||
+          input.coverage() != point || !input.object_id())
+        return Answer(Status{ErrorCode::OperationFailed,
+                             "tensor payload capability facts"});
+      *retained = input;
+    }
     if (denied) {
       double ignored = 0;
-      static_cast<void>(input.read({0, 0}, &ignored, 8));
+      static_cast<void>(phase.read_tensor(0, 0, {0, 0}, &ignored, 8));
     }
     if ((mode == 3 || mode == 4) && round == 2) {
       ResultProgramNeed need;
@@ -170,7 +174,7 @@ struct MetadataConsumer {
     }
     double value = 4;
     if (mode >= 2)
-      check(input.read({0, 2}, &value, 8));
+      check(phase.read_tensor(0, 0, {0, 2}, &value, 8));
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
         phase.query.semantic_key, {},
@@ -196,7 +200,7 @@ int metadata_tensor_need(unsigned mode, bool denied = false,
   consumer.key = "test.metadata_consumer";
   consumer.traits.input_count = 1;
   consumer.traits.input_schema.resize(1);
-  consumer.traits.input_schema[0].kind = OperationPortKind::Result;
+
   consumer.traits.input_schema[0].element_type =
       static_cast<unsigned>(ElementType::Float64);
   consumer.traits.outputs = {multi_result::output("value")};
@@ -226,7 +230,8 @@ int metadata_tensor_need(unsigned mode, bool denied = false,
     auto frozen = take(context.freeze(plan));
     ExecutionOptions options;
     auto run = context.execute_fragments(
-        frozen, {{"out", TileRequest{true, {}}}}, {}, options);
+        frozen, {{"out", TileRequest{{{0, take(TileSet::range(root, 0, 1))}}}}},
+        {}, options);
     if (denied) {
       PS_CHECK(!run.ok() &&
                run.status().reason == FailureReason::UnauthorizedRead &&
@@ -250,7 +255,7 @@ int metadata_tensor_need(unsigned mode, bool denied = false,
       auto actual = context.execute_fragments(
           frozen,
           {{"source",
-            TileRequest{false, take(TileSet::from_indices(root, {0}))}}},
+            TileRequest{{{0, take(TileSet::from_indices(root, {0}))}}}}},
           {}, options);
       if (failing_source) {
         PS_CHECK(!actual.ok() && actual.status().detail.node_id == 10 &&
@@ -263,8 +268,10 @@ int metadata_tensor_need(unsigned mode, bool denied = false,
       PS_CHECK(counts->starts == data_calls + 1);
     }
   }
-  PS_CHECK(retained && retained->spec().sample_shape() ==
-                           (std::vector<std::uint64_t>{1, 4}));
+  PS_CHECK(retained.has_value() == (mode >= 2 && !failing_source));
+  if (retained)
+    PS_CHECK(retained->spec().sample_shape() ==
+             (std::vector<std::uint64_t>{1, 4}));
   held = {};
   retained.reset();
   for (auto live : root.statistics().live.values)
@@ -308,7 +315,7 @@ struct BroadConsumer {
     }
     const auto& input = phase.tensors->at({0, 0});
     if (!input.object_id() || input.coverage() != samples ||
-        phase.results.size() != (mode == 5 ? 1u : 0u) || !phase.association ||
+        !phase.results.empty() || !phase.association ||
         phase.association->size() != 1)
       return Answer(Status{ErrorCode::OperationFailed,
                            "tensor grant identity or object permission"});
@@ -404,8 +411,6 @@ struct BroadConsumer {
 SchemaTemplate rich_tensor_schema() {
   auto schema = multi_result::schema(ElementType::Float64, {65});
   schema.id = "test.rich_tensor";
-  schema.fields.push_back(
-      {"associated", ElementType::Float64, {ResultExtentKind::Fixed, 1}, {}});
   return schema;
 }
 struct ResourceOwners {
@@ -435,12 +440,19 @@ struct RichTensorSource {
     ++counts->polls;
     if (!stage++) {
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false,
+           take(TileSet::range(
+               phase.resources, 0,
+               phase.query.input_tile_grids[0][0].tile_count()))});
       return Answer(std::move(need));
     }
     if (stage == 2) {
       const auto& input = phase.tensors->at({0, 0});
-      for (const auto& box : phase.query.tensor_outputs->boxes())
+      const auto coverage =
+          phase.query.tensor_outputs.value_or(take(Footprint::all(
+              phase.query.output.result_schema->tensors[0].sample_shape())));
+      for (const auto& box : coverage.boxes())
         windows.push_back(take(input.acquire(box)));
       ResourceSet resources;
       if (resource_owners) {
@@ -468,13 +480,7 @@ struct RichTensorSource {
         if (!charged.ok())
           return Answer(charged);
       }
-
-      auto buffer = take(phase.allocator.allocate(8));
-      const double value = 1000;
-      std::memcpy(buffer.data(), &value, sizeof(value));
-      check(builder->append(0, 1, {buffer.data(), buffer.size()}));
     }
-    check(builder->publish(0, 1));
     for (const auto& window : windows) {
       ResultTensorViewTransform identity;
       for (unsigned axis = 0; axis < window.region().rank(); ++axis)
@@ -505,7 +511,7 @@ int broad_tensor_need(unsigned mode) {
     source.traits.workspace_bytes = 8;
     source.traits.input_count = 1;
     source.traits.input_schema.resize(1);
-    source.traits.input_schema[0].kind = OperationPortKind::Result;
+
     source.traits.input_schema[0].result_schema_id = "test.multi_output";
     source.traits.input_schema[0].result_schema_version = 1;
     source.traits.outputs[0] =
@@ -519,6 +525,8 @@ int broad_tensor_need(unsigned mode) {
                                                         &observed);
     };
   }
+  if (mode == 5)
+    source = sdk::with_whole_stage(std::move(source), 10000000);
   check(registry->register_operation(std::move(source)));
   std::optional<ResultTensorInput> held_input;
   ResultTensorReadWindow held_window;
@@ -527,7 +535,7 @@ int broad_tensor_need(unsigned mode) {
   consumer.key = "test.broad_consumer";
   consumer.traits.input_count = 1;
   consumer.traits.input_schema.resize(1);
-  consumer.traits.input_schema[0].kind = OperationPortKind::Result;
+
   consumer.traits.input_schema[0].result_schema_id =
       mode == 5 ? "test.rich_tensor" : "test.multi_output";
   consumer.traits.input_schema[0].result_schema_version = 1;
@@ -541,6 +549,8 @@ int broad_tensor_need(unsigned mode) {
     return ResultContinuation::make<BroadConsumer>(allocator, mode, &held_input,
                                                    &held_window, &block_calls);
   };
+  if (mode == 5)
+    consumer = sdk::with_whole_stage(std::move(consumer), 10000000);
   check(registry->register_operation(std::move(consumer)));
   check(registry->freeze());
   WorkflowDocument document;
@@ -599,7 +609,8 @@ int broad_tensor_need(unsigned mode) {
                                                                   : mode == 5
                                                                       ? 2
                                                                       : 2210));
-      PS_CHECK(held.results.at("value").association().size() == 1);
+      PS_CHECK(held.results.at("value").association().size() ==
+               (mode == 5 ? 65U : 1U));
       if (mode == 6 || mode == 7) {
         PS_CHECK(block_calls == (mode == 6 ? 2u : 1u));
         PS_CHECK(held.diagnostics.dependency_cache_work <=
@@ -652,12 +663,8 @@ int broad_tensor_need(unsigned mode) {
       auto object = weak.lock();
       PS_CHECK(object.valid());
       auto facts = take(object.descriptor());
-      PS_CHECK(facts.field_count() == 1 && facts.rows(0) == 1);
-      auto data = take(take(object.prepare_read(facts, 0, 0, 1)).load(8));
-      std::memcpy(&last, data->bytes().data(), sizeof(last));
-      const auto at =
-          facts.tensor_coverage(0).boxes()[0].dimensions()[0].offset;
-      PS_CHECK(last == 1000 + at);
+      check(object.read_tensor(facts, 0, {64}, &last, sizeof(last)));
+      PS_CHECK(last == 66);
     }
     PS_CHECK(multi_result::number(held.results.at("value"), {64}) == 66);
   }
@@ -681,7 +688,11 @@ struct ResourceViewConsumer {
     if (!requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false,
+           take(TileSet::range(
+               phase.resources, 0,
+               phase.query.input_tile_grids[0][0].tile_count()))});
       return Answer(std::move(need));
     }
     *input = phase.tensors->at({0, 0});
@@ -718,15 +729,13 @@ int profile_owners(bool exhaust = false, bool work_exhaust = false) {
     schema.tensors[0].atomic_trailing_axes = 1;
     auto rich = schema;
     rich.id = "test.resource_tensor";
-    rich.fields.push_back(
-        {"associated", ElementType::Float64, {ResultExtentKind::Fixed, 1}, {}});
     auto counts = std::make_shared<WorkflowCounts>();
     auto registry = std::make_shared<OperationRegistry>();
     auto source = workflow_source(counts, 0, 65);
     source.traits.workspace_bytes = 8;
     source.traits.input_count = 1;
     source.traits.input_schema.resize(1);
-    source.traits.input_schema[0].kind = OperationPortKind::Result;
+
     source.traits.input_schema[0].result_schema_id = "test.multi_output";
     source.traits.input_schema[0].result_schema_version = 1;
     source.traits.outputs[0] = multi_result::output("value", rich);
@@ -738,12 +747,13 @@ int profile_owners(bool exhaust = false, bool work_exhaust = false) {
       return ResultContinuation::make<RichTensorSource>(
           allocator, counts, &observed, &owners, exhaust, work_exhaust);
     };
-    check(registry->register_operation(std::move(source)));
+    check(registry->register_operation(
+        sdk::with_whole_stage(std::move(source), 100000000)));
     OperationDefinition consumer;
     consumer.key = "test.resource_view";
     consumer.traits.input_count = 1;
     consumer.traits.input_schema.resize(1);
-    consumer.traits.input_schema[0].kind = OperationPortKind::Result;
+
     consumer.traits.input_schema[0].result_schema_id = "test.resource_tensor";
     consumer.traits.input_schema[0].result_schema_version = 1;
     consumer.traits.outputs[0] = multi_result::output("value", schema);
@@ -754,7 +764,8 @@ int profile_owners(bool exhaust = false, bool work_exhaust = false) {
       return ResultContinuation::make<ResourceViewConsumer>(
           allocator, &retained_input, &retained_window);
     };
-    check(registry->register_operation(std::move(consumer)));
+    check(registry->register_operation(
+        sdk::with_whole_stage(std::move(consumer), 100000000)));
     check(registry->freeze());
     WorkflowDocument document;
     document.inputs = {multi_result::declaration(1, "source", schema)};
@@ -834,12 +845,9 @@ int profile_owners(bool exhaust = false, bool work_exhaust = false) {
       auto source = weak.lock();
       PS_CHECK(source.valid());
       auto facts = take(source.descriptor());
-      auto field = take(take(source.prepare_read(facts, 0, 0, 1)).load(8));
       double number = 0;
-      std::memcpy(&number, field->bytes().data(), 8);
-      PS_CHECK(number ==
-               1000 +
-                   facts.tensor_coverage(0).boxes()[0].dimensions()[0].offset);
+      check(source.read_tensor(facts, 0, {64, 3}, &number, sizeof(number)));
+      PS_CHECK(number == 260);
     }
     PS_CHECK(multi_result::number(output, {64, 3}) == 260);
     auto final_window = take(output.acquire_tensor(take(output.descriptor()), 0,
@@ -878,7 +886,7 @@ int main() try {
     PS_CHECK(metadata_tensor_need(mode, false, true) == 0);
   for (unsigned mode = 0; mode <= 7; ++mode)
     PS_CHECK(broad_tensor_need(mode) == 0);
-  PS_CHECK(empty_scalar_guard() == 0);
+  PS_CHECK(empty_input_request() == 0);
   return 0;
 } catch (const multi_result::Failure& failure) {
   std::cerr << failure.what() << '\n';

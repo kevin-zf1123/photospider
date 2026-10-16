@@ -22,7 +22,11 @@ struct TupleProgram {
     if (!requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false,
+           multi_result::take(TileSet::range(
+               phase.resources, 0,
+               phase.query.input_tile_grids[0][0].tile_count()))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     auto builder = take(ResultBuilder::start(phase.resources,
@@ -58,7 +62,7 @@ int main() {
     definition.key = "test.tuple." + std::to_string(mode);
     definition.traits.input_count = 1;
     definition.traits.input_schema.resize(1);
-    definition.traits.input_schema[0].kind = OperationPortKind::Result;
+
     definition.traits.input_schema[0].result_schema_id = std::string(schema.id);
     definition.traits.input_schema[0].result_schema_version = schema.version;
     definition.traits.outputs = {multi_result::output("value", schema)};
@@ -86,7 +90,7 @@ int main() {
     PS_REQUIRE_OK(plan);
     auto demand =
         context.open_demand(plan.value().plan, {{input}}).take_value();
-    const TileRequest query{true, {}};
+    const TileRequest query{{{0, TileSet::range(root, 0, 1).take_value()}}};
     auto result = demand.request({{"y", query}});
     if (mode == 0) {
       PS_REQUIRE_OK(result);

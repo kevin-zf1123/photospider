@@ -24,7 +24,7 @@ struct ResultPublicationState {
   SchemaTemplate schema;
   ResourceString key;
   ResourceVector<std::uint64_t> association;
-  std::shared_ptr<PlanarPageBudget> image_budget;
+  std::shared_ptr<TensorBudget> image_budget;
   ResultGrowthLimits limits;
   std::uint64_t object = 0, revision = 1, bytes = 0;
   core_internal::StoredFailure failure;

@@ -13,13 +13,13 @@
 namespace ps::execution_internal {
 /** @brief Computes packed bytes for demanded coverage without allocating
  * payload. */
-Result<std::uint64_t> region_bytes(const ValueDescriptor& descriptor,
+Result<std::uint64_t> region_bytes(const TensorDescriptor& descriptor,
                                    const Region& region) {
   if (!region.validate(descriptor.shape).ok() || region.empty())
     return Result<std::uint64_t>(
         Status::failure(ErrorCode::InvalidArgument, "invalid packed region"));
   auto count = region.element_count();
-  const auto width = Value::element_size(descriptor.element_type);
+  const auto width = TensorSpan::element_size(descriptor.element_type);
   if (!count.ok() || !core_internal::can_multiply(count.value(), width))
     return Result<std::uint64_t>(Status::failure(
         ErrorCode::ResourceExhausted, "regional byte count overflows"));
@@ -27,7 +27,7 @@ Result<std::uint64_t> region_bytes(const ValueDescriptor& descriptor,
 }
 /** @brief Copies only logical coverage into a packed destination with global
  * origin. */
-Status copy_region(ValueView source, MutableValue* destination,
+Status copy_region(TensorSpanView source, TensorWriter* destination,
                    const Region& available,
                    const std::function<ErrorCode()>& stop) {
   const auto& region = source.region();
@@ -46,7 +46,7 @@ Status copy_region(ValueView source, MutableValue* destination,
   auto count = region.element_count();
   if (!count.ok())
     return count.status();
-  const auto width = Value::element_size(source.descriptor().element_type);
+  const auto width = TensorSpan::element_size(source.descriptor().element_type);
   for (std::uint64_t element = 0; element < count.value(); ++element) {
     if ((element & 1023) == 0 && stop) {
       const auto code = stop();
@@ -79,29 +79,31 @@ Status copy_region(ValueView source, MutableValue* destination,
 }
 
 /**
- * @brief Materializes one immutable Value into another local backend residency.
- * @param source Valid producer Value.
- * @return Packed physical backing when compact, otherwise a copied Value
+ * @brief Materializes one immutable TensorSpan into another local backend
+ * residency.
+ * @param source Valid producer TensorSpan.
+ * @return Packed physical backing when compact, otherwise a copied TensorSpan
  * preserving its source metadata.
  * @throws std::bad_alloc If transfer allocation fails.
- * @note Backend residency is tracked by the owning ExecutionRun; Value itself
- * remains backend-neutral and exposes no native device handle.
+ * @note Backend residency is tracked by the owning ExecutionRun; TensorSpan
+ * itself remains backend-neutral and exposes no native device handle.
  */
-Result<Value> transfer_value(const Value& source,
-                             const BufferAllocator& allocator, bool compact,
-                             const std::function<ErrorCode()>& stop) {
+Result<TensorSpan> transfer_value(const TensorSpan& source,
+                                  const BufferAllocator& allocator,
+                                  bool compact,
+                                  const std::function<ErrorCode()>& stop) {
   execution_testing::ExecutionTiming timing(
       execution_testing::TimingKind::ValueMaterialization);
   if (compact) {
     auto allocated =
-        MutableValue::allocate(source.descriptor(), source.region(), allocator);
+        TensorWriter::allocate(source.descriptor(), source.region(), allocator);
     if (!allocated.ok())
-      return Result<Value>(allocated.status());
+      return Result<TensorSpan>(allocated.status());
     auto output = allocated.take_value();
     auto status =
-        copy_region(ValueView(source), &output, source.region(), stop);
+        copy_region(TensorSpanView(source), &output, source.region(), stop);
     if (!status.ok())
-      return Result<Value>(status);
+      return Result<TensorSpan>(status);
     auto published = std::move(output).publish();
     if (published.ok())
       timing.success(published.value().bytes().size());
@@ -109,12 +111,12 @@ Result<Value> transfer_value(const Value& source,
   }
   auto allocated = allocator.allocate(source.bytes().size());
   if (!allocated.ok())
-    return Result<Value>(allocated.status());
+    return Result<TensorSpan>(allocated.status());
   auto buffer = allocated.take_value();
   std::memcpy(buffer.data(), source.bytes().data(), source.bytes().size());
   auto published =
-      Value::from_storage(source.descriptor(), source.region(), source.layout(),
-                          std::move(buffer).freeze());
+      TensorSpan::from_storage(source.descriptor(), source.region(),
+                               source.layout(), std::move(buffer).freeze());
   if (published.ok())
     timing.success(published.value().bytes().size());
   return published;
@@ -122,7 +124,7 @@ Result<Value> transfer_value(const Value& source,
 
 /** @brief Keys immutable physical coverage; a cache entry separately proves
  * that the source allocation is still alive. Facets do not change bytes. */
-std::string upload_view_key(const Value& value) {
+std::string upload_view_key(const TensorSpan& value) {
   content_internal::Sha256 hash;
   hash.text("photospider.native-view.v2");
   hash.integer(reinterpret_cast<std::uintptr_t>(value.storage().get()));
@@ -146,7 +148,7 @@ std::string upload_view_key(const Value& value) {
 }
 
 /** @brief Native physical upload identity, excluding Result semantic facts. */
-Result<std::string> upload_content_key(const Value& value,
+Result<std::string> upload_content_key(const TensorSpan& value,
                                        const std::string& device,
                                        const std::function<ErrorCode()>& stop) {
   content_internal::Sha256 hash;
@@ -164,7 +166,7 @@ Result<std::string> upload_content_key(const Value& value,
   auto count = value.region().element_count();
   if (!count.ok())
     return Result<std::string>(count.status());
-  const auto width = Value::element_size(value.descriptor().element_type);
+  const auto width = TensorSpan::element_size(value.descriptor().element_type);
   std::vector<std::uint64_t> coordinate(value.region().rank());
   for (std::uint64_t i = 0; i < count.value(); ++i) {
     if ((i & 1023) == 0) {
@@ -187,19 +189,19 @@ Result<std::string> upload_content_key(const Value& value,
 }
 
 /** @brief Binds this observation's metadata to an immutable packed backing. */
-Result<Value> uploaded_view(const Value& source,
-                            std::shared_ptr<const CpuStorage> backing) {
+Result<TensorSpan> uploaded_view(const TensorSpan& source,
+                                 std::shared_ptr<const CpuStorage> backing) {
   auto packed = source.descriptor();
   for (std::size_t i = 0; i < source.region().rank(); ++i)
     packed.shape[i] = source.region().dimensions()[i].extent;
   auto dense = input_internal::dense_metadata(packed);
   if (!dense.ok())
-    return Result<Value>(dense.status());
+    return Result<TensorSpan>(dense.status());
   auto layout = dense.take_value().layout;
   for (const auto dim : source.region().dimensions())
     layout.origin.push_back(dim.offset);
-  return Value::from_storage(source.descriptor(), source.region(),
-                             std::move(layout), std::move(backing));
+  return TensorSpan::from_storage(source.descriptor(), source.region(),
+                                  std::move(layout), std::move(backing));
 }
 
 }  // namespace ps::execution_internal

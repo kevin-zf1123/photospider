@@ -37,7 +37,7 @@ inline Status domain(const char* message) {
           FailureReason::InvalidDomain,
           {FailureOrigin::Domain, FailureScope::Group}};
 }
-inline std::uint64_t elements(const ValueDescriptor& descriptor) {
+inline std::uint64_t elements(const TensorDescriptor& descriptor) {
   std::uint64_t count = 1;
   for (auto n : descriptor.shape)
     count *= n;
@@ -100,10 +100,9 @@ inline std::vector<OperationParameterSpec> report_parameters() {
   return result;
 }
 inline bool sole_tensor(const OperationMetadata& input) {
-  return input.result_schema && input.result_schema->fields.empty() &&
-         input.result_schema->tensors.size() == 1;
+  return input.result_schema && input.result_schema->tensors.size() == 1;
 }
-inline ValueDescriptor tensor_descriptor(const OperationMetadata& input) {
+inline TensorDescriptor tensor_descriptor(const OperationMetadata& input) {
   const auto& tensor = input.result_schema->tensors[0];
   return {tensor.descriptor.element_type, tensor.sample_shape()};
 }

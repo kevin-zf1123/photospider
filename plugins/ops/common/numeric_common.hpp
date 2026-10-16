@@ -33,7 +33,7 @@ inline double add_split(Split* accumulator, double term) {
 }
 /** @brief Visits logical row-major samples, independent of storage layout. */
 template <class Function>
-Status visit(const Value& value, const CancellationToken& cancellation,
+Status visit(const TensorSpan& value, const CancellationToken& cancellation,
              Function function) {
   auto count = value.region().element_count();
   if (!count.ok())
@@ -63,7 +63,8 @@ Status visit(const Value& value, const CancellationToken& cancellation,
 /** @brief Reads one already validated coordinate without alignment assumptions.
  */
 template <class Number>
-Number read(const Value& value, const std::vector<std::uint64_t>& coordinate) {
+Number read(const TensorSpan& value,
+            const std::vector<std::uint64_t>& coordinate) {
   Number number;
   std::memcpy(&number,
               value.bytes().data() + value.byte_address(coordinate).value(),

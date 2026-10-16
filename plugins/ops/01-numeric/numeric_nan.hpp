@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Numeric reducers preserve the first NaN sign and payload. Conversion excludes

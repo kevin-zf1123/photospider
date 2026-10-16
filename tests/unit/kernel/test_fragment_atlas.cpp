@@ -10,28 +10,28 @@
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
-ValueFragments scattered(ElementType type, std::uint64_t add = 0) {
-  const ValueDescriptor descriptor{type, {1000}};
-  std::vector<Value> fragments;
+Tensor scattered(ElementType type, std::uint64_t add = 0) {
+  const TensorDescriptor descriptor{type, {1000}};
+  std::vector<TensorSpan> fragments;
   std::vector<Region> boxes;
   for (const auto at : {0U, 2U, 63U, 64U, 999U}) {
     Region box({{at, 1}});
     auto writer =
-        MutableValue::allocate(descriptor, box, BufferAllocator{}).take_value();
+        TensorWriter::allocate(descriptor, box, BufferAllocator{}).take_value();
     const std::uint64_t bits = add + at + 1;
     std::memcpy(writer.data(), &bits, writer.size());
     fragments.push_back(std::move(writer).publish().take_value());
     boxes.push_back(box);
   }
   auto coverage = Footprint::from_regions({1000}, boxes).take_value();
-  return ValueFragments::create(descriptor, coverage, fragments).take_value();
+  return Tensor::create(descriptor, coverage, fragments).take_value();
 }
 int exact_bytes() {
   for (const auto type : {ElementType::UInt8, ElementType::Int64,
                           ElementType::Float32, ElementType::Float64}) {
     auto input = scattered(type);
     auto plan = FragmentAtlasPlan::prepare(input, {64}).take_value();
-    const auto width = Value::element_size(type);
+    const auto width = TensorSpan::element_size(type);
     PS_CHECK(plan.occupied_tiles() == 3 &&
              plan.payload_allocation_bytes() == 5 * width &&
              plan.directory_allocation_bytes() == 8 * 80);
@@ -86,13 +86,12 @@ int strided_and_huge() {
   const double data[]{8, 7, 6, 5, 4, 3, 2, 1};
   std::vector<std::uint8_t> bytes(sizeof(data));
   std::memcpy(bytes.data(), data, sizeof(data));
-  auto value = Value::create({ElementType::Float64, {8}}, Region::whole({8}),
-                             {56, {-8}}, bytes)
+  auto value = TensorSpan::create({ElementType::Float64, {8}},
+                                  Region::whole({8}), {56, {-8}}, bytes)
                    .take_value();
   auto set = Footprint::from_regions({8}, {Region({{1, 2}}), Region({{6, 1}})})
                  .take_value();
-  auto source =
-      ValueFragments::create(value.descriptor(), set, {value}).take_value();
+  auto source = Tensor::create(value.descriptor(), set, {value}).take_value();
   auto atlas = FragmentAtlasPlan::prepare(source, {4})
                    .value()
                    .materialize(source, BufferAllocator{});
@@ -106,15 +105,14 @@ int strided_and_huge() {
   const std::vector<std::uint64_t> shape(8, UINT64_C(1) << 40);
   std::vector<RegionDimension> dimensions(8, {shape[0] - 1, 1});
   Region corner(dimensions);
-  auto writer = MutableValue::allocate({ElementType::UInt8, shape}, corner,
+  auto writer = TensorWriter::allocate({ElementType::UInt8, shape}, corner,
                                        BufferAllocator{})
                     .take_value();
   writer.data()[0] = 173;
   auto fragment = std::move(writer).publish().take_value();
   auto coverage = Footprint::from_regions(shape, {corner}).take_value();
   auto huge =
-      ValueFragments::create(fragment.descriptor(), coverage, {fragment})
-          .take_value();
+      Tensor::create(fragment.descriptor(), coverage, {fragment}).take_value();
   auto packed = FragmentAtlasPlan::prepare(huge).value().materialize(
       huge, BufferAllocator{});
   PS_CHECK(packed.ok() && packed.value().payload_bytes == 1);
@@ -172,8 +170,8 @@ int limits_and_owners() {
     independent = FragmentAtlasPlan::prepare(source).take_value();
   }
   PS_CHECK(owner.expired() && independent.valid());
-  auto empty = ValueFragments::create({ElementType::UInt8, {8}},
-                                      Footprint::none({8}).take_value(), {})
+  auto empty = Tensor::create({ElementType::UInt8, {8}},
+                              Footprint::none({8}).take_value(), {})
                    .take_value();
   auto none = FragmentAtlasPlan::prepare(empty).value().materialize(
       empty, BufferAllocator{});

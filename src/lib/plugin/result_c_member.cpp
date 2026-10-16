@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/callback_environment.hpp"
 #include "data/result_window_access.hpp"
 #include "execution/cpu_range_context.hpp"
 #include "photospider/core/checked_math.hpp"
@@ -37,10 +38,10 @@ struct ManagedRegion {
   ResourceLease lease;
   Region region;
 };
-Result<ManagedRegion> region(const ps_result_region_v4* source,
+Result<ManagedRegion> region(const ps_result_region_v5* source,
                              const std::vector<std::uint64_t>& shape) {
   if (!source ||
-      reinterpret_cast<std::uintptr_t>(source) % alignof(ps_result_region_v4) ||
+      reinterpret_cast<std::uintptr_t>(source) % alignof(ps_result_region_v5) ||
       source->struct_size != sizeof(*source) || source->rank != shape.size())
     return Result<ManagedRegion>(invalid("invalid Result region"));
   auto admitted = bridge_capacity(source->rank * sizeof(RegionDimension));
@@ -68,6 +69,7 @@ class CResultMemberBridge final {
   ~CResultMemberBridge() noexcept {
     if (entered_) {
       try {
+        core_internal::CallbackEnvironment environment;
         definition_->api.destroy(definition_->api.user_data, bytes_.data());
       } catch (...) {
       }
@@ -124,8 +126,13 @@ class CResultMemberBridge final {
     const auto& query = frame.query;
     if (!entered_) {
       entered_ = true;
-      const auto result = definition_->api.start(
-          definition_->api.user_data, bytes_.data(), &query, &services);
+      const auto result = [&] {
+        core_internal::CallbackEnvironment environment;
+        if (!environment.active())
+          return 1;
+        return definition_->api.start(definition_->api.user_data, bytes_.data(),
+                                      &query, &services);
+      }();
       auto status = callback_failure();
       if (status.ok())
         status = callback_outcome(result);
@@ -140,19 +147,24 @@ class CResultMemberBridge final {
       exit.lease = lease;
       services = services_for(lease.get(), phase);
     }
-    const auto result = definition_->api.poll(definition_->api.user_data,
-                                              bytes_.data(), &query, &services);
+    const auto result = [&] {
+      core_internal::CallbackEnvironment environment;
+      if (!environment.active())
+        return 1;
+      return definition_->api.poll(definition_->api.user_data, bytes_.data(),
+                                   &query, &services);
+    }();
     auto failure = callback_failure();
     if (!failure.ok())
       return Result<ResultProgramPoll>(failure);
-    if (result == PS_RESULT_NEED_V4) {
+    if (result == PS_RESULT_NEED_V5) {
       if (published_.valid())
         return Result<ResultProgramPoll>(invalid("Need after publication"));
       return Result<ResultProgramPoll>(std::move(need_));
     }
-    if (result != PS_RESULT_PUBLISH_V4)
+    if (result != PS_RESULT_PUBLISH_V5)
       return Result<ResultProgramPoll>(callback_outcome(result ? result : 1));
-    if (!need_.tiles.empty())
+    if (!need_.tiles.empty() || !need_.shared_stages.empty())
       return Result<ResultProgramPoll>(
           invalid("publication with pending Need"));
     if (!published_.valid())
@@ -162,7 +174,8 @@ class CResultMemberBridge final {
   }
 
   bool terminal_failure_conflicts() const noexcept {
-    return published_.valid() || !need_.tiles.empty();
+    return published_.valid() || !need_.tiles.empty() ||
+           !need_.shared_stages.empty();
   }
   Status failure_status() const {
     if (violation_.load())
@@ -270,12 +283,12 @@ class CResultMemberBridge final {
     return record.record(read(std::vector<std::uint64_t>(at, at + rank)));
   }
   static int window_row(void* raw, const std::uint64_t* at, std::uint32_t rank,
-                        ps_result_tensor_row_v4* output) noexcept {
+                        ps_result_tensor_row_v5* output) noexcept {
     auto& record = *static_cast<WindowRecord*>(raw);
     try {
       if (!output ||
           reinterpret_cast<std::uintptr_t>(output) %
-              alignof(ps_result_tensor_row_v4) ||
+              alignof(ps_result_tensor_row_v5) ||
           output->struct_size != sizeof(*output))
         return code(record.record(invalid("invalid image row destination")));
       return code(window_read(record, at, rank, [&](const auto& coordinate) {
@@ -294,12 +307,12 @@ class CResultMemberBridge final {
   }
   static int window_rectangle(void* raw, const std::uint64_t* at,
                               std::uint32_t rank,
-                              ps_result_tensor_rectangle_v4* output) noexcept {
+                              ps_result_tensor_rectangle_v5* output) noexcept {
     auto& record = *static_cast<WindowRecord*>(raw);
     try {
       if (!output ||
           reinterpret_cast<std::uintptr_t>(output) %
-              alignof(ps_result_tensor_rectangle_v4) ||
+              alignof(ps_result_tensor_rectangle_v5) ||
           output->struct_size != sizeof(*output))
         return code(
             record.record(invalid("invalid image rectangle destination")));
@@ -310,7 +323,7 @@ class CResultMemberBridge final {
             if (!run.ok())
               return run.status();
             *output = {sizeof(*output),
-                       {sizeof(ps_result_tensor_row_v4), run.value().row.data,
+                       {sizeof(ps_result_tensor_row_v5), run.value().row.data,
                         run.value().row.samples, run.value().row.bytes,
                         run.value().row.sample_stride_bytes},
                        run.value().rows,
@@ -325,12 +338,12 @@ class CResultMemberBridge final {
     }
   }
   Status acquire_window(
-      const ResultTensorInput& source, const ps_result_region_v4* requested,
-      ps_result_tensor_window_v4* output, std::uint64_t* handle,
+      const ResultTensorInput& source, const ps_result_region_v5* requested,
+      ps_result_tensor_window_v5* output, std::uint64_t* handle,
       std::optional<std::pair<std::uint32_t, std::uint32_t>> native = {}) {
     if (!output || !handle ||
         reinterpret_cast<std::uintptr_t>(output) %
-            alignof(ps_result_tensor_window_v4) ||
+            alignof(ps_result_tensor_window_v5) ||
         output->struct_size != sizeof(*output) ||
         next_handle_ >= quality_handle_base || windows_.size() >= 1024)
       return invalid("invalid image window request");
@@ -372,8 +385,8 @@ class CResultMemberBridge final {
   }
   static int acquire_tensor_window(void* raw, std::uint32_t input,
                                    std::uint32_t slot,
-                                   const ps_result_region_v4* requested,
-                                   ps_result_tensor_window_v4* output,
+                                   const ps_result_region_v5* requested,
+                                   ps_result_tensor_window_v5* output,
                                    std::uint64_t* handle) {
     return call(raw, [&](CResultMemberBridge& state) {
       if (!state.phase_->tensors)
@@ -387,8 +400,8 @@ class CResultMemberBridge final {
   }
   static int acquire_native_tensor_window(void* raw, std::uint32_t input,
                                           std::uint32_t slot,
-                                          const ps_result_region_v4* requested,
-                                          ps_result_tensor_window_v4* output,
+                                          const ps_result_region_v5* requested,
+                                          ps_result_tensor_window_v5* output,
                                           std::uint64_t* handle) {
     return call(raw, [&](CResultMemberBridge& state) {
       if (!state.phase_->tensors)
@@ -401,8 +414,8 @@ class CResultMemberBridge final {
     });
   }
   static int acquire_retained_window(void* raw, std::uint64_t input,
-                                     const ps_result_region_v4* requested,
-                                     ps_result_tensor_window_v4* output,
+                                     const ps_result_region_v5* requested,
+                                     ps_result_tensor_window_v5* output,
                                      std::uint64_t* handle) {
     return call(raw, [&](CResultMemberBridge& state) {
       auto found = state.retained_.find(input);
@@ -443,9 +456,9 @@ class CResultMemberBridge final {
     });
   }
   static int publish_tensor_view(
-      void* raw, std::uint32_t slot, const ps_result_region_v4* box,
+      void* raw, std::uint32_t slot, const ps_result_region_v5* box,
       const std::uint64_t* handles, std::uint32_t count,
-      const ps_result_tensor_transform_v4* transform) {
+      const ps_result_tensor_transform_v5* transform) {
     return call(
         raw,
         [&](CResultMemberBridge& state) {
@@ -467,7 +480,7 @@ class CResultMemberBridge final {
           }
           if (transform) {
             if (reinterpret_cast<std::uintptr_t>(transform) %
-                    alignof(ps_result_tensor_transform_v4) ||
+                    alignof(ps_result_tensor_transform_v5) ||
                 transform->struct_size != sizeof(*transform) || count != 1 ||
                 transform->reshape > 1 ||
                 !array(transform->axes, transform->source_rank, 8) ||
@@ -506,7 +519,7 @@ class CResultMemberBridge final {
   static int fail_domain(void* raw, int status_code, uint64_t domain_code) {
     return call(raw, [&](CResultMemberBridge&) {
       if (status_code <= 0 ||
-          status_code > PS_RESULT_STATUS_INVALID_ARGUMENT_V4 || !domain_code)
+          status_code > PS_RESULT_STATUS_INVALID_ARGUMENT_V5 || !domain_code)
         return invalid("invalid domain failure record");
       auto status = outcome(status_code);
       status.detail.domain_code = domain_code;
@@ -525,7 +538,7 @@ class CResultMemberBridge final {
   }
   static int acquire_native_atlas(void* raw, std::uint32_t input,
                                   std::uint32_t slot,
-                                  ps_result_native_atlas_v4* output) {
+                                  ps_result_native_atlas_v5* output) {
     auto* lease = static_cast<Lease*>(raw);
     return call(
         raw,
@@ -565,7 +578,7 @@ class CResultMemberBridge final {
           if (!packed.ok())
             return packed.status();
           const auto& atlas = *packed.value();
-          ps_result_native_atlas_v4 value{};
+          ps_result_native_atlas_v5 value{};
           value.struct_size = sizeof(value);
           value.rank = atlas.descriptor.shape.size();
           value.element_type =
@@ -602,17 +615,16 @@ class CResultMemberBridge final {
     *handle = token;
     return Status::success();
   }
-  static int create_block_state(void* raw, const ps_result_schema_v4* source,
+  static int create_block_state(void* raw, const ps_result_schema_v5* source,
                                 const std::uint8_t* bytes, std::uint64_t size,
                                 std::uint64_t* handle) {
     return call(
         raw,
         [&](CResultMemberBridge& state) {
           if (!array(source, 1, 1) || source->struct_size != sizeof(*source) ||
-              source->publication != PS_RESULT_COMPLETE_BUNDLE_V4 ||
-              source->field_count || source->domain_rank ||
-              source->tensor_count != 1 || !array(source->tensors, 1, 1) ||
-              source->tensors[0].group_count || source->tensors[0].batch_rank ||
+              source->domain_rank || source->publication_scope_count ||
+              source->publication_scopes || source->tensor_count != 1 ||
+              !array(source->tensors, 1, 1) || source->tensors[0].batch_rank ||
               source->tensors[0].spatial || !bytes || !size ||
               size > SIZE_MAX || !array(handle, 1, 1))
             return invalid("invalid generic Result block state");
@@ -627,7 +639,7 @@ class CResultMemberBridge final {
           auto metadata = copied.take_value();
           const auto& descriptor = metadata.tensors[0].descriptor;
           auto count = metadata.tensors[0].sample_count();
-          const auto width = Value::element_size(descriptor.element_type);
+          const auto width = TensorSpan::element_size(descriptor.element_type);
           if (!count.ok())
             return count.status();
           if (!width || !core_internal::can_multiply(count.value(), width) ||
@@ -641,7 +653,7 @@ class CResultMemberBridge final {
           if (!builder.ok())
             return builder.status();
           auto writer = builder.take_value();
-          auto backing = MutableValue::allocate(descriptor,
+          auto backing = TensorWriter::allocate(descriptor,
                                                 Region::whole(descriptor.shape),
                                                 state.phase_->allocator);
           if (!backing.ok())
@@ -676,7 +688,8 @@ class CResultMemberBridge final {
             return facts.status();
           const auto& spec = found->second.schema().tensors[0];
           auto count = spec.sample_count();
-          const auto width = Value::element_size(spec.descriptor.element_type);
+          const auto width =
+              TensorSpan::element_size(spec.descriptor.element_type);
           if (!count.ok() ||
               !core_internal::can_multiply(count.value(), width) ||
               size != count.value() * width)
@@ -716,14 +729,11 @@ class CResultMemberBridge final {
     if (!facts.ok())
       return Result<std::uint64_t>(facts.status());
     const auto& schema = result.schema();
-    if (schema.publication != PublishPolicy::CompleteBundle ||
-        !schema.fields.empty() || !schema.domain.empty() ||
-        schema.tensors.size() != 1)
+    if (!schema.domain.empty() || schema.tensors.size() != 1)
       return Result<std::uint64_t>(
           invalid("invalid C checkpoint representation"));
     const auto& tensor = schema.tensors[0];
-    if (!tensor.layout.groups.empty() || !tensor.batch_axes.empty() ||
-        tensor.layout.spatial)
+    if (!tensor.batch_axes.empty() || tensor.layout.spatial)
       return Result<std::uint64_t>(
           invalid("C checkpoint requires generic tensor state"));
     const auto& coverage = facts.value().tensor_coverage(0);
@@ -739,7 +749,7 @@ class CResultMemberBridge final {
             invalid("C checkpoint requires complete tensor coverage"));
     }
     auto count = tensor.sample_count();
-    auto width = Value::element_size(tensor.descriptor.element_type);
+    auto width = TensorSpan::element_size(tensor.descriptor.element_type);
     if (!count.ok())
       return Result<std::uint64_t>(count.status());
     if (!width || !core_internal::can_multiply(count.value(), width))
@@ -748,7 +758,7 @@ class CResultMemberBridge final {
   }
   static int checkpoint_before(void* raw, std::uint32_t phase,
                                std::uint64_t before,
-                               ps_result_checkpoint_v4* destination) {
+                               ps_result_checkpoint_v5* destination) {
     auto* lease = static_cast<Lease*>(raw);
     return call(raw, [&](CResultMemberBridge& state) {
       if (!array(destination, 1, 1) ||
@@ -758,7 +768,7 @@ class CResultMemberBridge final {
       auto found = state.phase_->checkpoint_before(phase, before);
       if (!found.ok())
         return found.status();
-      ps_result_checkpoint_v4 result{};
+      ps_result_checkpoint_v5 result{};
       result.struct_size = sizeof(result);
       if (found.value()) {
         if (found.value()->phase() != phase ||
@@ -809,7 +819,8 @@ class CResultMemberBridge final {
                                 state.phase_->query.cancellation);
       if (!window.ok())
         return window.status();
-      const auto width = Value::element_size(tensor.descriptor.element_type);
+      const auto width =
+          TensorSpan::element_size(tensor.descriptor.element_type);
       const auto first = offset / width;
       const auto last = (offset + size - 1) / width;
       auto lookup =
@@ -870,7 +881,7 @@ class CResultMemberBridge final {
   }
   static int block(void* raw, std::uint32_t kind, std::uint64_t begin,
                    std::uint64_t end, std::uint64_t mode,
-                   std::uint64_t incoming, ps_result_block_compute_v4 compute,
+                   std::uint64_t incoming, ps_result_block_compute_v5 compute,
                    void* user, std::uint64_t* outgoing) {
     auto* lease = static_cast<Lease*>(raw);
     return call(raw, [&](CResultMemberBridge& state) {
@@ -886,7 +897,7 @@ class CResultMemberBridge final {
               ~Exit() { active = false; }
             } exit{state.in_block_};
             state.in_block_ = true;
-            ps_result_block_services_v4 services{
+            ps_result_block_services_v5 services{
                 sizeof(services),
                 raw,
                 read_tensor,
@@ -900,7 +911,9 @@ class CResultMemberBridge final {
                 cancelled,
                 lease->host_gpu ? &lease->gpu : nullptr};
             std::uint64_t handle = 0;
-            auto status = outcome(compute(&services, incoming, &handle, user));
+            auto status = core_internal::invoke_callback([&] {
+              return outcome(compute(&services, incoming, &handle, user));
+            });
             auto failure = state.callback_failure();
             if (!failure.ok())
               return Result<ResultRef>(failure);
@@ -922,7 +935,7 @@ class CResultMemberBridge final {
   }
   static int discover(void* raw, std::uint32_t capacity,
                       std::uint32_t candidates,
-                      ps_result_discovery_compute_v4 compute, void* user,
+                      ps_result_discovery_compute_v5 compute, void* user,
                       std::uint64_t* handle) {
     auto* lease = static_cast<Lease*>(raw);
     return call(raw, [&](CResultMemberBridge& state) {
@@ -937,7 +950,7 @@ class CResultMemberBridge final {
               ~Scope() { active = false; }
             } scope{state.in_discovery_};
             state.in_discovery_ = true;
-            const ps_result_discovery_services_v4 services{
+            const ps_result_discovery_services_v5 services{
                 sizeof(services),
                 raw,
                 read_tensor,
@@ -947,8 +960,10 @@ class CResultMemberBridge final {
                 work,
                 cancelled,
                 lease->host_gpu ? &lease->gpu : nullptr};
-            auto status = outcome(compute(
-                &services, table.bytes, table.byte_size, table.capacity, user));
+            auto status = core_internal::invoke_callback([&] {
+              return outcome(compute(&services, table.bytes, table.byte_size,
+                                     table.capacity, user));
+            });
             auto failure = state.callback_failure();
             return failure.ok() ? status : failure;
           });
@@ -962,7 +977,7 @@ class CResultMemberBridge final {
     });
   }
   static int discovery_requests(void* raw, std::uint64_t handle,
-                                ps_result_discovery_request_v4* output,
+                                ps_result_discovery_request_v5* output,
                                 std::uint32_t capacity, std::uint32_t* count) {
     return call(raw, [&](CResultMemberBridge& state) {
       auto found = state.discoveries_.find(handle);
@@ -975,7 +990,7 @@ class CResultMemberBridge final {
         return charged;
       std::uint64_t size = 0;
       for (const auto& need : needs)
-        size += need.whole || need.descriptor_only ? 1 : need.tiles.size();
+        size += need.descriptor_only ? 1 : need.tiles.intervals().size();
       if (size > 65536 || (capacity && capacity < size))
         return Status{ErrorCode::ResourceExhausted,
                       "Result discovery receipt capacity"};
@@ -983,27 +998,22 @@ class CResultMemberBridge final {
         charged = state.phase_->consume_work(size);
         if (!charged.ok())
           return charged;
-        for (std::uint64_t i = 0; i < size; ++i)
-          if (output[i].struct_size != sizeof(output[i]))
-            return invalid("invalid Result discovery record destination");
         std::uint64_t index = 0;
         for (const auto& need : needs) {
-          const auto emit = [&](std::uint32_t kind, TileIndex tile) {
+          const auto emit = [&](std::uint32_t kind, TileInterval interval) {
             auto& record = output[index++];
             record = {};
-            record.struct_size = sizeof(record);
             record.input = need.input;
             record.kind = kind;
-            record.tile = tile;
+            record.tensor_slot = need.tensor_slot;
+            record.begin = interval.begin;
+            record.end = interval.end;
           };
-          if (need.whole || need.descriptor_only) {
-            emit(need.whole ? PS_RESULT_DISCOVERY_WHOLE_V4
-                            : PS_RESULT_DISCOVERY_DESCRIPTOR_V4,
-                 0);
-          } else {
-            for (auto tile : need.tiles)
-              emit(PS_RESULT_DISCOVERY_TILE_V4, tile);
-          }
+          if (need.descriptor_only)
+            emit(PS_RESULT_DISCOVERY_DESCRIPTOR_V5, {});
+          else
+            for (auto interval : need.tiles.intervals())
+              emit(PS_RESULT_DISCOVERY_TILE_V5, interval);
         }
       }
       *count = static_cast<std::uint32_t>(size);
@@ -1017,7 +1027,7 @@ class CResultMemberBridge final {
                  : invalid("expired Result discovery receipt");
     });
   }
-  static ps_result_services_v4 services_for(Lease* lease,
+  static ps_result_services_v5 services_for(Lease* lease,
                                             const ResultProgramPhase& phase) {
     lease->native_views = Lease::NativeViews(
         std::less<std::uint64_t>{},
@@ -1055,7 +1065,7 @@ class CResultMemberBridge final {
     return table;
   }
   static int parallel(void* raw, uint64_t count, uint64_t grain,
-                      uint32_t workers, ps_cpu_range_callback_v1 callback,
+                      uint32_t workers, ps_cpu_range_callback_v2 callback,
                       void* user) {
     auto* lease = static_cast<Lease*>(raw);
     return call(raw, [&](CResultMemberBridge&) {
@@ -1064,8 +1074,8 @@ class CResultMemberBridge final {
                                                user));
     });
   }
-  static int tiles(void* raw, const ps_cpu_tile_stage_v1* stage,
-                   ps_cpu_tile_callback_v1 callback, void* user) {
+  static int tiles(void* raw, const ps_cpu_tile_stage_v2* stage,
+                   ps_cpu_tile_callback_v2 callback, void* user) {
     auto* lease = static_cast<Lease*>(raw);
     return call(raw, [&](CResultMemberBridge&) {
       return outcome(lease->host_tiles->run(lease->host_tiles->context, stage,
@@ -1221,7 +1231,7 @@ class CResultMemberBridge final {
                 {FailureOrigin::Protocol, FailureScope::Group}};
     if (view_probe && status.code == ErrorCode::InvalidArgument &&
         status.reason == FailureReason::ViewUnavailable)
-      return PS_RESULT_VIEW_UNAVAILABLE_V4;
+      return PS_RESULT_VIEW_UNAVAILABLE_V5;
     if (!status.ok()) {
       if (state.failure_.ok())
         state.failure_ = std::move(status);
@@ -1238,32 +1248,156 @@ class CResultMemberBridge final {
     }
     return code(state.failure_.ok() ? status : state.failure_);
   }
-  static int need_tiles(void* c, const ps_result_tile_need_v4* request) {
+  static int need_shared_stage(void* raw, std::uint32_t stage) {
+    return call(raw, [&](CResultMemberBridge& state) {
+      if (!state.phase_->query.prepared ||
+          stage >=
+              state.phase_->query.prepared->traits().shared_stages.size() ||
+          std::any_of(
+              state.need_.shared_stages.begin(),
+              state.need_.shared_stages.end(),
+              [stage](const auto& need) { return need.stage == stage; }))
+        return invalid_result_need("invalid shared stage Need");
+      if (state.need_.shared_stages.empty())
+        state.need_.shared_stages = ResourceVector<ResultSharedNeed>(
+            ResourceAllocator<ResultSharedNeed>(state.phase_->resources));
+      state.need_.shared_stages.push_back(stage);
+      return Status::success();
+    });
+  }
+  static int need_shared_tiles(void* raw, std::uint32_t stage,
+                               std::uint32_t slot,
+                               const ps_result_tile_interval_v5* intervals,
+                               std::uint32_t count) {
+    return call(raw, [&](CResultMemberBridge& state) {
+      if (!state.phase_->query.prepared ||
+          stage >=
+              state.phase_->query.prepared->traits().shared_stages.size() ||
+          !array(intervals, count, 65536))
+        return invalid_result_need("invalid shared tile Need");
+      auto& root = state.phase_->resources;
+      ResourceVector<TileInterval> ranges{
+          ResourceAllocator<TileInterval>(root)};
+      for (std::uint32_t i = 0; i < count; ++i)
+        ranges.push_back({intervals[i].begin, intervals[i].end});
+      auto tiles = TileSet::from_intervals(root, ranges.data(), ranges.size());
+      if (!tiles.ok())
+        return tiles.status();
+      if (state.need_.shared_stages.empty())
+        state.need_.shared_stages = ResourceVector<ResultSharedNeed>(
+            ResourceAllocator<ResultSharedNeed>(root));
+      auto found = std::find_if(
+          state.need_.shared_stages.begin(), state.need_.shared_stages.end(),
+          [stage](const auto& need) { return need.stage == stage; });
+      if (found == state.need_.shared_stages.end()) {
+        state.need_.shared_stages.emplace_back(stage, TileRequest{});
+        found = state.need_.shared_stages.end() - 1;
+      }
+      if (!found->tiles || found->tiles->members.count(slot))
+        return invalid_result_need("duplicate shared tile Need");
+      found->tiles->members.emplace(slot, tiles.take_value());
+      return Status::success();
+    });
+  }
+  static int acquire_shared_window(void* raw, std::uint32_t stage,
+                                   std::uint32_t slot,
+                                   const ps_result_region_v5* requested,
+                                   ps_result_tensor_window_v5* output,
+                                   std::uint64_t* handle) {
+    return call(raw, [&](CResultMemberBridge& state) {
+      if (!state.phase_->shared_stages || !output || !handle ||
+          reinterpret_cast<std::uintptr_t>(output) %
+              alignof(ps_result_tensor_window_v5) ||
+          output->struct_size != sizeof(*output) ||
+          state.next_handle_ >= quality_handle_base ||
+          state.windows_.size() >= 1024)
+        return invalid("invalid shared window request");
+      auto found = state.phase_->shared_stages->find(stage);
+      if (found == state.phase_->shared_stages->end())
+        return Status{ErrorCode::InvalidArgument,
+                      "shared stage Need is absent",
+                      FailureReason::UnauthorizedRead,
+                      {FailureOrigin::Protocol, FailureScope::Group}};
+      const auto& source = found->second;
+      if (slot >= source.schema().tensors.size())
+        return invalid("invalid shared tensor slot");
+      const auto& spec = source.schema().tensors[slot];
+      auto bounds = region(requested, spec.sample_shape());
+      if (!bounds.ok())
+        return bounds.status();
+      auto facts = source.descriptor();
+      if (!facts.ok())
+        return facts.status();
+      auto acquired =
+          source.acquire_tensor(facts.value(), slot, bounds.value().region,
+                                state.phase_->query.cancellation);
+      if (!acquired.ok())
+        return acquired.status();
+      auto record = std::allocate_shared<WindowRecord>(
+          ResourceAllocator<WindowRecord>(state.phase_->resources));
+      record->window = acquired.take_value();
+      record->budget = state.phase_->resources;
+      record->cancellation = state.phase_->query.cancellation;
+      record->failure = state.phase_->failure;
+      record->first_failure = state.window_failure_;
+      const auto token = state.next_handle_++;
+      state.windows_.emplace(token, record);
+      state.window_records_.push_back(record);
+      *output = {sizeof(*output),
+                 record->window.row_axis().value_or(UINT32_MAX),
+                 record->window.sample_axis(),
+                 spec.layout.spatial && spec.layout.channel_axis
+                     ? *spec.layout.channel_axis +
+                           static_cast<uint32_t>(spec.batch_axes.size())
+                     : UINT32_MAX,
+                 source.object_id(),
+                 *requested,
+                 record.get(),
+                 window_row,
+                 window_rectangle};
+      *handle = token;
+      return Status::success();
+    });
+  }
+  static int need_tiles(void* c, const ps_result_tile_need_v5* request) {
     return call(c, [&](CResultMemberBridge& s) {
       if (!request ||
           reinterpret_cast<std::uintptr_t>(request) %
-              alignof(ps_result_tile_need_v4) ||
-          request->struct_size != sizeof(*request) || request->whole > 1 ||
+              alignof(ps_result_tile_need_v5) ||
+          request->struct_size != sizeof(*request) ||
           request->descriptor_only > 1 ||
-          !array(request->tiles, request->tile_count, 65536) ||
-          static_cast<unsigned>(request->whole) + request->descriptor_only +
-                  (request->tile_count != 0) !=
-              1 ||
+          !array(request->intervals, request->interval_count, 65536) ||
+          (request->descriptor_only && request->interval_count != 0) ||
           request->input >= s.phase_->query.inputs.size() ||
           s.need_.tiles.size() >= 65536)
         return invalid_result_need("invalid C tile Need");
       const auto& query = s.phase_->query;
-      const auto& selection =
+      const auto& output_selection =
           s.definition_->traits.outputs[query.output_index].input_indices;
+      const auto* selection = output_selection ? &*output_selection : nullptr;
+      if (query.shared_stage != UINT32_MAX) {
+        if (!query.prepared ||
+            query.shared_stage >= query.prepared->traits().shared_stages.size())
+          return invalid_result_need("invalid C shared stage");
+        selection = &query.prepared->traits()
+                         .shared_stages[query.shared_stage]
+                         .input_indices;
+      }
       if (selection && std::find(selection->begin(), selection->end(),
                                  request->input) == selection->end())
         return invalid_result_need(
             "C tile Need is outside the output input projection");
-      auto charged = s.phase_->consume_work(request->tile_count + 1);
+      auto charged = s.phase_->consume_work(request->interval_count + 1);
       if (!charged.ok())
         return charged;
-      auto indices = TileSet::from_indices(s.phase_->resources, request->tiles,
-                                           request->tile_count);
+      ResourceVector<TileInterval> ranges{
+          ResourceAllocator<TileInterval>(s.phase_->resources)};
+      ranges.reserve(request->interval_count);
+      for (std::size_t i = 0; i < request->interval_count; ++i)
+        ranges.push_back(
+            {request->intervals[i].begin, request->intervals[i].end});
+      auto indices = TileSet::from_intervals(s.phase_->resources, ranges.data(),
+                                             ranges.size());
       if (!indices.ok())
         return indices.status();
       const auto& schema = query.inputs[request->input].result_schema;
@@ -1273,15 +1407,14 @@ class CResultMemberBridge final {
           query.input_tile_grids.size() != query.inputs.size())
         return invalid_result_need("incomplete compiled C input grids");
       auto grid = query.input_tile_grids.empty()
-                      ? TileGrid::from_schema(*schema, query.tile_extent)
-                      : Result<std::optional<TileGrid>>(
+                      ? TileGrid::members(*schema, query.tile_extent)
+                      : Result<std::vector<TileGrid>>(
                             query.input_tile_grids[request->input]);
       if (!grid.ok())
         return grid.status();
-      TileNeed need{request->input, request->whole != 0,
+      TileNeed need{request->input, request->tensor_slot,
                     request->descriptor_only != 0, indices.take_value()};
-      auto valid = need.resolve(grid.value(), grid.value().has_value(),
-                                s.phase_->resources);
+      auto valid = need.resolve(grid.value(), s.phase_->resources);
       if (!valid.ok())
         return valid.status().code == ErrorCode::InvalidArgument
                    ? invalid_result_need(
@@ -1412,7 +1545,7 @@ class CResultMemberBridge final {
     });
   }
   static int publish_tensor(void* c, std::uint32_t slot,
-                            const ps_result_region_v4* box,
+                            const ps_result_region_v5* box,
                             const std::uint8_t* bytes, std::uint64_t size) {
     return call(c, [&](CResultMemberBridge& s) {
       const auto& schema = s.phase_->query.output.result_schema;
@@ -1431,7 +1564,7 @@ class CResultMemberBridge final {
     });
   }
   static int publish_tensor_buffer(void* raw, std::uint32_t slot,
-                                   const ps_result_region_v4* box,
+                                   const ps_result_region_v5* box,
                                    std::uint8_t* bytes, std::uint64_t size) {
     return call(raw, [&](CResultMemberBridge& state) {
       const auto& schema = state.phase_->query.output.result_schema;
@@ -1450,7 +1583,7 @@ class CResultMemberBridge final {
       if (!region_value.ok())
         return region_value.status();
       auto samples = region_value.value().region.element_count();
-      const auto width = Value::element_size(spec.descriptor.element_type);
+      const auto width = TensorSpan::element_size(spec.descriptor.element_type);
       if (!samples.ok() || !width ||
           !core_internal::can_multiply(samples.value(), width) ||
           samples.value() * width != size)
@@ -1472,65 +1605,7 @@ class CResultMemberBridge final {
           state.phase_->query.cancellation));
     });
   }
-  static int append_field(void* c, std::uint32_t field, std::uint64_t rows,
-                          const std::uint8_t* bytes, std::uint64_t size) {
-    return call(c, [&](CResultMemberBridge& s) {
-      if (!bytes || !size || size > SIZE_MAX)
-        return invalid("invalid field payload");
-      return s.publication(s.builder_.append(field, rows, ByteView(bytes, size),
-                                             s.phase_->query.cancellation));
-    });
-  }
-  static int publish_field(void* c, std::uint32_t field, std::uint64_t end) {
-    return call(c, [&](CResultMemberBridge& s) {
-      return s.publication(s.builder_.publish(field, end));
-    });
-  }
-  static int read_field(void* c, std::uint32_t input, std::uint32_t field,
-                        std::uint64_t first, std::uint64_t rows,
-                        std::uint8_t* bytes, std::uint64_t size) {
-    return call(c, [&](CResultMemberBridge& s) {
-      if ((!bytes && size) || size > SIZE_MAX)
-        return invalid("invalid field read destination");
-      auto found = s.phase_->results.find(input);
-      if (found == s.phase_->results.end())
-        return Status{ErrorCode::InvalidArgument,
-                      "Result field Whole Need is absent",
-                      FailureReason::UnauthorizedRead,
-                      {FailureOrigin::Protocol, FailureScope::Group}};
-      auto facts = found->second.descriptor(false);
-      if (!facts.ok())
-        return facts.status();
-      if (field >= facts.value().field_count() ||
-          first > facts.value().rows(field) ||
-          rows > facts.value().rows(field) - first)
-        return invalid("invalid field read range");
-      auto read = found->second.prepare_read(facts.value(), field, first, rows);
-      if (!read.ok())
-        return read.status();
-      if (read.value().byte_size() != size)
-        return invalid("field read byte size mismatch");
-      if (size > s.phase_->query.page_bytes)
-        return Status{ErrorCode::ResourceExhausted,
-                      "field read exceeds window limit",
-                      FailureReason::CapacityLimit};
-      auto work = s.phase_->consume_work(size);
-      if (!work.ok())
-        return work;
-      if (s.phase_->query.cancellation.cancelled())
-        return Status{ErrorCode::Cancelled, {}};
-      if (!size)
-        return Status::success();
-      auto window = read.value().load(s.phase_->query.page_bytes,
-                                      s.phase_->query.cancellation);
-      if (!window.ok())
-        return window.status();
-      if (s.phase_->query.cancellation.cancelled())
-        return Status{ErrorCode::Cancelled, {}};
-      std::memcpy(bytes, window.value()->bytes().data(), size);
-      return Status::success();
-    });
-  }
+
   static int publish_result(void* c, std::uint32_t complete) {
     return call(c, [&](CResultMemberBridge& s) {
       if (complete > 1)
@@ -1556,11 +1631,11 @@ class CResultMemberBridge final {
     });
   }
   static int result_descriptor(void* c, std::uint32_t input,
-                               ps_result_descriptor_v4* output) {
+                               ps_result_descriptor_v5* output) {
     return call(c, [&](CResultMemberBridge& s) {
       if (!output ||
           reinterpret_cast<std::uintptr_t>(output) %
-              alignof(ps_result_descriptor_v4) ||
+              alignof(ps_result_descriptor_v5) ||
           output->struct_size != sizeof(*output))
         return invalid("invalid Result descriptor destination");
       const auto descriptor = s.phase_->descriptors
@@ -1582,19 +1657,16 @@ class CResultMemberBridge final {
       *output = {};
       output->struct_size = sizeof(*output);
       output->sealed = facts.value().sealed();
-      output->field_count = facts.value().field_count();
       output->tensor_count = facts.value().tensor_count();
       output->object_id = facts.value().object_id();
       output->revision = facts.value().revision();
-      for (std::uint32_t i = 0; i < output->field_count; ++i)
-        output->rows[i] = facts.value().rows(i);
       return Status::success();
     });
   }
 
-  static ps_result_services_v4 service(Lease* lease) {
-    return {sizeof(ps_result_services_v4),
-            PS_RESULT_OPERATION_ABI_VERSION_4,
+  static ps_result_services_v5 service(Lease* lease) {
+    return {sizeof(ps_result_services_v5),
+            PS_RESULT_OPERATION_ABI_VERSION_5,
             lease,
             need_tiles,
             read_tensor,
@@ -1607,9 +1679,7 @@ class CResultMemberBridge final {
             cancelled,
             begin,
             publish_tensor,
-            append_field,
-            publish_field,
-            read_field,
+
             publish_result,
             result_descriptor,
             acquire_tensor_window,
@@ -1634,7 +1704,10 @@ class CResultMemberBridge final {
             checkpoint_before,
             checkpoint_read,
             checkpoint_publish,
-            fail_domain};
+            fail_domain,
+            need_shared_stage,
+            acquire_shared_window,
+            need_shared_tiles};
   }
   std::shared_ptr<const Definition> definition_;
   MutableBuffer bytes_;
@@ -1665,9 +1738,9 @@ std::uint64_t c_member_storage_bytes() noexcept {
   return sizeof(CResultMemberBridge);
 }
 Result<ResultContinuation> start_c_member(
-    std::shared_ptr<const Definition> owner, const BufferAllocator& allocator) {
-  auto allocated =
-      allocator.allocate(std::max<std::uint64_t>(1, owner->api.state_bytes));
+    std::shared_ptr<const Definition> owner, const BufferAllocator& allocator,
+    std::uint64_t state_bytes) {
+  auto allocated = allocator.allocate(std::max<std::uint64_t>(1, state_bytes));
   if (!allocated.ok())
     return Result<ResultContinuation>(allocated.status());
   auto buffer = allocated.take_value();

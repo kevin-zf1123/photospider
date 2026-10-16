@@ -10,7 +10,7 @@
 
 namespace ps::execution_internal {
 struct ResultCacheProof::SourceRange {
-  enum class Kind { Descriptor, Field, Tensor };
+  enum class Kind { Descriptor, Tensor };
   ResourceString input;
   Kind target;
   std::uint32_t slot;
@@ -18,18 +18,14 @@ struct ResultCacheProof::SourceRange {
 };
 Status ResultCacheProof::hash_facts(content_internal::Sha256& hash,
                                     const ResultRef& object,
-                                    const ResultDescriptor& facts) {
-  auto charged =
-      work_(1 + object.schema().canonical_size() + facts.field_count());
+                                    const ResultDescriptor&) {
+  auto charged = work_(1 + object.schema().canonical_size());
   if (!charged.ok())
     return charged;
   auto schema = object.schema().managed_canonical(root_);
   if (!schema.ok())
     return schema.status();
   hash.text(schema.value());
-  hash.integer(facts.field_count());
-  for (std::uint32_t field = 0; field < facts.field_count(); ++field)
-    hash.integer(facts.rows(field));
   return Status::success();
 }
 Result<ResourceString> ResultCacheProof::supplied_facts(
@@ -103,7 +99,7 @@ Result<ResourceString> ResultCacheProof::tile_source_digest(
     const auto& schema = *declaration->result_schema;
     if (!schema.same_schema(binding->result.schema()))
       return Result<ResourceString>(Status{ErrorCode::NotFound, {}});
-    auto descriptor = binding->result.descriptor(source.whole);
+    auto descriptor = binding->result.descriptor(false);
     if (!descriptor.ok())
       return Result<ResourceString>(descriptor.status());
     auto facts = Footprint::all({1}, limits);
@@ -111,45 +107,17 @@ Result<ResourceString> ResultCacheProof::tile_source_digest(
       return Result<ResourceString>(facts.status());
     selected.push_back(
         {source.name, SourceRange::Kind::Descriptor, 0, facts.take_value()});
-    if (!source.whole && source.tiles.empty())
+    if (source.tiles.empty())
       continue;
-    auto grid = TileGrid::from_schema(schema, plan.tile_extent());
+    auto grid =
+        TileGrid::from_schema(schema, plan.tile_extent(), source.tensor_slot);
     if (!grid.ok())
       return Result<ResourceString>(grid.status());
-    TileRequest request{source.whole, source.tiles};
-    auto resolved = request.resolve(grid.value(), grid.value().has_value());
-    if (!resolved.ok())
-      return Result<ResourceString>(resolved.status());
-    for (std::uint32_t slot = 0; slot < schema.fields.size(); ++slot) {
-      const auto rows = descriptor.value().rows(slot);
-      auto samples =
-          rows ? Footprint::all({rows}, limits) : Footprint::none({1}, limits);
-      if (!samples.ok())
-        return Result<ResourceString>(samples.status());
-      selected.push_back(
-          {source.name, SourceRange::Kind::Field, slot, samples.take_value()});
-    }
-    for (std::uint32_t slot = 0; slot < schema.tensors.size(); ++slot) {
-      const auto shape = schema.tensors[slot].sample_shape();
-      auto samples = source.whole ? Footprint::all(shape, limits)
-                                  : Footprint::none(shape, limits);
-      if (!samples.ok())
-        return Result<ResourceString>(samples.status());
-      for (auto tile : source.tiles) {
-        auto region = grid.value()->region(tile);
-        if (!region.ok())
-          return Result<ResourceString>(region.status());
-        auto part =
-            Footprint::from_regions(shape, {region.take_value()}, limits);
-        if (!part.ok())
-          return Result<ResourceString>(part.status());
-        samples = samples.value().unite(part.value(), limits);
-        if (!samples.ok())
-          return Result<ResourceString>(samples.status());
-      }
-      selected.push_back(
-          {source.name, SourceRange::Kind::Tensor, slot, samples.take_value()});
-    }
+    auto samples = grid.value()->coverage(source.tiles, limits);
+    if (!samples.ok())
+      return Result<ResourceString>(samples.status());
+    selected.push_back({source.name, SourceRange::Kind::Tensor,
+                        source.tensor_slot, samples.take_value()});
   }
   return source_digest(bindings, selected);
 }
@@ -184,7 +152,6 @@ Result<ResourceString> ResultCacheProof::source_digest(
       return Result<ResourceString>(descriptor.status());
     if (source.target == SourceRange::Kind::Descriptor) {
       auto charged = work_(found->result.schema().canonical_size() + 1 +
-                           descriptor.value().field_count() +
                            descriptor.value().tensor_count());
       if (!charged.ok())
         return Result<ResourceString>(charged);
@@ -196,35 +163,10 @@ Result<ResourceString> ResultCacheProof::source_digest(
     auto count = source.samples.element_count();
     if (!count.ok())
       return Result<ResourceString>(count.status());
-    if (source.target == SourceRange::Kind::Field) {
-      auto width = found->result.schema().row_bytes(source.slot);
-      if (!width.ok() || width.value() > maximum_window_ ||
-          !core_internal::can_multiply(count.value(), width.value()))
-        return Result<ResourceString>(Status{ErrorCode::ResourceExhausted, {}});
-      status = work_(count.value() * width.value());
-      if (!status.ok())
-        return Result<ResourceString>(status);
-      status = source.samples.visit(
-          [&](const auto& at) {
-            auto active = work_(0);
-            if (!active.ok())
-              return active;
-            auto plan = found->result.prepare_read(descriptor.value(),
-                                                   source.slot, at[0], 1);
-            if (!plan.ok())
-              return plan.status();
-            auto bytes = plan.value().load(maximum_window_, cancellation_());
-            if (!bytes.ok())
-              return bytes.status();
-            hash.bytes(bytes.value()->bytes().data(),
-                       bytes.value()->bytes().size());
-            return Status::success();
-          },
-          count.value(), cancellation_());
-    } else if (source.target == SourceRange::Kind::Tensor) {
+    if (source.target == SourceRange::Kind::Tensor) {
       if (source.slot >= found->result.schema().tensors.size())
         return Result<ResourceString>(Status{ErrorCode::NotFound, {}});
-      const auto width = Value::element_size(
+      const auto width = TensorSpan::element_size(
           found->result.schema().tensors[source.slot].descriptor.element_type);
       status = work_(count.value());
       if (!status.ok())

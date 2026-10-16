@@ -37,12 +37,7 @@ inline std::string layout_assertion(const ResultTensorLayout& layout) {
       std::to_string(layout.channel_axis
                          ? static_cast<std::int64_t>(*layout.channel_axis)
                          : -1) +
-      ":" + std::to_string(layout.row_pitch_bytes) + ":" +
-      std::to_string(layout.groups.size());
-  for (const auto& group : layout.groups)
-    result += ":" + std::to_string(group.role.size()) + ":" + group.role + ":" +
-              std::to_string(group.first_channel) + ":" +
-              std::to_string(group.channel_count);
+      ":" + std::to_string(layout.row_pitch_bytes);
   return result;
 }
 }  // namespace detail
@@ -111,8 +106,7 @@ inline Result<std::vector<ChannelHandle>> split_channels(
                   {FailureOrigin::Schema, FailureScope::Unspecified}};
   };
   if (!source_metadata.result_schema ||
-      source_metadata.result_schema->tensors.size() != 1 ||
-      !source_metadata.result_schema->fields.empty())
+      source_metadata.result_schema->tensors.size() != 1)
     return Answer(invalid("split requires one Result tensor and no fields"));
   const auto& schema = *source_metadata.result_schema;
   auto valid = schema.validate(true);

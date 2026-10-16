@@ -37,6 +37,16 @@ class TileRecords final {
                  std::shared_ptr<const TilePublication>* installed = nullptr,
                  const Snapshot* ancestry = nullptr,
                  const std::function<Status(std::uint64_t)>& charge = {});
+  struct PendingPublication {
+    const TileRecord* record;
+    ResultRef payload;
+    std::shared_ptr<const TilePublication>* installed = nullptr;
+  };
+  /** @brief All units in a static visibility scope commit atomically. */
+  Status install_batch(std::uint64_t generation,
+                       const PendingPublication* entries, std::size_t count,
+                       const Snapshot* ancestry = nullptr,
+                       const std::function<Status(std::uint64_t)>& charge = {});
   Result<std::shared_ptr<const TilePublication>> find(TileUnit unit) const;
   /** @brief Drops the table's payload pin but retains dependency structure.
    * Existing publication/window owners remain valid. No allocation is needed.
@@ -46,18 +56,17 @@ class TileRecords final {
                         const std::shared_ptr<const TilePublication>& expected);
   Result<std::shared_ptr<const TileRecord>> find_record(TileUnit unit) const;
   /** @brief Captures only the recorded producer closure of these Needs.
-   * No payload owners are retained. Whole dependencies visit every recorded
-   * unit of that producer, while explicit sets visit only their sparse keys.
+   * No payload owners are retained. Interval dependencies visit the recorded
+   * producer units within their selected member and tile intervals.
    * The task's own draft record is excluded by default. Synthetic query roots
    * pass exclude_task=false, making their unit value irrelevant. All traversal
    * charges Root.
    */
   struct ProducerUnits {
     std::uint64_t count = 1;
-    bool computed_descriptor = false;
   };
-  using ProducerQuery =
-      std::function<Result<ProducerUnits>(const PlanStepInput&, std::uint32_t)>;
+  using ProducerQuery = std::function<Result<ProducerUnits>(
+      const PlanStepInput&, std::uint32_t, std::uint32_t)>;
   Result<Snapshot> capture_ancestry(
       const TileRecord& record, const ProducerQuery& producer_units,
       const std::function<Status(std::uint64_t)>& charge = {},
@@ -96,26 +105,34 @@ class TileRecords final {
  private:
   struct Producer {
     std::size_t index = 0;
-    std::uint32_t output = 0;
+    std::uint32_t output = 0, tensor_slot = 0;
     bool workflow = false;
+    std::uint64_t evidence = 0;
     bool operator<(const Producer& other) const noexcept {
-      return std::tie(workflow, index, output) <
-             std::tie(other.workflow, other.index, other.output);
+      return std::make_tuple(evidence, workflow, index, output, tensor_slot) <
+             std::make_tuple(other.evidence, other.workflow, other.index,
+                             other.output, other.tensor_slot);
     }
     bool operator==(const Producer& other) const noexcept {
       return index == other.index && output == other.output &&
-             workflow == other.workflow;
+             workflow == other.workflow && tensor_slot == other.tensor_slot &&
+             evidence == other.evidence;
     }
   };
-  enum class Kind { Tile, Any, Descriptor };
+  enum class Kind { Tile, Descriptor };
   struct Edge {
     Producer producer;
     Kind kind = Kind::Tile;
     TileIndex tile = 0;
     TileUnit consumer;
+    TileIndex end = 0;
+    std::uint64_t evidence_consumer = 0;
     bool operator<(const Edge& other) const noexcept {
-      return std::tie(producer, kind, tile, consumer) <
-             std::tie(other.producer, other.kind, other.tile, other.consumer);
+      return std::make_tuple(producer, kind, tile, consumer, end,
+                             evidence_consumer) <
+             std::make_tuple(other.producer, other.kind, other.tile,
+                             other.consumer, other.end,
+                             other.evidence_consumer);
     }
   };
   struct UnitState {
@@ -128,11 +145,29 @@ class TileRecords final {
                ResourceAllocator<std::pair<const TileUnit, UnitState>>>;
   using Edges = std::map<Edge, bool, std::less<Edge>,
                          ResourceAllocator<std::pair<const Edge, bool>>>;
+  struct EvidenceState {
+    std::shared_ptr<const TileEvidence> node;
+    std::uint64_t references = 0;
+  };
+  using Evidence = std::map<
+      std::uint64_t, EvidenceState, std::less<std::uint64_t>,
+      ResourceAllocator<std::pair<const std::uint64_t, EvidenceState>>>;
+  using References = std::map<
+      std::uint64_t, std::uint64_t, std::less<std::uint64_t>,
+      ResourceAllocator<std::pair<const std::uint64_t, std::uint64_t>>>;
+  Status stage_evidence(TileRecord& record, Evidence& staged,
+                        Edges& edges) const;
+  Status stage_retirement(const Evidence& staged, const Edges& added,
+                          ResourceVector<Edge>& removed, References& references,
+                          ResourceVector<std::uint64_t>& retired) const;
+  void commit_evidence(Evidence& staged, const References& references,
+                       const ResourceVector<std::uint64_t>& retired);
   Status stage_ancestry(
       std::uint64_t generation, const Snapshot& records, Publications& staged,
-      Edges& staged_edges,
+      Edges& staged_edges, Evidence& staged_evidence,
       const std::function<Status(std::uint64_t)>& charge) const;
-  static Producer producer(const PlanInput& input, std::uint32_t output);
+  static Producer producer(const PlanInput& input, std::uint32_t output,
+                           std::uint32_t tensor_slot);
   Result<ResourceVector<Edge>> edges(const TileRecord& record) const;
   Status lookup_work(
       std::size_t size, std::uint64_t count = 1,
@@ -142,5 +177,6 @@ class TileRecords final {
   std::uint64_t generation_;
   Publications publications_;
   Edges reverse_;
+  Evidence evidence_;
 };
 }  // namespace ps::execution_internal

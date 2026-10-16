@@ -5,7 +5,7 @@
 #include <utility>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 #include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
@@ -52,12 +52,11 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
  * with schema photospider.tensor, member `samples`, shape [N] or [N,C]
  * (including C=1), selected dtype and ordinary data. Batch dimensions are
  * ordinary output axes. Compiler checks actual input edges; helpers own node
- * metadata and may be used concurrently. Nonempty Whole execution requests
- * Data, Validation and Descriptor (role 13) for all three inputs, computes all
- * queries and columns, and publishes a complete dense output. The Result
- * association names the actual source ObjectIds. Allocation may throw
- * bad_alloc. Invalid helper parameters fail
- * InvalidArgument/InvalidDomain/Schema; invalid edge metadata fails
+ * metadata and may be used concurrently. A nonempty request runs a shared stage
+ * that acquires all three inputs, computes all queries and columns, and
+ * publishes a complete dense output. The Result association names the actual
+ * source ObjectIds. Allocation may throw bad_alloc. Invalid helper parameters
+ * fail InvalidArgument/InvalidDomain/Schema; invalid edge metadata fails
  * TypeMismatch. It validates all x knots before y arithmetic. Exact knot/clamp
  * uses one y; linear uses two endpoints; PCHIP uses its fixed local stencil.
  * Generic y values outside evaluated stencils are numerically unused. Nonfinite

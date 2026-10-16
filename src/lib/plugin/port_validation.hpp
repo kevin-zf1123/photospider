@@ -1,7 +1,7 @@
 #include <vector>
 #pragma once
 
-#include "data/value_validation.hpp"
+#include "data/tensor_validation.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::input_internal {
@@ -25,18 +25,5 @@ Result<std::uint32_t> resolve_tensor_member(const OperationPortConstraint& port,
 
 Status validate_port_metadata(const OperationPortConstraint& port,
                               const OperationMetadata& metadata);
-
-/** @brief Validate a bounded scalar tensor using captured immutable coverage.
- * Reads its logical sample through Result access without dense-layout
- * assumptions. numeric_failure distinguishes external admission from computed
- * input failure.
- */
-Status validate_port_tensor(const OperationPortConstraint& port,
-                            const ResultRef& result,
-                            const ResultDescriptor& descriptor,
-                            const OperationMetadata& metadata,
-                            ErrorCode numeric_failure,
-                            const CancellationToken& cancellation,
-                            const std::function<ErrorCode()>& stop);
 
 }  // namespace ps::input_internal

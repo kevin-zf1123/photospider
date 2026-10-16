@@ -71,7 +71,7 @@ struct Source {
       return 1;
     }
   }
-  static int tile(void* raw, const ps_cpu_tile_v1* tile) noexcept {
+  static int tile(void* raw, const ps_cpu_tile_v2* tile) noexcept {
     return range(raw, tile->begin[0], tile->end[0], tile->slot);
   }
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
@@ -82,7 +82,7 @@ struct Source {
       Work work{&phase, probe};
       int status = 1;
       if (probe->tiles && phase.cpu_tiles) {
-        const ps_cpu_tile_stage_v1 stage{sizeof(ps_cpu_tile_stage_v1),
+        const ps_cpu_tile_stage_v2 stage{sizeof(ps_cpu_tile_stage_v2),
                                          {64, 1, 1},
                                          {8, 1, 1},
                                          2};
@@ -114,7 +114,8 @@ struct Consumer {
       supplied = true;
       ResultProgramNeed need;
       for (std::uint32_t port : {0U, 1U})
-        need.tiles.push_back({port, true, false, {}});
+        need.tiles.push_back(
+            {port, 0, false, take(TileSet::range(phase.resources, 0, 1))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     std::uint8_t left = 0, right = 0;
@@ -154,11 +155,10 @@ struct Fixture {
     source.traits.input_count = 0;
     source.traits.cpu_staged_tiles = probe.tiles;
     auto& out = source.traits.outputs[0];
-    out.output_schema.kind = OperationPortKind::Result;
+
     out.output_schema.result_schema_id = schema.id;
     out.output_schema.result_schema_version = 1;
     out.result_schema = schema;
-    out.region_rule = OperationRegionRule::Whole;
     out.continuation_bytes = sizeof(Source);
     out.maximum_dependency_stages = 1;
     source.start_result = [this](const auto&, const auto& allocator) {
@@ -171,7 +171,7 @@ struct Fixture {
       consumer.traits = source.traits;
       consumer.traits.input_count = 2;
       OperationPortConstraint input;
-      input.kind = OperationPortKind::Result;
+
       input.result_schema_id = schema.id;
       input.result_schema_version = schema.version;
       consumer.traits.input_schema = {input, input};

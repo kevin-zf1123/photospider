@@ -16,6 +16,7 @@
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -192,7 +193,7 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
   auto& traits = definition.traits;
   traits.input_count = 1;
   traits.input_schema.resize(1);
-  traits.input_schema[0].kind = OperationPortKind::Result;
+
   traits.input_schema[0].element_type_mask = 12;
   traits.parameter_schema = {{"axis", OperationParameterType::Int64},
                              {"radius", OperationParameterType::Int64},
@@ -211,7 +212,6 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
                                                 const auto& p) {
     using Answer = Result<OperationPreparation>;
     if (inputs.size() != 1 || !inputs[0].result_schema ||
-        !inputs[0].result_schema->fields.empty() ||
         inputs[0].result_schema->tensors.size() != 1 ||
         (inputs[0].result_schema->tensors[0].descriptor.element_type !=
              ElementType::Float32 &&
@@ -270,7 +270,7 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
   definition.start_result = [](const auto&, const auto& allocator) {
     return ResultContinuation::make<UniformProgram>(allocator);
   };
-  return definition;
+  return sdk::with_whole_stage(std::move(definition), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_uniform_lowpass(OperationRegistry* registry) {

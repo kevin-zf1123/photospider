@@ -13,6 +13,7 @@
 
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "common/floating_environment.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 struct FiniteArithmeticPrepared final {
@@ -91,7 +92,6 @@ inline OperationDefinition finite_arithmetic(const char* key, unsigned kind) {
   traits.input_count = kind == 4 ? 1 : 2;
   traits.input_schema.resize(traits.input_count);
   for (auto& port : traits.input_schema) {
-    port.kind = OperationPortKind::Result;
     port.element_type_mask = 12;
   }
   set_whole_tensor_output(traits, ElementType::Float64, sizeof(Program));
@@ -116,8 +116,7 @@ inline OperationDefinition finite_arithmetic(const char* key, unsigned kind) {
     if (inputs.size() != (kind == 4 ? 1U : 2U))
       return Answer(mismatch("arithmetic input count mismatch"));
     for (const auto& input : inputs)
-      if (!input.result_schema || !input.result_schema->fields.empty() ||
-          input.result_schema->tensors.size() != 1)
+      if (!input.result_schema || input.result_schema->tensors.size() != 1)
         return Answer(mismatch("arithmetic requires one tensor per Result"));
     const auto& first = inputs[0].result_schema->tensors[0];
     const auto shape = first.sample_shape();
@@ -137,7 +136,7 @@ inline OperationDefinition finite_arithmetic(const char* key, unsigned kind) {
     // A legal zero-stride source can be larger than any materializable output.
     // Preserve the capacity failure instead of imposing the profile families'
     // unrelated 2^40 logical-product limit on these finite-domain operations.
-    if (count.value() > UINT64_MAX / Value::element_size(dtype))
+    if (count.value() > UINT64_MAX / TensorSpan::element_size(dtype))
       return Answer(Status{ErrorCode::ResourceExhausted,
                            "arithmetic output byte count overflow",
                            FailureReason::CapacityLimit,
@@ -161,6 +160,6 @@ inline OperationDefinition finite_arithmetic(const char* key, unsigned kind) {
   operation.start_result = [](const auto&, const auto& allocator) {
     return ResultContinuation::make<Program>(allocator);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace ps::plugin_internal::numeric_ops

@@ -45,12 +45,12 @@ ExecutionBindings binding(const ResourceBudget& root,
                           const std::array<double, 6>& numbers) {
   std::vector<std::uint8_t> bytes(sizeof(numbers));
   std::memcpy(bytes.data(), numbers.data(), bytes.size());
-  auto value = take(Value::create({ElementType::Float64, {6}},
-                                  Region::whole({6}), {0, {8}}, bytes));
+  auto value = take(TensorSpan::create({ElementType::Float64, {6}},
+                                       Region::whole({6}), {0, {8}}, bytes));
   auto metadata = schema();
   return {{{"source", result_input_fixture::source(root, value, &metadata)}}};
 }
-int workflow(unsigned mode, bool cache, bool exhaust_cache_work = false) {
+int workflow(unsigned mode, bool cache) {
   Module module;
   PS_CHECK(module.handle);
   ResourceBudget root;
@@ -85,13 +85,11 @@ int workflow(unsigned mode, bool cache, bool exhaust_cache_work = false) {
     root = take(context.resource_budget());
     std::array<double, 6> numbers{0, 1, 0x1p54, 4, 5, 6};
     auto demand = take(context.open_demand(plan, binding(root, numbers)));
-    TileRequest point{false, take(TileSet::from_indices(root, {5}))};
+    TileRequest point{{{0, take(TileSet::from_indices(root, {5}))}}};
     DemandQuery query{{"value", point}};
     const auto before = module.counts();
     ExecutionOptions options;
-    if (exhaust_cache_work)
-      options.maximum_dependency_cache_work = 1;
-    const bool reuse = cache && !exhaust_cache_work;
+    const bool reuse = cache;
     if (mode == 0) {
       auto initial = demand.request(query, {}, options);
       if (!initial.ok())
@@ -105,10 +103,11 @@ int workflow(unsigned mode, bool cache, bool exhaust_cache_work = false) {
                control_value == 0x1p54 + 16);
       const auto control_step = plan.outputs().at("control");
       auto control_record = take(other.dependencies.tile_record(
-          {control_step, plan.steps()[control_step].output_index, 5}));
+          {control_step, plan.steps()[control_step].output_index, 0, 5}));
       PS_CHECK(control_record && control_record->inputs.size() == 1);
-      PS_CHECK(control_record->inputs[0].whole &&
-               control_record->inputs[0].tiles.empty());
+      PS_CHECK(control_record->inputs[0].tensor_slot == 0 &&
+               control_record->inputs[0].tiles ==
+                   take(TileSet::range(root, 0, 6)));
       PS_CHECK(std::holds_alternative<PlanWorkflowInput>(
           control_record->inputs[0].producer));
       PS_CHECK(std::get<PlanWorkflowInput>(control_record->inputs[0].producer)
@@ -117,8 +116,8 @@ int workflow(unsigned mode, bool cache, bool exhaust_cache_work = false) {
       PS_CHECK(module.counts()[2] - before[2] == (reuse ? 6 : 12));
       numbers[0] = 1;
       auto replacement = take(demand.replace_bindings(binding(root, numbers)));
-      PS_CHECK(replacement.potential_dirty.at("value") == point.tiles);
-      PS_CHECK(replacement.potential_dirty.at("control") == point.tiles);
+      PS_CHECK(replacement.potential_dirty.at("value") == point);
+      PS_CHECK(replacement.potential_dirty.at("control") == point);
       auto changed = take(demand.request(query, {}, options));
       volatile double expected = 0;
       for (const auto number : numbers)
@@ -130,10 +129,11 @@ int workflow(unsigned mode, bool cache, bool exhaust_cache_work = false) {
                actual == expected);
       const auto value_step = plan.outputs().at("value");
       auto value_record = take(changed.dependencies.tile_record(
-          {value_step, plan.steps()[value_step].output_index, 5}));
+          {value_step, plan.steps()[value_step].output_index, 0, 5}));
       PS_CHECK(value_record && value_record->inputs.size() == 1);
-      PS_CHECK(value_record->inputs[0].whole &&
-               value_record->inputs[0].tiles.empty());
+      PS_CHECK(value_record->inputs[0].tensor_slot == 0 &&
+               value_record->inputs[0].tiles ==
+                   take(TileSet::range(root, 0, 6)));
       PS_CHECK(std::holds_alternative<PlanWorkflowInput>(
           value_record->inputs[0].producer));
       PS_CHECK(std::get<PlanWorkflowInput>(value_record->inputs[0].producer)
@@ -167,7 +167,6 @@ int workflow(unsigned mode, bool cache, bool exhaust_cache_work = false) {
 int main() try {
   PS_CHECK(workflow(0, true) == 0);
   PS_CHECK(workflow(0, false) == 0);
-  PS_CHECK(workflow(0, true, true) == 0);
   for (unsigned mode = 7; mode <= 11; ++mode)
     PS_CHECK(workflow(mode, true) == 0);
   return 0;

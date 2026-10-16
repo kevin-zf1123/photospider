@@ -13,8 +13,9 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/lowpass_nonuniform_math.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/core/resource_allocator.hpp"
 #include "common/registry.hpp"
+#include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -215,7 +216,6 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
   traits.input_count = 2;
   traits.input_schema.resize(2);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = 12;
   }
   traits.parameter_schema = {
@@ -244,8 +244,7 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
     if (inputs.size() != 2)
       return Answer(mismatch("nonuniform lowpass ports"));
     for (const auto& input : inputs)
-      if (!input.result_schema || !input.result_schema->fields.empty() ||
-          input.result_schema->tensors.size() != 1 ||
+      if (!input.result_schema || input.result_schema->tensors.size() != 1 ||
           (input.result_schema->tensors[0].descriptor.element_type !=
                ElementType::Float32 &&
            input.result_schema->tensors[0].descriptor.element_type !=
@@ -299,7 +298,7 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
   definition.start_result = [](const auto&, const auto& allocator) {
     return ResultContinuation::make<NonuniformProgram>(allocator);
   };
-  return definition;
+  return sdk::with_whole_stage(std::move(definition), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_nonuniform_lowpass(OperationRegistry* registry) {

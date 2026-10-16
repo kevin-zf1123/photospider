@@ -6,20 +6,19 @@
 #include <vector>
 
 #include "photospider/core/checked_math.hpp"
-#include "photospider/data/value_fragments.hpp"
+#include "photospider/data/tensor.hpp"
 
 namespace ps::input_internal {
 // Prove one affine address map over an already certified rectangle. Singleton
 // pieces do not prescribe a stride; neighboring logical samples infer it.
 // Caller admits rank-bounded standard-container scratch before entry.
 template <class Parts>
-Result<std::optional<Value>> join_affine_view(const ValueDescriptor& descriptor,
-                                              const Region& domain,
-                                              const Parts& parts,
-                                              const FootprintLimits& limits) {
-  using Answer = Result<std::optional<Value>>;
+Result<std::optional<TensorSpan>> join_affine_view(
+    const TensorDescriptor& descriptor, const Region& domain,
+    const Parts& parts, const FootprintLimits& limits) {
+  using Answer = Result<std::optional<TensorSpan>>;
   if (parts.empty())
-    return Answer(std::optional<Value>{});
+    return Answer(std::optional<TensorSpan>{});
   uint64_t spent = 0;
   const auto work = [&](uint64_t amount) {
     if (limits.cancellation.cancelled())
@@ -36,11 +35,11 @@ Result<std::optional<Value>> join_affine_view(const ValueDescriptor& descriptor,
     if (!charged.ok())
       return Answer(charged);
     if (part.storage() != owner)
-      return Answer(std::optional<Value>{});
+      return Answer(std::optional<TensorSpan>{});
   }
   if (parts.size() == 1) {
     auto view = parts.front().view(domain);
-    return view.ok() ? Answer(std::optional<Value>{view.take_value()})
+    return view.ok() ? Answer(std::optional<TensorSpan>{view.take_value()})
                      : Answer(view.status());
   }
   const auto address = [&](const std::vector<uint64_t>& at) -> Result<size_t> {
@@ -79,7 +78,7 @@ Result<std::optional<Value>> join_affine_view(const ValueDescriptor& descriptor,
       return Answer(next.status());
     const auto stride = static_cast<__int128>(next.value()) - base.value();
     if (stride < INT64_MIN || stride > INT64_MAX)
-      return Answer(std::optional<Value>{});
+      return Answer(std::optional<TensorSpan>{});
     strides[axis] = static_cast<int64_t>(stride);
   }
   for (const auto& part : parts) {
@@ -93,19 +92,19 @@ Result<std::optional<Value>> join_affine_view(const ValueDescriptor& descriptor,
       const auto term =
           static_cast<__int128>(d.offset - origin[axis]) * strides[axis];
       if (__builtin_add_overflow(expected, term, &expected))
-        return Answer(std::optional<Value>{});
+        return Answer(std::optional<TensorSpan>{});
       if (d.extent > 1 && part.layout().byte_strides[axis] != strides[axis])
-        return Answer(std::optional<Value>{});
+        return Answer(std::optional<TensorSpan>{});
     }
     auto actual = part.byte_address(point);
     if (!actual.ok())
       return Answer(actual.status());
     if (expected != actual.value())
-      return Answer(std::optional<Value>{});
+      return Answer(std::optional<TensorSpan>{});
   }
-  auto joined = Value::from_storage(
+  auto joined = TensorSpan::from_storage(
       descriptor, domain, {base.value(), std::move(strides), origin}, owner);
-  return joined.ok() ? Answer(std::optional<Value>{joined.take_value()})
+  return joined.ok() ? Answer(std::optional<TensorSpan>{joined.take_value()})
                      : Answer(joined.status());
 }
 }  // namespace ps::input_internal

@@ -310,7 +310,7 @@ Result<ColorArrayDescriptor> color_array_from_parameter(
   return decode(bytes, true);
 }
 Status validate_color_array_descriptor(const ColorArrayDescriptor& s,
-                                       const ValueDescriptor& d) {
+                                       const TensorDescriptor& d) {
   auto status = validate(s, false);
   if (!status.ok())
     return status;
@@ -331,10 +331,10 @@ Status validate_color_array_descriptor(const ColorArrayDescriptor& s,
   return Status::success();
 }
 Status validate_color_array_value(const ColorArrayDescriptor& s,
-                                  const Value& value, ErrorCode failure,
+                                  const TensorSpan& value, ErrorCode failure,
                                   const std::function<ErrorCode()>& stop) {
   if (!value.valid())
-    return core_internal::invalid_domain("invalid color-array Value");
+    return core_internal::invalid_domain("invalid color-array TensorSpan");
   const auto reader = [&](const auto& at) -> Result<double> {
     auto address = value.byte_address(at);
     if (!address.ok())

@@ -20,7 +20,7 @@ struct PHOTOSPIDER_API RegionDimension final {
 };
 
 /**
- * @brief Bounded rank-general logical subset of a Value domain.
+ * @brief Bounded rank-general logical subset of a TensorSpan domain.
  *
  * @note Region coordinates are logical and never encode byte offsets.
  */

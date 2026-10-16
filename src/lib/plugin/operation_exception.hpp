@@ -3,6 +3,7 @@
 #include <exception>
 #include <new>
 
+#include "core/callback_environment.hpp"
 #include "photospider/core/status.hpp"
 
 namespace ps::plugin_internal {

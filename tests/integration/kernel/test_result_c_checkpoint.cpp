@@ -109,13 +109,13 @@ ExecutionBindings binding(const ResourceBudget& root, double first = 1,
   const std::array<double, 5> numbers{first, second, 3, 4, 5};
   std::vector<std::uint8_t> bytes(sizeof(numbers));
   std::memcpy(bytes.data(), numbers.data(), bytes.size());
-  auto value = take(Value::create({ElementType::Float64, {5}},
-                                  Region::whole({5}), {0, {8}}, bytes));
+  auto value = take(TensorSpan::create({ElementType::Float64, {5}},
+                                       Region::whole({5}), {0, {8}}, bytes));
   auto metadata = schema();
   return {{{"source", result_input_fixture::source(root, value, &metadata)}}};
 }
 TileRequest point(const ResourceBudget& root, std::uint64_t index) {
-  return {false, take(TileSet::from_indices(root, {index}))};
+  return {{{0, take(TileSet::from_indices(root, {index}))}}};
 }
 PlanningOptions planning() {
   PlanningOptions options;
@@ -177,16 +177,17 @@ int workflow(unsigned mode, bool cache = true,
                after[0] == 2 && after[1] == 2 && after[2] - before[2] == 5 &&
                after[3] == 0);
       auto record = take(second.value().dependencies.tile_record(
-          {plan.outputs().at("value"), 0, 4}));
+          {plan.outputs().at("value"), 0, 0, 4}));
       PS_CHECK(record && record->inputs.size() == 1 &&
-               record->inputs[0].whole && record->inputs[0].tiles.empty());
+               record->inputs[0].tensor_slot == 0 &&
+               record->inputs[0].tiles == take(TileSet::range(root, 0, 5)));
       PS_CHECK(std::holds_alternative<PlanWorkflowInput>(
           record->inputs[0].producer));
       PS_CHECK(std::get<PlanWorkflowInput>(record->inputs[0].producer)
                    .declaration_index == 0);
       PS_CHECK(record->inputs[0].producer_output == 0);
       auto changed = take(demand.replace_bindings(binding(root, 10)));
-      PS_CHECK(changed.potential_dirty.at("value") ==
+      PS_CHECK(changed.potential_dirty.at("value").members.at(0) ==
                take(TileSet::from_indices(root, {2, 4})));
       auto third =
           take(demand.request({{"value", point(root, 4)}}, {}, options));
@@ -280,9 +281,10 @@ int shared_prefix(unsigned mode, bool restore_prefix = true) {
              number(second.value().results.at("value"), 2) == 6 &&
              after[2] - before[2] == (restore_prefix ? 0 : 3));
     auto record = take(second.value().dependencies.tile_record(
-        {plan.outputs().at("value"), 0, 2}));
-    PS_CHECK(record && record->inputs.size() == 1 && record->inputs[0].whole &&
-             record->inputs[0].tiles.empty());
+        {plan.outputs().at("value"), 0, 0, 2}));
+    PS_CHECK(record && record->inputs.size() == 1 &&
+             record->inputs[0].tensor_slot == 0 &&
+             record->inputs[0].tiles == take(TileSet::range(root, 0, 5)));
     PS_CHECK(
         std::holds_alternative<PlanWorkflowInput>(record->inputs[0].producer));
     PS_CHECK(std::get<PlanWorkflowInput>(record->inputs[0].producer)

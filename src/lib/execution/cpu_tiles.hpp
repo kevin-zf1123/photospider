@@ -22,9 +22,9 @@ class CpuTileScope final {
         resources_(resources),
         current_(std::move(current)),
         owner_(std::this_thread::get_id()),
-        service_{sizeof(service_), PS_CPU_TILES_ABI_VERSION_1,
+        service_{sizeof(service_), PS_CPU_TILES_ABI_VERSION_2,
                  std::min(workers, queue.workers()), this, invoke} {}
-  const ps_cpu_tiles_service_v1* service() const noexcept { return &service_; }
+  const ps_cpu_tiles_service_v2* service() const noexcept { return &service_; }
   Status status() const {
     return violation_.load() ? Status{ErrorCode::InvalidArgument,
                                       "CPU tile coordinator thread violation"}
@@ -36,9 +36,9 @@ class CpuTileScope final {
 
  private:
   struct Work {
-    ps_cpu_tile_stage_v1 stage;
+    ps_cpu_tile_stage_v2 stage;
     std::uint64_t counts[3];
-    ps_cpu_tile_callback_v1 callback;
+    ps_cpu_tile_callback_v2 callback;
     void* user;
     const std::atomic<bool>* violation;
   };
@@ -47,7 +47,7 @@ class CpuTileScope final {
     const auto& work = *static_cast<const Work*>(raw);
     if (work.violation->load())
       return 6;
-    ps_cpu_tile_v1 tile{};
+    ps_cpu_tile_v2 tile{};
     tile.struct_size = sizeof(tile);
     tile.slot = slot;
     tile.index = index;
@@ -61,8 +61,8 @@ class CpuTileScope final {
     const int result = work.callback(work.user, &tile);
     return work.violation->load() ? 6 : result;
   }
-  Status run(const ps_cpu_tile_stage_v1* stage,
-             ps_cpu_tile_callback_v1 callback, void* user) {
+  Status run(const ps_cpu_tile_stage_v2* stage,
+             ps_cpu_tile_callback_v2 callback, void* user) {
     if (!stage || stage->struct_size != sizeof(*stage) || !callback ||
         !service_.maximum_workers || stage->workers > service_.maximum_workers)
       return Status{ErrorCode::InvalidArgument, "invalid CPU tile stage"};
@@ -110,8 +110,8 @@ class CpuTileScope final {
     peak_ = std::max(peak_, peak);
     return status;
   }
-  static int invoke(void* raw, const ps_cpu_tile_stage_v1* stage,
-                    ps_cpu_tile_callback_v1 callback, void* user) noexcept {
+  static int invoke(void* raw, const ps_cpu_tile_stage_v2* stage,
+                    ps_cpu_tile_callback_v2 callback, void* user) noexcept {
     auto& self = *static_cast<CpuTileScope*>(raw);
     if (std::this_thread::get_id() != self.owner_ || in_kernel_worker ||
         in_cpu_range) {
@@ -143,7 +143,7 @@ class CpuTileScope final {
   const ResourceBudget* resources_;
   std::function<bool()> current_;
   const std::thread::id owner_;
-  ps_cpu_tiles_service_v1 service_;
+  ps_cpu_tiles_service_v2 service_;
   Status failure_;
   std::atomic<bool> violation_{false};
   std::uint64_t stages_ = 0, tiles_ = 0;

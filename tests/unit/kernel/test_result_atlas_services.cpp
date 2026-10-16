@@ -62,8 +62,8 @@ int mock_failures() {
             throw std::bad_alloc();
           throw std::runtime_error("mock host materialization exception");
         });
-    auto allocator =
-        throwing.limited(4096, [&](ErrorCode code) { failure->store(code); });
+    auto allocator = throwing.limited(
+        4096, [&](const Status& status) { failure->store(status.code); });
     ResultObjectInputs inputs;
     ResultProgramPhase phase{
         query,
@@ -96,7 +96,13 @@ struct State {
     if (!supplied) {
       supplied = true;
       ResultProgramNeed need;
-      need.tiles.push_back({0, mode != 7, mode == 7, {}});
+      TileNeed input;
+      input.input = 0;
+      input.tensor_slot = 0;
+      input.descriptor_only = mode == 7;
+      if (!input.descriptor_only)
+        input.tiles = multi_result::take(TileSet::range(phase.resources, 0, 1));
+      need.tiles.push_back(std::move(input));
       return Poll(std::move(need));
     }
     if (mode == 3) {
@@ -166,7 +172,7 @@ int run(unsigned mode, Backend backend, ErrorCode expected,
   definition.traits.input_count = 1;
   definition.traits.input_schema.resize(1);
   auto& input = definition.traits.input_schema[0];
-  input.kind = OperationPortKind::Result;
+
   input.result_schema_id = schema.id;
   input.result_schema_version = schema.version;
   definition.traits.outputs[0] = multi_result::output("value", schema);
@@ -209,6 +215,10 @@ int run(unsigned mode, Backend backend, ErrorCode expected,
     if (result.status().code != expected)
       std::cerr << "mode=" << mode << " " << result.status().message << '\n';
     PS_CHECK(result.status().code == expected);
+    if (backend == Backend::Cpu)
+      PS_CHECK(result.status().message == "native atlas requires GPU callback");
+    if (mode == 7)
+      PS_CHECK(result.status().message == "missing authorized atlas input");
     if (result.ok()) {
       float actual = 0;
       auto output = result.value().results.at("out");

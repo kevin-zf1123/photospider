@@ -24,65 +24,61 @@ struct CancellationGate {
 struct State {
   bool requested = false;
 };
-const ps_result_region_v4 scalar_region = [] {
-  ps_result_region_v4 value{};
+const ps_result_region_v5 scalar_region = [] {
+  ps_result_region_v5 value{};
   value.struct_size = sizeof(value);
   value.rank = 1;
   value.extent[0] = 1;
   return value;
 }();
-const ps_result_tensor_spec_v4 tensor = [] {
-  ps_result_tensor_spec_v4 value{};
+const ps_result_tensor_spec_v5 tensor = [] {
+  ps_result_tensor_spec_v5 value{};
   value.struct_size = sizeof(value);
   value.key = "number";
   value.key_size = 6;
-  value.element_type = PS_RESULT_ELEMENT_FLOAT64_V4;
+  value.element_type = PS_RESULT_ELEMENT_FLOAT64_V5;
   value.rank = 1;
   value.shape[0] = 1;
-  value.channel_axis = PS_RESULT_NO_CHANNEL_V4;
+  value.channel_axis = PS_RESULT_NO_CHANNEL_V5;
   return value;
 }();
-const ps_result_schema_v4 schema = [] {
-  ps_result_schema_v4 value{};
+const ps_result_schema_v5 schema = [] {
+  ps_result_schema_v5 value{};
   value.struct_size = sizeof(value);
   value.id = "fixture.scalar";
   value.id_size = 14;
   value.version = 1;
-  value.publication = 1;
   value.tensors = &tensor;
   value.tensor_count = 1;
   return value;
 }();
-const ps_result_port_v4 port = [] {
-  ps_result_port_v4 value{};
+const ps_result_port_v5 port = [] {
+  ps_result_port_v5 value{};
   value.struct_size = sizeof(value);
-  value.kind = PS_RESULT_OBJECT_V4;
   value.schema = &schema;
   return value;
 }();
-const ps_result_output_v4 output = [] {
-  ps_result_output_v4 value{};
+const ps_result_output_v5 output = [] {
+  ps_result_output_v5 value{};
   value.struct_size = sizeof(value);
   value.key = "value";
   value.key_size = 5;
   value.port = port;
   value.input_count = UINT32_MAX;
-  value.execution = PS_RESULT_WHOLE_V4;
   return value;
 }();
-const ps_result_parameter_descriptor_v4 scale = {
-    sizeof(scale), "scale", 5, PS_RESULT_PARAMETER_FLOAT64_V4,
+const ps_result_parameter_descriptor_v5 scale = {
+    sizeof(scale), "scale", 5, PS_RESULT_PARAMETER_FLOAT64_V5,
     1};  // NOLINT(whitespace/indent_namespace)
-int resolve(void* user, const ps_result_port_v4* inputs, std::uint32_t count,
-            const ps_result_parameter_value_v4*, std::uint32_t,
-            const ps_result_port_v4*, std::uint32_t,
-            const ps_result_metadata_sink_v4* sink) {
-  if (count != 1 || !inputs[0].schema || inputs[0].schema->tensor_count != 1 ||
-      inputs[0].schema->field_count)
+int resolve(void* user, const ps_result_port_v5* inputs, std::uint32_t count,
+            const ps_result_parameter_value_v5*, std::uint32_t,
+            const ps_result_port_v5*, std::uint32_t,
+            const ps_result_metadata_sink_v5* sink) {
+  if (count != 1 || !inputs[0].schema || inputs[0].schema->tensor_count != 1)
     return 5;
   auto result_schema = *inputs[0].schema;
   auto result_tensor = result_schema.tensors[0];
-  if (result_tensor.element_type != PS_RESULT_ELEMENT_FLOAT64_V4 ||
+  if (result_tensor.element_type != PS_RESULT_ELEMENT_FLOAT64_V5 ||
       result_tensor.rank != 1 || result_tensor.shape[0] != 1 ||
       result_tensor.batch_rank)
     return 5;
@@ -93,8 +89,8 @@ int resolve(void* user, const ps_result_port_v4* inputs, std::uint32_t count,
   result.schema = &result_schema;
   return sink->set_output(sink->context, 0, &result);
 }
-int start(void* user, void* raw, const ps_result_query_v4* query,
-          const ps_result_services_v4* services) {
+int start(void* user, void* raw, const ps_result_query_v5* query,
+          const ps_result_services_v5* services) {
   *static_cast<State*>(raw) = {};
   if (!user)
     return 0;
@@ -108,7 +104,7 @@ int start(void* user, void* raw, const ps_result_query_v4* query,
     return observed.mode == 1 ? 3 : observed.mode == 2 ? 1 : 99;
   return 0;
 }
-int publish(const ps_result_services_v4* services, double value, unsigned bad) {
+int publish(const ps_result_services_v5* services, double value, unsigned bad) {
   // The extra byte exercises the Result publication's exact payload envelope.
   std::array<std::uint8_t, 9> bytes{};
   std::memcpy(bytes.data(), &value, sizeof(value));
@@ -119,13 +115,13 @@ int publish(const ps_result_services_v4* services, double value, unsigned bad) {
                                &scalar_region, bytes.data(), bad == 2 ? 9 : 8);
   return written ? written : services->publish_result(services->context, 1);
 }
-int poll(void* user, void* raw, const ps_result_query_v4* query,
-         const ps_result_services_v4* services) {
+int poll(void* user, void* raw, const ps_result_query_v5* query,
+         const ps_result_services_v5* services) {
   auto& state = *static_cast<State*>(raw);
   auto& observed = *static_cast<Observations*>(user);
   if (!state.requested) {
     state.requested = true;
-    return ps_result_need_whole_v4(services, 0) ? 1 : PS_RESULT_NEED_V4;
+    return ps_result_to_whole_v5(services, query, 0) ? 1 : PS_RESULT_NEED_V5;
   }
   std::uint64_t coordinate = 0;
   double number = 0;
@@ -140,7 +136,7 @@ int poll(void* user, void* raw, const ps_result_query_v4* query,
   }
   if (observed.mode == 14) {
     static_cast<void>(publish(services, number, 2));
-    return PS_RESULT_PUBLISH_V4;
+    return PS_RESULT_PUBLISH_V5;
   }
   if (observed.mode >= 6) {
     const int first = observed.mode == 11
@@ -174,20 +170,20 @@ int poll(void* user, void* raw, const ps_result_query_v4* query,
       }
       observed.waiting.store(0, std::memory_order_release);
     }
-    return PS_RESULT_PUBLISH_V4;
+    return PS_RESULT_PUBLISH_V5;
   }
   if (query->backend == 2 && (observed.mode == 4 || observed.mode == 5)) {
     static_cast<void>(publish(services, number, observed.mode == 5));
     return 3;
   }
-  return publish(services, number, false) ? 1 : PS_RESULT_PUBLISH_V4;
+  return publish(services, number, false) ? 1 : PS_RESULT_PUBLISH_V5;
 }
 void destroy_state(void*, void*) {}
 void destroy_plugin(void*) {
   destroy_count.fetch_add(1);
 }
 const auto operations = [] {
-  std::array<ps_result_operation_v4, 16> result{};
+  std::array<ps_result_operation_v5, 16> result{};
   const std::array<const char*, 16> keys = {
       "fixture.double",
       "fixture.bad_atomic_axis",
@@ -210,8 +206,8 @@ const auto operations = [] {
     op.struct_size = sizeof(op);
     op.key = keys[i];
     op.key_size = std::strlen(keys[i]);
-    op.flags = PS_RESULT_FLAG_CPU_V4 | PS_RESULT_FLAG_DETERMINISTIC_V4 |
-               PS_RESULT_FLAG_SIDE_EFFECT_FREE_V4;
+    op.flags = PS_RESULT_FLAG_CPU_V5 | PS_RESULT_FLAG_DETERMINISTIC_V5 |
+               PS_RESULT_FLAG_SIDE_EFFECT_FREE_V5;
     op.inputs = &port;
     op.input_count = 1;
     op.outputs = &output;
@@ -228,7 +224,7 @@ const auto operations = [] {
       op.user_data = &observations[mode];
     }
     if (i >= 2 && i <= 14)
-      op.flags |= PS_RESULT_FLAG_GPU_V4 | PS_RESULT_FLAG_CPU_FALLBACK_V4;
+      op.flags |= PS_RESULT_FLAG_GPU_V5 | PS_RESULT_FLAG_CPU_FALLBACK_V5;
     if (!i) {
       op.parameters = &scale;
       op.parameter_count = 1;
@@ -236,13 +232,13 @@ const auto operations = [] {
   }
   return result;
 }();
-const ps_result_operation_plugin_api_v4 api = {
-    sizeof(api),       PS_RESULT_OPERATION_ABI_VERSION_4,
+const ps_result_operation_plugin_api_v5 api = {
+    sizeof(api),       PS_RESULT_OPERATION_ABI_VERSION_5,
     operations.data(), operations.size(),
     nullptr,           destroy_plugin};  // NOLINT(whitespace/indent_namespace)
 }  // namespace
-extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v4*
-ps_result_operation_plugin_get_api_v4(void) {
+extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v5*
+ps_result_operation_plugin_get_api_v5(void) {
   return &api;
 }
 extern "C" PS_RESULT_EXPORT std::uint32_t ps_operation_fixture_destroy_count() {

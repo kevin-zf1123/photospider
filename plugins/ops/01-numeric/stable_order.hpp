@@ -9,7 +9,7 @@
 #include "01-numeric/comparison_profiles.hpp"
 #include "01-numeric/exact_predicate.hpp"
 #include "photospider/core/resource_allocator.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Canonical keys preserve equality of signed zeros and place every NaN after

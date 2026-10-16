@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
@@ -37,7 +38,7 @@ TileNeed tile_need(const ResultProgramPhase& phase, TileIndex tile) {
 ResourceVector<TileUnit> dirty(const ExecutionDependencies& dependencies,
                                const ResourceBudget& root, TileIndex tile) {
   ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
-  changes.push_back({PlanWorkflowInput{0}, 0,
+  changes.push_back({PlanWorkflowInput{0}, 0, 0,
                      take(TileSet::from_indices(root, {tile})), false});
   return take(dependencies.dirty_units(changes));
 }
@@ -104,7 +105,7 @@ struct SinglePair {
     const auto at = phase.query.output_index;
     if (stage < (metadata ? 2U : 1U)) {
       ResultProgramNeed need;
-      need.tiles.push_back(metadata && stage == 0 ? TileNeed{0, false, true, {}}
+      need.tiles.push_back(metadata && stage == 0 ? TileNeed{0, 0, true, {}}
                                                   : tile_need(phase, at));
       ++stage;
       return Result<ResultProgramPoll>(std::move(need));
@@ -139,7 +140,7 @@ OperationDefinition consumer_definition(bool pair, unsigned width,
   definition.key = "queries.consumer";
   definition.traits.input_count = 1;
   definition.traits.input_schema.resize(1);
-  definition.traits.input_schema[0].kind = OperationPortKind::Result;
+
   definition.traits.input_schema[0].result_schema_id = "test.multi_output";
   definition.traits.input_schema[0].result_schema_version = 1;
   definition.traits.outputs = {multi_result::output(pair ? "left" : "value")};
@@ -233,7 +234,7 @@ OperationDefinition controlled_definition(
   auto source = source_definition(2, calls);
   source.traits.input_count = 1;
   source.traits.input_schema.resize(1);
-  source.traits.input_schema[0].kind = OperationPortKind::Result;
+
   source.traits.input_schema[0].result_schema_id = "test.multi_output";
   source.traits.input_schema[0].result_schema_version = 1;
   source.start_result = [calls](const auto&, const auto& allocator) {
@@ -261,12 +262,12 @@ int query_dependencies(bool metadata) {
   auto frozen = take(context.freeze(
       plan,
       ExecutionBindings{{multi_result::binding(root, "control", 1, schema)}}));
-  const TileRequest one{true, {}};
+  const TileRequest one{{{0, take(TileSet::range(root, 0, 1))}}};
   const DemandQuery wanted{{"left", one}, {"right", one}};
   const auto verify = [&](const DemandResult& result) {
     for (unsigned at = 0; at < 2; ++at) {
       auto units = dirty(result.dependencies, root, at);
-      check(units.size() == 2 && units[0] == TileUnit{0, 0, at} &&
+      check(units.size() == 2 && units[0] == TileUnit{0, 0, 0, at} &&
                     units[1] == TileUnit{at + 1, at, 0}
                 ? Status::success()
                 : Status{ErrorCode::OperationFailed, "tile ancestry mismatch"});
@@ -308,7 +309,7 @@ int query_dependencies(bool metadata) {
            *calls == 3 && partial.diagnostics.cache_hits >= 1);
   for (unsigned at = 0; at < 2; ++at) {
     auto units = dirty(partial.dependencies, root, at);
-    PS_CHECK(units.size() == 2 && (units[0] == TileUnit{0, 0, at}) &&
+    PS_CHECK(units.size() == 2 && (units[0] == TileUnit{0, 0, 0, at}) &&
              (units[1] == TileUnit{at + 1, at, 0}));
   }
   return 0;
@@ -334,23 +335,29 @@ struct Partial {
     check(builder->publish_tensor(
         0, point,
         {reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)}));
-    return Result<ResultProgramPoll>(ResultPublication{
-        stage == 4 ? take(builder->seal()) : builder->reference(), stage == 4});
+    if (stage == 2) {
+      ++stage;
+      ResultProgramNeed need;
+      need.tiles.push_back(tile_need(phase, 1));
+      return Result<ResultProgramPoll>(std::move(need));
+    }
+    return Result<ResultProgramPoll>(
+        ResultPublication{take(builder->seal()), true});
   }
 };
-int partial_dependencies() {
+int shared_publication_dependencies() {
   auto calls = std::make_shared<std::atomic<unsigned>>(0);
   auto registry = std::make_shared<OperationRegistry>();
   check(registry->register_operation(controlled_definition(calls)));
   auto consumer = consumer_definition(false, 2);
   auto partial_schema = multi_result::schema(ElementType::Float64, {2});
-  partial_schema.publication = PublishPolicy::StablePrefix;
   consumer.traits.outputs = {multi_result::output("value", partial_schema)};
   consumer.traits.outputs[0].maximum_dependency_stages = 4;
   consumer.start_result = [](const auto&, const auto& allocator) {
     return ResultContinuation::make<Partial>(allocator);
   };
-  check(registry->register_operation(std::move(consumer)));
+  check(registry->register_operation(
+      sdk::with_whole_stage(std::move(consumer), 100000)));
   check(registry->freeze());
   WorkflowDocument doc;
   const auto schema = source_schema(2);
@@ -373,18 +380,20 @@ int partial_dependencies() {
   auto frozen = take(context.freeze(
       plan,
       ExecutionBindings{{multi_result::binding(root, "control", 1, schema)}}));
-  auto result = take(
-      context.execute_fragments(frozen, {{"value", {true, {}}}}, {}, options));
-  // A Whole unit becomes externally visible after all staged prefixes finish.
+  auto result = take(context.execute_fragments(
+      frozen, {{"value", {{{0, take(TileSet::range(root, 0, 1))}}}}}, {},
+      options));
+  // The requested tile is exposed only after its shared producer completes.
   PS_CHECK(notices == 1 && *calls == 2 &&
            first.object_id() == result.results.at("value").object_id());
   PS_CHECK(first.descriptor(false).value().tensor_coverage(0) ==
-           take(Footprint::all({2})));
+           take(Footprint::from_regions({2}, {Region({{0, 1}})})));
   for (unsigned at = 0; at < 2; ++at) {
     auto units = dirty(result.dependencies, root, at);
-    PS_CHECK(units.size() == 2 && (units[0] == TileUnit{0, 0, at}) &&
+    PS_CHECK(units.size() == 2 && (units[0] == TileUnit{0, 0, 0, at}) &&
              (units[1] == TileUnit{1, 0, 0}));
-    PS_CHECK(multi_result::number(result.results.at("value"), {at}) == 10 + at);
+    if (at == 0)
+      PS_CHECK(multi_result::number(result.results.at("value"), {at}) == 10);
   }
   PS_CHECK(root.statistics().live[ResourceKind::Queue] == 0);
   return 0;
@@ -428,12 +437,13 @@ int mixed_target_dependencies() {
     auto frozen =
         take(context.freeze(plan, ExecutionBindings{{multi_result::binding(
                                       root, "control", 1, schema)}}));
-    return take(context.execute_fragments(frozen, {{"value", {true, {}}}}));
+    return take(context.execute_fragments(
+        frozen, {{"value", {{{0, take(TileSet::range(root, 0, 1))}}}}}));
   };
   const auto verify = [&](const DemandResult& result) {
     for (unsigned at = 0; at < 2; ++at) {
       auto units = dirty(result.dependencies, root, at);
-      check(units.size() == 2 && units[0] == TileUnit{0, 0, at} &&
+      check(units.size() == 2 && units[0] == TileUnit{0, 0, 0, at} &&
                     units[1] == TileUnit{1, 0, 0}
                 ? Status::success()
                 : Status{ErrorCode::OperationFailed, "staged Need ancestry"});
@@ -475,6 +485,52 @@ struct Gate {
     changed.notify_all();
   }
 };
+int named_tile_aliases(unsigned width, bool reverse) {
+  Gate gate;
+  auto calls = std::make_shared<std::atomic<unsigned>>(0);
+  auto registry = std::make_shared<OperationRegistry>();
+  check(registry->register_operation(
+      source_definition(width, calls, [&](std::uint64_t) { gate.hold(); })));
+  check(registry->freeze());
+  WorkflowDocument document;
+  document.nodes = {{10, "queries.source", {}, {}}};
+  document.outputs = {{"a", 10, "value"},
+                      {"b", 10, "value"},
+                      {"c", 10, "value"}};
+  GraphContext graph(document);
+  auto plan = compile(registry, graph);
+  ExecutionContext context(registry, {2, false, 16, 1024 * 1024, 0});
+  auto root = take(context.resource_budget());
+  const TileRequest low{{{0, take(TileSet::range(root, 0, width / 2))}}};
+  const TileRequest high{{{0, take(TileSet::range(root, width / 2, width))}}};
+  const DemandQuery query{{"a", reverse ? high : low},
+                          {"b", reverse ? low : high},
+                          {"c", reverse ? high : low}};
+  auto frozen = take(context.freeze(plan));
+  auto pending = std::async(std::launch::async, [&] {
+    ExecutionOptions options;
+    options.maximum_parallelism = 2;
+    return context.execute_fragments(frozen, query, {}, options);
+  });
+  const bool concurrent = gate.wait(2);
+  gate.release();
+  auto result = pending.get();
+  PS_REQUIRE_OK(result);
+  PS_CHECK(concurrent && !gate.timed_out && *calls == width);
+  for (const auto& named : query) {
+    const auto& object = result.value().results.at(named.first.c_str());
+    const auto facts = take(object.descriptor());
+    for (unsigned at = 0; at < width; ++at) {
+      double value = 0;
+      auto read = object.read_tensor(facts, 0, {0, at}, &value, sizeof(value));
+      PS_CHECK(named.second.members.at(0).contains(at)
+                   ? read.ok() && value == 10 + at
+                   : !read.ok());
+    }
+  }
+  PS_CHECK(root.statistics().live[ResourceKind::Queue] == 0);
+  return 0;
+}
 int upstream_run_cancellation() {
   Gate gate;
   auto calls = std::make_shared<std::atomic<unsigned>>(0);
@@ -522,10 +578,12 @@ int main() try {
   PS_CHECK(workflow(false, false) == 0);
   PS_CHECK(workflow(true, true) == 0);
   PS_CHECK(workflow(false, true) == 0);
+  PS_CHECK(named_tile_aliases(2, true) == 0);
+  PS_CHECK(named_tile_aliases(8, false) == 0);
   PS_CHECK(upstream_run_cancellation() == 0);
   PS_CHECK(query_dependencies(false) == 0);
   PS_CHECK(query_dependencies(true) == 0);
-  PS_CHECK(partial_dependencies() == 0);
+  PS_CHECK(shared_publication_dependencies() == 0);
   PS_CHECK(mixed_target_dependencies() == 0);
   return 0;
 } catch (const std::exception& error) {

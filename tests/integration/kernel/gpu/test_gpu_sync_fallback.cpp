@@ -46,9 +46,9 @@ Footprint point(std::uint64_t at) {
       .take_value();
 }
 TileRequest request(const ResourceBudget& root, std::uint64_t at) {
-  return {false, gpu_result::take(TileSet::from_indices(root, {at}))};
+  return {{{0, gpu_result::take(TileSet::from_indices(root, {at}))}}};
 }
-template <bool Whole>
+template <bool FailInPoll>
 Result<ResultProgramPoll> increment(const ResultProgramPhase& phase) try {
   const auto demand = gpu_result::demand(phase);
   if (!phase.tensors || phase.tensors->empty())
@@ -76,7 +76,7 @@ Result<ResultProgramPoll> increment(const ResultProgramPhase& phase) try {
       if (row.samples != count || row.sample_stride_bytes != 4)
         return Result<ResultProgramPoll>(
             Status{ErrorCode::OperationFailed, "native source layout"});
-      if (Whole && unavailable)
+      if (FailInPoll && unavailable)
         return Result<ResultProgramPoll>(
             Status{ErrorCode::BackendUnavailable,
                    "example native implementation unavailable"});
@@ -216,21 +216,18 @@ ExecutionBindings make_bindings(const ResourceBudget& root) {
   return ExecutionBindings{{source}};
 }
 int fallback_records() {
-  for (unsigned mode = 0; mode < 5; ++mode) {
+  for (unsigned mode : {0U, 1U, 4U}) {
     auto registry = std::make_shared<OperationRegistry>();
     unsigned ancestors = 0;
     OperationDefinition ancestor;
     ancestor.key = "ancestor";
     ancestor.traits.input_count = 1;
     ancestor.traits.input_schema.resize(1);
-    ancestor.traits.input_schema[0].kind = OperationPortKind::Result;
+
     ancestor.traits.input_schema[0].result_schema_id = "example.gpu.tensor";
     ancestor.traits.input_schema[0].result_schema_version = 1;
     ancestor.traits.outputs = {gpu_result::output(image_schema())};
     ancestor.traits.outputs[0].continuation_bytes = sizeof(Ancestor);
-    ancestor.traits.outputs[0].region_rule = (mode == 2 || mode == 3)
-                                                 ? OperationRegionRule::Whole
-                                                 : OperationRegionRule::Tiled;
     ancestor.start_result = [&ancestors, mode](
                                 const ResultProgramQuery&,
                                 const BufferAllocator& allocator) {
@@ -241,7 +238,6 @@ int fallback_records() {
       return 1;
     auto child = ancestor;
     child.key = "fallback";
-    child.traits.outputs[0].region_rule = OperationRegionRule::Tiled;
     child.traits.supports_gpu = true;
     child.traits.allows_cpu_fallback = true;
     child.traits.outputs[0].continuation_bytes = sizeof(FallbackReads);
@@ -298,16 +294,15 @@ int fallback_records() {
       const auto& input = child_record->inputs[0];
       if (check(std::holds_alternative<PlanStepInput>(input.producer) &&
                     std::get<PlanStepInput>(input.producer).step_index == 0 &&
-                    input.whole == (mode == 2) &&
-                    (mode == 2 ? input.tiles.empty()
-                               : input.tiles == request(root, 2).tiles),
+                    input.tensor_slot == 0 &&
+                    input.tiles == request(root, 2).members.at(0),
                 "CPU retry dependency differs"))
         return 1;
     }
     for (TileIndex edited : {0, 1, 2, 3}) {
       ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
-      changes.push_back(
-          {PlanWorkflowInput{0}, 0, request(root, edited).tiles, false});
+      changes.push_back({PlanWorkflowInput{0}, 0, 0,
+                         request(root, edited).members.at(0), false});
       auto dirty = gpu_result::take(evidence.dirty_units(changes));
       const bool child_dirty =
           std::find(dirty.begin(), dirty.end(), child_unit) != dirty.end();
@@ -318,7 +313,7 @@ int fallback_records() {
            {std::pair<const char*, TileIndex>{"a", 0}, {"b", 3}}) {
         if (!plan.outputs().count(named.first))
           continue;
-        const TileUnit unit{plan.outputs().at(named.first), 0, named.second};
+        const TileUnit unit{plan.outputs().at(named.first), 0, 0, named.second};
         const bool affected =
             std::find(dirty.begin(), dirty.end(), unit) != dirty.end();
         if (check(affected == (edited == named.second),
@@ -340,13 +335,14 @@ int fallback_records() {
       auto record = gpu_result::take(ordinary.value().dependencies.tile_record(
           {tile.outputs().at("y"), 0, 0}));
       if (check(record && record->inputs.size() == (cpu_read ? 1U : 0U) &&
-                    (!cpu_read || record->inputs[0].whole),
-                "ordinary fallback preserves CPU Whole dependency"))
+                    (!cpu_read || record->inputs[0].tiles.contains(2)),
+                "ordinary fallback preserves CPU tile dependency"))
         return 1;
     }
   }
-  std::cout << "fallback record rollback: bounded retry, prior rows and Whole "
-               "evidence passed\n";
+  std::cout
+      << "fallback record rollback: bounded retry, prior publications and tile "
+         "evidence passed\n";
   return 0;
 }
 }  // namespace
@@ -356,7 +352,7 @@ int main() {
   op.key = "example.increment";
   op.traits.input_count = 1;
   op.traits.input_schema.resize(1);
-  op.traits.input_schema[0].kind = OperationPortKind::Result;
+
   op.traits.input_schema[0].result_schema_id = "example.gpu.tensor";
   op.traits.input_schema[0].result_schema_version = 1;
   op.traits.outputs = {gpu_result::output(image_schema())};
@@ -368,16 +364,13 @@ int main() {
   };
   if (check(registry->register_operation(op).ok(), "register increment"))
     return 1;
-  op.key = "example.whole";
-  op.traits.outputs[0].region_rule = OperationRegionRule::Whole;
+  op.key = "example.fail_in_poll";
   op.start_result = [](const ResultProgramQuery&, const BufferAllocator&) {
     return ResultContinuation::stateless<increment<true>>();
   };
-  if (check(registry->register_operation(op).ok(), "register Whole"))
+  if (check(registry->register_operation(op).ok(), "register poll failure"))
     return 1;
   op.key = "example.staged";
-  op.traits.outputs[0].region_rule = OperationRegionRule::Tiled;
-  op.traits.outputs[0].data_movement = DataMovementKind::BitwiseMapped;
   op.traits.outputs[0].continuation_bytes = sizeof(Stage);
   op.traits.outputs[0].maximum_dependency_stages = 4;
   op.traits.workspace_bytes = 4;
@@ -420,8 +413,8 @@ int main() {
     const auto root = context.resource_budget().take_value();
     const auto bindings = make_bindings(root);
     auto frozen = context.freeze(plan, bindings).take_value();
-    const TileRequest q{false,
-                        gpu_result::take(TileSet::from_indices(root, {0, 2}))};
+    const TileRequest q{
+        {{0, gpu_result::take(TileSet::from_indices(root, {0, 2}))}}};
     auto result = context.execute_fragments(frozen, {{"y", q}});
     if (!result.ok())
       std::cerr << "increment enabled=" << enabled << '\n';
@@ -439,14 +432,16 @@ int main() {
                     diagnostics.fallback_reasons.size() == 2,
                 "missing-device rejection/CPU attempt pairs"))
         return 1;
-      for (unsigned i = 0; i < 3; ++i)
-        if (check(diagnostics.operation_timings[i].backend ==
-                          (i == 2 ? Backend::Cpu : Backend::Gpu) &&
-                      diagnostics.operation_timings[i].outcome ==
-                          (i == 2 ? ErrorCode::Ok
-                                  : ErrorCode::BackendUnavailable),
-                  "missing-device attempt outcome"))
-          return 1;
+      unsigned rejected = 0, completed = 0;
+      for (const auto& attempt : diagnostics.operation_timings) {
+        rejected += attempt.backend == Backend::Gpu &&
+                    attempt.outcome == ErrorCode::BackendUnavailable;
+        completed +=
+            attempt.backend == Backend::Cpu && attempt.outcome == ErrorCode::Ok;
+      }
+      if (check(rejected == 2 && completed == 1,
+                "missing-device attempt outcome"))
+        return 1;
     }
     result = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
     auto warm_scope = context.freeze(plan, bindings).take_value();
@@ -462,7 +457,7 @@ int main() {
               "completed Result cache reuse/fallback isolation"))
       return 1;
     for (const auto& key :
-         {"example.whole", "example.staged", "example.start_rejected"}) {
+         {"example.fail_in_poll", "example.staged", "example.start_rejected"}) {
       context.clear_result_cache();
       GraphContext chain(document(key, true));
       auto chain_plan =
@@ -474,7 +469,7 @@ int main() {
           context.execute_fragments(captured, {{"y", request(root, 0)}});
       if (!fallback.ok())
         std::cerr << "chain " << key << " enabled=" << enabled << '\n';
-      const bool staged = std::string(key) != "example.whole";
+      const bool staged = std::string(key) != "example.fail_in_poll";
       const float expected = staged ? 1 : 2;
       const auto cache = context.cache_statistics();
       if (cache.retained_bytes != cache.native_retained_bytes)
@@ -514,24 +509,16 @@ int main() {
       auto proof =
           gpu_result::take(retry.value().dependencies.tile_record({0, 0, 0}));
       if (check(proof && proof->inputs.size() == 1 &&
-                    proof->inputs[0].tiles ==
-                        (staged ? request(root, 0).tiles
-                                : gpu_result::take(TileSet::from_indices(
-                                      root,
-                                      [&] {
-                                        std::vector<TileIndex> indices(length);
-                                        for (TileIndex i = 0; i < length; ++i)
-                                          indices[i] = i;
-                                        return indices;
-                                      }()))),
+                    proof->inputs[0].tiles == request(root, 0).members.at(0),
                 "source dependency tiles"))
         return 1;
     }
   }
   if (fallback_records())
     return 1;
-  // Whole dense input/output allocations each round independently to 32 KiB.
-  GraphContext whole(document("example.whole", false));
+  // One large tile has independent native input/output allocation rounding.
+  planning.tile_extent = 8192;
+  GraphContext whole(document("example.fail_in_poll", false));
   auto plan = Compiler(registry).compile(whole, planning).take_value().plan;
   for (std::uint64_t native_limit : {65535, 65536}) {
     const auto limit = length * 4 + native_limit;
@@ -554,8 +541,8 @@ int main() {
                     result.value().diagnostics.native_dispatch_count > 0,
                 "actual native admission"))
         return 1;
-      // Release the successful output before admitting another Whole. A GPU
-      // rejection must retire both rounded allocations before CPU retry.
+      // Release the successful output before admitting another large tile. A
+      // GPU rejection must retire both rounded allocations before CPU retry.
       result = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
       unavailable = true;
       auto fallback =
@@ -571,7 +558,7 @@ int main() {
         return 1;
       fallback = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
       if (check(root.statistics().live[ResourceKind::Payload] == length * 4,
-                "released Whole Result owner"))
+                "released large tile Result owner"))
         return 1;
       unavailable = false;
       auto retry = context.execute_fragments(frozen, {{"y", request(root, 0)}});
@@ -581,7 +568,7 @@ int main() {
         return 1;
     }
   }
-  std::cout << "synchronous GPU fragments, Whole/staged fallback, cache "
+  std::cout << "synchronous GPU fragments, tile fallback, cache "
                "isolation and 85536-byte Result admission passed\n";
   return 0;
 }

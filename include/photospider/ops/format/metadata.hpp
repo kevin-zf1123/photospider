@@ -63,6 +63,6 @@ struct MetadataOptions final {
  * bad_alloc.
  */
 PHOTOSPIDER_OPS_SDK_API Result<TensorDescription> edit_description(
-    const TensorDescription& source, const ValueDescriptor& descriptor,
+    const TensorDescription& source, const TensorDescriptor& descriptor,
     const MetadataOptions& options = {});
 }  // namespace ps::format

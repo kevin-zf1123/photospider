@@ -17,8 +17,9 @@
 #include "01-numeric/exact_bezier.hpp"
 #include "01-numeric/exact_sampling.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/core/resource_allocator.hpp"
+#include "common/independent_results.hpp"
 #include "common/registry.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -341,7 +342,6 @@ OperationDefinition bezier_operation(const std::string& key,
   traits.input_count = 4;
   traits.input_schema.resize(4);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = 12;
   }
   traits.requires_metadata_specialization = true;
@@ -410,7 +410,7 @@ OperationDefinition bezier_operation(const std::string& key,
                : ResultContinuation::make<BezierProgram<false>>(allocator,
                                                                 profile);
   };
-  return operation;
+  return independent_results(std::move(operation));
 }
 }  // namespace
 Status register_bezier_function(OperationRegistry* registry) {

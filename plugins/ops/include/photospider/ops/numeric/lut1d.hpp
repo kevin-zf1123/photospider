@@ -18,9 +18,10 @@
 
 namespace ps::numeric {
 /** @brief Owning authoring references to a generic baked table and its axis.
- * Contains no runtime Value or frozen state. Connect these references to later
- * nodes or explicitly export them with outputs(). The template does not modify
- * WorkflowDocument::outputs or claim a bound on table interpolation error.
+ * Contains no runtime TensorSpan or frozen state. Connect these references to
+ * later nodes or explicitly export them with outputs(). The template does not
+ * modify WorkflowDocument::outputs or claim a bound on table interpolation
+ * error.
  */
 struct BakedLut1d final {
   WorkflowNodeOutput values;
@@ -260,16 +261,16 @@ inline Result<BakedLut1d> bake_lut1d_pchip_multi(
  * node metadata and may be used concurrently; allocation may throw bad_alloc.
  * Invalid authoring parameters fail InvalidArgument/InvalidDomain.
  *
- * Whole execution requests input, table and axis with Data, Validation and
- * Descriptor (role 13). It validates the full endpoint-weighted RN64 grid, then
- * validates all queries before table arithmetic. It computes the complete
- * output even for sparse demand and returns full certified coverage in global
- * sample coordinates. Output association records actual source ObjectIds. Math
- * knot/clamp/singleton selects one table entry; other paths select two. Generic
- * entries outside evaluated stencils are numerically unused; complete typed and
- * upstream validation still applies. Singleton axes require bit-identical
- * endpoints and +0 step. Every query is validated even for constant tables.
- * Numeric domain/overflow failures have Run scope; typed/upstream/resource/
+ * A Run-shared stage acquires complete input, table and axis tensors. It
+ * validates the full endpoint-weighted RN64 grid, then validates all queries
+ * before table arithmetic. It computes the complete output even for sparse
+ * demand and publishes requested tile coverage in global sample coordinates.
+ * Output association records actual source ObjectIds. Math knot/clamp/singleton
+ * selects one table entry; other paths select two. Generic entries outside
+ * evaluated stencils are numerically unused; complete typed and upstream
+ * validation still applies. Singleton axes require bit-identical endpoints and
+ * +0 step. Every query is validated even for constant tables. Numeric
+ * domain/overflow failures have Run scope; typed/upstream/resource/
  * cancellation failures preserve their identities. Descending axes and all
  * CurveDomain policies retain their formulas. Exact selection preserves zero
  * sign; exact linear zero is -0 only for two -0 ends. Strict rounds once;

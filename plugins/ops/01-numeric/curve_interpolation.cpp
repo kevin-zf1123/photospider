@@ -18,6 +18,7 @@
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -29,11 +30,11 @@ Status shape_error(const char* message) {
           FailureReason::None,
           {FailureOrigin::Schema, FailureScope::Unspecified}};
 }
-Result<ValueDescriptor> metadata(
+Result<TensorDescriptor> metadata(
     bool multi, const std::vector<OperationMetadata>& inputs,
     const std::map<std::string, ParameterValue>& parameters) {
-  using Answer = Result<ValueDescriptor>;
-  std::array<ValueDescriptor, 3> descriptors;
+  using Answer = Result<TensorDescriptor>;
+  std::array<TensorDescriptor, 3> descriptors;
   for (unsigned i = 0; i < 3; ++i) {
     const auto& tensor = inputs[i].result_schema->tensors[0];
     descriptors[i] = {tensor.descriptor.element_type, tensor.sample_shape()};
@@ -65,7 +66,7 @@ Result<ValueDescriptor> metadata(
   std::vector<std::uint64_t> shape{count};
   if (multi)
     shape.push_back(columns);
-  return Answer(ValueDescriptor{
+  return Answer(TensorDescriptor{
       dtype == "float32" ? ElementType::Float32 : ElementType::Float64,
       std::move(shape)});
 }
@@ -292,7 +293,6 @@ OperationDefinition curve_operation(const std::string& key, bool pchip,
   traits.input_schema.resize(3);
   traits.requires_metadata_specialization = true;
   for (auto& port : traits.input_schema) {
-    port.kind = OperationPortKind::Result;
     port.element_type_mask = 12;
   }
   numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
@@ -319,7 +319,7 @@ OperationDefinition curve_operation(const std::string& key, bool pchip,
     return ResultContinuation::make<CurveProgram>(allocator, pchip, multi,
                                                   profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_curve_interpolation(OperationRegistry* registry) {

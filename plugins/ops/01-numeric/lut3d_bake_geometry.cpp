@@ -14,6 +14,7 @@
 #include "common/registry.hpp"
 #include "common/tensor_metadata.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -170,9 +171,9 @@ struct GeometryKernel {
       }
     }
     const auto& tensor = phase.query.output.result_schema->tensors[0];
-    const ValueDescriptor descriptor{tensor.descriptor.element_type,
-                                     tensor.sample_shape()};
-    const unsigned width = Value::element_size(descriptor.element_type);
+    const TensorDescriptor descriptor{tensor.descriptor.element_type,
+                                      tensor.sample_shape()};
+    const unsigned width = TensorSpan::element_size(descriptor.element_type);
     numeric_ops::MathTensorWriter writer(writers[0]);
     const auto at = Region::whole(descriptor.shape).dimensions();
     const auto count = tensor.sample_count().value();
@@ -261,7 +262,6 @@ OperationDefinition geometry(Geometry kind, SequenceProfile profile,
   traits.input_schema.resize(traits.input_count);
   traits.requires_metadata_specialization = true;
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = kind == Geometry::Color ? 12 : 4;
   }
   traits.parameter_schema =
@@ -300,7 +300,7 @@ OperationDefinition geometry(Geometry kind, SequenceProfile profile,
   definition.start_result = [](const auto&, const auto& allocator) {
     return ResultContinuation::make<GeometryResultProgram>(allocator);
   };
-  return definition;
+  return sdk::with_whole_stage(std::move(definition), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_lut3d_bake_geometry(OperationRegistry* registry) {

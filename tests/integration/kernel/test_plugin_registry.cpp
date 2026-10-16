@@ -35,24 +35,6 @@
 #ifndef PS_OPERATION_BAD_FIXTURE_PATH
 #error "PS_OPERATION_BAD_FIXTURE_PATH must name the invalid fixture"
 #endif
-#ifndef PS_OPERATION_DENSE_OVERFLOW_FIXTURE_PATH
-#error "missing dense-overflow operation fixture path"
-#endif
-#ifndef PS_OPERATION_DENSE_RANK1_LIMIT_FIXTURE_PATH
-#error "missing legal rank-one dense-limit fixture path"
-#endif
-#ifndef PS_OPERATION_DENSE_RANK1_OVERFLOW_FIXTURE_PATH
-#error "missing invalid rank-one dense-limit fixture path"
-#endif
-#ifndef PS_OPERATION_DENSE_RANK2_LIMIT_FIXTURE_PATH
-#error "missing legal rank-two dense-limit fixture path"
-#endif
-#ifndef PS_OPERATION_DENSE_RANK2_OVERFLOW_FIXTURE_PATH
-#error "missing invalid rank-two dense-limit fixture path"
-#endif
-#ifndef PS_OPERATION_DENSE_MULTI_OVERFLOW_FIXTURE_PATH
-#error "missing transactional dense-limit fixture path"
-#endif
 #ifndef PS_OPERATION_BAD_PARAMETER_POINTER_FIXTURE_PATH
 #error "missing parameter-pointer ABI fixture path"
 #endif
@@ -222,11 +204,10 @@ ps::OperationDefinition copy_aware_definition(
   ps::OperationDefinition definition;
   definition.key = std::move(key);
   auto& output = definition.traits.outputs[0];
-  output.output_schema.kind = ps::OperationPortKind::Result;
+
   output.result_schema = multi_result::schema();
   output.output_schema.result_schema_id = std::string(output.result_schema->id);
   output.output_schema.result_schema_version = output.result_schema->version;
-  output.region_rule = ps::OperationRegionRule::Whole;
   output.continuation_bytes = sizeof(CopyAwareOutput);
   output.maximum_dependency_stages = 1;
   definition.traits.workspace_bytes = 8;
@@ -537,63 +518,6 @@ int verify_dense_byte_size_contract() noexcept {
 }
 
 /**
- * @brief Loads one real dense-boundary DSO and verifies exact lifecycle.
- * @param path Build-generated fixture path.
- * @param should_load Whether descriptor validation must accept the table.
- * @param expected_key Accepted operation key, empty for rejected tables.
- * @param expected_shape Accepted fixed shape, empty for rejected tables.
- * @return Zero when registration, transactionality, destroy, and close match.
- * @throws std::bad_alloc If registry staging allocation fails.
- * @throws std::runtime_error If the fixture cannot be mapped or inspected.
- * @note Rejected multi-descriptor tables must leave the registry completely
- * empty even when the first descriptor was legal.
- */
-int verify_dense_dso_fixture(const char* path, bool should_load,
-                             const std::string& expected_key,
-                             const std::vector<std::uint64_t>& expected_shape) {
-  LibraryObserver observer(path);
-  PS_CHECK(observer.counter("ps_operation_dense_limit_fixture_destroy_count") ==
-           0U);
-  {
-    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Operation,
-                               false);
-    {
-      ps::OperationRegistry registry;
-      const ps::Status loaded = registry.load_plugin(path);
-      PS_CHECK(loaded.ok() == should_load);
-      if (should_load) {
-        PS_CHECK(registry.keys() == std::vector<std::string>({expected_key}));
-        auto traits = registry.find_traits(expected_key);
-        PS_CHECK(traits.ok());
-        const auto& output = traits.value().outputs[0];
-        PS_CHECK(output.output_schema.kind == ps::OperationPortKind::Result);
-        PS_CHECK(output.result_schema.has_value());
-        const auto& schema = *output.result_schema;
-        PS_CHECK(schema.tensors.empty() && schema.fields.size() == 1);
-        PS_CHECK(schema.fields[0].element_type == ps::ElementType::UInt8);
-        const auto& shape = schema.fields[0].record_shape;
-        PS_CHECK(std::vector<std::uint64_t>(shape.begin(), shape.end()) ==
-                 expected_shape);
-        const auto bytes = schema.row_bytes(0);
-        PS_CHECK(bytes.ok());
-        PS_CHECK(bytes.value() == (expected_shape.size() == 1
-                                       ? UINT64_C(9223372036854775807)
-                                       : UINT64_C(9223372036854775806)));
-      } else {
-        PS_CHECK(loaded.code == ps::ErrorCode::TypeMismatch);
-        PS_CHECK(registry.keys().empty());
-      }
-    }
-    PS_CHECK(lifecycle.native_close_count() == 1U);
-  }
-  PS_CHECK(
-      observer.counter("ps_operation_dense_limit_fixture_callback_count") == 0);
-  PS_CHECK(observer.counter("ps_operation_dense_limit_fixture_destroy_count") ==
-           1U);
-  return 0;
-}
-
-/**
  * @brief Proves registry snapshots retain immutable callback handles.
  *
  * The first registry receives a copy-aware callable through rvalue
@@ -769,13 +693,11 @@ ps::OperationDefinition prevalidation_definition(std::string key,
   operation.traits.input_count = input_count;
   operation.traits.input_schema.resize(input_count);
   for (auto& port : operation.traits.input_schema) {
-    port.kind = ps::OperationPortKind::Result;
     port.result_schema_id = "test.multi_output";
     port.result_schema_version = 1;
   }
   operation.traits.requires_metadata_specialization = true;
   operation.traits.outputs = {multi_result::output("value")};
-  operation.traits.outputs[0].region_rule = ps::OperationRegionRule::Whole;
   operation.prepare_static = [](const auto& inputs, const auto&) {
     for (const auto& input : inputs) {
       if (!input.result_schema)
@@ -940,11 +862,9 @@ int verify_tensor_extent_dso() {
         auto traits = registry.find_traits("fixture.tensor.extents");
         PS_CHECK(traits.ok() && traits.value().outputs.size() == 1);
         const auto& output = traits.value().outputs[0];
-        PS_CHECK(output.output_schema.kind == ps::OperationPortKind::Result);
         PS_CHECK(output.result_schema.has_value());
         const auto& schema = *output.result_schema;
-        PS_CHECK(schema.fields.empty() &&
-                 schema.tensors.size() == expected.size());
+        PS_CHECK(schema.tensors.size() == expected.size());
         for (std::size_t tensor = 0; tensor < expected.size(); ++tensor) {
           const auto& shape = schema.tensors[tensor].descriptor.shape;
           PS_CHECK(std::vector<std::uint64_t>(shape.begin(), shape.end()) ==
@@ -1027,8 +947,6 @@ int verify_result_registration() {
   PS_CHECK(unicode_traits.value().parameter_schema.front().key ==
            unicode_parameter_key);
   PS_CHECK(unicode_traits.value().outputs.size() == 1U);
-  PS_CHECK(unicode_traits.value().outputs.front().output_schema.kind ==
-           ps::OperationPortKind::Result);
   PS_CHECK(unicode_traits.value().outputs.front().result_schema.has_value());
   const auto keys = unicode_operation_registry->keys();
   const std::array<const char*, 5> invalid_parameters{
@@ -1093,7 +1011,7 @@ int main() {
   using ps::RegionDimension;
   using ps::Result;
   using ps::StridedLayout;
-  using ps::ValueDescriptor;
+  using ps::TensorDescriptor;
   using ps::WorkflowDocument;
   using ps::WorkflowNode;
   using ps::WorkflowNodeOutput;
@@ -1150,45 +1068,9 @@ int main() {
 
   PS_CHECK(verify_result_registration() == 0);
 
-  LibraryObserver dense_overflow_observer(
-      PS_OPERATION_DENSE_OVERFLOW_FIXTURE_PATH);
-  PS_CHECK(dense_overflow_observer.counter(
-               "ps_operation_dense_overflow_fixture_destroy_count") == 0U);
-  {
-    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Operation,
-                               false);
-    OperationRegistry registry;
-    PS_CHECK(
-        registry.load_plugin(PS_OPERATION_DENSE_OVERFLOW_FIXTURE_PATH).code ==
-        ErrorCode::TypeMismatch);
-    PS_CHECK(registry.keys().empty());
-    PS_CHECK(lifecycle.native_close_count() == 1U);
-  }
-  PS_CHECK(dense_overflow_observer.counter(
-               "ps_operation_dense_overflow_fixture_destroy_count") == 1U);
-  PS_CHECK(dense_overflow_observer.counter(
-               "ps_operation_dense_overflow_fixture_callback_count") == 0U);
   PS_CHECK(verify_tensor_extent_dso() == 0);
 
   PS_CHECK(verify_dense_byte_size_contract() == 0);
-  const std::uint64_t maximum_legal_dense_bytes = INT64_MAX;
-  PS_CHECK(verify_dense_dso_fixture(PS_OPERATION_DENSE_RANK1_LIMIT_FIXTURE_PATH,
-                                    true, "fixture.dense_rank1_limit",
-                                    {maximum_legal_dense_bytes}) == 0);
-  PS_CHECK(verify_dense_dso_fixture(
-               PS_OPERATION_DENSE_RANK1_OVERFLOW_FIXTURE_PATH, false, "", {}) ==
-           0);
-  PS_CHECK(verify_dense_dso_fixture(PS_OPERATION_DENSE_RANK2_LIMIT_FIXTURE_PATH,
-                                    true, "fixture.dense_rank2_limit",
-                                    {UINT64_C(2), (UINT64_C(1) << 62U) - 1}) ==
-           0);
-  PS_CHECK(verify_dense_dso_fixture(
-               PS_OPERATION_DENSE_RANK2_OVERFLOW_FIXTURE_PATH, false, "", {}) ==
-           0);
-  PS_CHECK(verify_dense_dso_fixture(
-               PS_OPERATION_DENSE_MULTI_OVERFLOW_FIXTURE_PATH, false, "", {}) ==
-           0);
-
   LibraryObserver operation_observer(PS_OPERATION_FIXTURE_PATH);
   PS_CHECK(operation_observer.counter("ps_operation_fixture_destroy_count") ==
            0U);

@@ -514,9 +514,6 @@ Result<OperationPreparation> prepare_alpha(
       return Answer(remapped.status());
     }
     desc = remapped.take_value();
-    if (output_spec.layout.spatial) {
-      output_spec.layout.groups.clear();
-    }
   } else {
     for (std::uint64_t i = 0; i < count; ++i) {
       source_map.push_back(static_cast<std::int64_t>(i));
@@ -664,7 +661,7 @@ Status generic_view(const ResultProgramPhase& phase, const Preparation& s,
   const auto& spec = phase.query.output.result_schema->tensors[0];
   const auto shape = spec.sample_shape();
   const auto rank = shape.size();
-  std::array<Value, 2> sources;
+  std::array<TensorSpan, 2> sources;
   std::array<__int128, 2> bases{};
   const CpuStorage* owner = nullptr;
   for (const auto& map : s.data_maps) {
@@ -1042,7 +1039,7 @@ OperationDefinition alpha_definition(const std::string& key, Action action,
   d.key = key;
   auto& t = d.traits;
   OperationPortConstraint port;
-  port.kind = OperationPortKind::Result;
+
   port.element_type_mask = 127;
   t.input_schema = {port};
   t.repeated_minimum = 1;
@@ -1079,7 +1076,6 @@ OperationDefinition alpha_definition(const std::string& key, Action action,
   out.key = "values";
   out.output_schema = port;
   out.result_schema = tensor_ops::scalar_schema();
-  out.region_rule = OperationRegionRule::Tiled;
   out.continuation_bytes = sizeof(State);
   out.maximum_dependency_stages = 2;
   d.prepare_static = [action, profile](const auto& inputs, const auto& params) {

@@ -66,11 +66,10 @@ inline ps::OperationOutputTraits output(const ps::SchemaTemplate& schema,
                                         std::uint32_t stages = 2) {
   ps::OperationOutputTraits result;
   result.key = "value";
-  result.output_schema.kind = ps::OperationPortKind::Result;
+
   result.output_schema.result_schema_id = std::string(schema.id);
   result.output_schema.result_schema_version = schema.version;
   result.result_schema = schema;
-  result.region_rule = ps::OperationRegionRule::Tiled;
   result.continuation_bytes = state_bytes;
   result.maximum_dependency_stages = stages;
   return result;
@@ -128,7 +127,7 @@ struct Source {
 inline ps::OperationDefinition source(std::string key,
                                       const ps::SchemaTemplate& schema,
                                       Fill fill) {
-  if (schema.tensors.size() != 1 || !schema.fields.empty() ||
+  if (schema.tensors.size() != 1 ||
       (schema.tensors[0].sample_shape().size() != 1 &&
        schema.tensors[0].sample_shape().size() != 2) ||
       (schema.tensors[0].descriptor.element_type != ps::ElementType::Float64 &&

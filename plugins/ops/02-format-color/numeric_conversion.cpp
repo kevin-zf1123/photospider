@@ -1220,7 +1220,7 @@ OperationDefinition conversion() {
   auto& traits = definition.traits;
   traits.input_count = 1;
   OperationPortConstraint port;
-  port.kind = OperationPortKind::Result;
+
   port.element_type_mask = 127;
   traits.input_schema = {port};
   traits.workspace_bytes = 16384;
@@ -1239,7 +1239,6 @@ OperationDefinition conversion() {
   output.key = "values";
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
-  output.region_rule = OperationRegionRule::Tiled;
   output.continuation_bytes = sizeof(Continuation);
   output.maximum_dependency_stages = 2;
   definition.prepare_static = [](const auto& inputs, const auto& params) {

@@ -13,7 +13,9 @@
 #include "common/registry.hpp"
 #include "photospider/ops/contracts.hpp"
 #include "photospider/ops/errors.hpp"
+#include "photospider/plugin/tensor_helpers.hpp"
 #include "photospider/plugin/tile_helpers.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -29,7 +31,7 @@ Lut3dBakeDescription placeholder() {
   result.recipe_identity.assign(64, '0');
   return result;
 }
-Result<Footprint> rows(const ValueDescriptor& descriptor, std::uint64_t first,
+Result<Footprint> rows(const TensorDescriptor& descriptor, std::uint64_t first,
                        std::uint64_t count) {
   auto at = coordinate(first * 3, descriptor.shape);
   std::vector<RegionDimension> dimensions;
@@ -55,8 +57,9 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
   if (!table_schema.ok() || !report_schema.ok())
     return Answer(!table_schema.ok() ? table_schema.status()
                                      : report_schema.status());
-  const ValueDescriptor table{spec.table_dtype,
-                              {spec.shape[0], spec.shape[1], spec.shape[2], 3}};
+  const TensorDescriptor table{
+      spec.table_dtype,
+      {spec.shape[0], spec.shape[1], spec.shape[2], 3}};
   OperationOutputSpecialization output;
   if (kind == Kind::Pack) {
     if (!sole_tensor(inputs[0]) ||
@@ -70,13 +73,13 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
         std::make_shared<const SchemaTemplate>(table_schema.take_value());
   } else if (kind == Kind::Measure) {
     const auto points = product(spec.shape, 1) + spec.extra_points;
-    const std::array<ValueDescriptor, 6> expected{
-        ValueDescriptor{ElementType::Float64, {3, 3}},
-        ValueDescriptor{ElementType::Float64, table.shape},
+    const std::array<TensorDescriptor, 6> expected{
+        TensorDescriptor{ElementType::Float64, {3, 3}},
+        TensorDescriptor{ElementType::Float64, table.shape},
         table,
-        ValueDescriptor{ElementType::Float64, {points, 3}},
-        ValueDescriptor{spec.source_dtype, {points, 3}},
-        ValueDescriptor{spec.table_dtype, {points, 3}}};
+        TensorDescriptor{ElementType::Float64, {points, 3}},
+        TensorDescriptor{spec.source_dtype, {points, 3}},
+        TensorDescriptor{spec.table_dtype, {points, 3}}};
     for (unsigned port = 0; port < 6; ++port) {
       if (port == 2) {
         if (!inputs[port].result_schema ||
@@ -248,7 +251,7 @@ struct MeasureState {
       }
       auto made = ResultBuilder::start(
           phase.resources, *phase.query.output.result_schema,
-          phase.query.semantic_key, {3, 353}, {table.object_id()});
+          phase.query.semantic_key, {}, {table.object_id()});
       if (!made.ok())
         return Poll(made.status());
       builder = made.take_value();
@@ -258,12 +261,25 @@ struct MeasureState {
       auto identity = lut3d_bake_configuration_id(description_value.value());
       if (!identity.ok())
         return Poll(identity.status());
-      auto identity_written = builder.append(
-          11, 1,
+      auto identity_written = builder.publish_tensor(
+          11,
+          Region::whole(
+              phase.query.output.result_schema->tensors[11].sample_shape()),
           {reinterpret_cast<const std::uint8_t*>(identity.value().data()), 64},
           phase.query.cancellation);
       if (!identity_written.ok())
         return Poll(identity_written);
+      // Report data survives shared grants and member projections unchanged.
+      // The identity is Run-local and must not be inferred from association.
+      std::array<std::uint8_t, 8> measured_table_id{};
+      for (unsigned i = 0; i < measured_table_id.size(); ++i)
+        measured_table_id[i] = (table.object_id() >> (8 * i)) & 255;
+      auto measured_written = builder.publish_tensor(
+          12, Region::whole({1, 8}),
+          {measured_table_id.data(), measured_table_id.size()},
+          phase.query.cancellation);
+      if (!measured_written.ok())
+        return Poll(measured_written);
       const std::uint8_t passed = report.passed;
       const std::array<const void*, 11> values{
           &passed,
@@ -284,19 +300,15 @@ struct MeasureState {
           return Poll(Status{ErrorCode::ResourceExhausted,
                              "bake report field exceeds Result window",
                              FailureReason::CapacityLimit});
-        auto written = builder.append(
-            f, (f == 1 || f == 5) ? 3 : 1,
+        auto written = builder.publish_tensor(
+            f,
+            Region::whole(
+                phase.query.output.result_schema->tensors[f].sample_shape()),
             {static_cast<const std::uint8_t*>(values[f]), sizes[f]},
             phase.query.cancellation);
         if (!written.ok())
           return Poll(written);
       }
-    }
-    for (unsigned field = 0; field < 12; ++field) {
-      const auto count = (field == 1 || field == 5) ? 3 : 1;
-      auto published = builder.publish(field, count);
-      if (!published.ok())
-        return Poll(published);
     }
     auto sealed = builder.seal();
     return sealed.ok() ? Poll(ResultPublication{sealed.take_value(), true})
@@ -306,7 +318,7 @@ struct MeasureState {
 struct TensorViewState {
   bool gate, pack;
   unsigned stage = 0;
-  ResultRef report;
+  std::array<std::uint8_t, 8> measured_table_id{};
   numeric_ops::ExactBakeError arithmetic;
   Footprint output;
   Lut3dBakeReport fields;
@@ -339,8 +351,10 @@ struct TensorViewState {
             : std::vector<std::uint64_t>{}));
     if (!output.empty()) {
       const auto& input = phase.tensors->at({0, 0});
-      if (gate && (report.association().size() < 3 ||
-                   report.association()[2] != input.object_id()))
+      std::uint64_t measured = 0;
+      for (unsigned i = 0; i < measured_table_id.size(); ++i)
+        measured |= std::uint64_t{measured_table_id[i]} << (8 * i);
+      if (gate && measured != input.object_id())
         return Poll(Status{ErrorCode::OperationFailed,
                            "bake report/table object mismatch",
                            ops_error::InvalidAssociation});
@@ -360,24 +374,27 @@ struct TensorViewState {
               [&](const auto& writers) {
                 return math_callback(phase, [&] {
                   MathTensorReader reader(input, phase.query.cancellation);
-                  MathTensorWriter writer(writers[0]);
-                  const auto width =
-                      Value::element_size(input.spec().descriptor.element_type);
-                  std::vector<std::uint64_t> at;
-                  for (auto axis : region.dimensions())
-                    at.push_back(axis.offset);
-                  const auto elements = region.element_count();
-                  if (!elements.ok())
-                    return elements.status();
-                  for (std::uint64_t i = 0; i < elements.value(); ++i) {
-                    math_require(phase.consume_work(1));
-                    const auto bits = reader.bits(at);
-                    std::memcpy(writer.address(at), &bits, width);
-                    for (unsigned axis = at.size(); axis-- > 0;) {
-                      if (++at[axis] < region.dimensions()[axis].offset +
-                                           region.dimensions()[axis].extent)
-                        break;
-                      at[axis] = region.dimensions()[axis].offset;
+                  for (const auto& destination : writers) {
+                    const auto& region = destination.region();
+                    MathTensorWriter writer(destination);
+                    const auto width = TensorSpan::element_size(
+                        input.spec().descriptor.element_type);
+                    std::vector<std::uint64_t> at;
+                    for (auto axis : region.dimensions())
+                      at.push_back(axis.offset);
+                    const auto elements = region.element_count();
+                    if (!elements.ok())
+                      return elements.status();
+                    for (std::uint64_t i = 0; i < elements.value(); ++i) {
+                      math_require(phase.consume_work(1));
+                      const auto bits = reader.bits(at);
+                      std::memcpy(writer.address(at), &bits, width);
+                      for (unsigned axis = at.size(); axis-- > 0;) {
+                        if (++at[axis] < region.dimensions()[axis].offset +
+                                             region.dimensions()[axis].extent)
+                          break;
+                        at[axis] = region.dimensions()[axis].offset;
+                      }
                     }
                   }
                   return Status::success();
@@ -406,13 +423,28 @@ struct TensorViewState {
       if (!gate)
         return need_table(phase);
       stage = 1;
-      return Poll(ResultProgramNeed{{{1, true, false, {}}}});
+      auto step = sdk::to_whole(phase, 1);
+      if (!step.ok())
+        return Poll(step.status());
+      if (const auto* need = std::get_if<ResultProgramNeed>(&step.value()))
+        return Poll(*need);
     }
     if (stage == 1) {
-      report = phase.results.at(1);
-      auto facts = report.descriptor();
-      if (!facts.ok())
-        return Poll(facts.status());
+      auto step = sdk::to_whole(phase, 1);
+      if (!step.ok())
+        return Poll(step.status());
+      if (const auto* need = std::get_if<ResultProgramNeed>(&step.value()))
+        return Poll(*need);
+      const auto& inputs = std::get<sdk::WholeTensorInputs>(step.value());
+      auto identity_window =
+          inputs[12].acquire(Region::whole(inputs[12].spec().sample_shape()),
+                             phase.query.cancellation);
+      if (!identity_window.ok())
+        return Poll(identity_window.status());
+      auto identity_copied = identity_window.value().copy_to(
+          measured_table_id.data(), measured_table_id.size());
+      if (!identity_copied.ok())
+        return Poll(identity_copied);
       std::uint8_t passed = 0;
       const std::array<void*, 11> targets{&passed,
                                           fields.axis.data(),
@@ -428,18 +460,17 @@ struct TensorViewState {
       const std::array<std::uint64_t, 11> sizes{1,  72, 8,  8,  24, 72,
                                                 24, 8,  24, 24, 24};
       for (unsigned f = 0; f < targets.size(); ++f) {
-        auto read = report.prepare_read(facts.value(), f, 0,
-                                        (f == 1 || f == 5) ? 3 : 1);
-        if (!read.ok())
-          return Poll(read.status());
-        auto loaded =
-            read.value().load(phase.query.page_bytes, phase.query.cancellation);
-        if (!loaded.ok())
-          return Poll(loaded.status());
-        const auto bytes = loaded.value()->bytes();
-        if (bytes.size() != sizes[f])
-          return Poll(domain("invalid bake report read window"));
-        std::memcpy(targets[f], bytes.data(), sizes[f]);
+        if (sizes[f] > phase.query.page_bytes)
+          return Poll(Status{ErrorCode::ResourceExhausted, {}});
+        auto window =
+            inputs[f].acquire(Region::whole(inputs[f].spec().sample_shape()),
+                              phase.query.cancellation);
+        if (!window.ok())
+          return Poll(window.status());
+        auto copied = window.value().copy_to(
+            static_cast<std::uint8_t*>(targets[f]), sizes[f]);
+        if (!copied.ok())
+          return Poll(copied);
       }
       auto spec = math_take(description(phase.query.parameters));
       auto checked = input_internal::validate_lut3d_bake_report_values(
@@ -508,18 +539,15 @@ OperationDefinition operation(Kind kind) {
   traits.input_count = kind == Kind::Measure ? 6 : kind == Kind::Gate ? 2 : 1;
   traits.input_schema.resize(traits.input_count);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = 12;
   }
   if (kind == Kind::Measure)
     for (unsigned port : {0U, 1U, 3U})
       traits.input_schema[port].element_type_mask = 4;
   const auto object = [&](unsigned port, const char* id) {
-    traits.input_schema[port].kind = OperationPortKind::Result;
     traits.input_schema[port].element_type_mask = 0;
     traits.input_schema[port].result_schema_id = id;
-    traits.input_schema[port].result_schema_version =
-        std::string(id) == "curve.bake_lut3d.table" ? 2 : 1;
+    traits.input_schema[port].result_schema_version = 2;
   };
   if (kind == Kind::Measure)
     object(2, "curve.bake_lut3d.table");
@@ -529,12 +557,18 @@ OperationDefinition operation(Kind kind) {
     object(1, "curve.bake_lut3d.report");
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = report_parameters();
-  traits.workspace_bytes = kind == Kind::Measure ? 353 : 0;
+  traits.workspace_bytes = kind == Kind::Measure ? 361 : 0;
+  // Object identity is Run-local, even with identical frozen inputs. Mark the
+  // identity-producing/checking operations nondeterministic so their downstream
+  // closure cannot share checkpoint or block state between Runs either.
+  if (kind == Kind::Measure || kind == Kind::Gate) {
+    traits.deterministic = false;
+    traits.cacheable = false;
+  }
   auto& out = traits.outputs[0];
   out.key = kind == Kind::Measure ? "report"
             : kind == Kind::Pack  ? "table"
                                   : "values";
-  out.region_rule = OperationRegionRule::Tiled;
   out.continuation_bytes =
       kind == Kind::Measure ? sizeof(MeasureState) : sizeof(TensorViewState);
   out.maximum_dependency_stages = 1048576;
@@ -545,14 +579,13 @@ OperationDefinition operation(Kind kind) {
     if (!schema.ok())
       throw std::logic_error(schema.status().message);
     out.result_schema = schema.take_value();
-    out.output_schema.kind = OperationPortKind::Result;
+
     out.output_schema.result_schema_id = std::string(out.result_schema->id);
     out.output_schema.result_schema_version = out.result_schema->version;
   }
   if (kind == Kind::Unpack || kind == Kind::Gate) {
     numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
                                          sizeof(TensorViewState));
-    out.region_rule = OperationRegionRule::Tiled;
     out.maximum_dependency_stages = kind == Kind::Gate ? 3 : 2;
   }
   if (kind == Kind::Pack)
@@ -591,6 +624,8 @@ OperationDefinition operation(Kind kind) {
     return ResultContinuation::make<TensorViewState>(allocator,
                                                      kind == Kind::Gate, false);
   };
+  if (kind == Kind::Pack || kind == Kind::Measure)
+    return sdk::with_whole_stage(std::move(result), UINT64_C(1) << 48);
   return result;
 }
 }  // namespace

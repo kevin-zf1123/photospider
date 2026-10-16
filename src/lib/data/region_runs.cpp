@@ -8,13 +8,13 @@
 
 namespace ps {
 Status copy_value_region(
-    const Value& source, const Region& region, const Region& destination,
+    const TensorSpan& source, const Region& region, const Region& destination,
     std::uint8_t* data, std::uint64_t bytes,
     const CancellationToken& cancellation,
     const std::function<Status(std::uint64_t)>& consume_samples) {
   if (!source.valid() || !data)
     return Status{ErrorCode::InvalidArgument, "invalid region copy buffer"};
-  const auto width = Value::element_size(source.descriptor().element_type);
+  const auto width = TensorSpan::element_size(source.descriptor().element_type);
   auto count = destination.element_count();
   if (!count.ok())
     return count.status();

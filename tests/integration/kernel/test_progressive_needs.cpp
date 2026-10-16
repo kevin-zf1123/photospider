@@ -19,7 +19,7 @@ struct Follow {
     const auto need = [&](std::uint32_t port) {
       ResultProgramNeed batch;
       batch.tiles.push_back(
-          {port, false, false,
+          {port, 0, false,
            take(TileSet::from_indices(phase.resources, {position}))});
       return Result<ResultProgramPoll>(std::move(batch));
     };
@@ -119,7 +119,7 @@ void progressive_workflow() {
   follow.traits.input_schema.resize(2);
   for (unsigned i = 0; i < 2; ++i) {
     auto& input = follow.traits.input_schema[i];
-    input.kind = OperationPortKind::Result;
+
     input.element_type = static_cast<std::uint32_t>(
         i == 0 ? ElementType::Int64 : ElementType::Float64);
     input.rank = 2;
@@ -146,7 +146,7 @@ void progressive_workflow() {
   ResourceBudget requests;
   options.tile_extent = 1;
   options.output_requests = {
-      {"sample", {false, take(TileSet::from_indices(requests, {0}))}}};
+      {"sample", {{{0, take(TileSet::from_indices(requests, {0}))}}}}};
   auto compiled = take(Compiler(registry).compile(graph, options));
   ExecutionContext execution(registry, {1, false, 4, 128});
   auto result = take(execution.execute(compiled.plan));
@@ -160,8 +160,7 @@ void progressive_workflow() {
       payloads != std::vector<std::uint64_t>({extent - 1}) || peak > 128)
     throw std::runtime_error("progressive independent oracle failed");
   auto record = take(result.dependencies.tile_record({2, 0, 0}));
-  if (!record || record->inputs.size() != 2 || record->inputs[0].whole ||
-      record->inputs[1].whole ||
+  if (!record || record->inputs.size() != 2 ||
       record->inputs[0].tiles !=
           take(TileSet::from_indices(requests, controls)) ||
       record->inputs[1].tiles !=

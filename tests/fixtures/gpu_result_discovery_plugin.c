@@ -12,10 +12,10 @@ struct State {
 };
 struct DiscoveryContext {
   struct State* state;
-  const ps_result_services_v4* outer;
+  const ps_result_services_v5* outer;
 };
 static const char discovery_source[] =
-    PS_FRAGMENT_ATLAS_MSL_V11 PS_RESULT_GPU_DISCOVERY_MSL_V4
+    PS_FRAGMENT_ATLAS_MSL_V11 PS_RESULT_GPU_DISCOVERY_MSL_V5
     "kernel void discover(device const uchar* controls [[buffer(0)]],"
     " device const ulong* directory [[buffer(1)]], device atomic_uint* table "
     "[[buffer(2)]],"
@@ -25,9 +25,10 @@ static const char discovery_source[] =
     " {atomic_store_explicit(table+1,1u,memory_order_relaxed);return;}"
     " for(uint b=0;b<8;++b) base|=ulong(controls[address+b])<<(8*b);"
     " ulong tile=base+ulong(c[8]==13?1-i:i)*4096;"
-    " uint kind=c[8]==3?3:(c[8]==4||c[8]==18?1:(c[8]==5||c[8]==19?2:0));"
+    " uint kind=c[8]==3?3:(c[8]==4||c[8]==19?1:(c[8]==5?2:0));"
     " if(c[8]==18||c[8]==19)tile=0;"
-    " ps_result_discovery_emit(table,uint(c[7]),c[8]==14?15:0,kind,tile);"
+    " ps_result_discovery_emit(table,uint(c[7]),c[8]==14?15:0,kind,0,tile,c[8]="
+    "=19?0:(c[8]==18?8192:tile+1));"
     " if(c[8]==6)atomic_store_explicit(table+2,1u,memory_order_relaxed);}";
 static const char value_source[] = PS_FRAGMENT_ATLAS_MSL_V11
     "kernel void value(device const uchar* data [[buffer(0)]],"
@@ -60,7 +61,7 @@ static ps_gpu_dispatch_v1 command(const char* source, uint32_t source_size,
   return result;
 }
 
-static int discover(const ps_result_discovery_services_v4* host, uint8_t* table,
+static int discover(const ps_result_discovery_services_v5* host, uint8_t* table,
                     uint64_t size, uint32_t capacity, void* user) {
   struct DiscoveryContext* context = user;
   struct State* state = context->state;
@@ -75,7 +76,7 @@ static int discover(const ps_result_discovery_services_v4* host, uint8_t* table,
   if ((state->mode == 16 || state->mode == 17) &&
       host->consume_work(host->context, 4096))
     return 1;
-  ps_result_native_atlas_v4 atlas = {0};
+  ps_result_native_atlas_v5 atlas = {0};
   atlas.struct_size = sizeof(atlas);
   uint64_t token = 0;
   if (host->acquire_native_atlas(host->context, 1, 0, &atlas) ||
@@ -98,35 +99,35 @@ static int discover(const ps_result_discovery_services_v4* host, uint8_t* table,
               buffers, constants, 2);
   return host->gpu->execute(host->gpu->context, &work, 1);
 }
-static int need(const ps_result_services_v4* host,
-                const ps_result_query_v4* query, uint32_t input, uint64_t first,
+static int need(const ps_result_services_v5* host,
+                const ps_result_query_v5* query, uint32_t input, uint64_t first,
                 uint32_t count) {
   (void)query;
-  const uint64_t tiles[2] = {first, first + 4096};
-  const ps_result_tile_need_v4 request = {.struct_size = sizeof(request),
+  const ps_result_tile_interval_v5 tiles[2] = {{first, first + 1},
+                                               {first + 4096, first + 4097}};
+  const ps_result_tile_need_v5 request = {.struct_size = sizeof(request),
                                           .input = input,
-                                          .tiles = tiles,
-                                          .tile_count = count};
-  return host->need_tiles(host->context, &request) ? 1 : PS_RESULT_NEED_V4;
+                                          .intervals = tiles,
+                                          .interval_count = count};
+  return host->need_tiles(host->context, &request) ? 1 : PS_RESULT_NEED_V5;
 }
-static int start(void* user, void* bytes, const ps_result_query_v4* query,
-                 const ps_result_services_v4* host) {
+static int start(void* user, void* bytes, const ps_result_query_v5* query,
+                 const ps_result_services_v5* host) {
   (void)user;
   (void)host;
-  if (!query->tiled || query->tile_extent != 1)
-    return PS_RESULT_STATUS_INVALID_ARGUMENT_V4;
+  if (query->tile_extent != 1)
+    return PS_RESULT_STATUS_INVALID_ARGUMENT_V5;
   struct State* state = bytes;
   state->capacity = (uint32_t)query->parameters[0].int64_value;
   state->mode = (uint32_t)query->parameters[1].int64_value;
   return 0;
 }
-static int finish(const ps_result_query_v4* query,
-                  const ps_result_services_v4* host, struct State* state) {
+static int finish(const ps_result_query_v5* query,
+                  const ps_result_services_v5* host, struct State* state) {
   uint64_t coordinates[2] = {state->base, state->base + 4096};
   float sum = 0;
   if (query->backend == 2) {
-    ps_result_discovery_request_v4 requests[2] = {{0}};
-    requests[0].struct_size = requests[1].struct_size = sizeof(requests[0]);
+    ps_result_discovery_request_v5 requests[2] = {{0}};
     uint32_t count = 0;
     if (host->discovery_requests(host->context, state->receipt, NULL, 0,
                                  &count) ||
@@ -136,25 +137,29 @@ static int finish(const ps_result_query_v4* query,
                                  &count))
       return 1;
     for (uint32_t i = 0; i < count; ++i) {
-      const uint32_t expected = state->mode == 18 ? PS_RESULT_DISCOVERY_WHOLE_V4
-                                : state->mode == 19
-                                    ? PS_RESULT_DISCOVERY_DESCRIPTOR_V4
-                                    : PS_RESULT_DISCOVERY_TILE_V4;
+      const uint32_t expected = state->mode == 19
+                                    ? PS_RESULT_DISCOVERY_DESCRIPTOR_V5
+                                    : PS_RESULT_DISCOVERY_TILE_V5;
       if (requests[i].input != 0 || requests[i].reserved ||
-          requests[i].kind != expected || (expected && requests[i].tile))
+          requests[i].kind != expected ||
+          (expected && (requests[i].begin || requests[i].end)) ||
+          requests[i].tensor_slot)
         return 1;
-      if (!expected)
-        coordinates[i] = requests[i].tile;
+      if (!expected && state->mode != 18) {
+        if (requests[i].end != requests[i].begin + 1)
+          return 1;
+        coordinates[i] = requests[i].begin;
+      }
     }
     if (state->mode == 19) {
       const uint64_t at[2] = {0, 0};
       float ignored = 0;
       host->read_tensor(host->context, 0, 0, at, 2, &ignored, 4);
-      return PS_RESULT_STATUS_CANCELLED_V4;
+      return PS_RESULT_STATUS_CANCELLED_V5;
     }
     if (host->release_discovery(host->context, state->receipt))
       return 1;
-    ps_result_native_atlas_v4 atlas = {0};
+    ps_result_native_atlas_v5 atlas = {0};
     atlas.struct_size = sizeof(atlas);
     uint8_t* scratch = NULL;
     uint64_t token = 0;
@@ -204,26 +209,25 @@ static int finish(const ps_result_query_v4* query,
   if (host->allocate_scratch(host->context, 4, &output))
     return 1;
   memcpy(output, &sum, 4);
-  const ps_result_region_v4 region = {.struct_size = sizeof(region),
+  const ps_result_region_v5 region = {.struct_size = sizeof(region),
                                       .rank = 2,
                                       .offset = {0, state->coordinate},
                                       .extent = {1, 1}};
   return host->publish_tensor_buffer(host->context, 0, &region, output, 4);
 }
-static int poll(void* user, void* bytes, const ps_result_query_v4* query,
-                const ps_result_services_v4* host) {
+static int poll(void* user, void* bytes, const ps_result_query_v5* query,
+                const ps_result_services_v5* host) {
   (void)user;
-  ps_result_region_v4 requested_region;
-  if (ps_result_output_region_v4(query, 0, &requested_region))
-    return PS_RESULT_STATUS_INVALID_ARGUMENT_V4;
-  const uint32_t requested_count =
-      query->requested.whole || query->requested.tile_count ? 1 : 0;
+  ps_result_region_v5 requested_region;
+  if (ps_result_output_region_v5(query, 0, &requested_region))
+    return PS_RESULT_STATUS_INVALID_ARGUMENT_V5;
+  const uint32_t requested_count = 1;
   struct State* state = bytes;
   if (!state->stage) {
     if (host->begin_result(host->context))
       return 1;
     if (!requested_count)
-      return host->publish_result(host->context, 1) ? 1 : PS_RESULT_PUBLISH_V4;
+      return host->publish_result(host->context, 1) ? 1 : PS_RESULT_PUBLISH_V5;
     state->coordinate = requested_region.offset[1];
     state->stage = 1;
     return need(host, query, 1, state->coordinate, 1);
@@ -236,7 +240,7 @@ static int poll(void* user, void* bytes, const ps_result_query_v4* query,
                      discover, &context, &state->receipt);
       if (state->mode == 1)
         return host->publish_result(host->context, 1) ? 1
-                                                      : PS_RESULT_PUBLISH_V4;
+                                                      : PS_RESULT_PUBLISH_V5;
       if (state->mode == 11) {
         if (host->release_discovery(host->context, state->receipt))
           return 1;
@@ -244,7 +248,7 @@ static int poll(void* user, void* bytes, const ps_result_query_v4* query,
         return 1;
       }
       if (state->mode == 12) {
-        ps_result_discovery_request_v4 record = {.struct_size = sizeof(record)};
+        ps_result_discovery_request_v5 record = {0};
         uint32_t count = 0;
         host->discovery_requests(host->context, state->receipt, &record, 1,
                                  &count);
@@ -268,7 +272,7 @@ static int poll(void* user, void* bytes, const ps_result_query_v4* query,
         host->gpu->execute(host->gpu->context, &command, 1);
         return 1;
       }
-      return PS_RESULT_NEED_V4;
+      return PS_RESULT_NEED_V5;
     }
     int64_t base = 0;
     const uint64_t at[2] = {0, state->coordinate};
@@ -294,7 +298,7 @@ static int poll(void* user, void* bytes, const ps_result_query_v4* query,
       state->coordinate = requested_region.offset[1];
   }
   if (state->box == requested_count)
-    return host->publish_result(host->context, 1) ? 1 : PS_RESULT_PUBLISH_V4;
+    return host->publish_result(host->context, 1) ? 1 : PS_RESULT_PUBLISH_V5;
   state->stage = 1;
   return need(host, query, 1, state->coordinate, 1);
 }
@@ -305,70 +309,61 @@ static void destroy(void* user, void* bytes) {
 static void release(void* user) {
   (void)user;
 }
-static const ps_result_tensor_spec_v4 tensors[] = {
-    {.struct_size = sizeof(ps_result_tensor_spec_v4),
+static const ps_result_tensor_spec_v5 tensors[] = {
+    {.struct_size = sizeof(ps_result_tensor_spec_v5),
      .key = "samples",
      .key_size = 7,
-     .element_type = PS_RESULT_ELEMENT_FLOAT32_V4,
+     .element_type = PS_RESULT_ELEMENT_FLOAT32_V5,
      .rank = 2,
      .shape = {1, 8192},
      .spatial = 1,
      .height_axis = 0,
      .width_axis = 1,
-     .channel_axis = PS_RESULT_NO_CHANNEL_V4},
-    {.struct_size = sizeof(ps_result_tensor_spec_v4),
+     .channel_axis = PS_RESULT_NO_CHANNEL_V5},
+    {.struct_size = sizeof(ps_result_tensor_spec_v5),
      .key = "samples",
      .key_size = 7,
-     .element_type = PS_RESULT_ELEMENT_INT64_V4,
+     .element_type = PS_RESULT_ELEMENT_INT64_V5,
      .rank = 2,
      .shape = {1, 8192},
      .spatial = 1,
      .height_axis = 0,
      .width_axis = 1,
-     .channel_axis = PS_RESULT_NO_CHANNEL_V4}};
-static const ps_result_schema_v4 schemas[] = {
-    {.struct_size = sizeof(ps_result_schema_v4),
+     .channel_axis = PS_RESULT_NO_CHANNEL_V5}};
+static const ps_result_schema_v5 schemas[] = {
+    {.struct_size = sizeof(ps_result_schema_v5),
      .id = "discovery.data",
      .id_size = 14,
      .version = 1,
-     .publication = PS_RESULT_COMPLETE_BUNDLE_V4,
      .tensors = tensors,
      .tensor_count = 1},
-    {.struct_size = sizeof(ps_result_schema_v4),
+    {.struct_size = sizeof(ps_result_schema_v5),
      .id = "discovery.control",
      .id_size = 17,
      .version = 1,
-     .publication = PS_RESULT_COMPLETE_BUNDLE_V4,
      .tensors = tensors + 1,
      .tensor_count = 1}};
-static const ps_result_port_v4 inputs[] = {
-    {.struct_size = sizeof(ps_result_port_v4),
-     .kind = PS_RESULT_OBJECT_V4,
-     .schema = schemas},
-    {.struct_size = sizeof(ps_result_port_v4),
-     .kind = PS_RESULT_OBJECT_V4,
-     .schema = schemas + 1}};
-static const ps_result_output_v4 output = {
+static const ps_result_port_v5 inputs[] = {
+    {.struct_size = sizeof(ps_result_port_v5), .schema = schemas},
+    {.struct_size = sizeof(ps_result_port_v5), .schema = schemas + 1}};
+static const ps_result_output_v5 output = {
     .struct_size = sizeof(output),
     .key = "value",
     .key_size = 5,
-    .port = {.struct_size = sizeof(ps_result_port_v4),
-             .kind = PS_RESULT_OBJECT_V4,
-             .schema = schemas},
-    .input_count = UINT32_MAX,
-    .execution = PS_RESULT_REGIONAL_V4};
-static const ps_result_parameter_descriptor_v4 parameters[] = {
-    {sizeof(ps_result_parameter_descriptor_v4), "capacity", 8,
-     PS_RESULT_PARAMETER_INT64_V4, 1, 1, 1, 65536},
-    {sizeof(ps_result_parameter_descriptor_v4), "mode", 4,
-     PS_RESULT_PARAMETER_INT64_V4, 1, 1, 0, 19}};
-static const ps_result_operation_v4 operation = {
+    .port = {.struct_size = sizeof(ps_result_port_v5), .schema = schemas},
+    .input_count = UINT32_MAX};
+static const ps_result_parameter_descriptor_v5 parameters[] = {
+    {sizeof(ps_result_parameter_descriptor_v5), "capacity", 8,
+     PS_RESULT_PARAMETER_INT64_V5, 1, 1, 1, 65536},
+    {sizeof(ps_result_parameter_descriptor_v5), "mode", 4,
+     PS_RESULT_PARAMETER_INT64_V5, 1, 1, 0, 19}};
+static const ps_result_operation_v5 operation = {
     .struct_size = sizeof(operation),
     .key = "example.c_discovery",
     .key_size = 19,
-    .flags = PS_RESULT_FLAG_CPU_V4 | PS_RESULT_FLAG_GPU_V4 |
-             PS_RESULT_FLAG_DETERMINISTIC_V4 |
-             PS_RESULT_FLAG_SIDE_EFFECT_FREE_V4,
+    .flags = PS_RESULT_FLAG_CPU_V5 | PS_RESULT_FLAG_GPU_V5 |
+             PS_RESULT_FLAG_DETERMINISTIC_V5 |
+             PS_RESULT_FLAG_SIDE_EFFECT_FREE_V5,
     .inputs = inputs,
     .input_count = 2,
     .outputs = &output,
@@ -381,10 +376,10 @@ static const ps_result_operation_v4 operation = {
     .start = start,
     .poll = poll,
     .destroy = destroy};
-static const ps_result_operation_plugin_api_v4 api = {
-    sizeof(api), PS_RESULT_OPERATION_ABI_VERSION_4, &operation, 1, NULL,
+static const ps_result_operation_plugin_api_v5 api = {
+    sizeof(api), PS_RESULT_OPERATION_ABI_VERSION_5, &operation, 1, NULL,
     release};
-PS_RESULT_EXPORT const ps_result_operation_plugin_api_v4*
-ps_result_operation_plugin_get_api_v4(void) {
+PS_RESULT_EXPORT const ps_result_operation_plugin_api_v5*
+ps_result_operation_plugin_get_api_v5(void) {
   return &api;
 }

@@ -46,11 +46,10 @@ inline ps::WorkflowInputDeclaration declaration(
 inline ps::OperationOutputTraits output(const ps::SchemaTemplate& schema) {
   ps::OperationOutputTraits output;
   output.key = "value";
-  output.output_schema.kind = ps::OperationPortKind::Result;
+
   output.output_schema.result_schema_id = std::string(schema.id);
   output.output_schema.result_schema_version = schema.version;
   output.result_schema = schema;
-  output.region_rule = ps::OperationRegionRule::Tiled;
   output.continuation_bytes = 1;
   output.maximum_dependency_stages = 4;
   return output;

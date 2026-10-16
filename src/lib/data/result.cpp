@@ -23,7 +23,7 @@
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
-#include "data/value_validation.hpp"
+#include "data/tensor_validation.hpp"
 #include "photospider/core/checked_math.hpp"
 
 namespace ps {
@@ -43,13 +43,14 @@ Result<ResourceVector<ResultRef::CacheStorage>> ResultRef::cache_storage(
   std::set<const void*, std::less<const void*>, ResourceAllocator<const void*>>
       owners;
   pending.push_back(*this);
-  auto add = [&](const void* owner, std::uint64_t bytes,
-                 bool native = false) -> Status {
+  auto add = [&](const std::shared_ptr<const CpuStorage>& storage,
+                 std::uint64_t bytes, bool native = false) -> Status {
     auto charged = work(1);
     if (!charged.ok())
       return charged;
-    if (bytes && owners.insert(owner).second)
-      answer.push_back({owner, bytes, native});
+    if (bytes && owners.insert(storage.get()).second)
+      answer.push_back(
+          {storage.get(), bytes, native, storage->weak_from_this()});
     return Status::success();
   };
   while (!pending.empty()) {
@@ -64,37 +65,12 @@ Result<ResourceVector<ResultRef::CacheStorage>> ResultRef::cache_storage(
     const auto& source = *object.impl_;
     if (require_complete && (!source.complete || !source.status().ok()))
       return Answer(Status{ErrorCode::NotFound, {}});
-    for (std::size_t field = 0; field < source.schema.fields.size(); ++field) {
-      const auto& storage = source.fields[field].storage;
-      if (!storage)
-        continue;
-      for (const auto& chunk : storage->chunks) {
-        auto status = add(chunk.bytes.get(), chunk.bytes->capacity());
-        if (!status.ok())
-          return Answer(status);
-      }
-    }
+
     for (std::size_t slot = 0; slot < source.schema.tensors.size(); ++slot) {
       const auto& tensor = source.tensors[slot];
-      for (const auto& backing : tensor.backing) {
-        auto status =
-            add(backing.image.owner_token(), backing.image.backed_bytes());
-        if (!status.ok())
-          return Answer(status);
-      }
-      for (const auto& view : tensor.views) {
-        auto status =
-            add(view.backing.owner_token(), view.backing.backed_bytes());
-        if (!status.ok())
-          return Answer(status);
-        auto owners_work = work(view.owners.size());
-        if (!owners_work.ok())
-          return Answer(owners_work);
-        pending.insert(pending.end(), view.owners.begin(), view.owners.end());
-      }
-      for (const auto& affine : tensor.affine) {
+      for (const auto& affine : tensor.tensor.fragments()) {
         const auto& storage = affine.storage();
-        auto status = add(storage.get(), storage->capacity(),
+        auto status = add(storage, storage->capacity(),
                           storage->native_owner_ != nullptr);
         if (!status.ok())
           return Answer(status);
@@ -133,19 +109,6 @@ Result<ResultRef> ResultRef::rebind_cached(
   auto charged = work(1 + impl_->schema.canonical_size() + association.size());
   if (!charged.ok())
     return Result<ResultRef>(charged);
-  std::uint64_t nested = 0;
-  for (const auto& image : impl_->tensors) {
-    for (const auto& view : image.views)
-      nested += view.region.rank() * sizeof(RegionDimension);
-    for (const auto& affine : image.affine) {
-      nested += affine.descriptor().shape.size() * sizeof(std::uint64_t) +
-                affine.region().rank() * sizeof(RegionDimension) +
-                affine.layout().byte_strides.size() * sizeof(std::int64_t);
-    }
-  }
-  auto admitted = impl_->budget.reserve(ResourceCapacity::host(nested, nested));
-  if (!admitted.ok())
-    return Result<ResultRef>(admitted.status());
   auto started = ResultBuilder::start(
       impl_->budget, impl_->schema, scope, impl_->limits,
       std::vector<std::uint64_t>(association.begin(), association.end()), 128);
@@ -153,9 +116,8 @@ Result<ResultRef> ResultRef::rebind_cached(
     return Result<ResultRef>(started.status());
   auto builder = started.take_value();
   auto target = builder.reference().impl_;
-  target->cache_metadata = admitted.take_value();
-  target->fields = impl_->fields;
   target->tensors = impl_->tensors;
+  target->storage_owners = impl_->storage_owners;
   target->image_budget = impl_->image_budget;
   target->bytes = impl_->bytes;
   lock.unlock();

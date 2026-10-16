@@ -20,6 +20,7 @@
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/ops/errors.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -70,10 +71,9 @@ Result<OperationPreparation> prepare(
           : 3;
   if (inputs.size() != (rational ? 5U : 3U))
     return Answer(mismatch("color-ramp input count mismatch"));
-  std::vector<ValueDescriptor> descriptors;
+  std::vector<TensorDescriptor> descriptors;
   for (std::size_t port = 0; port < inputs.size(); ++port) {
     if (!inputs[port].result_schema ||
-        !inputs[port].result_schema->fields.empty() ||
         inputs[port].result_schema->tensors.size() != 1)
       return Answer(mismatch("color-ramp requires one tensor per Result"));
     const auto& tensor = inputs[port].result_schema->tensors[0];
@@ -454,7 +454,6 @@ OperationDefinition operation(const std::string& name, ColorModel model,
   traits.input_count = hue == ColorHueUnit::RationalPi ? 5 : 3;
   traits.input_schema.resize(traits.input_count);
   for (unsigned port = 0; port < traits.input_count; ++port) {
-    traits.input_schema[port].kind = OperationPortKind::Result;
     traits.input_schema[port].element_type_mask = port < 3 ? 12 : 2;
   }
   traits.requires_metadata_specialization = true;
@@ -483,7 +482,7 @@ OperationDefinition operation(const std::string& name, ColorModel model,
                ? ResultContinuation::make<RampResultProgram<true>>(allocator)
                : ResultContinuation::make<RampResultProgram<false>>(allocator);
   };
-  return result;
+  return sdk::with_whole_stage(std::move(result), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_color_ramps(OperationRegistry* registry) {

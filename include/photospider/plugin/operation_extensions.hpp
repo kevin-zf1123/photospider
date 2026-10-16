@@ -36,6 +36,8 @@ struct ValidationPreparation final {
   const ResourceSet& resources;
   bool output = false;
   std::uint32_t port = 0;
+  /** @brief Prepared stage ordinal, or UINT32_MAX for an ordinary port. */
+  std::uint32_t shared_stage = UINT32_MAX;
 };
 
 /** @brief Synchronous host-granted read capabilities for one validation call.
@@ -56,13 +58,8 @@ struct ValidationContext final {
   const Footprint* samples = nullptr;
   std::function<Status(std::uint64_t)> consume;
   std::function<const Footprint*(std::uint32_t)> tensor_coverage;
-  std::function<Result<std::pair<std::uint64_t, std::uint64_t>>(std::uint32_t)>
-      field_range;
   std::function<Result<ResultTensorReadWindow>(std::uint32_t, const Region&)>
       acquire_tensor;
-  std::function<Result<std::shared_ptr<const CpuStorage>>(
-      std::uint32_t, std::uint64_t, std::uint64_t)>
-      read_field;
 };
 
 /** @brief Immutable, reentrant validation implementation owned by a registry.

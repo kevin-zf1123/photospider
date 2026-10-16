@@ -40,7 +40,8 @@ struct Program {
       requested = true;
       ResultProgramNeed need;
       for (unsigned port = 0; port < (mode == 3 ? 2U : 1U); ++port)
-        need.tiles.push_back({port, true, false, {}});
+        need.tiles.push_back(
+            {port, 0, false, take(TileSet::range(phase.resources, 0, 1))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     const auto active = ++control->active;
@@ -147,11 +148,9 @@ std::shared_ptr<OperationRegistry> registry(Control* control) {
     operation.traits.input_count = mode == 3 ? 2 : mode ? 1 : 0;
     operation.traits.input_schema.resize(operation.traits.input_count);
     for (auto& input : operation.traits.input_schema) {
-      input.kind = OperationPortKind::Result;
       input.tensor_key = "number";
     }
     operation.traits.outputs = {multi_result::output("value")};
-    operation.traits.outputs[0].region_rule = OperationRegionRule::Whole;
     operation.start_result = [control, mode](const auto&,
                                              const auto& allocator) {
       return ResultContinuation::make<Program>(allocator, control, mode);

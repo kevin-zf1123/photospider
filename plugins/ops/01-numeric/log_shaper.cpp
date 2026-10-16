@@ -11,8 +11,9 @@
 
 #include "01-numeric/exact_shaper.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/core/resource_allocator.hpp"
 #include "common/registry.hpp"
+#include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -92,7 +93,6 @@ OperationDefinition operation(const std::string& key, bool inverse,
   traits.input_count = 3;
   traits.input_schema.resize(3);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = 12;
   }
   numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
@@ -110,12 +110,11 @@ OperationDefinition operation(const std::string& key, bool inverse,
     if (inputs.size() != 3)
       return Answer(mismatch("shaper requires three Result inputs"));
     for (const auto& input : inputs)
-      if (!input.result_schema || !input.result_schema->fields.empty() ||
-          input.result_schema->tensors.size() != 1)
+      if (!input.result_schema || input.result_schema->tensors.size() != 1)
         return Answer(mismatch("shaper requires one tensor per Result"));
     const auto& tensor = inputs[0].result_schema->tensors[0];
-    const ValueDescriptor first{tensor.descriptor.element_type,
-                                tensor.sample_shape()};
+    const TensorDescriptor first{tensor.descriptor.element_type,
+                                 tensor.sample_shape()};
     if (first.shape.empty() || first.shape.size() > 8)
       return Answer(mismatch("shaper requires rank-1..8 input and two bounds"));
     const auto type = first.element_type;
@@ -148,7 +147,7 @@ OperationDefinition operation(const std::string& key, bool inverse,
   result.start_result = [](const auto&, const auto& allocator) {
     return ResultContinuation::make<ShaperProgram>(allocator);
   };
-  return result;
+  return sdk::with_whole_stage(std::move(result), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_log_shapers(OperationRegistry* registry) {

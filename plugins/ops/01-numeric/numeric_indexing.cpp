@@ -19,6 +19,7 @@
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -32,7 +33,7 @@ T taken(Result<T> value) {
   checked(value.status());
   return value.take_value();
 }
-void shape_valid(const ValueDescriptor& descriptor) {
+void shape_valid(const TensorDescriptor& descriptor) {
   std::uint64_t count = 1;
   if (descriptor.shape.empty() || descriptor.shape.size() > 8)
     throw Status{ErrorCode::TypeMismatch,
@@ -63,7 +64,7 @@ struct ConcatenateKernel final {
     const auto& target = phase.query.output.result_schema->tensors[0];
     const auto shape = target.sample_shape();
     const auto rank = shape.size();
-    const auto width = Value::element_size(target.descriptor.element_type);
+    const auto width = TensorSpan::element_size(target.descriptor.element_type);
     const auto axis = static_axis(phase.query.parameters, rank);
     const auto ports = phase.query.inputs.size();
     std::array<uint64_t, 257> prefixes{};
@@ -169,8 +170,8 @@ struct ConcatenateKernel final {
     for (uint32_t port = 0; port < ports; ++port)
       readers.emplace_back(phase.tensors->at({port, 0}),
                            phase.query.cancellation);
-    return builder.publish_tensor_kernel(
-        0, Region::whole(shape),
+    return sdk::publish_dense_tensor(
+        phase, builder, 0, Region::whole(shape),
         [&](const auto& writers) {
           return math_callback(phase, [&]() -> Status {
             if (writers.size() != 1)
@@ -368,7 +369,7 @@ struct IndexState final {
     resolve_indices();
     const auto& target = phase.query.output.result_schema->tensors[0];
     const auto shape = target.sample_shape();
-    const auto width = Value::element_size(target.descriptor.element_type);
+    const auto width = TensorSpan::element_size(target.descriptor.element_type);
     const auto count = taken(target.sample_count());
     numeric_ops::MathTensorWriter writer(writers[0]);
     std::vector<uint64_t> coordinate(shape.size(), 0);
@@ -425,7 +426,6 @@ OperationDefinition index_operation(const std::string& key, IndexKind kind,
   traits.input_count = kind == IndexKind::Gather ? 2 : 3;
   traits.input_schema.resize(traits.input_count);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = 15;
   }
   traits.input_schema[1].element_type_mask = 0;
@@ -443,7 +443,7 @@ OperationDefinition index_operation(const std::string& key, IndexKind kind,
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
     try {
       checked(numeric_ops::sequence_profile_available(profile));
-      std::vector<ValueDescriptor> descriptors;
+      std::vector<TensorDescriptor> descriptors;
       for (const auto& input : inputs) {
         const auto& tensor = input.result_schema->tensors[0];
         descriptors.push_back(
@@ -469,9 +469,9 @@ OperationDefinition index_operation(const std::string& key, IndexKind kind,
             FailureReason::None,
             {FailureOrigin::Schema, FailureScope::Unspecified}});
       OperationOutputSpecialization result;
-      ValueDescriptor descriptor{source.element_type, kind == IndexKind::Gather
-                                                          ? output_shape
-                                                          : source.shape};
+      TensorDescriptor descriptor{source.element_type, kind == IndexKind::Gather
+                                                           ? output_shape
+                                                           : source.shape};
       shape_valid(descriptor);
       result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
           numeric_ops::numeric_tensor_schema(descriptor.element_type,
@@ -485,7 +485,7 @@ OperationDefinition index_operation(const std::string& key, IndexKind kind,
   operation.start_result = [kind, profile](const auto&, const auto& allocator) {
     return ResultContinuation::make<IndexProgram>(allocator, kind, profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 OperationDefinition concatenate_operation(const std::string& key,
                                           SequenceProfile profile) {
@@ -500,7 +500,7 @@ OperationDefinition concatenate_operation(const std::string& key,
   traits.repeated_match = false;
   traits.requires_metadata_specialization = true;
   traits.input_schema.resize(1);
-  traits.input_schema[0].kind = OperationPortKind::Result;
+
   traits.input_schema[0].element_type_mask = 15;
   traits.parameter_schema = {{"axis", OperationParameterType::Int64},
                              {"layout", OperationParameterType::String}};
@@ -515,15 +515,15 @@ OperationDefinition concatenate_operation(const std::string& key,
     try {
       checked(numeric_ops::sequence_profile_available(profile));
       const auto& tensor = inputs[0].result_schema->tensors[0];
-      const ValueDescriptor first{tensor.descriptor.element_type,
-                                  tensor.sample_shape()};
+      const TensorDescriptor first{tensor.descriptor.element_type,
+                                   tensor.sample_shape()};
       const auto axis = static_axis(parameters, first.shape.size());
       auto descriptor = first;
       descriptor.shape[axis] = 0;
       for (const auto& metadata : inputs) {
         const auto& member = metadata.result_schema->tensors[0];
-        const ValueDescriptor input{member.descriptor.element_type,
-                                    member.sample_shape()};
+        const TensorDescriptor input{member.descriptor.element_type,
+                                     member.sample_shape()};
         shape_valid(input);
         bool match = input.element_type == first.element_type &&
                      input.shape.size() == first.shape.size();
@@ -556,7 +556,7 @@ OperationDefinition concatenate_operation(const std::string& key,
   operation.start_result = [profile](const auto&, const auto& allocator) {
     return ResultContinuation::make<ConcatenateProgram>(allocator, profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_numeric_indexing(OperationRegistry* registry) {

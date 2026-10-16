@@ -9,6 +9,7 @@
 #include <variant>
 #include <vector>
 
+#include "photospider/plugin/tile_helpers.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
@@ -33,9 +34,13 @@ struct TensorProgram {
     if (!requested && !demand.empty() && !phase.query.inputs.empty()) {
       requested = true;
       ResultProgramNeed need;
-      for (unsigned i = 0; i < phase.query.inputs.size(); ++i)
-        need.tiles.push_back(
-            {i, copy_samples && i == 0, !(copy_samples && i == 0), {}});
+      for (unsigned i = 0; i < phase.query.inputs.size(); ++i) {
+        if (copy_samples && i == 0)
+          need.tiles.push_back(take(sdk::tile_need_for_samples(
+              phase.resources, phase.query, i, 0, demand)));
+        else
+          need.tiles.push_back({i, 0, true, {}});
+      }
       return Result<ResultProgramPoll>(std::move(need));
     }
     const auto count = take(demand.element_count());
@@ -50,7 +55,7 @@ struct TensorProgram {
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
             : std::vector<std::uint64_t>{}));
-    const auto width = Value::element_size(spec.descriptor.element_type);
+    const auto width = TensorSpan::element_size(spec.descriptor.element_type);
     for (const auto& box : demand.boxes()) {
       const auto size = take(box.element_count());
       auto bytes = take(phase.allocator.allocate(size * width));
@@ -104,7 +109,7 @@ OperationDefinition copy_definition(const std::string& key,
   auto d = definition(key, output, true);
   d.traits.input_count = 1;
   OperationPortConstraint port;
-  port.kind = OperationPortKind::Result;
+
   port.element_type_mask = 12;
   d.traits.input_schema = {port};
   d.traits.requires_metadata_specialization = true;
@@ -240,7 +245,7 @@ int inference() {
   PS_CHECK(!compiler.compile(empty).ok());
   auto repeated = definition("test.repeated", multi_result::schema());
   repeated.traits.input_schema.resize(1);
-  repeated.traits.input_schema[0].kind = OperationPortKind::Result;
+
   repeated.traits.input_schema[0].rank = 2;
   repeated.traits.input_schema[0].element_type_mask = 12;
   repeated.traits.repeated_minimum = 1;
@@ -287,11 +292,8 @@ int inference() {
                 .ok());
   auto overflow_traits = resolved.value();
   auto& overflow_schema = *overflow_traits.outputs[0].result_schema;
-  overflow_schema.fields.push_back(
-      {"rows",
-       ElementType::Float64,
-       {ResultExtentKind::InputAxis, 1, 0, 0, 0, 1, UINT64_MAX},
-       {}});
+  overflow_schema.domain = {
+      {ResultExtentKind::InputAxis, 1, 0, 0, 1, UINT64_MAX}};
   PS_CHECK(infer_operation_output(overflow_traits, {field, field, field}, {})
                .status()
                .code == ErrorCode::ResourceExhausted);
@@ -450,7 +452,7 @@ int c_contract() {
     const auto& schema = *declaration.result_schema;
     const auto& tensor = schema.tensors[0];
     const auto length = tensor.descriptor.shape[0];
-    const auto width = Value::element_size(tensor.descriptor.element_type);
+    const auto width = TensorSpan::element_size(tensor.descriptor.element_type);
     const bool zero = layout == 2;
     const bool sparse = layout == 3;
     const auto stored = zero || sparse ? 1 : length;
@@ -465,9 +467,9 @@ int c_contract() {
                             : layout == 1 ? -static_cast<std::int64_t>(width)
                                           : static_cast<std::int64_t>(width)};
     auto backing =
-        Value::create(tensor.descriptor,
-                      sparse ? Region({{0, 1}}) : Region::whole({length}),
-                      strides, std::move(bytes))
+        TensorSpan::create(tensor.descriptor,
+                           sparse ? Region({{0, 1}}) : Region::whole({length}),
+                           strides, std::move(bytes))
             .take_value();
     auto builder =
         ResultBuilder::start(root, schema, "contract.source").take_value();
@@ -517,7 +519,7 @@ int c_contract() {
             PS_CHECK(number == (i == 0 ? 2 : -3));
             ResourceVector<TileChange> changes{
                 ResourceAllocator<TileChange>(root)};
-            changes.push_back({PlanWorkflowInput{i}, 0,
+            changes.push_back({PlanWorkflowInput{i}, 0, 0,
                                take(TileSet::from_indices(root, {0})), false});
             auto dirty = run.value().dependencies.dirty_units(changes);
             PS_CHECK(dirty.ok() && dirty.value().size() == 1);
@@ -525,7 +527,8 @@ int c_contract() {
             auto record = take(run.value().dependencies.tile_record({0, 0, 0}));
             PS_CHECK(record && record->inputs.size() == count);
             for (const auto& input : record->inputs)
-              PS_CHECK(input.whole && input.tiles.empty());
+              PS_CHECK(input.tensor_slot == 0 && input.tiles.size() == 1 &&
+                       input.tiles.contains(0));
           }
         }
       }
@@ -566,7 +569,7 @@ int c_contract() {
   ExecutionBindings half_bindings{
       {source(halves.inputs[0], .5, 0), source(halves.inputs[1], .5, 0)}};
   auto frozen = execution.freeze(half_plan.plan, half_bindings).take_value();
-  auto empty = execution.execute_fragments(frozen, {{"output", {false, {}}}});
+  auto empty = execution.execute_fragments(frozen, {{"output", {}}});
   PS_CHECK(empty.ok());
   const auto& empty_output = empty.value().results.at("output");
   auto empty_facts = empty_output.descriptor().take_value();
@@ -586,8 +589,8 @@ int c_contract() {
   auto huge_run = execution.execute(
       huge_plan.value().plan,
       {{source(huge.inputs[0], 2, 3), source(huge.inputs[1], -3, 3)}});
-  // Non-spatial inputs are Whole. A sparse prefix cannot authorize the
-  // missing remainder, even when the callback reads only the first sample.
+  // A partial source cannot satisfy the complete requested input tile,
+  // even when the callback reads only the first sample.
   PS_CHECK(!huge_run.ok() &&
            huge_run.status().code == ErrorCode::InvalidArgument);
   for (unsigned count : {0U, 5U}) {
@@ -619,9 +622,9 @@ int c_contract() {
 #ifdef PS_BAD_CONTRACT_1
   for (const auto* path :
        {PS_BAD_CONTRACT_1, PS_BAD_CONTRACT_2, PS_BAD_CONTRACT_3,
-        PS_BAD_CONTRACT_4, PS_BAD_CONTRACT_5, PS_BAD_CONTRACT_6,
-        PS_BAD_CONTRACT_7, PS_BAD_CONTRACT_8, PS_BAD_CONTRACT_9,
-        PS_BAD_CONTRACT_10, PS_BAD_CONTRACT_11, PS_BAD_CONTRACT_12}) {
+        PS_BAD_CONTRACT_5, PS_BAD_CONTRACT_6, PS_BAD_CONTRACT_7,
+        PS_BAD_CONTRACT_8, PS_BAD_CONTRACT_9, PS_BAD_CONTRACT_10,
+        PS_BAD_CONTRACT_11, PS_BAD_CONTRACT_12}) {
     OperationRegistry malformed;
     auto rejected = malformed.load_plugin(path);
     PS_CHECK(rejected.code == ErrorCode::InvalidArgument);

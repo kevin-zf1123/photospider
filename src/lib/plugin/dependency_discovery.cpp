@@ -26,7 +26,7 @@ Status visit_discovery_records(
     const std::function<Status(const GpuDiscoveryRecord&)>& visit) {
   if (limits.cancellation.cancelled())
     return {ErrorCode::Cancelled, {}};
-  const auto size = 16 + static_cast<std::uint64_t>(capacity) * 16;
+  const auto size = 16 + static_cast<std::uint64_t>(capacity) * 32;
   if (!visit || !capacity || capacity > 65536 || table.bytes().size() != size)
     return core_internal::invalid_argument("invalid GPU discovery allocation");
   const auto* bytes = table.bytes().data();
@@ -47,12 +47,17 @@ Status visit_discovery_records(
       if (!charged.ok())
         return charged;
     }
-    const auto* row = bytes + 16 + i * 16;
+    const auto* row = bytes + 16 + i * 32;
     GpuDiscoveryRecord record;
     record.input = word(row, 4);
     record.kind = word(row + 4, 4);
-    record.tile = word(row + 8, 8);
-    if (record.kind > 2 || (record.kind && record.tile))
+    record.tensor_slot = word(row + 8, 4);
+    record.begin = word(row + 16, 8);
+    record.end = word(row + 24, 8);
+    if (word(row + 12, 4) || record.kind > 1 ||
+        (record.kind == 0 && record.begin >= record.end) ||
+        (record.kind == 1 &&
+         (record.tensor_slot || record.begin || record.end)))
       return core_internal::invalid_argument("invalid GPU discovery record");
     auto status = visit(record);
     if (!status.ok())
@@ -69,15 +74,14 @@ Result<ResourceVector<TileNeed>> decode_result_discovery(
   if (!metadata_entries)
     return Answer(core_internal::invalid_argument("missing discovery counter"));
   struct Group {
-    bool whole = false;
-    ResourceVector<TileIndex> tiles;
+    ResourceVector<TileInterval> tiles;
     explicit Group(const ResourceBudget& root)
-        : tiles(ResourceAllocator<TileIndex>(root)) {}
+        : tiles(ResourceAllocator<TileInterval>(root)) {}
   };
-  using Entry = std::pair<const std::uint32_t, Group>;
-  std::map<std::uint32_t, Group, std::less<std::uint32_t>,
-           ResourceAllocator<Entry>>
-      groups{std::less<std::uint32_t>{}, ResourceAllocator<Entry>(resources)};
+  using Key = std::pair<std::uint32_t, std::uint32_t>;
+  using Entry = std::pair<const Key, Group>;
+  std::map<Key, Group, std::less<Key>, ResourceAllocator<Entry>> groups{
+      std::less<Key>{}, ResourceAllocator<Entry>(resources)};
   auto visited = visit_discovery_records(
       table, capacity, candidates, limits, [&](const GpuDiscoveryRecord& row) {
         if (row.input >= query.inputs.size() ||
@@ -85,20 +89,22 @@ Result<ResourceVector<TileNeed>> decode_result_discovery(
           return core_internal::invalid_argument(
               "invalid Result GPU discovery input");
         if (row.kind == 0) {
-          auto grid = TileGrid::from_schema(
-              *query.inputs[row.input].result_schema, query.tile_extent);
+          auto grid =
+              TileGrid::from_schema(*query.inputs[row.input].result_schema,
+                                    query.tile_extent, row.tensor_slot);
           if (!grid.ok())
             return grid.status();
-          if (!grid.value() || row.tile >= grid.value()->tile_count())
+          if (!grid.value() || row.end > grid.value()->tile_count())
             return core_internal::invalid_argument(
                 "GPU discovery tile outside compiled input grid");
         }
-        auto found = groups.find(row.input);
+        auto found = groups.find({row.input, row.tensor_slot});
         if (found == groups.end())
-          found = groups.emplace(row.input, Group(resources)).first;
-        found->second.whole |= row.kind == 1;
+          found =
+              groups.emplace(Key{row.input, row.tensor_slot}, Group(resources))
+                  .first;
         if (row.kind == 0)
-          found->second.tiles.push_back(row.tile);
+          found->second.tiles.push_back({row.begin, row.end});
         return Status::success();
       });
   if (!visited.ok())
@@ -117,18 +123,18 @@ Result<ResourceVector<TileNeed>> decode_result_discovery(
       if (!charged.ok())
         return Answer(charged);
     }
-    auto tiles = TileSet::from_indices(resources, group.second.tiles.data(),
-                                       group.second.tiles.size());
+    auto tiles = TileSet::from_intervals(resources, group.second.tiles.data(),
+                                         group.second.tiles.size());
     if (!tiles.ok())
       return Answer(tiles.status());
-    const auto weight = group.second.whole ? 1 : 1 + tiles.value().size();
+    const auto weight = 1 + tiles.value().intervals().size();
     if (!core_internal::can_add(entries, weight, limits.maximum_boxes))
       return Answer(
           Status{ErrorCode::ResourceExhausted, "GPU discovery metadata limit"});
     entries += weight;
-    const bool descriptor = !group.second.whole && tiles.value().empty();
-    result.push_back({group.first, group.second.whole, descriptor,
-                      group.second.whole ? TileSet{} : tiles.take_value()});
+    const bool descriptor = tiles.value().empty();
+    result.push_back({group.first.first, group.first.second, descriptor,
+                      tiles.take_value()});
   }
   if (limits.cancellation.cancelled())
     return Answer(Status{ErrorCode::Cancelled, {}});

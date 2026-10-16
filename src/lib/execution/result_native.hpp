@@ -8,6 +8,7 @@
 #include <mutex>
 #include <utility>
 
+#include "core/callback_environment.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_window_access.hpp"
 #include "photospider/core/checked_math.hpp"
@@ -20,8 +21,8 @@ namespace ps::execution_internal {
 class ResultNativeScope final {
  public:
   using CacheWork = std::function<Status(std::uint64_t)>;
-  using Upload = std::function<Result<std::pair<Value, std::uint64_t>>(
-      const Value&, const CacheWork&)>;
+  using Upload = std::function<Result<std::pair<TensorSpan, std::uint64_t>>(
+      const TensorSpan&, const CacheWork&)>;
   ResultNativeScope(const BufferAllocator& allocator, const Upload& upload,
                     const ResourceBudget& resources, FootprintLimits limits,
                     std::uint32_t maximum_requests,
@@ -67,44 +68,45 @@ class ResultNativeScope final {
     ++host_accesses;
     return Status::success();
   }
-  static Result<Value> input(const ResultTensorReadWindow& window,
-                             const std::function<Status(std::uint64_t)>& work,
-                             const CancellationToken& cancellation) {
+  static Result<TensorSpan> input(
+      const ResultTensorReadWindow& window,
+      const std::function<Status(std::uint64_t)>& work,
+      const CancellationToken& cancellation) {
     if (!active_ || !active_->upload_)
-      return Result<Value>(Status{ErrorCode::BackendUnavailable, {}});
+      return Result<TensorSpan>(Status{ErrorCode::BackendUnavailable, {}});
     auto charged = work(1 + window.region().rank());
     if (!charged.ok())
-      return Result<Value>(charged);
+      return Result<TensorSpan>(charged);
     auto source = ResultWindowAccess::affine(window);
     if (!source.ok() && source.status().code != ErrorCode::NotFound)
       return source;
     if (!source.ok()) {
-      const ValueDescriptor descriptor{window.spec().descriptor.element_type,
-                                       window.spec().sample_shape()};
+      const TensorDescriptor descriptor{window.spec().descriptor.element_type,
+                                        window.spec().sample_shape()};
       const auto count = window.region().element_count();
-      const auto width = Value::element_size(descriptor.element_type);
+      const auto width = TensorSpan::element_size(descriptor.element_type);
       if (!count.ok() || !core_internal::can_multiply(count.value(), width))
-        return Result<Value>(Status{ErrorCode::ResourceExhausted, {}});
+        return Result<TensorSpan>(Status{ErrorCode::ResourceExhausted, {}});
       auto lookup = ResultWindowAccess::read_work(window);
       if (!lookup.ok())
-        return Result<Value>(lookup.status());
+        return Result<TensorSpan>(lookup.status());
       std::uint64_t per_sample = 0;
       if (!core_internal::checked_add(
               lookup.value(), width + window.region().rank(), &per_sample) ||
           !core_internal::can_multiply(count.value(), per_sample))
-        return Result<Value>(Status{ErrorCode::ResourceExhausted, {}});
+        return Result<TensorSpan>(Status{ErrorCode::ResourceExhausted, {}});
       charged = work(count.value() * per_sample);
       if (!charged.ok())
-        return Result<Value>(charged);
-      auto allocated = MutableValue::allocate(descriptor, window.region(),
+        return Result<TensorSpan>(charged);
+      auto allocated = TensorWriter::allocate(descriptor, window.region(),
                                               active_->allocator_);
       if (!allocated.ok())
-        return Result<Value>(allocated.status());
+        return Result<TensorSpan>(allocated.status());
       auto writer = allocated.take_value();
       auto samples =
           Footprint::from_regions(descriptor.shape, {window.region()});
       if (!samples.ok())
-        return Result<Value>(samples.status());
+        return Result<TensorSpan>(samples.status());
       std::uint64_t offset = 0;
       auto status = samples.value().visit(
           [&](const auto& at) {
@@ -120,7 +122,7 @@ class ResultNativeScope final {
           },
           count.value(), cancellation);
       if (!status.ok())
-        return Result<Value>(status);
+        return Result<TensorSpan>(status);
       source = std::move(writer).publish();
       ++active_->transfers;
       active_->transferred_bytes += count.value() * width;
@@ -129,12 +131,12 @@ class ResultNativeScope final {
       return source;
     auto uploaded = active_->upload_(source.value(), active_->cache_work_);
     if (!uploaded.ok())
-      return Result<Value>(uploaded.status());
+      return Result<TensorSpan>(uploaded.status());
     if (uploaded.value().second) {
       ++active_->transfers;
       active_->transferred_bytes += uploaded.value().second;
     }
-    return Result<Value>(std::move(uploaded.value().first));
+    return Result<TensorSpan>(std::move(uploaded.value().first));
   }
   static Result<MutableBuffer> output(std::uint64_t bytes) {
     if (!active_ || !active_->upload_)
@@ -157,7 +159,7 @@ class ResultNativeScope final {
       return Answer(
           Status{ErrorCode::ResourceExhausted, "GPU discovery table limit"});
     const auto& charge = work;
-    const auto bytes = 16 + std::uint64_t{capacity} * 16;
+    const auto bytes = 16 + std::uint64_t{capacity} * 32;
     auto status = charge(candidates);
     if (status.ok())
       status = charge(2 * bytes);
@@ -180,7 +182,8 @@ class ResultNativeScope final {
     } scope{active_->discovering_};
     active_->discovering_ = true;
     try {
-      status = compute({buffer.data(), bytes, capacity});
+      status = core_internal::invoke_callback(
+          [&] { return compute({buffer.data(), bytes, capacity}); });
     } catch (...) {
       static_cast<void>(std::move(buffer).freeze());
       throw;

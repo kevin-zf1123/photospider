@@ -4,8 +4,10 @@
 #include <functional>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <new>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -29,19 +31,17 @@ bool same_input(const PlanInput& a, const PlanInput& b) {
 }
 Result<TileRecords::ProducerUnits> producer_units(const ExecutionPlan& plan,
                                                   const PlanStepInput& input,
-                                                  std::uint32_t output) {
+                                                  std::uint32_t output,
+                                                  std::uint32_t slot) {
   if (input.step_index >= plan.steps().size())
     return Result<TileRecords::ProducerUnits>(mismatch());
   const auto& step = plan.steps()[input.step_index];
-  if (step.output_index != output || !step.output_result_schema)
+  if (step.output_index != output || slot >= step.tile_grids.size() ||
+      !step.output_result_schema)
     return Result<TileRecords::ProducerUnits>(mismatch());
-  const auto& fields = step.output_result_schema->fields;
-  const bool dynamic =
-      std::any_of(fields.begin(), fields.end(), [](const auto& field) {
-        return field.rows.kind == ResultExtentKind::RuntimeCount;
-      });
-  return Result<TileRecords::ProducerUnits>(TileRecords::ProducerUnits{
-      step.tiled ? step.tile_grid->tile_count() : 1, dynamic});
+
+  return Result<TileRecords::ProducerUnits>(
+      TileRecords::ProducerUnits{step.tile_grids[slot].tile_count()});
 }
 }  // namespace
 Result<std::shared_ptr<const TileCacheSnapshot>> TileCacheSnapshot::capture(
@@ -66,18 +66,20 @@ Result<std::shared_ptr<const TileCacheSnapshot>> TileCacheSnapshot::capture(
   auto root_record = std::allocate_shared<TileRecord>(
       ResourceAllocator<TileRecord>(root), root);
   root_record->unit = task.unit;
-  root_record->computed_descriptor = task.computed_descriptor;
   for (const auto& dependency : task.inputs) {
-    status = account(dependency.tiles.size());
+    status = account(dependency.tiles.intervals().size());
     if (status.ok())
       status = root_record->include(dependency, root);
     if (!status.ok())
       return Answer(status);
   }
+  root_record->shared.insert(root_record->shared.end(), task.shared.begin(),
+                             task.shared.end());
   auto ancestry = table.capture_ancestry(
       task,
-      [&](const PlanStepInput& input, std::uint32_t output) {
-        return producer_units(plan, input, output);
+      [&](const PlanStepInput& input, std::uint32_t output,
+          std::uint32_t slot) {
+        return producer_units(plan, input, output, slot);
       },
       charge);
   if (!ancestry.ok())
@@ -85,23 +87,36 @@ Result<std::shared_ptr<const TileCacheSnapshot>> TileCacheSnapshot::capture(
   auto closure = ancestry.take_value();
   closure.insert(closure.begin(), std::move(root_record));
   TileRecord source_union(root);
-  for (const auto& record : closure) {
+  using Pending = std::pair<std::shared_ptr<const TileRecord>,
+                            std::shared_ptr<const TileEvidence>>;
+  ResourceVector<Pending> pending{ResourceAllocator<Pending>(root)};
+  for (auto it = closure.rbegin(); it != closure.rend(); ++it)
+    pending.emplace_back(*it, nullptr);
+  std::set<std::uint64_t, std::less<std::uint64_t>,
+           ResourceAllocator<std::uint64_t>>
+      seen{std::less<std::uint64_t>{}, ResourceAllocator<std::uint64_t>(root)};
+  while (!pending.empty()) {
+    auto entry = std::move(pending.back());
+    pending.pop_back();
+    const auto record = entry.first;
+
     if (record->unit.step >= plan.steps().size() ||
         record->unit.step >= contracts.size())
       return Answer(mismatch());
     const auto& step = plan.steps()[record->unit.step];
-    status = account(1 + record->inputs.size() +
+    status = account(1 + record->inputs.size() + record->shared.size() +
                      contracts[record->unit.step].size());
     if (!status.ok())
       return Answer(status);
-    TileCacheRecord routed{record,
-                           ResourceString(contracts[record->unit.step],
-                                          ResourceAllocator<char>(root)),
-                           ResourceVector<TileCacheRoute>(
-                               ResourceAllocator<TileCacheRoute>(root))};
+    TileCacheRecord routed{
+        record,
+        ResourceString(contracts[record->unit.step],
+                       ResourceAllocator<char>(root)),
+        ResourceVector<TileCacheRoute>(ResourceAllocator<TileCacheRoute>(root)),
+        entry.second};
     const auto& projection = step.traits.outputs[0].input_indices;
     for (const auto& dependency : record->inputs) {
-      status = account(1 + dependency.tiles.size());
+      status = account(1 + dependency.tiles.intervals().size());
       if (status.ok())
         status = charge(step.inputs.size() *
                         (1 + (projection ? projection->size() : 0)));
@@ -147,17 +162,38 @@ Result<std::shared_ptr<const TileCacheSnapshot>> TileCacheSnapshot::capture(
       routed.routes.push_back(std::move(route));
     }
     result->records.push_back(std::move(routed));
+    for (auto it = record->shared.rbegin(); it != record->shared.rend(); ++it) {
+      const auto& node = *it;
+      if (!node)
+        return Answer(mismatch());
+      status = account(1);
+      if (!status.ok())
+        return Answer(status);
+      if (!seen.insert(node->identity).second)
+        continue;
+      auto pseudo = std::allocate_shared<TileRecord>(
+          ResourceAllocator<TileRecord>(root), root);
+      pseudo->unit = node->owner;
+      for (const auto& dependency : node->inputs) {
+        status = pseudo->include(dependency, root);
+        if (!status.ok())
+          return Answer(status);
+      }
+      pseudo->shared.insert(pseudo->shared.end(), node->inherited.begin(),
+                            node->inherited.end());
+      pending.emplace_back(std::move(pseudo), node);
+    }
   }
   for (const auto& source : source_union.inputs) {
     const auto input =
         std::get<PlanWorkflowInput>(source.producer).declaration_index;
     const auto& name = plan.input_declarations()[input].name;
-    status = account(1 + name.size() + source.tiles.size());
+    status = account(1 + name.size() + source.tiles.intervals().size());
     if (!status.ok())
       return Answer(status);
     result->sources.push_back(
-        {ResourceString(name, ResourceAllocator<char>(root)), source.whole,
-         source.tiles});
+        {ResourceString(name, ResourceAllocator<char>(root)),
+         source.tensor_slot, source.tiles});
   }
   // Names, not declaration positions, define portable source ordering.
   std::uint64_t levels = 1;
@@ -173,7 +209,10 @@ Result<std::shared_ptr<const TileCacheSnapshot>> TileCacheSnapshot::capture(
   if (!status.ok())
     return Answer(status);
   std::sort(result->sources.begin(), result->sources.end(),
-            [](const auto& a, const auto& b) { return a.name < b.name; });
+            [](const auto& a, const auto& b) {
+              return std::tie(a.name, a.tensor_slot) <
+                     std::tie(b.name, b.tensor_slot);
+            });
   return Answer(std::move(result));
 } catch (const std::bad_alloc&) {
   return Result<std::shared_ptr<const TileCacheSnapshot>>(
@@ -185,6 +224,7 @@ Result<ReboundTileCache> TileCacheSnapshot::rebind(
     const std::function<Status(std::uint64_t)>& charge) const try {
   using Answer = Result<ReboundTileCache>;
   if (records.empty() || task.output != records[0].record->unit.output ||
+      task.tensor_slot != records[0].record->unit.tensor_slot ||
       task.tile != records[0].record->unit.tile)
     return Answer(mismatch());
   using Entry = std::pair<const std::size_t, std::size_t>;
@@ -197,6 +237,15 @@ Result<ReboundTileCache> TileCacheSnapshot::rebind(
   std::map<TileUnit, std::size_t, std::less<TileUnit>,
            ResourceAllocator<UnitEntry>>
       units_seen{std::less<TileUnit>{}, ResourceAllocator<UnitEntry>(root)};
+  using EvidenceEntry =
+      std::pair<const std::uint64_t, std::shared_ptr<TileEvidence>>;
+  std::map<std::uint64_t, std::shared_ptr<TileEvidence>,
+           std::less<std::uint64_t>, ResourceAllocator<EvidenceEntry>>
+      evidence{std::less<std::uint64_t>{},
+               ResourceAllocator<EvidenceEntry>(root)};
+  ResourceVector<std::pair<std::shared_ptr<TileRecord>, const TileRecord*>>
+      pending_records{ResourceAllocator<
+          std::pair<std::shared_ptr<TileRecord>, const TileRecord*>>(root)};
   for (std::size_t position = 0; position < records.size(); ++position) {
     const auto& saved = records[position];
     auto status =
@@ -211,23 +260,28 @@ Result<ReboundTileCache> TileCacheSnapshot::rebind(
         saved.routes.size() != saved.record->inputs.size())
       return Answer(mismatch());
     const auto current = found->second;
+    // Shared proof identities retain their compiled routing context. A cache
+    // candidate with reordered contexts misses instead of aliasing another DAG.
+    if (saved.evidence && current != saved.record->unit.step)
+      return Answer(mismatch());
+
     const auto& step = plan.steps()[current];
     auto units =
-        producer_units(plan, PlanStepInput{current}, saved.record->unit.output);
-    if (!units.ok() || saved.record->unit.tile >= units.value().count)
+        producer_units(plan, PlanStepInput{current}, saved.record->unit.output,
+                       saved.record->unit.tensor_slot);
+    if (!saved.evidence &&
+        (!units.ok() || saved.record->unit.tile >= units.value().count))
       return Answer(mismatch());
     auto record = std::allocate_shared<TileRecord>(
         ResourceAllocator<TileRecord>(root), root);
     record->unit = {current, saved.record->unit.output,
-                    saved.record->unit.tile};
-    if (saved.record->computed_descriptor != units.value().computed_descriptor)
-      return Answer(mismatch());
-    record->computed_descriptor = units.value().computed_descriptor;
+                    saved.record->unit.tensor_slot, saved.record->unit.tile};
     for (std::size_t i = 0; i < saved.routes.size(); ++i) {
       const auto& dependency = saved.record->inputs[i];
       const auto& route = saved.routes[i];
-      status = charge(1 + route.ports.size() + route.contract.size() +
-                      route.source.size() + dependency.tiles.size());
+      status =
+          charge(1 + route.ports.size() + route.contract.size() +
+                 route.source.size() + dependency.tiles.intervals().size());
       if (!status.ok())
         return Answer(status);
       std::optional<PlanInput> target;
@@ -242,11 +296,13 @@ Result<ReboundTileCache> TileCacheSnapshot::rebind(
       }
       if (!target)
         return Answer(mismatch());
+      if (saved.evidence && !same_input(*target, dependency.producer))
+        return Answer(mismatch());
       if (const auto* producer = std::get_if<PlanStepInput>(&*target)) {
         const auto previous =
             std::get<PlanStepInput>(dependency.producer).step_index;
-        auto count =
-            producer_units(plan, *producer, dependency.producer_output);
+        auto count = producer_units(plan, *producer, dependency.producer_output,
+                                    dependency.tensor_slot);
         if (!count.ok() || producer->step_index >= contracts.size() ||
             std::string_view(contracts[producer->step_index]) !=
                 std::string_view(route.contract) ||
@@ -264,8 +320,8 @@ Result<ReboundTileCache> TileCacheSnapshot::rebind(
                 std::string_view(route.source))
           return Answer(mismatch());
         auto grid = TileGrid::from_schema(
-            *plan.input_declarations()[input].result_schema,
-            plan.tile_extent());
+            *plan.input_declarations()[input].result_schema, plan.tile_extent(),
+            dependency.tensor_slot);
         if (!grid.ok() ||
             (!dependency.tiles.empty() &&
              (!grid.value() || *std::prev(dependency.tiles.end()) >=
@@ -273,11 +329,21 @@ Result<ReboundTileCache> TileCacheSnapshot::rebind(
           return Answer(mismatch());
       }
       status = record->include({*target, dependency.producer_output,
-                                dependency.whole, dependency.tiles},
+                                dependency.tensor_slot, dependency.tiles},
                                root);
       if (!status.ok())
         return Answer(status);
     }
+    if (saved.evidence) {
+      auto node = std::allocate_shared<TileEvidence>(
+          ResourceAllocator<TileEvidence>(root), root);
+      node->identity = saved.evidence->identity;
+      node->owner = record->unit;
+      node->inputs = std::move(record->inputs);
+      evidence.emplace(node->identity, std::move(node));
+      continue;
+    }
+    pending_records.emplace_back(record, saved.record.get());
     status = charge(units_seen.size() + 1);
     if (!status.ok())
       return Answer(status);
@@ -285,8 +351,7 @@ Result<ReboundTileCache> TileCacheSnapshot::rebind(
     if (prior != units_seen.end()) {
       const auto& existing =
           prior->second ? *rebound.ancestry[prior->second - 1] : rebound.task;
-      if (record->computed_descriptor != existing.computed_descriptor ||
-          record->inputs.size() != existing.inputs.size())
+      if (record->inputs.size() != existing.inputs.size())
         return Answer(mismatch());
       if (!core_internal::can_multiply(record->inputs.size(),
                                        existing.inputs.size()))
@@ -299,12 +364,13 @@ Result<ReboundTileCache> TileCacheSnapshot::rebind(
             existing.inputs.begin(), existing.inputs.end(),
             [&](const auto& entry) {
               return same_input(entry.producer, dependency.producer) &&
-                     entry.producer_output == dependency.producer_output;
+                     entry.producer_output == dependency.producer_output &&
+                     entry.tensor_slot == dependency.tensor_slot;
             });
-        if (found_input == existing.inputs.end() ||
-            dependency.whole != found_input->whole)
+        if (found_input == existing.inputs.end())
           return Answer(mismatch());
-        status = charge(dependency.tiles.size() + found_input->tiles.size());
+        status = charge(dependency.tiles.intervals().size() +
+                        found_input->tiles.intervals().size());
         if (!status.ok())
           return Answer(status);
         if (dependency.tiles != found_input->tiles)
@@ -315,9 +381,33 @@ Result<ReboundTileCache> TileCacheSnapshot::rebind(
     units_seen.emplace(record->unit,
                        position ? rebound.ancestry.size() + 1 : 0);
     if (!position)
-      rebound.task = std::move(*record);
+      rebound.task = *record;
     else
       rebound.ancestry.push_back(std::move(record));
+  }
+  for (const auto& saved : records) {
+    if (!saved.evidence)
+      continue;
+    auto node = evidence.at(saved.evidence->identity);
+    for (const auto& child : saved.evidence->inherited) {
+      auto found = child ? evidence.find(child->identity) : evidence.end();
+      if (found == evidence.end())
+        return Answer(mismatch());
+      node->inherited.push_back(found->second);
+    }
+  }
+  for (const auto& entry : pending_records) {
+    auto& target =
+        entry.first->unit == rebound.task.unit ? rebound.task : *entry.first;
+    for (const auto& child : entry.second->shared) {
+      const auto found =
+          child ? evidence.find(child->identity) : evidence.end();
+      if (found == evidence.end())
+        return Answer(mismatch());
+      auto status = target.inherit(found->second, root);
+      if (!status.ok())
+        return Answer(status);
+    }
   }
   return Answer(std::move(rebound));
 } catch (const std::bad_alloc&) {

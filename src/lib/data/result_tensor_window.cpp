@@ -22,12 +22,95 @@
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
-#include "data/value_validation.hpp"
+#include "data/tensor_validation.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/data/result.hpp"
 
 namespace ps {
-Result<Value> ResultTensorReadWindow::affine_view() const {
+namespace {
+struct WindowWorkFailure {
+  Status status;
+};
+void window_tick(const ResourceBudget& root,
+                 const CancellationToken& cancellation,
+                 std::uint64_t count = 1) {
+  if (cancellation.cancelled())
+    throw WindowWorkFailure{Status{ErrorCode::Cancelled, {}}};
+  auto status = root.consume({count});
+  if (!status.ok())
+    throw WindowWorkFailure{std::move(status)};
+}
+}  // namespace
+Status execution_internal::ResultWindowAccess::index(
+    ResultTensorReadWindow& window) try {
+  const auto& root = window.owner_.impl_->budget;
+  const auto tick = [&] { window_tick(root, window.cancellation_); };
+  window.affine_canonical_ = false;
+  std::sort(window.affine_.begin(), window.affine_.end(),
+            [&](const auto& a, const auto& b) {
+              for (std::size_t axis = 0; axis < window.region_.rank(); ++axis) {
+                tick();
+                const auto x = a.region().dimensions()[axis],
+                           y = b.region().dimensions()[axis];
+                if (x.offset != y.offset)
+                  return x.offset < y.offset;
+                if (x.extent != y.extent)
+                  return x.extent < y.extent;
+              }
+              return false;
+            });
+  // Equal prefix intervals must form one group. The first different interval
+  // of adjacent rectangles must be disjoint, so per-axis binary lookup is safe.
+  for (std::size_t i = 1; i < window.affine_.size(); ++i) {
+    bool disjoint = false;
+    for (std::size_t axis = 0; axis < window.region_.rank(); ++axis) {
+      tick();
+      const auto a = window.affine_[i - 1].region().dimensions()[axis];
+      const auto b = window.affine_[i].region().dimensions()[axis];
+      if (a.offset == b.offset && a.extent == b.extent)
+        continue;
+      disjoint = a.offset + a.extent <= b.offset;
+      break;
+    }
+    if (!disjoint)
+      return Status::success();
+  }
+  window.affine_canonical_ = true;
+  return Status::success();
+} catch (const WindowWorkFailure& failure) {
+  return failure.status;
+}
+
+Result<std::size_t> execution_internal::ResultWindowAccess::find(
+    const ResultTensorReadWindow& window,
+    const std::vector<std::uint64_t>& at) try {
+  const auto tick = [&] {
+    window_tick(window.owner_.impl_->budget, window.cancellation_);
+  };
+  if (window.affine_canonical_)
+    return Result<std::size_t>(footprint_internal::containing(
+        window.affine_.size(), at.size(), at.data(),
+        [&](auto i) -> const Region& { return window.affine_[i].region(); },
+        tick));
+  for (std::size_t i = 0; i < window.affine_.size(); ++i) {
+    bool contains = true;
+    for (std::size_t axis = 0; axis < at.size(); ++axis) {
+      tick();
+      const auto d = window.affine_[i].region().dimensions()[axis];
+      if (at[axis] < d.offset || at[axis] - d.offset >= d.extent) {
+        contains = false;
+        break;
+      }
+    }
+    if (contains)
+      return Result<std::size_t>(i);
+  }
+  return Result<std::size_t>(window.affine_.size());
+} catch (const WindowWorkFailure& failure) {
+  return Result<std::size_t>(failure.status);
+}
+
+Result<TensorSpan> ResultTensorReadWindow::affine_view() const {
   return execution_internal::ResultWindowAccess::affine(*this);
 }
 Result<std::uint64_t> ResultTensorReadWindow::read_work() const {
@@ -59,7 +142,7 @@ Result<ResultTensorReadWindow> execution_internal::ResultWindowAccess::compose(
   auto covered = Footprint::none(shape, limits);
   if (!requested.ok() || !covered.ok())
     return Answer(requested.ok() ? covered.status() : requested.status());
-  std::size_t affine = 0, planar = 0, owners = 0, leases = 0;
+  std::size_t affine = 0, owners = 0, leases = 0;
   for (const auto& window : windows) {
     if (!window.valid() || !window.owner_.owned_by(budget) ||
         window.slot_ != first.slot_)
@@ -85,7 +168,6 @@ Result<ResultTensorReadWindow> execution_internal::ResultWindowAccess::compose(
       return Answer(joined.status());
     covered = std::move(joined);
     affine += window.affine_.size();
-    planar += window.pieces_.size();
     owners += window.owners_.empty() ? 1 : window.owners_.size();
     leases += 1 + window.source_leases_.size();
   }
@@ -107,19 +189,11 @@ Result<ResultTensorReadWindow> execution_internal::ResultWindowAccess::compose(
       ResourceVector<ResultRef>{ResourceAllocator<ResultRef>(budget)};
   result.source_leases_ =
       ResourceVector<ResourceLease>{ResourceAllocator<ResourceLease>(budget)};
-  result.affine_ = ResourceVector<Value>{ResourceAllocator<Value>(budget)};
-  result.pieces_ = ResourceVector<PlanarImageReadWindow>{
-      ResourceAllocator<PlanarImageReadWindow>(budget)};
-  result.piece_batches_ = ResourceVector<std::array<std::uint64_t, 8>>{
-      ResourceAllocator<std::array<std::uint64_t, 8>>(budget)};
-  result.piece_order_ =
-      ResourceVector<std::size_t>{ResourceAllocator<std::size_t>(budget)};
+  result.affine_ =
+      ResourceVector<TensorSpan>{ResourceAllocator<TensorSpan>(budget)};
   result.owners_.reserve(owners);
   result.source_leases_.reserve(leases);
   result.affine_.reserve(affine);
-  result.pieces_.reserve(planar);
-  result.piece_batches_.reserve(planar);
-  result.piece_order_.reserve(planar);
   for (auto& window : windows) {
     if (window.owners_.empty())
       result.owners_.push_back(std::move(window.owner_));
@@ -131,34 +205,12 @@ Result<ResultTensorReadWindow> execution_internal::ResultWindowAccess::compose(
       result.source_leases_.push_back(std::move(prior));
     for (auto& value : window.affine_)
       result.affine_.push_back(std::move(value));
-    for (std::size_t i = 0; i < window.pieces_.size(); ++i) {
-      result.pieces_.push_back(std::move(window.pieces_[i]));
-      result.piece_batches_.push_back(window.piece_batches_[i]);
-      result.piece_order_.push_back(result.piece_order_.size());
-    }
   }
-  std::uint64_t rounds = 1;
-  for (auto n = planar; n > 1; n >>= 1)
-    ++rounds;
-  if (!core_internal::can_multiply(
-          planar, rounds * (1 + result.spec().batch_axes.size())))
-    return Answer(Status{ErrorCode::ResourceExhausted, {}});
-  auto charged =
-      budget.consume({planar * rounds * (1 + result.spec().batch_axes.size())});
-  if (!charged.ok())
-    return Answer(charged);
-  std::sort(
-      result.piece_order_.begin(), result.piece_order_.end(),
-      [&](std::size_t a, std::size_t b) {
-        for (std::size_t axis = 0; axis < result.spec().batch_axes.size();
-             ++axis)
-          if (result.piece_batches_[a][axis] != result.piece_batches_[b][axis])
-            return result.piece_batches_[a][axis] <
-                   result.piece_batches_[b][axis];
-        return a < b;
-      });
   if (cancellation.cancelled())
     return Answer(Status{ErrorCode::Cancelled, {}});
+  auto indexed = index(result);
+  if (!indexed.ok())
+    return Answer(indexed);
   return Answer(std::move(result));
 } catch (const std::bad_alloc&) {
   return Result<ResultTensorReadWindow>(
@@ -178,7 +230,7 @@ Result<std::uint64_t> execution_internal::ResultWindowAccess::read_work(
       levels += 2;
     affine = levels * rank;
   }
-  const auto pieces = affine + window.pieces_.size();
+  const auto pieces = affine;
   const auto fixed = 4 * rank + 2;
   if (pieces == UINT64_MAX ||
       !core_internal::can_multiply_add(pieces + 1, rank + 1, fixed))
@@ -191,7 +243,7 @@ Result<bool> execution_internal::ResultWindowAccess::visit_backing_regions(
   using Answer = Result<bool>;
   if (!window.valid())
     return Answer(Status{ErrorCode::Stale, {}});
-  if (window.affine_.size() + window.pieces_.size() <= 1)
+  if (window.affine_.size() <= 1)
     return Answer(false);
   auto scratch = budget.reserve(ResourceCapacity::host(512, 512));
   if (!scratch.ok())
@@ -207,21 +259,11 @@ Result<bool> execution_internal::ResultWindowAccess::visit_backing_regions(
     if (!status.ok())
       return Answer(status);
   }
-  for (std::size_t i = 0; i < window.pieces_.size(); ++i) {
-    std::vector<RegionDimension> dims;
-    for (std::size_t axis = 0; axis < window.spec().batch_axes.size(); ++axis)
-      dims.push_back({window.piece_batches_[i][axis], 1});
-    const auto& cell = window.pieces_[i].region().dimensions();
-    dims.insert(dims.end(), cell.begin(), cell.end());
-    auto status = visit(Region(std::move(dims)));
-    if (!status.ok())
-      return Answer(status);
-  }
   return Answer(true);
 }
 Result<ResultTensorReadWindow>
 execution_internal::ResultWindowAccess::replace_backing(
-    ResultTensorReadWindow window, Value backing, ResourceLease metadata) {
+    ResultTensorReadWindow window, TensorSpan backing, ResourceLease metadata) {
   using Answer = Result<ResultTensorReadWindow>;
   if (!window.valid() || !backing.valid() ||
       backing.descriptor().element_type !=
@@ -253,30 +295,28 @@ execution_internal::ResultWindowAccess::replace_backing(
   window.affine_.push_back(std::move(backing));
   if (metadata.valid())
     window.source_leases_.push_back(std::move(metadata));
-  window.pieces_.clear();
-  window.piece_batches_.clear();
-  window.piece_order_.clear();
   return Answer(std::move(window));
 }
-Result<Value> execution_internal::ResultWindowAccess::affine(
+Result<TensorSpan> execution_internal::ResultWindowAccess::affine(
     const ResultTensorReadWindow& window) {
   if (!window.valid())
-    return Result<Value>(Status{ErrorCode::Stale, {}});
+    return Result<TensorSpan>(Status{ErrorCode::Stale, {}});
   if (window.cancellation_.cancelled())
-    return Result<Value>(Status{ErrorCode::Cancelled, {}});
-  if (window.affine_.size() != 1 || !window.pieces_.empty())
-    return Result<Value>(Status{ErrorCode::NotFound, {}});
+    return Result<TensorSpan>(Status{ErrorCode::Cancelled, {}});
+  if (window.affine_.size() != 1)
+    return Result<TensorSpan>(Status{ErrorCode::NotFound, {}});
   return window.affine_[0].view(window.region_);
 }
-Result<std::optional<Value>> execution_internal::ResultWindowAccess::input_view(
+Result<std::optional<TensorSpan>>
+execution_internal::ResultWindowAccess::input_view(
     const ResultTensorReadWindow& window, const FootprintLimits& limits) {
-  using Answer = Result<std::optional<Value>>;
+  using Answer = Result<std::optional<TensorSpan>>;
   if (!window.valid())
     return Answer(Status{ErrorCode::Stale, {}});
   if (window.cancellation_.cancelled() || limits.cancellation.cancelled())
     return Answer(Status{ErrorCode::Cancelled, {}});
-  if (!window.pieces_.empty() || window.affine_.empty())
-    return Answer(std::optional<Value>{});
+  if (window.affine_.empty())
+    return Answer(std::optional<TensorSpan>{});
   return input_internal::join_affine_view(
       {window.spec().descriptor.element_type, window.spec().sample_shape()},
       window.region_, window.affine_, limits);
@@ -293,54 +333,36 @@ bool inside(const Region& region, const std::vector<std::uint64_t>& at) {
   return true;
 }
 }  // namespace
-Result<std::size_t> ResultTensorReadWindow::find_piece(
-    const std::vector<std::uint64_t>& at) const {
-  using Answer = Result<std::size_t>;
-  const auto compare = [&](std::size_t index) -> Result<int> {
+Status ResultTensorReadWindow::copy_to(std::uint8_t* destination,
+                                       std::uint64_t bytes) const {
+  if (!valid() || !destination)
+    return {ErrorCode::InvalidArgument, {}};
+  auto count = region_.element_count();
+  const auto width = TensorSpan::element_size(spec().descriptor.element_type);
+  if (!count.ok() || !core_internal::can_multiply(count.value(), width) ||
+      bytes != count.value() * width)
+    return {ErrorCode::InvalidArgument, "tensor copy byte count mismatch"};
+  std::vector<std::uint64_t> at;
+  for (const auto& axis : region_.dimensions())
+    at.push_back(axis.offset);
+  for (std::uint64_t sample = 0; sample < count.value(); ++sample) {
     if (cancellation_.cancelled())
-      return Result<int>(Status{ErrorCode::Cancelled, {}});
-    for (std::size_t axis = 0; axis < spec().batch_axes.size(); ++axis) {
-      auto charged = owner_.impl_->budget.consume({1});
-      if (!charged.ok())
-        return Result<int>(charged);
-      if (piece_batches_[index][axis] != at[axis])
-        return Result<int>(piece_batches_[index][axis] < at[axis] ? -1 : 1);
-    }
-    return Result<int>(0);
-  };
-  std::size_t low = 0, high = piece_order_.size();
-  while (low < high) {
-    const auto middle = low + (high - low) / 2;
-    auto order = compare(piece_order_[middle]);
-    if (!order.ok())
-      return Answer(order.status());
-    if (order.value() < 0)
-      low = middle + 1;
-    else
-      high = middle;
-  }
-  for (; low < piece_order_.size(); ++low) {
-    const auto index = piece_order_[low];
-    auto order = compare(index);
-    if (!order.ok())
-      return Answer(order.status());
-    if (order.value() != 0)
-      break;
-    auto charged =
-        owner_.impl_->budget.consume({pieces_[index].region().rank() + 1});
+      return {ErrorCode::Cancelled, {}};
+    auto charged = owner_.impl_->budget.consume({1});
     if (!charged.ok())
-      return Answer(charged);
-    bool covered = true;
-    for (std::size_t axis = 0; axis < pieces_[index].region().rank(); ++axis) {
-      const auto d = pieces_[index].region().dimensions()[axis];
-      const auto coordinate = at[spec().batch_axes.size() + axis];
-      covered =
-          covered && coordinate >= d.offset && coordinate - d.offset < d.extent;
+      return charged;
+    auto row = row_run(at);
+    if (!row.ok())
+      return row.status();
+    std::memcpy(destination + sample * width, row.value().data, width);
+    for (std::size_t axis = at.size(); axis-- > 0;) {
+      const auto d = region_.dimensions()[axis];
+      if (++at[axis] < d.offset + d.extent)
+        break;
+      at[axis] = d.offset;
     }
-    if (covered)
-      return Answer(index);
   }
-  return Answer(data_internal::unavailable());
+  return Status::success();
 }
 Result<ResultTensorRun> ResultTensorReadWindow::row_run(
     const std::vector<std::uint64_t>& at) const {
@@ -349,21 +371,11 @@ Result<ResultTensorRun> ResultTensorReadWindow::row_run(
   if (!valid() || !inside(region_, at))
     return Result<ResultTensorRun>(Status{
         ErrorCode::InvalidArgument, "coordinate outside Result tensor window"});
-  if (owners_.size() > 1) {
-    auto lookup = execution_internal::ResultWindowAccess::read_work(*this);
-    if (!lookup.ok())
-      return Result<ResultTensorRun>(lookup.status());
-    auto charged = owner_.impl_->budget.consume({lookup.value()});
-    if (!charged.ok())
-      return Result<ResultTensorRun>(charged);
-  }
-  auto first = std::size_t{0}, last = affine_.size();
-  if (affine_canonical_) {
-    first = footprint_internal::containing(
-        affine_.size(), at.size(), at.data(),
-        [&](auto i) -> const Region& { return affine_[i].region(); }, [] {});
-    last = first == affine_.size() ? first : first + 1;
-  }
+  auto found = execution_internal::ResultWindowAccess::find(*this, at);
+  if (!found.ok())
+    return Result<ResultTensorRun>(found.status());
+  const auto first = found.value();
+  const auto last = first == affine_.size() ? first : first + 1;
   for (auto i = first; i < last; ++i) {
     const auto& value = affine_[i];
     if (!inside(value.region(), at))
@@ -378,8 +390,9 @@ Result<ResultTensorRun> ResultTensorReadWindow::row_run(
     const auto magnitude = stride < 0
                                ? static_cast<std::uint64_t>(-(stride + 1)) + 1
                                : static_cast<std::uint64_t>(stride);
-    const auto width = Value::element_size(spec().descriptor.element_type);
-    // The validated Value span guarantees this product, including broadcasts.
+    const auto width = TensorSpan::element_size(spec().descriptor.element_type);
+    // The validated TensorSpan span guarantees this product, including
+    // broadcasts.
     const auto bytes = (samples - 1) * magnitude + width;
     auto observed =
         data_internal::ResultHostAccessScope::observe(value.storage());
@@ -388,21 +401,6 @@ Result<ResultTensorRun> ResultTensorReadWindow::row_run(
     return Result<ResultTensorRun>(ResultTensorRun{
         value.bytes().data() + address.value(), samples, bytes, stride});
   }
-  std::vector<std::uint64_t> spatial(at.begin() + spec().batch_axes.size(),
-                                     at.end());
-  auto selected = find_piece(at);
-  if (!selected.ok())
-    return Result<ResultTensorRun>(selected.status());
-  {
-    const auto& piece = pieces_[selected.value()];
-    auto run = piece.row_run(spatial);
-    if (!run.ok())
-      return Result<ResultTensorRun>(run.status());
-    return Result<ResultTensorRun>(ResultTensorRun{
-        run.value().data, run.value().samples, run.value().bytes,
-        static_cast<std::int64_t>(
-            Value::element_size(spec().descriptor.element_type))});
-  }
   return Result<ResultTensorRun>(data_internal::unavailable());
 }
 Result<ResultTensorRectangle> ResultTensorReadWindow::rectangle_run(
@@ -410,21 +408,11 @@ Result<ResultTensorRectangle> ResultTensorReadWindow::rectangle_run(
   auto row = row_run(at);
   if (!row.ok())
     return Result<ResultTensorRectangle>(row.status());
-  if (owners_.size() > 1) {
-    auto lookup = execution_internal::ResultWindowAccess::read_work(*this);
-    if (!lookup.ok())
-      return Result<ResultTensorRectangle>(lookup.status());
-    auto charged = owner_.impl_->budget.consume({lookup.value()});
-    if (!charged.ok())
-      return Result<ResultTensorRectangle>(charged);
-  }
-  auto first = std::size_t{0}, last = affine_.size();
-  if (affine_canonical_) {
-    first = footprint_internal::containing(
-        affine_.size(), at.size(), at.data(),
-        [&](auto i) -> const Region& { return affine_[i].region(); }, [] {});
-    last = first == affine_.size() ? first : first + 1;
-  }
+  auto found = execution_internal::ResultWindowAccess::find(*this, at);
+  if (!found.ok())
+    return Result<ResultTensorRectangle>(found.status());
+  const auto first = found.value();
+  const auto last = first == affine_.size() ? first : first + 1;
   for (auto i = first; i < last; ++i) {
     const auto& value = affine_[i];
     if (!inside(value.region(), at))
@@ -438,21 +426,29 @@ Result<ResultTensorRectangle> ResultTensorReadWindow::rectangle_run(
         ResultTensorRectangle{row.take_value(), d.offset + d.extent - at[axis],
                               value.layout().byte_strides[axis]});
   }
-  std::vector<std::uint64_t> spatial(at.begin() + spec().batch_axes.size(),
-                                     at.end());
-  auto selected = find_piece(at);
-  if (!selected.ok())
-    return Result<ResultTensorRectangle>(selected.status());
-  {
-    const auto& piece = pieces_[selected.value()];
-    auto run = piece.rectangle_run(spatial);
-    if (!run.ok())
-      return Result<ResultTensorRectangle>(run.status());
-    return Result<ResultTensorRectangle>(ResultTensorRectangle{
-        row.take_value(), run.value().rows,
-        static_cast<std::int64_t>(run.value().row_stride_bytes)});
-  }
   return Result<ResultTensorRectangle>(data_internal::unavailable());
+}
+Result<ResultTensorWriteWindow> ResultTensorWriteWindow::borrow_dense(
+    const ResultTensorSpec& spec, TensorWriter& writer) {
+  auto topology = data_internal::tensor_topology(spec);
+  if (!topology.ok())
+    return Result<ResultTensorWriteWindow>(topology);
+  if (!writer.data() ||
+      writer.descriptor().element_type != spec.descriptor.element_type ||
+      writer.descriptor().shape != spec.sample_shape())
+    return Result<ResultTensorWriteWindow>(
+        Status{ErrorCode::TypeMismatch, "dense writer schema mismatch"});
+  ResultTensorWriteWindow window;
+  window.spec_ = &spec;
+  window.region_ = writer.region();
+  window.affine_data_ = writer.data();
+  for (auto stride : writer.layout().byte_strides) {
+    if (stride < 0)
+      return Result<ResultTensorWriteWindow>(
+          Status{ErrorCode::InvalidArgument, "invalid dense writer stride"});
+    window.affine_strides_.push_back(static_cast<std::uint64_t>(stride));
+  }
+  return Result<ResultTensorWriteWindow>(std::move(window));
 }
 std::uint32_t ResultTensorWriteWindow::sample_axis() const {
   return spec().layout.spatial
@@ -465,15 +461,8 @@ Result<ResultTensorMutableRun> ResultTensorWriteWindow::row_run(
   if (!valid() || !inside(region_, at))
     return Answer({ErrorCode::InvalidArgument,
                    "coordinate outside Result tensor writer"});
-  const auto width = Value::element_size(spec().descriptor.element_type);
-  if (planar_) {
-    auto run = planar_->row_run(std::vector<std::uint64_t>(
-        at.begin() + spec().batch_axes.size(), at.end()));
-    return run.ok() ? Answer(ResultTensorMutableRun{
-                          run.value().data, run.value().samples,
-                          run.value().bytes, static_cast<std::int64_t>(width)})
-                    : Answer(run.status());
-  }
+  const auto width = TensorSpan::element_size(spec().descriptor.element_type);
+
   std::uint64_t offset = 0;
   for (std::size_t axis = 0; axis < at.size(); ++axis)
     offset +=
@@ -491,15 +480,7 @@ Result<ResultTensorMutableRectangle> ResultTensorWriteWindow::rectangle_run(
   auto row = row_run(at);
   if (!row.ok())
     return Answer(row.status());
-  if (planar_) {
-    auto rectangle = planar_->rectangle_run(std::vector<std::uint64_t>(
-        at.begin() + spec().batch_axes.size(), at.end()));
-    return rectangle.ok() ? Answer(ResultTensorMutableRectangle{
-                                row.take_value(), rectangle.value().rows,
-                                static_cast<std::int64_t>(
-                                    rectangle.value().row_stride_bytes)})
-                          : Answer(rectangle.status());
-  }
+
   if (at.size() == 1)
     return Answer(ResultTensorMutableRectangle{row.take_value(), 1, 0});
   const auto axis = spec().layout.spatial
@@ -518,12 +499,7 @@ const void* ResultTensorReadWindow::storage_owner_token() const noexcept {
       return nullptr;
     root = token;
   }
-  for (const auto& piece : pieces_) {
-    const auto token = piece.image_->owner_token();
-    if (root && root != token)
-      return nullptr;
-    root = token;
-  }
+
   return root;
 }
 Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
@@ -586,32 +562,41 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
   }
   result.slot_ = slot;
   result.region_ = region;
-  result.pieces_ = ResourceVector<PlanarImageReadWindow>(
-      ResourceAllocator<PlanarImageReadWindow>(impl_->budget));
   result.affine_ =
-      ResourceVector<Value>(ResourceAllocator<Value>(impl_->budget));
-  result.piece_batches_ = ResourceVector<std::array<std::uint64_t, 8>>(
-      ResourceAllocator<std::array<std::uint64_t, 8>>(impl_->budget));
-  result.piece_order_ = ResourceVector<std::size_t>(
-      ResourceAllocator<std::size_t>(impl_->budget));
+      ResourceVector<TensorSpan>(ResourceAllocator<TensorSpan>(impl_->budget));
   result.cancellation_ = cancellation;
+  const auto append_view = [&](const TensorSpan& value,
+                               const Region& part_region) {
+    auto part = value.view(part_region);
+    if (!part.ok())
+      return part.status();
+    result.affine_.push_back(part.take_value());
+    return Status::success();
+  };
+  auto scratch = impl_->budget.reserve(
+      ResourceCapacity::host(region.rank() * sizeof(RegionDimension),
+                             region.rank() * sizeof(RegionDimension)));
+  if (!scratch.ok())
+    return Answer(scratch.status());
   const auto& backing = impl_->tensors[slot];
   if (backing.affine_canonical) {
     std::array<std::uint64_t, 8> at{};
     for (std::size_t axis = 0; axis < region.rank(); ++axis)
       at[axis] = region.dimensions()[axis].offset;
     std::uint64_t levels = 1;
-    for (auto n = backing.affine.size(); n; n >>= 1)
+    for (auto n = backing.tensor.fragments().size(); n; n >>= 1)
       levels += 2;
     auto charged = impl_->budget.consume({levels * region.rank()});
     if (!charged.ok())
       return Answer(charged);
     const auto index = footprint_internal::containing(
-        backing.affine.size(), region.rank(), at.data(),
-        [&](auto i) -> const Region& { return backing.affine[i].region(); },
+        backing.tensor.fragments().size(), region.rank(), at.data(),
+        [&](auto i) -> const Region& {
+          return backing.tensor.fragments()[i].region();
+        },
         [] {});
-    if (index != backing.affine.size()) {
-      const auto& value = backing.affine[index];
+    if (index != backing.tensor.fragments().size()) {
+      const auto& value = backing.tensor.fragments()[index];
       bool contained = true;
       for (std::size_t axis = 0; axis < region.rank(); ++axis) {
         const auto a = region.dimensions()[axis],
@@ -619,10 +604,9 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
         contained &= a.extent <= b.extent - (a.offset - b.offset);
       }
       if (contained) {
-        auto part = value.view(region);
-        if (!part.ok())
-          return Answer(part.status());
-        result.affine_.push_back(part.take_value());
+        auto appended = append_view(value, region);
+        if (!appended.ok())
+          return Answer(appended);
         result.affine_canonical_ = true;
         return Answer(std::move(result));
       }
@@ -630,11 +614,11 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
     // Distinct canonical values are disjoint. The authorization check already
     // proved this entire request covered, so clip each backing once instead of
     // repeatedly subtracting its prefix from a growing set of remaining boxes.
-    charged =
-        impl_->budget.consume({backing.affine.size() * (region.rank() + 1)});
+    charged = impl_->budget.consume(
+        {backing.tensor.fragments().size() * (region.rank() + 1)});
     if (!charged.ok())
       return Answer(charged);
-    for (const auto& value : backing.affine) {
+    for (const auto& value : backing.tensor.fragments()) {
       if (cancellation.cancelled())
         return Answer(Status{ErrorCode::Cancelled, {}});
       auto dims = region.dimensions();
@@ -652,17 +636,16 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
       }
       if (!overlaps)
         continue;
-      auto part = value.view(Region(std::move(dims)));
-      if (!part.ok())
-        return Answer(part.status());
-      result.affine_.push_back(part.take_value());
+      auto appended = append_view(value, Region(std::move(dims)));
+      if (!appended.ok())
+        return Answer(appended);
     }
     result.affine_canonical_ = true;
     return Answer(std::move(result));
   }
   auto remaining = requested.take_value();
-  if (!impl_->tensors[slot].affine.empty()) {
-    for (const auto& value : impl_->tensors[slot].affine) {
+  if (!impl_->tensors[slot].tensor.fragments().empty()) {
+    for (const auto& value : impl_->tensors[slot].tensor.fragments()) {
       if (remaining.empty())
         break;
       if (cancellation.cancelled())
@@ -691,10 +674,9 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
       if (!covered.ok())
         return Answer(covered.status());
       for (const auto& box : covered.value().boxes()) {
-        auto part = value.view(box);
-        if (!part.ok())
-          return Answer(part.status());
-        result.affine_.push_back(part.take_value());
+        auto appended = append_view(value, box);
+        if (!appended.ok())
+          return Answer(appended);
       }
       auto next = remaining.subtract(covered.value(), limits);
       if (!next.ok())
@@ -702,144 +684,13 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
       remaining = next.take_value();
     }
     if (remaining.empty()) {
-      result.affine_canonical_ = backing.affine_canonical;
+      auto indexed = execution_internal::ResultWindowAccess::index(result);
+      if (!indexed.ok())
+        return Answer(indexed);
       return Answer(std::move(result));
     }
   }
-  if (!spec.layout.spatial)
-    return Answer(data_internal::unavailable());
-  ResourceVector<data_internal::ResultSpatialBacking> backings(
-      ResourceAllocator<data_internal::ResultSpatialBacking>(impl_->budget));
-  for (const auto& entry : impl_->tensors[slot].backing) {
-    if (cancellation.cancelled())
-      return Answer(Status{ErrorCode::Cancelled, {}});
-    auto inspected = impl_->budget.consume({spec.batch_axes.size() + 1});
-    if (!inspected.ok())
-      return Answer(inspected);
-    bool needed = true;
-    for (std::size_t axis = 0; axis < spec.batch_axes.size(); ++axis) {
-      const auto d = region.dimensions()[axis];
-      needed = needed && entry.batch[axis] >= d.offset &&
-               entry.batch[axis] - d.offset < d.extent;
-    }
-    if (needed)
-      backings.push_back(entry);
-  }
-  ResourceVector<std::pair<Region, PlanarImage>> views(
-      ResourceAllocator<std::pair<Region, PlanarImage>>(impl_->budget));
-  auto region_lease = impl_->budget.reserve(ResourceCapacity::host(
-      impl_->tensors[slot].views.size() * spec.sample_shape().size() *
-          sizeof(RegionDimension),
-      impl_->tensors[slot].views.size() * spec.sample_shape().size() *
-          sizeof(RegionDimension)));
-  if (!region_lease.ok())
-    return Answer(region_lease.status());
-  for (const auto& view : impl_->tensors[slot].views) {
-    if (cancellation.cancelled())
-      return Answer(Status{ErrorCode::Cancelled, {}});
-    auto inspected = impl_->budget.consume({view.region.rank() + 1});
-    if (!inspected.ok())
-      return Answer(inspected);
-    views.emplace_back(view.region, view.backing);
-  }
-  lock.unlock();
-  auto scratch = impl_->budget.reserve(ResourceCapacity::host(512, 512));
-  if (!scratch.ok())
-    return Answer(scratch.status());
-  const auto compare_batch = [&](const auto& left, const auto& right) {
-    for (std::size_t axis = 0; axis < spec.batch_axes.size(); ++axis) {
-      if (cancellation.cancelled())
-        throw Status{ErrorCode::Cancelled, {}};
-      auto charged = impl_->budget.consume({1});
-      if (!charged.ok())
-        throw charged;
-      if (left[axis] != right[axis])
-        return left[axis] < right[axis] ? -1 : 1;
-    }
-    return 0;
-  };
-  std::sort(backings.begin(), backings.end(),
-            [&](const auto& a, const auto& b) {
-              return compare_batch(a.batch, b.batch) < 0;
-            });
-  const auto append = [&](const Region& box,
-                          const PlanarImage* fixed) -> Status {
-    auto dimensions = box.dimensions();
-    const auto batches = spec.batch_axes.size();
-    for (std::size_t axis = 0; axis < batches; ++axis)
-      dimensions[axis].extent = 1;
-    for (;;) {
-      auto charged = impl_->budget.consume({1});
-      if (!charged.ok())
-        return charged;
-      std::array<std::uint64_t, 8> key{};
-      for (std::size_t axis = 0; axis < batches; ++axis)
-        key[axis] = dimensions[axis].offset;
-      const PlanarImage* backing = fixed;
-      if (!backing) {
-        auto entry =
-            std::lower_bound(backings.begin(), backings.end(), key,
-                             [&](const auto& value, const auto& at) {
-                               return compare_batch(value.batch, at) < 0;
-                             });
-        if (entry != backings.end() && compare_batch(entry->batch, key) == 0)
-          backing = &entry->image;
-      }
-      if (!backing)
-        return data_internal::unavailable();
-      auto window = backing->certified_window(
-          Region(std::vector<RegionDimension>(dimensions.begin() + batches,
-                                              dimensions.end())),
-          cancellation);
-      if (!window.ok())
-        return window.status();
-      result.pieces_.push_back(window.take_value());
-      result.piece_batches_.push_back(key);
-      bool advanced = false;
-      for (std::size_t axis = batches; axis-- > 0;) {
-        if (++dimensions[axis].offset <
-            box.dimensions()[axis].offset + box.dimensions()[axis].extent) {
-          advanced = true;
-          break;
-        }
-        dimensions[axis].offset = box.dimensions()[axis].offset;
-      }
-      if (!advanced)
-        return Status::success();
-    }
-  };
-  for (const auto& view : views) {
-    auto mapped =
-        Footprint::from_regions(spec.sample_shape(), {view.first}, limits);
-    if (!mapped.ok())
-      return Answer(mapped.status());
-    auto covered = remaining.intersect(mapped.value(), limits);
-    if (!covered.ok())
-      return Answer(covered.status());
-    for (const auto& box : covered.value().boxes()) {
-      auto status = append(box, &view.second);
-      if (!status.ok())
-        return Answer(status);
-    }
-    auto next = remaining.subtract(mapped.value(), limits);
-    if (!next.ok())
-      return Answer(next.status());
-    remaining = next.take_value();
-  }
-  for (const auto& box : remaining.boxes()) {
-    auto status = append(box, nullptr);
-    if (!status.ok())
-      return Answer(status);
-  }
-  result.piece_order_.reserve(result.pieces_.size());
-  for (std::size_t i = 0; i < result.pieces_.size(); ++i)
-    result.piece_order_.push_back(i);
-  std::sort(result.piece_order_.begin(), result.piece_order_.end(),
-            [&](auto left, auto right) {
-              return compare_batch(result.piece_batches_[left],
-                                   result.piece_batches_[right]) < 0;
-            });
-  return Answer(std::move(result));
+  return Answer(data_internal::unavailable());
 } catch (const Status& status) {
   return Result<ResultTensorReadWindow>(status);
 } catch (const std::bad_alloc&) {
@@ -856,8 +707,8 @@ Status ResultRef::read_tensor(const ResultDescriptor& facts, std::uint32_t slot,
   if (!impl_)
     return Status{ErrorCode::Stale, {}};
   if (!destination || slot >= schema().tensors.size() ||
-      bytes !=
-          Value::element_size(schema().tensors[slot].descriptor.element_type))
+      bytes != TensorSpan::element_size(
+                   schema().tensors[slot].descriptor.element_type))
     return Status{ErrorCode::InvalidArgument, "invalid image read"};
   if (slot >= facts.tensor_count() || !facts.tensor_coverage(slot).contains(at))
     return Status{ErrorCode::InvalidArgument, "unauthorized image sample"};

@@ -12,10 +12,10 @@
 namespace ps {
 namespace {
 void notify_failure(const BufferAllocator::FailureObserver& observer,
-                    ErrorCode code) noexcept {
+                    const Status& status) noexcept {
   if (observer) {
     try {
-      observer(code);
+      observer(status);
     } catch (...) {
     }
   }
@@ -123,28 +123,37 @@ BufferAllocator BufferAllocator::limited_impl(std::uint64_t maximum_bytes,
       }
     }
     result.allocation_scopes_.push_back(state);
-    result.failure_ = [parent = failure_, observer = failure](ErrorCode code) {
+    result.failure_ = [parent = failure_,
+                       observer = failure](const Status& status) {
       if (parent) {
         try {
-          parent(code);
+          parent(status);
         } catch (...) {
         }
       }
       if (observer) {
         try {
-          observer(code);
+          observer(status);
         } catch (...) {
         }
       }
     };
     return result;
   } catch (const std::bad_alloc&) {
-    notify_failure(failure_, ErrorCode::ResourceExhausted);
-    notify_failure(failure, ErrorCode::ResourceExhausted);
+    notify_failure(
+        failure_,
+        {ErrorCode::ResourceExhausted, {}, FailureReason::CapacityLimit});
+    notify_failure(
+        failure,
+        {ErrorCode::ResourceExhausted, {}, FailureReason::CapacityLimit});
     throw;
   } catch (...) {
-    notify_failure(failure_, ErrorCode::OperationFailed);
-    notify_failure(failure, ErrorCode::OperationFailed);
+    notify_failure(
+        failure_,
+        {ErrorCode::OperationFailed, {}, FailureReason::HostException});
+    notify_failure(
+        failure,
+        {ErrorCode::OperationFailed, {}, FailureReason::HostException});
     throw;
   }
 }
@@ -166,7 +175,7 @@ Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
   const auto reject = [&](Status status) {
     if (failure_) {
       try {
-        failure_(status.code);
+        failure_(status);
       } catch (...) {
       }
     }

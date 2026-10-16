@@ -6,7 +6,7 @@
 
 #include "01-numeric/exact_ratio.hpp"
 #include "01-numeric/numeric_nan.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Four binary64 products plus one bias at 2^-2148 need fewer than 4200

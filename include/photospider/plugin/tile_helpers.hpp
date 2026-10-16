@@ -18,81 +18,85 @@ template <class Iterator>
 Result<TileSet> regions(const ResourceBudget& root, const TileGrid& grid,
                         Iterator first, Iterator last) try {
   using Answer = Result<TileSet>;
-  if (!grid.tile_count() || grid.rank() < 2 || grid.rank() > 8)
+  if (!grid.tile_count() || !grid.rank() || grid.rank() > 8)
     return Answer(Status{ErrorCode::InvalidArgument, "invalid tile grid"});
-  std::uint64_t count = 0;
-  for (auto it = first; it != last; ++it) {
-    auto charged = root.consume({grid.rank() + 1});
-    if (!charged.ok())
-      return Answer(charged);
-    if (it->rank() != grid.rank())
-      return Answer(
-          Status{ErrorCode::InvalidArgument, "tile Region rank mismatch"});
-    const auto& dimensions = it->dimensions();
-    for (std::size_t axis = 0; axis < dimensions.size(); ++axis)
-      if (dimensions[axis].offset > grid.shape()[axis] ||
-          dimensions[axis].extent >
-              grid.shape()[axis] - dimensions[axis].offset)
-        return Answer(
-            Status{ErrorCode::InvalidArgument, "tile Region outside grid"});
-    if (it->empty())
-      continue;
-    const auto& height = dimensions[grid.height_axis()];
-    const auto& width = dimensions[grid.width_axis()];
-    const auto rows = (height.offset + height.extent - 1) / grid.tile_extent() -
-                      height.offset / grid.tile_extent() + 1;
-    const auto columns =
-        (width.offset + width.extent - 1) / grid.tile_extent() -
-        width.offset / grid.tile_extent() + 1;
-    // Every factor is a subset of a validated grid whose count fits uint64.
-    std::uint64_t units = rows * columns;
-    for (std::size_t axis = 0; axis < grid.batch_rank(); ++axis)
-      units *= dimensions[axis].extent;
-    if (units > std::numeric_limits<std::size_t>::max() - count)
-      return Answer(Status{ErrorCode::ResourceExhausted, "tile list overflow"});
-    count += units;
+  std::array<std::uint32_t, 8> axes{};
+  std::array<std::uint64_t, 8> sizes{}, strides{};
+  std::size_t n = 0;
+  for (std::uint32_t axis = 0; axis < grid.rank(); ++axis)
+    if (grid.batch_axis_mask() & (1U << axis)) {
+      axes[n] = axis;
+      sizes[n++] = grid.shape()[axis];
+    }
+  if (grid.height_axis() < grid.rank()) {
+    axes[n] = grid.height_axis();
+    sizes[n++] = grid.tile_rows();
   }
-  auto charged = root.consume({count});
-  if (!charged.ok())
-    return Answer(charged);
-  ResourceVector<TileIndex> indices{ResourceAllocator<TileIndex>(root)};
-  if (count > indices.max_size())
-    return Answer(Status{ErrorCode::ResourceExhausted,
-                         "tile list exceeds addressable storage"});
-  indices.reserve(static_cast<std::size_t>(count));
+  if (grid.width_axis() < grid.rank()) {
+    axes[n] = grid.width_axis();
+    sizes[n++] = grid.tile_columns();
+  }
+  std::uint64_t stride = 1;
+  for (auto j = n; j-- > 0;) {
+    strides[j] = stride;
+    stride *= sizes[j];
+  }
+  ResourceVector<TileInterval> intervals{ResourceAllocator<TileInterval>(root)};
   for (auto it = first; it != last; ++it) {
+    auto work = root.consume({grid.rank() + n + 1});
+    if (!work.ok())
+      return Answer(work);
+    if (it->rank() != grid.rank())
+      return Answer(Status{ErrorCode::InvalidArgument, "tile region rank"});
+    const auto& dims = it->dimensions();
+    for (std::size_t axis = 0; axis < dims.size(); ++axis)
+      if (dims[axis].offset > grid.shape()[axis] ||
+          dims[axis].extent > grid.shape()[axis] - dims[axis].offset)
+        return Answer(Status{ErrorCode::InvalidArgument, "tile region bounds"});
     if (it->empty())
       continue;
-    const auto& dimensions = it->dimensions();
-    const auto& height = dimensions[grid.height_axis()];
-    const auto& width = dimensions[grid.width_axis()];
-    const auto first_row = height.offset / grid.tile_extent();
-    const auto last_row =
-        (height.offset + height.extent - 1) / grid.tile_extent();
-    const auto first_column = width.offset / grid.tile_extent();
-    const auto last_column =
-        (width.offset + width.extent - 1) / grid.tile_extent();
-    std::uint64_t batches = 1;
-    for (std::size_t axis = 0; axis < grid.batch_rank(); ++axis)
-      batches *= dimensions[axis].extent;
-    for (std::uint64_t batch = 0; batch < batches; ++batch) {
-      auto remaining = batch;
-      std::array<std::uint64_t, 8> coordinates{};
-      for (std::size_t axis = grid.batch_rank(); axis-- > 0;) {
-        coordinates[axis] =
-            dimensions[axis].offset + remaining % dimensions[axis].extent;
-        remaining /= dimensions[axis].extent;
+    std::array<std::uint64_t, 8> begin{}, end{}, at{};
+    for (std::size_t j = 0; j < n; ++j) {
+      const auto d = dims[axes[j]];
+      const auto scale =
+          grid.batch_axis_mask() & (1U << axes[j]) ? 1 : grid.tile_extent();
+      begin[j] = d.offset / scale;
+      end[j] = (d.offset + d.extent - 1) / scale + 1;
+      at[j] = begin[j];
+    }
+    auto inner = n ? n - 1 : 0;
+    while (inner && !begin[inner] && end[inner] == sizes[inner])
+      --inner;
+    std::uint64_t count = 1;
+    for (std::size_t j = 0; j < inner; ++j) {
+      if (end[j] - begin[j] > 65536 / count)
+        return Answer(
+            Status{ErrorCode::ResourceExhausted, "tile interval count"});
+      count *= end[j] - begin[j];
+    }
+    if (count > 65536 - intervals.size())
+      return Answer(
+          Status{ErrorCode::ResourceExhausted, "tile interval count"});
+    work = root.consume({count * (n + 1)});
+    if (!work.ok())
+      return Answer(work);
+    intervals.reserve(intervals.size() + count);
+    for (std::uint64_t i = 0; i < count; ++i) {
+      std::uint64_t first_tile = 0;
+      for (std::size_t j = 0; j < n; ++j)
+        first_tile += at[j] * strides[j];
+      intervals.push_back(
+          {first_tile,
+           first_tile +
+               (n ? (end[inner] - begin[inner]) * strides[inner] : 1)});
+      for (auto j = inner; j-- > 0;) {
+        if (++at[j] < end[j])
+          break;
+        at[j] = begin[j];
       }
-      std::uint64_t index = 0;
-      for (std::size_t axis = 0; axis < grid.batch_rank(); ++axis)
-        index = index * grid.shape()[axis] + coordinates[axis];
-      for (auto row = first_row; row <= last_row; ++row)
-        for (auto column = first_column; column <= last_column; ++column)
-          indices.push_back(
-              (index * grid.tile_rows() + row) * grid.tile_columns() + column);
     }
   }
-  return TileSet::from_indices(root, indices.data(), indices.size());
+  return TileSet::from_intervals(root, intervals.data(), intervals.size());
 } catch (const std::bad_alloc&) {
   return Result<TileSet>(Status{ErrorCode::ResourceExhausted, {}});
 }
@@ -114,12 +118,16 @@ inline Result<TileIndex> tile_for_coordinate(const TileGrid& grid,
       return Result<TileIndex>(
           Status{ErrorCode::InvalidArgument, "tile coordinate outside grid"});
   TileIndex batch = 0;
-  for (std::size_t axis = 0; axis < grid.batch_rank(); ++axis)
-    batch = batch * grid.shape()[axis] + at[axis];
+  for (std::size_t axis = 0; axis < rank; ++axis)
+    if (grid.batch_axis_mask() & (1U << axis))
+      batch = batch * grid.shape()[axis] + at[axis];
+  const auto row = grid.height_axis() < rank
+                       ? at[grid.height_axis()] / grid.tile_extent()
+                       : 0;
+  const auto column =
+      grid.width_axis() < rank ? at[grid.width_axis()] / grid.tile_extent() : 0;
   return Result<TileIndex>(
-      (batch * grid.tile_rows() + at[grid.height_axis()] / grid.tile_extent()) *
-          grid.tile_columns() +
-      at[grid.width_axis()] / grid.tile_extent());
+      (batch * grid.tile_rows() + row) * grid.tile_columns() + column);
 }
 
 /** @brief Converts a logical sample rectangle to all intersecting tiles.
@@ -153,10 +161,11 @@ inline Result<TileSet> tiles_for_samples(const ResourceBudget& root,
 }
 /** @brief Creates an input Need at the operation boundary.
  * A nonempty sample selection requests complete intersecting spatial tiles.
- * Inputs without a grid request Whole, including all Result members. Empty
- * payload selections are invalid; descriptor_only must be explicit. Compiled
- * grids take precedence. Direct calls derive grids from declared schemas.
- * No payload is read. Coordinate conversion and index storage charge root.
+ * Every tensor member has its own grid. Empty
+ * payload selections request no work; descriptor_only must be explicit.
+ * Compiled grids take precedence. Direct calls derive grids from declared
+ * schemas. No payload is read. Coordinate conversion and index storage charge
+ * root.
  */
 inline Result<TileNeed> tile_need_for_samples(const ResourceBudget& root,
                                               const ResultProgramQuery& query,
@@ -174,13 +183,10 @@ inline Result<TileNeed> tile_need_for_samples(const ResourceBudget& root,
     return Answer(
         Status{ErrorCode::InvalidArgument, "invalid tile Need domain"});
   if (descriptor_only)
-    return Answer(TileNeed{input, false, true, {}});
-  if (samples.empty())
-    return Answer(
-        Status{ErrorCode::InvalidArgument, "empty tile payload Need"});
+    return Answer(TileNeed{input, 0, true, {}});
   std::optional<TileGrid> grid;
   if (query.input_tile_grids.empty()) {
-    auto declared = TileGrid::from_schema(schema, query.tile_extent);
+    auto declared = TileGrid::from_schema(schema, query.tile_extent, slot);
     if (!declared.ok())
       return Answer(declared.status());
     grid = declared.take_value();
@@ -188,13 +194,13 @@ inline Result<TileNeed> tile_need_for_samples(const ResourceBudget& root,
     if (query.input_tile_grids.size() != query.inputs.size())
       return Answer(
           Status{ErrorCode::InvalidArgument, "incomplete input grids"});
-    grid = query.input_tile_grids[input];
+    if (slot >= query.input_tile_grids[input].size())
+      return Answer(Status{ErrorCode::InvalidArgument, "missing member grid"});
+    grid = query.input_tile_grids[input][slot];
   }
-  if (!grid)
-    return Answer(TileNeed{input, true, false, {}});
   auto tiles = tiles_for_samples(root, *grid, samples);
   if (!tiles.ok())
     return Answer(tiles.status());
-  return Answer(TileNeed{input, false, false, tiles.take_value()});
+  return Answer(TileNeed{input, slot, false, tiles.take_value()});
 }
 }  // namespace ps::sdk

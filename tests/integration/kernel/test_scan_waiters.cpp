@@ -64,7 +64,8 @@ struct Scan {
         restored = true;
       }
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false, take(TileSet::range(phase.resources, 0, 1))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     if (!restored) {
@@ -98,10 +99,9 @@ int concurrent_scans(bool cancel_owner, bool finite, bool cache) {
   operation.key = "test.checkpoint_scan";
   operation.traits.input_count = 1;
   operation.traits.input_schema.resize(1);
-  operation.traits.input_schema[0].kind = OperationPortKind::Result;
+
   operation.traits.input_schema[0].tensor_key = "number";
   operation.traits.outputs = {multi_result::output("value")};
-  operation.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   operation.traits.outputs[0].continuation_bytes = sizeof(Scan);
   operation.start_result = [&](const auto&, const auto& allocator) {
     return ResultContinuation::make<Scan>(allocator, &gate);
@@ -167,7 +167,9 @@ int concurrent_scans(bool cancel_owner, bool finite, bool cache) {
       PS_REQUIRE_OK(*result);
       PS_CHECK(multi_result::number(result->value().results.at("y")) == 3);
       auto record = take(result->value().dependencies.tile_record({0, 0, 0}));
-      PS_CHECK(record && record->inputs.size() == 1 && record->inputs[0].whole);
+      PS_CHECK(record && record->inputs.size() == 1 &&
+               record->inputs[0].tiles.size() == 1 &&
+               record->inputs[0].tiles.contains(0));
     }
   }
   if (finite) {
@@ -184,11 +186,208 @@ int concurrent_scans(bool cancel_owner, bool finite, bool cache) {
   PS_CHECK(root.statistics().live[ResourceKind::Queue] == 0);
   return 0;
 }
+// A checkpoint hit must become a miss when restoring its metadata cannot fit.
+// No restored dependency or association may escape that refused transaction.
+struct CapacityProbe {
+  Gate gate;
+  std::uint64_t remaining = 0;
+  bool hit = false, grants_empty = false;
+  std::size_t associations = 0;
+  ErrorCode failure = ErrorCode::Internal;
+};
+struct CapacityScan {
+  CapacityProbe* probe;
+  unsigned ordinal, turn = 0;
+  explicit CapacityScan(CapacityProbe* state)
+      : probe(state), ordinal(++state->gate.starts) {}
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    using Answer = Result<ResultProgramPoll>;
+    if (ordinal == 2) {
+      const auto available = phase.resources.available_capacity();
+      const auto bytes = available[ResourceKind::Metadata] - probe->remaining -
+                         ResourceBudget::lease_metadata_bytes();
+      auto held =
+          take(phase.resources.reserve(ResourceCapacity::host(bytes, bytes)));
+      auto saved = phase.checkpoint_before(1, 0);
+      held = {};
+      if (!saved.ok())
+        return Answer(saved.status());
+      probe->hit = saved.value().has_value();
+      probe->failure = phase.failure->load();
+      probe->associations = phase.association->size();
+      probe->grants_empty = phase.tensors->empty();
+    } else if (!turn++) {
+      ResultProgramNeed need;
+      for (unsigned port = 0; port < 100; ++port)
+        need.tiles.push_back(
+            {port, 0, false, take(TileSet::range(phase.resources, 0, 1))});
+      return Answer(std::move(need));
+    } else {
+      auto state = multi_result::binding(phase.resources, "carry", 7).result;
+      check(phase.checkpoint_publish(1, 0, state));
+    }
+    auto builder = take(ResultBuilder::start(phase.resources,
+                                             *phase.query.output.result_schema,
+                                             phase.query.semantic_key));
+    const double value = 7;
+    check(builder.publish_tensor(
+        0, Region::whole({1}),
+        ByteView(reinterpret_cast<const std::uint8_t*>(&value),
+                 sizeof(value))));
+    return Answer(ResultPublication{take(builder.seal()), true});
+  }
+};
+int checkpoint_restore_capacity(bool enough) {
+  CapacityProbe probe;
+  probe.remaining = enough ? 65536 : 2048;
+  auto registry = std::make_shared<OperationRegistry>();
+  OperationDefinition operation;
+  operation.key = "test.checkpoint_capacity";
+  operation.traits.input_count = 100;
+  operation.traits.input_schema.resize(100);
+  for (auto& input : operation.traits.input_schema)
+    input.tensor_key = "number";
+  operation.traits.outputs = {multi_result::output("value")};
+  operation.traits.outputs[0].continuation_bytes = sizeof(CapacityScan);
+  operation.traits.cacheable = false;
+  operation.start_result = [&](const auto&, const auto& allocator) {
+    return ResultContinuation::make<CapacityScan>(allocator, &probe);
+  };
+  check(registry->register_operation(std::move(operation)));
+  check(registry->freeze());
+  WorkflowDocument document;
+  WorkflowNode node{1, "test.checkpoint_capacity", {}, {}};
+  for (unsigned port = 0; port < 100; ++port) {
+    document.inputs.push_back(
+        multi_result::declaration(port + 1, "input" + std::to_string(port)));
+    node.inputs.push_back(WorkflowInputReference{port + 1});
+  }
+  document.nodes.push_back(std::move(node));
+  document.outputs = {{"value", 1, "value"}};
+  GraphContext graph(document);
+  auto plan = take(Compiler(registry).compile(graph)).plan;
+  ExecutionContextConfig config;
+  config.cpu_workers = 2;
+  ExecutionContext context(registry, config);
+  auto root = take(context.resource_budget());
+  ExecutionBindings bindings;
+  for (unsigned port = 0; port < 100; ++port)
+    bindings.inputs.push_back(
+        multi_result::binding(root, "input" + std::to_string(port), 1));
+  auto frozen = take(context.freeze(plan, bindings));
+  execution_testing::ExecutionTestHooks hooks;
+  hooks.checkpoint_published = published;
+  hooks.checkpoint_borrowed = borrowed;
+  active = &probe.gate;
+  execution_testing::install_execution_test_hooks(&hooks);
+  struct Cleanup {
+    ~Cleanup() {
+      execution_testing::install_execution_test_hooks(nullptr);
+      active = nullptr;
+    }
+  } cleanup;
+  auto owner =
+      std::async(std::launch::async, [&] { return context.execute(frozen); });
+  const bool entered = probe.gate.wait();
+  auto peer =
+      std::async(std::launch::async, [&] { return context.execute(frozen); });
+  const bool finished =
+      peer.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+  probe.gate.release();
+  auto first = owner.get();
+  auto second = peer.get();
+  PS_CHECK(entered && finished && !probe.gate.timed_out);
+  PS_REQUIRE_OK(first);
+  PS_REQUIRE_OK(second);
+  PS_CHECK(probe.hit == enough && probe.failure == ErrorCode::Ok);
+  PS_CHECK(probe.grants_empty && probe.associations == (enough ? 100U : 0U));
+  PS_CHECK(probe.gate.borrowed == (enough ? 1U : 0U));
+  auto record = take(second.value().dependencies.tile_record({0, 0, 0}));
+  PS_CHECK(record && record->inputs.size() == (enough ? 100U : 0U));
+  PS_CHECK(multi_result::number(second.value().results.at("value")) == 7);
+  return 0;
+}
+struct BlockCapacityProbe {
+  std::uint64_t remaining;
+  unsigned computations = 0;
+  ErrorCode failure = ErrorCode::Internal;
+};
+struct BlockCapacityScan {
+  BlockCapacityProbe* probe;
+  explicit BlockCapacityScan(BlockCapacityProbe* probe) : probe(probe) {}
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    using Answer = Result<ResultProgramPoll>;
+    auto incoming = multi_result::binding(phase.resources, "carry", 7).result;
+    const auto compute = [&]() -> Result<ResultRef> {
+      ++probe->computations;
+      return Result<ResultRef>(incoming);
+    };
+    auto warm = phase.block(1, 0, 1, 0, incoming, compute);
+    if (!warm.ok())
+      return Answer(warm.status());
+    const auto available = phase.resources.available_capacity();
+    const auto bytes = available[ResourceKind::Metadata] - probe->remaining -
+                       ResourceBudget::lease_metadata_bytes();
+    auto held =
+        take(phase.resources.reserve(ResourceCapacity::host(bytes, bytes)));
+    auto restored = phase.block(1, 0, 1, 0, incoming, compute);
+    held = {};
+    probe->failure = phase.failure->load();
+    if (!restored.ok())
+      return Answer(restored.status());
+    const double value = multi_result::number(restored.value());
+    auto builder = take(ResultBuilder::start(phase.resources,
+                                             *phase.query.output.result_schema,
+                                             phase.query.semantic_key));
+    check(builder.publish_tensor(
+        0, Region::whole({1}),
+        ByteView(reinterpret_cast<const std::uint8_t*>(&value),
+                 sizeof(value))));
+    return Answer(ResultPublication{take(builder.seal()), true});
+  }
+};
+int block_restore_capacity(bool cache, bool enough) {
+  BlockCapacityProbe probe{enough ? 65536U : 4096U};
+  auto registry = std::make_shared<OperationRegistry>();
+  OperationDefinition operation;
+  operation.key = "test.block_capacity";
+  operation.traits.outputs = {multi_result::output("value")};
+  operation.traits.outputs[0].continuation_bytes = sizeof(BlockCapacityScan);
+  operation.start_result = [&](const auto&, const auto& allocator) {
+    return ResultContinuation::make<BlockCapacityScan>(allocator, &probe);
+  };
+  check(registry->register_operation(std::move(operation)));
+  check(registry->freeze());
+  WorkflowDocument document;
+  document.nodes = {{1, "test.block_capacity", {}, {}}};
+  document.outputs = {{"value", 1, "value"}};
+  GraphContext graph(document);
+  auto plan = take(Compiler(registry).compile(graph)).plan;
+  ExecutionContextConfig config;
+  config.cpu_workers = 1;
+  config.result_cache_bytes = cache ? 1048576 : 0;
+  ExecutionContext context(registry, config);
+  auto result = context.execute(plan);
+  PS_REQUIRE_OK(result);
+  PS_CHECK(probe.failure == ErrorCode::Ok);
+  PS_CHECK(probe.computations == (cache && enough ? 1U : 2U));
+  if (cache)
+    PS_CHECK(context.cache_statistics().hits == 1);
+  PS_CHECK(result.value().diagnostics.block_cache_hits ==
+           (cache && enough ? 1U : 0U));
+  PS_CHECK(multi_result::number(result.value().results.at("value")) == 7);
+  return 0;
+}
 }  // namespace
 int main() {
   for (bool cache : {false, true})
     for (bool cancel : {false, true})
       for (bool finite : {false, true})
         PS_CHECK(concurrent_scans(cancel, finite, cache) == 0);
+  PS_CHECK(checkpoint_restore_capacity(false) == 0);
+  PS_CHECK(checkpoint_restore_capacity(true) == 0);
+  PS_CHECK(block_restore_capacity(true, false) == 0);
+  PS_CHECK(block_restore_capacity(true, true) == 0);
+  PS_CHECK(block_restore_capacity(false, false) == 0);
   return 0;
 }

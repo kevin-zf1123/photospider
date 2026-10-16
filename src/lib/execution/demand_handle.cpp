@@ -41,7 +41,7 @@ Result<std::uint64_t> diagnostic_byte_sum(std::uint64_t left,
 struct DemandHandle::Impl {
   struct Publication {
     DemandQuery query;
-    std::map<std::string, TileSet> dirty;
+    std::map<std::string, TileRequest> dirty;
   };
   std::weak_ptr<execution_internal::DemandCoordinator> owner;
   std::shared_ptr<const FrozenExecution> bundle;
@@ -169,15 +169,15 @@ Result<DemandQuery> normalize_tile_demands(const DemandQuery& query,
       return Result<DemandQuery>(
           Status{ErrorCode::InvalidArgument, "unknown demand output"});
     const auto& step = plan.steps()[found->second];
-    auto closed = item.second.resolve(step.tile_grid, step.tiled);
+    auto closed = item.second.resolve(step.tile_grids);
     if (!closed.ok())
       return Result<DemandQuery>(closed.status());
     result.emplace(item.first, closed.take_value());
   }
   return Result<DemandQuery>(std::move(result));
 }
-Status unite_named(std::map<std::string, TileSet>* target,
-                   const std::map<std::string, TileSet>& values,
+Status unite_named(std::map<std::string, TileRequest>* target,
+                   const std::map<std::string, TileRequest>& values,
                    const ResourceBudget& root) {
   for (const auto& item : values) {
     auto work = root.consume({1 + item.first.size()});
@@ -193,22 +193,16 @@ Status unite_named(std::map<std::string, TileSet>* target,
   }
   return Status::success();
 }
-Result<TileSet> query_units(const TileRequest& query, const PlanStep& step,
-                            const ResourceBudget& root, std::uint64_t maximum) {
-  if (!query.whole)
-    return query.tiles.copy_to(root);
-  const auto count = step.tiled ? step.tile_grid->tile_count() : 1;
-  if (count > maximum)
-    return Result<TileSet>(
-        Status{ErrorCode::ResourceExhausted, "demand unit limit"});
-  auto work = root.consume({count});
-  if (!work.ok())
-    return Result<TileSet>(work);
-  ResourceVector<TileIndex> indices{ResourceAllocator<TileIndex>(root)};
-  indices.reserve(count);
-  for (TileIndex tile = 0; tile < count; ++tile)
-    indices.push_back(tile);
-  return TileSet::from_indices(root, indices.data(), indices.size());
+Result<TileRequest> query_units(const TileRequest& query, const PlanStep& step,
+                                const ResourceBudget& root,
+                                std::uint64_t maximum) {
+  auto normalized = query.resolve(step.tile_grids);
+  if (!normalized.ok())
+    return normalized;
+  if (normalized.value().interval_count() > maximum)
+    return Result<TileRequest>(
+        Status{ErrorCode::ResourceExhausted, "demand metadata limit"});
+  return normalized.value().copy_to(root);
 }
 template <class Publications>
 Result<std::shared_ptr<const TileRecords>> retained_records(
@@ -219,33 +213,29 @@ Result<std::shared_ptr<const TileRecords>> retained_records(
   TileRecord roots(root);
   for (const auto& item : publications) {
     for (const auto& named : item.second->query) {
-      if (!named.second.whole && named.second.tiles.empty())
-        continue;
       const auto index = plan.outputs().at(named.first);
-      auto status =
-          roots.include({PlanStepInput{index}, plan.steps()[index].output_index,
-                         named.second.whole, named.second.tiles},
-                        root);
-      if (!status.ok())
-        return Result<std::shared_ptr<const TileRecords>>(status);
+      for (const auto& member : named.second.members) {
+        auto status = roots.include(
+            {PlanStepInput{index}, plan.steps()[index].output_index,
+             member.first, member.second},
+            root);
+        if (!status.ok())
+          return Result<std::shared_ptr<const TileRecords>>(status);
+      }
     }
   }
   return previous.replaced(
       generation, updates, roots,
-      [&](const PlanStepInput& input, std::uint32_t output) {
+      [&](const PlanStepInput& input, std::uint32_t output,
+          std::uint32_t slot) {
         using Answer = Result<TileRecords::ProducerUnits>;
         if (input.step_index >= plan.steps().size())
           return Answer(Status{ErrorCode::InvalidArgument, {}});
         const auto& step = plan.steps()[input.step_index];
-        if (output != step.output_index)
+        if (output != step.output_index || slot >= step.tile_grids.size())
           return Answer(Status{ErrorCode::InvalidArgument, {}});
-        const bool dynamic = std::any_of(
-            step.output_result_schema->fields.begin(),
-            step.output_result_schema->fields.end(), [](const auto& field) {
-              return field.rows.kind == ResultExtentKind::RuntimeCount;
-            });
-        return Answer(TileRecords::ProducerUnits{
-            step.tiled ? step.tile_grid->tile_count() : 1, dynamic});
+        return Answer(
+            TileRecords::ProducerUnits{step.tile_grids[slot].tile_count()});
       },
       [&](std::uint64_t n) {
         return cancellation.cancelled() ? Status{ErrorCode::Cancelled, {}}
@@ -271,7 +261,7 @@ Result<std::uint64_t> retained_weight(const Publications& publications,
       return next;
     weight = next.value();
     for (const auto& named : item.second->dirty) {
-      next = diagnostic_byte_sum(weight, 1 + named.second.size());
+      next = diagnostic_byte_sum(weight, 1 + named.second.interval_count());
       if (!next.ok())
         return next;
       weight = next.value();
@@ -384,7 +374,7 @@ Result<DemandResult> DemandHandle::request(
       ResourceAllocator<Impl::Publication>(root));
   publication->query = std::move(original);
   for (const auto& named : publication->query)
-    publication->dirty.emplace(named.first, TileSet{});
+    publication->dirty.emplace(named.first, TileRequest{});
   auto updates =
       result.dependencies.tiles_
           ? result.dependencies.tiles_->snapshot()
@@ -416,21 +406,28 @@ Result<DemandResult> DemandHandle::request(
         ResourceAllocator<Impl::Publication>(root), *item.second);
     for (auto& named : copied->dirty) {
       const auto index = lease->bundle->plan().outputs().at(named.first);
-      ResourceVector<TileIndex> remaining{ResourceAllocator<TileIndex>(root)};
-      for (auto tile : named.second) {
-        const TileUnit unit{
-            index, lease->bundle->plan().steps()[index].output_index, tile};
-        auto fresh = result.dependencies.tile_record(unit);
-        if (!fresh.ok())
-          return failure(fresh.status());
-        if (!fresh.value())
-          remaining.push_back(tile);
+      TileRequest remaining_request;
+      for (const auto& member : named.second.members) {
+        ResourceVector<TileIndex> remaining{ResourceAllocator<TileIndex>(root)};
+        for (auto tile : member.second) {
+          const TileUnit unit{index,
+                              lease->bundle->plan().steps()[index].output_index,
+                              member.first, tile};
+          auto fresh = result.dependencies.tile_record(unit);
+          if (!fresh.ok())
+            return failure(fresh.status());
+          if (!fresh.value())
+            remaining.push_back(tile);
+        }
+        auto selected =
+            TileSet::from_indices(root, remaining.data(), remaining.size());
+        if (!selected.ok())
+          return failure(selected.status());
+        if (!selected.value().empty())
+          remaining_request.members.emplace(member.first,
+                                            selected.take_value());
       }
-      auto selected =
-          TileSet::from_indices(root, remaining.data(), remaining.size());
-      if (!selected.ok())
-        return failure(selected.status());
-      named.second = selected.take_value();
+      named.second = std::move(remaining_request);
     }
     item.second = std::move(copied);
   }
@@ -621,7 +618,7 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
   for (auto& item : publications) {
     auto publication = std::allocate_shared<Impl::Publication>(
         ResourceAllocator<Impl::Publication>(*root), *item.second);
-    std::map<std::string, TileSet> coverage;
+    std::map<std::string, TileRequest> coverage;
     for (const auto& named : publication->query) {
       const auto index = next->plan().outputs().at(named.first);
       const auto& step = next->plan().steps()[index];
@@ -629,21 +626,26 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
                                impl_->config.maximum_metadata_entries);
       if (!units.ok())
         return failure(units.status());
-      ResourceVector<TileIndex> selected{ResourceAllocator<TileIndex>(*root)};
-      for (const auto& unit : dirty.value()) {
-        auto work = root->consume({1});
-        if (!work.ok())
-          return failure(work);
-        if (unit.step == index && unit.output == step.output_index &&
-            units.value().contains(unit.tile))
-          selected.push_back(unit.tile);
+      TileRequest changes;
+      for (const auto& member : units.value().members) {
+        ResourceVector<TileIndex> selected{ResourceAllocator<TileIndex>(*root)};
+        for (const auto& unit : dirty.value()) {
+          auto work = root->consume({1});
+          if (!work.ok())
+            return failure(work);
+          if (unit.step == index && unit.output == step.output_index &&
+              unit.tensor_slot == member.first &&
+              member.second.contains(unit.tile))
+            selected.push_back(unit.tile);
+        }
+        auto changed =
+            TileSet::from_indices(*root, selected.data(), selected.size());
+        if (!changed.ok())
+          return failure(changed.status());
+        if (!changed.value().empty())
+          changes.members.emplace(member.first, changed.take_value());
       }
-      auto changed =
-          TileSet::from_indices(*root, selected.data(), selected.size());
-      if (!changed.ok())
-        return failure(changed.status());
-      auto merged =
-          publication->dirty[named.first].unite(changed.value(), *root);
+      auto merged = publication->dirty[named.first].unite(changes, *root);
       if (!merged.ok())
         return failure(merged.status());
       publication->dirty[named.first] = merged.take_value();

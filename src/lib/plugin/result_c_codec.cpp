@@ -16,39 +16,40 @@
 #include "photospider/core/utf8_validation.hpp"
 #include "plugin/operation_exception.hpp"
 #include "plugin/port_validation.hpp"
+#include "plugin/result_c_member.hpp"
 
 namespace ps::plugin_internal::result_c {
 Status outcome(int code) {
   switch (code) {
-    case PS_RESULT_STATUS_OK_V4:
+    case PS_RESULT_STATUS_OK_V5:
       return Status::success();
-    case PS_RESULT_STATUS_CANCELLED_V4:
+    case PS_RESULT_STATUS_CANCELLED_V5:
       return {ErrorCode::Cancelled, {}};
-    case PS_RESULT_STATUS_BACKEND_UNAVAILABLE_V4:
+    case PS_RESULT_STATUS_BACKEND_UNAVAILABLE_V5:
       return {ErrorCode::BackendUnavailable, {}};
-    case PS_RESULT_STATUS_RESOURCE_EXHAUSTED_V4:
+    case PS_RESULT_STATUS_RESOURCE_EXHAUSTED_V5:
       return {ErrorCode::ResourceExhausted, {}};
-    case PS_RESULT_STATUS_TYPE_MISMATCH_V4:
+    case PS_RESULT_STATUS_TYPE_MISMATCH_V5:
       return {ErrorCode::TypeMismatch, {}};
-    case PS_RESULT_STATUS_INVALID_ARGUMENT_V4:
+    case PS_RESULT_STATUS_INVALID_ARGUMENT_V5:
       return {ErrorCode::InvalidArgument, {}};
     default:
       return {ErrorCode::OperationFailed, {}};
   }
 }
 int code(const Status& status) {
-  return status.ok()                           ? PS_RESULT_STATUS_OK_V4
-         : status.code == ErrorCode::Cancelled ? PS_RESULT_STATUS_CANCELLED_V4
+  return status.ok()                           ? PS_RESULT_STATUS_OK_V5
+         : status.code == ErrorCode::Cancelled ? PS_RESULT_STATUS_CANCELLED_V5
          : status.code == ErrorCode::BackendUnavailable
-             ? PS_RESULT_STATUS_BACKEND_UNAVAILABLE_V4
+             ? PS_RESULT_STATUS_BACKEND_UNAVAILABLE_V5
          : status.code == ErrorCode::ResourceExhausted
-             ? PS_RESULT_STATUS_RESOURCE_EXHAUSTED_V4
+             ? PS_RESULT_STATUS_RESOURCE_EXHAUSTED_V5
          : status.code == ErrorCode::TypeMismatch
-             ? PS_RESULT_STATUS_TYPE_MISMATCH_V4
+             ? PS_RESULT_STATUS_TYPE_MISMATCH_V5
          : status.code == ErrorCode::InvalidArgument ||
                  status.code == ErrorCode::Stale
-             ? PS_RESULT_STATUS_INVALID_ARGUMENT_V4
-             : PS_RESULT_STATUS_FAILURE_V4;
+             ? PS_RESULT_STATUS_INVALID_ARGUMENT_V5
+             : PS_RESULT_STATUS_FAILURE_V5;
 }
 Result<std::string> text(const char* pointer, std::uint32_t count,
                          std::uint32_t maximum) {
@@ -59,22 +60,21 @@ Result<std::string> text(const char* pointer, std::uint32_t count,
     return Result<std::string>(invalid("invalid Result plugin key"));
   return Result<std::string>(std::move(string));
 }
-ResultExtent extent(const ps_result_extent_v4& source) {
+ResultExtent extent(const ps_result_extent_v5& source) {
   return {static_cast<ResultExtentKind>(source.kind),
           source.value,
           source.input,
           source.axis,
-          source.field,
           source.divisor,
           source.offset};
 }
-Result<SchemaTemplate> schema(const ps_result_schema_v4* source) {
+Result<SchemaTemplate> schema(const ps_result_schema_v5* source) {
   if (!source ||
-      reinterpret_cast<std::uintptr_t>(source) % alignof(ps_result_schema_v4) ||
+      reinterpret_cast<std::uintptr_t>(source) % alignof(ps_result_schema_v5) ||
       source->struct_size != sizeof(*source) ||
-      !array(source->fields, source->field_count, 16) ||
       !array(source->tensors, source->tensor_count, 16) ||
-      !array(source->domain, source->domain_rank, 8))
+      !array(source->domain, source->domain_rank, 8) ||
+      !array(source->publication_scopes, source->publication_scope_count, 16))
     return Result<SchemaTemplate>(invalid("invalid Result schema table"));
   auto id = text(source->id, source->id_size);
   if (!id.ok())
@@ -82,28 +82,13 @@ Result<SchemaTemplate> schema(const ps_result_schema_v4* source) {
   SchemaTemplate target;
   target.id = id.take_value();
   target.version = source->version;
-  target.publication = static_cast<PublishPolicy>(source->publication);
-  for (std::uint32_t i = 0; i < source->field_count; ++i) {
-    const auto& field = source->fields[i];
-    if (field.struct_size != sizeof(field) || field.record_rank > 7)
-      return Result<SchemaTemplate>(invalid("invalid Result field"));
-    auto key = text(field.key, field.key_size);
-    if (!key.ok())
-      return Result<SchemaTemplate>(key.status());
-    ResultFieldSpec copied;
-    copied.key = key.take_value();
-    copied.element_type = static_cast<ElementType>(field.element_type);
-    copied.rows = extent(field.rows);
-    copied.record_shape.assign(field.record_shape,
-                               field.record_shape + field.record_rank);
-    target.fields.push_back(std::move(copied));
-  }
+
   for (std::uint32_t i = 0; i < source->tensor_count; ++i) {
     const auto& image = source->tensors[i];
     if (image.struct_size != sizeof(image) || image.rank < 1 ||
         image.rank > 8 ||
         !core_internal::can_add(image.rank, image.batch_rank, 8) ||
-        image.spatial > 1 || !array(image.groups, image.group_count, 64))
+        image.spatial > 1)
       return Result<SchemaTemplate>(invalid("invalid typed image record"));
     auto key = text(image.key, image.key_size);
     if (!key.ok())
@@ -119,38 +104,37 @@ Result<SchemaTemplate> schema(const ps_result_schema_v4* source) {
     copied.descriptor.shape.assign(image.shape, image.shape + image.rank);
     if (image.storage_order > 1)
       return Result<SchemaTemplate>(invalid("invalid image storage order"));
-    copied.layout.order = static_cast<ImagePlaneOrder>(image.storage_order);
+    copied.layout.order = static_cast<TensorStorageOrder>(image.storage_order);
     copied.layout.row_pitch_bytes = image.row_pitch_bytes;
     copied.layout.height_axis = image.height_axis;
     copied.layout.width_axis = image.width_axis;
     copied.layout.channel_axis = image.channel_axis == UINT32_MAX
                                      ? std::optional<std::uint32_t>{}
                                      : image.channel_axis;
-    for (std::uint32_t g = 0; g < image.group_count; ++g) {
-      const auto& group = image.groups[g];
-      if (group.struct_size != sizeof(group))
-        return Result<SchemaTemplate>(invalid("invalid image group"));
-      auto role = text(group.role, group.role_size);
-      if (!role.ok())
-        return Result<SchemaTemplate>(role.status());
-      copied.layout.groups.push_back(
-          {role.take_value(), group.first_channel, group.channel_count});
-    }
+
     target.tensors.push_back(std::move(copied));
   }
   for (std::uint32_t i = 0; i < source->domain_rank; ++i)
     target.domain.push_back(extent(source->domain[i]));
+  for (std::uint32_t i = 0; i < source->publication_scope_count; ++i) {
+    const auto& scope = source->publication_scopes[i];
+    if (scope.struct_size != sizeof(scope) ||
+        !array(scope.members, scope.member_count, 16) || !scope.member_count)
+      return Result<SchemaTemplate>(invalid("invalid publication scope"));
+    ResultPublicationScope copied;
+    copied.policy = static_cast<ResultPublicationPolicy>(scope.policy);
+    copied.members.assign(scope.members, scope.members + scope.member_count);
+    target.publication_scopes.push_back(std::move(copied));
+  }
   auto checked = target.validate();
   return checked.ok() ? Result<SchemaTemplate>(std::move(target))
                       : Result<SchemaTemplate>(checked);
 }
-Result<OperationPortConstraint> constraint(const ps_result_port_v4& p);
-Result<OperationMetadata> port(const ps_result_port_v4& input) {
+Result<OperationPortConstraint> constraint(const ps_result_port_v5& p);
+Result<OperationMetadata> port(const ps_result_port_v5& input) {
   if (input.struct_size != sizeof(input))
     return Result<OperationMetadata>(invalid("invalid Result port size"));
   OperationMetadata metadata;
-  if (input.kind != PS_RESULT_OBJECT_V4)
-    return Result<OperationMetadata>(invalid("invalid Result port kind"));
   auto copied = schema(input.schema);
   if (!copied.ok())
     return Result<OperationMetadata>(copied.status());
@@ -181,31 +165,24 @@ MetadataView::MetadataView(const OperationMetadata* source, size_t count) {
       status = invalid("C Result metadata requires a schema");
       return;
     }
-    p.kind = PS_RESULT_OBJECT_V4;
     p.schema = &b.schema;
     const auto& schema = *m.result_schema;
     b.schema.struct_size = sizeof(b.schema);
     b.schema.id = schema.id.data();
     b.schema.id_size = schema.id.size();
     b.schema.version = schema.version;
-    b.schema.publication = static_cast<uint32_t>(schema.publication);
-    b.fields.reserve(schema.fields.size());
-    for (const auto& f : schema.fields) {
-      ps_result_field_spec_v4 field{};
-      field.struct_size = sizeof(field);
-      field.key = f.key.data();
-      field.key_size = f.key.size();
-      field.element_type = static_cast<uint32_t>(f.element_type);
-      field.record_rank = f.record_shape.size();
-      std::copy(f.record_shape.begin(), f.record_shape.end(),
-                field.record_shape);
-      field.rows = encode(f.rows);
-      b.fields.push_back(field);
+    b.publication_scopes.resize(schema.publication_scopes.size());
+    for (std::size_t j = 0; j < schema.publication_scopes.size(); ++j) {
+      const auto& scope = schema.publication_scopes[j];
+      b.publication_scopes[j] = {
+          sizeof(ps_result_publication_scope_v5),
+          static_cast<std::uint32_t>(scope.policy), scope.members.data(),
+          static_cast<std::uint32_t>(scope.members.size())};
     }
-    b.schema.fields = b.fields.empty() ? nullptr : b.fields.data();
-    b.schema.field_count = b.fields.size();
+    b.schema.publication_scopes =
+        b.publication_scopes.empty() ? nullptr : b.publication_scopes.data();
+    b.schema.publication_scope_count = b.publication_scopes.size();
     b.tensors.resize(schema.tensors.size());
-    b.groups.resize(schema.tensors.size());
     for (size_t j = 0; j < schema.tensors.size(); ++j) {
       auto& image = b.tensors[j];
       const auto& f = schema.tensors[j];
@@ -225,12 +202,6 @@ MetadataView::MetadataView(const OperationMetadata* source, size_t count) {
       image.channel_axis = f.layout.channel_axis.value_or(UINT32_MAX);
       image.storage_order = static_cast<uint32_t>(f.layout.order);
       image.row_pitch_bytes = f.layout.row_pitch_bytes;
-      for (const auto& g : f.layout.groups)
-        b.groups[j].push_back({sizeof(ps_result_group_v4), g.role.data(),
-                               static_cast<uint32_t>(g.role.size()),
-                               g.first_channel, g.channel_count});
-      image.groups = b.groups[j].empty() ? nullptr : b.groups[j].data();
-      image.group_count = b.groups[j].size();
     }
     b.schema.tensors = b.tensors.empty() ? nullptr : b.tensors.data();
     b.schema.tensor_count = b.tensors.size();
@@ -243,23 +214,18 @@ MetadataView::MetadataView(const OperationMetadata* source, size_t count) {
 void apply_constraint(MetadataView& view, size_t i,
                       const OperationPortConstraint& prototype) {
   auto& p = view.ports[i];
-  p.kind = static_cast<uint32_t>(prototype.kind);
-  p.minimum = prototype.minimum;
-  p.maximum = prototype.maximum;
   p.tensor_key =
       prototype.tensor_key.empty() ? nullptr : prototype.tensor_key.data();
   p.tensor_key_size = prototype.tensor_key.size();
-  p.scalar_bounds = prototype.scalar_bounds;
   auto& validators = view.storage[i].validators;
   for (const auto& id : prototype.validators)
-    validators.push_back({sizeof(ps_result_extension_identity_v4), id.version,
+    validators.push_back({sizeof(ps_result_extension_identity_v5), id.version,
                           id.key.data(), static_cast<uint32_t>(id.key.size()),
                           id.implementation.data(),
                           static_cast<uint32_t>(id.implementation.size())});
   p.validators = validators.empty() ? nullptr : validators.data();
   p.validator_count = validators.size();
-  if (p.kind == PS_RESULT_OBJECT_V4 &&
-      input_internal::tensor_member_predicate(prototype)) {
+  if (input_internal::tensor_member_predicate(prototype)) {
     p.element_type = prototype.element_type;
     p.rank = prototype.rank;
     p.element_type_mask = prototype.element_type_mask;
@@ -280,27 +246,27 @@ uint32_t float_bits(float value) {
   std::memcpy(&bits, &value, sizeof(bits));
   return bits;
 }
-ResourceVector<ps_result_parameter_value_v4> parameters_view(
+ResourceVector<ps_result_parameter_value_v5> parameters_view(
     const std::map<std::string, ParameterValue>& source) {
-  ResourceVector<ps_result_parameter_value_v4> result;
+  ResourceVector<ps_result_parameter_value_v5> result;
   result.reserve(source.size());
   for (const auto& parameter : source) {
-    ps_result_parameter_value_v4 p{};
+    ps_result_parameter_value_v5 p{};
     p.struct_size = sizeof(p);
     p.key = parameter.first.data();
     p.key_size = parameter.first.size();
     if (const auto* integer = std::get_if<std::int64_t>(&parameter.second)) {
-      p.type = PS_RESULT_PARAMETER_INT64_V4;
+      p.type = PS_RESULT_PARAMETER_INT64_V5;
       p.int64_value = *integer;
     } else if (const auto* number = std::get_if<double>(&parameter.second)) {
-      p.type = PS_RESULT_PARAMETER_FLOAT64_V4;
+      p.type = PS_RESULT_PARAMETER_FLOAT64_V5;
       p.float64_value = *number;
     } else if (const auto* boolean = std::get_if<bool>(&parameter.second)) {
-      p.type = PS_RESULT_PARAMETER_BOOL_V4;
+      p.type = PS_RESULT_PARAMETER_BOOL_V5;
       p.bool_value = *boolean;
     } else {
       const auto& string = std::get<std::string>(parameter.second);
-      p.type = PS_RESULT_PARAMETER_STRING_V4;
+      p.type = PS_RESULT_PARAMETER_STRING_V5;
       p.string_value = string.data();
       p.string_size = string.size();
     }
@@ -308,23 +274,20 @@ ResourceVector<ps_result_parameter_value_v4> parameters_view(
   }
   return result;
 }
-Result<OperationPortConstraint> constraint(const ps_result_port_v4& p) {
-  if (p.struct_size != sizeof(p) || p.kind != PS_RESULT_OBJECT_V4)
+Result<OperationPortConstraint> constraint(const ps_result_port_v5& p) {
+  if (p.struct_size != sizeof(p))
     return Result<OperationPortConstraint>(
         invalid("invalid Result port constraint size/kind"));
   OperationPortConstraint c;
-  c.kind = OperationPortKind::Result;
+
   auto ids = extension_ids(p.validators, p.validator_count);
   if (!ids.ok())
     return Result<OperationPortConstraint>(ids.status());
   c.validators = ids.take_value();
   c.element_type = p.element_type;
   c.rank = p.rank;
-  c.minimum = p.minimum;
-  c.maximum = p.maximum;
   c.element_type_mask = p.element_type_mask;
-  if (p.scalar_bounds > 1 ||
-      (p.tensor_key == nullptr) != (p.tensor_key_size == 0))
+  if ((p.tensor_key == nullptr) != (p.tensor_key_size == 0))
     return Result<OperationPortConstraint>(
         invalid("invalid Result member predicate"));
   if (p.tensor_key) {
@@ -333,7 +296,6 @@ Result<OperationPortConstraint> constraint(const ps_result_port_v4& p) {
       return Result<OperationPortConstraint>(key.status());
     c.tensor_key = key.take_value();
   }
-  c.scalar_bounds = p.scalar_bounds != 0;
   if (p.schema) {
     auto copied = schema(p.schema);
     if (!copied.ok())
@@ -343,6 +305,37 @@ Result<OperationPortConstraint> constraint(const ps_result_port_v4& p) {
   }
   return Result<OperationPortConstraint>(std::move(c));
 }
+Result<OperationSharedStage> shared_stage(
+    const ps_result_shared_stage_v5& source) {
+  using Answer = Result<OperationSharedStage>;
+  if (source.struct_size != sizeof(source) || source.mandatory > 1 ||
+      source.state_bytes > 1048576 ||
+      !array(source.input_indices, source.input_count, 1024))
+    return Answer(invalid("invalid shared stage declaration"));
+  auto name = text(source.key, source.key_size);
+  auto result_schema = schema(source.schema);
+  if (!name.ok() || !result_schema.ok())
+    return Answer(!name.ok() ? name.status() : result_schema.status());
+  auto ids = extension_ids(source.validators, source.validator_count);
+  if (!ids.ok())
+    return Answer(ids.status());
+  OperationSharedStage result;
+  result.validators = ids.take_value();
+  result.key = name.take_value();
+  result.result_schema = result_schema.take_value();
+  if (source.input_count)
+    result.input_indices.assign(source.input_indices,
+                                source.input_indices + source.input_count);
+  result.backend = static_cast<Backend>(source.backend);
+  result.mandatory = source.mandatory != 0;
+  result.continuation_bytes =
+      c_member_storage_bytes() + std::max<std::uint64_t>(1, source.state_bytes);
+  result.workspace_bytes = source.workspace_bytes;
+  result.maximum_work = source.maximum_work;
+  result.maximum_output_payload_bytes = source.maximum_output_payload_bytes;
+  result.maximum_dependency_stages = source.maximum_stages;
+  return Answer(std::move(result));
+}
 struct MetadataSink {
   const OperationTraits& traits;
   std::vector<OperationOutputSpecialization> outputs;
@@ -351,8 +344,35 @@ struct MetadataSink {
   const std::thread::id owner = std::this_thread::get_id();
   std::vector<ResourceIdentity> resource_ids = {};
   bool resources_supplied = false;
+  std::optional<std::vector<OperationSharedStage>> stages = {};
+  static int set_shared_stages(void* raw,
+                               const ps_result_shared_stage_v5* values,
+                               uint32_t count) noexcept {
+    auto& sink = *static_cast<MetadataSink*>(raw);
+    if (!sink.failure.ok())
+      return code(sink.failure);
+    try {
+      if (sink.owner != std::this_thread::get_id() || sink.stages ||
+          !array(values, count, 64)) {
+        sink.failure = invalid("invalid shared stage preparation");
+      } else {
+        sink.stages.emplace();
+        for (uint32_t i = 0; i < count; ++i) {
+          auto stage = shared_stage(values[i]);
+          if (!stage.ok()) {
+            sink.failure = stage.status();
+            break;
+          }
+          sink.stages->push_back(stage.take_value());
+        }
+      }
+    } catch (...) {
+      sink.failure = {ErrorCode::ResourceExhausted, {}};
+    }
+    return code(sink.failure);
+  }
   static int set_resources(void* raw,
-                           const ps_result_resource_identity_v4* values,
+                           const ps_result_resource_identity_v5* values,
                            uint32_t count) noexcept {
     auto& sink = *static_cast<MetadataSink*>(raw);
     if (!sink.failure.ok())
@@ -376,18 +396,16 @@ struct MetadataSink {
     return code(sink.failure);
   }
   static int set(void* raw, uint32_t index,
-                 const ps_result_port_v4* source) noexcept {
+                 const ps_result_port_v5* source) noexcept {
     auto& sink = *static_cast<MetadataSink*>(raw);
     if (!sink.failure.ok())
       return code(sink.failure);
     try {
       if (sink.owner != std::this_thread::get_id() || !source ||
           reinterpret_cast<std::uintptr_t>(source) %
-              alignof(ps_result_port_v4) ||
+              alignof(ps_result_port_v5) ||
           source->struct_size != sizeof(*source) ||
-          index >= sink.outputs.size() || sink.supplied[index] ||
-          source->kind != static_cast<uint32_t>(
-                              sink.traits.outputs[index].output_schema.kind)) {
+          index >= sink.outputs.size() || sink.supplied[index]) {
         sink.failure = invalid("invalid metadata sink output/kind");
       } else {
         auto translated = port(*source);
@@ -403,9 +421,6 @@ struct MetadataSink {
                     prototype.tensor_key));
           auto ids = extension_ids(source->validators, source->validator_count);
           if (!ids.ok() || ids.value() != prototype.validators || !key_equal ||
-              source->scalar_bounds != prototype.scalar_bounds ||
-              float_bits(source->minimum) != float_bits(prototype.minimum) ||
-              float_bits(source->maximum) != float_bits(prototype.maximum) ||
               source->element_type_mask != prototype.element_type_mask) {
             sink.failure =
                 invalid("metadata resolver changed output constraints");
@@ -424,37 +439,30 @@ struct MetadataSink {
   }
 };
 namespace {
-bool same_grid(const std::optional<TileGrid>& first,
-               const std::optional<TileGrid>& second) {
-  if (first.has_value() != second.has_value())
-    return false;
-  return !first || (first->tile_extent() == second->tile_extent() &&
-                    first->rank() == second->rank() &&
-                    first->batch_rank() == second->batch_rank() &&
-                    first->height_axis() == second->height_axis() &&
-                    first->width_axis() == second->width_axis() &&
-                    first->shape() == second->shape() &&
-                    first->batch_count() == second->batch_count() &&
-                    first->tile_rows() == second->tile_rows() &&
-                    first->tile_columns() == second->tile_columns() &&
-                    first->tile_count() == second->tile_count());
+bool same_grid(const TileGrid& a, const TileGrid& b) {
+  return a.tile_extent() == b.tile_extent() && a.shape() == b.shape() &&
+         a.rank() == b.rank() && a.batch_rank() == b.batch_rank() &&
+         a.batch_axis_mask() == b.batch_axis_mask() &&
+         a.height_axis() == b.height_axis() && a.width_axis() == b.width_axis();
 }
-ps_result_tile_grid_v4 encode_grid(const std::optional<TileGrid>& grid) {
-  ps_result_tile_grid_v4 view{};
+bool same_grids(const std::vector<TileGrid>& a,
+                const std::vector<TileGrid>& b) {
+  return a.size() == b.size() &&
+         std::equal(a.begin(), a.end(), b.begin(), same_grid);
+}
+ps_result_tile_grid_v5 encode_grid(const TileGrid& value) {
+  ps_result_tile_grid_v5 view{};
   view.struct_size = sizeof(view);
-  if (grid) {
-    const auto& value = *grid;
-    view.present = 1;
-    view.rank = value.rank();
-    view.batch_rank = value.batch_rank();
-    view.height_axis = value.height_axis();
-    view.width_axis = value.width_axis();
-    view.tile_extent = value.tile_extent();
-    view.tile_rows = value.tile_rows();
-    view.tile_columns = value.tile_columns();
-    view.tile_count = value.tile_count();
-    std::copy(value.shape().begin(), value.shape().end(), view.shape);
-  }
+  view.rank = value.rank();
+  view.batch_rank = value.batch_rank();
+  view.batch_axis_mask = value.batch_axis_mask();
+  view.height_axis = value.height_axis();
+  view.width_axis = value.width_axis();
+  view.tile_extent = value.tile_extent();
+  view.tile_rows = value.tile_rows();
+  view.tile_columns = value.tile_columns();
+  view.tile_count = value.tile_count();
+  std::copy(value.shape().begin(), value.shape().end(), view.shape);
   return view;
 }
 }  // namespace
@@ -463,7 +471,7 @@ QueryFrame::QueryFrame(const ResultProgramQuery& source,
                        const ResourceBudget& resources)
     : input_views(source.inputs),
       output_view(&source.output, 1),
-      input_tile_grids(ResourceAllocator<ps_result_tile_grid_v4>(resources)) {
+      input_tile_grids(ResourceAllocator<ps_result_tile_grids_v5>(resources)) {
   if (source.parameters.size() > 128 ||
       source.output_index >= definition.traits.outputs.size() ||
       !source.output.result_schema) {
@@ -472,6 +480,8 @@ QueryFrame::QueryFrame(const ResultProgramQuery& source,
   }
   query.struct_size = sizeof(query);
   query.output_index = source.output_index;
+  query.shared_stage = source.shared_stage;
+  query.tensor_slot = source.tensor_slot;
   query.tile_unit = source.tile_unit;
   query.tile_extent = source.tile_extent;
   if (!input_views.status.ok()) {
@@ -484,7 +494,8 @@ QueryFrame::QueryFrame(const ResultProgramQuery& source,
   }
   apply_constraint_view(input_views, definition.traits);
   const auto& output_trait = definition.traits.outputs[query.output_index];
-  apply_constraint(output_view, 0, output_trait.output_schema);
+  if (source.shared_stage == UINT32_MAX)
+    apply_constraint(output_view, 0, output_trait.output_schema);
   resolved_output.struct_size = sizeof(resolved_output);
   resolved_output.key = output_trait.key.data();
   resolved_output.key_size = output_trait.key.size();
@@ -495,24 +506,29 @@ QueryFrame::QueryFrame(const ResultProgramQuery& source,
       output_trait.input_indices && !output_trait.input_indices->empty()
           ? output_trait.input_indices->data()
           : nullptr;
-  resolved_output.execution =
-      output_trait.region_rule == OperationRegionRule::Whole
-          ? PS_RESULT_WHOLE_V4
-          : PS_RESULT_REGIONAL_V4;
-  resolved_output.failure_delivery =
-      static_cast<std::uint32_t>(output_trait.failure_delivery);
-  resolved_output.flags =
-      (output_trait.preserve_output_views ? PS_RESULT_OUTPUT_PRESERVE_VIEWS_V4
-                                          : 0U) |
-      (output_trait.requires_input_views
-           ? PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V4
-           : 0U) |
-      (output_trait.maximum_output_payload_bytes
-           ? PS_RESULT_OUTPUT_PAYLOAD_BOUND_V4
-           : 0U);
+  resolved_output.flags = (output_trait.maximum_output_payload_bytes
+                               ? PS_RESULT_OUTPUT_PAYLOAD_BOUND_V5
+                               : 0U);
   resolved_output.maximum_output_payload_bytes =
       output_trait.maximum_output_payload_bytes.value_or(0);
   resolved_output.port = output_view.ports[0];
+  if (source.shared_stage != UINT32_MAX) {
+    if (!source.prepared ||
+        source.shared_stage >= source.prepared->traits().shared_stages.size()) {
+      status = invalid("unknown C shared stage");
+      return;
+    }
+    const auto& stage =
+        source.prepared->traits().shared_stages[source.shared_stage];
+    resolved_output.key = stage.key.data();
+    resolved_output.key_size = stage.key.size();
+    resolved_output.input_count = stage.input_indices.size();
+    resolved_output.input_indices =
+        stage.input_indices.empty() ? nullptr : stage.input_indices.data();
+    resolved_output.flags = PS_RESULT_OUTPUT_PAYLOAD_BOUND_V5;
+    resolved_output.maximum_output_payload_bytes =
+        stage.maximum_output_payload_bytes;
+  }
   query.backend = static_cast<std::uint32_t>(source.backend);
   query.inputs = input_views.ports.empty() ? nullptr : input_views.ports.data();
   query.input_count = input_views.ports.size();
@@ -527,62 +543,112 @@ QueryFrame::QueryFrame(const ResultProgramQuery& source,
       status = invalid("C input grid has no schema");
       return;
     }
-    auto grid = TileGrid::from_schema(*source.inputs[i].result_schema,
-                                      source.tile_extent);
+    auto grid =
+        TileGrid::members(*source.inputs[i].result_schema, source.tile_extent);
     if (!grid.ok()) {
       status = grid.status();
       return;
     }
     if (!source.input_tile_grids.empty() &&
-        !same_grid(source.input_tile_grids[i], grid.value())) {
+        !same_grids(source.input_tile_grids[i], grid.value())) {
       status = invalid("C input grid differs from resolved schema");
       return;
     }
-    const auto view = encode_grid(grid.value());
-    input_tile_grids.push_back(view);
+    ResourceVector<ps_result_tile_grid_v5> views{
+        ResourceAllocator<ps_result_tile_grid_v5>(resources)};
+    for (const auto& member : grid.value())
+      views.push_back(encode_grid(member));
+    input_grid_members.push_back(std::move(views));
+    const auto& members = input_grid_members.back();
+    input_tile_grids.push_back({sizeof(ps_result_tile_grids_v5),
+                                static_cast<std::uint32_t>(members.size()),
+                                members.data()});
   }
   query.input_tile_grids =
       input_tile_grids.empty() ? nullptr : input_tile_grids.data();
   query.output = &resolved_output;
-  auto grid =
-      TileGrid::from_schema(*source.output.result_schema, source.tile_extent);
-  if (!grid.ok()) {
-    status = grid.status();
+  auto grids =
+      TileGrid::members(*source.output.result_schema, source.tile_extent);
+  if (!grids.ok()) {
+    status = grids.status();
     return;
   }
-  if (source.output_tile_grid &&
-      !same_grid(source.output_tile_grid, grid.value())) {
-    status = invalid("C output grid differs from resolved schema");
+  if (!source.output_tile_grids.empty() &&
+      !same_grids(source.output_tile_grids, grids.value())) {
+    status = invalid("C output grids differ from resolved schema");
     return;
   }
-  output_tile_grid = encode_grid(grid.value());
-  query.output_tile_grid = &output_tile_grid;
-  query.tiled = output_trait.region_rule == OperationRegionRule::Tiled &&
-                grid.value().has_value();
-  auto selection =
-      source.output_request.resolve(grid.value(), query.tiled != 0);
-  if (!selection.ok()) {
-    status = selection.status();
+  if (source.shared_stage == UINT32_MAX &&
+      (source.tensor_slot >= grids.value().size() ||
+       source.tile_unit >= grids.value()[source.tensor_slot].tile_count())) {
+    status = invalid("C query has invalid member tile");
     return;
   }
-  const auto& selected = selection.value();
-  if ((query.tiled && selected.whole) ||
-      (query.tiled && !selected.tiles.empty() &&
-       (selected.tiles.size() != 1 ||
-        !selected.tiles.contains(source.tile_unit))) ||
-      (!query.tiled && source.tile_unit != 0)) {
-    status = invalid("C query must name one computation unit");
-    return;
+  if (source.shared_stage == UINT32_MAX && source.tensor_outputs) {
+    auto region = grids.value()[source.tensor_slot].region(source.tile_unit);
+    if (!region.ok()) {
+      status = region.status();
+      return;
+    }
+    FootprintLimits limits;
+    limits.consume_work = [&](std::uint64_t work) {
+      return resources.consume({work});
+    };
+    limits.cancellation = source.cancellation;
+    auto expected = Footprint::from_regions(
+        source.output.result_schema->tensors[source.tensor_slot].sample_shape(),
+        {region.take_value()}, limits);
+    if (!expected.ok()) {
+      status = expected.status();
+      return;
+    }
+    if (*source.tensor_outputs != expected.value()) {
+      status = invalid("C query coverage differs from selected member tile");
+      return;
+    }
   }
-  auto copied = selected.tiles.copy_to(resources);
-  if (!copied.ok()) {
-    status = copied.status();
-    return;
+  output_grid_members = ResourceVector<ps_result_tile_grid_v5>(
+      ResourceAllocator<ps_result_tile_grid_v5>(resources));
+  for (const auto& member : grids.value())
+    output_grid_members.push_back(encode_grid(member));
+  output_tile_grids = {sizeof(ps_result_tile_grids_v5),
+                       static_cast<std::uint32_t>(output_grid_members.size()),
+                       output_grid_members.data()};
+  query.output_tile_grids = &output_tile_grids;
+  if (source.prepared) {
+    const auto& stages = source.prepared->traits().shared_stages;
+    for (const auto& stage : stages)
+      stage_metadata.push_back({std::shared_ptr<const SchemaTemplate>(
+          source.prepared, &stage.result_schema)});
+    stage_views = std::make_unique<MetadataView>(stage_metadata);
+    if (!stage_views->status.ok()) {
+      status = stage_views->status;
+      return;
+    }
+    stage_contracts = ResourceVector<ps_result_shared_stage_v5>(
+        ResourceAllocator<ps_result_shared_stage_v5>(resources));
+    for (std::size_t i = 0; i < stages.size(); ++i) {
+      const auto& stage = stages[i];
+      OperationPortConstraint constraint;
+      constraint.validators = stage.validators;
+      apply_constraint(*stage_views, i, constraint);
+      stage_contracts.push_back(
+          {sizeof(ps_result_shared_stage_v5), stage.key.data(),
+           static_cast<uint32_t>(stage.key.size()),
+           stage_views->ports[i].schema,
+           stage.input_indices.empty() ? nullptr : stage.input_indices.data(),
+           static_cast<uint32_t>(stage.input_indices.size()),
+           static_cast<uint32_t>(stage.backend), stage.mandatory ? 1U : 0U,
+           stage.continuation_bytes - c_member_storage_bytes(),
+           stage.workspace_bytes, stage.maximum_work,
+           stage.maximum_output_payload_bytes, stage.maximum_dependency_stages,
+           stage_views->ports[i].validators,
+           stage_views->ports[i].validator_count});
+    }
+    query.shared_stages =
+        stage_contracts.empty() ? nullptr : stage_contracts.data();
+    query.shared_stage_count = stage_contracts.size();
   }
-  requested = copied.take_value();
-  query.requested = {
-      sizeof(ps_result_tile_request_v4), selected.whole ? 1U : 0U,
-      requested.empty() ? nullptr : requested.begin(), requested.size()};
   parameters = parameters_view(source.parameters);
   query.parameters = parameters.empty() ? nullptr : parameters.data();
   query.parameter_count = parameters.size();
@@ -609,8 +675,9 @@ Result<OperationPreparation> prepare_metadata(
       std::vector<OperationOutputSpecialization>(owner.api.output_count),
       {},
       Status::success()};
-  ps_result_metadata_sink_v4 service{sizeof(service), &sink, MetadataSink::set,
-                                     MetadataSink::set_resources};
+  ps_result_metadata_sink_v5 service{sizeof(service), &sink, MetadataSink::set,
+                                     MetadataSink::set_resources,
+                                     MetadataSink::set_shared_stages};
   Status status;
   try {
     status = outcome(owner.api.resolve_metadata(
@@ -631,6 +698,7 @@ Result<OperationPreparation> prepare_metadata(
           invalid("metadata resolver omitted output"));
   OperationPreparation prepared;
   prepared.outputs = std::move(sink.outputs);
+  prepared.shared_stages = std::move(sink.stages);
   prepared.resources = std::move(sink.resource_ids);
   return Result<OperationPreparation>(std::move(prepared));
 }

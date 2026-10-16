@@ -15,6 +15,7 @@
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "common/floating_environment.hpp"
 #include "common/numeric_common.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal::expression_result {
 struct SamplingDomain {
@@ -204,7 +205,6 @@ inline OperationDefinition operation(const char* key, bool lut) {
   traits.requires_metadata_specialization = true;
   traits.input_schema.resize(traits.input_count);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type = static_cast<std::uint32_t>(lut ? ElementType::Float32
                                                         : ElementType::Float64);
   }
@@ -235,8 +235,7 @@ inline OperationDefinition operation(const char* key, bool lut) {
                    "numeric metadata environment unavailable"});
       std::vector<TensorMetadata> metadata;
       for (const auto& input : inputs) {
-        if (!input.result_schema || !input.result_schema->fields.empty() ||
-            input.result_schema->tensors.size() != 1)
+        if (!input.result_schema || input.result_schema->tensors.size() != 1)
           return Result<OperationPreparation>(
               Status{ErrorCode::TypeMismatch,
                      "expression requires one tensor and no fields"});
@@ -281,6 +280,6 @@ inline OperationDefinition operation(const char* key, bool lut) {
                                   const BufferAllocator& allocator) {
     return ResultContinuation::make<Program>(allocator, lut);
   };
-  return definition;
+  return sdk::with_whole_stage(std::move(definition), UINT64_C(1) << 48);
 }
 }  // namespace ps::plugin_internal::expression_result

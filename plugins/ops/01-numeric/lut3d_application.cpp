@@ -18,6 +18,7 @@
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/ops/color_array.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -66,8 +67,8 @@ Result<OperationPreparation> prepare(
     return Answer(type_error("LUT3D requires input, table, axis"));
   for (unsigned port = 0; port < 3; ++port) {
     const auto& tensor = inputs[port].result_schema->tensors[0];
-    const ValueDescriptor descriptor{tensor.descriptor.element_type,
-                                     tensor.sample_shape()};
+    const TensorDescriptor descriptor{tensor.descriptor.element_type,
+                                      tensor.sample_shape()};
     if ((descriptor.element_type != ElementType::Float64 &&
          (port == 2 || descriptor.element_type != ElementType::Float32)) ||
         (port == 0 &&
@@ -351,8 +352,8 @@ OperationDefinition operation(const std::string& key, bool tetrahedral,
   traits.input_count = 3;
   traits.input_schema.resize(3);
   for (auto& input : traits.input_schema)
-    input.kind = OperationPortKind::Result;
-  traits.input_schema[0].element_type_mask = 12;
+
+    traits.input_schema[0].element_type_mask = 12;
   traits.input_schema[1].element_type_mask = 12;
   traits.input_schema[2].element_type_mask = 4;
   traits.requires_metadata_specialization = true;
@@ -371,7 +372,7 @@ OperationDefinition operation(const std::string& key, bool tetrahedral,
   result.start_result = [](const auto&, const auto& allocator) {
     return ResultContinuation::make<Lut3dResultProgram>(allocator);
   };
-  return result;
+  return sdk::with_whole_stage(std::move(result), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_lut3d_application(OperationRegistry* registry) {

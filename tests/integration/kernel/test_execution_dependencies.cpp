@@ -13,9 +13,9 @@
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
 template <class T>
-Value values(ElementType type, const std::vector<T>& samples) {
+TensorSpan values(ElementType type, const std::vector<T>& samples) {
   auto output =
-      MutableValue::allocate({type, {samples.size()}},
+      TensorWriter::allocate({type, {samples.size()}},
                              Region::whole({samples.size()}), BufferAllocator{})
           .take_value();
   std::memcpy(output.data(), samples.data(), samples.size() * sizeof(T));
@@ -33,7 +33,8 @@ WorkflowInputDeclaration declaration(unsigned id, std::string name,
                                      ElementType type = ElementType::Float64) {
   return multi_result::declaration(id, std::move(name), schema(count, type));
 }
-ResultRef backing_source(const ResourceBudget& root, const Value& backing) {
+ResultRef backing_source(const ResourceBudget& root,
+                         const TensorSpan& backing) {
   const auto spec =
       schema(backing.descriptor().shape[0], backing.descriptor().element_type);
   auto output =
@@ -44,13 +45,12 @@ ResultRef backing_source(const ResourceBudget& root, const Value& backing) {
   return multi_result::take(output.seal());
 }
 ExecutionBinding binding(const ResourceBudget& root, std::string name,
-                         const Value& backing) {
+                         const TensorSpan& backing) {
   return {std::move(name), backing_source(root, backing)};
 }
 struct Route {
-  bool choose = false, whole = false, ready = false;
-  explicit Route(bool choose, bool whole = false)
-      : choose(choose), whole(whole) {}
+  bool choose = false, ready = false;
+  explicit Route(bool choose) : choose(choose) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     using Answer = Result<ResultProgramPoll>;
     const auto shape =
@@ -61,7 +61,11 @@ struct Route {
       ready = true;
       ResultProgramNeed need;
       for (unsigned port = 0; port < phase.query.inputs.size(); ++port)
-        need.tiles.push_back({port, true, false, {}});
+        need.tiles.push_back(
+            {port, 0, false,
+             multi_result::take(TileSet::range(
+                 phase.resources, 0,
+                 phase.query.input_tile_grids[port][0].tile_count()))});
       return Answer(std::move(need));
     }
     auto builder =
@@ -95,22 +99,19 @@ struct Route {
   }
 };
 OperationDefinition route(std::string key, unsigned inputs = 1,
-                          bool choose = false, bool whole = false) {
+                          bool choose = false) {
   OperationDefinition op;
   op.key = std::move(key);
   op.traits.input_count = inputs;
   op.traits.workspace_bytes = 8192;
   op.traits.input_schema.resize(inputs);
   for (auto& input : op.traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type = static_cast<unsigned>(ElementType::Float64);
     input.rank = 1;
   }
   op.traits.outputs[0] = multi_result::output("value", schema());
   op.traits.outputs[0].continuation_bytes = sizeof(Route);
   op.traits.outputs[0].maximum_dependency_stages = 4;
-  op.traits.outputs[0].region_rule =
-      whole ? OperationRegionRule::Whole : OperationRegionRule::Tiled;
   op.traits.requires_metadata_specialization = true;
   op.specialize_metadata = [](const std::vector<OperationMetadata>& inputs,
                               const std::map<std::string, ParameterValue>&) {
@@ -119,9 +120,9 @@ OperationDefinition route(std::string key, unsigned inputs = 1,
     return Result<std::vector<OperationOutputSpecialization>>(
         std::vector<OperationOutputSpecialization>{std::move(output)});
   };
-  op.start_result = [choose, whole](const ResultProgramQuery&,
-                                    const BufferAllocator& allocator) {
-    return ResultContinuation::make<Route>(allocator, choose, whole);
+  op.start_result = [choose](const ResultProgramQuery&,
+                             const BufferAllocator& allocator) {
+    return ResultContinuation::make<Route>(allocator, choose);
   };
   return op;
 }
@@ -176,11 +177,12 @@ int late_delta() {
     PS_CHECK(record.value() &&
              record.value()->inputs.size() == (step == 3 ? 2 : 1));
     for (const auto& input : record.value()->inputs)
-      PS_CHECK(input.whole && input.tiles.empty());
+      PS_CHECK(input.tensor_slot == 0 && input.tiles.size() == 1 &&
+               input.tiles.contains(0));
   }
   ResourceVector<TileChange> changes{
       ResourceAllocator<TileChange>(retained_root)};
-  changes.push_back({PlanWorkflowInput{0}, 0,
+  changes.push_back({PlanWorkflowInput{0}, 0, 0,
                      TileSet::from_indices(retained_root, {0}).take_value(),
                      false});
   auto dirty = evidence.dirty_units(changes);
@@ -191,10 +193,9 @@ int late_delta() {
   PS_CHECK(!evidence.tile_record({999, 0, 0}).value());
   return 0;
 }
-int whole_record() {
+int repeated_input_record() {
   auto registry = std::make_shared<OperationRegistry>();
-  PS_CHECK(
-      registry->register_operation(route("global", 100, false, true)).ok());
+  PS_CHECK(registry->register_operation(route("global", 100)).ok());
   PS_CHECK(registry->register_operation(route("leaf")).ok());
   PS_CHECK(registry->freeze().ok());
   WorkflowDocument document;
@@ -204,11 +205,14 @@ int whole_record() {
   document.nodes[0].inputs.assign(100, WorkflowInputReference{1});
   document.outputs = {{"y", 2, "value"}};
   GraphContext graph(document);
-  auto plan = Compiler(registry)
-                  .compile(graph)
-                  .take_value()
-                  .plan.tile_plan("y", TileRequest{true, {}})
-                  .take_value();
+  auto plan =
+      Compiler(registry)
+          .compile(graph)
+          .take_value()
+          .plan
+          .tile_plan("y", TileRequest{{{0, multi_result::take(TileSet::range(
+                                               ResourceBudget{}, 0, 1))}}})
+          .take_value();
   ExecutionContext context(registry, {1, false, 4, 4096});
   auto executed = context.execute(
       plan, {{binding(context.resource_budget().take_value(), "x",
@@ -217,8 +221,10 @@ int whole_record() {
   const auto& evidence = executed.value().dependencies;
   auto global = evidence.tile_record({0, 0, 0}).take_value();
   auto leaf = evidence.tile_record({1, 0, 0}).take_value();
-  PS_CHECK(global && global->inputs.size() == 1 && global->inputs[0].whole);
-  PS_CHECK(leaf && leaf->inputs.size() == 1 && leaf->inputs[0].whole);
+  PS_CHECK(global && global->inputs.size() == 1 &&
+           global->inputs[0].tiles.size() == 1);
+  PS_CHECK(leaf && leaf->inputs.size() == 1 &&
+           leaf->inputs[0].tiles.size() == 1);
   const auto& result = executed.value().results.at("y");
   PS_CHECK(multi_result::number(result, {0}) == 3 &&
            multi_result::number(result, {1}) == 5);
@@ -233,9 +239,11 @@ int whole_record() {
               {{binding(context.resource_budget().take_value(), "x",
                         values<double>(ElementType::Float64, {3, 5}))}})
           .take_value();
-  auto complete = demand.request({{"global", {true, {}}}});
+  auto complete = demand.request(
+      {{"global",
+        {{{0, multi_result::take(TileSet::range(ResourceBudget{}, 0, 1))}}}}});
   PS_REQUIRE_OK(complete);
-  auto independent = demand.request({{"global", {false, {}}}});
+  auto independent = demand.request({{"global", {}}});
   PS_REQUIRE_OK(independent);
   PS_CHECK(!independent.value().dependencies.tile_record({0, 0, 0}).value());
   PS_CHECK(independent.value()
@@ -275,7 +283,7 @@ int metadata_bounds() {
   auto record = evidence.tile_record({0, 0, 0}).take_value();
   PS_CHECK(record && record->inputs.size() == 1);
   ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
-  changes.push_back({PlanWorkflowInput{0}, 0, {}, true});
+  changes.push_back({PlanWorkflowInput{0}, 0, 0, {}, true});
   const auto expected = evidence.dirty_units(changes);
   PS_REQUIRE_OK(expected);
   PS_CHECK(expected.value().size() == 1 &&
@@ -300,6 +308,6 @@ int metadata_bounds() {
 int main() {
   PS_CHECK(late_delta() == 0);
   PS_CHECK(metadata_bounds() == 0);
-  PS_CHECK(whole_record() == 0);
+  PS_CHECK(repeated_input_record() == 0);
   return 0;
 }

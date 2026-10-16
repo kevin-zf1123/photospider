@@ -50,7 +50,7 @@ void data_workflow() {
   source.name = "source";
   source.result = checked(builder.seal());
   const auto tiles = checked(TileSet::from_indices(root, {1, width - 2}));
-  const TileRequest request{false, tiles};
+  const TileRequest request{{{0, tiles}}};
   const auto coverage = checked(Footprint::from_regions(
       {1, width},
       {Region({{0, 1}, {1, 1}}), Region({{0, 1}, {width - 2, 1}})}));
@@ -69,25 +69,33 @@ void data_workflow() {
               hole == 7,
           "hole was materialized");
   ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
-  changes.push_back({PlanWorkflowInput{0}, 0,
+  changes.push_back({PlanWorkflowInput{0}, 0, 0,
                      checked(TileSet::from_indices(root, {1})), false});
   const auto dirty = checked(result.dependencies.dirty_units(changes));
-  require(dirty.size() == 1 && dirty[0] == TileUnit{0, 0, 1},
+  require(dirty.size() == 1 && dirty[0] == TileUnit{0, 0, 0, 1},
           "identity tile invalidation");
   for (auto tile : {UINT64_C(1), width - 2}) {
-    auto record = checked(result.dependencies.tile_record({0, 0, tile}));
-    require(record && record->inputs.size() == 1 && !record->inputs[0].whole &&
+    auto record = checked(result.dependencies.tile_record({0, 0, 0, tile}));
+    require(record && record->inputs.size() == 1 &&
+                record->inputs[0].tensor_slot == 0 &&
                 record->inputs[0].tiles ==
                     checked(TileSet::from_indices(root, {tile})),
             "identity records only its actual source tile");
   }
   require(root.statistics().peak[ResourceKind::Payload] <= 4096,
           "sparse source exceeded the payload budget");
-  auto original = Value::create({ElementType::Int64, {2}}, Region::whole({2}),
-                                {0, {8}}, std::vector<std::uint8_t>(16))
-                      .take_value();
+  auto original =
+      TensorSpan::create({ElementType::Int64, {2}}, Region::whole({2}),
+                         {0, {8}}, std::vector<std::uint8_t>(16))
+          .take_value();
   InputSnapshotStore store({32, 1});
-  auto snapshot = checked(store.import_value(original));
+  auto snapshot = checked(store.import_tensor(
+      Tensor::create(original.descriptor(),
+                     Footprint::from_regions(original.descriptor().shape,
+                                             {original.region()})
+                         .take_value(),
+                     {original})
+          .take_value()));
   require(checked(snapshot.content_identity(original.region())).size() == 64,
           "generic snapshot identity missing");
   std::cout << "data: values=[1,999999998], source_samples=2, hole=rejected, "

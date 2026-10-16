@@ -96,15 +96,14 @@ Result<WorkflowNodeOutput> expand(WorkflowDocument* document,
 }
 Result<ElementType> source_type(const SemanticGraphIR& graph,
                                 const WorkflowNodeOutput& output,
-                                const ValueDescriptor& descriptor,
+                                const TensorDescriptor& descriptor,
                                 const ColorArrayDescriptor& color) {
   for (const auto& node : graph.nodes()) {
     if (node.id != output.source_node)
       continue;
     for (const auto& value : node.outputs)
       if (value.key == output.source_port) {
-        if (!value.result_schema || !value.result_schema->fields.empty() ||
-            value.result_schema->tensors.size() != 1)
+        if (!value.result_schema || value.result_schema->tensors.size() != 1)
           break;
         const auto& tensor = value.result_schema->tensors[0];
         if (tensor.sample_shape() != descriptor.shape ||
@@ -196,7 +195,7 @@ Result<BakedLut3d> bake_lut3d(WorkflowDocument& document,
   for (auto n : spec.shape)
     count *= n - 1;
   count += spec.extra_points;
-  const ValueDescriptor grid_descriptor{
+  const TensorDescriptor grid_descriptor{
       ElementType::Float64,
       {spec.shape[0], spec.shape[1], spec.shape[2], 3}},
       point_descriptor{ElementType::Float64, {count, 3}};

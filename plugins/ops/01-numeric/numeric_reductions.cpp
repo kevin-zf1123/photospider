@@ -19,6 +19,7 @@
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/ops/numeric/diagnostics.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -27,7 +28,7 @@ enum class ReductionKind { Sum, Minimum, Maximum, Mean, Count, Variance, Std };
 struct ReductionMetadata {
   unsigned mask = 0;
   std::uint64_t count = 1, ddof = 0;
-  ValueDescriptor output;
+  TensorDescriptor output;
 };
 Result<ReductionMetadata> metadata(
     ReductionKind kind, const ResultTensorSpec& input,
@@ -39,8 +40,8 @@ Result<ReductionMetadata> metadata(
                          FailureReason::None,
                          {FailureOrigin::Schema, FailureScope::Unspecified}});
   };
-  const ValueDescriptor descriptor{input.descriptor.element_type,
-                                   input.sample_shape()};
+  const TensorDescriptor descriptor{input.descriptor.element_type,
+                                    input.sample_shape()};
   if (descriptor.shape.empty() || descriptor.shape.size() > 8)
     return mismatch("reduction requires rank 1..8");
   std::uint64_t elements = 1;
@@ -187,7 +188,8 @@ struct ReductionKernel final {
         [](ReductionState* item) { item->~ReductionState(); });
     const auto& input = phase.tensors->at({0, 0});
     const auto shape = input.spec().sample_shape();
-    const auto out_width = Value::element_size(description.output.element_type);
+    const auto out_width =
+        TensorSpan::element_size(description.output.element_type);
     numeric_ops::MathTensorReader reader(input, phase.query.cancellation);
     numeric_ops::MathTensorWriter writer(writers[0]);
     std::vector<std::uint64_t> coordinate(shape.size(), 0),
@@ -255,8 +257,8 @@ struct ReductionKernel final {
     const auto& target = phase.query.output.result_schema->tensors[0];
     const auto region = Region::whole(target.sample_shape());
     if (kind != ReductionKind::Count)
-      return builder.publish_tensor_kernel(
-          0, region,
+      return sdk::publish_dense_tensor(
+          phase, builder, 0, region,
           [&](const auto& writers) {
             return numeric_ops::math_callback(
                 phase, [&] { return write(phase, writers); });
@@ -304,7 +306,7 @@ OperationDefinition reduction_operation(const std::string& key,
   traits.diagnostics = {numeric_diagnostic_identity()};
   traits.input_count = 1;
   traits.input_schema.resize(1);
-  traits.input_schema[0].kind = OperationPortKind::Result;
+
   traits.input_schema[0].element_type_mask = 15;
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = {{"axes", OperationParameterType::String}};
@@ -343,7 +345,7 @@ OperationDefinition reduction_operation(const std::string& key,
   operation.start_result = [kind, profile](const auto&, const auto& allocator) {
     return ResultContinuation::make<ReductionProgram>(allocator, kind, profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_numeric_reductions(OperationRegistry* registry) {

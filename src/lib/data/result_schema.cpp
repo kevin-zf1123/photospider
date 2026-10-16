@@ -17,7 +17,7 @@
 #include <vector>
 
 #include "data/result_support.hpp"
-#include "data/value_validation.hpp"
+#include "data/tensor_validation.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/data/result.hpp"
 
@@ -28,8 +28,7 @@ bool key_valid(std::string_view key, std::size_t maximum) {
          std::all_of(key.begin(), key.end(),
                      [](unsigned char c) { return c >= 0x21 && c <= 0x7e; });
 }
-bool extent_valid(const ResultExtent& extent, bool resolved,
-                  std::size_t field_count) {
+bool extent_valid(const ResultExtent& extent, bool resolved) {
   if (!extent.divisor || extent.input >= 1024 || extent.axis >= 8)
     return false;
   switch (extent.kind) {
@@ -38,10 +37,6 @@ bool extent_valid(const ResultExtent& extent, bool resolved,
     case ResultExtentKind::InputAxis:
     case ResultExtentKind::InputElements:
       return !resolved;
-    case ResultExtentKind::FieldRows:
-      return extent.field < field_count;
-    case ResultExtentKind::RuntimeCount:
-      return extent.divisor == 1 && extent.offset == 0;
   }
   return false;
 }
@@ -99,13 +94,17 @@ const Footprint& ResultDescriptor::tensor_coverage(std::uint32_t slot) const {
     throw std::out_of_range("invalid image slot");
   return tensors_[slot];
 }
+const ResultPublicationScope* SchemaTemplate::publication_scope(
+    std::uint32_t slot) const noexcept {
+  for (const auto& scope : publication_scopes)
+    for (auto member : scope.members)
+      if (member == slot)
+        return &scope;
+  return nullptr;
+}
 Status SchemaTemplate::validate(bool resolved) const {
-  if (!key_valid(id, 128) || !version || (fields.empty() && tensors.empty()) ||
-      !core_internal::can_add(fields.size(), tensors.size(), 16) ||
-      domain.size() > 8 ||
-      (publication != PublishPolicy::CompleteBundle &&
-       publication != PublishPolicy::IndependentChunks &&
-       publication != PublishPolicy::StablePrefix))
+  if (!key_valid(id, 128) || !version || tensors.empty() ||
+      tensors.size() > 16 || domain.size() > 8)
     return data_internal::invalid_schema();
   std::array<std::string_view, 64> keys;
   std::size_t key_count = 0;
@@ -116,15 +115,7 @@ Status SchemaTemplate::validate(bool resolved) const {
     keys[key_count++] = key;
     return true;
   };
-  for (std::size_t i = 0; i < fields.size(); ++i) {
-    const auto& field = fields[i];
-    const auto type = static_cast<std::uint32_t>(field.element_type);
-    if (!key_valid(field.key, 128) || !add_key(field.key) || type < 1 ||
-        type > 7 || field.record_shape.size() > 7 ||
-        !extent_valid(field.rows, resolved, i) ||
-        !row_bytes(static_cast<std::uint32_t>(i)).ok())
-      return data_internal::invalid_schema();
-  }
+
   for (const auto& image : tensors) {
     if (!key_valid(image.key, 128) || !add_key(image.key) ||
         !data_internal::tensor_topology(image).ok())
@@ -133,25 +124,36 @@ Status SchemaTemplate::validate(bool resolved) const {
     if (!validated.ok())
       return validated;
   }
+  std::uint32_t seen = 0, previous = 0;
+  bool first_scope = true;
+  if (publication_scopes.size() > 16)
+    return data_internal::invalid_schema();
+  for (const auto& scope : publication_scopes) {
+    if (scope.members.empty() || scope.members.size() > tensors.size() ||
+        (scope.policy != ResultPublicationPolicy::CompleteBundle &&
+         scope.policy != ResultPublicationPolicy::IndependentChunks &&
+         scope.policy != ResultPublicationPolicy::StablePrefix) ||
+        (scope.policy == ResultPublicationPolicy::StablePrefix &&
+         scope.members.size() != 1) ||
+        (!first_scope && scope.members.front() <= previous))
+      return data_internal::invalid_schema();
+    previous = scope.members.front();
+    first_scope = false;
+    std::uint32_t last = 0;
+    bool first_member = true;
+    for (auto member : scope.members) {
+      if (member >= tensors.size() || (seen & (1U << member)) ||
+          (!first_member && member <= last))
+        return data_internal::invalid_schema();
+      seen |= 1U << member;
+      last = member;
+      first_member = false;
+    }
+  }
   for (const auto& extent : domain)
-    if (!extent_valid(extent, resolved, fields.size()) ||
-        extent.kind == ResultExtentKind::RuntimeCount)
+    if (!extent_valid(extent, resolved))
       return data_internal::invalid_schema();
   return Status::success();
-}
-Result<std::uint64_t> SchemaTemplate::row_bytes(std::uint32_t field) const {
-  if (field >= fields.size())
-    return Result<std::uint64_t>(data_internal::invalid_schema());
-  const auto type = static_cast<std::uint32_t>(fields[field].element_type);
-  if (type < 1 || type > 7)
-    return Result<std::uint64_t>(data_internal::invalid_schema());
-  std::uint64_t bytes = Value::element_size(fields[field].element_type);
-  for (const auto extent : fields[field].record_shape) {
-    if (!extent || !core_internal::can_multiply(bytes, extent, INT64_MAX))
-      return Result<std::uint64_t>(data_internal::invalid_schema());
-    bytes *= extent;
-  }
-  return Result<std::uint64_t>(bytes);
 }
 Result<SchemaTemplate> SchemaTemplate::resolve(
     const std::vector<std::vector<std::uint64_t>>& input_domains) const {
@@ -187,11 +189,7 @@ Result<SchemaTemplate> SchemaTemplate::resolve(
     *extent = ResultExtent{ResultExtentKind::Fixed, resolved_extent.value()};
     return Status::success();
   };
-  for (auto& field : result.fields) {
-    auto status = resolve_extent(&field.rows);
-    if (!status.ok())
-      return Result<SchemaTemplate>(status);
-  }
+
   for (auto& extent : result.domain) {
     auto status = resolve_extent(&extent);
     if (!status.ok())
@@ -216,23 +214,13 @@ void encode_schema(String* destination, const SchemaTemplate& schema) {
     word(e.value);
     word(e.input);
     word(e.axis);
-    word(e.field);
     word(e.divisor);
     word(e.offset);
   };
-  text("photospider.result-schema.v4");
+  text("photospider.result-schema.v5");
   text(schema.id);
   word(schema.version);
-  word(static_cast<std::uint32_t>(schema.publication));
-  word(schema.fields.size());
-  for (const auto& field : schema.fields) {
-    text(field.key);
-    word(static_cast<std::uint32_t>(field.element_type));
-    extent(field.rows);
-    word(field.record_shape.size());
-    for (auto size : field.record_shape)
-      word(size);
-  }
+
   word(schema.tensors.size());
   for (const auto& image : schema.tensors) {
     text(image.key);
@@ -250,12 +238,13 @@ void encode_schema(String* destination, const SchemaTemplate& schema) {
     word(image.layout.spatial && image.layout.channel_axis
              ? *image.layout.channel_axis + 1
              : 0);
-    word(image.layout.groups.size());
-    for (const auto& group : image.layout.groups) {
-      text(group.role);
-      word(group.first_channel);
-      word(group.channel_count);
-    }
+  }
+  word(schema.publication_scopes.size());
+  for (const auto& scope : schema.publication_scopes) {
+    word(static_cast<std::uint32_t>(scope.policy));
+    word(scope.members.size());
+    for (auto member : scope.members)
+      word(member);
   }
   word(schema.domain.size());
   for (const auto& e : schema.domain)
@@ -263,22 +252,19 @@ void encode_schema(String* destination, const SchemaTemplate& schema) {
 }
 bool same_extent(const ResultExtent& a, const ResultExtent& b) {
   return a.kind == b.kind && a.value == b.value && a.input == b.input &&
-         a.axis == b.axis && a.field == b.field && a.divisor == b.divisor &&
-         a.offset == b.offset;
+         a.axis == b.axis && a.divisor == b.divisor && a.offset == b.offset;
 }
 }  // namespace
 std::uint64_t SchemaTemplate::canonical_size() const noexcept {
   std::uint64_t size =
-      8 + sizeof("photospider.result-schema.v4") - 1 + 8 + id.size() + 24 + 16;
-  for (const auto& field : fields)
-    size += 8 + field.key.size() + 8 + 56 + 8 + field.record_shape.size() * 8;
+      8 + sizeof("photospider.result-schema.v5") - 1 + 8 + id.size() + 8 + 16;
   for (const auto& image : tensors) {
-    size += 8 + image.key.size() + 72 +
+    size += 8 + image.key.size() + 64 +
             (image.descriptor.shape.size() + image.batch_axes.size()) * 8;
-    for (const auto& group : image.layout.groups)
-      size += 24 + group.role.size();
   }
-  size += domain.size() * 56;
+  size += 8 + domain.size() * 48;
+  for (const auto& scope : publication_scopes)
+    size += 16 + 8 * scope.members.size();
   return size;
 }
 ResourceString SchemaTemplate::canonical() const {
@@ -333,21 +319,6 @@ Result<SchemaTemplate> SchemaTemplate::managed_copy(
     copy.id =
         ResourceString(id.data(), id.size(), ResourceAllocator<char>(budget));
     copy.version = version;
-    copy.publication = publication;
-    copy.fields = ResourceVector<ResultFieldSpec>(
-        ResourceAllocator<ResultFieldSpec>(budget));
-    copy.fields.reserve(fields.size());
-    for (const auto& field : fields) {
-      ResultFieldSpec target;
-      target.key = ResourceString(field.key.data(), field.key.size(),
-                                  ResourceAllocator<char>(budget));
-      target.element_type = field.element_type;
-      target.rows = field.rows;
-      target.record_shape = ResourceVector<std::uint64_t>(
-          field.record_shape.begin(), field.record_shape.end(),
-          ResourceAllocator<std::uint64_t>(budget));
-      copy.fields.push_back(std::move(target));
-    }
     copy.tensors = ResourceVector<ResultTensorSpec>(
         ResourceAllocator<ResultTensorSpec>(budget));
     copy.tensors.reserve(tensors.size());
@@ -355,9 +326,6 @@ Result<SchemaTemplate> SchemaTemplate::managed_copy(
       std::uint64_t bytes =
           (image.descriptor.shape.size() + image.batch_axes.size()) *
           sizeof(std::uint64_t);
-      bytes += image.layout.groups.size() * sizeof(ImageComponentGroup);
-      for (const auto& group : image.layout.groups)
-        bytes += group.role.size() + 1;
       auto lease = budget.reserve(ResourceCapacity::host(bytes, bytes));
       if (!lease.ok())
         return Result<SchemaTemplate>(lease.status());
@@ -370,6 +338,16 @@ Result<SchemaTemplate> SchemaTemplate::managed_copy(
       target.metadata_owner = lease.take_value();
       copy.tensors.push_back(std::move(target));
     }
+    copy.publication_scopes = ResourceVector<ResultPublicationScope>(
+        ResourceAllocator<ResultPublicationScope>(budget));
+    for (const auto& scope : publication_scopes) {
+      ResultPublicationScope owned;
+      owned.policy = scope.policy;
+      owned.members = ResourceVector<std::uint32_t>(
+          scope.members.begin(), scope.members.end(),
+          ResourceAllocator<std::uint32_t>(budget));
+      copy.publication_scopes.push_back(std::move(owned));
+    }
     copy.domain = ResourceVector<ResultExtent>(
         domain.begin(), domain.end(), ResourceAllocator<ResultExtent>(budget));
     return Result<SchemaTemplate>(std::move(copy));
@@ -379,10 +357,9 @@ Result<SchemaTemplate> SchemaTemplate::managed_copy(
 }
 bool SchemaTemplate::same_schema(const SchemaTemplate& other) const noexcept {
   if (id != other.id || version != other.version ||
-      publication != other.publication ||
-      fields.size() != other.fields.size() ||
       tensors.size() != other.tensors.size() ||
-      domain.size() != other.domain.size())
+      domain.size() != other.domain.size() ||
+      publication_scopes.size() != other.publication_scopes.size())
     return false;
   for (std::size_t i = 0; i < tensors.size(); ++i) {
     const auto& a = tensors[i];
@@ -392,26 +369,16 @@ bool SchemaTemplate::same_schema(const SchemaTemplate& other) const noexcept {
         a.layout.spatial != b.layout.spatial ||
         a.descriptor.shape != b.descriptor.shape ||
         a.descriptor.element_type != b.descriptor.element_type ||
-        (a.layout.spatial &&
-         (a.layout.height_axis != b.layout.height_axis ||
-          a.layout.width_axis != b.layout.width_axis ||
-          a.layout.channel_axis != b.layout.channel_axis)) ||
-        a.layout.groups.size() != b.layout.groups.size())
-      return false;
-    for (std::size_t j = 0; j < a.layout.groups.size(); ++j)
-      if (a.layout.groups[j].role != b.layout.groups[j].role ||
-          a.layout.groups[j].first_channel !=
-              b.layout.groups[j].first_channel ||
-          a.layout.groups[j].channel_count != b.layout.groups[j].channel_count)
-        return false;
-  }
-  for (std::size_t i = 0; i < fields.size(); ++i) {
-    const auto& a = fields[i];
-    const auto& b = other.fields[i];
-    if (a.key != b.key || a.element_type != b.element_type ||
-        !same_extent(a.rows, b.rows) || a.record_shape != b.record_shape)
+        (a.layout.spatial && (a.layout.height_axis != b.layout.height_axis ||
+                              a.layout.width_axis != b.layout.width_axis ||
+                              a.layout.channel_axis != b.layout.channel_axis)))
       return false;
   }
+
+  for (std::size_t i = 0; i < publication_scopes.size(); ++i)
+    if (publication_scopes[i].policy != other.publication_scopes[i].policy ||
+        publication_scopes[i].members != other.publication_scopes[i].members)
+      return false;
   for (std::size_t i = 0; i < domain.size(); ++i)
     if (!same_extent(domain[i], other.domain[i]))
       return false;

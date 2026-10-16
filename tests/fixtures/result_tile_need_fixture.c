@@ -4,45 +4,37 @@
 
 #include "photospider/plugin/result_tile_helpers.h"
 
-static const ps_result_tensor_spec_v4 tensor = {
+static const ps_result_tensor_spec_v5 tensor = {
     .struct_size = sizeof(tensor),
     .key = "number",
     .key_size = 6,
-    .element_type = PS_RESULT_ELEMENT_FLOAT64_V4,
+    .element_type = PS_RESULT_ELEMENT_FLOAT64_V5,
     .rank = 1,
     .shape = {1},
-    .channel_axis = PS_RESULT_NO_CHANNEL_V4};
-static const ps_result_schema_v4 schema = {
+    .channel_axis = PS_RESULT_NO_CHANNEL_V5};
+static const ps_result_schema_v5 schema = {
     .struct_size = sizeof(schema),
     .id = "test.c_tile_need",
     .id_size = sizeof("test.c_tile_need") - 1,
     .version = 1,
-    .publication = PS_RESULT_COMPLETE_BUNDLE_V4,
     .tensors = &tensor,
     .tensor_count = 1};
-static const ps_result_port_v4 input = {.struct_size = sizeof(input),
-                                        .kind = PS_RESULT_OBJECT_V4,
+static const ps_result_port_v5 input = {.struct_size = sizeof(input),
                                         .tensor_key = "number",
                                         .tensor_key_size = 6};
-static const ps_result_output_v4 outputs[] = {
-    {.struct_size = sizeof(ps_result_output_v4),
+static const ps_result_output_v5 outputs[] = {
+    {.struct_size = sizeof(ps_result_output_v5),
      .key = "value",
      .key_size = 5,
-     .port = {.struct_size = sizeof(ps_result_port_v4),
-              .kind = PS_RESULT_OBJECT_V4,
-              .schema = &schema},
-     .input_count = UINT32_MAX,
-     .execution = PS_RESULT_WHOLE_V4},
-    {.struct_size = sizeof(ps_result_output_v4),
+     .port = {.struct_size = sizeof(ps_result_port_v5), .schema = &schema},
+     .input_count = UINT32_MAX},
+    {.struct_size = sizeof(ps_result_output_v5),
      .key = "independent",
      .key_size = 11,
-     .port = {.struct_size = sizeof(ps_result_port_v4),
-              .kind = PS_RESULT_OBJECT_V4,
-              .schema = &schema},
-     .input_count = 0,
-     .execution = PS_RESULT_WHOLE_V4}};
-static const ps_result_parameter_descriptor_v4 mode = {
-    sizeof(mode), "mode", 4, PS_RESULT_PARAMETER_INT64_V4, 1, 1, 0, 28};
+     .port = {.struct_size = sizeof(ps_result_port_v5), .schema = &schema},
+     .input_count = 0}};
+static const ps_result_parameter_descriptor_v5 mode = {
+    sizeof(mode), "mode", 4, PS_RESULT_PARAMETER_INT64_V5, 1, 1, 0, 28};
 struct State {
   uint32_t stage;
 };
@@ -58,48 +50,43 @@ static atomic_uint_fast64_t input_starts;
 PS_RESULT_EXPORT uint64_t ps_result_tile_need_starts(void) {
   return atomic_load(&input_starts);
 }
-static int start(void* user, void* raw, const ps_result_query_v4* query,
-                 const ps_result_services_v4* host) {
+static int start(void* user, void* raw, const ps_result_query_v5* query,
+                 const ps_result_services_v5* host) {
   atomic_fetch_add(&input_starts, 1);
   (void)user;
   (void)host;
   ((struct State*)raw)->stage = 0;
   if (query->input_count != 1 || !query->input_tile_grids)
     return 6;
-  const ps_result_tile_grid_v4* grid = query->input_tile_grids;
+  const ps_result_tile_grids_v5* members = query->input_tile_grids;
+  if (members->struct_size != sizeof(*members) || members->count != 1 ||
+      !members->members)
+    return 6;
+  const ps_result_tile_grid_v5* grid = members->members;
   if (query->parameters[0].int64_value >= 25 &&
-      query->parameters[0].int64_value <= 27) {
-    if (grid->struct_size != sizeof(*grid) || grid->present || grid->rank ||
-        grid->batch_rank || grid->height_axis || grid->width_axis ||
-        grid->tile_extent || grid->tile_rows || grid->tile_columns ||
-        grid->tile_count)
-      return 6;
-    for (uint32_t i = 0; i < 8; ++i)
-      if (grid->shape[i])
-        return 6;
-    return 0;
-  }
-  return grid->struct_size == sizeof(*grid) && grid->present == 1 &&
-                 grid->rank == 5 && grid->batch_rank == 2 &&
-                 grid->height_axis == 2 && grid->width_axis == 3 &&
-                 grid->tile_extent == 2 && grid->tile_rows == 1 &&
-                 grid->tile_columns == 3 && grid->tile_count == 12 &&
-                 grid->shape[0] == 2 && grid->shape[1] == 2 &&
-                 grid->shape[2] == 1 && grid->shape[3] == 5 &&
-                 grid->shape[4] == 2
+      query->parameters[0].int64_value <= 27)
+    return ps_result_tile_grid_validate_v5(
+        grid, query->inputs[0].schema->tensors, query->tile_extent);
+  return grid->struct_size == sizeof(*grid) && grid->rank == 5 &&
+                 grid->batch_rank == 2 && grid->height_axis == 2 &&
+                 grid->width_axis == 3 && grid->tile_extent == 2 &&
+                 grid->tile_rows == 1 && grid->tile_columns == 3 &&
+                 grid->tile_count == 12 && grid->shape[0] == 2 &&
+                 grid->shape[1] == 2 && grid->shape[2] == 1 &&
+                 grid->shape[3] == 5 && grid->shape[4] == 2
              ? 0
              : 6;
 }
-static int poll(void* user, void* raw, const ps_result_query_v4* query,
-                const ps_result_services_v4* host) {
+static int poll(void* user, void* raw, const ps_result_query_v5* query,
+                const ps_result_services_v5* host) {
   (void)user;
   const int64_t selected = query->parameters[0].int64_value;
   if (!((struct State*)raw)->stage++) {
-    uint64_t indices[8192] = {7, 6, 6};
-    ps_result_tile_need_v4 need = {sizeof(need), 0, 0, 0, indices, 3};
+    ps_result_tile_interval_v5 indices[8192] = {{7, 8}, {6, 7}, {6, 7}};
+    ps_result_tile_need_v5 need = {sizeof(need), 0, 0, 0, indices, 3};
     int status = 0;
     if (selected == 1 || selected == 20 || selected == 21 || selected == 22) {
-      ps_result_region_v4 region = {.struct_size = sizeof(region),
+      ps_result_region_v5 region = {.struct_size = sizeof(region),
                                     .rank = 5,
                                     .offset = {1, 0, 0, 1, 1},
                                     .extent = {1, 1, 1, 1, 1}};
@@ -113,42 +100,42 @@ static int poll(void* user, void* raw, const ps_result_query_v4* query,
         region.offset[3] = 3;
         region.extent[3] = 2;
       }
-      status = ps_result_need_regions_v4(host, query, 0, &region, 1);
+      status = ps_result_need_regions_v5(host, query, 0, 0, &region, 1);
     } else if (selected == 2 || selected == 14 || selected == 26) {
-      status = ps_result_need_whole_v4(host, 0);
+      status = ps_result_to_whole_v5(host, query, 0);
     } else if (selected == 3 || selected == 13 || selected == 27) {
-      status = ps_result_need_descriptor_v4(host, 0);
+      status = ps_result_need_descriptor_v5(host, 0);
     } else if (selected == 18) {
       status = host->need_tiles(host->context, NULL);
     } else if (selected == 19) {
       status = host->need_tiles(
           host->context,
-          (const ps_result_tile_need_v4*)((const uint8_t*)&need + 1));
+          (const ps_result_tile_need_v5*)((const uint8_t*)&need + 1));
     } else {
       switch (selected) {
         case 4:
-          need.whole = need.descriptor_only = 1;
-          need.tiles = NULL;
-          need.tile_count = 0;
+          need.tensor_slot = need.descriptor_only = 1;
+          need.intervals = NULL;
+          need.interval_count = 0;
           break;
         case 5:
-          need.whole = 1;
+          need.descriptor_only = 1;
           break;
         case 6:
-          need.tiles = NULL;
-          need.tile_count = 0;
+          need.intervals = NULL;
+          need.interval_count = 0;
           break;
         case 7:
-          indices[0] = 12;
+          indices[0] = (ps_result_tile_interval_v5){12, 13};
           break;
         case 8:
-          need.tile_count = 0;
+          need.interval_count = 0;
           break;
         case 9:
-          need.tiles = NULL;
+          need.intervals = NULL;
           break;
         case 10:
-          need.whole = 2;
+          need.descriptor_only = 2;
           break;
         case 11:
           need.struct_size = 0;
@@ -157,21 +144,22 @@ static int poll(void* user, void* raw, const ps_result_query_v4* query,
           need.input = 1;
           break;
         case 15:
-          need.tile_count = 65537;
+          need.interval_count = 65537;
           break;
         case 16:
-          need.tile_count = 1;
-          indices[0] = 6;
+          need.interval_count = 1;
+          indices[0] = (ps_result_tile_interval_v5){6, 7};
           break;
         case 17:
-          need.whole = 1;
-          indices[0] = 12;
+          need.tensor_slot = 1;
+          indices[0] = (ps_result_tile_interval_v5){12, 13};
           break;
         case 24:
-          need.tiles = (const uint64_t*)((const uint8_t*)indices + 1);
+          need.intervals =
+              (const ps_result_tile_interval_v5*)((const uint8_t*)indices + 1);
           break;
         case 28:
-          need.tile_count = 8192;
+          need.interval_count = 8192;
           break;
         default:
           break;
@@ -182,20 +170,24 @@ static int poll(void* user, void* raw, const ps_result_query_v4* query,
       if (selected == 28 && observer)
         observer(observer_context, status);
       if (!status && (selected == 16 || selected == 23)) {
-        indices[0] = selected == 23 ? 12 : 7;
+        indices[0] = selected == 23 ? (ps_result_tile_interval_v5){12, 13}
+                                    : (ps_result_tile_interval_v5){7, 8};
         status = host->need_tiles(host->context, &need);
         if (selected == 23 && observer)
           observer(observer_context, status);
       }
-      indices[0] = indices[1] = indices[2] = UINT64_MAX;
+      indices[0] = indices[1] = indices[2] =
+          (ps_result_tile_interval_v5){UINT64_MAX, 0};
     }
     // Wire errors must remain sticky even if a callback ignores their status.
     return (selected == 20 || selected == 21) && status ? status
-                                                        : PS_RESULT_NEED_V4;
+                                                        : PS_RESULT_NEED_V5;
   }
   double value = 0;
-  if (selected == 3 || selected == 27) {
-    ps_result_descriptor_v4 descriptor = {.struct_size = sizeof(descriptor)};
+  if (selected == 6 || selected == 21) {
+    value = 42;
+  } else if (selected == 3 || selected == 27) {
+    ps_result_descriptor_v5 descriptor = {.struct_size = sizeof(descriptor)};
     if (host->result_descriptor(host->context, 0, &descriptor))
       return 1;
     value = descriptor.tensor_count;
@@ -211,7 +203,7 @@ static int poll(void* user, void* raw, const ps_result_query_v4* query,
     if (host->read_tensor(host->context, 0, 0, at, 5, &value, sizeof(value)))
       return 1;
   }
-  const ps_result_region_v4 region = {.struct_size = sizeof(region),
+  const ps_result_region_v5 region = {.struct_size = sizeof(region),
                                       .rank = 1,
                                       .extent = {1}};
   if (host->begin_result(host->context) ||
@@ -219,7 +211,7 @@ static int poll(void* user, void* raw, const ps_result_query_v4* query,
                            sizeof(value)) ||
       host->publish_result(host->context, 1))
     return 1;
-  return PS_RESULT_PUBLISH_V4;
+  return PS_RESULT_PUBLISH_V5;
 }
 static void destroy(void* user, void* state) {
   (void)user;
@@ -228,11 +220,11 @@ static void destroy(void* user, void* state) {
 static void destroy_api(void* user) {
   (void)user;
 }
-static const ps_result_tensor_spec_v4 query_tensors[] = {
-    {.struct_size = sizeof(ps_result_tensor_spec_v4),
+static const ps_result_tensor_spec_v5 query_tensors[] = {
+    {.struct_size = sizeof(ps_result_tensor_spec_v5),
      .key = "image",
      .key_size = 5,
-     .element_type = PS_RESULT_ELEMENT_FLOAT64_V4,
+     .element_type = PS_RESULT_ELEMENT_FLOAT64_V5,
      .rank = 3,
      .shape = {2, 3, 5},
      .batch_rank = 2,
@@ -240,92 +232,53 @@ static const ps_result_tensor_spec_v4 query_tensors[] = {
      .spatial = 1,
      .height_axis = 1,
      .width_axis = 2,
-     .channel_axis = 0},
-    {.struct_size = sizeof(ps_result_tensor_spec_v4),
-     .key = "number",
-     .key_size = 6,
-     .element_type = PS_RESULT_ELEMENT_FLOAT64_V4,
-     .rank = 1,
-     .shape = {1},
-     .channel_axis = PS_RESULT_NO_CHANNEL_V4}};
-static const ps_result_schema_v4 query_schemas[] = {
-    {.struct_size = sizeof(ps_result_schema_v4),
+     .channel_axis = 0}};
+static const ps_result_schema_v5 query_schemas[] = {
+    {.struct_size = sizeof(ps_result_schema_v5),
      .id = "test.c_tile_query",
      .id_size = sizeof("test.c_tile_query") - 1,
      .version = 1,
-     .publication = PS_RESULT_COMPLETE_BUNDLE_V4,
      .tensors = query_tensors,
-     .tensor_count = 1},
-    {.struct_size = sizeof(ps_result_schema_v4),
-     .id = "test.c_tile_bundle",
-     .id_size = sizeof("test.c_tile_bundle") - 1,
-     .version = 1,
-     .publication = PS_RESULT_COMPLETE_BUNDLE_V4,
-     .tensors = query_tensors,
-     .tensor_count = 2}};
-static const ps_result_output_v4 query_outputs[] = {
-    {.struct_size = sizeof(ps_result_output_v4),
+     .tensor_count = 1}};
+static const ps_result_output_v5 query_outputs[] = {
+    {.struct_size = sizeof(ps_result_output_v5),
      .key = "tiled",
      .key_size = 5,
-     .port = {.struct_size = sizeof(ps_result_port_v4),
-              .kind = PS_RESULT_OBJECT_V4,
-              .schema = query_schemas},
-     .execution = PS_RESULT_REGIONAL_V4},
-    {.struct_size = sizeof(ps_result_output_v4),
-     .key = "whole",
-     .key_size = 5,
-     .port = {.struct_size = sizeof(ps_result_port_v4),
-              .kind = PS_RESULT_OBJECT_V4,
-              .schema = query_schemas},
-     .execution = PS_RESULT_WHOLE_V4},
-    {.struct_size = sizeof(ps_result_output_v4),
-     .key = "bundle",
-     .key_size = 6,
-     .port = {.struct_size = sizeof(ps_result_port_v4),
-              .kind = PS_RESULT_OBJECT_V4,
-              .schema = query_schemas + 1},
-     .execution = PS_RESULT_REGIONAL_V4}};
-static atomic_uint_fast64_t query_starts[3];
+     .port = {.struct_size = sizeof(ps_result_port_v5),
+              .schema = query_schemas}}};
+static atomic_uint_fast64_t query_starts;
 PS_RESULT_EXPORT uint64_t ps_result_tile_query_starts(uint32_t output) {
-  return output < 3 ? atomic_load(query_starts + output) : UINT64_MAX;
+  return output == 0 ? atomic_load(&query_starts) : UINT64_MAX;
 }
-static int query_start(void* user, void* raw, const ps_result_query_v4* query,
-                       const ps_result_services_v4* host) {
+static int query_start(void* user, void* raw, const ps_result_query_v5* query,
+                       const ps_result_services_v5* host) {
   (void)user;
   (void)raw;
   (void)host;
-  if (query->output_index < 3)
-    atomic_fetch_add(query_starts + query->output_index, 1);
-  if (query->output_index >= 3 || query->input_count ||
-      query->input_tile_grids || !query->output_tile_grid ||
-      query->tile_extent != 2 || query->tiled != (query->output_index == 0) ||
-      query->output_tile_grid->present != (query->output_index != 2))
+  if (query->output_index == 0)
+    atomic_fetch_add(&query_starts, 1);
+  if (query->output_index != 0 || query->input_count ||
+      query->input_tile_grids || !query->output_tile_grids ||
+      query->tile_extent != 2 || query->output_tile_grids->count != 1)
     return 6;
-  if (query->output_index == 0) {
-    if (query->requested.whole || query->requested.tile_count != 1 ||
-        query->requested.tiles[0] != query->tile_unit ||
-        query->output_tile_grid->height_axis != 3 ||
-        query->output_tile_grid->width_axis != 4 ||
-        query->output_tile_grid->tile_count != 24)
-      return 6;
-  } else if (!query->requested.whole || query->requested.tile_count ||
-             query->tile_unit) {
+  const ps_result_tile_grid_v5* grid = query->output_tile_grids->members;
+  if (!grid || grid->height_axis != 3 || grid->width_axis != 4 ||
+      grid->tile_count != 24)
     return 6;
-  }
   return 0;
 }
-static int query_poll(void* user, void* raw, const ps_result_query_v4* query,
-                      const ps_result_services_v4* host) {
+static int query_poll(void* user, void* raw, const ps_result_query_v5* query,
+                      const ps_result_services_v5* host) {
   (void)user;
   (void)raw;
   if (host->begin_result(host->context))
     return 1;
-  for (uint32_t slot = 0; slot < query->output->port.schema->tensor_count;
-       ++slot) {
-    ps_result_region_v4 region;
-    if (ps_result_output_region_v4(query, slot, &region))
+  {
+    const uint32_t slot = query->tensor_slot;
+    ps_result_region_v5 region;
+    if (ps_result_output_region_v5(query, slot, &region))
       return 6;
-    const ps_result_tensor_spec_v4* spec =
+    const ps_result_tensor_spec_v5* spec =
         query->output->port.schema->tensors + slot;
     uint64_t count = 1;
     for (uint32_t axis = 0; axis < region.rank; ++axis)
@@ -346,20 +299,20 @@ static int query_poll(void* user, void* raw, const ps_result_query_v4* query,
                                    : spec->shape[axis - spec->batch_rank];
         flat = flat * bound + at[axis];
       }
-      values[i] = slot ? 42 : (double)(flat + 1);
+      values[i] = (double)(flat + 1);
     }
     if (host->publish_tensor(host->context, slot, &region,
                              (const uint8_t*)values, count * sizeof(double)))
       return 1;
   }
-  return host->publish_result(host->context, 1) ? 1 : PS_RESULT_PUBLISH_V4;
+  return host->publish_result(host->context, 1) ? 1 : PS_RESULT_PUBLISH_V5;
 }
-static const ps_result_operation_v4 operations[] = {
-    {.struct_size = sizeof(ps_result_operation_v4),
+static const ps_result_operation_v5 operations[] = {
+    {.struct_size = sizeof(ps_result_operation_v5),
      .key = "test.c_tile_need",
      .key_size = sizeof("test.c_tile_need") - 1,
-     .flags = PS_RESULT_FLAG_CPU_V4 | PS_RESULT_FLAG_DETERMINISTIC_V4 |
-              PS_RESULT_FLAG_SIDE_EFFECT_FREE_V4,
+     .flags = PS_RESULT_FLAG_CPU_V5 | PS_RESULT_FLAG_DETERMINISTIC_V5 |
+              PS_RESULT_FLAG_SIDE_EFFECT_FREE_V5,
      .inputs = &input,
      .input_count = 1,
      .outputs = outputs,
@@ -372,25 +325,25 @@ static const ps_result_operation_v4 operations[] = {
      .start = start,
      .poll = poll,
      .destroy = destroy},
-    {.struct_size = sizeof(ps_result_operation_v4),
+    {.struct_size = sizeof(ps_result_operation_v5),
      .key = "test.c_tile_query",
      .key_size = sizeof("test.c_tile_query") - 1,
-     .flags = PS_RESULT_FLAG_CPU_V4 | PS_RESULT_FLAG_DETERMINISTIC_V4 |
-              PS_RESULT_FLAG_SIDE_EFFECT_FREE_V4,
+     .flags = PS_RESULT_FLAG_CPU_V5 | PS_RESULT_FLAG_DETERMINISTIC_V5 |
+              PS_RESULT_FLAG_SIDE_EFFECT_FREE_V5,
      .outputs = query_outputs,
-     .output_count = 3,
+     .output_count = 1,
      .workspace_bytes = 65536,
      .maximum_stages = 1,
      .start = query_start,
      .poll = query_poll,
      .destroy = destroy}};
-static const ps_result_operation_plugin_api_v4 api = {
+static const ps_result_operation_plugin_api_v5 api = {
     .struct_size = sizeof(api),
-    .abi_version = PS_RESULT_OPERATION_ABI_VERSION_4,
+    .abi_version = PS_RESULT_OPERATION_ABI_VERSION_5,
     .operations = operations,
     .operation_count = 2,
     .destroy = destroy_api};
-PS_RESULT_EXPORT const ps_result_operation_plugin_api_v4*
-ps_result_operation_plugin_get_api_v4(void) {
+PS_RESULT_EXPORT const ps_result_operation_plugin_api_v5*
+ps_result_operation_plugin_get_api_v5(void) {
   return &api;
 }

@@ -36,13 +36,12 @@ inline Result<WorkflowNode> node(std::uint64_t id, bool pchip, WorkflowInput x,
  * InvalidArgument/InvalidDomain/Schema; incompatible edge metadata fails
  * TypeMismatch.
  *
- * Every nonempty Whole request reads all inputs with Data, Validation and
- * Descriptor (role 13), validates global topology and all query controls, then
- * publishes the complete dense output with source ObjectId association. Empty
- * reads no payload. Legal source strides/offsets are supported; output
- * ownership survives context teardown. Promoted inputs use 16*K element bytes
- * plus overhead, and complete input/output storage consumes managed
- * capacity/work.
+ * Each nonempty request runs a shared stage that acquires all input tensors,
+ * validates global topology and all query controls, then publishes the complete
+ * dense output with source ObjectId association. Empty reads no payload. Legal
+ * source strides/offsets are supported; output ownership survives context
+ * teardown. Promoted inputs use 16*K element bytes plus overhead, and complete
+ * input/output storage consumes managed capacity/work.
  *
  * Strict rounds the complete expression once. Accelerated follows the shared
  * FP32 bound and retains the monotone inverse mapping. Knot/clamp conversion

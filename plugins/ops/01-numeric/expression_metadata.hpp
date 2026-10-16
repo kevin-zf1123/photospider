@@ -16,5 +16,5 @@ namespace ps::plugin_internal::expression_result {
 Status validate_expression_metadata(
     bool lut, const std::vector<TensorMetadata>& inputs,
     const std::map<std::string, ParameterValue>& parameters,
-    const ValueDescriptor& output);
+    const TensorDescriptor& output);
 }  // namespace ps::plugin_internal::expression_result

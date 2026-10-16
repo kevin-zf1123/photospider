@@ -62,7 +62,6 @@ OperationDefinition definition(unsigned mode, bool start, bool sticky,
   OperationDefinition op;
   op.key = "test.result_exception";
   op.traits.outputs = {multi_result::output("value")};
-  op.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   op.traits.outputs[0].continuation_bytes = sizeof(ThrowingState);
   op.traits.workspace_bytes = 8;
   op.traits.cacheable = false;
@@ -98,10 +97,11 @@ int direct(unsigned mode, bool start, bool sticky,
     query.snapshot_identity = "exception.snapshot";
     ResultObjectInputs objects;
     auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
-    auto allocator = root.allocator().limited(8, [failure](ErrorCode code) {
-      auto ok = ErrorCode::Ok;
-      failure->compare_exchange_strong(ok, code);
-    });
+    auto allocator =
+        root.allocator().limited(8, [failure](const Status& status) {
+          auto ok = ErrorCode::Ok;
+          failure->compare_exchange_strong(ok, status.code);
+        });
     ResultProgramPhase phase{
         query,
         objects,
@@ -118,6 +118,10 @@ int direct(unsigned mode, bool start, bool sticky,
         registry.start_result("test.result_exception", query, root.allocator());
     if (start) {
       PS_CHECK(!begun.ok() && expected(begun.status(), mode, sticky));
+      if (sticky) {
+        PS_CHECK(begun.status().reason == FailureReason::CapacityLimit &&
+                 begun.status().message == "allocator live sublimit exceeded");
+      }
     } else {
       PS_CHECK(begun.ok());
       auto continuation = begun.take_value();
@@ -159,7 +163,6 @@ int direct_service_failure(unsigned mode) {
   OperationDefinition op;
   op.key = "test.service_failure";
   op.traits.outputs = {multi_result::output("value")};
-  op.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   op.traits.outputs[0].continuation_bytes = sizeof(ServiceFailure);
   op.start_result = [&](const auto&, const auto& allocator) {
     return ResultContinuation::make<ServiceFailure>(allocator, mode, &counts);

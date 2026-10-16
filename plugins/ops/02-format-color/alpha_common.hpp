@@ -137,7 +137,7 @@ struct SemanticSource final {
 };
 inline Result<SemanticSource> semantic_source(const OperationMetadata& m,
                                               const Params& p,
-                                              bool allow_boundary,
+                                              bool /* allow_boundary */,
                                               bool allow_component) {
   using Answer = Result<SemanticSource>;
   auto status = shape_valid(m);
@@ -158,18 +158,6 @@ inline Result<SemanticSource> semantic_source(const OperationMetadata& m,
       return Answer(invalid("axis assertion disagrees with description"));
     }
   }
-  if (!allow_boundary) {
-    if (result.description.association == "premultiplied") {
-      return Answer(
-          mismatch("premultiplied boundary requires unassociate first"));
-    }
-    for (const auto& g : result.description.groups) {
-      if (!g.interpretation.association.empty() &&
-          g.interpretation.association != "straight") {
-        return Answer(mismatch("all complete groups must be straight"));
-      }
-    }
-  }
   const auto name = text(p, "group");
   if (name.empty()) {
     return Answer(invalid("explicit group is required"));
@@ -185,9 +173,7 @@ inline Result<SemanticSource> semantic_source(const OperationMetadata& m,
                    "internal alpha"));
     }
     if (!d.component || d.component->name != name ||
-        interpretation.model != "gray" || d.component->role != "gray" ||
-        (!interpretation.association.empty() &&
-         interpretation.association != "straight")) {
+        interpretation.model != "gray" || d.component->role != "gray") {
       return Answer(
           invalid("component input requires an explicitly named straight Gray "
                   "component"));

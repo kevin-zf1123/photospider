@@ -1,14 +1,13 @@
 #include <utility>
 
-#include "common/tensor_program.hpp"
 #include "common/registry.hpp"
+#include "common/tensor_program.hpp"
 
 namespace ps::plugin_internal {
 Status register_core_constant(OperationRegistry* registry) {
   OperationDefinition operation;
   operation.key = "core.constant";
   operation.traits = tensor_ops::traits(0, sizeof(tensor_ops::Constant), 1);
-  operation.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   operation.traits.parameter_schema = {
       {"value", OperationParameterType::Float64, true}};
   operation.start_result = [](const ResultProgramQuery&,

@@ -13,6 +13,7 @@
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -128,7 +129,7 @@ struct RangeKernel final {
       return {ErrorCode::OperationFailed, "range requires one packed writer"};
     const auto& target = phase.query.output.result_schema->tensors[0];
     const auto shape = target.sample_shape();
-    const auto width = Value::element_size(target.descriptor.element_type);
+    const auto width = TensorSpan::element_size(target.descriptor.element_type);
     auto scratch = math_take(phase.allocator.allocate(sizeof(RangeMath)));
     static_assert(alignof(RangeMath) <= alignof(std::max_align_t));
     std::unique_ptr<RangeMath, void (*)(RangeMath*)> math(
@@ -178,7 +179,6 @@ OperationDefinition range_operation(const std::string& key, RangeKind kind,
   traits.input_count = kind == RangeKind::Clamp ? 3 : 5;
   traits.input_schema.resize(traits.input_count);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = kind == RangeKind::Clamp ? 15 : 12;
   }
   numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
@@ -194,8 +194,8 @@ OperationDefinition range_operation(const std::string& key, RangeKind kind,
                            {FailureOrigin::Schema, FailureScope::Unspecified}});
     };
     const auto& selected = inputs[0].result_schema->tensors[0];
-    const ValueDescriptor first{selected.descriptor.element_type,
-                                selected.sample_shape()};
+    const TensorDescriptor first{selected.descriptor.element_type,
+                                 selected.sample_shape()};
     if (first.shape.empty() || first.shape.size() > 8)
       return mismatch("range requires rank 1..8");
     std::uint64_t count = 1;
@@ -221,7 +221,7 @@ OperationDefinition range_operation(const std::string& key, RangeKind kind,
   operation.start_result = [kind, profile](const auto&, const auto& allocator) {
     return ResultContinuation::make<RangeProgram>(allocator, kind, profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_numeric_ranges(OperationRegistry* registry) {

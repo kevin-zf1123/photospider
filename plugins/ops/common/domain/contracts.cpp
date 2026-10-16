@@ -1,10 +1,12 @@
 #include "photospider/ops/contracts.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "01-numeric/lut3d_bake_validation.hpp"
 #include "common/domain/typed_sample_validation.hpp"
@@ -52,53 +54,79 @@ Status tuples(const ValidationContext& c, const ColorArrayDescriptor* color) {
           });
       if (!status.ok())
         return status;
-    } else {
-      std::array<double, 4> tuple{};
-      auto status =
-          input_internal::visit_typed_samples(region, {}, [&](const auto& at) {
-            auto value = read(at);
-            if (!value.ok())
-              return value.status();
-            tuple[at.back()] = value.value();
-            if (!std::isfinite(value.value()))
-              return Status{ErrorCode::OperationFailed,
-                            "nonfinite RGBA sample"};
-            if (at.back() == 3 &&
-                (value.value() < 0 || value.value() > 1 ||
-                 (value.value() == 0 &&
-                  (tuple[0] != 0 || tuple[1] != 0 || tuple[2] != 0))))
-              return Status{ErrorCode::OperationFailed,
-                            "invalid premultiplied RGBA tuple"};
-            return Status::success();
-          });
-      if (!status.ok())
-        return status;
     }
   }
   return Status::success();
 }
 }  // namespace
 Status register_ops_contracts(OperationRegistry& registry) {
-  ValidationDefinition rgba;
-  rgba.identity = rgba_contract();
-  rgba.scratch_bytes = 4096;
-  rgba.prepare = [](const ValidationPreparation& p)
+  Status status;
+  struct ScalarRange {
+    std::uint32_t slot;
+    double minimum, maximum;
+  };
+  ValidationDefinition scalar;
+  scalar.identity = scalar_range_contract();
+  scalar.requires_complete = false;
+  scalar.prepare = [](const ValidationPreparation& p)
       -> Result<std::shared_ptr<const void>> {
-    if (p.schema.tensors.size() != 1 || !p.schema.fields.empty())
-      return Result<std::shared_ptr<const void>>(
-          Status{ErrorCode::TypeMismatch, "RGBA tensor required"});
-    const auto& spec = p.schema.tensors[0];
-    if (spec.descriptor.element_type != ElementType::Float32 ||
-        spec.descriptor.shape.back() != 4 || spec.atomic_trailing_axes != 1)
-      return Result<std::shared_ptr<const void>>(
-          Status{ErrorCode::TypeMismatch,
-                 "RGBA contract requires Float32 atomic tuples of four"});
-    return Result<std::shared_ptr<const void>>(std::shared_ptr<const void>{});
+    using Answer = Result<std::shared_ptr<const void>>;
+    const auto minimum = p.parameters.find("scalar_range.minimum");
+    const auto maximum = p.parameters.find("scalar_range.maximum");
+    const auto selected = p.parameters.find("scalar_range.tensor_slot");
+    std::int64_t slot = 0;
+    if (selected != p.parameters.end()) {
+      const auto* value = std::get_if<std::int64_t>(&selected->second);
+      if (!value)
+        return Answer(
+            Status{ErrorCode::InvalidArgument, "invalid scalar range slot"});
+      slot = *value;
+    }
+    const auto* lo = minimum == p.parameters.end()
+                         ? nullptr
+                         : std::get_if<double>(&minimum->second);
+    const auto* hi = maximum == p.parameters.end()
+                         ? nullptr
+                         : std::get_if<double>(&maximum->second);
+    if (!lo || !hi || !std::isfinite(*lo) || !std::isfinite(*hi) || *lo > *hi ||
+        slot < 0 || static_cast<std::uint64_t>(slot) >= p.schema.tensors.size())
+      return Answer(Status{ErrorCode::InvalidArgument,
+                           "invalid scalar range parameters"});
+    const auto& tensor = p.schema.tensors[slot];
+    if (tensor.descriptor.element_type != ElementType::Float32 ||
+        tensor.sample_shape() != std::vector<std::uint64_t>{1})
+      return Answer(Status{ErrorCode::TypeMismatch,
+                           "scalar range requires a Float32 [1] member"});
+    return Answer(std::make_shared<const ScalarRange>(
+        ScalarRange{static_cast<std::uint32_t>(slot), *lo, *hi}));
   };
-  rgba.validate = [](const void*, const ValidationContext& c) {
-    return tuples(c, nullptr);
+  scalar.validate = [](const void* state, const ValidationContext& c) {
+    const auto& range = *static_cast<const ScalarRange*>(state);
+    if (c.cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, {}};
+    auto charged = c.consume(1);
+    if (!charged.ok())
+      return charged;
+    auto window = c.acquire_tensor(range.slot, Region::whole({1}));
+    if (!window.ok())
+      return window.status();
+    auto sample = window.value().row_run({0});
+    if (!sample.ok())
+      return sample.status();
+    float value;
+    std::memcpy(&value, sample.value().data, sizeof(value));
+    plugin_internal::FloatingEnvironment environment;
+    if (!environment.active())
+      return Status{ErrorCode::OperationFailed,
+                    "cannot set scalar environment"};
+    return std::isfinite(value) && value >= range.minimum &&
+                   value <= range.maximum
+               ? Status::success()
+               : Status{ErrorCode::InvalidArgument,
+                        "scalar is nonfinite or outside the declared range",
+                        FailureReason::InvalidDomain};
   };
-  auto status = registry.register_validator(std::move(rgba));
+  status = registry.register_validator(std::move(scalar));
   if (!status.ok())
     return status;
   for (bool report : {false, true}) {
@@ -129,14 +157,30 @@ Status register_ops_contracts(OperationRegistry& registry) {
       auto identity = lut3d_bake_configuration_id(description);
       if (!identity.ok())
         return identity.status();
-      auto stored = c.read_field(11, 0, 1);
-      if (!stored.ok())
-        return stored.status();
-      if (stored.value()->bytes().size() != 64 ||
-          std::memcmp(stored.value()->bytes().data(), identity.value().data(),
-                      64))
+      const auto read = [&](std::uint32_t slot, void* destination,
+                            std::uint64_t bytes) {
+        auto window = c.acquire_tensor(
+            slot, Region::whole(c.schema.tensors[slot].sample_shape()));
+        return window.ok() ? window.value().copy_to(
+                                 static_cast<std::uint8_t*>(destination), bytes)
+                           : window.status();
+      };
+      std::array<std::uint8_t, 64> stored{};
+      auto copied = read(11, stored.data(), stored.size());
+      if (!copied.ok())
+        return copied;
+      if (std::memcmp(stored.data(), identity.value().data(), 64))
         return Status{ErrorCode::TypeMismatch,
                       "bake report configuration mismatch"};
+      std::array<std::uint8_t, 8> measured{};
+      copied = read(12, measured.data(), measured.size());
+      if (!copied.ok())
+        return copied;
+      if (std::all_of(measured.begin(), measured.end(),
+                      [](auto byte) { return byte == 0; }))
+        return Status{ErrorCode::OperationFailed,
+                      "missing measured table identity",
+                      FailureReason::InvalidDomain};
       Lut3dBakeReport value;
       std::uint8_t passed;
       const std::array<void*, 11> output{&passed,
@@ -153,12 +197,9 @@ Status register_ops_contracts(OperationRegistry& registry) {
       const std::array<std::size_t, 11> sizes{1,  72, 8,  8,  24, 72,
                                               24, 8,  24, 24, 24};
       for (unsigned i = 0; i < 11; ++i) {
-        auto field = c.read_field(i, 0, (i == 1 || i == 5) ? 3 : 1);
-        if (!field.ok())
-          return field.status();
-        if (field.value()->bytes().size() != sizes[i])
-          return Status{ErrorCode::TypeMismatch, "bake report field width"};
-        std::memcpy(output[i], field.value()->bytes().data(), sizes[i]);
+        auto copied = read(i, output[i], sizes[i]);
+        if (!copied.ok())
+          return copied;
       }
       return input_internal::validate_lut3d_bake_report_values(
           description, &value, passed, c.consume);

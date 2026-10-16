@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/callback_environment.hpp"
 #include "photospider/core/utf8_validation.hpp"
 #include "plugin/operation_exception.hpp"
 
@@ -59,7 +60,10 @@ Status DiagnosticAccumulator::initialize(
           return record.type->identity.key == type->identity.key;
         }))
       return {ErrorCode::InvalidArgument, "invalid diagnostic definition"};
-    admitted.emplace_back(type, resources_);
+    auto guarded = core_internal::protect_callback_state(type);
+    admitted.emplace_back(std::shared_ptr<const DiagnosticDefinition>(
+                              std::move(guarded), type.get()),
+                          resources_);
     auto& record = admitted.back();
     auto work = resources_.consume({type->payload_bytes});
     if (!work.ok())
@@ -88,15 +92,20 @@ Status DiagnosticAccumulator::report(const ExtensionIdentity& type,
   auto status = resources_.consume({report.size()});
   if (!status.ok())
     return status;
-  status = found->type->validate(report);
+  status = core_internal::invoke_callback(
+      [&] { return found->type->validate(report); });
   if (!status.ok())
     return status;
   std::fill(found->next.begin(), found->next.end(), 0);
-  status = found->type->merge({found->value.data(), found->value.size()},
+  status = core_internal::invoke_callback([&] {
+    return found->type->merge({found->value.data(), found->value.size()},
                               report, {found->next.data(), found->next.size()});
+  });
   if (!status.ok())
     return status;
-  status = found->type->validate({found->next.data(), found->next.size()});
+  status = core_internal::invoke_callback([&] {
+    return found->type->validate({found->next.data(), found->next.size()});
+  });
   if (!status.ok())
     return status;
   found->value.swap(found->next);
@@ -125,16 +134,21 @@ Status DiagnosticAccumulator::merge(const DiagnosticAccumulator& other) try {
     auto status = resources_.consume({incoming.size()});
     if (!status.ok())
       return status;
-    status = found->type->validate(incoming);
+    status = core_internal::invoke_callback(
+        [&] { return found->type->validate(incoming); });
     if (!status.ok())
       return status;
     std::fill(found->next.begin(), found->next.end(), 0);
-    status =
-        found->type->merge({found->value.data(), found->value.size()}, incoming,
-                           {found->next.data(), found->next.size()});
+    status = core_internal::invoke_callback([&] {
+      return found->type->merge({found->value.data(), found->value.size()},
+                                incoming,
+                                {found->next.data(), found->next.size()});
+    });
     if (!status.ok())
       return status;
-    status = found->type->validate({found->next.data(), found->next.size()});
+    status = core_internal::invoke_callback([&] {
+      return found->type->validate({found->next.data(), found->next.size()});
+    });
     if (!status.ok())
       return status;
   }

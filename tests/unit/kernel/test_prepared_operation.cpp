@@ -1,4 +1,5 @@
 #include <atomic>
+#include <cfenv>  // NOLINT(build/c++11)
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -72,7 +73,8 @@ struct Computation {
     if (input && !requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false, take(TileSet::range(phase.resources, 0, 1))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     double value = 7 + phase.query.output_index;
@@ -102,7 +104,7 @@ OperationDefinition definition(const std::shared_ptr<Counts>& counts) {
   op.key = "test.prepared";
   op.traits.input_count = 1;
   op.traits.input_schema.resize(1);
-  op.traits.input_schema[0].kind = OperationPortKind::Result;
+
   op.traits.input_schema[0].tensor_key = "number";
   op.traits.input_schema[0].element_type =
       static_cast<unsigned>(ElementType::Float64);
@@ -114,7 +116,6 @@ OperationDefinition definition(const std::shared_ptr<Counts>& counts) {
   op.traits.outputs = {multi_result::output("value"),
                        multi_result::output("constant")};
   for (auto& output : op.traits.outputs) {
-    output.region_rule = OperationRegionRule::Whole;
     output.continuation_bytes = sizeof(Computation);
   }
   op.prepare_static = [counts](const auto& inputs, const auto& parameters) {
@@ -178,8 +179,9 @@ int compiled_reuse() {
     PS_CHECK(prepared == compiled.optimized.nodes()[0].prepared);
     PS_CHECK(prepared == compiled.plan.steps()[0].prepared);
     PS_CHECK(prepared == compiled.plan.steps()[1].prepared);
-    auto selected =
-        take(compiled.plan.tile_plan("value", TileRequest{true, {}}));
+    auto selected = take(compiled.plan.tile_plan(
+        "value",
+        TileRequest{{{0, take(TileSet::range(ResourceBudget{}, 0, 1))}}}));
     PS_CHECK(selected.steps()[0].prepared == prepared);
     PS_CHECK(prepared->traits().outputs[0].input_indices ==
              std::optional<std::vector<std::uint32_t>>({{0}}));
@@ -405,8 +407,82 @@ int projected_execution() {
   return 0;
 }
 
+int floating_owner_restoration() {
+  struct Restore {
+    std::fenv_t saved{};
+    Restore() { std::fegetenv(&saved); }
+    ~Restore() { std::fesetenv(&saved); }
+  } restore;
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    PS_CHECK(std::fesetround(FE_DOWNWARD) == 0);
+    std::feclearexcept(FE_ALL_EXCEPT);
+    std::feraiseexcept(FE_DIVBYZERO);
+    unsigned schemas_destroyed = 0, states_destroyed = 0;
+    bool inherited = false;
+    auto registry = std::make_shared<OperationRegistry>();
+    OperationDefinition operation;
+    operation.key = "test.environment";
+    operation.traits.outputs = {multi_result::output("value")};
+    operation.traits.requires_metadata_specialization = true;
+    const auto specialize = [&](const auto&, const auto&) {
+      inherited = std::fegetround() == FE_DOWNWARD &&
+                  std::fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO;
+      std::fesetround(FE_UPWARD);
+      std::feraiseexcept(FE_INVALID);
+      OperationOutputSpecialization output;
+      output.metadata.result_schema = std::shared_ptr<const SchemaTemplate>(
+          new SchemaTemplate(multi_result::schema()),
+          [&](const SchemaTemplate* schema) {
+            delete schema;
+            ++schemas_destroyed;
+            std::fesetround(FE_TOWARDZERO);
+            std::feraiseexcept(FE_OVERFLOW);
+          });
+      return Result<std::vector<OperationOutputSpecialization>>(
+          std::vector<OperationOutputSpecialization>{std::move(output)});
+    };
+    if (!mode) {
+      operation.specialize_metadata = specialize;
+    } else {
+      operation.prepare_static = [&, mode](const auto& inputs,
+                                           const auto& parameters) {
+        OperationPreparation prepared;
+        prepared.outputs = take(specialize(inputs, parameters));
+        if (mode == 2)
+          prepared.outputs.push_back(prepared.outputs.front());
+        prepared.state =
+            std::shared_ptr<const void>(new int(7), [&](const void* state) {
+              delete static_cast<const int*>(state);
+              ++states_destroyed;
+              std::fesetround(FE_TOWARDZERO);
+              std::feraiseexcept(FE_OVERFLOW);
+            });
+        return Result<OperationPreparation>(std::move(prepared));
+      };
+    }
+    operation.start_result = [](const auto&, const auto& allocator) {
+      return ResultContinuation::make<multi_result::Program>(allocator, -1, 7);
+    };
+    check(registry->register_operation(std::move(operation)));
+    check(registry->freeze());
+    {
+      auto prepared = registry->prepare_operation("test.environment", {}, {});
+      PS_CHECK(prepared.ok() == (mode != 2));
+      PS_CHECK(inherited && schemas_destroyed == 1);
+      PS_CHECK(std::fegetround() == FE_DOWNWARD &&
+               std::fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO);
+    }
+    registry.reset();
+    PS_CHECK(states_destroyed == (mode ? 1U : 0U));
+    PS_CHECK(std::fegetround() == FE_DOWNWARD &&
+             std::fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO);
+  }
+  return 0;
+}
+
 }  // namespace
 int main() {
+  PS_CHECK(floating_owner_restoration() == 0);
   PS_CHECK(compiled_reuse() == 0);
   PS_CHECK(static_seals_and_lifetime() == 0);
   PS_CHECK(projection_validation() == 0);

@@ -49,7 +49,8 @@ struct PayloadProbe {
     if (borrow && !ready) {
       ready = true;
       ps::ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false, take(ps::TileSet::range(phase.resources, 0, 1))});
       return Answer(std::move(need));
     }
     auto builder = take(ps::ResultBuilder::start(
@@ -126,19 +127,17 @@ ps::OperationDefinition payload_probe(bool borrow,
   traits.input_count = borrow ? 1 : 0;
   traits.input_schema.resize(traits.input_count);
   for (auto& input : traits.input_schema) {
-    input.kind = ps::OperationPortKind::Result;
     input.result_schema_id = "manual.payload";
     input.result_schema_version = 1;
     input.tensor_key = "samples";
   }
   traits.workspace_bytes = 8;
   auto& output = traits.outputs[0];
-  output.output_schema.kind = ps::OperationPortKind::Result;
+
   output.output_schema.result_schema_id = "manual.payload";
   output.output_schema.result_schema_version = 1;
   output.output_schema.tensor_key = "samples";
   output.result_schema = payload_schema();
-  output.region_rule = ps::OperationRegionRule::Whole;
   output.continuation_bytes = sizeof(PayloadProbe);
   output.maximum_dependency_stages = 2;
   output.maximum_output_payload_bytes = borrow ? 0 : 8;
@@ -151,6 +150,75 @@ ps::OperationDefinition payload_probe(bool borrow,
     traits.outputs.back().key = "other";
   }
   return definition;
+}
+struct TilePayloadProbe {
+  std::shared_ptr<std::shared_ptr<const ps::CpuStorage>> storage;
+  unsigned mode;
+  TilePayloadProbe(
+      std::shared_ptr<std::shared_ptr<const ps::CpuStorage>> storage,
+      unsigned mode)
+      : storage(std::move(storage)), mode(mode) {}
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
+    auto owner = *storage;
+    if (!owner || mode != 2) {
+      auto bytes = take(phase.resources.allocator().allocate(8));
+      std::memset(bytes.data(), 0, bytes.size());
+      owner = std::move(bytes).freeze();
+      if (mode == 2)
+        *storage = owner;
+    }
+    auto builder = take(ps::ResultBuilder::start(
+        phase.resources, *phase.query.output.result_schema,
+        phase.query.semantic_key, {}, {}, phase.query.tile_extent));
+    const auto at = phase.query.tile_unit;
+    require(
+        builder.publish_tensor(0, ps::Region({{at, 1}}), {0, {8}, {at}}, owner)
+            .ok(),
+        "per-tile payload");
+    return ps::Result<ps::ResultProgramPoll>(
+        ps::ResultPublication{take(builder.seal()), true});
+  }
+};
+void cumulative_tile_payload() {
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    auto storage = std::make_shared<std::shared_ptr<const ps::CpuStorage>>();
+    auto definition = payload_probe(false);
+    auto& outputs = definition.traits.outputs;
+    outputs.resize(1);
+    outputs[0].result_schema->tensors[0].atomic_trailing_axes = 0;
+    outputs[0].maximum_output_payload_bytes = mode == 1 ? 16 : 8;
+    outputs[0].continuation_bytes = sizeof(TilePayloadProbe);
+    definition.start_result = [storage, mode](const auto&,
+                                              const auto& allocator) {
+      return ps::ResultContinuation::make<TilePayloadProbe>(allocator, storage,
+                                                            mode);
+    };
+    auto registry = std::make_shared<ps::OperationRegistry>();
+    require(registry->register_operation(std::move(definition)).ok(),
+            "register per-tile payload");
+    require(registry->freeze().ok(), "freeze per-tile payload");
+    ps::WorkflowDocument document;
+    document.nodes = {{1, "manual.output_payload", {}, {}}};
+    document.outputs = {{"value", 1, "value"}};
+    ps::GraphContext graph(document);
+    ps::PlanningOptions planning;
+    planning.tile_extent = 1;
+    auto plan = take(ps::Compiler(registry).compile(graph, planning)).plan;
+    ps::ExecutionContextConfig config;
+    config.result_cache_bytes = 1048576;
+    config.cpu_workers = 1;
+    ps::ExecutionContext execution(registry, config);
+    for (unsigned run = 0; run < 2; ++run) {
+      auto result = execution.execute(plan);
+      require(mode ? result.ok()
+                   : !result.ok() && result.status().reason ==
+                                         ps::FailureReason::CapacityLimit,
+              "logical output counts physical owners across tile actors");
+      if (mode && run)
+        require(result.value().diagnostics.cache_hits == 2,
+                "cached tiles preserve cumulative owner accounting");
+    }
+  }
 }
 struct MetadataControl {
   std::optional<ps::ResourceBudget> root;
@@ -261,7 +329,6 @@ void output_payload_bounds() {
         std::make_shared<const ps::SchemaTemplate>(payload_schema());
     const std::map<std::string, ps::ParameterValue> parameters;
     ps::ResultProgramQuery request(metadata, parameters);
-    request.output_request = {true, {}};
     request.semantic_key = "payload-probe";
     request.snapshot_identity = "payload-inputs";
     auto session = take(registry->start_result("manual.output_payload", request,
@@ -308,7 +375,6 @@ void output_payload_bounds() {
         std::make_shared<const ps::SchemaTemplate>(payload_schema());
     const std::map<std::string, ps::ParameterValue> parameters;
     ps::ResultProgramQuery query(metadata, parameters);
-    query.output_request = {true, {}};
     query.semantic_key = "payload.guard";
     auto state = take(registry->start_result("manual.output_payload", query,
                                              guard_root.allocator()));
@@ -350,7 +416,6 @@ void output_payload_bounds() {
         std::make_shared<const ps::SchemaTemplate>(payload_schema());
     const std::map<std::string, ps::ParameterValue> parameters;
     ps::ResultProgramQuery query(metadata, parameters);
-    query.output_request = {true, {}};
     query.semantic_key = "foreign.payload";
     auto state = take(foreign_registry->start_result(
         "manual.output_payload", query, normal_root.allocator()));
@@ -382,12 +447,9 @@ void output_payload_bounds() {
   for (bool reuse : {false, true}) {
     auto prefix_definition = payload_probe(false);
     auto prefix_schema = payload_schema();
-    prefix_schema.publication = ps::PublishPolicy::IndependentChunks;
     prefix_schema.tensors[0].atomic_trailing_axes = 0;
     prefix_definition.traits.outputs.resize(1);
     prefix_definition.traits.outputs[0].result_schema = prefix_schema;
-    prefix_definition.traits.outputs[0].failure_delivery =
-        ps::FailureDelivery::RequestFailureOnly;
     prefix_definition.traits.outputs[0].continuation_bytes =
         sizeof(PrefixPayloadProbe);
     prefix_definition.start_result = [reuse](const auto&,
@@ -406,7 +468,6 @@ void output_payload_bounds() {
           std::make_shared<const ps::SchemaTemplate>(prefix_schema);
       const std::map<std::string, ps::ParameterValue> parameters;
       ps::ResultProgramQuery query(metadata, parameters);
-      query.output_request = {true, {}};
       query.semantic_key = "prefix-payload";
       auto state = take(prefix_registry.start_result(
           "manual.output_payload", query, prefix_root.allocator()));
@@ -449,11 +510,13 @@ void output_payload_bounds() {
   ps::ExecutionContext mixed_context(mixed);
   auto frozen = take(mixed_context.freeze(mixed_plan));
   auto bad = mixed_context.execute_fragments(
-      frozen, {{"a", ps::TileRequest{true, {}}}});
+      frozen,
+      {{"a", ps::TileRequest{{{0, take(ps::TileSet::range(root, 0, 1))}}}}});
   require(!bad.ok() && bad.status().reason == ps::FailureReason::CapacityLimit,
           "selected output enforces its own payload bound");
   auto good = take(mixed_context.execute_fragments(
-      frozen, {{"b", ps::TileRequest{true, {}}}}));
+      frozen,
+      {{"b", ps::TileRequest{{{0, take(ps::TileSet::range(root, 0, 1))}}}}}));
   require(good.results.size() == 1 && good.results.at("b").valid(),
           "independent request permits the legal sibling output");
   auto cancellation_registry = std::make_shared<ps::OperationRegistry>();
@@ -493,7 +556,6 @@ void output_payload_bounds() {
     ps::ResultProgramQuery first_query(metadata, parameters);
     first_query.semantic_key = "payload.cancel.first";
     first_query.snapshot_identity = "payload.cancel.inputs";
-    first_query.output_request = {true, {}};
     first_query.cancellation = stop.token();
     auto state = take(cancellation_registry->start_result(
         "manual.output_payload", first_query, cancellation_root.allocator()));
@@ -523,7 +585,9 @@ void output_payload_bounds() {
   require(borrowing->register_operation(payload_probe(true)).ok(),
           "register borrowed Result probe");
   require(borrowing->freeze().ok(), "freeze borrowed Result probe");
-  ps::ExecutionContext borrowed_context(borrowing);
+  ps::ExecutionContextConfig borrowed_config;
+  borrowed_config.result_cache_bytes = 1048576;
+  ps::ExecutionContext borrowed_context(borrowing, borrowed_config);
   auto resources = take(borrowed_context.resource_budget());
   auto builder = take(
       ps::ResultBuilder::start(resources, payload_schema(), "payload.source"));
@@ -555,6 +619,35 @@ void output_payload_bounds() {
       source.storage_owner_token() == window.storage_owner_token() &&
           resources.statistics().live[ps::ResourceKind::Payload] == 16,
       "zero new-payload bound permits a Need-authorized borrowed Result view");
+  auto hit = take(borrowed_context.execute(plan, {{{"input", input}}}));
+  require(hit.diagnostics.cache_hits == 1,
+          "same borrowed owner can reuse a zero-cap output");
+  auto replacement_builder = take(
+      ps::ResultBuilder::start(resources, payload_schema(), "payload.source"));
+  const double zeros[2] = {};
+  require(
+      replacement_builder
+          .publish_tensor(0, ps::Region::whole({2}),
+                          ps::ByteView(reinterpret_cast<const uint8_t*>(zeros),
+                                       sizeof(zeros)))
+          .ok(),
+      "replacement source payload");
+  auto replacement = take(replacement_builder.seal());
+  auto rerun = take(borrowed_context.execute(plan, {{{"input", replacement}}}));
+  require(rerun.diagnostics.cache_hits == 0,
+          "cache storage outside the payload allowance falls back to compute");
+  auto replaced_source = take(replacement.acquire_tensor(
+      take(replacement.descriptor()), 0, ps::Region::whole({2})));
+  const auto& replaced_output = rerun.results.at("a");
+  auto replaced_window = take(replaced_output.acquire_tensor(
+      take(replaced_output.descriptor()), 0, ps::Region::whole({2})));
+  require(replaced_window.storage_owner_token() ==
+              replaced_source.storage_owner_token(),
+          "cache miss borrows the current input owner");
+  auto replacement_hit =
+      take(borrowed_context.execute(plan, {{{"input", replacement}}}));
+  require(replacement_hit.diagnostics.cache_hits == 1,
+          "recomputed borrowed payload can be cached normally");
   std::cout << "Result output payload: direct/workflow bounds and "
                "borrowed view passed\n";
 }
@@ -562,6 +655,7 @@ void output_payload_bounds() {
 int main() {
   try {
     output_payload_bounds();
+    cumulative_tile_payload();
     worker_metadata_limits(ps::ResourceKind::Metadata, true);
     for (auto kind : {ps::ResourceKind::Metadata, ps::ResourceKind::Entries})
       worker_metadata_limits(kind);

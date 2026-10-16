@@ -16,8 +16,9 @@
 
 namespace ps::metadata_internal {
 namespace {
-// This bounded tree is a transaction representation, not a second Value codec.
-// Published semantics always use the canonical tensor-description-v4/v5 facet.
+// This bounded tree is a transaction representation, not a second TensorSpan
+// codec. Published semantics always use the canonical tensor-description-v4/v5
+// facet.
 struct Tree final {
   char kind = 'o';
   std::string bytes;
@@ -829,7 +830,7 @@ void schema_path(const std::vector<std::string>& p) {
 }
 std::vector<std::string> resolve(std::vector<std::string> p,
                                  const TensorDescription& source,
-                                 const ValueDescriptor& d,
+                                 const TensorDescriptor& d,
                                  bool ignore_absent = false) {
   schema_path(p);
   if (p.size() >= 3 && p[0] == "semantic" && p[1] == "channels") {
@@ -1041,7 +1042,7 @@ Tree transaction(const format::MetadataOptions& o) {
 }  // namespace
 namespace {
 Result<TensorDescription> edit(const TensorDescription& source,
-                               const ValueDescriptor& descriptor,
+                               const TensorDescriptor& descriptor,
                                const format::MetadataOptions& opts) try {
   using Answer = Result<TensorDescription>;
   const ResultTensorSpec input = [&] {
@@ -1418,7 +1419,7 @@ Result<TensorDescription> edit(const TensorDescription& source,
 
 namespace ps::format {
 Result<TensorDescription> edit_description(const TensorDescription& source,
-                                           const ValueDescriptor& descriptor,
+                                           const TensorDescriptor& descriptor,
                                            const MetadataOptions& options) {
   return metadata_internal::edit(source, descriptor, options);
 }

@@ -17,6 +17,7 @@
 
 #include "data/memory_budget.hpp"
 #include "photospider/photospider.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/result_input_fixture.hpp"
 #include "support/test_support.hpp"
@@ -29,8 +30,8 @@ Footprint point(std::uint64_t at, std::uint64_t size = 16) {
       Footprint::from_regions({1, size}, {Region({{0, 1}, {at, 1}})}));
 }
 template <class T>
-Value values(ElementType type, const std::vector<T>& samples) {
-  auto writer = multi_result::take(MutableValue::allocate(
+TensorSpan values(ElementType type, const std::vector<T>& samples) {
+  auto writer = multi_result::take(TensorWriter::allocate(
       {type, {1, samples.size()}}, Region::whole({1, samples.size()}),
       BufferAllocator{}));
   std::memcpy(writer.data(), samples.data(), writer.size());
@@ -46,7 +47,7 @@ SchemaTemplate schema(ElementType type = ElementType::Float64,
   return result;
 }
 ExecutionBinding source(const ResourceBudget& root, const std::string& name,
-                        const Value& backing) {
+                        const TensorSpan& backing) {
   auto builder = multi_result::take(
       ResultBuilder::start(root,
                            schema(backing.descriptor().element_type,
@@ -110,7 +111,6 @@ OperationTraits staged_traits(unsigned inputs, std::uint64_t state,
   traits.input_count = inputs;
   traits.input_schema.resize(inputs);
   for (auto& port : traits.input_schema) {
-    port.kind = OperationPortKind::Result;
     port.rank = 2;
     port.element_type = static_cast<std::uint32_t>(ElementType::Float64);
   }
@@ -152,8 +152,8 @@ Result<ExecutionResult> execute_probe(OperationDefinition operation,
                       graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
                   .plan;
   plan = multi_result::take(plan.tile_plan(
-      "result", TileRequest{false, multi_result::take(TileSet::from_indices(
-                                       ResourceBudget{}, {0}))}));
+      "result", TileRequest{{{0, multi_result::take(TileSet::from_indices(
+                                     ResourceBudget{}, {0}))}}}));
   ExecutionContext context(registry, {1, false, 8, 65536});
   const auto root = multi_result::take(context.resource_budget());
   return context.execute(
@@ -242,8 +242,8 @@ int progressive() {
                       graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
                   .plan;
   plan = multi_result::take(plan.tile_plan(
-      "result", TileRequest{false, multi_result::take(TileSet::from_indices(
-                                       ResourceBudget{}, {0}))}));
+      "result", TileRequest{{{0, multi_result::take(TileSet::from_indices(
+                                     ResourceBudget{}, {0}))}}}));
   ExecutionContext context(registry, {1, false, 8, 65536});
   const auto root = multi_result::take(context.resource_budget());
   std::vector<std::int64_t> pointers(16, -1);
@@ -273,7 +273,7 @@ int progressive() {
            multi_result::take(TileSet::from_indices(root, {15})));
   for (auto tile : {2u, 3u}) {
     ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
-    changes.push_back({PlanWorkflowInput{0}, 0,
+    changes.push_back({PlanWorkflowInput{0}, 0, 0,
                        multi_result::take(TileSet::from_indices(root, {tile})),
                        false});
     auto dirty =
@@ -343,8 +343,8 @@ int block_services() {
              values<double>(ElementType::Float64, std::vector<double>(16)));
   for (unsigned run = 0; run < 3; ++run) {
     auto selected = multi_result::take(plan.tile_plan(
-        "result", TileRequest{false, multi_result::take(TileSet::from_indices(
-                                         ResourceBudget{}, {run}))}));
+        "result", TileRequest{{{0, multi_result::take(TileSet::from_indices(
+                                       ResourceBudget{}, {run}))}}}));
     auto executed = context.execute(selected, {{input}});
     PS_CHECK(executed.ok());
     double value = 0;
@@ -662,8 +662,8 @@ int root_work_resume() {
                         graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
                     .plan;
     plan = multi_result::take(plan.tile_plan(
-        "result", TileRequest{false, multi_result::take(TileSet::from_indices(
-                                         ResourceBudget{}, {0}))}));
+        "result", TileRequest{{{0, multi_result::take(TileSet::from_indices(
+                                       ResourceBudget{}, {0}))}}}));
     ExecutionContextConfig config{1, false, 8, 65536};
     config.managed_resources = ResourceLimits{};
     config.managed_resources->maximum_work = limit;
@@ -687,8 +687,14 @@ struct SiblingState {
   Poll poll(const ResultProgramPhase& phase) {
     if (!requested) {
       requested = true;
-      return Poll(
-          ResultProgramNeed{{{0, true, false, {}}, {1, true, false, {}}}});
+      ResultProgramNeed need;
+      for (unsigned port = 0; port < 2; ++port)
+        need.tiles.push_back(
+            {port, 0, false,
+             multi_result::take(TileSet::range(
+                 phase.resources, 0,
+                 phase.query.input_tile_grids[port][0].tile_count()))});
+      return Poll(std::move(need));
     }
     double sum = 0;
     for (unsigned port = 0; port < 2; ++port) {
@@ -739,7 +745,10 @@ int sibling_admission() {
     operation.key = id ? "sibling_b" : "sibling_a";
     operation.traits = staged_traits(0, sizeof(LargeSource),
                                      schema(ElementType::Float64, mib / 8));
-    operation.traits.outputs[0].region_rule = OperationRegionRule::Whole;
+    operation.traits.outputs[0].result_schema->tensors[0].atomic_trailing_axes =
+        2;
+    operation.traits.outputs[0].result_schema->tensors[0].layout.spatial =
+        false;
     operation.traits.workspace_bytes = 4 * mib;
     operation.start_result = [&, id](const ResultProgramQuery&,
                                      const BufferAllocator& allocator) {
@@ -835,7 +844,7 @@ int execution_network() {
   effect.traits.input_schema.clear();
   effect.traits.side_effect_free = false;
   effect.traits.cacheable = false;
-  effect.traits.outputs[0].region_rule = OperationRegionRule::Whole;
+  effect = sdk::with_whole_stage(std::move(effect), 1000000);
   multi_result::check(registry->register_operation(effect));
   multi_result::check(registry->freeze());
   WorkflowDocument document;
@@ -858,8 +867,8 @@ int execution_network() {
                       graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
                   .plan;
   plan = multi_result::take(plan.tile_plan(
-      "result", TileRequest{false, multi_result::take(TileSet::from_indices(
-                                       ResourceBudget{}, {0}))}));
+      "result", TileRequest{{{0, multi_result::take(TileSet::from_indices(
+                                     ResourceBudget{}, {0}))}}}));
   ExecutionContext execution(registry, {1, false, 8, 65536});
   auto root = multi_result::take(execution.resource_budget());
   std::vector<std::int64_t> pointers(16, -1);

@@ -9,11 +9,17 @@ namespace ps {
  */
 PHOTOSPIDER_OPS_SDK_API Status
 register_ops_contracts(OperationRegistry& registry);
-inline ExtensionIdentity rgba_contract() {
-  return {"ops.rgba", 1, "finite-premultiplied-v1"};
+/** @brief Finite Float32 scalar selected by scalar_range.tensor_slot (Int64,
+ * default 0), with inclusive scalar_range.minimum/maximum (Float64).
+ * The three parameters are part of the operation identity. Preparation rejects
+ * nonfinite/reversed bounds and non-scalar members; runtime checks only the
+ * explicitly authorized [1] sample. Register via register_ops_contracts().
+ */
+inline ExtensionIdentity scalar_range_contract() {
+  return {"ops.scalar-range", 1, "finite-f32-inclusive-v1"};
 }
 inline ExtensionIdentity bake_report_contract() {
-  return {"ops.bake-report", 1, "measured-fields-v1"};
+  return {"ops.bake-report", 2, "measured-fields-v2"};
 }
 inline ExtensionIdentity bake_table_contract() {
   return {"ops.bake-table", 1, "color-tuples-v1"};

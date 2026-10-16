@@ -4,24 +4,25 @@
 #include <vector>
 
 #include "photospider/data/result.hpp"
-#include "photospider/data/value_fragments.hpp"
+#include "photospider/data/tensor.hpp"
 #include "support/test_support.hpp"
 
 namespace {
 int bounded_read() {
   using namespace ps;  // NOLINT(build/namespaces)
   constexpr std::uint64_t count = 2048;
-  const ValueDescriptor descriptor{ElementType::UInt8, {count}};
-  std::vector<Value> pieces;
+  const TensorDescriptor descriptor{ElementType::UInt8, {count}};
+  std::vector<TensorSpan> pieces;
   for (std::uint64_t i = 0; i < count; ++i)
-    pieces.push_back(Value::create(descriptor, Region({{i, 1}}), {0, {1}, {i}},
-                                   {static_cast<std::uint8_t>(i)})
+    pieces.push_back(TensorSpan::create(descriptor, Region({{i, 1}}),
+                                        {0, {1}, {i}},
+                                        {static_cast<std::uint8_t>(i)})
                          .take_value());
   FootprintLimits construction;
   construction.maximum_work = 1000000000;
-  auto created = ValueFragments::create(
-      descriptor, Footprint::all(descriptor.shape).take_value(), pieces,
-      construction);
+  auto created =
+      Tensor::create(descriptor, Footprint::all(descriptor.shape).take_value(),
+                     pieces, construction);
   PS_CHECK(created.ok());
   const auto& fragments = created.value();
   PS_CHECK(fragments.fragments().size() == count);
@@ -80,22 +81,22 @@ int packed_collection() {
   using namespace ps;  // NOLINT(build/namespaces)
   for (const auto type : {ElementType::UInt8, ElementType::Int64,
                           ElementType::Float32, ElementType::Float64}) {
-    const auto width = Value::element_size(type);
-    const ValueDescriptor descriptor{type, {300, 1, 150}};
+    const auto width = TensorSpan::element_size(type);
+    const TensorDescriptor descriptor{type, {300, 1, 150}};
     const Region region({{10, 257}, {0, 1}, {9, 129}});
     const auto count = 257 * 129;
     std::vector<std::uint8_t> bytes(3 + count * width + 5);
     for (std::size_t i = 0; i < bytes.size(); ++i)
       bytes[i] = static_cast<std::uint8_t>(i * 37 + 11);
-    auto source = Value::create(descriptor, region,
-                                {3 + 129 * width,
-                                 {static_cast<std::int64_t>(129 * width), -999,
-                                  static_cast<std::int64_t>(width)},
-                                 {11, 0, 9}},
-                                bytes)
+    auto source = TensorSpan::create(descriptor, region,
+                                     {3 + 129 * width,
+                                      {static_cast<std::int64_t>(129 * width),
+                                       -999, static_cast<std::int64_t>(width)},
+                                      {11, 0, 9}},
+                                     bytes)
                       .take_value();
     auto fragments =
-        ValueFragments::create(
+        Tensor::create(
             descriptor,
             Footprint::from_regions(descriptor.shape, {region}).take_value(),
             {source})
@@ -158,21 +159,20 @@ int packed_collection() {
             .take_value();
     PS_CHECK(narrow.collect(region, BufferAllocator{}).status().code ==
              ErrorCode::NotFound);
-    source = Value{};
-    fragments = ValueFragments{};
-    narrow = ValueFragments{};
+    source = TensorSpan{};
+    fragments = Tensor{};
+    narrow = Tensor{};
     PS_CHECK(output.value().copy_bytes()[0] == bytes[3]);
   }
   // Padded/reversed rows and broadcast elements keep their logical order.
-  const ValueDescriptor d{ElementType::UInt8, {2, 3}};
+  const TensorDescriptor d{ElementType::UInt8, {2, 3}};
   for (const auto& layout :
        std::vector<StridedLayout>{{1, {4, 1}}, {7, {-4, -1}}, {2, {0, 0}}}) {
-    auto v = Value::create(d, Region::whole(d.shape), layout,
-                           {0, 1, 2, 3, 4, 5, 6, 7, 8})
+    auto v = TensorSpan::create(d, Region::whole(d.shape), layout,
+                                {0, 1, 2, 3, 4, 5, 6, 7, 8})
                  .take_value();
-    auto f =
-        ValueFragments::create(d, Footprint::all(d.shape).take_value(), {v})
-            .take_value();
+    auto f = Tensor::create(d, Footprint::all(d.shape).take_value(), {v})
+                 .take_value();
     const auto collected =
         f.collect(v.region(), BufferAllocator{}).take_value();
     std::vector<std::uint8_t> expected;
@@ -194,22 +194,22 @@ int main() {
   using namespace ps;  // NOLINT(build/namespaces)
   for (auto type : {ElementType::UInt8, ElementType::Int64,
                     ElementType::Float32, ElementType::Float64}) {
-    const auto width = Value::element_size(type);
-    const ValueDescriptor descriptor{type, {1000000000}};
+    const auto width = TensorSpan::element_size(type);
+    const TensorDescriptor descriptor{type, {1000000000}};
     const auto bytes = std::vector<std::uint8_t>(width * 2, 0x3f);
-    auto left =
-        Value::create(descriptor, Region({{0, 2}}),
-                      {width, {-static_cast<std::int64_t>(width)}, {0}}, bytes)
-            .take_value();
+    auto left = TensorSpan::create(
+                    descriptor, Region({{0, 2}}),
+                    {width, {-static_cast<std::int64_t>(width)}, {0}}, bytes)
+                    .take_value();
     auto right =
-        Value::create(descriptor, Region({{999999998, 2}}),
-                      {0, {static_cast<std::int64_t>(width)}, {999999998}},
-                      bytes)
+        TensorSpan::create(descriptor, Region({{999999998, 2}}),
+                           {0, {static_cast<std::int64_t>(width)}, {999999998}},
+                           bytes)
             .take_value();
     auto wanted = Footprint::from_regions(descriptor.shape,
                                           {left.region(), right.region()})
                       .take_value();
-    auto sparse = ValueFragments::create(descriptor, wanted, {left, right});
+    auto sparse = Tensor::create(descriptor, wanted, {left, right});
     PS_CHECK(sparse.ok() && sparse.value().fragments().size() == 2);
     std::vector<std::uint8_t> sample(width, 0);
     PS_CHECK(sparse.value().read({1}, sample.data(), width).ok());
@@ -234,63 +234,65 @@ int main() {
     PS_CHECK(restricted.ok() && restricted.value().fragments().size() == 1);
     PS_CHECK(!restricted.value().read({0}, sample.data(), width).ok());
     PS_CHECK(!restricted.value().restrict(wanted).ok());
-    PS_CHECK(ValueFragments::create(descriptor, wanted, {left}).status().code ==
+    PS_CHECK(Tensor::create(descriptor, wanted, {left}).status().code ==
              ErrorCode::NotFound);
     // Retained owner survives the original inputs and the full sparse carrier.
     std::weak_ptr<const CpuStorage> owner = left.storage();
-    sparse = Result<ValueFragments>(ValueFragments{});
-    left = Value{};
+    sparse = Result<Tensor>(Tensor{});
+    left = TensorSpan{};
     PS_CHECK(!owner.expired());
-    restricted = Result<ValueFragments>(ValueFragments{});
+    restricted = Result<Tensor>(Tensor{});
     PS_CHECK(owner.expired());
   }
-  auto value = Value::create({ElementType::UInt8, {4}}, Region({{0, 4}}),
-                             {0, {1}}, {1, 2, 3, 4})
+  auto value = TensorSpan::create({ElementType::UInt8, {4}}, Region({{0, 4}}),
+                                  {0, {1}}, {1, 2, 3, 4})
                    .take_value();
   const auto all = Footprint::all({4}).take_value();
-  auto duplicate = ValueFragments::create(
-      value.descriptor(), all,
-      {value, value.view(Region({{1, 2}})).take_value()});
+  auto duplicate =
+      Tensor::create(value.descriptor(), all,
+                     {value, value.view(Region({{1, 2}})).take_value()});
   PS_CHECK(duplicate.ok());
   PS_CHECK(duplicate.value().retained_bytes().value() ==
            value.storage()->capacity());
-  auto explicit_origin = Value::from_storage(value.descriptor(), value.region(),
-                                             {0, {1}, {0}}, value.storage())
-                             .take_value();
-  auto shifted_origin =
-      Value::from_storage(value.descriptor(), Region({{1, 2}}), {1, {1}, {1}},
-                          value.storage())
+  auto explicit_origin =
+      TensorSpan::from_storage(value.descriptor(), value.region(),
+                               {0, {1}, {0}}, value.storage())
           .take_value();
-  auto aliases = ValueFragments::create(
-      value.descriptor(), all, {value, explicit_origin, shifted_origin});
+  auto shifted_origin =
+      TensorSpan::from_storage(value.descriptor(), Region({{1, 2}}),
+                               {1, {1}, {1}}, value.storage())
+          .take_value();
+  auto aliases = Tensor::create(value.descriptor(), all,
+                                {value, explicit_origin, shifted_origin});
   PS_CHECK(aliases.ok() && aliases.value().retained_bytes().value() ==
                                value.storage()->capacity());
-  auto other = Value::create(value.descriptor(), value.region(), value.layout(),
-                             {4, 3, 2, 1})
+  auto other = TensorSpan::create(value.descriptor(), value.region(),
+                                  value.layout(), {4, 3, 2, 1})
                    .take_value();
-  PS_CHECK(
-      !ValueFragments::create(value.descriptor(), all, {value, other}).ok());
+  PS_CHECK(!Tensor::create(value.descriptor(), all, {value, other}).ok());
   // A shared parameter-sized table stays compact even with atomic publication.
-  const ValueDescriptor table_descriptor{ElementType::UInt8, {129, 129}};
-  auto table = Value::create(table_descriptor, Region::whole({129, 129}),
-                             {0, {129, 1}}, std::vector<std::uint8_t>(16641, 7))
-                   .take_value();
-  std::vector<Value> atoms;
+  const TensorDescriptor table_descriptor{ElementType::UInt8, {129, 129}};
+  auto table =
+      TensorSpan::create(table_descriptor, Region::whole({129, 129}),
+                         {0, {129, 1}}, std::vector<std::uint8_t>(16641, 7))
+          .take_value();
+  std::vector<TensorSpan> atoms;
   for (std::uint64_t y = 0; y < 129; ++y)
     for (std::uint64_t x = 0; x < 129; ++x)
       atoms.push_back(table.view(Region({{y, 1}, {x, 1}})).take_value());
-  auto compact = ValueFragments::create(
-      table_descriptor, Footprint::all({129, 129}).take_value(), atoms);
+  auto compact = Tensor::create(table_descriptor,
+                                Footprint::all({129, 129}).take_value(), atoms);
   PS_CHECK(compact.ok() && compact.value().fragments().size() == 1);
   PS_CHECK(compact.value().retained_bytes().value() ==
            table.storage()->capacity());
   std::uint8_t last = 0;
   PS_CHECK(compact.value().read({128, 128}, &last, 1).ok() && last == 7);
   // Adjacent logical regions with a different mapping must not be coalesced.
-  auto reversed_tail = Value::from_storage(value.descriptor(), Region({{2, 2}}),
-                                           {3, {-1}, {2}}, value.storage())
-                           .take_value();
-  auto mixed = ValueFragments::create(
+  auto reversed_tail =
+      TensorSpan::from_storage(value.descriptor(), Region({{2, 2}}),
+                               {3, {-1}, {2}}, value.storage())
+          .take_value();
+  auto mixed = Tensor::create(
       value.descriptor(), all,
       {value.view(Region({{0, 2}})).take_value(), reversed_tail});
   PS_CHECK(mixed.ok() && mixed.value().fragments().size() == 2);
@@ -300,24 +302,25 @@ int main() {
                .value()
                .copy_bytes() == std::vector<std::uint8_t>({1, 2, 4, 3}));
   // A reversed contiguous mapping may coalesce without changing its samples.
-  auto reverse = Value::from_storage(value.descriptor(), value.region(),
-                                     {3, {-1}, {0}}, value.storage())
+  auto reverse = TensorSpan::from_storage(value.descriptor(), value.region(),
+                                          {3, {-1}, {0}}, value.storage())
                      .take_value();
   auto reverse_parts =
-      ValueFragments::create(value.descriptor(), all,
-                             {reverse.view(Region({{0, 2}})).take_value(),
-                              reverse.view(Region({{2, 2}})).take_value()});
+      Tensor::create(value.descriptor(), all,
+                     {reverse.view(Region({{0, 2}})).take_value(),
+                      reverse.view(Region({{2, 2}})).take_value()});
   PS_CHECK(reverse_parts.ok() && reverse_parts.value().fragments().size() == 1);
   PS_CHECK(reverse_parts.value().read({3}, &last, 1).ok() && last == 1);
   // Generic rank-three data may select channels; typed image-v2 may not.
-  const ValueDescriptor image{ElementType::Float32, {1, 1, 4}};
+  const TensorDescriptor image{ElementType::Float32, {1, 1, 4}};
   const auto channel =
       Footprint::from_regions(image.shape, {Region({{0, 1}, {0, 1}, {3, 1}})})
           .take_value();
-  auto generic = Value::create(image, Region::whole(image.shape),
-                               {0, {16, 16, 4}}, std::vector<std::uint8_t>(16))
-                     .take_value();
-  PS_CHECK(ValueFragments::create(image, channel, {generic}).ok());
+  auto generic =
+      TensorSpan::create(image, Region::whole(image.shape), {0, {16, 16, 4}},
+                         std::vector<std::uint8_t>(16))
+          .take_value();
+  PS_CHECK(Tensor::create(image, channel, {generic}).ok());
   SchemaTemplate typed_schema;
   typed_schema.id = "test.fragment.image";
   ResultTensorSpec pixels;

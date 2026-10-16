@@ -31,7 +31,8 @@ struct Program {
     using multi_result::take;
     if (!stage++) {
       ResultProgramNeed need;
-      need.tiles.push_back({1, true, false, {}});
+      need.tiles.push_back(
+          {1, 0, false, take(TileSet::range(phase.resources, 0, 1))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     if (stage == 2) {
@@ -39,12 +40,9 @@ struct Program {
       check(phase.read_tensor(1, 0, {0}, &control, sizeof(control)));
       source = phase.query.tile_unit + (control >= 1 ? 2 : 0);
       ResultProgramNeed need;
-      if (phase.query.input_tile_grids[0])
-        need.tiles.push_back(
-            {0, false, false,
-             take(TileSet::from_indices(phase.resources, {source}))});
-      else
-        need.tiles.push_back({0, true, false, {}});
+      need.tiles.push_back(
+          {0, 0, false,
+           take(TileSet::from_indices(phase.resources, {source}))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     if (gate->fail.load())
@@ -74,54 +72,6 @@ struct Program {
         ResultPublication{take(builder.seal()), true});
   }
 };
-struct FieldProgram {
-  explicit FieldProgram(bool whole) : whole(whole) {}
-  bool whole, requested = false;
-  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    if (!requested) {
-      requested = true;
-      ResultProgramNeed need;
-      need.tiles.push_back({0, whole, !whole, {}});
-      return Result<ResultProgramPoll>(std::move(need));
-    }
-    const auto facts =
-        whole ? multi_result::take(phase.results.at(0).descriptor())
-              : phase.descriptors->at(0);
-    multi_result::Program result(-1, facts.rows(0));
-    return result.poll(phase);
-  }
-};
-struct FieldProducer {
-  bool requested = false;
-  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    using multi_result::check;
-    using multi_result::take;
-    if (!requested) {
-      requested = true;
-      ResultProgramNeed need;
-      need.tiles.push_back({0, true, false, {}});
-      return Result<ResultProgramPoll>(std::move(need));
-    }
-    double control = 0;
-    check(phase.read_tensor(0, 0, {0}, &control, sizeof(control)));
-    const auto& schema = *phase.query.output.result_schema;
-    const auto rows =
-        schema.fields[0].rows.kind == ResultExtentKind::RuntimeCount
-            ? static_cast<std::uint64_t>(control)
-            : 1;
-    auto builder = take(ResultBuilder::start(phase.resources, schema,
-                                             phase.query.semantic_key));
-    std::vector<double> values(rows, control);
-    if (rows)
-      check(builder.append(
-          0, rows,
-          ByteView(reinterpret_cast<const std::uint8_t*>(values.data()),
-                   rows * sizeof(double))));
-    check(builder.publish(0, rows));
-    return Result<ResultProgramPoll>(
-        ResultPublication{take(builder.seal()), true});
-  }
-};
 struct Fixture {
   SchemaTemplate data = multi_result::schema(ElementType::Float64, {1, 8, 1});
   SchemaTemplate output = multi_result::schema(ElementType::Float64, {1, 4, 1});
@@ -132,15 +82,14 @@ struct Fixture {
   ExecutionPlan plan;
   ResourceBudget root;
   Gate gate;
-  explicit Fixture(bool tiled_data = true, bool tiled_output = true) {
-    data.tensors[0].layout.spatial = tiled_data;
-    output.tensors[0].layout.spatial = tiled_output;
+  explicit Fixture() {
+    data.tensors[0].layout.spatial = true;
+    output.tensors[0].layout.spatial = true;
     OperationDefinition operation;
     operation.key = "test.tile_demand";
     operation.traits.input_count = 2;
     operation.traits.input_schema.resize(2);
     for (auto& input : operation.traits.input_schema) {
-      input.kind = OperationPortKind::Result;
       input.tensor_key = "number";
     }
     operation.traits.outputs = {multi_result::output("value", output)};
@@ -173,7 +122,7 @@ struct Fixture {
                              bool padded = false, unsigned tiles = 4) {
     auto schema = data;
     if (padded) {
-      schema.tensors[0].layout.order = ImagePlaneOrder::Continuous;
+      schema.tensors[0].layout.order = TensorStorageOrder::Continuous;
       schema.tensors[0].layout.row_pitch_bytes = 128;
     }
     auto builder =
@@ -188,10 +137,13 @@ struct Fixture {
   }
   DemandQuery query(std::vector<TileIndex> tiles) {
     return {{"result",
-             {false, multi_result::take(TileSet::from_indices(root, tiles))}}};
+             {{{0, multi_result::take(TileSet::from_indices(root, tiles))}}}}};
   }
 };
-bool equals(const TileSet& actual, std::vector<TileIndex> wanted) {
+bool equals(const TileRequest& request, std::vector<TileIndex> wanted) {
+  if (request.members.size() != 1 || !request.members.count(0))
+    return false;
+  const auto& actual = request.members.at(0);
   return actual.size() == wanted.size() &&
          std::equal(actual.begin(), actual.end(), wanted.begin());
 }
@@ -247,7 +199,7 @@ int overlapping_queries() {
            released.value().potential_dirty.empty());
   return 0;
 }
-int sparse_and_whole() {
+int sparse_bindings() {
   const std::vector<double> values{10, 10, 20, 20, 30, 30, 40, 40};
   Fixture sparse;
   auto demand = multi_result::take(sparse.context->open_demand(
@@ -260,16 +212,6 @@ int sparse_and_whole() {
   auto missing = demand.replace_bindings(sparse.bindings(values, 0, false, 0));
   PS_CHECK(missing.status().code == ErrorCode::InvalidArgument &&
            demand.generation().value() == generation);
-  Fixture whole(false, false);
-  auto coarse = multi_result::take(
-      whole.context->open_demand(whole.plan, whole.bindings(values, 0)));
-  PS_REQUIRE_OK(coarse.request({{"result", {true, {}}}}));
-  auto edited = values;
-  edited[7] = 41;
-  auto changed = coarse.replace_bindings(whole.bindings(edited, 0));
-  PS_REQUIRE_OK(changed);
-  PS_CHECK(equals(changed.value().coverage.at("result"), {0}) &&
-           equals(changed.value().potential_dirty.at("result"), {0}));
   return 0;
 }
 int generation_race(bool cancel_run = false) {
@@ -323,149 +265,6 @@ int generation_race(bool cancel_run = false) {
   auto update = demand.replace_bindings(fixture.bindings(edit, 1));
   PS_REQUIRE_OK(update);
   PS_CHECK(update.value().potential_dirty.at("result").empty());
-  return 0;
-}
-int field_descriptors() {
-  for (bool whole : {false, true}) {
-    auto registry = std::make_shared<OperationRegistry>();
-    SchemaTemplate schema;
-    schema.id = "test.tile_fields";
-    schema.fields = {
-        {"rows", ElementType::Float64, {ResultExtentKind::RuntimeCount, 0}, {}},
-        {"other", ElementType::Float64, {ResultExtentKind::Fixed, 1}, {}}};
-    OperationDefinition definition;
-    definition.key = "test.field_demand";
-    definition.traits.input_count = 1;
-    definition.traits.input_schema.resize(1);
-    definition.traits.input_schema[0].kind = OperationPortKind::Result;
-    definition.traits.input_schema[0].result_schema_id = schema.id;
-    definition.traits.input_schema[0].result_schema_version = schema.version;
-    definition.traits.outputs = {multi_result::output("value")};
-    definition.traits.cacheable = false;
-    definition.traits.workspace_bytes = 4096;
-    definition.start_result = [whole](const auto&, const auto& allocator) {
-      return ResultContinuation::make<FieldProgram>(allocator, whole);
-    };
-    PS_CHECK(registry->register_operation(std::move(definition)).ok());
-    PS_CHECK(registry->freeze().ok());
-    WorkflowDocument document;
-    document.inputs = {multi_result::declaration(1, "rows", schema)};
-    document.nodes = {
-        {1, "test.field_demand", {WorkflowInputReference{1}}, {}}};
-    document.outputs = {{"result", 1, "value"}};
-    GraphContext graph(std::move(document));
-    auto compiled = Compiler(registry).compile(graph);
-    PS_REQUIRE_OK(compiled);
-    ExecutionContext context(registry);
-    auto root = context.resource_budget().take_value();
-    const auto bindings = [&](std::uint64_t rows, double other) {
-      auto builder =
-          multi_result::take(ResultBuilder::start(root, schema, "fields"));
-      for (std::uint32_t slot = 0; slot < 2; ++slot) {
-        const auto count = slot ? 1 : rows;
-        std::vector<double> values(count, slot ? other : 7);
-        if (count)
-          multi_result::check(builder.append(
-              slot, count,
-              ByteView(reinterpret_cast<const std::uint8_t*>(values.data()),
-                       count * sizeof(double))));
-        multi_result::check(builder.publish(slot, count));
-      }
-      return ExecutionBindings{{{"rows", multi_result::take(builder.seal())}}};
-    };
-    auto demand = multi_result::take(
-        context.open_demand(compiled.value().plan, bindings(2, 10)));
-    const DemandQuery query{{"result", {true, {}}}};
-    PS_REQUIRE_OK(demand.request(query));
-    auto bytes = demand.replace_bindings(bindings(2, 11));
-    PS_REQUIRE_OK(bytes);
-    PS_CHECK(
-        equals(bytes.value().potential_dirty.at("result"),
-               whole ? std::vector<TileIndex>{0} : std::vector<TileIndex>{}));
-    PS_REQUIRE_OK(demand.request(query));
-    auto facts = demand.replace_bindings(bindings(3, 11));
-    PS_REQUIRE_OK(facts);
-    PS_CHECK(equals(facts.value().potential_dirty.at("result"), {0}));
-    const auto generation = demand.generation().value();
-    auto wrong =
-        demand.replace_bindings({{multi_result::binding(root, "rows", 1)}});
-    PS_CHECK(wrong.status().code == ErrorCode::TypeMismatch &&
-             demand.generation().value() == generation);
-  }
-  return 0;
-}
-int computed_descriptors() {
-  for (bool dynamic : {false, true}) {
-    auto registry = std::make_shared<OperationRegistry>();
-    SchemaTemplate rows;
-    rows.id = "test.computed_rows";
-    rows.fields.push_back(
-        {"rows",
-         ElementType::Float64,
-         {dynamic ? ResultExtentKind::RuntimeCount : ResultExtentKind::Fixed,
-          1},
-         {}});
-    OperationDefinition producer;
-    producer.key = "test.field_producer";
-    producer.traits.input_count = 1;
-    producer.traits.input_schema.resize(1);
-    producer.traits.input_schema[0].kind = OperationPortKind::Result;
-    producer.traits.input_schema[0].tensor_key = "number";
-    producer.traits.outputs = {multi_result::output("rows", rows)};
-    producer.traits.cacheable = true;
-    producer.start_result = [](const auto&, const auto& allocator) {
-      return ResultContinuation::make<FieldProducer>(allocator);
-    };
-    PS_CHECK(registry->register_operation(std::move(producer)).ok());
-    OperationDefinition consumer;
-    consumer.key = "test.field_consumer";
-    consumer.traits.input_count = 1;
-    consumer.traits.input_schema.resize(1);
-    consumer.traits.input_schema[0].kind = OperationPortKind::Result;
-    consumer.traits.input_schema[0].result_schema_id = rows.id;
-    consumer.traits.input_schema[0].result_schema_version = rows.version;
-    consumer.traits.outputs = {multi_result::output("value")};
-    consumer.traits.cacheable = true;
-    consumer.traits.workspace_bytes = 4096;
-    consumer.start_result = [](const auto&, const auto& allocator) {
-      return ResultContinuation::make<FieldProgram>(allocator, false);
-    };
-    PS_CHECK(registry->register_operation(std::move(consumer)).ok());
-    PS_CHECK(registry->freeze().ok());
-    WorkflowDocument document;
-    document.inputs = {multi_result::declaration(1, "control")};
-    document.nodes = {
-        {1, "test.field_producer", {WorkflowInputReference{1}}, {}},
-        {2, "test.field_consumer", {WorkflowNodeOutput{1, "rows"}}, {}}};
-    document.outputs = {{"result", 2, "value"}, {"rows", 1, "rows"}};
-    GraphContext graph(std::move(document));
-    auto compiled = Compiler(registry).compile(graph);
-    PS_REQUIRE_OK(compiled);
-    ExecutionContextConfig config;
-    config.result_cache_bytes = 16 * 1024 * 1024;
-    ExecutionContext context(registry, config);
-    auto root = context.resource_budget().take_value();
-    auto demand = multi_result::take(context.open_demand(
-        compiled.value().plan, {{multi_result::binding(root, "control", 0)}}));
-    const DemandQuery query{{"result", {true, {}}}, {"rows", {true, {}}}};
-    auto initial = demand.request(query);
-    PS_REQUIRE_OK(initial);
-    PS_CHECK(multi_result::number(initial.value().results.at("result")) ==
-             (dynamic ? 0 : 1));
-    auto cached = demand.request(query);
-    PS_REQUIRE_OK(cached);
-    PS_CHECK(cached.value().diagnostics.cache_hits >= 1);
-    auto changed =
-        demand.replace_bindings({{multi_result::binding(root, "control", 1)}});
-    PS_REQUIRE_OK(changed);
-    PS_CHECK(
-        equals(changed.value().potential_dirty.at("result"),
-               dynamic ? std::vector<TileIndex>{0} : std::vector<TileIndex>{}));
-    PS_CHECK(equals(changed.value().potential_dirty.at("rows"), {0}));
-    auto current = demand.request(query);
-    PS_REQUIRE_OK(current);
-    PS_CHECK(multi_result::number(current.value().results.at("result")) == 1);
-  }
   return 0;
 }
 int limits_bits_and_retirement() {
@@ -530,7 +329,7 @@ int limits_bits_and_retirement() {
           }));
     });
     auto mutable_value = multi_result::take(
-        MutableValue::allocate(fixture.data.tensors[0].descriptor,
+        TensorWriter::allocate(fixture.data.tensors[0].descriptor,
                                Region::whole({1, 8, 1}), allocator));
     std::memset(mutable_value.data(), 0, mutable_value.size());
     auto value = multi_result::take(std::move(mutable_value).publish());
@@ -560,7 +359,6 @@ int limits_bits_and_retirement() {
 }
 }  // namespace
 int main() {
-  return overlapping_queries() || sparse_and_whole() || generation_race() ||
-         generation_race(true) || field_descriptors() ||
-         computed_descriptors() || limits_bits_and_retirement();
+  return overlapping_queries() || sparse_bindings() || generation_race() ||
+         generation_race(true) || limits_bits_and_retirement();
 }

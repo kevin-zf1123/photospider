@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "photospider/core/cancellation.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor.hpp"
 
 namespace ps {
 /** @brief Per-call sample/copy bound and cooperative cancellation.
@@ -27,7 +27,7 @@ struct InputSnapshotStoreConfig final {
   std::uint64_t maximum_blocks = 65536;
 };
 /**
- * @brief Immutable rank-1..8 Value of any built-in dtype in shared blocks.
+ * @brief Immutable rank-1..8 Tensor of any built-in dtype in shared blocks.
  * @note IEEE/integer bits are retained exactly.
  * Copies/reads are concurrent-safe. Captured storage outlives its store.
  * Default snapshots are invalid; metadata access throws logic_error for them.
@@ -36,7 +36,9 @@ class PHOTOSPIDER_API InputSnapshot final {
  public:
   InputSnapshot() noexcept = default;
   bool valid() const noexcept { return impl_ != nullptr; }
-  const ValueDescriptor& descriptor() const;
+  const TensorDescriptor& descriptor() const;
+  /** @brief Immutable composite directory; copies retain all block owners. */
+  const Tensor& tensor() const;
   /**
    * @brief Copies exact nonempty coverage into caller-owned packed bytes.
    * @param region Contained logical region, of any contained shape.
@@ -71,7 +73,8 @@ class PHOTOSPIDER_API InputSnapshot final {
 /**
  * @brief Owns a strict aggregate byte budget across all snapshot versions.
  * @note Concurrent imports/patches are supported. No mutation of published
- * snapshots occurs. Metadata and caller-supplied Values are outside this limit.
+ * snapshots occurs. Metadata and caller-supplied tensors are outside this
+ * limit.
  */
 class PHOTOSPIDER_API InputSnapshotStore final {
  public:
@@ -81,18 +84,19 @@ class PHOTOSPIDER_API InputSnapshotStore final {
    */
   explicit InputSnapshotStore(InputSnapshotStoreConfig config = {});
   ~InputSnapshotStore();
-  /** @brief Imports a complete Value into owned blocks.
-   * @param value Complete immutable Value; any valid origin/stride layout.
+  /** @brief Imports a complete Tensor into owned blocks.
+   * @param value Complete immutable Tensor; arbitrary fragments and affine
+   * layouts.
    * @param options Sample bound and cancellation for validation and copying.
    * @return Immutable snapshot or structure/budget/cancellation error.
    * @throws std::bad_alloc For metadata allocation; no partial publication.
    */
-  Result<InputSnapshot> import_value(
-      const Value& value, const SnapshotAccessOptions& options = {}) const;
+  Result<InputSnapshot> import_tensor(
+      const Tensor& value, const SnapshotAccessOptions& options = {}) const;
   /**
    * @brief Creates a new version by exact-region replacement in input order.
    * @param base Valid snapshot from this store.
-   * @param replacement Matching descriptor and nonempty Region.
+   * @param replacement Matching descriptor and nonempty exact coverage.
    * @param options Bounds validation and affected-block copy samples; observes
    * cancellation during scans and between bounded byte-copy chunks.
    * @return New snapshot or typed failure, leaving base unchanged.
@@ -100,7 +104,7 @@ class PHOTOSPIDER_API InputSnapshotStore final {
    * @note Only intersecting blocks are copied; all old references remain valid.
    */
   Result<InputSnapshot> patch(const InputSnapshot& base,
-                              const Value& replacement,
+                              const Tensor& replacement,
                               const SnapshotAccessOptions& options = {}) const;
   /** @brief Actual allocated block bytes including all retained old versions.
    */

@@ -12,6 +12,7 @@
 #include "01-numeric/sequence_profiles.hpp"
 #include "common/exact_binary_sum.hpp"
 #include "common/floating_environment.hpp"
+#include "common/independent_results.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
 namespace ps::plugin_internal {
@@ -69,7 +70,7 @@ struct SequenceKernel final {
         std::get<std::int64_t>(phase.query.parameters.at("count")));
     const auto& dtype =
         std::get<std::string>(phase.query.parameters.at("dtype"));
-    const bool integer = dtype == "int64", axis = phase.query.output_index == 1;
+    const bool integer = dtype == "int64", axis = phase.query.shared_stage == 1;
     const auto type = integer                      ? ElementType::Int64
                       : axis || dtype == "float64" ? ElementType::Float64
                                                    : ElementType::Float32;
@@ -91,7 +92,7 @@ struct SequenceKernel final {
       const auto& input = phase.tensors->at({port, 0});
       numeric_ops::MathTensorReader reader(input, phase.query.cancellation);
       const auto width =
-          Value::element_size(input.spec().descriptor.element_type);
+          TensorSpan::element_size(input.spec().descriptor.element_type);
       words[port] = reader.bits({0});
       if (!integer) {
         double number = 0;
@@ -108,7 +109,7 @@ struct SequenceKernel final {
         (port ? other : start) = number;
       }
     }
-    const auto width = Value::element_size(type);
+    const auto width = TensorSpan::element_size(type);
     for (std::uint32_t i = 0; i < (axis ? 1U : count); ++i) {
       status = consume(axis ? 24576 : 8192);
       if (!status.ok())
@@ -193,7 +194,6 @@ OperationDefinition sequence(const std::string& key, Sequence kind,
   traits.input_count = 2;
   traits.input_schema.resize(2);
   for (auto& port : traits.input_schema) {
-    port.kind = OperationPortKind::Result;
     port.rank = 1;
     port.element_type_mask = kind == Sequence::Linspace ? 12 : 14;
   }
@@ -261,7 +261,7 @@ OperationDefinition sequence(const std::string& key, Sequence kind,
   operation.start_result = [kind, profile](const auto&, const auto& allocator) {
     return ResultContinuation::make<SequenceProgram>(allocator, kind, profile);
   };
-  return operation;
+  return independent_results(std::move(operation));
 }
 }  // namespace
 Status register_numeric_sequences(OperationRegistry* registry) {

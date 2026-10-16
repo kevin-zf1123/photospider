@@ -1,5 +1,6 @@
 #include "plugin/validation_dispatch.hpp"
 
+#include <array>
 #include <utility>
 #include <vector>
 
@@ -60,20 +61,14 @@ Status validate_tensor_contract(
   auto all = Footprint::all(granted.shape(), limits);
   if (!all.ok())
     return all.status();
-  context.complete = schema.fields.empty() && schema.tensors.size() == 1 &&
-                     granted == all.value();
+  context.complete = schema.tensors.size() == 1 && granted == all.value();
   context.tensor_slot = slot;
   context.samples = &granted;
   context.consume = [&](auto n) { return observe(consume(n)); };
   context.tensor_coverage = [&](auto index) {
     return index == slot ? &granted : nullptr;
   };
-  context.field_range = [&](std::uint32_t) {
-    return Result<std::pair<std::uint64_t, std::uint64_t>>(observe(denied()));
-  };
-  context.read_field = [&](std::uint32_t, std::uint64_t, std::uint64_t) {
-    return Result<std::shared_ptr<const CpuStorage>>(observe(denied()));
-  };
+
   context.acquire_tensor = [&](std::uint32_t index, const Region& region) {
     using Answer = Result<ResultTensorReadWindow>;
     if (index != slot)
@@ -94,14 +89,88 @@ Status validate_tensor_contract(
 } catch (...) {
   return current_operation_exception();
 }
+Status validate_tensor_contracts(
+    const PreparedOperation& prepared, std::uint32_t port,
+    const SchemaTemplate& schema, const ResultTensorInputs& inputs,
+    const ResourceBudget& resources, const CancellationToken& cancellation,
+    const std::function<Status(std::uint64_t)>& consume,
+    ErrorCode domain_failure) try {
+  if (!prepared.has_validators(false, port))
+    return Status::success();
+  std::array<const ResultTensorInput*, 16> granted{};
+  std::size_t count = 0;
+  for (const auto& input : inputs) {
+    if (input.first.first != port || input.second.coverage().empty())
+      continue;
+    if (input.first.second >= schema.tensors.size())
+      return denied();
+    granted[input.first.second] = &input.second;
+    ++count;
+  }
+  if (!count)
+    return Status::success();
+  Status service_failure;
+  const auto observe = [&](Status status) {
+    if (!status.ok() && service_failure.ok())
+      service_failure = status;
+    return status;
+  };
+  ValidationContext context(schema, resources, cancellation);
+  context.complete = true;
+  FootprintLimits limits;
+  limits.cancellation = cancellation;
+  limits.consume_work = consume;
+  for (std::uint32_t slot = 0; slot < schema.tensors.size(); ++slot) {
+    if (!granted[slot]) {
+      context.complete = false;
+      continue;
+    }
+    auto full = Footprint::all(schema.tensors[slot].sample_shape(), limits);
+    if (!full.ok())
+      return full.status();
+    context.complete =
+        context.complete && granted[slot]->coverage() == full.value();
+    if (count == 1) {
+      context.tensor_slot = slot;
+      context.samples = &granted[slot]->coverage();
+    }
+  }
+  context.consume = [&](auto n) { return observe(consume(n)); };
+  context.tensor_coverage = [&](std::uint32_t slot) -> const Footprint* {
+    return slot < schema.tensors.size() && granted[slot]
+               ? &granted[slot]->coverage()
+               : nullptr;
+  };
+  context.acquire_tensor = [&](std::uint32_t slot, const Region& region) {
+    using Answer = Result<ResultTensorReadWindow>;
+    if (slot >= schema.tensors.size() || !granted[slot])
+      return Answer(observe(denied()));
+    auto included = covers(granted[slot]->coverage(), region, cancellation,
+                           context.consume);
+    if (!included.ok())
+      return Answer(observe(included.status()));
+    if (!included.value())
+      return Answer(observe(denied()));
+    auto window = granted[slot]->acquire(region, cancellation);
+    if (!window.ok())
+      observe(window.status());
+    return window;
+  };
+  auto status = prepared.validate_port(false, port, context);
+  return service_failure.ok() ? domain(status, domain_failure)
+                              : service_failure;
+} catch (...) {
+  return current_operation_exception();
+}
 Status validate_result_contract(
     const PreparedOperation& prepared, bool output, std::uint32_t port,
     const ResultRef& result, const ResultDescriptor& descriptor,
     const ResultDescriptor* previous, const ResourceBudget& resources,
     const CancellationToken& cancellation,
-    const std::function<Status(std::uint64_t)>& consume,
-    std::uint64_t maximum_window, ErrorCode domain_failure) try {
-  if (!prepared.has_validators(output, port))
+    const std::function<Status(std::uint64_t)>& consume, std::uint64_t,
+    ErrorCode domain_failure, std::uint32_t shared_stage) try {
+  if (shared_stage == UINT32_MAX ? !prepared.has_validators(output, port)
+                                 : !prepared.has_stage_validators(shared_stage))
     return Status::success();
   const auto& schema = result.schema();
   ResourceVector<Footprint> coverage{ResourceAllocator<Footprint>(resources)};
@@ -127,35 +196,18 @@ Status validate_result_contract(
     return status;
   };
   ValidationContext context(schema, resources, cancellation);
-  context.complete = descriptor.sealed();
+  context.complete = true;
+  for (std::uint32_t slot = 0; slot < coverage.size(); ++slot) {
+    auto full = Footprint::all(schema.tensors[slot].sample_shape(), limits);
+    if (!full.ok())
+      return full.status();
+    context.complete = context.complete && coverage[slot] == full.value();
+  }
   context.consume = [&](auto n) { return observe(consume(n)); };
   context.tensor_coverage = [&](std::uint32_t slot) -> const Footprint* {
     return slot < coverage.size() ? &coverage[slot] : nullptr;
   };
-  context.field_range = [&](std::uint32_t field) {
-    using Answer = Result<std::pair<std::uint64_t, std::uint64_t>>;
-    if (field >= schema.fields.size())
-      return Answer(observe(denied()));
-    const auto begin = previous ? previous->rows(field) : 0;
-    return Answer({begin, descriptor.rows(field) - begin});
-  };
-  context.read_field = [&](std::uint32_t field, std::uint64_t first,
-                           std::uint64_t count) {
-    using Answer = Result<std::shared_ptr<const CpuStorage>>;
-    auto range = context.field_range(field);
-    if (!range.ok())
-      return Answer(range.status());
-    const auto start = range.value().first, size = range.value().second;
-    if (first < start || first - start > size || count > size - (first - start))
-      return Answer(observe(denied()));
-    auto read = result.prepare_read(descriptor, field, first, count);
-    if (!read.ok())
-      return Answer(observe(read.status()));
-    auto loaded = read.value().load(maximum_window, cancellation);
-    if (!loaded.ok())
-      observe(loaded.status());
-    return loaded;
-  };
+
   context.acquire_tensor = [&](std::uint32_t slot, const Region& region) {
     using Answer = Result<ResultTensorReadWindow>;
     if (slot >= coverage.size())
@@ -171,7 +223,9 @@ Status validate_result_contract(
       observe(window.status());
     return window;
   };
-  auto status = prepared.validate_port(output, port, context);
+  auto status = shared_stage == UINT32_MAX
+                    ? prepared.validate_port(output, port, context)
+                    : prepared.validate_stage(shared_stage, context);
   return service_failure.ok() ? domain(status, domain_failure)
                               : service_failure;
 } catch (...) {

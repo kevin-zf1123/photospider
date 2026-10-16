@@ -18,13 +18,14 @@
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/ops/numeric/diagnostics.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
 using numeric_ops::SequenceProfile;
 struct ScanMetadata {
   unsigned mask = 0, axis = 0;
-  ValueDescriptor output;
+  TensorDescriptor output;
 };
 Result<ScanMetadata> metadata(
     bool integral, const ResultTensorSpec& input,
@@ -210,7 +211,7 @@ struct ScanKernel final {
       numeric_ops::select_words(replicas.data(), calculated.value(),
                                 calculated.value(), 1, profile);
       std::memcpy(writer.address(coordinate), replicas.data(),
-                  Value::element_size(description.output.element_type));
+                  TensorSpan::element_size(description.output.element_type));
       return Status::success();
     };
     std::uint64_t planes = 1;
@@ -323,7 +324,7 @@ OperationDefinition scan_operation(const std::string& key, bool integral,
   traits.diagnostics = {numeric_diagnostic_identity()};
   traits.input_count = 1;
   traits.input_schema.resize(1);
-  traits.input_schema[0].kind = OperationPortKind::Result;
+
   traits.input_schema[0].element_type_mask = 15;
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = {
@@ -355,7 +356,7 @@ OperationDefinition scan_operation(const std::string& key, bool integral,
                                                const auto& allocator) {
     return ResultContinuation::make<ScanProgram>(allocator, integral, profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_numeric_scans(OperationRegistry* registry) {

@@ -33,16 +33,17 @@ Result<DemandKey> demand_key(const DemandQuery& query,
                  {FailureOrigin::Protocol, FailureScope::Group}});
     const auto& step = plan.steps()[found->second];
     const auto& allowed = plan.output_requests().at(item.first);
-    if (!core_internal::can_add(item.second.tiles.size(),
-                                allowed.tiles.size()) ||
-        !core_internal::can_add(item.second.tiles.size() + allowed.tiles.size(),
-                                item.first.size() + 16))
+    if (!core_internal::can_add(item.second.interval_count(),
+                                allowed.interval_count()) ||
+        !core_internal::can_add(
+            item.second.interval_count() + allowed.interval_count(),
+            item.first.size() + 16))
       return Result<DemandKey>(Status{ErrorCode::ResourceExhausted, {}});
-    charged = root.consume({item.second.tiles.size() + allowed.tiles.size() +
-                            item.first.size() + 16});
+    charged = root.consume({item.second.interval_count() +
+                            allowed.interval_count() + item.first.size() + 16});
     if (!charged.ok())
       return Result<DemandKey>(charged);
-    auto request = item.second.resolve(step.tile_grid, step.tiled);
+    auto request = item.second.resolve(step.tile_grids);
     if (!request.ok() ||
         !allowed.contains(request.ok() ? request.value() : TileRequest{}))
       return Result<DemandKey>(
@@ -50,52 +51,36 @@ Result<DemandKey> demand_key(const DemandQuery& query,
                  "tile demand exceeds plan",
                  FailureReason::None,
                  {FailureOrigin::Protocol, FailureScope::Group}});
-    const auto weight = 1 + request.value().tiles.size();
+    const auto weight = 1 + request.value().interval_count();
     if (!core_internal::can_add(weight, entries, maximum))
       return Result<DemandKey>(
           Status{ErrorCode::ResourceExhausted, "demand query metadata limit"});
     entries += weight;
     hash.text(item.first);
-    hash.integer(request.value().whole);
-    hash.integer(request.value().tiles.size());
-    for (const auto tile : request.value().tiles)
-      hash.integer(tile);
+    hash.integer(request.value().members.size());
+    for (const auto& member : request.value().members) {
+      hash.integer(member.first);
+      hash.integer(member.second.intervals().size());
+      for (const auto interval : member.second.intervals()) {
+        hash.integer(interval.begin);
+        hash.integer(interval.end);
+      }
+    }
   }
   return Result<DemandKey>(
       DemandKey{hash.finish(), entries, lease.take_value()});
 }
 Result<Footprint> demand_samples(const TileRequest& requested,
-                                 const PlanStep& step,
+                                 const PlanStep& step, std::uint32_t slot,
                                  const FootprintLimits& limits) {
-  auto normalized = requested.resolve(step.tile_grid, step.tiled);
+  auto normalized = requested.resolve(step.tile_grids);
   if (!normalized.ok())
     return Result<Footprint>(normalized.status());
-  const auto& shape =
-      step.output_result_schema && !step.output_result_schema->tensors.empty()
-          ? step.output_result_schema->tensors[0].sample_shape()
-          : std::vector<std::uint64_t>{1};
-  const auto& request = normalized.value();
-  if (request.whole)
-    return Footprint::all(shape, limits);
-  auto samples = Footprint::none(shape, limits);
-  if (!samples.ok())
-    return samples;
-  for (auto tile : request.tiles) {
-    if (limits.consume_work) {
-      auto charged = limits.consume_work(1);
-      if (!charged.ok())
-        return Result<Footprint>(charged);
-    }
-    auto region = step.tile_grid->region(tile);
-    if (!region.ok())
-      return Result<Footprint>(region.status());
-    auto part = Footprint::from_regions(shape, {region.take_value()}, limits);
-    if (!part.ok())
-      return part;
-    samples = samples.value().unite(part.value(), limits);
-    if (!samples.ok())
-      return samples;
-  }
-  return samples;
+  if (slot >= step.tile_grids.size())
+    return Result<Footprint>(Status{ErrorCode::InvalidArgument, {}});
+  const auto found = normalized.value().members.find(slot);
+  return step.tile_grids[slot].coverage(
+      found == normalized.value().members.end() ? TileSet{} : found->second,
+      limits);
 }
 }  // namespace ps::execution_internal

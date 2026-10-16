@@ -7,13 +7,13 @@
 #include <vector>
 
 #include "photospider/core/cancellation.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 
 namespace ps {
 
 /** @brief One borrowed, logically ordered source run and its dense destination.
- * Data is valid only while the input Value lives. A negative/zero stride is
- * intentional. destination_element is relative to the complete destination
+ * Data is valid only while the input TensorSpan lives. A negative/zero stride
+ * is intentional. destination_element is relative to the complete destination
  * region, whereas logical_element is relative to the visited subregion.
  */
 struct ValueReadRun final {
@@ -38,7 +38,7 @@ inline void region_run_coordinate(const Region& region, std::uint64_t index,
   }
 }
 
-/** @brief Visit bounded runs of a valid Value in row-major logical order.
+/** @brief Visit bounded runs of a valid TensorSpan in row-major logical order.
  * Both regions use the source descriptor axes. The visited region must be
  * covered by the source and contained in destination. Contiguous trailing
  * axes are merged only when BOTH source and dense destination permit it.
@@ -50,13 +50,14 @@ inline void region_run_coordinate(const Region& region, std::uint64_t index,
  * before the caller can poll again. Allocations may throw std::bad_alloc.
  */
 template <class Visitor>
-Status visit_value_runs(const Value& source, const Region& region,
+Status visit_value_runs(const TensorSpan& source, const Region& region,
                         const Region& destination,
                         std::uint64_t maximum_samples,
                         std::optional<std::uint32_t> fixed_axis,
                         Visitor&& visitor) {
   const auto invalid = [] {
-    return Status{ErrorCode::InvalidArgument, "invalid Value run traversal"};
+    return Status{ErrorCode::InvalidArgument,
+                  "invalid TensorSpan run traversal"};
   };
   if (!source.valid() || source.region().empty() ||
       source.region().rank() != region.rank() || region.empty() ||
@@ -83,7 +84,7 @@ Status visit_value_runs(const Value& source, const Region& region,
   auto target_count = destination.element_count();
   if (!target_count.ok())
     return target_count.status();
-  const auto width = Value::element_size(source.descriptor().element_type);
+  const auto width = TensorSpan::element_size(source.descriptor().element_type);
   const auto& strides = source.layout().byte_strides;
   std::size_t first = dims.size();
   std::uint64_t run = 1, target_stride = 1;
@@ -118,7 +119,8 @@ Status visit_value_runs(const Value& source, const Region& region,
     const auto* data = source.bytes().data() + address.value();
     for (std::uint64_t x = 0; x < run;) {
       const auto n = std::min(maximum_samples, run - x);
-      // Validated Value addresses and the run proof bound this signed offset.
+      // Validated TensorSpan addresses and the run proof bound this signed
+      // offset.
       const auto delta =
           static_cast<std::int64_t>(static_cast<__int128>(x) * stride);
       auto status =
@@ -145,7 +147,7 @@ Status visit_value_runs(const Value& source, const Region& region,
  * sandbox.
  */
 PHOTOSPIDER_API Status copy_value_region(
-    const Value& source, const Region& region, const Region& destination,
+    const TensorSpan& source, const Region& region, const Region& destination,
     std::uint8_t* data, std::uint64_t bytes,
     const CancellationToken& cancellation = {},
     const std::function<Status(std::uint64_t)>& consume_samples = {});

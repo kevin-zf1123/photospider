@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "photospider/data/immutable_resource.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 #include "photospider/ops/export.hpp"
 
 namespace ps {
@@ -37,7 +37,8 @@ enum class ColorAssociation : std::uint8_t {
   Straight = 1,
   Premultiplied = 2,
 };
-/** @brief Split rational hue describes static ramp ports, never a Value. */
+/** @brief Split rational hue describes static ramp ports, never a TensorSpan.
+ */
 enum class ColorSourceLayout : std::uint8_t {
   Interleaved = 0,
   RationalHueSplit = 1,
@@ -142,9 +143,10 @@ PHOTOSPIDER_OPS_SDK_API Result<ColorArrayDescriptor> color_array_from_parameter(
  * @return InvalidArgument for metadata, TypeMismatch for dtype/shape.
  * @throws std::bad_alloc On diagnostics. Pure/thread-safe, no payload scan.
  */
-PHOTOSPIDER_OPS_SDK_API Status validate_color_array_descriptor(
-    const ColorArrayDescriptor& description, const ValueDescriptor& descriptor);
-/** @brief Validates complete colors in the supplied regional Value only.
+PHOTOSPIDER_OPS_SDK_API Status
+validate_color_array_descriptor(const ColorArrayDescriptor& description,
+                                const TensorDescriptor& descriptor);
+/** @brief Validates complete colors in the supplied regional TensorSpan only.
  * @param description Explicit expected interpretation, independent of storage.
  * @param value Immutable data; arbitrary valid byte strides are supported.
  * @param numeric_failure Error code for invalid demanded sample values.
@@ -155,7 +157,7 @@ PHOTOSPIDER_OPS_SDK_API Status validate_color_array_descriptor(
  * caller floating environment is restored, including exception flags.
  */
 PHOTOSPIDER_OPS_SDK_API Status validate_color_array_value(
-    const ColorArrayDescriptor& description, const Value& value,
+    const ColorArrayDescriptor& description, const TensorSpan& value,
     ErrorCode numeric_failure = ErrorCode::InvalidArgument,
     const std::function<ErrorCode()>& stop = {});
 

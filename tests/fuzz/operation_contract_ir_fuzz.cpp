@@ -83,10 +83,9 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   // The C++ trait schema and the C plugin table have independent versions.
   traits.version = reader.next();
   const auto element_type = static_cast<ps::ElementType>(
-      (reader.next() % 7U) + PS_RESULT_ELEMENT_UINT8_V4);
+      (reader.next() % 7U) + PS_RESULT_ELEMENT_UINT8_V5);
   const std::uint64_t extent = 1U + reader.next() % 16U;
-  traits.outputs[0].region_rule =
-      static_cast<ps::OperationRegionRule>((reader.next() % 6U) + 1U);
+  const auto atomic_axes = reader.next() % 3U;
   auto& output = traits.outputs[0];
   output.continuation_bytes = 1;
   output.maximum_dependency_stages = 1;
@@ -95,10 +94,11 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   schema.version = 1;
   ps::ResultTensorSpec tensor;
   tensor.key = "samples";
+  tensor.atomic_trailing_axes = atomic_axes;
   tensor.descriptor = {element_type, {extent}};
   schema.tensors.push_back(std::move(tensor));
   output.result_schema = std::move(schema);
-  output.output_schema.kind = ps::OperationPortKind::Result;
+
   output.output_schema.result_schema_id = "fuzz.output";
   output.output_schema.result_schema_version = 1;
   bool duplicate_schema = false;

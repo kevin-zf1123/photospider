@@ -5,7 +5,7 @@
 #include <utility>
 
 #include "photospider/compiler/workflow_document.hpp"
-#include "photospider/data/value.hpp"
+#include "photospider/data/tensor_span.hpp"
 #include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {

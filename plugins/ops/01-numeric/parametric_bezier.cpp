@@ -17,6 +17,7 @@
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -221,9 +222,9 @@ OperationDefinition parametric_operation(const std::string& key,
   traits.input_count = 4;
   traits.input_schema.resize(4);
   for (auto& port : traits.input_schema)
-    port.kind = OperationPortKind::Result;
-  for (unsigned p : {0, 1, 3})
-    traits.input_schema[p].element_type_mask = 12;
+
+    for (unsigned p : {0, 1, 3})
+      traits.input_schema[p].element_type_mask = 12;
   traits.input_schema[2].element_type =
       static_cast<std::uint32_t>(ElementType::Int64);
   traits.requires_metadata_specialization = true;
@@ -269,7 +270,7 @@ OperationDefinition parametric_operation(const std::string& key,
   operation.start_result = [profile](const auto&, const auto& allocator) {
     return ResultContinuation::make<ParametricProgram>(allocator, profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_parametric_bezier(OperationRegistry* registry) {

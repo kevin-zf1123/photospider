@@ -25,7 +25,7 @@
 namespace ps::execution_internal {
 namespace {
 using StructuredTask = std::function<Status(const StructuredServices&)>;
-using NativeInput = Result<std::pair<Value, std::uint64_t>>;
+using NativeInput = Result<std::pair<TensorSpan, std::uint64_t>>;
 
 // Borrows the queued callback's captures only for its synchronous work call.
 struct StageContext {
@@ -44,10 +44,10 @@ struct UploadLookup {
   std::string content_key;
 };
 
-Status find_run_upload(const StageContext& context, const Value& source,
+Status find_run_upload(const StageContext& context, const TensorSpan& source,
                        const std::function<Status(std::uint64_t)>& cache_work,
                        UploadLookup* lookup) {
-  if (!cache_work)
+  if (!cache_work || !context.uploads)
     return Status::success();
   auto issued = cache_work(32 + 5 * source.region().rank() +
                            context.uploads->lookup_work());
@@ -60,7 +60,7 @@ Status find_run_upload(const StageContext& context, const Value& source,
 }
 
 Status find_cached_upload(
-    const StageContext& context, const Value& source, std::uint64_t bytes,
+    const StageContext& context, const TensorSpan& source, std::uint64_t bytes,
     const std::function<Status(std::uint64_t)>& cache_work,
     const std::function<ErrorCode()>& stop, UploadLookup* lookup) {
   if (lookup->physical || !context.dependency_cache || !cache_work ||
@@ -92,29 +92,30 @@ Status find_cached_upload(
   return Status::success();
 }
 
-Result<Value> copy_native_input(const StageContext& context,
-                                const Value& source, std::uint64_t bytes,
-                                const BufferAllocator& allocator,
-                                const std::function<ErrorCode()>& stop,
-                                const std::string& content_key) {
+Result<TensorSpan> copy_native_input(const StageContext& context,
+                                     const TensorSpan& source,
+                                     std::uint64_t bytes,
+                                     const BufferAllocator& allocator,
+                                     const std::function<ErrorCode()>& stop,
+                                     const std::string& content_key) {
   auto capacity = context.native_device->allocation_capacity(bytes);
   if (!capacity.ok())
-    return Result<Value>(capacity.status());
+    return Result<TensorSpan>(capacity.status());
   if (capacity.value() < bytes)
-    return Result<Value>(
+    return Result<TensorSpan>(
         Status{ErrorCode::OperationFailed, "native capacity is too small"});
   auto count = source.region().element_count();
   const auto per_sample = 1 + source.region().rank();
   if (!count.ok())
-    return Result<Value>(count.status());
+    return Result<TensorSpan>(count.status());
   if (!core_internal::can_multiply_add(count.value(), per_sample, bytes))
-    return Result<Value>(Status{ErrorCode::ResourceExhausted, {}});
+    return Result<TensorSpan>(Status{ErrorCode::ResourceExhausted, {}});
   auto issued =
       context.resources->consume({bytes + count.value() * per_sample});
   if (!issued.ok())
-    return Result<Value>(issued);
+    return Result<TensorSpan>(issued);
   if (stop() != ErrorCode::Ok)
-    return Result<Value>(Status{stop(), {}});
+    return Result<TensorSpan>(Status{stop(), {}});
   auto copied = transfer_value(source, allocator, true, stop);
   if (!copied.ok())
     return copied;
@@ -126,7 +127,8 @@ Result<Value> copy_native_input(const StageContext& context,
 
 NativeInput upload_native_input(
     const StageContext& context, const CancellationToken& token,
-    const Value& source, const std::function<Status(std::uint64_t)>& cache_work,
+    const TensorSpan& source,
+    const std::function<Status(std::uint64_t)>& cache_work,
     const BufferAllocator& allocator, std::uint64_t* upload_hits) {
   const std::function<ErrorCode()> stop = [&] {
     return token.cancelled()                       ? ErrorCode::Cancelled
@@ -197,7 +199,7 @@ Status configure_native_services(
   // The pointees and borrowed references live in run_queued_stage, not here.
   services->native_input =
       [&context, &token, services, upload_hits](
-          const Value& source,
+          const TensorSpan& source,
           const std::function<Status(std::uint64_t)>& work) {
         return upload_native_input(context, token, source, work,
                                    services->allocator, upload_hits);
@@ -214,7 +216,7 @@ Status configure_native_services(
 }
 
 Result<int> run_queued_stage(const StageContext& context, Backend backend,
-                             bool whole, bool native_gpu_available,
+                             bool native_gpu_available,
                              const CancellationToken& token,
                              const StructuredTask& task) {
   if (token.cancelled())
@@ -236,7 +238,7 @@ Result<int> run_queued_stage(const StageContext& context, Backend backend,
     return Result<int>(configured);
   CpuRangeScope ranges(context.pool->ranges(), token, context.resources.get(),
                        context.current);
-  if (backend == Backend::Cpu && whole)
+  if (backend == Backend::Cpu)
     services.cpu_parallel = ranges.service();
   auto status = task(services);
   if (!ranges.status().ok())
@@ -287,18 +289,18 @@ Result<StructuredSubmission> submit_queued_stage(
     WaitingAdmission* admission, const std::function<bool()>& current,
     const std::shared_ptr<NativeRunUploads>& uploads,
     ResultCache* dependency_cache, std::uint64_t cache_epoch, Backend backend,
-    bool whole, CancellationToken token, StructuredTask task) {
+    CancellationToken token, StructuredTask task) {
   auto submitted = submit_result_stage(
       backend == Backend::Gpu ? gpu_pool : pool, admission,
-      [pool, native_device, budget, resources, current, backend, whole, uploads,
+      [pool, native_device, budget, resources, current, backend, uploads,
        dependency_cache, cache_epoch,
        native_gpu_available = gpu_lane_available(gpu_pool, native_device),
        token = std::move(token), task = std::move(task)] {
         const StageContext context{pool,       native_device, resources,
                                    current,    uploads,       dependency_cache,
                                    cache_epoch};
-        return run_queued_stage(context, backend, whole, native_gpu_available,
-                                token, task);
+        return run_queued_stage(context, backend, native_gpu_available, token,
+                                task);
       },
       resources.get());
   if (!submitted.ok())
@@ -383,8 +385,13 @@ Result<ExecutionResult> run_result_plan(
   std::shared_ptr<execution_internal::NativeRunUploads> uploads;
   if (native_device && native_device->available() &&
       std::any_of(
-          plan.steps().begin(), plan.steps().end(),
-          [](const auto& step) { return step.backend == Backend::Gpu; }))
+          plan.steps().begin(), plan.steps().end(), [](const auto& step) {
+            return step.backend == Backend::Gpu ||
+                   std::any_of(step.shared_stages.begin(),
+                               step.shared_stages.end(), [](const auto& stage) {
+                                 return stage->backend == Backend::Gpu;
+                               });
+          }))
     uploads = std::allocate_shared<execution_internal::NativeRunUploads>(
         ResourceAllocator<execution_internal::NativeRunUploads>(*stage_root),
         native_uploads, *stage_root);
@@ -399,7 +406,7 @@ Result<ExecutionResult> run_result_plan(
       [pool, gpu_pool, native_device, budget, stage_root, admission, current,
        uploads, dependency_cache, cache_epoch,
        maximum_parallelism = options.maximum_parallelism](
-          Backend backend, bool whole, bool tiles, CancellationToken token,
+          Backend backend, bool tiles, CancellationToken token,
           std::function<Status(const execution_internal::StructuredServices&)>
               task) -> Result<execution_internal::StructuredSubmission> {
         using Answer = Result<StructuredSubmission>;
@@ -418,7 +425,7 @@ Result<ExecutionResult> run_result_plan(
         return submit_queued_stage(pool, gpu_pool, native_device, budget,
                                    stage_root, admission, current, uploads,
                                    dependency_cache, cache_epoch, backend,
-                                   whole, std::move(token), std::move(task));
+                                   std::move(token), std::move(task));
       },
       requested, snapshot_identity, result_checkpoints, dependency_cache,
       plan_owner,

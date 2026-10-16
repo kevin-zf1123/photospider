@@ -13,9 +13,7 @@
 namespace ps::execution_internal {
 inline Status result_block_state(const ResultRef& state,
                                  const ResourceBudget& root) {
-  if (!state.owned_by(root) || !state.schema().fields.empty() ||
-      state.schema().tensors.size() != 1 ||
-      state.schema().publication != PublishPolicy::CompleteBundle)
+  if (!state.owned_by(root) || state.schema().tensors.size() != 1)
     return Status{ErrorCode::InvalidArgument, "invalid Result block state"};
   auto facts = state.descriptor();
   if (!facts.ok())
@@ -49,7 +47,7 @@ Status append_block_samples(content_internal::Sha256* hash,
                             const std::function<Status(std::uint64_t)>& work,
                             const CancellationToken& cancellation) {
   append_block_footprint(hash, samples);
-  const auto width = Value::element_size(type);
+  const auto width = TensorSpan::element_size(type);
   hash->integer(static_cast<std::uint32_t>(type));
   return samples.visit(
       [&](const auto& at) {
@@ -75,33 +73,33 @@ Status append_block_samples(content_internal::Sha256* hash,
       },
       UINT64_MAX, cancellation);
 }
-inline Result<Value> pack_block_state(const ResultRef& state,
-                                      const ResultProgramPhase& phase) {
+inline Result<TensorSpan> pack_block_state(const ResultRef& state,
+                                           const ResultProgramPhase& phase) {
   const auto& spec = state.schema().tensors[0];
-  const ValueDescriptor descriptor{spec.descriptor.element_type,
-                                   spec.sample_shape()};
+  const TensorDescriptor descriptor{spec.descriptor.element_type,
+                                    spec.sample_shape()};
   if (phase.query.backend == Backend::Gpu) {
     auto facts = state.descriptor();
     if (!facts.ok())
-      return Result<Value>(facts.status());
+      return Result<TensorSpan>(facts.status());
     auto window =
         state.acquire_tensor(facts.value(), 0, Region::whole(descriptor.shape),
                              phase.query.cancellation);
     if (!window.ok())
-      return Result<Value>(window.status());
+      return Result<TensorSpan>(window.status());
     return ResultNativeScope::input(window.value(), phase.consume_work,
                                     phase.query.cancellation);
   }
-  auto made = MutableValue::allocate(
+  auto made = TensorWriter::allocate(
       descriptor, Region::whole(descriptor.shape), phase.resources.allocator());
   if (!made.ok())
-    return Result<Value>(made.status());
+    return Result<TensorSpan>(made.status());
   auto writer = made.take_value();
   auto facts = state.descriptor();
   if (!facts.ok())
-    return Result<Value>(facts.status());
+    return Result<TensorSpan>(facts.status());
   std::uint64_t position = 0;
-  const auto width = Value::element_size(descriptor.element_type);
+  const auto width = TensorSpan::element_size(descriptor.element_type);
   auto status = facts.value().tensor_coverage(0).visit(
       [&](const auto& at) {
         auto stopped = phase.consume_work(0);
@@ -115,10 +113,10 @@ inline Result<Value> pack_block_state(const ResultRef& state,
       },
       UINT64_MAX, phase.query.cancellation);
   if (!status.ok())
-    return Result<Value>(status);
+    return Result<TensorSpan>(status);
   return std::move(writer).publish();
 }
-inline Result<ResultRef> unpack_block_state(const Value& state,
+inline Result<ResultRef> unpack_block_state(const TensorSpan& state,
                                             const SchemaTemplate& schema,
                                             const ResultProgramPhase& phase) {
   auto builder =

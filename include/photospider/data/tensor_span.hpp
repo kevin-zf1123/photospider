@@ -23,7 +23,7 @@ enum class ElementType : std::uint32_t {
   UInt8 = 1,
   Int64 = 2,
   Float64 = 3,
-  /** @brief IEEE-754 binary32; generic Values preserve all bit patterns. */
+  /** @brief IEEE-754 binary32; Tensor spans preserve all bit patterns. */
   Float32 = 4,
   Int8 = 5,
   UInt16 = 6,
@@ -31,11 +31,11 @@ enum class ElementType : std::uint32_t {
 };
 
 /**
- * @brief Logical type and full shape of one runtime Value.
+ * @brief Logical type and full shape of one runtime TensorSpan.
  *
  * @note Shape rank is 1..8 and every extent is nonzero.
  */
-struct PHOTOSPIDER_API ValueDescriptor final {
+struct PHOTOSPIDER_API TensorDescriptor final {
   /** @brief Built-in physical scalar representation. */
   ElementType element_type = ElementType::UInt8;
   /** @brief Nonzero logical extents in axis order. */
@@ -43,7 +43,7 @@ struct PHOTOSPIDER_API ValueDescriptor final {
 };
 
 /**
- * @brief Origin-relative byte layout for one regional runtime Value.
+ * @brief Origin-relative byte layout for one regional runtime TensorSpan.
  *
  * @note Signed strides permit reversed/broadcast views when bounds validation
  * proves every addressed element remains inside the retained buffer. A
@@ -68,55 +68,55 @@ struct PHOTOSPIDER_API StridedLayout final {
 };
 
 /**
- * @brief Immutable validated regional runtime Value with validated structure
- * and storage.
+ * @brief Immutable validated regional runtime TensorSpan with validated
+ * structure and storage.
  *
  * @note Copies share immutable bytes and retain their structural description.
  * Logical identity is independent from allocation address, residency, and
  * optional content digests.
  */
-class PHOTOSPIDER_API Value final {
+class PHOTOSPIDER_API TensorSpan final {
  public:
   /**
-   * @brief Constructs an empty invalid/default Value.
+   * @brief Constructs an empty invalid/default TensorSpan.
    * @throws Nothing.
-   * @note Default Values are useful only as container placeholders.
+   * @note Default spans are useful only as container placeholders.
    */
-  Value() noexcept = default;
-  Value(const Value&) = default;
-  Value& operator=(const Value&);
-  Value(Value&&) noexcept = default;
-  Value& operator=(Value&&) noexcept;
+  TensorSpan() noexcept = default;
+  TensorSpan(const TensorSpan&) = default;
+  TensorSpan& operator=(const TensorSpan&);
+  TensorSpan(TensorSpan&&) noexcept = default;
+  TensorSpan& operator=(TensorSpan&&) noexcept;
   /** @brief Retires owned metadata before releasing its storage lifetime.
    * Storage aliases may retain a host metadata-capacity owner in addition to
    * payload ownership. Destruction performs no allocation.
    */
-  ~Value() noexcept;
+  ~TensorSpan() noexcept;
 
   /**
-   * @brief Validates and publishes an immutable Value.
+   * @brief Validates and publishes an immutable TensorSpan.
    * @param descriptor Logical scalar type and shape.
    * @param region Logical valid coverage contained by descriptor shape.
    * @param layout Explicit byte layout.
    * @param bytes Owned allocation bytes copied into immutable shared storage.
-   * @return Complete Value or a typed validation failure.
+   * @return Complete TensorSpan or a typed validation failure.
    * @throws std::bad_alloc If owned storage cannot be allocated.
-   * @note Publication is atomic; failure retains no partial Value. Layout
+   * @note Publication is atomic; failure retains no partial TensorSpan. Layout
    * span validation ignores zero-stride and singleton axes before converting
    * logical extents into signed address arithmetic.
    */
-  [[nodiscard]] static Result<Value> create(ValueDescriptor descriptor,
-                                            Region region, StridedLayout layout,
-                                            std::vector<std::uint8_t> bytes);
+  [[nodiscard]] static Result<TensorSpan> create(
+      TensorDescriptor descriptor, Region region, StridedLayout layout,
+      std::vector<std::uint8_t> bytes);
 
   /**
-   * @brief Creates one rank-one Float64 scalar Value.
+   * @brief Creates one rank-one Float64 scalar TensorSpan.
    * @param value Finite or non-finite binary64 payload preserved exactly.
-   * @return Complete scalar Value.
+   * @return Complete scalar TensorSpan.
    * @throws std::bad_alloc If storage allocation fails.
    * @note The descriptor shape is `{1}` and Region is whole.
    */
-  [[nodiscard]] static Value from_float64(double value);
+  [[nodiscard]] static TensorSpan from_float64(double value);
 
   /**
    * @brief Reads a rank-one Float64 scalar.
@@ -124,32 +124,32 @@ class PHOTOSPIDER_API Value final {
    * any Region other than exact scalar coverage `{offset=0, extent=1}`.
    * @throws std::bad_alloc If a diagnostic allocation fails.
    * @note The method copies bytes and never exposes writable storage. Empty,
-   * partial, and offset Regions remain valid general Value coverage but cannot
-   * be read through this scalar accessor.
+   * partial, and offset Regions remain valid general TensorSpan coverage but
+   * cannot be read through this scalar accessor.
    */
   [[nodiscard]] Result<double> as_float64() const;
 
   /**
-   * @brief Returns whether this object contains a published Value.
+   * @brief Returns whether this object contains a published TensorSpan.
    * @return True when immutable storage is present.
    * @throws Nothing.
-   * @note A valid Value may contain zero bytes only when validation permits it;
-   * empty coverage may own an empty caller allocation.
+   * @note A valid TensorSpan may contain zero bytes only when validation
+   * permits it; empty coverage may own an empty caller allocation.
    */
   [[nodiscard]] bool valid() const noexcept { return storage_ != nullptr; }
 
   /**
    * @brief Returns the immutable descriptor.
    * @return Descriptor reference.
-   * @throws std::logic_error If this Value is invalid/default.
-   * @note Reference lifetime is bounded by this Value.
+   * @throws std::logic_error If this TensorSpan is invalid/default.
+   * @note Reference lifetime is bounded by this TensorSpan.
    */
-  [[nodiscard]] const ValueDescriptor& descriptor() const;
+  [[nodiscard]] const TensorDescriptor& descriptor() const;
 
   /**
    * @brief Returns logical valid coverage.
    * @return Region reference.
-   * @throws std::logic_error If this Value is invalid/default.
+   * @throws std::logic_error If this TensorSpan is invalid/default.
    * @note Region coordinates are not byte offsets.
    */
   [[nodiscard]] const Region& region() const;
@@ -157,7 +157,7 @@ class PHOTOSPIDER_API Value final {
   /**
    * @brief Returns the immutable byte layout.
    * @return Layout reference.
-   * @throws std::logic_error If this Value is invalid/default.
+   * @throws std::logic_error If this TensorSpan is invalid/default.
    * @note The layout was range-checked against `bytes()` at construction.
    */
   [[nodiscard]] const StridedLayout& layout() const;
@@ -165,7 +165,7 @@ class PHOTOSPIDER_API Value final {
   /**
    * @brief Returns immutable storage bytes.
    * @return Borrowed read-only byte view.
-   * @throws std::logic_error If this Value is invalid/default.
+   * @throws std::logic_error If this TensorSpan is invalid/default.
    * @note Callers cannot mutate the retained allocation through this API.
    */
   [[nodiscard]] ByteView bytes() const;
@@ -174,7 +174,7 @@ class PHOTOSPIDER_API Value final {
    * bad_alloc. */
   [[nodiscard]] std::vector<std::uint8_t> copy_bytes() const;
   /** @brief Returns shared immutable storage, valid independently of this
-   * Value. */
+   * TensorSpan. */
   [[nodiscard]] const std::shared_ptr<const CpuStorage>& storage() const;
   /**
    * @brief Validates a regional view and retains immutable storage without
@@ -183,16 +183,16 @@ class PHOTOSPIDER_API Value final {
    * @param region Valid nonempty or empty logical coverage inside descriptor.
    * @param layout Origin-relative byte layout of that coverage.
    * @param storage Immutable owner; null is InvalidArgument.
-   * @return Validated Value or bounds/type failure; no partial
+   * @return Validated TensorSpan or bounds/type failure; no partial
    * publication.
    * @throws std::bad_alloc For metadata allocation failure.
    */
-  [[nodiscard]] static Result<Value> from_storage(
-      ValueDescriptor descriptor, Region region, StridedLayout layout,
-      std::shared_ptr<const CpuStorage> storage);
+  [[nodiscard]] static Result<TensorSpan> from_storage(
+      const TensorDescriptor& descriptor, const Region& region,
+      const StridedLayout& layout, std::shared_ptr<const CpuStorage> storage);
   /** @brief Creates a shared read-only subview; rejects coverage outside this
-   * Value. */
-  [[nodiscard]] Result<Value> view(const Region& region) const;
+   * TensorSpan. */
+  [[nodiscard]] Result<TensorSpan> view(const Region& region) const;
   /**
    * @brief Returns an element byte offset for a logical coordinate in coverage.
    * @return Checked offset or InvalidArgument for a coordinate outside
@@ -206,11 +206,12 @@ class PHOTOSPIDER_API Value final {
    * storage.
    * @param coordinate Array of rank logical coordinates, borrowed for this
    * call. A null pointer is rejected.
-   * @param rank Number of coordinates; must match this Value's rank.
+   * @param rank Number of coordinates; must match this TensorSpan's rank.
    * @return Checked offset into bytes(), or InvalidArgument for an invalid
-   * Value, null pointer, rank mismatch, or coordinate outside coverage.
-   * @note Read-only and safe for concurrent calls on the same immutable Value.
-   * The successful path performs no allocation and retains no caller memory.
+   * TensorSpan, null pointer, rank mismatch, or coordinate outside coverage.
+   * @note Read-only and safe for concurrent calls on the same immutable
+   * TensorSpan. The successful path performs no allocation and retains no
+   * caller memory.
    */
   [[nodiscard]] Result<std::size_t> byte_address(
       const std::uint64_t* coordinate, std::size_t rank) const;
@@ -230,34 +231,33 @@ class PHOTOSPIDER_API Value final {
   [[nodiscard]] static std::size_t element_size(ElementType type);
 
  private:
-  void swap(Value& other) noexcept;
-  /** @brief Published logical descriptor. */
-  ValueDescriptor descriptor_;
-  /** @brief Published logical valid coverage. */
-  Region region_;
-  /** @brief Published byte layout. */
-  StridedLayout layout_;
+  void swap(TensorSpan& other) noexcept;
+  struct Metadata;
+  // Copies share immutable descriptor, coverage, layout and their admission.
+  std::shared_ptr<const Metadata> metadata_;
   /** @brief Shared immutable CPU owner; null marks the default state. */
   std::shared_ptr<const CpuStorage> storage_;
 };
 
 /**
- * @brief Borrowed logical Value view with no allocation ownership.
- * @note The referenced Value must outlive this view. Stream sinks may use it
- * only until callback return; retaining this view or its pointers is invalid.
+ * @brief Borrowed logical TensorSpan view with no allocation ownership.
+ * @note The referenced TensorSpan must outlive this view. Stream sinks may use
+ * it only until callback return; retaining this view or its pointers is
+ * invalid.
  */
-class PHOTOSPIDER_API ValueView final {
+class PHOTOSPIDER_API TensorSpanView final {
  public:
-  explicit ValueView(const Value& value) : value_(&value) {}
-  const ValueDescriptor& descriptor() const { return value_->descriptor(); }
+  explicit TensorSpanView(const TensorSpan& value) : value_(&value) {}
+  const TensorDescriptor& descriptor() const { return value_->descriptor(); }
   const Region& region() const { return value_->region(); }
   const StridedLayout& layout() const { return value_->layout(); }
   ByteView bytes() const { return value_->bytes(); }
-  /** @brief Explicitly retains an owning immutable Value during this callback.
-   * The shared payload stays charged until the last copy retires. Keeping many
-   * outputs can exhaust the execution budget; subsequent admission then fails.
+  /** @brief Explicitly retains an owning immutable TensorSpan during this
+   * callback. The shared payload stays charged until the last copy retires.
+   * Keeping many outputs can exhaust the execution budget; subsequent admission
+   * then fails.
    */
-  Value retain() const { return *value_; }
+  TensorSpan retain() const { return *value_; }
   Result<std::size_t> byte_address(
       const std::vector<std::uint64_t>& coordinate) const {
     return value_->byte_address(coordinate);
@@ -272,39 +272,41 @@ class PHOTOSPIDER_API ValueView final {
   }
 
  private:
-  const Value* value_;
+  const TensorSpan* value_;
 };
 
 /**
  * @brief Move-only tightly packed writable region allocated by the host.
  * @note Valid until publish/destruction; callbacks must not retain data().
  */
-class PHOTOSPIDER_API MutableValue final {
+class PHOTOSPIDER_API TensorWriter final {
  public:
-  MutableValue() = default;
-  MutableValue(MutableValue&&) noexcept = default;
-  MutableValue& operator=(MutableValue&&) noexcept = default;
-  MutableValue(const MutableValue&) = delete;
-  MutableValue& operator=(const MutableValue&) = delete;
+  TensorWriter() = default;
+  TensorWriter(TensorWriter&&) noexcept = default;
+  TensorWriter& operator=(TensorWriter&&) noexcept = default;
+  TensorWriter(const TensorWriter&) = delete;
+  TensorWriter& operator=(const TensorWriter&) = delete;
   /** @brief Allocates nonempty regional coverage, checking all byte products.
    */
-  static Result<MutableValue> allocate(const ValueDescriptor& descriptor,
+  static Result<TensorWriter> allocate(const TensorDescriptor& descriptor,
                                        const Region& region,
                                        const BufferAllocator& allocator);
   /** @brief Borrowed writable region bytes; invalidated by publication. */
   std::uint8_t* data() noexcept { return buffer_.data(); }
   /** @brief Exact regional allocation size. */
   std::size_t size() const noexcept { return buffer_.size(); }
+  const TensorDescriptor& descriptor() const noexcept { return descriptor_; }
+  const Region& region() const noexcept { return region_; }
   /** @brief Regional origin and row-major strides, borrowed until destruction.
    */
   const StridedLayout& layout() const noexcept { return layout_; }
   /** @brief Freezes this writer and validates structure; consumes even on
    * failure.
    */
-  Result<Value> publish() &&;
+  Result<TensorSpan> publish() &&;
 
  private:
-  ValueDescriptor descriptor_;
+  TensorDescriptor descriptor_;
   Region region_;
   StridedLayout layout_;
   MutableBuffer buffer_;

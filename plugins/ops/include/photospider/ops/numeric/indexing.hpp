@@ -41,17 +41,16 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
  * The result is a photospider.tensor/samples Result with the full concatenated
  * shape as ordinary axes and no batch topology.
  *
- * The helper only authors node metadata. The CPU Whole program statically
- * validates shape and parameters, then requests active input tensors with
- * Data, Validation and Descriptor roles (role 13) for nonempty work. It
- * publishes the complete output; query projection does not reduce preparation
- * or computation. View proves one affine map across the complete inputs and
- * can join compatible fragments from the same owner. Explicit View reports
- * Domain/Run ViewUnavailable for multiple owners or incompatible geometry.
- * Dense materializes a complete packed output. Concatenate disables
- * cross-run content caching because content does not establish physical
- * viewability; Views retain source storage/resources after context retirement.
- * Empty demand reads no payload or performs sample copying.
+ * The helper only authors node metadata. The CPU program statically validates
+ * shape and parameters, then its Run-shared stage requests complete active
+ * input tensors for nonempty work. It publishes the complete output; query
+ * projection does not reduce preparation or computation. View proves one affine
+ * map across the complete inputs and can join compatible fragments from the
+ * same owner. Explicit View reports Domain/Run ViewUnavailable for multiple
+ * owners or incompatible geometry. Dense materializes a complete packed output.
+ * Concatenate disables cross-run content caching because content does not
+ * establish physical viewability; Views retain source storage/resources after
+ * context retirement. Empty demand reads no payload or performs sample copying.
  *
  * Inputs are ordered input_0..input_(K-1); the output port is values. This
  * pure, concurrent-safe helper reads no payload and returns owned node
@@ -86,7 +85,7 @@ inline Result<WorkflowNode> concatenate_node(
  * output `values` is a packed photospider.tensor/samples Result with the
  * selected source extent replaced by M and batch axes represented as ordinary
  * axes; its N*element_size bytes remain owned after context retirement. A
- * nonempty CPU Whole request uses role 13 for source and indices, validates
+ * nonempty CPU Run-shared stage acquires source and indices, validates
  * every index and computes the complete output before projection. Repeated
  * indices retain order, and an out-of-range index reports
  * InvalidArgument/InvalidDomain with diagnostic IndexOutOfBounds. Active input
@@ -108,8 +107,8 @@ inline Result<WorkflowNode> gather_node(
  * UInt8, Int64, Float32 and Float64 are supported. The immutable `values`
  * output retains base shape/dtype as a packed photospider.tensor/samples Result
  * of N*element_size bytes; it has no batch topology and remains owned
- * after context retirement. Nonempty Whole work requests all three inputs with
- * role 13, validates every index and computes the complete output before
+ * after context retirement. A nonempty Run-shared stage acquires all three
+ * input tensors, validates every index and computes the complete output before
  * projection. Any active input or typed-validation failure can fail the Run.
  * Replacement selects the last update position; aggregates include base, then
  * updates in increasing position. No-hit and replacement copies preserve bits,

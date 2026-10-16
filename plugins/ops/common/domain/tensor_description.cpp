@@ -1086,7 +1086,7 @@ Result<TensorDescription> tensor_description_from_parameter(
 }
 
 Status validate_tensor_description(const TensorDescription& description,
-                                   const ValueDescriptor& descriptor) {
+                                   const TensorDescriptor& descriptor) {
   auto status = validate_structure(description);
   if (!status.ok())
     return status;

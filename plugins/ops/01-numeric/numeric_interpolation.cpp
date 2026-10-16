@@ -9,8 +9,9 @@
 
 #include "01-numeric/exact_interpolation.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/core/resource_allocator.hpp"
 #include "common/registry.hpp"
+#include "photospider/core/resource_allocator.hpp"
+#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -96,7 +97,7 @@ struct InterpolationKernel final {
     const auto& input = phase.tensors->at({0, 0});
     const auto shape = input.spec().sample_shape();
     const auto type = input.spec().descriptor.element_type;
-    const auto width = Value::element_size(type);
+    const auto width = TensorSpan::element_size(type);
     auto scratch =
         math_take(phase.allocator.allocate(sizeof(InterpolationMath)));
     static_assert(alignof(InterpolationMath) <= alignof(std::max_align_t));
@@ -150,7 +151,6 @@ OperationDefinition interpolation_operation(const std::string& key,
   traits.input_count = 3;
   traits.input_schema.resize(traits.input_count);
   for (auto& input : traits.input_schema) {
-    input.kind = OperationPortKind::Result;
     input.element_type_mask = 12;
   }
   numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
@@ -166,8 +166,8 @@ OperationDefinition interpolation_operation(const std::string& key,
                            {FailureOrigin::Schema, FailureScope::Unspecified}});
     };
     const auto& member = inputs[0].result_schema->tensors[0];
-    const ValueDescriptor first{member.descriptor.element_type,
-                                member.sample_shape()};
+    const TensorDescriptor first{member.descriptor.element_type,
+                                 member.sample_shape()};
     if (first.shape.empty() || first.shape.size() > 8)
       return mismatch("interpolation requires rank 1..8");
     std::uint64_t count = 1;
@@ -195,7 +195,7 @@ OperationDefinition interpolation_operation(const std::string& key,
     return ResultContinuation::make<InterpolationProgram>(allocator, kind,
                                                           profile);
   };
-  return operation;
+  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
 }
 }  // namespace
 Status register_numeric_interpolation(OperationRegistry* registry) {

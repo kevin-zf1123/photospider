@@ -21,7 +21,7 @@ struct ColorRampOptions {
 };
 /** @brief RGB association is independent of the input description. */
 struct RgbRampOptions : ColorRampOptions {
-  /** @brief Default None for RGB, Premultiplied for explicitly described RGBA.
+  /** @brief Default None for RGB, Straight for explicitly described RGBA.
    */
   std::optional<ColorAssociation> output_association;
 };
@@ -161,7 +161,7 @@ inline Result<WorkflowNode> node(
  * and parameters and may be used concurrently; invalid options fail
  * InvalidArgument/InvalidDomain/Schema. Allocation may throw bad_alloc.
  * Descriptor/edge conflicts fail TypeMismatch at compilation. Each nonempty
- * Whole run grants Data, Validation and Descriptor (role 13) for all inputs.
+ * Run-shared stage acquires all complete input tensors.
  * The callback reads authorized windows directly, validates all finite strictly
  * increasing stops, then every finite position before color arithmetic.
  * Selected rows define the math, with unused generic rows remaining numerically
@@ -193,7 +193,7 @@ inline Result<WorkflowNode> color_ramp_rgb_node(
   const auto association = options.output_association.value_or(
       description.association == ColorAssociation::None
           ? ColorAssociation::None
-          : ColorAssociation::Premultiplied);
+          : ColorAssociation::Straight);
   return color_ramp_detail::node(
       id, "rgb", ColorModel::Rgb,
       {std::move(input), std::move(stops), std::move(colors)}, colors_type,

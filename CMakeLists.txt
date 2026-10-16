@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.34.0
+  VERSION 0.35.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -84,10 +84,9 @@ find_package(Threads REQUIRED)
 set(
   PHOTOSPIDER_KERNEL_SOURCES
 
-  src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
   src/lib/data/footprint.cpp
-  src/lib/data/value_fragments.cpp
+  src/lib/data/tensor.cpp
   src/lib/data/fragment_atlas.cpp
   src/lib/data/region.cpp
   src/lib/data/tiles.cpp
@@ -99,7 +98,6 @@ set(
   src/lib/data/result_builder.cpp
   src/lib/data/result_tensor_store.cpp
   src/lib/data/result_tensor_publication.cpp
-  src/lib/data/result_fields.cpp
   src/lib/data/result_tensor_window.cpp
   src/lib/data/result_capture.cpp
   src/lib/data/result_schema.cpp
@@ -107,8 +105,8 @@ set(
   src/lib/core/resources.cpp
   src/lib/data/resource_storage.cpp
   src/lib/core/cancellation.cpp
-  src/lib/data/value.cpp
-  src/lib/data/planar_image.cpp
+  src/lib/data/tensor_span.cpp
+  src/lib/data/tensor_layout.cpp
   src/lib/plugin/result_fragment_atlas.cpp
   src/lib/plugin/result_program.cpp
   src/lib/plugin/result_plugin_import.cpp
@@ -118,7 +116,7 @@ set(
   src/lib/plugin/result_c_poll_lease.cpp
   src/lib/plugin/dependency_discovery.cpp
   src/lib/plugin/operation_contract.cpp
-  src/lib/data/value_validation.cpp
+  src/lib/data/tensor_validation.cpp
   src/lib/plugin/port_validation.cpp
   src/lib/data/input_snapshot.cpp
   src/lib/execution/execution.cpp
@@ -155,9 +153,9 @@ endif()
 if(PHOTOSPIDER_ENABLE_VULKAN)
   list(APPEND PHOTOSPIDER_KERNEL_SOURCES src/lib/execution/native_gpu_vulkan.cpp)
 endif()
-# Scalar bounds require nearest rounding and gradual underflow at runtime.
+# Preserve callback floating-environment and parameter-validation semantics.
 set_source_files_properties(
-  src/lib/data/value_validation.cpp
+  src/lib/data/tensor_validation.cpp
   src/lib/plugin/port_validation.cpp src/lib/compiler/compiler.cpp
   src/lib/plugin/operation_registry.cpp PROPERTIES
   COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
@@ -189,7 +187,6 @@ else()
 endif()
 # Common translation units are compiled once for the package and internal tests.
 set(PHOTOSPIDER_SEAM_SOURCES
-  src/lib/benchmark/raw_benchmark.cpp
   src/lib/execution/execution_context_resources.cpp
   src/lib/execution/result_run.cpp
   src/lib/execution/native_upload_codec.cpp
@@ -277,6 +274,7 @@ if(NOT BUILD_SHARED_LIBS)
 endif()
 
 include(cmake/OpsSdk.cmake)
+include(cmake/BenchmarkTools.cmake)
 if(PHOTOSPIDER_BUILD_OPS)
   include(cmake/BundledOperations.cmake)
 endif()
@@ -315,7 +313,7 @@ install(
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY include/photospider DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-  FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h" PATTERN "ops" EXCLUDE)
+  FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h" PATTERN "ops" EXCLUDE PATTERN "benchmark" EXCLUDE)
 install(
   EXPORT PhotospiderTargets
   FILE PhotospiderTargets.cmake
@@ -347,7 +345,6 @@ if(BUILD_TESTING)
     photospider_test_kernel STATIC EXCLUDE_FROM_ALL
     $<TARGET_OBJECTS:photospider_common_objects>
     ${PHOTOSPIDER_SEAM_SOURCES}
-    src/lib/benchmark/raw_benchmark_test_hooks.cpp
     src/lib/execution/execution_test_hooks.cpp
     src/lib/plugin/library_test_hooks.cpp)
   photospider_configure_kernel_target(photospider_test_kernel)
@@ -355,8 +352,7 @@ if(BUILD_TESTING)
     photospider_test_kernel
     PUBLIC PHOTOSPIDER_STATIC
     PRIVATE PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS
-            PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS
-            PHOTOSPIDER_ENABLE_RAW_BENCHMARK_TEST_HOOKS)
+            PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
 
   function(photospider_add_kernel_test target kernel_target)
     add_executable(${target} ${ARGN})

@@ -21,7 +21,7 @@ namespace ps::numeric {
  */
 struct Lut3dSourceInput {
   WorkflowNodeOutput colors;
-  ValueDescriptor descriptor;
+  TensorDescriptor descriptor;
 };
 /** @brief Authoring-only source expansion, called twice on a staged document.
  * Append ordinary nodes and return an output that resolves to one Result tensor
@@ -57,13 +57,11 @@ struct Lut3dValidationPoints {
 /** @brief Connectable exports; table is a globally quality-gated
  * `photospider.tensor` v1 Result with `samples` shape [N0,N1,N2,3], selected
  * dtype and atomic trailing color axis. Axis is an independent Float64 tensor.
- * report is a curve.bake_lut3d.report v1 ResultRef; request it through
+ * report is a curve.bake_lut3d.report v2 ResultRef; request it through
  * `ExecutionContext::execute()` and read it with the public
- * read_lut3d_bake_report helper with description. Its association records
- * observed Result input
- * ObjectIds in port order: axis, grid and owned table occupy the first three
- * entries, followed by owners observed from source batches. Names are not
- * auto-exported.
+ * read_lut3d_bake_report helper with description. Its measured_table_id tensor
+ * identifies the complete table object acquired during measurement. This
+ * identity is local to the producing Run; names are not auto-exported.
  */
 struct BakedLut3d {
   WorkflowNodeOutput table, axis, report;
@@ -80,8 +78,8 @@ struct BakedLut3d {
  * immutable binding snapshot, including shared inputs. No nested execution or
  * file save occurs.
  *
- * All 15 profile geometry nodes use Whole Result programs with role-13 inputs,
- * full outputs, complete-demand invalidation and numeric Run failures. Static
+ * Profile geometry nodes use Run-shared stages with complete input tensors,
+ * full internal results, recorded dependencies and numeric failures. Static
  * preparation validates each operation's metadata and stores immutable POD
  * state for geometry or report work; runtime callbacks reuse that prepared
  * state. Budget full grid, points, converted colors and source intermediates
@@ -91,8 +89,11 @@ struct BakedLut3d {
  * transactional packed materialization of that ROI, charged to Root payload.
  * The final gate returns requested complete-color fragments with global
  * coordinates. Measure and gate validate bounded report windows before table
- * publication; a passed gate checks report association entry 2 against the
- * owned-table input after role-13 table validation.
+ * publication; a passed gate checks measured_table_id against the owned-table
+ * input after complete table validation. Measure and gate are declared
+ * nondeterministic and non-cacheable: equal frozen inputs may produce different
+ * intermediate ObjectIds in each Run. Their downstream closure cannot reuse
+ * completed results, checkpoints or blocks across Runs.
  * Every nonempty table or report request validates all grid colors, complete
  * source outputs, centers and extra points. report successfully records
  * passed=false on exceeded tolerances; table then fails OperationFailed/

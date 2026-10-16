@@ -24,7 +24,7 @@ class PHOTOSPIDER_API ExecutionDependencies final {
   Result<std::shared_ptr<const TileRecord>> tile_record(TileUnit unit) const;
   /** @brief Returns each recorded unit reachable from changed producer units.
    * Descriptor changes traverse all dependencies on that producer. Payload
-   * changes traverse only Whole or matching tile dependencies. Root limits
+   * changes traverse only matching member tile dependencies. Root limits
    * bound sparse traversal, and failure returns no partial answer.
    */
   Result<ResourceVector<TileUnit>> dirty_units(

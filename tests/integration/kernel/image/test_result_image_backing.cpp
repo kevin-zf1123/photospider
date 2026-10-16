@@ -10,11 +10,11 @@ namespace {
 using namespace ps::test_image;  // NOLINT(build/namespaces)
 void numerical_tensor_windows() {
   ResourceBudget root;
-  auto make = [&](ValueDescriptor descriptor, StridedLayout layout,
+  auto make = [&](TensorDescriptor descriptor, StridedLayout layout,
                   std::vector<std::uint8_t> bytes, std::uint32_t atomic = 0) {
     auto storage =
-        take(Value::create(descriptor, Region::whole(descriptor.shape), layout,
-                           std::move(bytes)))
+        take(TensorSpan::create(descriptor, Region::whole(descriptor.shape),
+                                layout, std::move(bytes)))
             .storage();
     SchemaTemplate schema;
     schema.id = "test.tensor";
@@ -50,7 +50,7 @@ void numerical_tensor_windows() {
   no_spatial_axes.tensors[0].layout.channel_axis.reset();
   no_spatial_axes.tensors[0].layout.height_axis = 6;
   no_spatial_axes.tensors[0].layout.width_axis = 7;
-  no_spatial_axes.tensors[0].layout.order = ImagePlaneOrder::Continuous;
+  no_spatial_axes.tensors[0].layout.order = TensorStorageOrder::Continuous;
   no_spatial_axes.tensors[0].layout.row_pitch_bytes = 256;
   require(
       canonical.validate(true).ok() && no_spatial_axes.validate(true).ok() &&
@@ -293,7 +293,6 @@ void tensor_writer_reentrancy() {
       ResourceBudget root;
       SchemaTemplate schema;
       schema.id = "test.writer.reentrancy";
-      schema.publication = PublishPolicy::StablePrefix;
       ResultTensorSpec slot;
       slot.key = "samples";
       slot.descriptor = {ElementType::Float32, {1, 3}};
@@ -313,10 +312,10 @@ void tensor_writer_reentrancy() {
               "writer earlier prefix");
       auto reference = builder.reference();
       auto facts = take(reference.descriptor(false));
-      auto storage =
-          take(Value::create({ElementType::Float32, {1}}, Region::whole({1}),
-                             {0, {4}}, std::vector<std::uint8_t>(4)))
-              .storage();
+      auto storage = take(TensorSpan::create({ElementType::Float32, {1}},
+                                             Region::whole({1}), {0, {4}},
+                                             std::vector<std::uint8_t>(4)))
+                         .storage();
       Status inner;
       std::optional<ResultBuilder> transferred;
       unsigned nested_calls = 0;
@@ -488,8 +487,9 @@ void lazy_spatial_backing() {
             "spatial start does not choose a payload backing");
 
     const auto storage =
-        take(Value::create({ElementType::Float32, {1}}, Region::whole({1}),
-                           {0, {0}}, std::vector<std::uint8_t>{0, 0, 0, 0x3f}))
+        take(TensorSpan::create({ElementType::Float32, {1}}, Region::whole({1}),
+                                {0, {0}},
+                                std::vector<std::uint8_t>{0, 0, 0, 0x3f}))
             .storage();
     StridedLayout layout;
     layout.byte_strides.resize(shape.size(), 0);
@@ -551,8 +551,10 @@ void lazy_spatial_backing() {
           });
       require(failed.code == ErrorCode::ResourceExhausted && !called &&
                   limited.statistics().live[ResourceKind::Payload] == 0 &&
-                  denied.reference().descriptor(false).status().code ==
-                      ErrorCode::ResourceExhausted,
+                  take(denied.reference().descriptor(false))
+                      .tensor_coverage(0)
+                      .empty() &&
+                  denied.seal().status().code == ErrorCode::ResourceExhausted,
               "affine ROI backing checks actual reservation before callback");
     } else {
       auto sparse = take(ResultBuilder::start(root, schema, "spatial.sparse"));
@@ -596,26 +598,26 @@ void direct_tensor_writers() {
         huge ? Region({{UINT64_MAX - 1, 1}, {0, 2}}) : Region::whole(shape);
     auto builder = take(ResultBuilder::start(root, schema, "direct.tensor"));
 
-    require(builder
-                .publish_tensor_kernel(
-                    0, region,
-                    [](const auto& writers) {
-                      std::vector<std::uint64_t> at;
-                      for (const auto d : writers[0].region().dimensions()) {
-                        at.push_back(d.offset);
-                      }
-                      auto run = writers[0].row_run(at);
-                      if (!run.ok()) {
-                        return run.status();
-                      }
-                      for (std::uint64_t n = 0; n < run.value().samples; ++n) {
-                        run.value().data[n * run.value().sample_stride_bytes] =
-                            0x7f;
-                      }
-                      return Status::success();
-                    })
-                .ok(),
-            "generic direct write publishes exact ROI");
+    require(
+        builder
+            .publish_tensor_kernel(
+                0, region,
+                [](const auto& writers) {
+                  for (const auto& writer : writers) {
+                    std::vector<std::uint64_t> at;
+                    for (const auto d : writer.region().dimensions())
+                      at.push_back(d.offset);
+                    auto run = writer.row_run(at);
+                    if (!run.ok())
+                      return run.status();
+                    for (std::uint64_t n = 0; n < run.value().samples; ++n)
+                      run.value().data[n * run.value().sample_stride_bytes] =
+                          0x7f;
+                  }
+                  return Status::success();
+                })
+            .ok(),
+        "generic direct write publishes exact ROI");
     auto result = take(builder.seal());
     require(
         root.statistics().peak[ResourceKind::Payload] == (huge ? 2 : 300000),
@@ -628,9 +630,14 @@ void direct_tensor_writers() {
       at.push_back(d.offset);
     }
     auto run = take(window.row_run(at));
-    require(run.samples == (huge ? 2 : 300000) && run.data[0] == 0x7f &&
+    require(run.samples == (huge ? 2 : 128) && run.data[0] == 0x7f &&
                 run.data[(run.samples - 1) * run.sample_stride_bytes] == 0x7f,
             "direct writer data survives unpublished buffer retirement");
+    if (!huge) {
+      const auto last = take(window.row_run({299999}));
+      require(*last.data == 0x7f && last.samples == 1,
+              "last clipped tile is initialized");
+    }
     if (huge) {
       require(!result
                    .acquire_tensor(take(result.descriptor()), 0,
@@ -654,8 +661,8 @@ void backing_independent_spatial_runs() {
   for (std::size_t i = 0; i < bytes.size(); ++i) {
     bytes[i] = static_cast<std::uint8_t>(i);
   }
-  auto storage = take(Value::create({ElementType::UInt8, {24}},
-                                    Region::whole({24}), {0, {1}}, bytes))
+  auto storage = take(TensorSpan::create({ElementType::UInt8, {24}},
+                                         Region::whole({24}), {0, {1}}, bytes))
                      .storage();
   for (bool affine : {false, true}) {
     auto builder = take(ResultBuilder::start(root, schema, "spatial.runs"));
@@ -709,7 +716,6 @@ void backing_independent_spatial_runs() {
 void window_failures() {
   ResourceBudget root;
   auto shape = schema(true);
-  shape.publication = PublishPolicy::StablePrefix;
   shape.tensors[0].batch_axes[0] = shape.tensors[0].batch_axes[1] = 1;
   shape.tensors[0].descriptor.shape = {2, 2};
   const Region left({{0, 1}, {0, 1}, {0, 2}, {0, 1}});
@@ -848,10 +854,16 @@ void windows_and_views() {
       take(ResultBuilder::start(destination_root, output_schema, "view.test"));
 
   const Region target({{1, 1}, {0, 1}, {0, 3}, {0, 5}});
+  ResultTensorViewTransform channel_view;
+  channel_view.source_axes = {{0, 0, 1, 1},
+                              {1, 0, 1, 1},
+                              {2, 0, 1, 1},
+                              {3, 0, 1, 1},
+                              {-1, 2, 0, 1}};
   const auto ambient_live = source_root.statistics().live.values;
   {
     ResourceAllocationScope foreign(source_root);
-    require(builder.publish_tensor_view(0, target, {&window}).ok(),
+    require(builder.publish_tensor_view(0, target, window, channel_view).ok(),
             "cross-budget channel view");
   }
   require(source_root.statistics().live.values == ambient_live,
@@ -881,14 +893,15 @@ void windows_and_views() {
   builder =
       take(ResultBuilder::start(destination_root, output_schema, "mixed.test"));
 
+  channel_view.source_axes.back().source_origin = 1;
   require(builder
               .publish_tensor_view(0, Region({{0, 1}, {0, 1}, {0, 3}, {0, 2}}),
-                                   {&left})
+                                   left, channel_view)
               .ok(),
           "left view");
   require(builder
               .publish_tensor_view(0, Region({{0, 1}, {0, 1}, {0, 3}, {3, 2}}),
-                                   {&right})
+                                   right, channel_view)
               .ok(),
           "right view");
   require(builder
@@ -925,7 +938,8 @@ void windows_and_views() {
           "window acquisition cancellation");
 }
 void spatial_backing_boundaries() {
-  for (auto order : {ImagePlaneOrder::Continuous, ImagePlaneOrder::Tiled}) {
+  for (auto order :
+       {TensorStorageOrder::Continuous, TensorStorageOrder::Tiled}) {
     ResourceBudget root;
     SchemaTemplate spec;
     spec.id = "test.spatial.physical";
@@ -935,7 +949,7 @@ void spatial_backing_boundaries() {
     tensor.layout.spatial = true;
     tensor.layout.order = order;
     tensor.layout.row_pitch_bytes =
-        order == ImagePlaneOrder::Continuous ? 32 : 0;
+        order == TensorStorageOrder::Continuous ? 32 : 0;
     spec.tensors.push_back(tensor);
     auto builder =
         take(ResultBuilder::start(root, spec, "physical.roi", {}, {}, 2));
@@ -946,32 +960,26 @@ void spatial_backing_boundaries() {
             .publish_tensor_kernel(
                 0, roi,
                 [&](const auto& windows) {
-                  const auto& window = windows.at(0);
-                  for (std::uint64_t c = 0; c < 3; ++c)
-                    for (std::uint64_t y = 1; y < 4; ++y)
-                      for (std::uint64_t x = 3; x < 17;) {
+                  for (const auto& window : windows) {
+                    const auto& dims = window.region().dimensions();
+                    for (std::uint64_t c = 0; c < 3; ++c)
+                      for (auto y = dims[0].offset;
+                           y < dims[0].offset + dims[0].extent; ++y) {
+                        const auto x = dims[1].offset;
                         auto rectangle = take(window.rectangle_run({y, x, c}));
-                        const auto columns =
-                            order == ImagePlaneOrder::Continuous
-                                ? 17 - x
-                                : std::min<std::uint64_t>(17 - x, 2 - x % 2);
-                        const auto rows =
-                            order == ImagePlaneOrder::Continuous
-                                ? 4 - y
-                                : std::min<std::uint64_t>(4 - y, 2 - y % 2);
                         require(
-                            rectangle.row.samples == columns &&
-                                rectangle.rows == rows &&
+                            rectangle.row.samples == dims[1].extent &&
+                                rectangle.rows ==
+                                    dims[0].offset + dims[0].extent - y &&
                                 rectangle.row_stride_bytes ==
-                                    (order == ImagePlaneOrder::Continuous ? 32
-                                                                          : 2),
-                            "physical runs stop at ROI and tile edges without "
-                            "padding");
-                        for (std::uint64_t dx = 0; dx < columns; ++dx)
+                                    static_cast<std::int64_t>(dims[1].extent),
+                            "tile-local physical runs stop at clipped tile "
+                            "edges");
+                        for (std::uint64_t dx = 0; dx < dims[1].extent; ++dx)
                           rectangle.row.data[dx] = static_cast<std::uint8_t>(
                               y * 40 + (x + dx) * 2 + c);
-                        x += columns;
                       }
+                  }
                   return Status::success();
                 })
             .ok(),
@@ -996,14 +1004,13 @@ void spatial_backing_boundaries() {
   ResourceBudget root;
   SchemaTemplate spec;
   spec.id = "test.spatial.rollback";
-  spec.publication = PublishPolicy::StablePrefix;
   ResultTensorSpec tensor;
   tensor.key = "samples";
-  constexpr std::uint64_t width = 16384 * 1027;
+  constexpr std::uint64_t width = 128 * 1027;
   tensor.descriptor = {ElementType::UInt8, {2, width}};
   tensor.layout.spatial = true;
   tensor.layout.channel_axis.reset();
-  tensor.layout.order = ImagePlaneOrder::Continuous;
+  tensor.layout.order = TensorStorageOrder::Continuous;
   spec.tensors.push_back(tensor);
   auto builder = take(ResultBuilder::start(root, spec, "rollback.pages"));
 
@@ -1024,7 +1031,7 @@ void spatial_backing_boundaries() {
   bool wrote = false;
   auto failed = builder.publish_tensor_kernel(
       0, Region({{0, 2}, {1, width - 1}}), [&](const auto& windows) {
-        take(windows.at(0).row_run({1, width - 1})).data[0] = 99;
+        take(windows.back().row_run({1, width - 1})).data[0] = 99;
         wrote = true;
         return Status{ErrorCode::Cancelled,
                       "rollback large unpublished page run"};

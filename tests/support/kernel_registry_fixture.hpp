@@ -16,7 +16,12 @@ struct ScalarSum {
     if (!requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tiles = {{0, true, false, {}}, {1, true, false, {}}};
+      for (unsigned port = 0; port < 2; ++port)
+        need.tiles.push_back(
+            {port, 0, false,
+             take(TileSet::range(
+                 phase.resources, 0,
+                 phase.query.input_tile_grids[port][0].tile_count()))});
       return Result<ResultProgramPoll>(std::move(need));
     }
     double left, right;
@@ -60,7 +65,8 @@ struct TensorIdentity {
         transform.source_axes.push_back({static_cast<int>(axis), 0, 1, 1});
       auto status = builder.publish_tensor_view(0, region, window, transform);
       if (status.reason == FailureReason::ViewUnavailable) {
-        const auto width = Value::element_size(spec.descriptor.element_type);
+        const auto width =
+            TensorSpan::element_size(spec.descriptor.element_type);
         auto bytes = take(
             phase.allocator.allocate(take(region.element_count()) * width));
         std::uint64_t index = 0;
@@ -90,7 +96,7 @@ inline OperationDefinition kernel_identity(const char* key) {
   operation.traits.outputs[0] = multi_result::output("value");
   operation.traits.input_count = 1;
   operation.traits.input_schema.resize(1);
-  operation.traits.input_schema[0].kind = OperationPortKind::Result;
+
   operation.traits.input_schema[0].element_type_mask = 127;
   operation.traits.outputs[0].output_schema.result_schema_id.clear();
   operation.traits.outputs[0].output_schema.result_schema_version = 0;
@@ -129,7 +135,6 @@ inline std::shared_ptr<OperationRegistry> kernel_registry(bool freeze = true) {
   sum.traits.input_count = 2;
   sum.traits.input_schema.resize(2);
   for (auto& port : sum.traits.input_schema) {
-    port.kind = OperationPortKind::Result;
     port.result_schema_id = "test.multi_output";
     port.result_schema_version = 1;
   }
