@@ -23,7 +23,7 @@ flowchart TD
 
 Phase A 进一步提供分页全局结果、结构化 schema、独立 emission、资源预算与错误/质量模型，统计、FFT、连通域和 Layer 有公开 workflow。默认节点、显式 factory 和仅提供表示/helper 的范围见[当前实现](current-state.md)。
 
-后续节点应复用已实现 Value/多输出/Result 入口，逐算子明确数值域、映射、资源和发布条件；Whole 和分页的选择取决于算法与可检查预算。算子数量本身不足以证明需要重写通用runtime。CPU参考可先实现可检查行为，GPU选择依实际输入域、质量与开销。
+后续节点应复用已实现 Tensor/多输出/Result 入口，逐算子明确数值域、映射、资源和发布条件；complete-input 和分页的选择取决于算法与可检查预算。算子数量本身不足以证明需要重写通用runtime。CPU参考可先实现可检查行为，GPU选择依实际输入域、质量与开销。
 
 ## 四项关键语义结论
 

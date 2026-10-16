@@ -58,7 +58,7 @@ are shared across adjacent segments rather than duplicated in their input data.
 The supported anchor count is `2 <= K <= 65536`. Each control-data array accepts
 Float32 or Float64 independently; widening to Float64 is exact. Reconstructed
 absolute control points use RN64 anchor-plus-offset additions, as defined below.
-Only mathematically used numeric components are checked for finiteness; Whole
+Only mathematically used numeric components are checked for finiteness; complete-input
 collection and typed validation are complete for each active input.
 
 ### Complete port and parameter contract
@@ -118,8 +118,8 @@ sampling positions originally requested. Tangent extrapolation is not selected.
 
 ## Dependency and validation decisions
 
-The Whole Result program requests complete active inputs with Data, Validation
-and Descriptor (role 13). For nonempty `values`, it collects complete anchors,
+The Run-shared Result program requests complete active inputs with Data, Validation
+and Descriptor . For nonempty `values`, it collects complete anchors,
 handles, start and, only when count>1, end. Recognized typed validation and
 upstream failures apply to all collected components. It validates all x topology,
 then every generated coordinate/domain/adjacent-separation control before y
@@ -143,7 +143,7 @@ Complete immutable input versions, profile, metadata and parameters remain in
 cache identity. Both outputs retain their existing names, dtypes, no attached domain description
 and independent identity; there is no new pairing object. Returned owners survive
 context destruction. A nonempty local request computes the complete dense
-output and the returned Result certifies full coverage in global sample
+output and the shared stage retains the complete internal result while public actors expose only requested complete tiles in global sample
 coordinates; coordinates are not rebased to the request. Each output publishes
 through its own all-or-nothing Result transaction.
 
@@ -169,7 +169,7 @@ inverse-plus-evaluation mapping as one mathematical function for final rounding.
 The accelerated reference is this same curve and correctly rounded output.
 If an accelerated inverse/evaluation path cannot guarantee its four-ULP bound,
 it falls back to strict. The current implementation uses exact evaluation for
-all profiles and does not expose per-value Whole fallback counters. Correct-rounding refinement
+all profiles and does not expose per-value complete-input fallback counters. Correct-rounding refinement
 and fallback remain under the active capacity/work budgets. Exhaustion
 returns ResourceExhausted; it does not publish a value with unresolved accuracy.
 
@@ -191,7 +191,7 @@ cannot convert a nonfinite correctly rounded reference into a finite success.
 
 A platform-specific accelerated key on an incompatible platform returns
 BackendUnavailable. Its capability must be recognized rather than silently
-dispatching another operator. The distinct registered profile key retains its identity. The Whole callback
+dispatching another operator. The distinct registered profile key retains its identity. The complete-input callback
 has no DependencySession numeric counters; zero counters are not a measurement
 of solver calls or fallbacks. Cancellation, upstream and budget failures retain
 their categories.
@@ -254,9 +254,9 @@ with independent exact-rational de Casteljau evaluation during clarification.
 
 ## Reference execution algorithm
 
-1. Validate complete static metadata. Resolve Whole input projections separately
+1. Validate complete static metadata. Resolve complete-input input projections separately
    for values and axis, omitting end only when count=1.
-2. Collect active Result inputs with typed validation (role 13). Axis evaluates
+2. Collect active Result inputs with typed validation . Axis evaluates
    sampling endpoints and publishes its tuple independently.
 3. Values validates the global x topology with RN64 reconstructed controls and
    exact derivative tests. A budgeted x index requires O(K*degree) storage.
@@ -303,8 +303,8 @@ silently simplified to the old linear/PCHIP operators.
 
 ## Demand, dirty mapping and returned ownership
 
-The Whole Result program requests complete active inputs with Data, Validation
-and Descriptor (role 13). For nonempty `values`, it collects complete anchors,
+The Run-shared Result program requests complete active inputs with Data, Validation
+and Descriptor . For nonempty `values`, it collects complete anchors,
 handles, start and, only when count>1, end. Recognized typed validation and
 upstream failures apply to all collected components. It validates all x topology,
 then every generated coordinate/domain/adjacent-separation control before y
@@ -328,7 +328,7 @@ Complete immutable input versions, profile, metadata and parameters remain in
 cache identity. Both outputs retain their existing names, dtypes, no attached domain description
 and independent identity; there is no new pairing object. Returned owners survive
 context destruction. A nonempty local request computes the complete dense
-output and the returned Result certifies full coverage in global sample
+output and the shared stage retains the complete internal result while public actors expose only requested complete tiles in global sample
 coordinates; coordinates are not rebased to the request. Each output publishes
 through its own all-or-nothing Result transaction.
 
@@ -337,7 +337,7 @@ through its own all-or-nothing Result transaction.
 Let S=K-1, d be degree, N=count and b the output element size.
 The float64-sized upper bound for both complete control inputs is
 `16*K + 16*(d-1)*(K-1)` bytes. For cubic at K=65536 it is 3,145,696 bytes,
-slightly below 3 MiB. Whole collects both complete arrays; the numeric topology index retains their
+slightly below 3 MiB. complete-input collects both complete arrays; the numeric topology index retains their
 x components. Account collected inputs and retained source owners separately.
 
 | Resource | Bound or required accounting |
@@ -367,7 +367,7 @@ Managed bounds exclude the documented host allocator/runtime/OS overhead and
 do not constitute an RSS guarantee.
 
 Poll cancellation before reads, at least every 64 topology segments, at every
-inverse/precision refinement boundary and before publication. Whole evaluates every output sample, including unrequested positions. Host read, work and allocation errors
+inverse/precision refinement boundary and before publication. complete-input evaluates every output sample, including unrequested positions. Host read, work and allocation errors
 remain sticky and preserve their original origin; fallback cannot erase them.
 
 ## Error contract
@@ -462,9 +462,9 @@ runs are additional coverage.
 
 ## Current implementation and verification
 
-The maintained implementation registers the three profile keys in `plugins/ops/01-numeric/bezier_function.cpp` as Whole Result operations. Each input is a sole tensor member under any schema id/version/key; shapes derive from `sample_shape()`. Output ports use `photospider.tensor` v1 / `samples`, with `values[count]` and atomic Float64 `axis[3]`, no attached domain description and source associations. Input needs use role 13. For count=1, the values dependency omits end and the axis dependency contains only start. Nonempty requests return full certified coverage in global sample coordinates; Empty reads no payload. It performs exact x topology and monotonicity validation, RN64 control reconstruction, an inverse solver with up to 8192 fractional bits of dyadic refinement, exact polynomial/Horner evaluation and direct output rounding. The polynomial workspace is 40,960 bits with a 96-slot arena; the static live-slot bound is at most 44. All profiles use the same exact mathematical path with scalar/NEON/AVX2 integer helpers; the numerical contract retains the shared accelerated allowance. Whole eliminates per-sample dependency certificates and staged read windows. Fixed state is allocator-owned; topology has 8*(K+(degree-1)*(K-1)) element bytes plus metadata overhead. Complete values cost b*count; axis costs 24 bytes. The common operation workspace declaration conservatively bounds the larger values state even for axis, whose actual callback allocates only its smaller state.
+The maintained implementation registers the three profile keys in `plugins/ops/01-numeric/bezier_function.cpp` as Run-shared Result operations. Each input is a sole tensor member under any schema id/version/key; shapes derive from `sample_shape()`. Output ports use `photospider.tensor` v1 / `samples`, with `values[count]` and atomic Float64 `axis[3]`, no attached domain description and source associations. Input needs use ordinary tile Needs. For count=1, the values dependency omits end and the axis dependency contains only start. Nonempty requests return complete internal coverage, with public coverage restricted to requested tiles in global sample coordinates; Empty reads no payload. It performs exact x topology and monotonicity validation, RN64 control reconstruction, an inverse solver with up to 8192 fractional bits of dyadic refinement, exact polynomial/Horner evaluation and direct output rounding. The polynomial workspace is 40,960 bits with a 96-slot arena; the static live-slot bound is at most 44. All profiles use the same exact mathematical path with scalar/NEON/AVX2 integer helpers; the numerical contract retains the shared accelerated allowance. complete-input eliminates per-sample dependency certificates and staged read windows. Fixed state is allocator-owned; topology has 8*(K+(degree-1)*(K-1)) element bytes plus metadata overhead. Complete values cost b*count; axis costs 24 bytes. The common operation workspace declaration conservatively bounds the larger values state even for axis, whose actual callback allocates only its smaller state.
 
-Acceptance should cover count-one and axis projection, complete Whole coverage
+Acceptance should cover count-one and axis projection, complete complete-input coverage
 under sparse requests, current source associations, preparation reuse, layouts,
 caller/worker floating environments, typed validation, work/output/scratch limits,
 cancellation, upstream failures and owner retirement. In a three-value Float64
@@ -483,7 +483,7 @@ When measuring `result_execute_fragments`, state whether the measured interval
 includes coordinator discovery, polling, computation, publication and digest,
 and keep source construction, compilation, freeze, readback and output checking
 separate. Report continuation polls, computed elements and Root Payload peak.
-Whole diagnostics do not expose per-value root-solver or fallback counters;
+complete-input diagnostics do not expose per-value root-solver or fallback counters;
 leave those unavailable. Bounded smoke cases alone do not establish a
 performance improvement.
 

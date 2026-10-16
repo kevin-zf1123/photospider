@@ -45,7 +45,7 @@ struct MetadataOptions final {
   std::string missing = "error";       // "error" or "ignore"
 };
 Result<TensorDescription> edit_description(
-    const TensorDescription& source, const ValueDescriptor& descriptor,
+    const TensorDescription& source, const TensorDescriptor& descriptor,
     const MetadataOptions& options = {});
 }  // namespace ps::format
 ```
@@ -75,7 +75,7 @@ Result<TensorDescription> edit_description(
 | `dependencies` | `error` by default; `cascade` explicitly. |
 | `missing` | `error` by default; `ignore` applies only to absent deletion targets. |
 
-`descriptor` is the `ValueDescriptor` of the tensor the description will be used
+`descriptor` is the `TensorDescriptor` of the tensor the description will be used
 with. Both the source and the result are validated against it with
 `validate_tensor_description`, so a description that does not fit the tensor's
 rank or channel extent is rejected before it reaches an operation.

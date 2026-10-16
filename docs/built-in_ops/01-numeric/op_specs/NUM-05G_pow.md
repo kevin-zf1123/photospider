@@ -65,7 +65,7 @@ not defined by rounded exp(b*ln(a)) or sequential rounded multiplication.
 Finite overflow/underflow produces correctly signed infinity/subnormal/zero.
 Accelerated nonzero finite results permit at most four FP32-scaled ULP from
 strict; special-case outputs and NaN/Inf/zero classification/sign match strict
-exactly. Unsupported accuracy ranges use strict fallback (per-value Whole diagnostics are N/A),
+exactly. Unsupported accuracy ranges use strict fallback (per-value complete-input diagnostics are N/A),
 following [exp's quality/resource rules](NUM-04D_exp.md). Profile results do not
 vary with request batching, vector width or scheduling.
 
@@ -84,7 +84,7 @@ small bases, overflow/underflow boundaries and difficult rounding cases in both
 dtypes. Independently certify finite results by exact integer/rational cases or
 directed high-precision power; model special values and payloads separately.
 
-Test both upstream dependencies even for NaN^0 and 1^NaN; apply shared Whole,
+Test both upstream dependencies even for NaN^0 and 1^NaN; apply shared complete-input,
 resource, cancellation, typed validation and lifetime fixtures through the public
 entry point. The maintained versioned key and manual tests are recorded below.
 
@@ -92,7 +92,7 @@ entry point. The maintained versioned key and manual tests are recorded below.
 
 The three keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/ops/numeric/binary.hpp`.
-The shared Whole adapter retains and validates both complete inputs, including
+The shared Run-shared adapter retains and validates both complete inputs, including
 when a numeric identity determines a result.
 Floating elementary operations use controlled correctly rounded hardware
 arithmetic after exact special-value classification, with exact fallback; integer

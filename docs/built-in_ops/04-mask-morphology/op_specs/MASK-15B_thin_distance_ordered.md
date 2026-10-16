@@ -26,14 +26,14 @@ input: Binary[H,W] -> skeleton: Binary[H,W], radius: Float32/64[H,W]
 
 Required static parameters: sy,sx>0 finite; output_dtype float32|float64. Values and controls use the stated
 port order. Infer ordinary output dimensions from descriptors/statics only;
-Result RuntimeCount and association rules, where relevant, are those of the family.
+Static Tensor capacities, payload counts and source-association rules, where relevant, are those of the family.
 No hidden default, conversion, color/alpha inference or optional port is added.
 
 ## Mathematics and exact request behavior
 
 Same deletion predicate as A, fixed original EDT order; radius from original background distances at survivors.
 
-Whole input for either output, not fixed halo. Empty Q has no runtime sample/control/validation reads. Descriptor
+complete-input input for either output, not fixed halo. Empty Q has no runtime sample/control/validation reads. Descriptor
 checks still run. The family defines validation closure, border extension,
 stage rounding, dynamic witnesses and the forward dirty relation. A bounding
 rectangle may not replace a smaller declared sparse support.
@@ -45,7 +45,7 @@ CPU is the initial target; no implicit accelerated/GPU/third-party fallback is
 registered. Exact choices/copies stay exact; arithmetic uses the inherited
 rounding boundary and finite-domain error rules. Account for output, scratch,
 exact state, retained source owners and all simultaneous intermediates. Poll
-inside long loops/refinement. Whole or CompleteBundle members do not publish
+inside long loops/refinement. complete-input or CompleteBundle scopes do not expose
 partially converged or partially associated results. Preserve the host's
 upstream/cancellation/resource scope and immutable owner lifetime.
 

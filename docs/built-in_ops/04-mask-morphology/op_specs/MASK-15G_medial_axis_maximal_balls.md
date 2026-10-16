@@ -53,7 +53,7 @@ connectivity, continuous-boundary width or minimal number of centers is promised
 
 ## Demand and resources
 
-Any nonempty axis or radius request requires Whole input Data/Validation.
+Any nonempty axis or radius request requires complete-input input Data/Validation.
 Output buffers cover their requested global coordinates. Empty output demand
 requires descriptor checks only. Any input change may dirty the full outputs.
 There are no fixed-halo shortcuts to global maximality.

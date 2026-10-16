@@ -1,9 +1,9 @@
 # 图形、坐标、渐变与噪声生成
 
-本页按功能整理当前已接受的目标规格。Perlin2002 strict CPU Whole、CPU tiled 和
+本页按功能整理当前已接受的目标规格。Perlin2002 strict CPU complete-input、CPU tiled 和
 原生 GPU 形式已注册。三者使用 Result 输入与输出，GPU 按内核构建使用 Metal
 或 Vulkan，且不提供 CPU fallback。当前 Result GPU 路径已在 Metal 上通过独立
-oracle 与安装消费检查；Vulkan 的旧 Value 路径验证不代表当前 Result 实现。
+oracle 与安装消费检查；Vulkan 的旧 Tensor 路径验证不代表当前 Result 实现。
 Gaussian Vulkan 尚未交付。具体英文规格记录端口、
 参数、数学定义与依赖规则，继承 01-numeric 与 02-format-color。
 [共享契约](op_specs/GEN_common_contract.md)、[oracle 覆盖说明](oracle-coverage.md)、
@@ -65,7 +65,7 @@ Philox4x64-10 的全局 x/y 为 signed32，frame/draw/stream 取 uint32 范围�
 
 解析测试覆盖坐标identity、线性渐变0/1端点、非法半径、repeat/reflect、全局seed一致；随机统计使用固定样本数与置信阈值，不能要求每次精确达到理论均值。shape/path coverage的误差用面积/轮廓检查，不仅看图。
 
-执行依真实依赖选择 Regional、Halo 或 Whole，完整控制数据校验与区域计算分开。
+执行依真实依赖选择 Regional、Halo 或 complete-input，完整控制数据校验与区域计算分开。
 CPU 是必需后端，GPU 按成员提供实际负载并使用独立 profile；同版本同 profile 的
 数值、数量、顺序与 ID 必须确定。旧 `field.constant`、`field.coordinate` 不再提供实现。
 

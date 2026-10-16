@@ -1,4 +1,4 @@
-# NUM-01 Whole execution
+# NUM-01 Run-shared complete-input computation
 
 The three suffixed `numeric.sample_expression_*` operations expose independent
 Result outputs. Port `values` uses schema `photospider.tensor` / member
@@ -15,7 +15,7 @@ input schema, member shape and dtype is checked, even when a runtime projection
 excludes that input.
 
 For nonempty demand, `WholeTensorProgram` sends authorized Data, Validation and
-Descriptor Needs (role 13) in envelopes of at most 64 input ports. Registration
+Descriptor Needs  in envelopes of at most 64 input ports. Registration
 declares a conservative 258 input slots: start, end and a 256-coefficient
 ceiling. Its stage budget allows five bounded input stages and publication as
 stage six. The 256-node AST limit can reject expressions before all declared

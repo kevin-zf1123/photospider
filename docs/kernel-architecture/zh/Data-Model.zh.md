@@ -1,105 +1,45 @@
 # 数据模型
 
-## 1. 模块职责与所有权
+## 1. 范围与所有权
 
-Compiler 持有 workflow 结构和推导出的结构 metadata 的不可变描述。Structured operation 通过具名 binding 交换 `ResultRef` owner；Result 可包含 typed tensor slots、packed fields 或两者。`Value` 保留为 typed backing 和本地数据容器，`PlanarImage` 提供图像存储。返回的 Result 在 execution context 退休后仍持有其存储与 accounting leases。
+编译器拥有不可变 workflow 结构和已解析的静态 schema。算子通过 Result 端口交换 `ResultRef` owner。一个 Result 包含 1 到 16 个具名 Tensor 成员，其名称、dtype、rank、cell shape、batch 轴、atomic 末尾轴和逻辑网格在准备后的 plan 中固定。结构可以依赖输入 schema 和静态参数，不能依赖运行期样本值。输入结构改变后需要重新准备和编译。
 
-Result 与 Value 只携带结构、样本数据以及存储实际需要的 owner，不附着领域描述：颜色空间、白点、transfer、alpha association、采样和 LUT 解释都是需要它们的算子的显式静态参数。算子拥有的不可变资源（例如 ICC profile）通过 `ResourceSet` 保存在 plan 和执行状态中，而不保存在 Result 中。
+`Tensor` 是唯一数值载体。`TensorSpan` 表示其中一个矩形 backing 映射，不构成第二种数值模型。`CpuStorage`、buffer、native allocation 和资源租约表示物理资源。`ValueRef` 仍是图引用，`Result<T>` 仍是错误返回模板。
+
+Result 和 Tensor 不附着颜色、alpha、transfer 或 LUT 解释。算法需要的解释由显式参数和资源提供。普通图像算子默认 straight alpha；内核不认证此约定，也不根据四通道推断 RGBA。
 
 ## 2. 核心结构与内存布局
 
-```cpp
-struct WorkflowDocument {
-  std::uint32_t schema_version = 6;
-  std::vector<WorkflowInputDeclaration> inputs;
-  std::vector<WorkflowNode> nodes;
-  std::vector<WorkflowOutput> outputs;
-};
+公共结构位于 [`result.hpp`](../../../include/photospider/data/result.hpp)、[`tensor.hpp`](../../../include/photospider/data/tensor.hpp) 和 [`tensor_span.hpp`](../../../include/photospider/data/tensor_span.hpp)。WorkflowDocument 使用 schema 7。`WorkflowInputDeclaration::result_schema` 必须提供，`ExecutionBinding` 按精确声明名称提供拥有所有权的 Result。
 
-class Region;  // descriptor 轴顺序中的逻辑 offset/extent 区间
+支持 UInt8、Int8、UInt16、Int16、Int64、Float32 和 Float64。完整样本 rank 仍为 1 到 8，extent 必须为正。Scalar 使用 `[1]`。不引入 rank-zero、零 extent、ragged 或运行期 rank。样本 shape 由显式 batch extent 和 cell shape 拼接。`InputAxis` 与 `InputElements` 尺寸表达式在执行前根据静态输入结构解析。
 
-class Value {
- public:
-  static Result<Value> create(ValueDescriptor, Region, StridedLayout,
-                              std::vector<std::uint8_t>);
-  // bytes() 中一个逻辑坐标的 checked 字节偏移。
-  Result<std::size_t> byte_address(const std::uint64_t* coordinate,
-                                   std::size_t rank) const;
-  Result<std::size_t> byte_address(
-      std::initializer_list<std::uint64_t> coordinate) const;
-  Result<std::size_t> byte_address(
-      const std::vector<std::uint64_t>& coordinate) const;
-};
+数据依赖的记录数量使用静态容量，例如 `records: Float32[N,R]` 和 `count: Int64[1]`，或同形状数据加 mask。这些名称和数值都是普通 payload。读取 count 或 mask 需要 payload Need 并记录依赖。每个发布 tile 都完整定义，包括按算子契约填充的未使用位置。缺失 tile 不缩短数组。容量不足时失败，除非算子明确承诺最多 K 个结果。
 
-struct ExecutionBinding {
-  std::string name;
-  ResultRef result;
-};
+宿主新建的 Result backing 默认使用 tiled planar 存储。逻辑网格独立于物理分配。物理 tile 和目录随实际生产覆盖增长，不要求预留完整逻辑画布或建立稠密目录。小 Tensor 和边缘 tile 按实际覆盖分配。同一 backing 可以服务不同逻辑 tile extent 的 plan。
 
-class PlanarImage {
- public:
-  static Result<PlanarImage> create(const ValueDescriptor&,
-                                    const PlanarImageConfig&);
-};
-```
+`Tensor::create` 校验 descriptor、精确授权和不可变片段。兼容重叠去重，覆盖缺失失败。负 stride、zero-stride broadcast、共享 owner 的多个片段和合法外部 backing 保留其映射。结构检查覆盖 dtype、rank、坐标、字节跨度、溢出、所有权和同步。
 
-`WorkflowDocument` 是复制后送入 compiler 的 source。Node 带有 operation key、按端口排序的输入引用、typed parameter 和命名输出选择。Input declaration 必须提供固定的 `result_schema`；缺少 schema 时 compiler validation 返回 `InvalidArgument`。Execution binding 提供对应的 owning `ResultRef`，其结构 schema 会与 declaration 比对。Compiler 拒绝 `schema_version` 不等于 6 的 document，包括早期基于标签的 workflow。Plan 保留 declaration 与选中的 resource identity，不保留调用方 sample 地址。
+算子获取拥有型 `ResultTensorReadWindow`，通过受限 `ResultTensorWriteWindow` callback 写入。`row_run()` 与 `rectangle_run()` 返回真实地址和 stride，并在授权、物理 tile 和片段边界截断。保留窗口会保留 backing。借用的 callback 服务在返回时失效，包括 poll 暂停时。
 
-通用 `Value` 包含 rank 为 1..8 且 extent 非零的 descriptor、逻辑 `Region`、`StridedLayout`，以及共享的不可变 CPU 可访问存储。Element type 包括 `UInt8`、`Int8`、`UInt16`、`Int16`、`Int64`、`Float32` 和 `Float64`。`ValueDescriptor` 只包含 element type 和逻辑 shape。`Value::create` 在发布前校验 shape 和 coverage、stride 数量与寻址字节范围以及 element type。只要全部寻址字节都位于 backing allocation 内，负 stride 和零 stride 均有效。副本共享存储，不暴露可写指针。
-
-`Value::byte_address` 把一个逻辑坐标映射为 `bytes()` 中经过检查的字节偏移。它应用 Region 原点和 layout stride，包括负 stride、broadcast（零）stride 和高原点。坐标超出 coverage、rank 不匹配、坐标指针为空或 Value 为默认构造状态时返回 `InvalidArgument`。指针加 rank 的重载和花括号列表重载只在调用期间借用坐标，成功路径不分配内存，适合逐样本循环；例如 `value.byte_address({y, x, c})` 直接寻址 HWC 图像中像素 `(x, y)` 的通道 `c`，不需要构造 vector。vector 重载的结果相同。`ValueView` 转发全部三个重载。对同一个不可变 Value 的并发调用是安全的。
-
-`Region` 按 descriptor 轴顺序保存无符号 offset/extent。它描述逻辑样本，不表示字节范围。Region interval 和 element count 使用 checked arithmetic。`Value::as_float64()` 只接受连续的 Float64 scalar，且 Region 必须为 rank one 并精确等于 `{offset=0, extent=1}`；其他合法 coverage 仍可通过通用 accessor 使用。
-
-`BufferAllocator` 在分配前预留容量。只能移动的 mutable buffer 在发布时将租约转移给不可变存储。`Value::from_storage` 和 `view` 可以无复制共享 backing；`bytes()` 返回借用视图，`copy_bytes()` 明确复制到调用方所有的内存。存储可超过 allocator 和 execution context 的寿命。Regional-source callback 同步填充请求的 packed Region；可写目标和 allocator 指针在回调返回时失效。
-
-`PlanarImage` 表示结构化 rank-2 或 rank-3 存储，带有显式图像轴和结构分量组。分量组为存储分组命名 channel 范围；内核不会从中推导颜色模型、alpha 或数值范围。它的虚拟地址预留、已 backing 页面、metadata 容量和有效样本是不同资源。连续和 tiled 存储都保证每行样本连续。Tile 高度与宽度必须为正的 2 次幂；图像或 ROI 可以在部分 tile 结束。
-
-样本发布后才可读取。已发布样本不可变，存储租约保留到最后一个 image 或 read-window owner 释放。预算耗尽不会驱逐存活 backing。`acquire` 返回保留 owner 的读取窗口；`row_run` 和 `rectangle_run` 只暴露获准范围，并受请求 Region 和物理 tile 边界限制。`read` 复制到调用方所有的 packed 存储。事务写窗口在 commit 时发布获准输出范围，失败时丢弃未发布写入。
+稠密收集是显式操作。`Tensor::collect` 和 SDK collection 检查覆盖与容量、计费复制并观察取消。设备不支持的映射需要显式、计费的 packing 或 transfer。完整逻辑覆盖不意味着连续存储。
 
 ## 3. 调度与状态
 
-```text
-WorkflowDocument -> declarations + inferred schemas ----> ExecutionPlan
-          |                                              |
-          +---- 调用方持有的具名 bindings ---------------+
-                                                         v
-                                                    ExecutionRun
-                                           +-------------+-------------+
-                                           |                           |
-                                  Result producers 与 typed tensor slots
-                                           |                           |
-                                      命名 Result outputs     dependency evidence
-                                           +-------------+-------------+
-                                                         v
-                                                ExecutionResult
-```
+一个 Run 固定 plan、binding snapshot 和 generation。每个成员在 plan-wide `tile_extent` 下拥有逻辑网格；该值是正二次幂，默认 128。空间成员切分 H/W，非空间成员切分最后两个非 atomic cell 轴。显式 batch 坐标保持独立，atomic 末尾轴保持完整。见 [ADR 0023](../../adr/zh/0023-track-dependencies-between-fixed-tiles.zh.md#31-成员-tile-网格)。
 
-`ExecutionBindings` 使用精确名称并为 structured operation 提供 Result owners。Binding 在 callback 前检查 declaration schema。Plan 不捕获 runtime address，因此独立的不可变 bindings 可独立或并发执行同一个 current plan。`Value` 与 `PlanarImage` 可作为本地或 backing storage，但不是 structured operation 的替代 port。
+Payload Need 使用成员 slot 和紧凑 tile 区间寻址。Descriptor-only 请求必须显式提出，且不授予样本。空 payload 集合不执行工作。Continuation 可以跨多次 poll 请求输入。普通输出 actor 恰好发布一个完整成员 tile；Run 共享 stage 承担全局计算，可以生产多个 tile。见 [Global Results](Global-Results.zh.md)。
 
-Planning 保留两个 closure。Metadata closure 沿 output-reachable operation 的全部静态 input 展开，以保留完整 schema、specialization 与 identity。Executable closure 从命名 output 和 side-effect root 开始，再只沿所选 output 的 `input_indices` 展开；未声明 projection 时展开该 node 的全部 input。Backend placement 与准入只作用于 executable closure。只用于 metadata 的 input 仍接受静态校验并参与 identity，但其 producer 不执行。直接请求 GPU-only output 时，`CpuExact` 仍返回不可用错误。
+Metadata 闭包包括 schema 和 identity 所需的静态输入。可执行闭包遵循所选输出投影和声明的共享 stage 依赖。仅用于 metadata 的 producer 不执行 payload callback。Binding schema 在 callback 前检查，plan 不保留调用方样本地址。
 
-Workflow input declaration id 与 node id 使用不同命名空间。Document 最多有 4096 个 declaration；每个 declaration 的 id 非零且唯一，name 唯一并由 1 至 128 个可打印 ASCII 字节组成，取值范围为 `0x21` 到 `0x7e`。Compiler stage 按 id 顺序携带 declaration。每个 Result input declaration 都携带完整 schema；缺少 schema 时返回 `InvalidArgument`。Compiler 根据静态 input domain 解析 input-derived extent，不读取 payload samples。
-
-当 Result binding 引用 execution root 之外的 storage 时，runtime 会按 `Referenced` 准入其保留容量。已发布的 view 保留其 source Result 与 backing owner。Result tensor read 受 captured descriptor 与请求授权区域限制；publication 和 window ownership 见[Structured Results and tensor slots](../Global-Results.md)。
-
-`ExecutionResult` 包含具名 Result outputs、dependency evidence 和 diagnostics。每个返回的 Result 持有其存储 leases，直到最后一个 owning reference 释放。
+Workflow 输入 id 和 node id 分属不同命名空间。最多 4096 个输入声明使用唯一非零 id 和唯一的 1 到 128 字节可打印 ASCII 名称。Context 退役后，Result owner 和读窗口仍保留 backing 与 Root 租约。执行保留的外部 backing 计入 Referenced 容量。
 
 ## 4. 算法与校验
 
-Result schema 描述逻辑 sample domain；Compiler 不要求其 dense element product 或 packed byte count 能表示为机器 allocation size，Result planning 也不估算 dense payload bytes。实际 `Value` backing 创建时会校验 allocation size 和寻址字节范围，stride 也必须适配有符号表示。Result 的逻辑 domain 可以远大于物理 backing，例如由小 allocation 支持的 broadcast view。
+逻辑 schema 不必能装入一个稠密 allocation。实际分配和寻址字节跨度必须满足表示范围与预算。Tile 数、区间端点和索引运算检查溢出。Tensor 存储保留整数和浮点位模式；数值域约束由算子和显式绑定的 validator 施加。
 
-Result tensor schema 描述逻辑轴和可选空间布局。Tiled physical address 不能用普通仿射 stride 表示。各 operation 声明支持的 Result schema 与执行行为；空间规划需要时，`PlanningOptions` 提供 physical tile 几何。
-
-`SchemaTemplate::id` 与 `version` 标识显式结构契约，并参与编译身份。内核不会据此分派到某种领域解释。结构相同但对调用方含义不同的两个 Result（例如线性 RGB 与 sRGB 编码 RGB）可以连接到同一个端口；样本含义由算子的显式参数和绑定的校验器决定。
-
-Float32 Value 保留 binary32 payload bits。Scalar 或 operation contract 校验实际消费的数值定义域；存储层独立处理 element 表示。3D LUT bake report 与 table 等领域 schema 由算子 SDK（`photospider/ops/numeric/lut3d_bake.hpp`）定义，不属于内核；见 [CRV-09](../../built-in_ops/01-numeric/op_specs/CRV-09_bake_lut3d.md)。
+`SchemaTemplate::id` 与 `version` 标识结构契约并进入编译 identity，不在内核中选择领域语义。LUT bake 等领域报告 schema 属于 ops SDK。完整 validator 要求其范围内所有成员均已获得完整授权，不自动增加输入 Need。
 
 ## 5. 限制与非目标
 
-- Result 是内存中的值，没有持久 identity、receipt、serialization 或 recovery contract。
-- Data-definition registry 保存来自受信任启动注册或 DSO 的复制 schema metadata；它不分配 Value，也不提供存储。
-- Structural image 能力由 Result tensor schema 和 operation contract 声明；不支持的组合会在校验或规划阶段返回带类型的失败。
-- `CpuStorage` 暴露 CPU 可访问的不可变字节，也可保留已完成的原生存储。Device handle 保持私有。
-- 管线元素类型为 UInt8、Int8、UInt16、Int16、Int64、Float32 和 Float64。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) D6（Proposed）保持该集合封闭，并拒绝未知 dtype。
-- Kernel 没有时间或序列类型。Batch axes，包括图像的 frame/layer axes，不带时间含义；ADR 0022 D7 将时间表示、选帧和跨帧状态交给宿主应用。
+Result 不具有持久序列化或恢复契约。静态 schema 和 tile 几何不意味着稠密驻留。Batch 轴不携带时间含义。内核不提供动态 field 行或独立的整体 Result 执行模式。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) 仍为 Proposed，其目标 ABI 设计与已实现的 ABI 5 分开描述。

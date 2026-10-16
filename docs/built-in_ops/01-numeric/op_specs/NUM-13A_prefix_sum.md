@@ -50,13 +50,12 @@ own source interval, not a recurrence on previously rounded output values.
 Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
 
 Empty mathematical prefixes yield integer zero or floating +0. For every
-nonempty output demand, Whole requests complete input support with Data,
-Validation and Descriptor (role 13), including a request limited to k=0. The
+nonempty output demand, complete-input requests complete input support with Data,
+Validation and Descriptor , including a request limited to k=0. The
 kernel reads through authorized Result windows and does not pack the complete
-input into another payload. It computes and publishes the complete output in
-global coordinates; the requested footprint scopes observed dependency roots.
-Consumers can read any coordinate within the Result's complete published
-coverage. Empty demand has no sample coverage or arithmetic and issues no input
+input into another payload. The shared stage computes and retains the complete internal output in global
+coordinates. Public actors publish requested complete tiles only; consumers may
+read only authorized coverage, regardless of retained backing or evidence. Empty demand has no sample coverage or arithmetic and issues no input
 payload Need.
 For nonempty prefixes, source NaN priority follows original logical axis order,
 with shared quieting/payload conversion. Mixed signed infinities and finite zero
@@ -73,7 +72,7 @@ The exact accumulator itself can exceed destination range; only an actual
 complete-output final conversion fails. Floating overflow remains a numerical
 infinity and does not contaminate the exact carry used by later outputs.
 
-## Whole demand, state and invalidation
+## complete-input demand, state and invalidation
 
 Nonempty demand requests and validates the complete input support, then computes
 complete output, including all lines and boundaries. A request only at k=0 still
@@ -100,7 +99,7 @@ including coordinates outside the requested projection.
 
 ## Implementation and executable acceptance
 
-The six registered profile keys use Whole execution. Public authoring helpers are
+The six registered profile keys use Run-shared complete-input computation. Public authoring helpers are
 declared in `photospider/ops/numeric/scans.hpp`; current execution and focused
-validation details are in [NUM-13 Whole execution](../scans-whole.md). Proposed
+validation details are in [NUM-13 Run-shared complete-input computation](../scans-whole.md). Proposed
 specification status is unchanged.

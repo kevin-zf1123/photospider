@@ -77,7 +77,7 @@ Confirmed operator-specific decisions:
 
 Each operation has named inputs `a`, `b` and output `values`, except atan2/atan2pi
 use `y` and `x` in that order. Each bound input Result contains exactly one
-tensor member in slot 0 and may also contain fields. The Result schema IDs may
+tensor member in slot 0. The Result schema IDs may
 differ. Input rank is 1..8, extents are positive, and the full sample shapes
 and dtypes match. Input structure and explicitly bound validators are checked under the
 operation contract; there is no implicit domain-label validation. The `values` output is a Result using schema `photospider.tensor`,
@@ -86,8 +86,8 @@ no attached domain description. Output batch topology is dropped. No implicit br
 unit inference occurs.
 
 Compile/preflight rejects unsupported dtype, mismatched shape or unknown static
-parameters before numeric reads. A nonempty Whole request needs complete input
-support with Data, Validation and Descriptor roles (mask 13). The coordinator
+parameters before numeric reads. A nonempty complete-input request needs complete input
+support with ordinary member tile Needs with explicitly bound validators. The coordinator
 supplies authorized tensor windows, including legal signed and zero strides;
 the operation does not require a packed copy of either input. It validates and
 computes the complete packed output Result, after which the executor projects
@@ -108,7 +108,7 @@ more work and memory.
 Acceptance uses independent exact integer/rational or high-precision mathematical
 oracles, not the implementation helper. Exercise all supported dtypes, signed
 zeros, subnormals, extrema, NaN payload priority, valid strided inputs, disjoint
-requests, typed validation, Whole overflow failure and resource/cancellation cleanup.
+requests, typed validation, complete-input overflow failure and resource/cancellation cleanup.
 A conceptual WorkflowDocument fixture binds both arrays, compiles a selected key,
 and reads requested values through ExecutionContext. Implementation delivery
 provides actual runnable public fixtures and results as documented below.
@@ -117,7 +117,7 @@ provides actual runnable public fixtures and results as documented below.
 
 All 27 keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/ops/numeric/binary.hpp`.
-The shared Whole Result implementation validates both complete inputs, even
+The shared complete-input Result implementation validates both complete inputs, even
 when a numeric identity determines a result. Floating elementary operations
 use controlled correctly rounded hardware arithmetic after exact special-value
 classification, with exact fallback; integer operations retain checked exact

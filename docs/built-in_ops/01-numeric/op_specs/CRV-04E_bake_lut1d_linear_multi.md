@@ -22,7 +22,7 @@ range/fallback rules. Discrete results, copies, selected endpoints and special
 values remain exact.
 
 Inherit the [baking template contract](CRV-04_bake_lut1d.md) in full for authoring
-profile/defaults, count/dtype, named outputs, Whole execution, resources, errors,
+profile/defaults, count/dtype, named outputs, Run-shared complete-input computation, resources, errors,
 owner lifetime and public graph-equivalence acceptance. This is a workflow
 construction template; its name is not an OperationRegistry key.
 
@@ -40,7 +40,7 @@ Create numeric.linspace with the selected profile suffix, start/end inputs,
 count and fixed dtype="float64". Create curve.interpolate_linear_multi with the same profile
 suffix; connect x/y and linspace.values to query, and pass the final dtype and
 out_of_domain. Export interpolator.values and linspace.axis. Values execution materializes the complete Float64 query array and complete
-interpolation output under the inherited Whole contract.
+interpolation output under the inherited complete-input contract.
 
 Each exported shape/dtype is inferred by its expanded source. Scalar values
 retain [count]; multi-function values retain [count,C], including C=1. This

@@ -41,7 +41,7 @@ Positive-weight normalized filters, signed kernels, local regression, and global
 
 ## Dependencies and acceptance
 
-Each member’s support set is normative. A halo does not mean the operation can run independently on an arbitrary cropped ROI, and paging does not cancel a Whole-image dependency. Staged rounding, global connectivity, transforms, and iterative state must follow each member’s definition. Multi-output requests are independent; validation of an unrequested component’s payload must not introduce a hidden whole-image dependency.
+Each member’s support set is normative. A halo does not mean the operation can run independently on an arbitrary cropped ROI, and paging does not cancel a complete-input-image dependency. Staged rounding, global connectivity, transforms, and iterative state must follow each member’s definition. Multi-output requests are independent; validation of an unrequested component’s payload must not introduce a hidden whole-image dependency.
 
 All members must follow the [acceptance protocol](FILTER_oracle_protocol.md). This round’s mathematical references and associated self-checks are documented in the [oracle instructions](../../../../oracle/ops/filter/README.md); no new Photospider runtime implementation was executed. D1/D2 describe draft maturity, not pass rates.
 

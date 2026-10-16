@@ -41,7 +41,7 @@ Keep `k_new` as exact rational state so `sum(k)=1` remains exact. Do not write i
 
 ## Demand, resources and failure
 
-Whole image and PSF are required; support is control data. Both outputs refer to one coherent iteration state. Descriptor shape is derived from inputs and static parameters. Work is `O(T*P*A)+O(T*A log A)` for this single-plane member. Charge exact rational limb growth and projection workspace. Budget exhaustion fails without changing precision or publishing a partial pair. Cancellation and owner lifetime follow FILTER common contracts.
+complete-input image and PSF are required; support is control data. Both outputs refer to one coherent iteration state. Descriptor shape is derived from inputs and static parameters. Work is `O(T*P*A)+O(T*A log A)` for this single-plane member. Charge exact rational limb growth and projection workspace. Budget exhaustion fails without changing precision or publishing a partial pair. Cancellation and owner lifetime follow FILTER common contracts.
 
 ## Oracle and acceptance
 

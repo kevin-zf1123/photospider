@@ -53,7 +53,7 @@ class ExecutionContext {
 };
 ```
 
-以上是省略其他成员后的 public method 签名。每个阶段返回完整不可变值或带类型的失败。Optimizer 将 semantic node 复制到独立阶段并计算独立 digest。Planning 保留静态 metadata，以完整校验 schema 和 identity，再根据选定 output 的 input projection 推导 executable demand。Execution 在 callback 前检查 plan currentness 与冻结的 operation registry identity，然后校验 Result schema、请求 coverage、dependency evidence 和 publication finality。`analyze` 接收不可变的内容寻址 `ResourceSet`；每个算子的 preparation 选择它需要的 identity，例如由显式颜色参数命名的 ICC profile。Result 与 Value 只携带结构和数据；领域解释是显式算子参数，内核不在连线上做标签匹配。
+以上是省略其他成员后的 public method 签名。每个阶段返回完整不可变值或带类型的失败。Optimizer 将 semantic node 复制到独立阶段并计算独立 digest。Planning 保留静态 metadata，以完整校验 schema 和 identity，再根据选定 output 的 input projection 推导 executable demand。Execution 在 callback 前检查 plan currentness 与冻结的 operation registry identity，然后校验 Result schema、请求 coverage、dependency evidence 和 publication finality。`analyze` 接收不可变的内容寻址 `ResourceSet`；每个算子的 preparation 选择它需要的 identity，例如由显式颜色参数命名的 ICC profile。Result 与 Tensor 只携带结构和数据；领域解释是显式算子参数，内核不在连线上做标签匹配。
 
 `CpuExact` 是默认执行模式。`NativeGpu` 仅允许把声明了原生实现且匹配当前配置后端的算子放到 GPU。CPU 工作使用固定 context pool；原生回调使用配置的 backend lane。Cancellation 是协作式的，已经进入回调的任务可能需要完成后 Run 才能返回。
 

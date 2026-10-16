@@ -37,7 +37,7 @@
 Bézier二次 `B=(1-t)²P0+2(1-t)tP1+t²P2`；三次用对应Bernstein权重。弧长 `s(t)=∫₀ᵗ|B′(u)|du`，具体成员规定单调(t,s)表与反求t策略。均匀t通常不是均匀几何距离；Fourier只适合显式周期profile，普通线宽优先linear/PCHIP避免振铃负值。
 
 零长路径不计算未定义的 s/L；宽度定义域、重采样数量及零长 cap 分别按成员规定处理。
-空 PathSet 使用零字段 rows 与 offsets=[0]；普通 Value 轴约束独立适用。B-spline
+空 PathSet 使用 payload count=0，offsets 有效前缀为 [0]；固定容量和 padding codec 在注册前明确；普通 Tensor 轴约束独立适用。B-spline
 须带 degree/knots，并显式定义归一 t 到有效 knot 区间的映射。
 精确几何对象与近似发布结果分离；拟合按后端求解器区分算子，连续 Hausdorff 误差
 验证独立于求解器的离散残差。拓扑策略默认 allow_change，可选 reject_unproven；
@@ -53,12 +53,12 @@ coverage与SDF独立：前者为像素面积比例[0,1]，后者为px距离。�
 
 ## Region、使用和验收
 
-输出tile需读取所有可能覆盖其footprint的段，stroke扩张包含半宽、join/miter与AA。PathSet schema 不提供 stroke 专用空间索引；节点可用现有 ResultRelation 表达 Conservative 全路径支持，或提供经过证明的精确段映射，并声明 descriptor/拓扑依赖。路径中一次编辑的dirty不能只用控制点bbox，要覆盖曲线与描边的真实/保守范围。
+输出tile需读取所有可能覆盖其footprint的段，stroke扩张包含半宽、join/miter与AA。PathSet schema 不提供 stroke 专用空间索引；节点把完整路径或经证明的数学段支持转换为普通成员 tile Needs，并显式记录 descriptor/拓扑读取。路径中一次编辑的dirty不能只用控制点bbox，要覆盖曲线与描边的真实/保守范围。
 
 概念流程：`controls→arc-length→width curve→stroke coverage→color ramp/constant→over`；另可`path→SDF→mask offset→feather`。解析验收包括100px直线、圆/矩形面积、孔洞、自交、闭合接缝、宽度0/.25/1/10px、非均匀变换和不同tile一致。边界与迭代使用Float64参考，GPU 按独立后端 profile 声明数值契约，同版本同 profile 保持确定性；几何误差与数值误差分别验收。
 
 
-Regional、Halo 与 Whole 按实际数学依赖选择。全局拓扑构造需要 Whole 时显式声明；
+Regional、Halo 与 complete-input 按实际数学依赖选择。全局拓扑构造需要 complete-input 时显式声明；
 局部 raster 输出与完整控制验证分开。精确 Boolean、量化网格 Boolean、精确 Result
 发布和 Float64 网格输出分别由 PTH-12 成员定义，Result schema 与生产后端仍须落实。
 

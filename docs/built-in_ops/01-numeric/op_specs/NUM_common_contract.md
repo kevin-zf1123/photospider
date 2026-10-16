@@ -11,7 +11,7 @@ implementation_status: implemented
 # NUM: specification and execution baseline
 
 The [FMT explicit-configuration contract](../../02-format-color/op_specs/FMT_common_contract.md)
-keeps domain interpretation outside Result/Value. Numeric operations receive
+keeps domain interpretation outside Result/Tensor. Numeric operations receive
 structure and samples; any color, alpha, sampling or LUT interpretation required
 by an operation is a declared static parameter. Outputs do not propagate or
 clear a facet list, because no such list exists. Domain checks come from the
@@ -72,8 +72,8 @@ Resource, cancellation and upstream failure must not be hidden by fallback.
 ## Interface and descriptor conventions
 
 Runtime operation ports are Results, required unless explicitly stated otherwise.
-A numeric input normally contains one tensor and no fields; individual contracts
-define the allowed schema and any field-only reports. Value is backing storage.
+A numeric input normally contains one tensor; individual contracts
+define the allowed schema and any field-only reports. Tensor is backing storage.
 Input and output order is their listed order; single-output specifications use
 values unless explicitly named otherwise. Each file supplies the shape, dtype
 and static parameters or names the family from which it inherits them. Rank is
@@ -111,7 +111,7 @@ tuple closure uses atomic_trailing_axes. Descriptor demand covers the static inp
 metadata needed by compilation. Empty Q introduces no runtime payload reads.
 Dynamic controls retain witnesses even when they do not change returned values.
 The operator must not enlarge its support to a bounding gap. Required upstream
-execution may have its own indivisible or Whole support; these specifications
+execution may have its own indivisible or complete-input support; these specifications
 do not promise suppression of failures inside genuinely required upstream work.
 
 The following default mapping applies where an individual file has not supplied
@@ -140,7 +140,7 @@ integrate_1d step affects positive indices only, and prefix_sum integer overflow
 belongs only to the requested overflowing prefix. Existing typed validation
 domains retain their own scope. Ordinary execute is fail-fast.
 
-A failed observation publishes no partial Value or successful certificate.
+A failed observation publishes no partial Tensor or successful certificate.
 Independently completed observations retain their terminal outcomes. Dense
 results cover requested global coordinates with owned packed fragments. Explicit
 view policies may retain source owners or publish broader valid constant coverage

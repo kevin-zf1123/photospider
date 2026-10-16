@@ -27,7 +27,7 @@ must represent source maps, closed seams and zero-length behavior.
 
 Inherit [GEN common](GEN_common_contract.md), and applicable
 [random](NOI_random_contract.md) and [path geometry](PTH_geometry_contract.md) rules.
-Members declare Regional, Halo or Whole from actual mathematical dependencies,
+Members declare Regional, Halo or complete-input from actual mathematical dependencies,
 independently of complete control validation. GPU capability is member/backend-specific.
 Same version/profile means bit-identical output; numerical error, geometry error and
 topology guarantees are separate. Public Result data requires validated source

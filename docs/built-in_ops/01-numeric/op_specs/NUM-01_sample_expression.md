@@ -101,10 +101,10 @@ Singleton coordinates preserve the supplied start, and endpoint coordinates
 preserve endpoint bits, including a signed zero where the interval is legal.
 
 Adjacent sampled coordinates must remain distinguishable in Float64. For each
-index `i` in a nonempty Whole values request, compute its coordinate and the valid neighbor coordinates
+index `i` in a nonempty complete-input values request, compute its coordinate and the valid neighbor coordinates
 `i-1` and `i+1` for this validation only. Reject equality with either neighbor
 as insufficient sampling-coordinate precision. Neighbor function values are
-not evaluated by the neighbor check. Whole values evaluates all N samples
+not evaluated by the neighbor check. complete-input values evaluates all N samples
 before projection; axis-only performs no coordinate-distinctness scan. The same rule applies to ascending and descending intervals.
 
 ## 3. Dynamic workflow inputs
@@ -122,7 +122,7 @@ tensor member under any member key. Its `sample_shape()` is `[1]` and its dtype
 is Float32 or Float64. Ports may use different floating dtypes.
 Float32 values widen exactly to Float64 before arithmetic. Integer inputs
 require an explicit upstream cast; there is no implicit integer conversion.
-Whole input preparation requests Data, Validation and Descriptor (role 13) for
+complete-input input preparation requests ordinary payload tile Needs for
 each active input. Domain units are explicit configuration and no domain description is
 propagated to outputs.
 Valid immutable signed-stride, offset and unaligned `[1]` views are supported.
@@ -191,7 +191,7 @@ platform and strict-step fallback. A call to a platform-specific accelerated key
 on a mismatched platform returns `BackendUnavailable`; it does not silently
 select another operator. Cancellation, allocation/work failure and upstream
 failure are not capability fallback conditions and retain their original errors.
-Whole Result executions retain their explicit operation/profile identities but do not
+complete-input Result executions retain their explicit operation/profile identities but do not
 expose per-atom strict-call or fallback counters. Such counters are unavailable;
 do not infer them from successful output count. Numerical core diagnostics may
 be collected by a separate targeted driver without changing public outputs.
@@ -306,7 +306,7 @@ No count, endpoint or coefficient value is implicitly synthesized by the
 registry. Changing expression, names, count or dtype requires compilation;
 changing numeric input values does not.
 
-## 6. Whole execution
+## 6. Run-shared complete-input computation
 
 A nonempty values request collects all active scalar inputs and computes all N
 samples before projecting the immutable Result to the requested global indices.
@@ -317,7 +317,7 @@ is zero. No partially successful values output is published.
 `prepare_static` parses the expression once and shares the immutable AST between
 the two output programs and later dynamic executions. It validates all input
 schemas, member shapes and numeric dtypes before runtime projection. For runtime
-needs, the Whole program sends input requests in envelopes of at most 64 ports.
+needs, the complete-input program sends input requests in envelopes of at most 64 ports.
 Registration declares up to 258 input slots (start, end and a ceiling of 256
 coefficient slots) and reserves five input Need stages plus publication, six
 stages total. The AST node limit can reject a source before its declared
@@ -364,7 +364,7 @@ Cache identity retains exact parameters, metadata and active input witnesses.
 Profiles remain separate. Cache-off preserves ownership and arithmetic. Numeric
 failure uses Domain/Run with no Atom, retaining failing global sample, x and AST
 span text. Upstream, capacity/work, cancellation and stale status retain their
-original categories. Failure is limited to the selected Whole output; an axis
+original categories. Failure is limited to the selected complete-input output; an axis
 success does not certify values success.
 
 ### Reference algorithms, resources and cancellation
@@ -397,7 +397,7 @@ terms. Excluding external consumers, plan storage and upstream ownership:
 
 | Storage/work | Bound or accounting rule |
 | --- | --- |
-| Whole values payload | `b*N`; full output at maximum N is 4 MiB or 8 MiB |
+| complete-input values payload | `b*N`; full output at maximum N is 4 MiB or 8 MiB |
 | Axis payload | 24 bytes if requested |
 | Scalar/evaluation scratch per active sample or admitted lane | `8*(K+2)+8*A <= 4112` bytes, plus coordinate state |
 | Shared packed input scalars | At most `8*(K+2)` bytes when deduplicated; no sharing is required for correctness |
@@ -409,7 +409,7 @@ Reserve before allocation, account old/new buffers simultaneously when growing,
 and bound live batch width by the admitted resources. No temporary disk backing
 or persistent runtime state is required by this Result operator. Every nonempty
 values projection requires complete output capacity, so a small ROI cannot avoid
-that payload admission. No universal RSS bound is claimed. The Whole program
+that payload admission. No universal RSS bound is claimed. The complete-input program
 sends active input Needs in envelopes of at most 64 ports, then publishes the
 output. Values needs at most five input stages and one publication stage. Host
 limits never permit silently truncating count, expression or coefficient set.
@@ -434,7 +434,7 @@ failures are sticky and are never converted into an accelerated fallback success
 | Cancellation or stale input/plan | Preserve the existing cancellation/stale status and origin |
 | Upstream failure | Preserve upstream node/input identity, code, reason and scope |
 
-Numeric failure has Domain origin and Run scope for the selected Whole output.
+Numeric failure has Domain origin and Run scope for the selected complete-input output.
 Diagnostics retain the failing global sample index and exact-round-trip x when
 available, together with AST source span/function or input name. Pre-coordinate
 errors state x unavailable. No partial values are published. Bounded status text
@@ -471,7 +471,7 @@ Rejected samples replay through the strict evaluator when the final bound is not
 fixed-refinement resource limits.
 
 Static preparation sets the values input projection to all active scalars and
-axis to its active endpoints. Both outputs execute through Whole Result programs;
+axis to its active endpoints. Both outputs execute through Run-shared Result programs;
 the axis program requests an atomic tuple. There are no per-sample requests or
 custom dependency pieces. Axis allocates its smaller exact-coordinate state
 without the transcendental arena; the common workspace admission reserves the
@@ -510,7 +510,7 @@ Test exact zeros, sensitive cancellation and subnormal boundaries explicitly.
 | T14 | Dirty/cache tests: coefficient changes affect values only; N=1 end changes affect neither; N>=2 endpoint changes affect both; profile changes cannot reuse another profile's numeric entry |
 | T15 | Small ROI requires full values capacity; rejected allocation/work limits; cancellation during AST and strict refinement; all unpublished ownership released |
 | T16 | Cache-off, multiple consumers, context destruction with live output Results, and release by the final owner |
-| T17 | Strict bit equality on supported Apple Silicon and x86-64 builds; accelerated final FP32-scaled ULP checks, input-domain fallback, wrong-platform BackendUnavailable and unavailable Whole counters |
+| T17 | Strict bit equality on supported Apple Silicon and x86-64 builds; accelerated final FP32-scaled ULP checks, input-domain fallback, wrong-platform BackendUnavailable and unavailable complete-input counters |
 | T18 | Sensitive `1/(exp(x)-a)` boundary: require strict-equivalent failure classification and final-error acceptance |
 
 All three operation keys require public WorkflowDocument -> Compiler ->
@@ -543,7 +543,7 @@ axis and plan. Use the appropriate accelerated key on its supported CPU target.
 
 Performance acceptance records hardware, OS/compiler, math library/profile, N,
 AST, dtype, requested M, cache state, admitted resources and timing distribution.
-For the current Whole Result benchmark, `invocations` counts operation polls and
+For the current complete-input Result benchmark, `invocations` counts operation polls and
 `computed_elements` reports the full output count even for an ROI; per-value
 evaluation, strict-math and fallback counters are N/A. Report the cumulative
 Root Payload peak separately from Referenced input storage and RSS. Compare
@@ -560,7 +560,7 @@ height 8 across 130 declared ports, atomic axis publication and source associati
 Cover failures outside requested values, duplicate coordinates with axis-only
 behavior, N=1 end-producer exclusion, invalid scalar schemas, Float32 overflow,
 Empty queries, caller/worker floating environments, work limits, cancellation
-and output lifetime. See [NUM-01 Whole execution](../expression-whole.md) for the
+and output lifetime. See [NUM-01 Run-shared complete-input computation](../expression-whole.md) for the
 execution behavior and validation scope.
 
 ## 9. Related requirements
@@ -570,4 +570,4 @@ execution behavior and validation scope.
 - [Operator specification template](../../00-foundation/spec-template.md).
 - [Common data and execution contracts](../../00-foundation/contracts.md).
 
-Whole execution: [expression Whole](../expression-whole.md).
+Run-shared complete-input computation: [expression complete-input](../expression-whole.md).

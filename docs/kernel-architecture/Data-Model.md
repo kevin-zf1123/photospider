@@ -2,104 +2,44 @@
 
 ## 1. Scope and ownership
 
-The compiler owns immutable workflow structure and inferred structural metadata. Structured operations exchange `ResultRef` owners through named bindings; a Result contains typed tensor slots, packed fields, or both. `Value` remains a typed backing and local data container, while `PlanarImage` provides image storage. Returned Result owners retain their storage and accounting leases after the execution context retires.
+The compiler owns immutable workflow structure and resolved static schemas. Operations exchange `ResultRef` owners through Result ports. A Result has 1 to 16 named Tensor members. Their names, dtype, rank, cell shape, batch axes, atomic trailing axes and logical grids are fixed in the prepared plan. Structure may depend on input schemas and static parameters, never on runtime sample values. A changed input structure requires preparation and compilation again.
 
-Result and Value carry structure, sample data, and the owners that their storage needs. They carry no attached domain description: color space, white point, transfer, alpha association, sampling, and LUT interpretation are explicit static parameters of each operation that needs them. Operation-owned immutable resources, such as ICC profiles, stay in the plan and execution state through `ResourceSet`, not in the Result.
+`Tensor` is the single numerical carrier. `TensorSpan` describes one rectangular backing mapping within it; it is not a second numerical model. `CpuStorage`, buffers, native allocations and resource leases represent physical resources. `ValueRef` remains a graph reference and `Result<T>` remains the error-return template.
+
+Result and Tensor carry no attached color, alpha, transfer or LUT interpretation. Operations receive explicit parameters and resources where their algorithms need them. Ordinary image operations default to straight alpha; the kernel neither certifies this convention nor infers RGBA from four channels.
 
 ## 2. Core structures and memory layout
 
-```cpp
-struct WorkflowDocument {
-  std::uint32_t schema_version = 6;
-  std::vector<WorkflowInputDeclaration> inputs;
-  std::vector<WorkflowNode> nodes;
-  std::vector<WorkflowOutput> outputs;
-};
+The public structures are in [`result.hpp`](../../include/photospider/data/result.hpp), [`tensor.hpp`](../../include/photospider/data/tensor.hpp) and [`tensor_span.hpp`](../../include/photospider/data/tensor_span.hpp). WorkflowDocument uses schema 7. `WorkflowInputDeclaration::result_schema` is required, and `ExecutionBinding` supplies an owning Result under its exact declared name.
 
-class Region;  // logical offset/extent intervals in descriptor-axis order
+The supported dtypes are UInt8, Int8, UInt16, Int16, Int64, Float32 and Float64. Sample rank remains 1 through 8 and extents remain positive. A scalar uses `[1]`. No rank-zero, zero-extent, ragged or runtime-rank member is introduced. Sample shape concatenates explicit batch extents and cell shape. `InputAxis` and `InputElements` extent expressions are resolved from static input structure before execution.
 
-class Value {
- public:
-  static Result<Value> create(ValueDescriptor, Region, StridedLayout,
-                              std::vector<std::uint8_t>);
-  // Checked byte offset of one logical coordinate inside bytes().
-  Result<std::size_t> byte_address(const std::uint64_t* coordinate,
-                                   std::size_t rank) const;
-  Result<std::size_t> byte_address(
-      std::initializer_list<std::uint64_t> coordinate) const;
-  Result<std::size_t> byte_address(
-      const std::vector<std::uint64_t>& coordinate) const;
-};
+A data-dependent number of records uses a static capacity, for example `records: Float32[N,R]` and `count: Int64[1]`, or same-shape data plus a mask. These are ordinary member names and payload values. Reading count or mask requires a payload Need and records dependencies. Every published tile is fully defined, including unused positions filled according to the operation contract. Missing tiles do not shorten the array. Capacity exhaustion fails unless the operation explicitly promises at most K results.
 
-struct ExecutionBinding {
-  std::string name;
-  ResultRef result;
-};
+Host-created Result backing defaults to tiled planar storage. Logical grids and physical allocations are independent. Physical tiles and directories grow with produced coverage; neither a full logical canvas reservation nor a dense directory is required. Small tensors and edge tiles allocate for their actual coverage. One backing may serve plans with different logical tile extents.
 
-class PlanarImage {
- public:
-  static Result<PlanarImage> create(const ValueDescriptor&,
-                                    const PlanarImageConfig&);
-};
-```
+`Tensor::create` validates descriptor, exact authorization and immutable fragments. Compatible overlaps deduplicate; missing coverage fails. Negative strides, zero-stride broadcast, multiple fragments sharing one owner and valid external backing retain their mappings. Structural checks cover dtype, rank, coordinates, byte spans, overflow, ownership and synchronization.
 
-`WorkflowDocument` is copied compiler input. Its nodes carry operation keys, ordered input references, typed parameters, and named output selections. Input declarations require a fixed `result_schema`; compiler validation rejects a missing schema with `InvalidArgument`. Execution bindings provide the corresponding owning `ResultRef`, whose structural schema is checked against that declaration. The compiler rejects documents whose `schema_version` is not 6, including earlier label-based workflows. Plans keep declarations and selected resource identities, not caller sample addresses.
+Operations acquire owning `ResultTensorReadWindow` objects and write through restricted `ResultTensorWriteWindow` callbacks. `row_run()` and `rectangle_run()` report actual addresses and strides and stop at authorization, physical tile and fragment boundaries. Retaining a window retains its backing. Borrowed callback services expire on return, including when poll yields.
 
-A generic `Value` has a nonzero rank-1-to-8 descriptor, a logical `Region`, a `StridedLayout`, and shared immutable CPU-accessible storage. Its element types are `UInt8`, `Int8`, `UInt16`, `Int16`, `Int64`, `Float32`, and `Float64`. `ValueDescriptor` holds only the element type and logical shape. `Value::create` validates shape and coverage, stride count and addressed byte span, and element type before publishing. Negative and zero strides are valid when every addressed byte remains in the backing allocation. Copies share storage and expose no writable pointer.
-
-`Value::byte_address` maps one logical coordinate to a checked byte offset into `bytes()`. It applies the Region origin and the layout strides, including negative strides, broadcast (zero) strides and high origins. A coordinate outside coverage, a rank mismatch, a null coordinate pointer or a default-constructed Value returns `InvalidArgument`. The pointer-plus-rank and brace-list overloads borrow the coordinate only for the duration of the call and perform no allocation on the success path, so they suit per-sample loops; for example, `value.byte_address({y, x, c})` addresses channel `c` of pixel `(x, y)` in an HWC image without building a vector. The vector overload has the same result. `ValueView` forwards all three overloads. Concurrent calls on the same immutable Value are safe.
-
-`Region` stores unsigned offset/extent pairs in descriptor-axis order. It describes logical samples, not bytes. Region interval and element-count arithmetic is checked. `Value::as_float64()` accepts only a contiguous Float64 scalar whose Region is exactly rank one with `{offset=0, extent=1}`; other valid Value coverage remains usable through the general accessors.
-
-`BufferAllocator` reserves capacity before allocation. Move-only mutable buffers transfer their lease into immutable storage at publication. `Value::from_storage` and `view` can share backing without copying; `bytes()` returns a borrowed view and `copy_bytes()` makes an explicit caller-owned copy. Storage can outlive the allocator and execution context. Regional-source callbacks fill a requested packed Region synchronously; their writable destination and allocator pointers expire when the callback returns.
-
-`PlanarImage` represents structural rank-two or rank-three storage with explicit image axes and structural component groups. Component groups name channel ranges for storage grouping; the kernel does not derive a color model, alpha, or numeric range from them. Its virtual address reservation, backed pages, metadata capacity, and valid samples are distinct quantities. Continuous rows and tiled rows store contiguous samples within each row. Tiled geometry requires positive power-of-two tile height and width; image and ROI extents may end at partial tiles.
-
-Pages become readable only after their produced samples are published. Published samples are immutable, and storage leases remain until the last image or read-window owner retires. Budget exhaustion does not evict live backing. `acquire` returns a retained read window; `row_run` and `rectangle_run` expose only authorized spans, bounded by the requested Region and physical tile. `read` copies into caller-owned packed storage. A transactional write window publishes authorized output spans on commit and discards unpublished writes on failure.
+Dense collection is explicit. `Tensor::collect` and SDK collection check coverage and capacity, charge copying and observe cancellation. Packing or transferring an unsupported device mapping is also explicit and charged. Complete logical coverage does not imply contiguous storage.
 
 ## 3. Scheduling and state
 
-```text
-WorkflowDocument -> declarations + inferred schemas ----> ExecutionPlan
-          |                                              |
-          +---- caller-owned named bindings ------------+
-                                                         v
-                                                    ExecutionRun
-                                           +-------------+-------------+
-                                           |                           |
-                                  Result producers and typed tensor slots
-                                           |                           |
-                                  named Result outputs      dependency evidence
-                                           +-------------+-------------+
-                                                         v
-                                                ExecutionResult
-```
+A Run fixes its plan, binding snapshot and generation. Every member has a logical grid under the plan-wide positive power-of-two `tile_extent`, default 128. Spatial members split H/W; nonspatial members split the last two non-atomic cell axes. Explicit batch coordinates stay separate, and atomic trailing axes remain complete. See [ADR 0023](../adr/0023-track-dependencies-between-fixed-tiles.md#31-member-tile-grids).
 
-`ExecutionBindings` uses exact names and supplies Result owners for structured operation inputs. Binding checks the declaration schema before callbacks. The plan does not capture runtime addresses, so separate immutable bindings can execute the same current plan independently or concurrently. `Value` and `PlanarImage` may provide local or backing storage, but they are not alternate structured operation ports.
+Payload Needs address member slots and compact tile intervals. Descriptor-only requests are explicit and grant no samples. An empty payload set does nothing. A continuation may request inputs across multiple polls. Ordinary output actors publish exactly one complete member tile; Run-shared stages provide global computation and may produce several tiles. See [Global Results](Global-Results.md).
 
-Planning retains two closures. The metadata closure follows every static input of output-reachable operations so schemas, specialization, and identity remain complete. The executable closure starts at named outputs and side-effect roots, then follows only each selected output's `input_indices`; when an output does not declare a projection, all of that node's inputs are executable. Backend placement and admission apply to the executable closure. An input used only for metadata still undergoes static validation and contributes to identity, but its producer does not run. A directly requested GPU-only output remains unavailable in `CpuExact` mode.
+Metadata closure includes static inputs needed for schemas and identity. Executable closure follows selected output projections and declared shared-stage dependencies. Metadata-only producers do not execute payload callbacks. Binding schema checks happen before callbacks, and the plan retains no caller sample addresses.
 
-Workflow input declaration ids and node ids use separate namespaces. A document may contain up to 4096 declarations; each declaration has a unique nonzero id and unique 1-to-128-byte printable ASCII name (`0x21` through `0x7e`). Compiler stages carry declarations in id order. Every Result input declaration carries its complete schema; a missing schema is rejected with `InvalidArgument`. The compiler resolves input-derived extents from static input domains without reading payload samples.
-
-When a Result binding references storage outside the execution root, the runtime admits its retained capacity under `Referenced`. A published view keeps its source Result and backing owners alive. Result tensor reads use the captured descriptor and the requested authorized region; see [Structured Results and tensor slots](Global-Results.md) for publication and window ownership.
-
-`ExecutionResult` contains named Result outputs, dependency evidence, and diagnostics. Each returned Result retains the leases needed by its storage until its final owning reference is released.
+Workflow input ids and node ids occupy separate namespaces. At most 4096 input declarations have unique nonzero ids and unique 1-to-128-byte printable ASCII names. Result owners and read windows retain backing and Root leases after context retirement. External backing retained by execution is admitted under Referenced capacity.
 
 ## 4. Algorithms and validation
 
-Result schemas describe logical sample domains; the compiler does not require their dense element product or packed byte count to fit a machine allocation size, and Result planning does not estimate dense payload bytes. Actual `Value` backing creation validates allocation size and addressed byte span, and its strides must fit the signed representation. A Result may describe a much larger logical domain than its physical backing, for example a broadcast view over a small allocation.
+Logical schemas need not fit one dense allocation. Actual allocations and addressed byte spans must fit their representations and budgets. Tile counts, interval endpoints and indexing arithmetic are checked for overflow. Tensor storage preserves integer and floating-point bits; operations and explicitly bound validators impose any numerical domain constraints.
 
-Result tensor schemas describe logical axes and optional spatial layout. Physical tiled addresses are not represented by ordinary affine strides. Each operation declares supported Result schemas and execution behavior; `PlanningOptions` supplies physical tile geometry where spatial planning uses it.
-
-`SchemaTemplate::id` and `version` identify an explicit structural contract and enter compile identity. The kernel does not dispatch on them to a domain interpretation. Two Results with the same structure but different meanings for the caller, for example linear and sRGB-encoded RGB, connect to the same port; the operation's explicit parameters and bound validators decide what the samples mean.
-
-Float32 Values preserve binary32 payload bits. A scalar or operation contract validates any numeric domain it consumes; storage accepts the element representation independently from that domain. Domain schemas such as the 3D LUT bake report and table are defined by the operations SDK (`photospider/ops/numeric/lut3d_bake.hpp`), not by the kernel; see [CRV-09](../built-in_ops/01-numeric/op_specs/CRV-09_bake_lut3d.md).
+`SchemaTemplate::id` and `version` identify structural contracts and enter compilation identity. They do not select domain semantics inside the kernel. Domain reports such as LUT bake schemas belong to the ops SDK. Complete validators require authorized coverage of all members in their scope and do not automatically add input Needs.
 
 ## 5. Limitations and non-goals
 
-- Results are in-memory values. They have no durable identity, receipt, serialization, or recovery contract.
-- The data-definition registry stores copied schema metadata from trusted startup registrations or DSOs; it does not allocate Values or provide storage.
-- Structural image support is declared by the Result tensor schema and operation contract; an unsupported combination returns a typed failure during validation or planning.
-- `CpuStorage` exposes CPU-accessible immutable bytes and may retain completed native storage. Device handles remain private.
-- The pipeline element types are UInt8, Int8, UInt16, Int16, Int64, Float32 and Float64. [ADR 0022](../adr/0022-freeze-operation-c-abi-v3.md) D6 (Proposed) keeps this set closed and rejects unknown dtypes.
-- The kernel has no time or sequence type. Batch axes, including the image frame/layer axes, carry no temporal meaning; ADR 0022 D7 assigns time representation, frame selection and cross-frame state to the host application.
+Results have no durable serialization or recovery contract. Static schema and tile geometry do not imply dense residency. Batch axes carry no temporal meaning. The kernel provides neither dynamic field rows nor a separate whole-result execution mode. [ADR 0022](../adr/0022-freeze-operation-c-abi-v3.md) remains Proposed; its target ABI design is distinct from the implemented ABI 5.

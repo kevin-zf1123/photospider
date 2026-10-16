@@ -96,7 +96,7 @@ For pi multiples, test positive/negative large integers, half/quarter-integers
 and neighboring representable values. Check that radian pi rounded to dtype is
 not silently treated as the exact pi-multiple input 1. Validate actual strict
 fallback for unsupported fast argument ranges and common public execution,
-Whole demand and lifetime/resource cases. Implementation evidence is recorded
+complete-input demand and lifetime/resource cases. Implementation evidence is recorded
 separately below; Proposed specification status does not imply missing runtime keys.
 
 LLVM libc provides a CPU `sinpif` entry point delegating to its internal
@@ -130,7 +130,7 @@ SLEEF binary64 kernels and conservative final-error checks within the
 [admitted ranges](NUM_accelerated_contract.md#image-budget-and-extended-domains).
 Pi and rational-pi arguments undergo exact quadrant reduction before approximation.
 Rejected candidates use strict evaluation . Unresolved
-strict rounding may return `ResourceExhausted`. Nonempty requests use Whole execution with full-input typed validation,
+strict rounding may return `ResourceExhausted`. Nonempty requests use Run-shared complete-input computation with full-input typed validation,
 complete packed output allocation and Run-scoped arithmetic errors. Empty requests
 read no payload. Per-value fallback/evaluation diagnostics are unavailable (N/A)
 on this callback path; numerical fallback behavior is unchanged.

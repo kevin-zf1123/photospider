@@ -23,7 +23,7 @@ Inherit the complete [family contract](FMT-11_model_conversion_contract.md),
 
 ## Interface and output inference
 
-One Result containing a single Float32 or Float64 tensor and no fields produces one `values` Result containing a single tensor.
+One Result containing a single Float32 or Float64 tensor produces one `values` Result containing a single tensor.
 Source: relative or absolute xyY. Target: XYZ with unchanged Y units/reference.
 Preserve shape, channel axis/count and slots; target roles follow the selected source role order.
 Unrelated groups, internal alpha and AOV samples pass through bit-for-bit.
@@ -52,7 +52,7 @@ publication; unrelated unobserved sample errors do not. Preserve upstream scope.
 This is a registered native Result primitive. Internal helper reuse preserves its declared support, rounding and validation.
 This member materializes transformed output and rejects forced view even for a bypass-only request.
 The implementation supports generic and spatial layouts. Q permits a physical view when the complete requested mapping is representable; other members materialize and reject forced view. Empty demand is stateless, and publication is transactional.
-The implementation uses Result ABI 4 and the registered CPU profiles.
+The implementation uses Result ABI 5 and the registered CPU profiles.
 
 ## Independent acceptance and conceptual workflow
 

@@ -81,8 +81,8 @@ Float32 or Float64 independently. The `values` output uses schema
 `photospider.tensor`, member `samples`, no attached domain description, and shape [N] or [N,C]; the
 multi-function column is an ordinary sample axis.
 
-All four operations use Whole execution. For a nonempty request, the Result
-continuation requests Data, Validation and Descriptor (role 13) for all three
+All four operations use Run-shared complete-input computation. For a nonempty request, the Result
+continuation requests ordinary payload tile Needs for all three
 inputs, then validates all x knots and query controls before ordinate arithmetic.
 It evaluates every query and output column and publishes the complete dense
 output, even when the request is sparse. Result structure and any explicitly bound contracts are checked over their

@@ -28,7 +28,7 @@ Inherits [FRQ-02 family contract](FRQ-02_contract.md), [FILTER shared contract](
 
 `real, imag` FrequencyGrid/v1 `r2c_x` → `output` with the original spatial shape.
 
-Unless this member defines a semantic color entry point, ports are raw numerical fields: channel count does not imply RGB or alpha semantics, and attached color metadata does not widen numeric-domain validation. Axis, positive extent, explicit broadcasting, canonical planar publication, and applicable metadata preservation or reconstruction follow the shared contract. Each requested component/output declares its own demand. Associated collections use the FrequencyGrid/v1 or FilterBands/v1 logical schema defined by the shared contract.
+Unless the member defines an explicit color interpretation, ports contain raw numerical Tensor samples; channel count does not imply RGB or alpha. Color descriptions are explicit operation parameters, never attached Result metadata. Positive extents, axis validation and explicit broadcasting follow the common contract. Host-created backing defaults to tiled planar without requiring a conformance declaration. Associated FilterBands/FrequencyGrid structures remain Proposed static Tensor schemas; each requested output records its actual tile Needs.
 
 ## Static Parameters and Valid Domain
 
@@ -46,15 +46,15 @@ When this formula invokes another member, its RN stages must be retained as stat
 
 ## Data, Control, Validation, and Descriptors
 
-Whole demand on the complete half-spectrum is required for inverse reconstruction and boundary validation. Reject an invalid boundary pair; never silently discard its imaginary component.
+complete-input demand on the complete half-spectrum is required for inverse reconstruction and boundary validation. Reject an invalid boundary pair; never silently discard its imaginary component.
 
-Boundary coordinates are defined against the complete logical image; ROI or tile edges do not become new boundaries. Empty demand reads no payload; selection conditions retain a Control dirty witness. Exact support may not be replaced by a convenient rectangular or Whole read. Any expansion must be explicitly requested as a Conservative plan. Output descriptors are derived from static parameters and input descriptors, never from input sample values.
+Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Mathematical sample support is rounded to the current plan's member tiles for payload Needs, authorization and invalidation. Control and validation samples use ordinary payload Needs and participate in the same evidence. Empty payload demand reads no samples. Output structure derives only from static parameters and input schemas. The kernel has no support-role or Exact/Conservative/Unknown dependency mode.
 
 ## Algorithm, Resources, and Execution
 
 The direct reference costs O(P²C). Hermitian completion may be virtual, but the budget must include all actual reads and outputs.
 
-In complexity notation, P=HW, C is the number of independent planes, A is the tap count, and T is the iteration count. Arbitrary-precision limb complexity is additional and is not a measured benchmark. The shared contract defines work, memory, and stage admission, cancellation, failure status, and owner lifetime. Failure publishes no partial Value or CompleteBundle. Execution does not spill automatically, lower precision silently, or invoke a retired implementation as fallback.
+In complexity notation, P=HW, C is the number of independent planes, A is the tap count, and T is the iteration count. Arbitrary-precision limb complexity is additional and is not a measured benchmark. The shared contract defines work, memory, and stage admission, cancellation, failure status, and owner lifetime. Failure publishes no partial Tensor or CompleteBundle. Execution does not spill automatically, lower precision silently, or invoke a retired implementation as fallback.
 
 ## Oracle, Fixtures, and Acceptance
 
@@ -78,7 +78,7 @@ Float64 accelerated variants retain Float64 inputs, outputs, and exponent range;
 
 `static + descriptors → preflight / demand → this member’s declared Data and Control demands → exact expression / declared RN stages → requested owned output / complete result`
 
-This diagram adds no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-fill for missing data. Whole demand and multistage buffering are defined by this member and its family contract.
+This diagram adds no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-fill for missing data. complete-input demand and multistage buffering are defined by this member and its family contract.
 
 ## Sources and Open Items
 

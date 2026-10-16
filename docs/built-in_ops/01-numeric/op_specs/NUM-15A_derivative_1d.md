@@ -59,14 +59,14 @@ successful validation. Fixed NaN bits follow [NUM-04](NUM-04_unary_contract.md).
 
 ## Dependencies, errors and invalidation
 
-For any nonempty demand, Whole collects and validates complete samples and step
+For any nonempty demand, complete-input collects and validates complete samples and step
 before callback. The callback rejects zero/nonfinite step with Domain/Run
 InvalidArgument/InvalidDomain and InvalidSampleStep. A source failure may occur
 before step validation. Empty reads nothing. All active input edits invalidate
 all recorded output observations.
 
 Only the stated two-point stencil enters each numerical result; an interior
-center NaN still does not enter that result. Whole reads it and all other samples
+center NaN still does not enter that result. complete-input reads it and all other samples
 for preparation and other complete outputs. Their upstream/typed failures may
 fail the Run. Public output identity and numeric NaN priority are unchanged.
 
@@ -93,14 +93,14 @@ lifetime after context retirement.
 
 ## Implementation and executable acceptance
 
-All six registered profile keys use Whole Result programs and the existing
+All six registered profile keys use Run-shared Result programs and the existing
 `ExactCalculus` arithmetic. The manual public workflow binds Result sources
 whose tensor storage references the fixture's backing Values. Nonempty sparse
-requests still prepare all required inputs and publish the complete Whole
+requests still prepare all required inputs and publish the complete complete-input
 output with full tensor coverage. The query scopes the recorded dependency
 observation and dirty mapping; it does not trim Result coverage. The fixture
 checks that a center sample excluded from an interior stencil does not enter
-that output's arithmetic, while Whole preparation reads and validates all active
+that output's arithmetic, while complete-input preparation reads and validates all active
 sources. It also exercises
 negative strides, unaligned and zero-stride input, caller and worker floating
 environments during actual continuation polls, schema rejection, work limits,
@@ -110,4 +110,4 @@ Use independent exact Fraction references for temporary numerical acceptance.
 Strict results must match the final rounded reference bits. Accelerated results
 use the shared final FP32-scaled bound and need not be bit-exact. Compile the
 checker with `-fno-fast-math -frounding-math -ffp-contract=off`; execution details
-and validation cases are in [NUM-15 Whole execution](../calculus-whole.md).
+and validation cases are in [NUM-15 Run-shared complete-input computation](../calculus-whole.md).

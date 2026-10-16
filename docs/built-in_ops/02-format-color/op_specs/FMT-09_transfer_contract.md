@@ -15,7 +15,7 @@ Inherit [FMT-common](FMT_common_contract.md), the NUM numerical/execution baseli
 [model coverage](FMT_model_conversion_coverage.md) and
 [canonical image/codec boundary](FMT_codec_boundary.md). The family contains [A decode](FMT-09A_decode_transfer.md) and
 [B encode](FMT-09B_encode_transfer.md). Each direction has strict, accelerated
-Apple Silicon and accelerated x86-64 CPU Result ABI 4 keys. Their exact scalar
+Apple Silicon and accelerated x86-64 CPU Result ABI 5 keys. Their exact scalar
 definitions are normative in [FMT-09 mathematics](FMT-09_transfer_math.md). The
 specification remains Proposed; registration and implementation status are separate.
 
@@ -72,7 +72,7 @@ math remains in NUM.
 
 ## Tensor interface and static parameters
 
-One input Result with one tensor member and no fields produces one `values`
+One input Result with one tensor member  produces one `values`
 output Result containing one tensor. The member must use Float32 or Float64; the
 output retains the dtype, logical shape, axes and channel order. Complete sample
 rank, including batch and cell axes, is at most 8; sample count is at most 2^40.
@@ -167,7 +167,7 @@ Every transformed component uses only itself. Do not skip hidden straight color
 because alpha=0; alpha is not read to make such a decision. Alpha/AOV-only and
 unselected-group requests are exact copies without transfer-domain validation.
 Invalid unrequested peers do not fail another component's observation. A required
-upstream Whole operation retains its own dependency and failure extent.
+upstream complete-input operation retains its own dependency and failure extent.
 
 An input dirty set maps identically to output coordinates; there is no alpha or
 cross-channel fanout. Keep these input witnesses even on intrinsic constant
@@ -239,7 +239,7 @@ and precision bounds remain unchanged.
 | Numeric profiles | Three default-registry CPU entries per direction: strict, accelerated Apple Silicon and accelerated x86-64. NUM defines their precision, ISA checks and explicit fallback reporting. | No automatic profile dispatcher, unsuffixed alias or GPU implementation. |
 | Samples | Float32/Float64; same dtype throughout one tensor. Semantic RGB/compatible Gray; explicit raw components. | Integer decoding, Float16, mixed per-channel dtype or implicit complex math. |
 | Storage | Legal generic and spatial Result tensor layouts; shape and axes unchanged. | Interleaved image semantics, per-node tile geometry or metadata-only storage adaptation. |
-| Demand | Exact per-output-coordinate Data and dirty mapping, selected-component Validation, static Descriptor dependence; no halo or pixel Control read. | Whole fallback claimed as exact FMT support. |
+| Demand | Exact per-output-coordinate Data and dirty mapping, selected-component Validation, static Descriptor dependence; no halo or pixel Control read. | complete-input fallback claimed as exact FMT support. |
 | Publication | Exact Q coverage at unchanged global coordinates with ordinary retained immutable owner/read windows. | Unrequested samples as implicit zero, whole-owner sample-validity certificates or hidden recovery. |
 | Determinism | Static curve/reference/parameters and explicit NUM numerical profile. | Display-device queries, implicit environment/view settings or external color engines. |
 
@@ -260,7 +260,7 @@ variants and explicit reference/parameter conflicts. Members add concrete cases.
 Compare full, offset/disjoint, R-only, alpha/AOV-only and cross-tile requests,
 including y/x=[127,130) under tile size 128. Put NaN or invalid-domain samples in
 unrequested peers, then request them separately. Test hidden color at zero alpha,
-Whole upstream failures, exact dirty support, Empty, source immutability,
+complete-input upstream failures, exact dirty support, Empty, source immutability,
 view/materialize equality, retained owner lifetime, budgets/cancellation and
 floating-environment restoration. A view must not bypass identity validation.
 

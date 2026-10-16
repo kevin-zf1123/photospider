@@ -2,11 +2,11 @@
 
 The current FP32 quality contract, backend, measured results and limitations are
 maintained in the [accelerated specification](op_specs/NUM_accelerated_contract.md#current-implementation).
-All132 formal profile Value keys resolve to Whole,
+All132 formal profile Tensor keys resolve to complete-input,
 including15 LUT3D baking geometry keys; the four structured LUT3D Result keys
 retain protocol2 and bounded collect windows. Thirteen authoring templates keep
 their ordinary-node expansion and independent output identities. Legacy unsuffixed
-sample keys remain separate. Whole widens input/output storage, invalidation and
+sample keys remain separate. complete-input widens input/output storage, invalidation and
 failure scope as specified per family; numerical contracts remain unchanged.
 
 Primitive keys and authoring templates

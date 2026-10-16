@@ -90,7 +90,7 @@ AE Camera Lens Blur的Diffraction Fringe名称不证明实现了Fourier光学；
 
 首条流程：`HDR透明点→aperture PSF→premul blur→checkerboard over`。第二条：已知near/far图层先各自模糊合成作参考，再压成单RGBD比较屏幕近似。光谱后期流程：圆孔+lambda→PSF→encircled energy/MTF。
 
-验收包括focus CoC=0、恒定CoC/固定PSF、单点总能量、完整域/crop区别、非方形Rx/Ry、alpha边缘、近景扩张、bucket误差、PSF二阶矩/L1/负旁瓣、lambda采样收敛。精度参考用Float64；差分重建的HDR相消可能需要分段/高精度累加。公开prefix沿扫描线有scan依赖；有静态最大半径的滤波可在带halo的块内建立局部prefix，数学支持仍有限。无界数据相关PSF才需要支持域预处理或Whole；辅助半径场端口仍须G4核验。
+验收包括focus CoC=0、恒定CoC/固定PSF、单点总能量、完整域/crop区别、非方形Rx/Ry、alpha边缘、近景扩张、bucket误差、PSF二阶矩/L1/负旁瓣、lambda采样收敛。精度参考用Float64；差分重建的HDR相消可能需要分段/高精度累加。公开prefix沿扫描线有scan依赖；有静态最大半径的滤波可在带halo的块内建立局部prefix，数学支持仍有限。无界数据相关PSF才需要支持域预处理或完整输入共享计算；辅助半径场端口仍须G4核验。
 
 未决项：single RGBD的默认hole strategy；波动光学采样/能量单位；PSFBank表示与资源上界；real-time近似质量档。不得将邻仓已有测试源码称为本次通过结果。
 

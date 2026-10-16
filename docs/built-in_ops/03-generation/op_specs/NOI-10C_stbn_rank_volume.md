@@ -29,7 +29,7 @@ spatial/temporal reports.
 
 ## Mathematical specialization
 
-Whole volume is a permutation0..N-1, N=T*Th*Tw. Address frame+offset_t modulo T and
+complete-input volume is a permutation0..N-1, N=T*Th*Tw. Address frame+offset_t modulo T and
 global xy plus offsets modulo spatial shape; use NOI-07A midpoint mapping. This frame is
 a lookup coordinate, not the unsigned32 RNG frame field. SDK formats require explicit
 conversion and requalification.

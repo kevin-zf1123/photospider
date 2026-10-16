@@ -19,11 +19,11 @@ fill, mapped assembly and core identity operations. FMT-04 association
 operations are also registered. The profiles are `strict`,
 `accelerated_apple_silicon`, and `accelerated_x86_64`.
 
-All FMT-05B/C inputs and outputs use the single-tensor Result ABI with no fields,
+All FMT-05B/C inputs and outputs use the single-tensor Result ABI with
 support the seven native copy dtypes, preserve the batch prefix, and avoid
 sample-domain validation. Axes are cell-relative and exclude the Result batch
 prefix. The complete sample rank, including batch and cell axes, is at most 8;
-full sample count is at most 2^40. Native FMT-04/FMT-05A operations execute as Result ABI 4 operations. B/C are
+full sample count is at most 2^40. Native FMT-04/FMT-05A operations execute as Result ABI 5 operations. B/C are
 compile-time compositions over registered Result operations.
 
 Inherit [FMT-common](FMT_common_contract.md), its NUM baseline and the
@@ -197,7 +197,7 @@ B maps dirty alpha coordinates to output coordinates; missing opaque has only
 structural dependencies. C drops removed-channel sample invalidations and
 remaps retained channels. Descriptor/shape/group changes invalidate static maps.
 Preserve disjoint requests; do not close them over unrequested colors or the
-whole image. Required upstream Whole work retains its original scope.
+whole image. Required upstream complete-input work retains its original scope.
 
 ## Layout selection
 

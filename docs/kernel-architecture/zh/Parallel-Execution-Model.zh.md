@@ -2,24 +2,24 @@
 
 ## 1. 核心摘要 (TL;DR)
 
-`ExecutionContext` 拥有固定 CPU worker pool、独立的 CPU/GPU callback lane，以及共享的等待 callback 上限。Whole CPU callback 可与空闲 pool worker 共同执行 range work；planar staged callback 提交单线程 tile，并在每个 stage 等待完成。取消会停止后续领取和发布，再等待已运行的工作及已提交设备任务结束。
+`ExecutionContext` 拥有固定 CPU worker pool、独立的 CPU/GPU callback lane，以及共享的等待 callback 上限。ordinary CPU callback 可与空闲 pool worker 共同执行 range work；planar staged callback 提交单线程 tile，并在每个 stage 等待完成。取消会停止后续领取和发布，再等待已运行的工作及已提交设备任务结束。
 
 ## 2. 架构心智模型 (Mental Model & Intuition)
 
-不同 Run 竞争同一 context 的 worker 容量。Whole callback 的调用线程处理 range block，空闲 worker 可领取其他 block；被其他 callback 占用的 worker 必须等其返回后才能协助。共享调度器在普通 callback 和 range block 之间轮换机会，并在领取后轮转可执行的 range job。
+不同 Run 竞争同一 context 的 worker 容量。ordinary callback 的调用线程处理 range block，空闲 worker 可领取其他 block；被其他 callback 占用的 worker 必须等其返回后才能协助。共享调度器在普通 callback 和 range block 之间轮换机会，并在领取后轮转可执行的 range job。
 
 ```mermaid
 flowchart LR
     A[Run A callback] --> Q[CPU callback FIFO]
     B[Run B callback] --> Q
     Q --> S[共享调度器与 pool mutex]
-    R[Whole range jobs] --> JQ[共享 range/stage job queue]
+    R[ordinary range jobs] --> JQ[共享 range/stage job queue]
     JQ --> S
     S --> W1[Worker 1]
     S --> W2[Worker 2]
     S --> WN[Worker W]
     W1 -->|helper 领取不相交 block| J[Range barrier]
-    Caller[Whole callback 调用线程] -->|参与 range work| J
+    Caller[ordinary callback 调用线程] -->|参与 range work| J
     WN -->|完成其他 Run 工作| O[独立 callback]
     J -->|活动 block 全部退出| P[最终检查后发布]
     C[Planar CPU_STAGES coordinator] -->|提交一个 stage job| JQ
@@ -31,28 +31,28 @@ flowchart LR
     D -->|完成后返回| GQ
 ```
 
-普通 callback 使用 CPU callback FIFO。Whole range job 与 planar `CPU_STAGES` job 使用另一个共享 range/stage job list。两个结构共用 scheduler mutex 和 worker pool，因此 callback、range job 和 staged job 会争用 worker 容量。调度器在 callback 与 range 工作之间轮换机会；range worker 领取互不重叠的 block，stage coordinator 提交 tile 工作并在每个 stage barrier 等待。Whole callback 调用线程也直接参与自己的 range barrier。GPU callback lane 使用独立队列，但共享 context 的等待容量。Range block 和 stage tile 会增加普通 callback 的等待时间。
+普通 callback 使用 CPU callback FIFO。ordinary range job 与 planar `CPU_STAGES` job 使用另一个共享 range/stage job list。两个结构共用 scheduler mutex 和 worker pool，因此 callback、range job 和 staged job 会争用 worker 容量。调度器在 callback 与 range 工作之间轮换机会；range worker 领取互不重叠的 block，stage coordinator 提交 tile 工作并在每个 stage barrier 等待。ordinary callback 调用线程也直接参与自己的 range barrier。GPU callback lane 使用独立队列，但共享 context 的等待容量。Range block 和 stage tile 会增加普通 callback 的等待时间。
 
-### CPU Whole range service
+### CPU range service
 
 ```c
 #include <stdint.h>
 
-typedef int (*ps_cpu_range_callback_v1)(
+typedef int (*ps_cpu_range_callback_v2)(
     void* user, uint64_t begin, uint64_t end, uint32_t slot);
 
-typedef struct ps_cpu_parallel_service_v1 {
+typedef struct ps_cpu_parallel_service_v2 {
   uint32_t struct_size;
   uint32_t abi_version;
   uint32_t maximum_workers;
   void* context;
   int (*run)(void* context, uint64_t count, uint64_t grain,
-             uint32_t workers, ps_cpu_range_callback_v1 callback,
+             uint32_t workers, ps_cpu_range_callback_v2 callback,
              void* user);
-} ps_cpu_parallel_service_v1;
+} ps_cpu_parallel_service_v2;
 ```
 
-该 service 借给 CPU Whole callback。它把 `[0, count)` 划分为有限、不相交且不超过 `grain` 的区间。`workers == 0` 使用最大 grant；正数请求 1 到最大参与者，其中包含调用线程。实际并行 block 数可以少于 grant。每个活动 block 获得唯一存活的 scratch slot。输入和 callback user data 借用至同步 barrier 返回；scratch 不得逃逸该调用。
+该 service 借给 CPU ordinary callback。它把 `[0, count)` 划分为有限、不相交且不超过 `grain` 的区间。`workers == 0` 使用最大 grant；正数请求 1 到最大参与者，其中包含调用线程。实际并行 block 数可以少于 grant。每个活动 block 获得唯一存活的 scratch slot。输入和 callback user data 借用至同步 barrier 返回；scratch 不得逃逸该调用。
 
 非空 run 在启动任何 block callback 前，先按 Root Host 和 Metadata 容量预留 job record 与一个 Root Entry，再扣除 `work=count` 和 `stages=ceil(count/grain)`。预留或扣费失败时，run 返回 sticky resource failure，block callback 调用数为零。`count=0` 不创建 job，也不扣 work 或 stages；常规参数检查和取消检查仍会执行。
 
@@ -65,7 +65,7 @@ N_{blocks}=N/B + (N\bmod B\ne0),\qquad
 end=begin+\min(B,N-begin).
 $$
 
-Structured CPU Result Whole poll 会通过 `ResultProgramPhase::cpu_parallel` 收到此借用 service。它只在当前 Whole callback 内调度 block，不会独立并行化 Result dependency graph。`tests/integration/kernel/test_cpu_parallel.cpp` 在 Root 已发行 work 后请求 `UINT64_MAX` range，并检查资源拒绝发生在任何 block callback 之前。`tests/unit/kernel/test_cpu_range.cpp` 在没有 Root 预算时检查端点算术，因此不能证明 Root admission 行为。
+Structured CPU Result ordinary poll 会通过 `ResultProgramPhase::cpu_parallel` 收到此借用 service。它只在当前 ordinary callback 内调度 block，不会独立并行化 Result dependency graph。`tests/integration/kernel/test_cpu_parallel.cpp` 在 Root 已发行 work 后请求 `UINT64_MAX` range，并检查资源拒绝发生在任何 block callback 之前。`tests/unit/kernel/test_cpu_range.cpp` 在没有 Root 预算时检查端点算术，因此不能证明 Root admission 行为。
 
 ### Structured Result callback wave
 
@@ -80,28 +80,28 @@ Run coordinator 拥有调度策略和发布顺序。独立组件分别拥有每 
 ```c
 #include <stdint.h>
 
-#define PS_CPU_TILES_ABI_VERSION_1 1U
+#define PS_CPU_TILES_ABI_VERSION_2 2U
 
-typedef struct ps_cpu_tile_v1 {
+typedef struct ps_cpu_tile_v2 {
   uint32_t struct_size, slot;
   uint64_t index, begin[3], end[3];
-} ps_cpu_tile_v1;
+} ps_cpu_tile_v2;
 
-typedef int (*ps_cpu_tile_callback_v1)(void* user,
-                                       const ps_cpu_tile_v1* tile);
+typedef int (*ps_cpu_tile_callback_v2)(void* user,
+                                       const ps_cpu_tile_v2* tile);
 
-typedef struct ps_cpu_tile_stage_v1 {
+typedef struct ps_cpu_tile_stage_v2 {
   uint32_t struct_size;
   uint64_t extent[3], tile[3];
   uint32_t workers;
-} ps_cpu_tile_stage_v1;
+} ps_cpu_tile_stage_v2;
 
-typedef struct ps_cpu_tiles_service_v1 {
+typedef struct ps_cpu_tiles_service_v2 {
   uint32_t struct_size, abi_version, maximum_workers;
   void* context;
-  int (*run)(void*, const ps_cpu_tile_stage_v1*,
-             ps_cpu_tile_callback_v1, void*);
-} ps_cpu_tiles_service_v1;
+  int (*run)(void*, const ps_cpu_tile_stage_v2*,
+             ps_cpu_tile_callback_v2, void*);
+} ps_cpu_tiles_service_v2;
 ```
 
 Coordinator 提交一个三维 work-item grid，并等待全部 tile callback 退出后才开始下一 stage。每个 callback 收到半开 tile box，作为一个不可分割任务运行于共享 CPU worker。Coordinator 执行分配、行访问和 stage 转换。`workers == 0` 使用 Run grant 上限；正数只限制并行参与数，不改变 tile 几何。
@@ -116,13 +116,13 @@ Context 在创建时确定 CPU worker 数；`cpu_workers` 为零时解析为有�
 
 长时间运行的 CPU block 只在自身循环中轮询 token 的位置观察取消。例如，一个在 262,144 次迭代的循环中每次检查 `phase.query.cancellation` 的 block，在第 64 次迭代后被取消就会提前返回。Run 随后报告 `Cancelled`，此时只完成了计划迭代中的一部分；没有 block 仍处于活动状态，Root 的 Queue 用量回到零。`test_cpu_parallel` 覆盖这一情形。从不轮询的 block 会执行完整个区间，Run 之后才观察到取消。
 
-CPU helper 保存并恢复浮点环境，以 nearest-even 舍入和 gradual underflow 执行。Operation 自行定义 reduction 顺序，以及保持该顺序的 block 几何。
+Kernel helper 保存和恢复调用线程浮点环境，不强制数值模式。算子在每个实际 poll、worker、数值 preparation 和 validator callback 内建立所需模式，并在返回或暂停前恢复。算子自行定义归约顺序与兼容的工作分块。
 
 `ExecutionContextConfig::collect_scheduler_timing` 默认为 false。启用后，`scheduler_statistics()` 分别返回 CPU/GPU lane 快照，并分别同步。Accepted 统计成功插入 FIFO 的 callback；started 统计 worker 从 FIFO 取出的 callback。`submission_ns` 从提交入口计至插入 FIFO，包括 mutex 获取和队列存储。`queue_wait_ns` 从成功插入计至 worker 取出。计时不包括 callback runtime 和 device execution。FIFO 统计不包含 range/tile claim，但这些工作占用 worker 时会增加 callback 等待。多个 Run 共享 context 的累计计数；仅当快照未饱和时，计数和耗时总和的差可用于选定区间。`maximum_queue_wait_ns` 与 `maximum_queued_callbacks` 是 context 生命周期最大值，不能通过差分得到区间最大值。不同 lane 快照可能对应不同时间点。
 
 ## 4. 负面清单与边界 (Non-Goals & Explicit Boundaries)
 
-- 同一 invocation 的 Whole range callback 与 planar CPU staged callback 使用互斥服务。
+- 同一 invocation 的 ordinary range callback 与 planar CPU staged callback 使用互斥服务。
 - Tile callback 不拥有 coordinator 的行、分配、发布、诊断或准备服务。
 - 调度器不承诺 work stealing、抢占，也不保证实际并发数等于 worker grant。
 - GPU callback 经每 context 单 lane 同步提交；已提交 dispatch 完成后才能释放 owner。

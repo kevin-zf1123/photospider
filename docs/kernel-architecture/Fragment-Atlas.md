@@ -2,9 +2,9 @@
 
 ## Scope and ownership
 
-The plan retains descriptor-domain metadata, exact sample coverage and occupied tile coordinates. Materialized payload and directory Values own packed bytes through the supplied allocator; a Result-backed atlas retains no source Result or read window. A native host keeps each device view alive until the synchronous invocation drains. Atlas support for all scalar widths is transport support only; it does not imply GPU arithmetic support for a dtype.
+The plan retains descriptor-domain metadata, exact sample coverage and occupied tile coordinates. Materialized payload and directory TensorSpans own packed bytes through the supplied allocator; a Result-backed atlas retains no source Result or read window. A native host keeps each device view alive until the synchronous invocation drains. Atlas support for all scalar widths is transport support only; it does not imply GPU arithmetic support for a dtype.
 
-The atlas packs generic tensor sample bits into one payload and a sparse tile directory. Callers can prepare it from `ValueFragments` or from the exact coverage carried by a `ResultTensorInput` capability. The Result overload reads only that capability's authorized samples; it does not convert a Result to Value semantics or broaden input authorization. The older `ValueFragments` overload remains available to its existing callers: it packs generic Value coverage and does not interpret channel tuples. Atlas packing alone does not implement image operations or grant new reads. Generic directory planning and packing are implemented in the data layer. The `ResultTensorInput` overloads are implemented in the plugin layer beside the Result input capability and adapt its coverage and owning windows to the generic packer, using the same packing work policy.
+The atlas packs Tensor sample bits into a payload and sparse transport directory. Input is either a Tensor or an authorized ResultTensorInput. The Result overload reads owning windows under the current Need; neither path broadens authorization or interprets image semantics. Data-layer Tensor packing and plugin-layer capability packing share geometry and preserve holes.
 
 ## Core data structures and memory layout
 
@@ -12,10 +12,10 @@ The atlas packs generic tensor sample bits into one payload and a sparse tile di
 class ResultTensorInput;
 
 struct FragmentAtlas final {
-  ValueDescriptor descriptor;
+  TensorDescriptor descriptor;
   std::vector<std::uint64_t> tile_shape;
   std::uint64_t slot_count = 0, payload_bytes = 0;
-  Value payload, directory;
+  TensorSpan payload, directory;
   Result<std::uint64_t> address(
       const std::vector<std::uint64_t>& coordinate) const;
 };
@@ -23,14 +23,14 @@ struct FragmentAtlas final {
 class FragmentAtlasPlan final {
  public:
   static Result<FragmentAtlasPlan> prepare(
-      const ValueFragments& input, std::vector<std::uint64_t> tile_shape = {},
+      const Tensor& input, std::vector<std::uint64_t> tile_shape = {},
       const FootprintLimits& limits = {});
   static Result<FragmentAtlasPlan> prepare(
       const ResultTensorInput& input,
       std::vector<std::uint64_t> tile_shape = {},
       const FootprintLimits& limits = {});
   Result<FragmentAtlas> materialize(
-      const ValueFragments& input, const BufferAllocator& allocator,
+      const Tensor& input, const BufferAllocator& allocator,
       const FootprintLimits& limits = {}) const;
   Result<FragmentAtlas> materialize(
       const ResultTensorInput& input, const BufferAllocator& allocator,
@@ -40,7 +40,7 @@ class FragmentAtlasPlan final {
 
 `FragmentAtlasPlan` prepares transport metadata from exact coverage and materializes it through a caller-supplied allocator. It supports rank 1..8 and every built-in `ElementType` (UInt8, Int64, Float64, Float32, Int8, UInt16 and Int16) without converting sample bits. The plan retains domain, coverage and tile masks, but no source data owners. The `ResultTensorInput` overload acquires owning windows for the Need-authorized samples and copies them through `row_run()`. It supports signed strides, zero-stride broadcasts, fragmented windows and batch-prefixed spatial tensors without filling holes or bounding boxes. Once packed, the atlas remains valid independently of the input Result, poll and execution context. When the capability grants no payload read, materialization still routes through `input.read`, so the attempt latches `UnauthorizedRead` exactly as a direct read would.
 
-`preparation_work()` reports the generic directory-planning work. `materialization_work()` reports the generic packing work. The `ResultTensorInput` overload precharges window acquisition and read-bound work through `FootprintLimits::consume_work`, so `materialization_work()` is not its complete charge. The older `ValueFragments` overloads preserve their caller-charged work convention; their `consume_work` callback is not invoked.
+`preparation_work()` reports the generic directory-planning work. `materialization_work()` reports the generic packing work. The `ResultTensorInput` overload precharges window acquisition and read-bound work through `FootprintLimits::consume_work`, so `materialization_work()` is not its complete charge. The generic `Tensor` overloads preserve their caller-charged work convention; their `consume_work` callback is not invoked.
 
 A `ResultTensorInput` may represent one source Result. Atlas preparation and materialization use only the capability's granted sample coverage. The input windows retain their original Result owners while the atlas packs the requested samples; the atlas owns its packed buffers independently afterward. This path handles tensor Needs; it does not aggregate object or field support.
 
@@ -74,14 +74,14 @@ Current integration sources exercise the transport and failure boundaries:
 These native tests return the configured skip code when the required device is unavailable. Protocol mocks and CPU fallback do not establish native execution.
 ## Algorithms and wire format
 
-Each tile has at most 64 logical samples. Callers can specify positive rank-sized tile extents with product at most 64, or use the deterministic default geometry that fills the rightmost axes first. Only occupied tiles enter the directory. Global shape products need not fit uint64: lookup uses per-axis tile coordinates, never a flattened global index. The atlas accepts generic Values without creating planar image execution support; tuple completeness for Result inputs comes from the tensor Need, which is already closed over `atomic_trailing_axes`.
+Each tile has at most 64 logical samples. Callers can specify positive rank-sized tile extents with product at most 64, or use the deterministic default geometry that fills the rightmost axes first. Only occupied tiles enter the directory. Global shape products need not fit uint64: lookup uses per-axis tile coordinates, never a flattened global index. The generic packer accepts Tensor coverage as supplied. The Result overload packs only the captured Need-authorized coverage. Atlas transport tiles are independent of plan payload tiles; packing grants no new sample access.
 
 The hash is FNV-1a over the rank coordinate words, low byte first, with offset basis 14695981039346656037 and prime 1099511628211. Local row-major coordinates select a mask bit. A present sample's payload offset is the tile byte offset plus its preceding set-bit count times dtype width. Payload is ordered by tile key and increasing valid mask bit. No hole occupies a payload sample. An empty port uses one inert payload byte and a two-slot empty directory; neither authorizes samples.
 
-`prepare` reports exact logical allocation sizes for payload and directory before materialization. A GPU host must round each separately to actual device capacity before admission. `maximum_boxes` bounds occupied tiles, while `maximum_work` bounds metadata scanning, sample discovery, hashing/probing and packing. Entry cancellation and metadata precharges precede cardinality/equality scans. `preparation_work()` reports generic geometry-planning work and `materialization_work()` reports generic packing work. The `ResultTensorInput` overload precharges its work through `FootprintLimits::consume_work`; Result materialization additionally precharges window acquisition and read-bound work that `materialization_work()` does not include. The `ValueFragments` overloads preserve the existing caller-charged convention. Cancellation after either allocation, including an empty input, retires all newly owned buffers and publishes no atlas.
+`prepare` reports exact logical allocation sizes for payload and directory before materialization. A GPU host must round each separately to actual device capacity before admission. `maximum_boxes` bounds occupied tiles, while `maximum_work` bounds metadata scanning, sample discovery, hashing/probing and packing. Entry cancellation and metadata precharges precede cardinality/equality scans. `preparation_work()` reports generic geometry-planning work and `materialization_work()` reports generic packing work. The `ResultTensorInput` overload precharges its work through `FootprintLimits::consume_work`; Result materialization additionally precharges window acquisition and read-bound work that `materialization_work()` does not include. The `Tensor` overloads preserve the existing caller-charged convention. Cancellation after either allocation, including an empty input, retires all newly owned buffers and publishes no atlas.
 
 ## Limits and failure handling
 
 The generic atlas unit suite is registered as `test_fragment_atlas` from [`tests/unit/kernel/test_fragment_atlas.cpp`](../../tests/unit/kernel/test_fragment_atlas.cpp). The native SDK suite uses [`tests/unit/kernel/test_fragment_atlas_gpu.cpp`](../../tests/unit/kernel/test_fragment_atlas_gpu.cpp); the Result callback integration path uses [`tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp`](../../tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp). These sources cover wire layout, coordinate lookup, sparse holes, signed and zero strides, rank and dtype transport, buffer admission, cancellation and native readback. Native tests may skip when the required Metal device is unavailable.
 
-The `ValueFragments` overload preserves its accepted Value coverage. The `ResultTensorInput` overload reads only samples authorized by its tensor Need. Both packers preserve holes, return `NotFound` for missing directory samples, and fail plans that exceed tile or work limits. Cancellation retires newly allocated owners. Device hosts must admit rounded payload and directory capacities separately; atlas lookup does not trigger additional reads or provide a CPU fallback.
+The `Tensor` overload preserves its accepted Tensor coverage. The `ResultTensorInput` overload reads only samples authorized by its tensor Need. Both packers preserve holes, return `NotFound` for missing directory samples, and fail plans that exceed tile or work limits. Cancellation retires newly allocated owners. Device hosts must admit rounded payload and directory capacities separately; atlas lookup does not trigger additional reads or provide a CPU fallback.

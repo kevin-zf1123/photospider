@@ -23,7 +23,7 @@ Inherits the [RES-14 family contract](RES-14_contract.md), [FILTER common contra
 
 The explicitly selected, linear, opaque RGB `input` with no associated alpha plane → `output, transmission, airlight`, independently observable according to requested outputs. Reject alpha-associated structure at preflight; do not drop alpha or inspect its samples to infer opacity. RGB samples must be finite and nonnegative.
 
-Except for semantic entry points explicitly specified by this member, inputs are raw numerical fields: channel count does not imply RGB or alpha, and attached color metadata does not expand numerical-domain validation. Axes, positive extents, explicit broadcasting, canonical planar publication, and preservation or reconstruction of applicable metadata follow the common contract. Dependencies for components and multi-output requests are declared per request; associated collections follow the proposed FilterBands/FrequencyGrid schemas.
+Unless the member defines an explicit color interpretation, ports contain raw numerical Tensor samples; channel count does not imply RGB or alpha. Color descriptions are explicit operation parameters, never attached Result metadata. Positive extents, axis validation and explicit broadcasting follow the common contract. Host-created backing defaults to tiled planar without requiring a conformance declaration. Associated FilterBands/FrequencyGrid structures remain Proposed static Tensor schemas; each requested output records its actual tile Needs.
 
 ## Static parameters and legal domains
 
@@ -35,21 +35,21 @@ Inherit NaN, Inf, overflow, signed-zero, payload, rounding, and precision semant
 
 Numeric classification: **S**. See [FILTER_numeric_reference](FILTER_numeric_reference.md) for the meanings of E/B/S.
 
-A → B → optional guided filter plus clamp → C. Rounding is explicit at every stage. An airlight-only request does not run apply. Requesting output requires Whole A, so the complete restoration is Whole. The guide gray is the arithmetic mean defined by this profile; it is not claimed to be photometric luminance.
+A → B → optional guided filter plus clamp → C. Rounding is explicit at every stage. An airlight-only request does not run apply. Requesting output requires complete-input A, so the complete restoration is complete-input. The guide gray is the arithmetic mean defined by this profile; it is not claimed to be photometric luminance.
 
 When a formula calls another member, preserve the RN stages produced by that call as specified here or by the family contract. Internal temporary operations must not add undeclared rounding. Signed zero, dynamic-domain failures, gradual underflow, and output range follow the common contract and NUM.
 
 ## Data / Control / Validation / Descriptor
 
-For airlight, demand Whole A. Raw transmission combines A’s Whole demand with its local demand. B can be local when supplied an existing A, but the complete D workflow is not a local filter.
+For airlight, demand complete-input A. Raw transmission combines A’s complete-input demand with its local demand. B can be local when supplied an existing A, but the complete D workflow is not a local filter.
 
-Boundary coordinates are defined against the full logical image; ROI/tile edges do not become new boundaries. An empty demand reads no payload. Selection conditions retain their Control dirty witnesses. Exact support must not be replaced by a convenient bounding rectangle or Whole read; any expansion requires an explicit Conservative plan. Output descriptors are derived from static parameters and input descriptors, not sample values.
+Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Mathematical sample support is rounded to the current plan's member tiles for payload Needs, authorization and invalidation. Control and validation samples use ordinary payload Needs and participate in the same evidence. Empty payload demand reads no samples. Output structure derives only from static parameters and input schemas. The kernel has no support-role or Exact/Conservative/Unknown dependency mode.
 
 ## Algorithm, resources, and execution
 
 Complexity and resource costs add across composed stages. Do not automatically increase omega to avoid failures in sky regions.
 
-Here P=HW, C is the number of independent planes, A is the tap count, and T is the iteration count. Arbitrary-precision limb complexity is additional and is not a measured benchmark. Shared contracts govern work/memory/stage admission, cancellation, failure status, and owner lifetime; failures publish no partial Value or CompleteBundle. Do not spill automatically, silently reduce precision, or fall back to retired implementations.
+Here P=HW, C is the number of independent planes, A is the tap count, and T is the iteration count. Arbitrary-precision limb complexity is additional and is not a measured benchmark. Shared contracts govern work/memory/stage admission, cancellation, failure status, and owner lifetime; failures publish no partial Tensor or CompleteBundle. Do not spill automatically, silently reduce precision, or fall back to retired implementations.
 
 ## Oracle, fixtures, and acceptance
 
@@ -76,7 +76,7 @@ Float64 acceleration retains Float64 inputs, outputs, and exponent range; it doe
 
 `static + descriptors → preflight / demand → Data and Control declared by this member → exact expression / declared RN stages → requested owned output / complete result`
 
-This sketch introduces no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-filling of missing data. Whole behavior and multi-stage buffers are governed by this member and its family contract.
+This sketch introduces no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-filling of missing data. complete-input behavior and multi-stage buffers are governed by this member and its family contract.
 
 ## References and conformance notes
 

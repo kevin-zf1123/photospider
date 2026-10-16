@@ -38,11 +38,11 @@ read `input` at `s[j] = o[j]` for `j != axis` and
 `s[axis] = indices[o[axis]]`. Repeated indices retain their output order.
 This is single-axis gather, not coordinate-tuple `gather_nd`.
 
-## Whole demand and support
+## complete-input demand and support
 
 Static schemas and parameters are checked during specialization. For nonempty
-demand, the Whole program requests the complete input and index vector with
-data, validation and descriptor support (role 13), triggering typed-payload
+demand, the complete-input program requests the complete input and index vector with
+data, validation and descriptor support , triggering typed-payload
 validation. Every index must be in `[0, input.shape[axis])`, including indices
 whose output coordinates are outside consumer demand. Empty demand requests no
 payload and performs no sample access. Edits to either input dirty the complete
@@ -67,4 +67,4 @@ categories.
 
 The public workflow checks nonleading-axis gather, repeated and invalid indices,
 strided reads, Empty demand, and raw-bit preservation. Current commands and evidence boundaries are listed in
-[NUM-10 Whole execution](../indexing-whole.md).
+[NUM-10 Run-shared complete-input computation](../indexing-whole.md).

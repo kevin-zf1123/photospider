@@ -37,7 +37,7 @@ In particular, rounding is nearest/ties-to-even with gradual underflow and the
 caller floating environment is preserved. This is limited inheritance: the ports,
 output structures, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
-turn a composite template or structured Result into a generic NUM Value primitive.
+turn a composite template or structured Result into a generic NUM Tensor primitive.
 
 Proposed authoring template name: curve.bake_lut3d. No operation key named
 compose or opaque chain object is registered by this specification.
@@ -127,7 +127,7 @@ grid axis without source execution or error measurement. A nonempty table reques
 triggers source evaluation of all grid vertices and all validation points plus
 the global acceptance gate, irrespective of its requested table subset. The final
 gate publishes the requested color ROI with its original global coordinates;
-generated Whole Result outputs and source intermediates retain their full owners.
+generated complete-input Result outputs and source intermediates retain their full owners.
 
 ## Authoring and evaluation contract
 
@@ -171,36 +171,43 @@ workflow contract rather than a new opaque runtime composition primitive.
 
 ## Structured report schema
 
-The SDK defines SchemaTemplate id `curve.bake_lut3d.report`, version 1,
-PublishPolicy::CompleteBundle, observation domain [1]. The kernel validates its
-structure generically; operations explicitly bind the SDK report validator.
-There are twelve fixed fields:
+The SDK defines SchemaTemplate id `curve.bake_lut3d.report`, version 2,
+observation domain [1], and thirteen static Tensor members. Measurement publishes
+the report after complete measurement; its explicitly bound validator requires
+complete report coverage.
 
-| Field | Type and logical payload |
+| Tensor member | Dtype and shape |
 | --- | --- |
-| passed | UInt8 scalar |
+| passed | UInt8 [1] |
 | axis | Float64 [3,3] |
-| validation_count, failed_count | Int64 scalars |
-| max_abs_error | Float64 [3] |
+| validation_count, failed_count | Int64 [1] each |
+| max_abs_error | Float64 [1,3] |
 | max_error_point | Float64 [3,3] |
-| max_error_index | Int64 [3] |
-| first_failure_index | Int64 scalar |
-| first_failure_input, first_failure_reference, first_failure_lut | Float64 [3] each |
-| configuration_id | UInt8 [64], lowercase hexadecimal SHA-256 configuration identity |
+| max_error_index | Int64 [1,3] |
+| first_failure_index | Int64 [1] |
+| first_failure_input, first_failure_reference, first_failure_lut | Float64 [1,3] each |
+| configuration_id | UInt8 [1,64], lowercase hexadecimal SHA-256 |
+| measured_table_id | UInt8 [1,8], little-endian ObjectId |
 
-The configuration identity covers the explicit shape, interpolation, tolerances,
-source/table dtypes, extra-point count, both color descriptions and source recipe
-identity. It is ordinary report data, not schema metadata or a label. The reader
-and gate receive `Lut3dBakeDescription` explicitly and reject a mismatched
-configuration, including changed tolerance or interpolation. Dynamic axis remains
-a data field. Use `ExecutionContext::execute()` to observe the field-only report;
-`execute_fragments()` requests tensor footprints, not generic report rows.
+The fixed payload is 361 bytes. Configuration identity covers shape,
+interpolation, tolerances, source/table dtypes, extra-point count, explicit color
+descriptions and source recipe; its hash domain remains
+`photospider.bake-configuration.v1`. It is ordinary payload. The reader and gate
+receive matching `Lut3dBakeDescription` explicitly. `measured_table_id` binds the
+complete owned table acquired for measurement. It is process-local object
+identity, not a content digest; equal bytes do not authorize another object.
+Result association is provenance and is not the authoritative table binding.
+
+Use `ExecutionContext::execute()` or request all thirteen report members through
+`execute_fragments()` before `read_lut3d_bake_report(result, description)`. The
+reader does not start production; its window limit must admit the largest member,
+72 bytes. Axis values are ordinary payload, not dynamic schema extents.
 
 Compare errors and tolerances using exact arithmetic before report rounding.
 Choose maxima by exact absolute error, breaking ties with the earliest ordinal.
 Report +Inf is a diagnostic bound for an unrepresentable error, not a nonfinite
 source color or a failure of report validity. A zero maximum is +0. The fixed
-field payload is 353 bytes; metadata and all backing capacities are additionally
+Tensor payload is 361 bytes; metadata and all backing capacities are additionally
 budgeted. Report observations cannot publish an incomplete prefix while later
 validation may alter counts/maxima. A passed report corresponds to the same
 owned bake state/binding provenance as its gated table, not merely equal shapes.
@@ -227,7 +234,7 @@ and schema identity preserved. No temporary pointer stands in for shared state.
 Let V=N0*N1*N2 and P=(N0-1)*(N1-1)*(N2-1)+M. A table/report observation evaluates
 V grid colors and P reference colors, then P applied-LUT queries and exact error
 checks, plus declared source work. The 15 geometry keys return Result tensors
-with complete Whole outputs: grid inputs use 3*V*8 bytes, validation points use
+with complete complete-input outputs: grid inputs use 3*V*8 bytes, validation points use
 3*P*8 bytes, and converted color arrays use their selected dtype widths. Source
 work and outputs additionally follow each source operator contract. The sampled
 table Result owns 3*V*b bytes; pack, unpack and gate retain legal authorized
@@ -308,17 +315,10 @@ if (!measured.ok()) return measured.status();
 const bool passed = measured.value().passed;
 ```
 
-A standalone caller can retain the same explicit `Lut3dBakeDescription` itself.
-The reader does not recover configuration from the schema. Report association
-records observed input ObjectIds in port order: axis, grid and owned table are
-the first three, followed by observed source-batch owners. Entry 2 identifies
-the table checked by the gate. Association records identity, not an attached
-color configuration. A completed failed-tolerance report remains readable with
-passed=false while the dependent table fails. Source, resource, cancellation
-and budget failures remain execution failures.
+The gate compares the measured_table_id payload with the complete owned-table input ObjectId. Association records provenance only. A foreign object fails with OperationFailed/InvalidAssociation even when bytes match; passed=false instead fails the gate with OperationFailed/InvalidDomain and diagnostic LutApproximationToleranceExceeded. The report itself remains valid.
 
 All 15 formal `curve.bake_lut3d_{axis,grid,points,points_extra,color}` profile
-keys execute Whole Result programs with role-13 input validation, complete output
+keys execute Run-shared Result programs with ordinary tile Needs input validation, complete output
 coverage and numeric Run failure scope. Any participating input edit invalidates
 the complete recorded demand. Axis remains independent from source/extra data.
 Static `prepare_static` validates geometry parameters and Result metadata, then
@@ -334,23 +334,16 @@ transactional materialization of only the requested region, preserving
 dependency support and sample bits while charging Root Payload. Pack requests
 the complete table, so its fallback may materialize the full table. Acceptance should cover Float32/Float64 across the supported geometries with
 reversed and unaligned layouts; retained views reuse the admitted backing. Pack uses two Result polls on this path, without the former
-Value-copy poll.
+Tensor-copy poll.
 
-Measure reads authorized Result windows and appends the twelve report fields
-only after complete measurement. Gate reads and validates all report fields
-before its table Need; the largest field needs a 72-byte window. It then requests
-the table with role 13 and typed validation, checks association entry 2, and
-publishes the requested complete-color region at its global coordinates. An
-association mismatch need not precede table-pixel validation. Empty tensor
-coverage skips payload validation. The v2 owned-table validator preserves
-status code, reason, origin and scope, including WorkLimit.
+The gate validates the complete owned-table input and compares its ObjectId with the report's measured_table_id payload. Association entries retain provenance only. A foreign table fails even when its bytes match; passed=false remains a valid report but makes the gate return OperationFailed/InvalidDomain with diagnostic LutApproximationToleranceExceeded.
 
 Axis grid storage, prepared report/geometry state, source program state, table
 output, read-window ancestry, exact arithmetic workspace, metadata and allocator
 overhead remain managed. Table, axis and report Results can be held independently;
 a retained table read window may keep its backing alive after output handles are
 released. A small requested table ROI does not reduce source evaluation,
-Whole outputs or global measurement work. Validate owner retirement, both table
+complete-input outputs or global measurement work. Validate owner retirement, both table
 dtypes, geometry/layout combinations, source-error ordering, Empty requests,
 configuration mismatch, cache association, preparation reuse and rebinding with
 temporary public workflows. Delete those programs after validation and retain
@@ -360,3 +353,5 @@ current performance count is asserted by this document.
 - [3D LUT application](CRV-07_apply_lut3d.md).
 - [1D baking templates](CRV-04_bake_lut1d.md).
 - [Curve category](../curves.md).
+
+Geometry generators, pack and measurement use prepared Run-shared stages. Ordinary output actors publish requested tiles from their shared results. Measure and gate are nondeterministic and non-cacheable because the measured table identity is Run-local; their dependent closure is ineligible for cross-Run completed-result, checkpoint and block reuse. Unpack and gate use authorized views where representable, otherwise explicitly charged copies.

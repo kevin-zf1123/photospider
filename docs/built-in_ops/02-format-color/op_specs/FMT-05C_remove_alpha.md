@@ -17,7 +17,7 @@ FMT-05C remains Proposed. The public `format::remove_alpha` helper is compiled
 and installed in `photospider/ops/format/alpha.hpp`. It appends an executable Result
 composition using registered mapped assembly for channel-bearing inputs, or
 `core.identity` for component Gray identity. These paths add no
-alpha operation key. The helper takes one single-tensor Result without fields
+alpha operation key. The helper takes one single-tensor Result
 and publishes one such Result. It supports all seven copy dtypes, preserves the
 batch prefix and exact sample bits, and performs no sample-domain validation.
 
@@ -67,7 +67,7 @@ removed-alpha samples or other color peers are read/validated. Dirty support
 is the inverse retained-slot map; discarded samples have no output effect.
 For shared alpha, that channel's own output still depends on its original samples.
 Static group/reference changes reinfer the mapping. A required upstream producer
-can still fail at its own Whole scope; C does not cancel such work.
+can still fail at its own complete-input scope; C does not cancel such work.
 
 Channel-bearing mapped assembly honors auto/view/materialize, including when
 missing_alpha=identity. Forced materialize creates requested backing; forced

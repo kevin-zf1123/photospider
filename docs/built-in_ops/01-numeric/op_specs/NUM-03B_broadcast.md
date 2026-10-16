@@ -77,7 +77,7 @@ a shape or channel count does not trigger an image/color domain validator.
 Any required operation validation support must be explicitly declared and
 retained in the dependency witness.
 
-## Whole demand, dirty mapping and representation
+## complete-input demand, dirty mapping and representation
 
 Every nonempty request reads and validates the complete input, then publishes
 the complete selected representation before projection. Any source change
@@ -86,11 +86,11 @@ the consumer's actual Region. Empty reads no payload. Parameters and complete
 input metadata still validate before execution. Full typed validation may fail
 because of data outside the mapped coordinates of a partial consumer request.
 
-View requires one original Value covering the full input demand. Mapped
+View requires one original Tensor covering the full input demand. Mapped
 non-singleton axes retain its byte strides; expanded singleton/unmapped axes
 have zero stride. Source offset, unaligned and negative/zero strides remain
 valid. The output retains the source owner with no new payload, and does not
-expand a zero-stride source before the callback. If no covering input Value
+expand a zero-stride source before the callback. If no covering input Tensor
 exists, explicit View returns InvalidArgument/InvalidDomain ViewUnavailable with
 Domain/Run scope before the callback. It does not synthesize a multi-owner output.
 
@@ -166,7 +166,7 @@ requested region for dense output. Local Clang execution checked `[3]` to
 replication, a `[274877906944,3]` view backed by three Int64 samples, and a
 structured consumer reading the giant view through an 8-byte result view.
 
-The following dated implementation/acceptance record predates Whole.
+The following dated implementation/acceptance record predates complete-input.
 It includes negative-stride unaligned permutation, independent owners, image Data
 versus complete-pixel Validation, invalid unselected alpha, bit patterns, Empty,
 collector cancellation, StageLimit, capacity/schema/profile failures, final source
@@ -183,4 +183,4 @@ does not change the Proposed status of this specification.
 - [NUM-03A constant](NUM-03A_constant.md).
 - [Existing shape/region traits](../../../../include/photospider/plugin/operation_registry.hpp).
 
-Current Whole validation and timing: [array Whole](../arrays-whole.md).
+Current complete-input validation and timing: [array complete-input](../arrays-whole.md).

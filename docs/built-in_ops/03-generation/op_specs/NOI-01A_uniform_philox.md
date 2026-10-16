@@ -21,7 +21,7 @@ and profile; within one version/profile, output bits and discrete decisions are 
 
 ## Interface and representation
 
-No Value input; raw values[H,W,C] Float32/64.
+No Tensor input; raw values[H,W,C] Float32/64.
 
 ## Parameters and domain
 

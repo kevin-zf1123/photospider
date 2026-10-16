@@ -2,39 +2,39 @@
 
 ## Current contract
 
-The current package version is **0.34.0**. C++ consumers must rebuild against the package headers. The package uses `SameMinorVersion` compatibility, so requests for a different minor version are incompatible. The C operation-plugin interface remains Result ABI 4; its exact table and record sizes must match the installed SDK.
+Package 0.35.0 uses SameMinorVersion compatibility. C++ consumers and external C operation modules must rebuild against the matching headers. Result ABI 5 requires exact table/record sizes and provides no compatibility shim. The prefix-negotiated frozen ABI in ADR 0022 remains Proposed.
 
-| Contract | Current version |
+| Contract | Version |
 | --- | --- |
-| Package | 0.34.0 |
-| WorkflowDocument schema | 6 |
-| OperationTraits | 26 |
-| Operation plugin C table | Result ABI 4 |
-| Semantic graph identity | `semantic-graph-ir-v21` |
-| Physical plan identity | `physical-plan-v21` |
-| Outer plan cache key | `plan-cache-key-v17` |
-| Optimizer identity | `optimizer-v5-canonical-noop` |
-| Tensor-description codecs | TDM4/TDM5, selected by the current codec rules |
-| Result schema canonical encoding | Version 4 |
+| Package | 0.35.0 |
+| WorkflowDocument | 7 |
+| OperationTraits | 27 |
+| Result operation C ABI | 5, exact-size |
+| CPU parallel / tiles service ABI | 2 / 2 |
+| Native GPU service ABI | 1 |
+| Result schema encoding | `photospider.result-schema.v5` |
+| Semantic graph | `semantic-graph-ir-v22` |
+| Physical plan | `physical-plan-v22` |
+| Plan cache key | `plan-cache-key-v18` |
+| Optimizer | `optimizer-v5-canonical-noop` |
+| Ops TensorDescription codecs | TDM4/TDM5 |
 
-These versions describe independent compatibility axes. A C++ layout change requires rebuilding C++ consumers even when a C table version remains unchanged. The package update and the Result-only C++ operation and workflow APIs are breaking C++ changes. The Result C table remains ABI 4 and is the sole operation-plugin C interface. ABI 4 includes tensor-window, tensor-view, reshape services, plus immutable classification fields on named `ps_result_output_v4` records. `failure_delivery` is `PS_RESULT_REQUEST_FAILURE_ONLY_V4` (0). The importer requires exact current record sizes; C modules must rebuild against the SDK.
+These axes are independent. A C++ layout change can require rebuilding without changing an unrelated native service ABI. Current authoritative definitions are the public headers, CMake package declaration and compiler canonical encoders.
 
 ## Workflow inputs and operation execution
 
-`WorkflowInputDeclaration` contains an id, exact binding name, and required `result_schema`. `ExecutionBinding` contains a name and owning `ResultRef`. `ExecutionResult` and `DemandResult` expose named Results; Value is internal typed backing used by Result storage and codecs. Input `OperationMetadata` carries the Result schema. Tensor shape and layout belong to each `ResultTensorSpec`.
+Workflow declarations require static Result schemas. Bindings supply owning ResultRef objects by exact name. A Run fixes plan, binding snapshot and generation. Each output/member has a grid under one plan-wide tile extent, default 128. Payload Needs use member slots and compact intervals; descriptor-only is explicit. Empty payload sets do nothing.
 
-`OperationTraits` version 26 and `WorkflowDocument` schema 6 identify the current C++ contracts. An operation executes through `start_result` and its `ResultContinuation`. `ExecutionContext::execute` returns named Results. Incremental publication uses `ExecutionOptions::result_publication`, which receives certified prefixes as they become available and may retain the owning Result reference. A prefix is not complete execution success. Callback failure stops the Run and follows the existing failure, cancellation, and callback-retirement rules.
+Continuations may span polls and multiple Needs. Prepared shared stages provide one producer per original node/stage within a Run, independent of output selection. Ordinary actors publish one complete member tile. Fixed bundle/prefix visibility remains separate from execution. Mandatory roots and cancellation follow the execution contract.
 
 ## Result and image interface
 
-A Result schema declares typed tensor members, primitive fields and domain. Tensor members carry element type, descriptor cell shape, optional batch axes and physical layout; complete sample coordinates are batch axes followed by cell axes. A spatial tensor's height, width, and channel axes are cell-relative. Physical storage order and row pitch describe backing; tensor payload remains distinct from primitive field records. Planar image pixels use typed Result tensor slots backed by planar pages.
+A Result has 1..16 named static Tensor members. Dtype, positive shape, rank, batch/atomic axes and topology are fixed before execution, including statically derived extents. Runtime counts and masks are ordinary payload inside fixed capacity. There are no dynamic field rows, End protocol, numeric port kind, failure-delivery selector or kernel scalar-bounds field.
 
-A Result schema can contain tensor slots, fields, or both. `read_tensor` copies authorized samples, while owning tensor windows expose authorized rows or rectangles and retain backing owners until release. `publish_tensor_view` publishes an authorized source view. `make_mapping` maps output tensor support to an input tensor; other relation helpers construct tensor support witnesses. Relations do not authorize sample reads.
+Tensor unifies backing, fragments and view access. Host allocation defaults to tiled planar. Legal signed/zero strides, external owners and sparse physical coverage remain supported. Owning windows expose actual runs; explicit collection and packing consume capacity and work. Ordinary images default to straight alpha in operation implementations and helpers, without a kernel compliance validator.
 
-The resolver supplies each output schema once through its synchronous metadata sink, and the host copies and validates nested schema records before the sink call returns. The query view reflects the selected output declaration; metadata resolution cannot change its failure classification. Retained tensor and window handles have explicit release or operation-state destruction lifetimes. CPU workers may poll cancellation; retained window row/rectangle access is worker-safe and does not reenter execution services.
+C metadata resolution supplies schemas, selected resources and static shared-stage declarations. Retained windows have explicit retain/release lifetimes. Query and service tables expire at callback return. The kernel validates addresses, authorization, owners and synchronization without interpreting pixel values.
 
 ## Identity and runtime matching
 
-Semantic identity includes operation contracts, typed Result schema, parameters, ordered inputs, selected output, and captured query where applicable. Physical plan identity includes physical choices that affect execution. Page offsets and transient addresses are not semantic identity. Internal IR and plans are not serialization formats.
-
-The installed C++ headers, linked kernel library, and selected C table must describe the same package and ABI. The loader validates exact C table version and size before importing a module. Native GPU behavior additionally requires the selected backend and an available device. Package 0.34.0 defines the current C++ interface contract. C++ layout and field removals are breaking changes; rebuild every C++ consumer against the installed 0.34.0 package. The package version file accepts compatible releases in the 0.34 minor line.
+Canonical identities include the prepared operation contracts, static schemas, parameters, selected resources, input projections, shared-stage definitions and relevant backend choices. Raw pointers, padding and allocation addresses do not define semantic identity. C import rejects wrong ABI or size; native service availability also depends on build and device. Internal IR and plans are not serialized wire formats.

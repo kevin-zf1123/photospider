@@ -37,9 +37,9 @@ V = sum((x - mean)^2) / (N - ddof)
 
 and round V once to the selected floating type. Do not round the mean, squares or partial sums. Integer inputs enter this formula exactly. Its exact numerator is nonnegative; clamping a negative approximate variance is not a substitute for the formula. For `reduce_std`, compute the exact same V and return `RN_dtype(sqrt(V))` without first rounding V. Both operations propagate the first NaN using the shared payload conversion. If there is an infinity and no NaN, return the fixed positive quiet NaN. A finite constant group has variance and standard deviation +0. Finite positive results may round to +Inf or +0.
 
-## Whole execution and count's metadata path
+## Run-shared complete-input computation and count's metadata path
 
-The six numeric reducers run as Whole tensor programs. Static specialization validates the complete Result schema and parameters. For nonempty demand, each requests the complete input with Data, Validation and Descriptor roles (role 13), validates the typed payload, and reads through the authorized Result windows. It computes all keepdims groups and publishes the complete dense output before consumer projection; it does not first collect or pack the complete input. Thus a typed-validation failure or arithmetic overflow in an unrequested group fails the selected output. Empty demand reads no payload or performs group arithmetic. Any active source edit dirties the complete output.
+The six numeric reducers run as complete-input tensor programs. Static specialization validates the complete Result schema and parameters. For nonempty demand, each requests the complete input with ordinary member tile Needs with explicitly bound validators , validates the typed payload, and reads through the authorized Result windows. It computes all keepdims groups and publishes the complete dense output before consumer projection; it does not first collect or pack the complete input. Thus a typed-validation failure or arithmetic overflow in an unrequested group fails the selected output. Empty demand reads no payload or performs group arithmetic. Any active source edit dirties the complete output.
 
 `reduce_count` specializes with an empty runtime input projection. It validates the complete input schema and axes, but requests no runtime input, creates no source observation or association, and does not schedule a source producer for sample values. Its descriptor relation is a known empty witness. It computes the product of reduced extents with O(rank) work, allocates one 8-byte Int64 owner, and publishes the keepdims result through zero strides. Source-byte edits do not invalidate the count; schema shape/type and axes determine it. Cancellation, work and resource errors keep their original host status.
 
@@ -49,7 +49,7 @@ Numeric reducers own the complete dense output and hold authorized input read wi
 
 Compile/preflight rejects malformed or empty axes, duplicate/out-of-rank axes, unsupported dtype or shape, invalid numeric parameters and input sizes above 2^40. Invalid `ddof` reports `InvalidArgument` / `InvalidDomain` before sample reads. Integer final overflow reports `OperationFailed` / `ArithmeticOverflow`, attributed to the failing linear output group as Domain/Run. Floating numeric outcomes such as infinity or generated NaN are results, not Status failures. Upstream, typed-validation, resource and cancellation failures retain their original categories. No partial failed output is published.
 
-The seven member specifications define per-operation outputs, formulas and acceptance cases. Current public integration coverage and its limits are summarized in [NUM-11 Whole execution](../reductions-whole.md). The specifications remain Proposed.
+The seven member specifications define per-operation outputs, formulas and acceptance cases. Current public integration coverage and its limits are summarized in [NUM-11 Run-shared complete-input computation](../reductions-whole.md). The specifications remain Proposed.
 
 ## Individual specifications
 

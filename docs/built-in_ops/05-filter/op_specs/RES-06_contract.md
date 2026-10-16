@@ -40,7 +40,7 @@ Fixed-step members require `max_iterations>=0`, use that as the exact number of 
 
 Ordinary arithmetic follows NUM, including NaN, Inf, overflow, signed zero, payload and precision behavior. Validate finite positive algorithm controls and the stated control-model/stability domain. Resource exhaustion fails explicitly and must not change the algorithm, precision or requested step limit.
 
-Whole-plane dependency applies to each fixed-step profile. Members declare exact support and dirty behavior; a theoretical finite halo does not authorize partial-state sharing. Account for two state generations, baked edge conductances, work, checker-held state and checker workspace for early-stop members. Cancellation and owner lifetime follow common execution contracts.
+complete-input-plane dependency applies to each fixed-step profile. Members declare exact support and dirty behavior; a theoretical finite halo does not authorize partial-state sharing. Account for two state generations, baked edge conductances, work, checker-held state and checker workspace for early-stop members. Cancellation and owner lifetime follow common execution contracts.
 
 ## Acceptance
 

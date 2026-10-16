@@ -14,7 +14,7 @@ clarification_status: complete
 
 # CRV-06D: color_ramp_cielch
 
-Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member and no fields, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member , under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
 ## Revised lightness coordinate and implementation boundary
 
@@ -115,8 +115,8 @@ mixed zero rules to L/C. All selected source rows are validated before shortcuts
 
 ## Demand, invalidation, resources and failures
 
-All formal strict and accelerated keys use Whole Result programs. A nonempty
-Run declares Data, Validation and Descriptor needs (role 13) for every input, so
+All formal strict and accelerated keys use Run-shared Result programs. A nonempty
+Run declares ordinary payload tile Needs  for every input, so
 typed and upstream validation covers complete tensor members. The executor reads
 authorized windows directly; the callback does not collect or copy complete input
 arrays. It validates all stops, then every input position, before color arithmetic.
@@ -126,11 +126,11 @@ unused, while their typed/upstream validation still applies. Empty reads no samp
 payload after static preparation.
 
 The `values` port publishes an immutable `photospider.tensor` v1 Result with
-`samples` shape `sample_shape(input)+[C]`, `atomic_trailing_axes=1`. Whole writes publish the full output transactionally;
-the Result retains full certified coverage and global coordinates. Fragments expose
+`samples` shape `sample_shape(input)+[C]`, `atomic_trailing_axes=1`. the shared stage publishes the full internal output transactionally;
+the shared stage retains full internal coverage; public actors expose only requested complete tiles and global coordinates. Fragments expose
 requested regions while retaining the full output owner. Arbitrary immutable source
 strides, offsets and unaligned storage are supported. Result association records
-source ObjectIds, and selected ColorArray resources remain owned by the output.
+source ObjectIds, and selected operation resources remain owned by preparation and execution; the output retains its data backing.
 Input edits invalidate complete recorded output demand. Numeric errors have Run
 scope; failed callbacks publish no color subset. Upstream, resource and cancellation
 errors retain their categories.

@@ -17,7 +17,7 @@ registered_operation_keys:
 
 Inherit the complete [FMT-06 contract](FMT-06_numeric_conversion_contract.md).
 The default registry provides `numeric.convert_format_strict` as a native Result
-ABI 4 operation. It takes one single-tensor Result with no fields and publishes one `values` output
+ABI 5 operation. It takes one single-tensor Result with publishes one `values` output
 Result containing one tensor. Its default scales numeric intervals while converting dtype;
 explicit `rescale=false` gives a pure numerical cast. The specification remains
 Proposed.
@@ -51,7 +51,7 @@ The caller supplies any target encoding to later consumers explicitly.
 Data and dirty mapping are exactly q<->q. All static table entries/consumed
 metadata contribute to Descriptor checks, even if their channels are unrequested.
 No extra alpha/color peer read or global min/max scan occurs. Requested conversion
-failures stay within their inherited observation scope; required upstream Whole
+failures stay within their inherited observation scope; required upstream complete-input
 failures retain their original broader scope. No error at an unrequested source
 sample is manufactured by this operation.
 

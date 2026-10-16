@@ -52,13 +52,13 @@ require both starts[j] and last[j] within input axis bounds. Monotonic stepping
 then proves the entire axis valid. Invalid parameters fail the observation even
 when the actual requested output subset would have valid source coordinates.
 
-## Single-sample axes and Whole input support
+## Single-sample axes and complete-input input support
 
 A singleton count ignores that axis's step numerically. If all counts are one,
 static projection excludes the complete step port, including a failing producer;
-static schema and parameter checks still run. Otherwise the Whole program
+static schema and parameter checks still run. Otherwise the complete-input program
 requests the active source, starts and steps through full Tensor Needs using
-Data, Validation and Descriptor roles (role 13), which trigger typed-payload
+ordinary member tile Needs with explicitly bound validators , which trigger typed-payload
 validation. An unused step entry can then cause an upstream/typed failure.
 Source gaps and unselected coordinates remain part of the complete input
 preparation. The program publishes a complete Result with global output coordinates; `Q` limits
@@ -96,11 +96,11 @@ Conceptual fixture: input=[0,1,2,3,4,5], starts=[4], steps=[-2], counts="3"
 yields [4,2,0]. Independent exact integer coordinate mapping and raw-bit reads
 are the oracle. Verify a partial output request still rejects a full slice that
 would run out of bounds. For counts="1", prove steps is never requested even if
-its upstream would fail; numerical selection is starts while Whole reads the source. Include multi-axis mixed
+its upstream would fail; numerical selection is starts while complete-input reads the source. Include multi-axis mixed
 positive/negative steps, signed-zero/sNaN data, dynamic control changes, singleton
 axes, metadata limits, source strides/owners, auto/view/dense and disjoint reads.
 
-All formal profiles use Whole and disable cross-run content caching because
+All formal profiles use complete-input and disable cross-run content caching because
 content does not prove physical owner/stride identity; same-Run sharing remains
 available. Execution behavior and temporary acceptance cases are described in
-[NUM-09 Whole execution](../layouts-whole.md).
+[NUM-09 Run-shared complete-input computation](../layouts-whole.md).

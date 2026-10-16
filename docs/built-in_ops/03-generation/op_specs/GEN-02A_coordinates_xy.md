@@ -24,7 +24,7 @@ output bits and discrete decisions are fixed.
 
 ## Interface and representation
 
-No Value inputs; coordinates[H,W,2] Float32/64, component order xy.
+No Tensor inputs; coordinates[H,W,2] Float32/64, component order xy.
 
 ## Parameters and domain
 

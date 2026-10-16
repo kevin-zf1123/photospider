@@ -57,7 +57,7 @@ class QualityReport final {
 - Association identifies the immutable Result ObjectId being validated before publication. Associated fields are checked before observers see that result.
 - Group, Run and Waiter describe operational extent and do not invent a failed semantic value at an arbitrary coordinate.
 
-The host binds `node_id` or `input_id` to the actual source of a failure. Propagation retains that identity and the original atom. A transport read failure remains Io/Group with its input declaration identity. Failure records have no success Value or success dependency certificate.
+The host binds `node_id` or `input_id` to the actual source of a failure. Propagation retains that identity and the original atom. A transport read failure remains Io/Group with its input declaration identity. Failure records have no success Tensor or success dependency certificate.
 
 `FailureReason` contains only kernel-generic causes. An operation that needs a finer domain meaning constructs `Status(code, message, DomainErrorCode{value}, detail)`, or calls `fail_domain(status_code, domain_code)` from C. The kernel copies the value into `FailureDetail::domain_code` and transports it unchanged; it does not interpret or validate the number. The operations SDK defines its stable codes in `photospider/ops/errors.hpp`, for example `ops_error::DivideByZero` and `ops_error::InvalidAssociation`. A caller that branches on these codes includes that SDK header.
 

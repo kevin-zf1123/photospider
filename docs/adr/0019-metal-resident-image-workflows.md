@@ -51,7 +51,7 @@ struct ExecutionContextConfig {
 };
 ```
 
-Result operation callbacks use operation ABI 2. Native GPU services have an independent ABI 1 in the standalone C header `photospider/plugin/native_gpu_api.h`; C Result services and C++ Result phases expose this table for the current invocation. Including the native GPU header does not require the operation plugin header.
+Result operation callbacks use operation ABI 5. Native GPU services have an independent ABI 1 in the standalone C header `photospider/plugin/native_gpu_api.h`; C Result services and C++ Result phases expose this table for the current invocation. Including the native GPU header does not require the operation plugin header.
 
 ```c
 #include <photospider/plugin/native_gpu_api.h>
@@ -84,8 +84,8 @@ For Result operation callbacks, runtime fallback occurs only when a GPU attempt 
 
 ## 5. Consequences
 
-The execution context accounts for native input copies, outputs, scratch and staging using actual allocation capacity. If the working set cannot fit, admission fails with `ResourceExhausted`; reducing concurrency or releasing retained Values can reduce pressure. Pipeline metadata and driver allocations are outside the pixel-buffer budget.
+The execution context accounts for native input copies, outputs, scratch and staging using actual allocation capacity. If the working set cannot fit, admission fails with `ResourceExhausted`; reducing concurrency or releasing retained Tensors can reduce pressure. Pipeline metadata and driver allocations are outside the pixel-buffer budget.
 
 Device absence prevents GPU-only operations from running. An operation with a permitted CPU implementation may use that path when the GPU reports pre-publication unavailability. Ordinary operation failures and submitted device errors are returned to the caller; the kernel does not retry them as CPU work. Callers can inspect fallback reasons and actual dispatch/submission counters to distinguish device work from CPU execution.
 
-The synchronous lane makes buffer lifetime and publication ordering explicit, but one long GPU callback occupies the lane until its commands drain. Cancellation stops new admission and waits for submitted commands to retire before the callback releases its resources. Result operation ABI 2 and native GPU service ABI 1 are independent plugin boundaries. C modules that compile against `native_gpu_api.h` must be rebuilt when that header changes; no older GPU-service alias is provided.
+The synchronous lane makes buffer lifetime and publication ordering explicit, but one long GPU callback occupies the lane until its commands drain. Cancellation stops new admission and waits for submitted commands to retire before the callback releases its resources. Result operation ABI 5 and native GPU service ABI 1 are independent plugin boundaries. C modules that compile against `native_gpu_api.h` must be rebuilt when that header changes; no older GPU-service alias is provided.

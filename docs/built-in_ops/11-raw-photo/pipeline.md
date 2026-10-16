@@ -27,7 +27,7 @@ DNG1.7.1.0的参考归一化分母使用WhiteLevel减去sample plane的maximum c
 
 ## 多图摄影
 
-输入为显式图像列表、各图时间/曝光/有效mask、可选校准与变换。多图不同data window要先对齐到共同坐标。输出confidence、source map、focus index是数值诊断，可使用已实现静态命名多输出或带动态 count 的 Result；专用诊断语义和关联仍须定义。
+输入为显式图像列表、各图时间/曝光/有效mask、可选校准与变换。多图不同data window要先对齐到共同坐标。输出confidence、source map、focus index是数值诊断，可使用已实现静态命名多输出或静态容量 Tensor 与普通 count/mask payload；专用诊断语义和关联仍须定义。
 
 | ID / 功能 | 输入 → 输出 | 实现路线/参数 | 验收与边界 |
 | --- | --- | --- | --- |

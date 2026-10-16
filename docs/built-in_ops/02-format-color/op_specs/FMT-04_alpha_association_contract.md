@@ -13,7 +13,7 @@ clarification_status: complete
 
 The default registry provides `alpha.associate_<profile>` and
 `alpha.unassociate_<profile>` for `strict`, `accelerated_apple_silicon`, and
-`accelerated_x86_64`. Each uses Result ABI 4. Semantic calls bind one Result; raw
+`accelerated_x86_64`. Each uses Result ABI 5. Semantic calls bind one Result; raw
 plane/scalar calls may bind a second Result. The family and its members remain
 Proposed; status records design acceptance separately from implementation.
 
@@ -68,7 +68,7 @@ Alpha must be finite in [0,1] when consumed by semantic color conversion.
 
 ## Ports, shape and static parameters
 
-Input `input` and output `values` have the same shape and Float32/Float64 dtype. A call connects one source Result and optionally one explicit alpha Result for raw plane/scalar modes; each connected Result contains exactly one tensor and no fields. Nonscalar batch prefixes match exactly; scalar weights are unbatched shape `[1]`. The complete sample rank, including batch and cell axes, is at most 8 and full sample count is at most 2^40.
+Input `input` and output `values` have the same shape and Float32/Float64 dtype. A call connects one source Result and optionally one explicit alpha Result for raw plane/scalar modes; each connected Result contains exactly one tensor. Nonscalar batch prefixes match exactly; scalar weights are unbatched shape `[1]`. The complete sample rank, including batch and cell axes, is at most 8 and full sample count is at most 2^40.
 With `input_description`, the input has a declared channel axis, selected RGB indices
 or a Gray index, and a distinct internal alpha index outside those color indices.
 Resolve index/name/role selectors by the FMT-01 exact unique namespace rules.
@@ -182,7 +182,7 @@ copy exact bits without extra finite/range validation. Static descriptor, group,
 source-state and channel-reference checks apply regardless of requested samples.
 
 No value-dependent Control read or short circuit at a=0 suppresses a required
-operand failure. Upstream Whole work retains its original scope. A failed
+operand failure. Upstream complete-input work retains its original scope. A failed
 observation publishes no success and does not revoke unrelated completed output.
 Input component changes map pointwise to the same output; internal alpha changes
 also fan out to selected group components at that coordinate. Raw external plane

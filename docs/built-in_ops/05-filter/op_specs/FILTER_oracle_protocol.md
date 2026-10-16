@@ -68,7 +68,7 @@ mandatory manual-review gate or universal cross-effect score is implied.
 | ID | Required evidence |
 | --- | --- |
 | H01 | Missing/type/domain/shape/axis validation before prohibited reads |
-| H02 | Whole versus nonzero ROI/tile crops where mathematically applicable |
+| H02 | complete-input versus nonzero ROI/tile crops where mathematically applicable |
 | H03 | Exact sparse support, excluded mask/tap data and dynamic radius demand |
 | H04 | Control dirty witnesses for guide/mask/kernel/radius changes |
 | H05 | Independent/joint outputs and failure scope |

@@ -1,4 +1,4 @@
-# NUM-04/05 Whole execution
+# NUM-04/05 Run-shared complete-input computation
 
 ## Current NUM-04 unary Result path
 
@@ -10,7 +10,7 @@ requires matching dtype and complete sample shape, rank 1..8, positive extents,
 and at most 2^40 samples; input schema IDs are not fixed. Structure is checked independently from
 any explicitly declared domain validator; there is no label-triggered scan.
 
-The Whole continuation requests complete input support with Data, Validation
+The complete-input continuation requests complete input support with Data, Validation
 and Descriptor roles. It reads authorized Result windows and preserves compatible
 signed or zero strides without requiring packed input collection. Every
 nonempty execution validates all input samples and writes one complete packed
@@ -19,20 +19,20 @@ the executor then projects requested coordinates. Ordinary unary output keeps
 the input dtype. Rational pi constructors accept matching Int64 tensors and
 select a Float32 or Float64 output explicitly. Empty requests pass static
 validation and resource admission, then produce empty tensor coverage without
-input reads or arithmetic callbacks. Whole arithmetic errors retain Run scope,
+input reads or arithmetic callbacks. complete-input arithmetic errors retain Run scope,
 and returned Results keep immutable backing after the execution context retires.
 
 ## Current NUM-05 binary Result path
 
-`numeric_binary.cpp` registers 27 CPU Whole Result keys through the shared
+`numeric_binary.cpp` registers 27 CPU complete-input Result keys through the shared
 `point_math_operation` implementation. The public helpers in
 `photospider/ops/numeric/binary.hpp` build editable workflows.
 
-Each input Result has one tensor member in slot 0 and may also contain fields.
+Each input Result has one tensor member in slot 0.
 Input schema IDs may differ, but dtype and the complete `sample_shape()` must
 match. Rank is 1..8, extents are positive, and the sample count is at most
 2^40. Input structure and explicitly declared validators are checked without
-color or image label inference. Nonempty Whole execution requests Data, Validation and
+color or image label inference. Nonempty Run-shared complete-input computation requests Data, Validation and
 Descriptor support for both inputs, reads authorized windows, and publishes a
 complete packed Result. The output uses `photospider.tensor` with tensor key
 `samples`, retains the full logical sample shape as ordinary axes, and drops

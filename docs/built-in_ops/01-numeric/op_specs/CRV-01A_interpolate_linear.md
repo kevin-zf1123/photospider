@@ -126,7 +126,7 @@ policy rather than NUM-04's IEEE-style successful NaN/Inf outputs.
 
 ## Confirmed requested-data support
 
-For every nonempty request, the Whole Result program requests complete x, y and query inputs with Data, Validation and Descriptor (role 13), including typed validation and upstream failures. It validates all x knots and query controls before y arithmetic, evaluates every query and output column, and publishes a complete dense Result of shape [N] or [N,C]. The Result association records the actual source ObjectIds. Empty reads no payload; static metadata validation still applies. A nonempty local request still computes and stores the complete output. The returned Result may retain complete certified coverage, and sample coordinates remain global rather than being rebased to the request.
+For every nonempty request, the Run-shared Result program requests complete x, y and query inputs with ordinary payload tile Needs, including typed validation and upstream failures. It validates all x knots and query controls before y arithmetic, evaluates every query and output column, and publishes a complete dense Result of shape [N] or [N,C]. The Result association records the actual source ObjectIds. Empty reads no payload; static metadata validation still applies. A nonempty local request still computes and stores the complete output. Output tile actors retain the shared backing but expose only the requested complete member tiles, and sample coordinates remain global rather than being rebased to the request.
 
 The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
 linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
@@ -146,7 +146,7 @@ negative strides remain legal. Packed output storage outlives the context.
 The callback chooses an exact knot before interpolation. Otherwise interior
 queries select the unique j with x[j]<query<x[j+1]; extrapolation uses j=0 or
 K-2. Signed zeros compare numerically equal. Both linear endpoints undergo
-finite validation even when equal. Whole execution, ownership and invalidation
+finite validation even when equal. Run-shared complete-input computation, ownership and invalidation
 follow the preceding section. All static edges are checked without payload.
 
 ## Reference algorithm and bounded resources
@@ -211,7 +211,7 @@ acceptance obligations. These cases remain acceptance requirements.
 
 For temporary public-path acceptance, compare all four interpolation forms with
 independent small-input references. Cover exact linear and nonlinear PCHIP
-results, admitted profiles, Float32/Float64, knot/clamp signed zero, typed Whole
+results, admitted profiles, Float32/Float64, knot/clamp signed zero, typed complete-input
 validation, query/domain error precedence, limits, cancellation, associations
 and output lifetime. Include `linspace -> bake_lut1d_pchip` and `resample_linear`
 compositions when changing the corresponding helpers.
@@ -222,7 +222,7 @@ temporary checker and its build registration.
 ## Existing implementation distinction
 
 The existing curve.sample_linear takes controls[K,2] and static domain/count,
-validates all controls and materializes Whole output. See the
+validates all controls and materializes complete-input output. See the
 [family source comparison](CRV-01_interpolate.md). It does not implement this
 separate-x/y, explicit-query interface. The maintained target workflow and current validation boundary are recorded below.
 
@@ -241,7 +241,7 @@ destination rounding. Accelerated Float32 evaluation accepts only enclosures
 whose endpoints round to the same Float32 result, preserving monotonicity;
 unresolved cases use exact fallback. Exact cross products identify collinear
 PCHIP stencils and reduce them to the linear formula. Complete input collection, Run failures and complete-output allocation follow
-the Whole contract above; mathematical y stencils remain unchanged.
+the complete-input contract above; mathematical y stencils remain unchanged.
 
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
 contains the shared arithmetic/resource details and current validation boundary.

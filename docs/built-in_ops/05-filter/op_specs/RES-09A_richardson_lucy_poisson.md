@@ -40,7 +40,7 @@ For RES-09A, epsilon is exactly zero: if the exact denominator is zero, `y=0` gi
 
 ## Demand and resource behavior
 
-Estimate demand reads Whole plane and full PSF. `unobserved`-only demand does not read observation/background/initial payload. An estimate-only zero-step request copies initial but still validates PSF/mask descriptors needed for the other requested output or preflight. Unrequested payload is not read. The output descriptor depends on input descriptors and static parameters.
+Estimate demand reads complete-input plane and full PSF. `unobserved`-only demand does not read observation/background/initial payload. An estimate-only zero-step request copies initial but still validates PSF/mask descriptors needed for the other requested output or preflight. Unrequested payload is not read. The output descriptor depends on input descriptors and static parameters.
 
 The direct algorithm costs `O(max_iterations*P*C*A)` and retains the finite `A` and `Aᵀ` plans plus exact sensitivity and state buffers. Any FFT path must reproduce the finite operator and rounding stages, not use circular convolution. Budget work and memory; on insufficiency fail without spill, hidden approximation or partial publication. Cancellation and owner lifetime follow shared contracts.
 

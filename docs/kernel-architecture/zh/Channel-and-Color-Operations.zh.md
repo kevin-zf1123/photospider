@@ -2,7 +2,7 @@
 
 [英文权威页面](../Channel-and-Color-Operations.md)。
 
-内置格式算子使用 Result 端口和当前 Result C ABI 4。Result 只携带结构与样本，不附着颜色、alpha、transfer、采样或 encoding 描述。每个算子通过显式静态参数接收所需解释。描述是配置，不是样本有效性的证明；内核不会仅因调用者对结构相容的数据赋予不同含义而拒绝连线。
+内置格式算子使用 Result 端口和当前 Result C ABI 5。Result 只携带结构与样本，不附着颜色、alpha、transfer、采样或 encoding 描述。每个算子通过显式静态参数接收所需解释。描述是配置，不是样本有效性的证明；内核不会仅因调用者对结构相容的数据赋予不同含义而拒绝连线。
 
 公开 workflow helper 与运行算子属于 `Photospider::ops`。消费者链接该目标，它依赖 `Photospider::ops_sdk`、`Photospider::ops_headers` 与 kernel。共享描述、codec、资源封装、精确领域数学和 `format::edit_description` 属于 `Photospider::ops_sdk`；SDK 只使用 kernel 公共接口。`TensorDescription` codec 按坐标记录选择规范 TDM4/TDM5，见[张量描述](Tensor-Semantic-Metadata.zh.md)。
 
@@ -25,15 +25,15 @@
 
 ## 结构性通道操作
 
-提取、组合与编辑保留 UInt8、Int8、UInt16、Int16、Int64、Float32、Float64 的样本位模式，包括 NaN payload 和 signed zero。它们不执行颜色转换、alpha 归一化或样本领域扫描。轴索引相对于 cell axes，不含 Result batch prefix；完整 sample rank 至多为 8。Assembly 接受 1..1024 个 single-tensor/no-fields Results，要求非 scalar 输入的 batch prefix 与非通道 shape 匹配，输入/输出样本上限为 2^40。Extraction 服从 Result backing 和请求区域的可表示性，没有族级 dense product 上限。
+提取、组合与编辑保留 UInt8、Int8、UInt16、Int16、Int64、Float32、Float64 的样本位模式，包括 NaN payload 和 signed zero。它们不执行颜色转换、alpha 归一化或样本领域扫描。轴索引相对于 cell axes，不含 Result batch prefix；完整 sample rank 至多为 8。Assembly 接受 1..1024 个 single-Tensor Results，要求非 scalar 输入的 batch prefix 与非通道 shape 匹配，输入/输出样本上限为 2^40。Extraction 服从 Result backing 和请求区域的可表示性，没有族级 dense product 上限。
 
-Extraction 精确请求选中来源的 Data 与 Descriptor。keepdims=false 删除选定 cell axis，不能产生 rank zero；若删除 atomic trailing axis，结构字段同步调整。Split helper 校验完整规范结构与物理布局，包括 forward producer reference；输出不投影描述。
+Extraction 请求与选中来源坐标相交的普通成员 tile。实际计算读取选中样本；tile 授权可能包含更多样本。keepdims=false 删除选定 cell axis，不能产生 rank zero；若删除 atomic trailing axis，结构字段同步调整。Split helper 校验完整规范结构与物理布局，包括 forward producer reference；输出不投影描述。
 
 Assembly 插入、拼接或映射通道索引。所有连接输入都参与静态 Descriptor 检查，payload 只读取选中坐标。Mapped record 只有 input、match、selector、destination，每个目标恰好填一次；没有 output_description 或 destination_component 参数。Replacement 同时读取原始不可变输入；被覆盖的 base 样本只有被另一个请求目标选中时才读取。Scalar record 显式重复无 batch 的 `[1]` 值，普通 plane 不隐式广播。
 
-通用 view 要求在保留 backing 上证明可表示的仿射映射；空间 view 还需满足 Result 存储证明。相同字节或共享 ancestry 本身不足。Auto 仅因物理 view 不可用而物化，保留其他错误。物化在 Root 预算和取消约束下事务式发布请求覆盖，不读取缺失样本、padding 或未请求通道。Empty observation 做静态检查但不处理样本。
+非 reshape view 逐一校验保留的 backing 片段，可以保留不同 owner 和 stride；reshape 要求兼容的 affine join。相同字节或共享 ancestry 本身不证明映射合法。Auto 仅因物理 view 不可用而物化，保留其他错误。物化在 Root 预算和取消约束下事务式发布请求覆盖，不读取缺失样本、padding 或未请求通道。Empty observation 做静态检查但不处理样本。
 
-`channel.literal_like_<profile>` 接收一个 tensor Result，仅请求 Descriptor。准备好的 bits、shape/axis/keepdims、source assertion 与 layout 定义生成输出；不接受输出描述。`channel.scalar_literal_<profile>` 是无输入 Whole primitive，从精确 native bits 产生同 dtype 的 `[1]` tensor。
+`channel.literal_like_<profile>` 接收一个 tensor Result，仅请求 Descriptor。准备好的 bits、shape/axis/keepdims、source assertion 与 layout 定义生成输出；不接受输出描述。`channel.scalar_literal_<profile>` 是无输入 complete-input primitive，从精确 native bits 产生同 dtype 的 `[1]` tensor。
 
 ## Alpha
 
@@ -45,7 +45,7 @@ FMT-05 要求调用方提供 straight 解释。Set 使用 Float32/64，校验请
 
 ## 数值格式与 transfer
 
-FMT-06 实现全部 49 对 dtype 转换。Rescale 默认为 true，源与目标区间分别来自显式值或 dtype 默认值；pure cast 拒绝 ranges 和 axis。逐通道 range table 使用显式 cell axis。精确仿射结果只向目标舍入一次，再执行 reject/clip。Result 保留结构 schema identity、tensor key、shape、batch，改变 dtype 并将 atomic_trailing_axes 设为零；不传播 decoder。仅需 Data 与 Descriptor；同 dtype 的静态 identity 可保留合法 view。SIMD/SME 路径共享 strict 数值契约，测量时仍需独立的 native dispatch 证据。
+FMT-06 实现全部 49 对 dtype 转换。Rescale 默认为 true，源与目标区间分别来自显式值或 dtype 默认值；pure cast 拒绝 ranges 和 axis。逐通道 range table 使用显式 cell axis。精确仿射结果只向目标舍入一次，再执行 reject/clip。Result 保留结构 schema identity、tensor key、shape、batch，改变 dtype 并将 atomic_trailing_axes 设为零；不传播 decoder。通过普通 payload tile Need 获取所需覆盖；同 dtype 的静态 identity 可保留合法 view。SIMD/SME 路径共享 strict 数值契约，测量时仍需独立的 native dispatch 证据。
 
 FMT-09 有 input_description 时要求唯一 group，并禁止 raw axis/components。Decode 可从该配置解析完整曲线；encode 要求目标 curve 和 linear 源解释。无描述时必需 components 与 curve，index list 还要求 axis。各曲线的单位/reference 校验保留。输出保留 shape/dtype、atomic_trailing_axes=0，不带 transfer 标签。
 
@@ -59,4 +59,4 @@ D 在修改原图前暂存完整展开。它根据显式源描述推导中间 XY
 
 FMT-11 A–R/T 提供 57 个按 profile 区分的原生 model key，S 使用三个 MASK threshold key。显式描述可解析唯一 group，并允许相符的 axis/components assertion。Raw 调用提供成员要求的 selectors、white、hue unit、NCL 系数、Gray kind 或常量。Raw XYZ→xyY 需要实现声明的 white_x/white_y。Q 删除两个选定槽；R 展开 Gray 槽或插入显式 output_axis。输出不附着模型描述。
 
-仅 Q 支持 forced view。选定描述样本使用 Data 与 Validation；raw T 始终校验精确 0/1 selector；raw S 与旁路使用 Data；常量 R 输出只需 Descriptor。发布、错误、owner、预算和取消服从 Result 契约。数值报告通过 SDK report_numeric/reader 使用内核有界通用诊断通道；cache hit 不报告未执行的算术。
+仅 Q 支持 forced view。选中样本使用普通 payload tile Need，算子按显式描述执行领域检查。Raw T 始终校验精确 0/1 selector；raw S 与旁路读取所选样本；常量 R 使用显式 descriptor-only 访问。发布、错误、owner、预算和取消服从 Result 契约。数值报告通过 SDK report_numeric/reader 使用内核有界通用诊断通道；cache hit 不报告未执行的算术。

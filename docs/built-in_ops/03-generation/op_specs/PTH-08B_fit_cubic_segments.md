@@ -37,14 +37,14 @@ return different valid outputs; no minimum-segment promise.
 
 ## Dependencies, resources and failures
 
-Execution rule: **Whole**. Read complete structural/global inputs and publish the
+Computation scope: **complete input in a Run-shared stage**. Read complete structural/global inputs and publish the
 selected complete Result atomically. Full shared-control/topology/resource changes
 conservatively invalidate dependent output; sample changes follow the actual dependency
 map. Empty requests perform static preflight without payload reads or advancing a random
 sequence. Compute only requested output mathematics, retaining required shared
 validation.
 
-Whole; candidate fitting and continuous verification charged independently;
+complete-input; candidate fitting and continuous verification charged independently;
 solver/verifier must be frozen before registration. Budget exhaustion cannot return an
 uncertified best guess.
 

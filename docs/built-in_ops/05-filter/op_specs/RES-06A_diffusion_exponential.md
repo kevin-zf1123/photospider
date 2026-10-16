@@ -35,7 +35,7 @@ The profile is S+B: stage rounding is normative and conductance is a baked RN64 
 
 ## Demand and resources
 
-The fixed-step member requests Whole per plane. The recurrence has a finite mathematical dependency, but this proposal does not authorize partial-state sharing. Control dependence includes the previous state’s conductance. The output descriptor depends only on parameters and input descriptor.
+The fixed-step member requests complete-input per plane. The recurrence has a finite mathematical dependency, but this proposal does not authorize partial-state sharing. Control dependence includes the previous state’s conductance. The output descriptor depends only on parameters and input descriptor.
 
 Work is `O(max_iterations*P*C)`, with two state generations and edge conductances. `P=H*W`; `C` is plane count. Account for buffers and intermediate state; budget failure is explicit, with no silent early stop, reduced precision, spilling, or partial publication. Cancellation is checked at safe iteration boundaries. Errors and output ownership follow FILTER common contracts.
 

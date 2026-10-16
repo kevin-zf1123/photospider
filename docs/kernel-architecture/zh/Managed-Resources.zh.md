@@ -58,17 +58,17 @@ Coordinator 在提供 capability 前，会按 input schema 和已发布 coverage
 
 结构化 Result 缓存和 checkpoint 缓存状态各自保存一份从执行 root 复制而来的 `ResourceBudget` handle。副本共享同一个 root，因此即使 coordinator 的包装对象被重新赋值或销毁，这两个组件仍向该 root 计费，其正确性也不依赖 coordinator 中成员的声明顺序。
 
-Structured Result execution 使用同一 root 管理图像页、不可变 sample coverage、relation witnesses、field storage 和 retained source owners。图像 publication 选择 PlanarImage materialization 时，每个 frame 和 layer 使用有界 backing；metadata 与 coverage maps 计入 Metadata，planar pixel capacity 计入 Payload。其他 tensor publication 路径可保留 affine 或 `CpuStorage` backing 及 source Result owners，而不复制 payload；这些 owner 继续持有原有 accounting leases。Image read capability 保留 Result 和授权其 sample Region 的 captured descriptor。复制 capability 也会保留 backing 和 accounting lease。`ResultRef::capture()` 固定一份不可变的 descriptor revision、coverage、relations 和 dependency evidence。
+Structured Result execution 在同一 Root 下计费 Tensor backing、coverage、tile 记录、冻结共享证据和保留 owner。物化按实际请求样本容量分配；view 发布保留已有 owner 而不复制 payload。元数据与目录计入 Metadata，数值 backing 计入 Payload，外部保留存储按适用规则计入 Referenced。`capture()` 固定 descriptor revision 和授权覆盖，后续进度不扩大旧 capture。
 
-Result relation rows 与已发布图像 payload 使用所选 resource root 计量。每次 publication 都必须符合配置的 payload、work、I/O 和 stage 限额。`Exact`、`Conservative` 与 `Unknown` 具有不同的 dirty-propagation 行为；未解析的 relation 不能证明输出为 clean。PlanarImage materialization 会将字节复制到 managed backing，并在公开 sample coverage 前计入 payload；affine 与 storage-view publication 则保留 source owners 及其 accounting，不复制 tensor bytes。Result schema 不携带资源。算子资源是通用的 `ImmutableResource` handle：拥有不可变字节及 `ResourceIdentity`（字节长度与 SHA-256），在某个 root 下准入，不做任何格式解析。`ImmutableResource::import` 复制并哈希字节；`from_storage` 哈希已有存储而不复制；二者都在提供的预算中计入 work 并观察取消，失败时释放全部临时分配。`ResourceSet::create` 对 backing 去重并拒绝冲突；`select` 精确保留请求的 identity，缺失时返回 `NotFound`；`reference` 在另一个 root 下重新准入整个集合而不复制 payload。Compiler 从调用方集合中选择每个算子声明的 identity，plan 保留它们；执行 root 与 owning root 不同时，这些引用会在执行 root 下准入。Result 自身不会让资源保持存活。
+Tile 依赖元数据和已发布 Tensor payload 使用所选 Root。每次事务检查 work、payload、stage 和 I/O 上限。复用冻结证据不授予样本访问。Result schema 不携带资源。算子资源是通用的 `ImmutableResource` handle：拥有不可变字节及 `ResourceIdentity`（字节长度与 SHA-256），在某个 root 下准入，不做任何格式解析。`ImmutableResource::import` 复制并哈希字节；`from_storage` 哈希已有存储而不复制；二者都在提供的预算中计入 work 并观察取消，失败时释放全部临时分配。`ResourceSet::create` 对 backing 去重并拒绝冲突；`select` 精确保留请求的 identity，缺失时返回 `NotFound`；`reference` 在另一个 root 下重新准入整个集合而不复制 payload。Compiler 从调用方集合中选择每个算子声明的 identity，plan 保留它们；执行 root 与 owning root 不同时，这些引用会在执行 root 下准入。Result 自身不会让资源保持存活。
 
-内核只对 scalar-bound 端口（一个 Float32 样本对照有限区间）和显式绑定的校验器检查样本值。校验器通过 `ValidationContext::consume` 计入读取工作，其声明的 `scratch_bytes` 在进入前准入；校验失败前已消耗的 work 不退还。颜色数组合法性等领域样本检查由算子 SDK 在这些校验器或算子回调中实现。
+内核调用显式绑定 validator，不添加默认样本域规则。Float32 scalar 闭区间属于 ops SDK `ops.scalar-range` validator 契约。Validator 读取消耗 work，scratch 在进入前准入，失败不退还已消耗 work。算法保留自身领域检查。
 
 GPU context 在创建 device 时使用 execution context 的资源 root 进行 native 分配；无论是否提供自定义 managed-resource limits，该 root 都存在。Invocation metadata 使用显式独立的计量域。native pipeline cache 最多保留 64 个 entry；单批最多保留 32 条命令，每条最多 31 个 storage binding；一次 invocation 最多 1024 个存活 view token。地址映射仅持有弱 `CpuStorage` 引用，不拥有 native buffer。
 
 托管 native metadata 准入失败后，device 清空 native pipeline cache 并重试一次。GPU payload 准入可先回收可丢弃的待写磁盘缓存和 result-cache owner，再原子预留实际 native capacity。这些恢复路径不会重试 operation callback。
 
-`preserve_output_views` operation 在仿射 view 覆盖输入需求时可以发布该 view。同一 owner 的兼容 fragment 只有经地址映射验证覆盖关系后才可合并。root 外部的源 storage 通过 Referenced lease 计费；root allocator 已拥有的源 storage 保持原有 Payload 和 Host 计账，不重复计入 Referenced。新分配的输出 backing 由活动输出 allocator 计费。该选项适用于 CPU Atomic staged 或 Whole 执行，排除 GPU 执行。`requires_input_views` 会进一步要求 Whole 执行。
+算子显式获取并发布授权 view。兼容片段映射需要检查，reshape 还要求可合并为仿射映射。Root 外部来源 owner 获得 Referenced 租约，Root 自有存储保持原计费而不重复收费。新 backing 使用活动 allocator。稠密收集和设备 packing/transfer 是具有容量、work 与取消检查的显式操作，不是协调器策略。
 
 ## 算法与数学实现 (Algorithms & Math)
 
@@ -85,6 +85,6 @@ GPU context 在创建 device 时使用 execution context 的资源 root 进行 n
 ## 限制与非目标 (Limitations & Non-Goals)
 
 - `WithinBudgetOrFail` 只覆盖已纳入计量的 allocation，不限制总 RSS、驱动私有存储和标准库外部存储。
-- 空容器及部分内部几何/重建 metadata 未被完整计量。重建的外层 `ValueFragments` metadata 可能独立于原 publication token 存活，但每个 `Value` 仍持有自身 storage owner。
-- 调用方从管理范围取出原始 `Value` 或 vector 并在 managed allocator 之外复制时，自行承担该副本的内存成本。
-- Result C ABI 4 在每次 bridge `poll` 结束时释放普通的 C callback scratch。已保留的 tensor handle 以及由 `create_block_state` 创建的不可变 block-state Result 可以跨 poll 存在。
+- 空容器及部分内部几何/重建 metadata 未被完整计量。重建的外层 `Tensor` metadata 可能独立于原 publication token 存活，但每个 `Tensor` 仍持有自身 storage owner。
+- 调用方从管理范围取出原始 `Tensor` 或 vector 并在 managed allocator 之外复制时，自行承担该副本的内存成本。
+- Result C ABI 5 在每次 bridge `poll` 结束时释放普通的 C callback scratch。已保留的 tensor handle 以及由 `create_block_state` 创建的不可变 block-state Result 可以跨 poll 存在。

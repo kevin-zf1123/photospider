@@ -48,8 +48,8 @@ For input shape I and permutation p, output shape O[j]=I[p[j]]. At output
 coordinate o, read s with s[p[j]]=o[j]. This exact bijection maps each output
 rectangle to its axis-permuted input rectangle numerically. The compiler
 validates static shape, schema and permutation metadata before runtime. For
-nonempty work, the Whole program requests the complete input with a Tensor Need
-using Data, Validation and Descriptor roles (role 13), which triggers
+nonempty work, the complete-input program requests the complete input with a Tensor Need
+using ordinary member tile Needs with explicitly bound validators , which triggers
 typed-payload validation. It publishes a complete
 `photospider.tensor`/`samples` Result
 with ordinary axes and no attached domain description/batch metadata. Publication uses global
@@ -86,7 +86,7 @@ permutation [2,0,1] yields shape [4,2,3], with values[k,i,j]=100*i+10*j+k.
 Use an independent coordinate oracle and source-read logs. Cover identity and
 all rank-2/rank-3 permutations, reverse/zero input strides, fragmented owners,
 sNaN payloads, view/auto/dense choices, disjoint requests and inverse dirty sets.
-The nine formal profile keys use CPU Whole and disable cross-run content caching
+The nine formal profile keys use CPU complete-input and disable cross-run content caching
 because content alone does not prove physical owner/stride identity; same-Run
-sharing remains available. See [NUM-09 Whole execution](../layouts-whole.md) for
+sharing remains available. See [NUM-09 Run-shared complete-input computation](../layouts-whole.md) for
 the current Result workflow and validation.

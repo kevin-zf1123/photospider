@@ -26,7 +26,7 @@ Inherit [FIL-04](FIL-04_contract.md), [FILTER common contract](FILTER_common_con
 
 ## Ports, shape, and semantics
 
-Input port `input` selects a Result containing one tensor and no fields. Output
+Input port `input` selects a Result containing one tensor. Output
 port `output` publishes one Result tensor with the same complete sample shape,
 including batch axes. Its tensor schema, facets, layout metadata, and bound
 resources are copied from the input; supported typed ColorArray v1 and ICC
@@ -49,16 +49,16 @@ Treat `kx` and `ky` as exact binary64 constants. Return `RN_t(Σ ky*kx*I / ((Σk
 
 The numeric class and E/B/S meanings are defined in [FILTER numeric reference](FILTER_numeric_reference.md). Retain every declared rounding stage; helper calls do not introduce extra intermediate rounding unless the member says so. Signed zero, discrete choices, gradual underflow, and output range follow the member and NUM contracts.
 
-Whole and GPU demand the complete tensor domain and publish a complete output. CPU tiled uses IndependentChunks and computes only requested output regions. Its Data support is a compact exact Neighborhood relation for nonzero taps after boundary mapping. It unions a separate Validation relation that closes typed ColorArray channel tuples and atomic trailing axes; the first Need also carries Descriptor role. Later Needs request Data and Validation without repeating descriptor demand. Boundaries use the complete input sample domain, including batch axes, never an ROI or tile edge. Empty demand reads no payload and performs no coefficient or arithmetic payload allocation.
+complete-input and GPU demand the complete tensor domain and publish a complete output. CPU tiled uses IndependentChunks and computes only requested output regions. Its Data support is a compact exact Neighborhood relation for nonzero taps after boundary mapping. It unions a separate Validation relation that closes typed ColorArray channel tuples and atomic trailing axes; the first Need also carries Descriptor role. Later Needs request Data and Validation without repeating descriptor demand. Boundaries use the complete input sample domain, including batch axes, never an ROI or tile edge. Empty demand reads no payload and performs no coefficient or arithmetic payload allocation.
 
 Use the Cartesian product of nonzero 1D taps; the kernel is derived static control data. Zero sigma only removes support on its own axis. There is no hidden UI maximum for large sigma, though indexing, work, and resource budgets still apply. Execution follows FIL-02A.
 
-Complexity uses P=HW samples, C independent planes, A taps, and T iterations where applicable; arbitrary-precision limb cost is additional and is not a measured benchmark. Follow FILTER admission, work/memory/stage accounting, cancellation, failure, and owner-lifetime rules. Whole and GPU publish only a complete Result. A tiled execution may retain already certified IndependentChunks if a later stage fails. Do not spill implicitly, lower precision silently, or fall back to retired implementations.
+Complexity uses P=HW samples, C independent planes, A taps, and T iterations where applicable; arbitrary-precision limb cost is additional and is not a measured benchmark. Follow FILTER admission, work/memory/stage accounting, cancellation, failure, and owner-lifetime rules. complete-input and GPU publish only a complete Result. A tiled execution may retain already certified IndependentChunks if a later stage fails. Do not spill implicitly, lower precision silently, or fall back to retired implementations.
 
 ## Registered execution forms
 
 `filter.gaussian_baked64_v1_strict_cpu_whole` implements the mathematical profile
-above using explicit Whole execution. It demands and computes the complete input
+above using explicit Run-shared complete-input computation. It demands and computes the complete input
 and output domains; any input change invalidates the complete output group.
 Static parameters are `sigma_x`, `sigma_y`, `radius_x`, `radius_y`, `x_axis`,
 `y_axis`, `boundary` and `cval`, all mandatory with the types and domains inherited
@@ -87,7 +87,7 @@ Fixture coverage identifiers: `gaussian_constant`, `straight_alpha_zero_hidden_c
 The proposed keys are `filter.gaussian_filter_strict`,
 `filter.gaussian_filter_accelerated_apple_silicon`, and
 `filter.gaussian_filter_accelerated_x86_64`. Those proposed base/accelerated
-keys remain unregistered. The separately named strict CPU Whole, CPU tiled and
+keys remain unregistered. The separately named strict CPU complete-input, CPU tiled and
 native GPU forms are registered as described above. Accelerated variants must
 satisfy NUM's final FP32-scaled four-ULP requirement and fallback rules without
 accumulating a separate budget per tap, axis, stage, or iteration. Threshold,
@@ -100,7 +100,7 @@ differential acceptance are not established here.
 
 `static parameters + descriptors -> preflight/demand -> declared data and control -> exact expression and declared rounding stages -> requested owned output/result`
 
-This sketch introduces no implicit color conversion, alpha premultiplication, frequency correction, or zero-fill for missing data. Whole and staged-buffer requirements are those declared by the member and family.
+This sketch introduces no implicit color conversion, alpha premultiplication, frequency correction, or zero-fill for missing data. complete-input and staged-buffer requirements are those declared by the member and family.
 
 ## Sources and open items
 

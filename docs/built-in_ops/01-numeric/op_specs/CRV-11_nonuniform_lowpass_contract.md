@@ -25,7 +25,7 @@ In particular, rounding is nearest/ties-to-even with gradual underflow and the
 caller floating environment is preserved. This is limited inheritance: the ports,
 output structures, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
-turn a composite template or structured Result into a generic NUM Value primitive.
+turn a composite template or structured Result into a generic NUM Tensor primitive.
 A stated four-ULP final bound uses the shared FP32-scaled contract for both
 Float32 and Float64 outputs.
 Classification, exact landmarks and signed-zero rules are checked separately.
@@ -61,12 +61,12 @@ handling retains full-kernel normalization.
 
 positions and values independently accept Float32/Float64 and may mix. Output
 retains values dtype. All source values and final outputs must be finite;
-nonfinite samples or final overflow fail the Whole run.
+nonfinite samples or final overflow fail the complete-input run.
 This is a continuous real-signal contract, unlike the uniform discrete family's
 explicit IEEE NaN/Inf aggregation. Dependency and accelerated details follow.
 
-Every nonempty Whole Result request declares Data, Validation and Descriptor
-needs (role 13) for both complete tensor members. Typed/upstream validation covers
+Every nonempty complete-input Result request declares payload tile coverage with explicit validation
+needs  for both complete tensor members. Typed/upstream validation covers
 every element. The callback validates all positions globally through authorized
 windows, promotes coordinates into Root-owned storage, then reads source values
 through authorized windows without collecting or copying their full tensor. Each
@@ -86,7 +86,7 @@ release temporary state; failed runs publish no partial output.
 
 Strict correctly rounds the complete integral quotient; accelerated Apple Silicon
 and x86-64 keys allow final nonzero finite error <=4 ULP and must match strict
-finite/zero/sign classification. Strict fallback remains available; Whole fallback
+finite/zero/sign classification. Strict fallback remains available; complete-input fallback
 counters are unavailable. Certified integration/rounding that cannot finish
 within available capacity/work/stage returns ResourceExhausted. Do not publish
 an unconverged approximation.
@@ -115,14 +115,14 @@ coordinate folds must not overflow merely because an intermediate Float64 value
 would be unrepresentable. Underlying finite inputs retain their exact values.
 
 Ordered dynamic ports are `positions` and `values`. Each is a Result containing
-exactly one tensor member and no fields under any structurally valid schema
+exactly one tensor member  under any structurally valid schema
 id/version/member key. Use the complete `sample_shape()` including batch axes.
 `positions` has shape [K], rank 1, Float32/64, finite strictly increasing values
 and K=2..1048576. `values` has rank 1..8, positive extents and product <=2^40;
 static axis selects its extent K. The `samples` output is an immutable
 `photospider.tensor` v1 Result member with the original full shape and dtype and
 no attached domain description, evaluated at the original positions. The output retains its backing owners; the schema carries no operation resource configuration.
-Nonempty output has full certified coverage and retains global coordinates and
+Nonempty output has complete internal coverage, with public coverage restricted to requested tiles and retains global coordinates and
 source associations.
 Static support_radius is a finite positive Float64; boundary is String default
 reflect. Four sinc kernels require finite positive Float64 cutoff; Kaiser also
@@ -150,7 +150,7 @@ workspace, pieces/coefficient vectors and growth overlap consume managed capacit
 Authorized position/value windows and N*sizeof(dtype) output are required even
 for sparse delivery; large sparse requests can now fail capacity admission.
 
-All input edits invalidate the complete output. All 15 formal keys use Whole;
+All input edits invalidate the complete output. All 15 formal keys use complete-input;
 source typed/upstream failures remain observable. Arbitrary immutable strides,
 zero/negative strides, offsets and unaligned access are supported. One immutable
 dense output owns data/metadata past context teardown, and requested delivery
@@ -222,7 +222,7 @@ results are linked below.
 
 This shared contract covers five nonuniform kernels and 15 profile keys; it is
 not itself a registered operation. Static preparation stores immutable kernel,
-boundary, axis and profile state. Each Whole Run promotes positions into
+boundary, axis and profile state. Each complete-input Run promotes positions into
 Root-owned storage and retains one reusable piece vector. The implementation
 uses exact partition and paired-affine integration plus global Taylor moments
 with a rigorous tail bound, not local adaptive quadrature. All accelerated keys
@@ -231,4 +231,4 @@ return `ResourceExhausted`. Temporary acceptance should cover complete input
 and dirty support, global position validation, remote-column Run errors, cache
 replacement with current source associations, static preparation reuse, active
 arithmetic cancellation and escaped Result/read-window owners.
-Whole numerical/fallback counters are unavailable. See [CRV-11 umbrella](CRV-11_resample_signal.md).
+complete-input numerical/fallback counters are unavailable. See [CRV-11 umbrella](CRV-11_resample_signal.md).

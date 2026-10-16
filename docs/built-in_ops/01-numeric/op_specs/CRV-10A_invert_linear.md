@@ -39,11 +39,11 @@ Use the exact selected-segment linear inverse formula and correctly round once; 
 Other mathematical exact zeros are +0 and nonzero underflow retains sign.
 Demanded queries and outputs are finite, with narrowing overflow failure.
 
-All three formal profile keys use Whole. Every nonempty request collects all x/y/query Results with Data, Validation and Descriptor (role 13), validates global topology and all query controls, then computes a complete dense Result. Any input edit invalidates the complete output; dynamic numerical
+All three formal profile keys use complete-input. Every nonempty request collects all x/y/query Results with ordinary payload tile Needs, validates global topology and all query controls, then computes a complete dense Result. Any input edit invalidates the complete output; dynamic numerical
 failures are Domain/Run, including invalid or overflowing undelivered positions.
 Empty requests read no payload. Inherit CRV-10's typed/upstream closure, arbitrary strides, source associations, output ownership, cache-off, complete input/output storage, work and cancellation rules. Lookup work is O(K+N log K) plus exact arithmetic. Numerical stencils and
 rounding rules remain unchanged; unused endpoint conversion cannot reject a
-finite root. No partial output is published on failure. Whole fallback counters
+finite root. No partial output is published on failure. complete-input fallback counters
 are N/A; the actual strict fallback remains available.
 
 Conceptual fixture: x=[0,1,3],y=[0,2,4],query=[3,1,3] -> values=[2,0.5,2].
@@ -56,7 +56,7 @@ workflow should supply x/y/query and static dtype/policy. Create this check for 
 
 
 
-`plugins/ops/01-numeric/curve_inverse.cpp` registers the six Whole Result keys; the public constructors are `invert_linear_node` and `invert_pchip_node` in [`inverse_curves.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/inverse_curves.hpp). The current Result implementation retains the exact inverse algorithm and resource accounting described above.
+`plugins/ops/01-numeric/curve_inverse.cpp` registers the six complete-input Result keys; the public constructors are `invert_linear_node` and `invert_pchip_node` in [`inverse_curves.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/inverse_curves.hpp). The current Result implementation retains the exact inverse algorithm and resource accounting described above.
 
 For temporary validation, bind immutable source Results and read outputs through
 authorized windows. Cover caller/worker floating environments, mixed dtypes,
@@ -66,6 +66,6 @@ polling a failing producer, SampledSignal errors attributed to input 2,
 cancellation and source-owner retirement. A three-element Float32/Float64 output
 and its windows retain 12/24 Payload bytes after source retirement; releasing
 the last window releases that payload. A constant View with N=2^40 must fail
-`ResourceExhausted/CapacityLimit` when complete Whole output storage exceeds the
+`ResourceExhausted/CapacityLimit` when complete complete-input output storage exceeds the
 configured Payload cap. This case checks admission, not numerical execution at
 that logical size.

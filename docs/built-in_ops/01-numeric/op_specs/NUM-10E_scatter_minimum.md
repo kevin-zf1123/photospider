@@ -35,12 +35,12 @@ registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
 Inherit the [scatter contract](NUM-10_scatter_contract.md) for ports, shapes,
-Whole demand, index validation, storage and shared exceptional-value rules.
+complete-input demand, index validation, storage and shared exceptional-value rules.
 Every input is a Result with exactly one tensor member at an unrestricted key;
 its `sample_shape()` includes batch axes. The `values` output is a Result using
 `photospider.tensor` / `samples`, with full ordinary output shape and no attached domain description
 or batch topology. Nonempty demand reads complete `base`, `indices` and `updates`
-with data, validation and descriptor support (role 13); Empty demand reads no
+with data, validation and descriptor support ; Empty demand reads no
 payload and performs no sample arithmetic. The kernel computes the complete
 output before consumer projection. The base is immutable.
 
@@ -53,7 +53,7 @@ ignores a NaN or converts Int64 through floating point.
 If no update matches, copy base without arithmetic, including signaling-NaN
 bits. For aggregate variants with matching updates, use the shared exceptional
 value priority and zero rules. Only matching contributors enter arithmetic, but
-an upstream or typed-validation failure from any active input can fail Whole
+an upstream or typed-validation failure from any active input can fail complete-input
 preparation.
 
 ## Acceptance and implementation status
@@ -68,5 +68,5 @@ index changes, global invalid-index rejection and shared resource/lifetime tests
 Temporary validation should cover all four scatter variants and first-NaN
 quieting. Use independent index grouping and bit comparisons for minimum
 NaN and signed-zero ordering on each admitted profile. See
-[NUM-10 Whole execution](../indexing-whole.md) for execution behavior and
+[NUM-10 Run-shared complete-input computation](../indexing-whole.md) for execution behavior and
 validation cases.

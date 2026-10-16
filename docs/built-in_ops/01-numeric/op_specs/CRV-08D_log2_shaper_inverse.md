@@ -38,15 +38,15 @@ The independent operation key selects the CPU profile; there is no additional st
 Inherit the [complete shaper contract](CRV-08_shaper.md) for exact endpoints,
 zero signs, NaN quieting/payloads, infinity/domain extensions and overflow as
 successful IEEE results. Bound validation always precedes source special values.
-Strict correctly rounds the complete formula. Accelerated allows final nonzero finite error <=4 ULP, exact endpoint/classification/sign agreement and monotone nondecreasing results for fixed bounds. The strict path is retained when needed; Whole counters are unavailable; the combined implementation must remain monotone and partition-independent.
+Strict correctly rounds the complete formula. Accelerated allows final nonzero finite error <=4 ULP, exact endpoint/classification/sign agreement and monotone nondecreasing results for fixed bounds. The strict path is retained when needed; complete-input counters are unavailable; the combined implementation must remain monotone and partition-independent.
 These operations do not modify a color description or implement tone mapping.
 
 ## Execution and failures
 
-Nonempty Whole requests all three inputs with Data, Validation and Descriptor
-(role 13), including complete typed/upstream validation. The Result program reads
+Nonempty complete-input requests all three inputs with payload tile coverage with explicit validation
+, including complete typed/upstream validation. The Result program reads
 authorized windows directly; it does not collect or copy the full input through
-Value. Empty reads no payload. Inherit full-output allocation, full dirty scope,
+Tensor. Empty reads no payload. Inherit full-output allocation, full dirty scope,
 sparse public delivery, arbitrary input strides, ownership, budgets and
 cancellation from CRV-08.
 Account certified numerical refinement and scratch growth; do not use a separately rounded pow/log pipeline as the strict oracle.

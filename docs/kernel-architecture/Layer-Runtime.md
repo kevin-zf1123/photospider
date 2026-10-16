@@ -2,7 +2,7 @@
 
 [Chinese reader version](zh/Layer-Runtime.zh.md).
 
-This page describes an operations-SDK type. Layer values and their pure arithmetic helpers are declared in `photospider/ops/composite/layer.hpp`, implemented in `plugins/ops/09-composite/layer.cpp`, and built into `Photospider::ops_sdk`. The kernel has no Layer type, no Layer schema, and no Layer-specific validation. Images in workflows use [Result Tensor storage and region access](../kernel-specs/Tensor-Storage-and-Region-Access.md); `PlanarImage` is typed backing for that storage.
+This page describes an operations-SDK type. Layer values and their pure arithmetic helpers are declared in `photospider/ops/composite/layer.hpp`, implemented in `plugins/ops/09-composite/layer.cpp`, and built into `Photospider::ops_sdk`. The kernel has no Layer type, no Layer schema, and no Layer-specific validation. Images in workflows use [Result Tensor storage and region access](../kernel-specs/Tensor-Storage-and-Region-Access.md); `Tensor` provides its unified numerical backing.
 
 ## 1. Scope and ownership
 

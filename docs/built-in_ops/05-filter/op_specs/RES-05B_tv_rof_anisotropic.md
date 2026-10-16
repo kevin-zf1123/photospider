@@ -40,7 +40,7 @@ For each plane minimize `0.5*Σ(u-f)^2 + lambda*Σ phi(K_y u,K_x u)`, with `phi(
 
 ## Demand and resource behavior
 
-Each output plane requires Whole input for the fixed-step profile. Although a finite step count admits a theoretical expanded support, this proposal specifies Whole execution and no partial-state sharing. Energy and residual diagnostics are not public result ports. Shape/descriptor inference depends only on parameters and input descriptor.
+Each output plane requires complete-input input for the fixed-step profile. Although a finite step count admits a theoretical expanded support, this proposal specifies Run-shared complete-input computation and no partial-state sharing. Energy and residual diagnostics are not public result ports. Shape/descriptor inference depends only on parameters and input descriptor.
 
 Work is `O(max_iterations*P*C)`, with dual planes and two generations each of `u`/`ubar`; P is plane pixel count and C plane count. Account for all stages and working buffers. Insufficient budget fails; do not shorten the iteration count, spill implicitly, lower precision, or publish a partial value. Cancellation, ownership and error publication follow FILTER shared contracts.
 

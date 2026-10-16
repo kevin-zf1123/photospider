@@ -14,7 +14,7 @@ clarification_status: complete
 
 # CRV-06F: OKLCh ramps
 
-Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member and no fields, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member , under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -48,13 +48,13 @@ The shared lightness revision does not rescale OKLab coordinates. Specifically:
   retaining multiple turns. There is no hue_path or normalization parameter.
 - C=0 never discards hue. Unit conversion and interpolation are performed as
   one mathematical formula with final correct rounding; all versions match bits.
-- Whole requests validate all Result inputs; authorized tensor windows supply selected complete rows for the mathematics.
+- complete-input requests validate all Result inputs; authorized tensor windows supply selected complete rows for the mathematics.
   Any channel request observes the full color, including rational numerator and
   denominator, and carries an output OKLCh/D65/hue-unit description.
 
 Attached descriptions must match the explicit input model and hue representation;
 CIELCh descriptors cannot be relabeled as OKLCh. Rational L/C ports alone are not
-complete ColorArrays. All shapes, immutable owners, Whole dirty support,
+complete ColorArrays. All shapes, immutable owners, complete-input dirty support,
 cancellation and publication scopes are inherited without relaxation.
 
 ## Acceptance and entrypoints

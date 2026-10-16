@@ -45,8 +45,8 @@ choose the unique input `k` where `P[k] <= o[axis] < P[k] + L[k]`. Read that
 input at `s[axis] = o[axis] - P[k]` and `s[j] = o[j]` for every other axis.
 
 Static schemas and parameters are checked during specialization. For nonempty
-Whole demand, the program requests every input with complete data, validation and
-descriptor support (role 13), triggering typed-payload validation before
+complete-input demand, the program requests every input with complete data, validation and
+descriptor support , triggering typed-payload validation before
 publication. A request that selects one output slab still prepares every port.
 An active source edit dirties the complete output; Empty demand reads no payload
 and performs no sample copying. Port reuse does not change the ordered mapping.
@@ -67,7 +67,7 @@ authorized input windows; Dense does not first pack each complete input.
 
 Viewability depends on physical storage and cannot be established from content
 identity, so concatenate is not content-cacheable. Dense and View share checked
-static shape inference and Whole source support. The continuation accumulates
+static shape inference and complete-input source support. The continuation accumulates
 owning input capabilities in a Root-accounted map across Need envelopes, while
 each poll borrows its phase tensor map only for that call. Each Need contains at
 most 64 original ports; the five-stage bound allows four Need envelopes and the
@@ -87,4 +87,4 @@ outputs, independent owners, unselected-input failures, escaped Result/window
 lifetime, singleton-fragment stride inference, negative global strides, reordered
 inputs under partial demand, Empty and 65-/256-input repeated-reference cases.
 These bounded cases do not cover every dtype, owner arrangement or geometry.
-See [NUM-10 Whole execution](../indexing-whole.md) for execution behavior.
+See [NUM-10 Run-shared complete-input computation](../indexing-whole.md) for execution behavior.

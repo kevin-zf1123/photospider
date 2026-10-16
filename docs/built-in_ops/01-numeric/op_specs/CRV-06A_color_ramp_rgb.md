@@ -18,7 +18,7 @@ clarification_status: complete
 
 # CRV-06A: color_ramp_rgb
 
-Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member and no fields, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member , under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -53,7 +53,7 @@ The maintainer requires RGBA association/encoding to be explicitly declared in
 the specification and color description. An unspecified four-component color
 must not be treated as automatically straight or automatically premultiplied.
 Input and output association are independently declared straight or premultiplied;
-the output authoring default is premultiplied. Premultiplied storage means encoded
+the output authoring default is straight. Premultiplied storage means encoded
 RGB multiplied by alpha, where encoded refers to the description's transfer.
 For nonzero alpha, restore encoded straight RGB before decoding, then premultiply
 linear-light RGB for interpolation. After interpolation, recover straight linear
@@ -86,7 +86,7 @@ logical element limit. Total logical input/color/output products retain the 2^40
 ## Confirmed color observation granularity
 
 The final channel axis is a complete RGB/RGBA color. Any channel request closes
-to a complete color, and a nonempty request evaluates the full Whole output.
+to a complete color, and a nonempty request evaluates the full complete-input output.
 All input Result tensors are typed/upstream-validated; stop order and every finite
 position are checked before selected-row color mathematics. Alpha and finite
 constraints apply to all components of each mathematically selected color.
@@ -102,14 +102,7 @@ a needless transfer round trip even near the standard sRGB segment thresholds.
 
 ## Confirmed description binding
 
-A required static input color description supplies model, primaries, white,
-transfer and input alpha association. Plain numeric colors are interpreted under
-that explicit description. If colors already carries a recognized color-array
-description, it must match; the ramp does not silently override or relabel it.
-The authoring constructor may explicitly populate sRGB/D65/sRGB-transfer defaults,
-but a direct node supplies its description. Output carries the resulting complete
-description, preserving color space/transfer and selecting the separately declared
-output association. Descriptor mismatch fails before numeric sample reads.
+A required static `color_description` supplies model, primaries, white, transfer and input alpha association. The output association is a separate parameter. Results and Tensor members carry no attached color description. The authoring helper serializes these parameters and performs no payload conversion while constructing the node. It supplies the declared defaults; direct nodes must provide the required configuration.
 
 ## Confirmed numerical versions
 
@@ -124,7 +117,7 @@ at most four FP32-scaled representable steps per final RGB or alpha component.
 Exact selected endpoints and zero-alpha cases retain exact semantics; ordinary
 alpha arithmetic must also preserve its [0,1] constraint. Required special values,
 alpha constraints and complete-color numerical success/failure must agree with
-strict. Use the strict path when those guarantees cannot be established; Whole fallback
+strict. Use the strict path when those guarantees cannot be established; complete-input fallback
 counters are unavailable. Resource/cancellation failures remain explicit.
 
 If exact output alpha is positive but its correctly rounded destination value
@@ -166,12 +159,12 @@ arbitrary rank-1..7 positive shape, C=3 or 4, colors.shape[0]=stops.shape[0],
 and output values has shape S+[C]. Enforce the stated K and 2^40 input/color/
 output product limits using checked integer arithmetic. Position input and stops
 are generic floating Result tensors; colors may be generic or already color-described
-under the explicit matching rule. All scalar positions must be finite for a nonempty Whole request.
+under the explicit matching rule. All scalar positions must be finite for a nonempty complete-input request.
 
 | Static parameter | Type/domain | Constructor behavior |
 | --- | --- | --- |
 | color_description | Canonical String emitted by the proposed color-description helper; RGB model and explicit input association | Populate sRGB primaries, D65, sRGB transfer defaults; input alpha format remains explicit |
-| output_association | String none for C=3, straight/premultiplied for C=4 | none for RGB; premultiplied for RGBA |
+| output_association | String none for C=3, straight/premultiplied for C=4 | none for RGB; straight for RGBA |
 | dtype | String float32/float64 | Match colors dtype |
 | out_of_domain | String clamp/reject | clamp |
 
@@ -226,8 +219,8 @@ on the identical-color shortcut.
 
 ## Observation mapping, demand and ownership
 
-All formal strict and accelerated keys use Whole Result programs. A nonempty
-Run declares Data, Validation and Descriptor needs (role 13) for every input, so
+All formal strict and accelerated keys use Run-shared Result programs. A nonempty
+Run declares ordinary payload tile Needs  for every input, so
 typed and upstream validation covers complete tensor members. The executor reads
 authorized windows directly; the callback does not collect or copy complete input
 arrays. It validates all stops, then every input position, before color arithmetic.
@@ -236,15 +229,7 @@ mathematics. Generic color rows outside all evaluated stencils remain numericall
 unused, while their typed/upstream validation still applies. Empty reads no sample
 payload after static preparation.
 
-The `values` port publishes an immutable `photospider.tensor` v1 Result with
-`samples` shape `sample_shape(input)+[C]`, `atomic_trailing_axes=1`. Whole writes publish the full output transactionally;
-the Result retains full certified coverage and global coordinates. Fragments expose
-requested regions while retaining the full output owner. Arbitrary immutable source
-strides, offsets and unaligned storage are supported. Result association records
-source ObjectIds, and selected ColorArray resources remain owned by the output.
-Input edits invalidate complete recorded output demand. Numeric errors have Run
-scope; failed callbacks publish no color subset. Upstream, resource and cancellation
-errors retain their categories.
+The `values` port uses `photospider.tensor` v1/member `samples`, shape `sample_shape(input)+[C]`, with one atomic trailing axis. One prepared Run-shared stage acquires complete input coverage through ordinary tile Needs and computes the complete internal output. Acquiring owning windows does not implicitly collect dense arrays. Ordinary output actors publish only their requested complete member tiles as retained views. Global coordinates and source ObjectId provenance are preserved; operation resources stay in prepared state. Shared input edits invalidate dependent output tiles. Failed computation exposes no partial tile.
 
 Lookup work remains O(K+N log K), plus exact or certified arithmetic. Full output
 payload is N*C*sizeof(dtype), even for a small request. Account source owners/windows,
@@ -260,10 +245,10 @@ Validate stops with an optional bounded Float64 index; search each required inpu
 fetch/validate selected complete colors, take exact shortcuts or evaluate the
 whole transfer/association expression using exact rational and directed-precision
 arithmetic. Accelerated libraries require final RGB error/classification guarantees
-for their declared input domains; otherwise use strict fallback. Whole does not expose fallback counters.
+for their declared input domains; otherwise use strict fallback. complete-input does not expose fallback counters.
 Finite residual or individual pow accuracy alone does not certify the whole ramp.
 
-Whole storage and O(K+N log K) lookup follow the preceding execution contract.
+complete-input storage and O(K+N log K) lookup follow the preceding execution contract.
 The RGB fixed state additionally owns the transfer/association arithmetic arena.
 Final-expression guarantees remain required for any accelerated arithmetic.
 
@@ -292,15 +277,15 @@ Under linear transfer it is 0.5. Use independent directed-precision transfer
 enclosures and exact rational weights, not the production helper, as oracle.
 
 RGBA fixture with straight inputs: transparent red [1,0,0,0] to opaque blue
-[0,0,1,1] at w=0.5 gives premultiplied encoded [0,0,0.5,0.5] by default,
-or straight [0,0,1,0.5]. At the transparent stop return [0,0,0,0]. Cover
+[0,0,1,1] at w=0.5 gives straight [0,0,1,0.5] by default.
+Explicit premultiplied output gives [0,0,0.5,0.5]. At the transparent stop return [0,0,0,0]. Cover
 same-format and cross-format direct paths, repeated identical bit-pattern stops,
 zero signs, negative/HDR components, transfer join neighbors, tiny-alpha
 AssociationUnderflow, valid all-zero underflow, invalid premultiplied sources,
 K=1, irregular stops and description mismatch.
 
 Test strict bits and accelerated final ULP separately from exact selections, complete
-color classification. Whole fallback counters are unavailable. Public implementation fixtures
+color classification. complete-input fallback counters are unavailable. Public implementation fixtures
 must bind all inputs, construct the explicit descriptions/parameters, execute
 through Compiler/ExecutionContext and inspect the explicit color parameters and numerical
 results using actual supplied build/run commands. Validate full-color expansion,

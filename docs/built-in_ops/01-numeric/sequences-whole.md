@@ -1,10 +1,10 @@
-# NUM-02 Whole execution
+# NUM-02 Run-shared complete-input computation
 
 The six formal `numeric.linspace_*` and `numeric.arange_*` keys take Result inputs and publish two independently selectable Result outputs, `values` and `axis`. Each input Result contains exactly one tensor member at any key, with complete `sample_shape()` `[1]`. The values output uses `photospider.tensor` / `samples` and shape `[count]`. Axis uses the same schema and member key with shape `[3]`; `atomic_trailing_axes=1` makes the three components one atomic observation. Both outputs use ordinary axes and drop batch topology.
 
 ## Input demand and output selection
 
-For a nonempty selected output, the Whole program requests full active scalar windows with Data, Validation and Descriptor roles (role 13). It reads those authorized windows and computes the entire selected output through a packed Result writer. The published Result retains its complete object and global sample coordinates; a consumer query does not turn it into a packed ROI Result. Selecting a single values index does not reduce the sequence computation. Selecting one axis component closes demand over all three components. Values and axis remain independent: an axis overflow does not invalidate already successful values, and an axis-only request does not allocate values.
+For a nonempty selected output, the complete-input program requests full active scalar windows with ordinary member tile Needs with explicitly bound validators . It reads those authorized windows and computes the entire selected output through a packed Result writer. The published Result retains its complete object and global sample coordinates; a consumer query does not turn it into a packed ROI Result. Selecting a single values index does not reduce the sequence computation. Selecting one axis component closes demand over all three components. Values and axis remain independent: an axis overflow does not invalidate already successful values, and an axis-only request does not allocate values.
 
 Static `count=1` changes the active port set. Both outputs use `start` only; `end` for linspace and `step` for arange receive no runtime Need and do not contribute a Descriptor relation. The declared second input still undergoes complete static schema checks during specialization and seal. For `count>1`, both inputs are required even for endpoint-only output coverage. Empty selected outputs request no payload and perform no sample arithmetic.
 

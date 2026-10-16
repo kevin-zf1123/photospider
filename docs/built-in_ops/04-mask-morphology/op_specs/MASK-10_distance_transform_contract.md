@@ -76,7 +76,7 @@ field existence flag. It does not distinguish distant sites from absent sites. L
 happens only after exact membership/sign decisions. A squared output can overflow
 where an ordinary distance does not; that is a demanded-output arithmetic error.
 
-A/B declare Whole input support and validation for every nonempty requested
+A/B declare complete-input input support and validation for every nonempty requested
 output; changing any input may dirty the whole field. C/D declare a finite
 metric stencil around Q (plus center classification for D, already in it):
 axis bounds floor(limit/sy), floor(limit/sx), then exact metric membership.

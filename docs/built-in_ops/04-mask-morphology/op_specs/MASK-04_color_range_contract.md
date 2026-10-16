@@ -88,7 +88,7 @@ reason is zero_total_weight. Diagnostics enumerate only positive IDs present
 in the input, not missing integers between IDs. Illegal weights remain errors,
 not skipped-group conditions. Effective model rows contain only groups with
 positive total weight. If all IDs are zero or all present groups have zero
-weight, return an empty model with RuntimeCount=0. Applying an empty model
+weight, return an empty model with payload count=0 with unchanged static capacity. Applying an empty model
 produces an all-zero Coverage mask; there is no inferred fallback group.
 Application combines effective group responses by maximum:
 coverage(p)=max_g response_g(p), with the empty maximum defined as +0.
@@ -169,8 +169,8 @@ decimal check values alone do not certify correctly rounded final outputs.
 
 For A-C, input is planar Field[C,H,W]. Required `channels` is an ordered unique canonical
 String. A uses any K>=1 selected coordinates, `target: Float64[K]` and
-`scales: Float64[K]` required Value ports; B uses K=3, `target: Float64[3]`;
-C uses two selected raw coordinates hue and chroma, no target Value.
+`scales: Float64[K]` required Tensor ports; B uses K=3, `target: Float64[3]`;
+C uses two selected raw coordinates hue and chroma, no target Tensor.
 Runtime targets/scales are controls: all are validated/read for nonempty Q.
 They cannot be executed during output descriptor inference. Output Coverage
 [H,W] uses the image dtype. `interpretation=raw|respect|override` and optional
@@ -206,7 +206,7 @@ in between. Exact branch comparisons can compare squared distances before any
 sqrt. Certified irrational evaluation is needed only in an interior ramp.
 
 For A-C, CPU cost is O(|Q|K), with O(K) exact/control scratch plus refinement.
-These three members have no Whole statistics or inferred selection center.
+These three members have no complete-input statistics or inferred selection center.
 Statistics-assisted selection uses explicitly supplied samples in a separate
 fitting stage; applying its fitted model is separately specified. Neither that
 model nor CIEDE2000 changes A-C's formulas or demand rules. All numerical

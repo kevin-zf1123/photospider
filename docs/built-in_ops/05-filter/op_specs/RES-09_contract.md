@@ -49,7 +49,7 @@ Fixed-step members require explicit `max_iterations>=0`; zero steps returns `ini
 
 ## Demand, resources and errors
 
-The estimate requests Whole for its plane and full PSF. An unobserved-only request does not read observation, background or initial estimate. A zero-step estimate-only request bit-copies initial; PSF and mask still undergo descriptor/preflight checks as needed. If estimate is not requested, do not read unused observation/background/initial payloads beyond required parameter/model validation. Both outputs share a coherent result owner. The descriptor and mask/PSF structural requirements can be validated independently of image samples.
+The estimate requests complete-input for its plane and full PSF. An unobserved-only request does not read observation, background or initial estimate. A zero-step estimate-only request bit-copies initial; PSF and mask still undergo descriptor/preflight checks as needed. If estimate is not requested, do not read unused observation/background/initial payloads beyond required parameter/model validation. Both outputs share a coherent result owner. The descriptor and mask/PSF structural requirements can be validated independently of image samples.
 
 The direct reference is `O(max_iterations*P*C*A)` and retains `A`, `Aᵀ` support/plan and `s`; FFT replacement must preserve the exact finite operator and declared stages, not switch to circular convolution. Charge all operator plans, state buffers and work. Resource exhaustion is an explicit failure. No implicit spill, reduced precision, fallback algorithm or partial output. Cancellation and ownership follow shared FILTER contracts.
 

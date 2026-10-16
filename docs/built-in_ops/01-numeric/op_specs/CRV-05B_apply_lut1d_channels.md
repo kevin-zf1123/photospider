@@ -56,12 +56,12 @@ constructor defaults and explicit direct-node parameters. There is no channel_ax
 per-channel dtype, per-channel policy or independent-axis mode. Validate the
 table/input C relation at compile/preflight; output shape/dtype are static.
 
-Every nonempty Whole request requests complete input, table and axis Results
-with Data, Validation and Descriptor (role 13), including typed validation and
+Every nonempty complete-input request requests complete input, table and axis Results
+with ordinary payload tile Needs, including typed validation and
 upstream failures. It validates the complete reconstructed axis first, then every
 finite/domain query before table arithmetic. It computes every output element
 and channel and publishes one immutable packed dense Result of the complete input shape,
-with full certified coverage and global coordinates. Its association records
+with complete internal coverage, with public coverage restricted to requested tiles and global coordinates. Its association records
 actual source ObjectIds. Empty reads no payload; static metadata checks still
 apply.
 
@@ -97,7 +97,7 @@ Unpublished output/workspace is released; the output Result transaction is
 all-or-nothing.
 Numeric InvalidDomain/ArithmeticOverflow failures have Run scope. Typed, upstream,
 resource, stale, backend and cancellation failures retain their categories.
-Whole does not expose per-value fallback counters; report those as unavailable.
+complete-input does not expose per-value fallback counters; report those as unavailable.
 
 Each channel may have a different input query; sharing a row prefix does not
 permit sharing the selected table index. Apply the unchanged scalar formula
@@ -120,11 +120,11 @@ WorkflowDocument fixture must connect a multi-function CRV-04 table/axis and
 inspect requested output channels through Compiler/ExecutionContext.
 
 The maintained constructor preserves the channel shape, including C=1 and
-rank-1 vectors, in the six Whole Result profile keys. Manual
+rank-1 vectors, in the six complete-input Result profile keys. Manual
 channel coverage includes independent queries and table columns, all-port
-reversed unaligned layouts, zero strides, mixed dtypes, typed RGBA rejection of
+reversed unaligned layouts, zero strides, mixed dtypes, explicitly bound validation of
 an invalid unrequested alpha, upstream failure propagation and all six CRV-04
-baking chains. Sparse demand returns full Whole output coverage, while dirty
+baking chains. Sparse demand returns requested tile coverage and full internal ownership, while dirty
 mapping follows the recorded query region. Replacing source Results retains the
 static preparation and refreshes cache associations.
 

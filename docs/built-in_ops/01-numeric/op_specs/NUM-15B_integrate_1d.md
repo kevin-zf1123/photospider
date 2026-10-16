@@ -43,7 +43,7 @@ failed producers, while all port metadata is checked. For N>1, every nonempty
 demand reads/validates full samples, step and initial; step must be finite nonzero,
 including when only output0 is projected. Negative step remains valid.
 
-## Whole-formula quality and special values
+## Complete-formula quality and special values
 
 At i>0, evaluate the entire initial-plus-area expression mathematically, rounding
 only once to output dtype. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
@@ -70,7 +70,7 @@ Fixed NaN patterns and floating-environment preservation follow
 
 ## Validation, dependence and invalidation
 
-For N>1 Whole input preparation precedes callback step validation. Invalid step
+For N>1 complete-input input preparation precedes callback step validation. Invalid step
 returns Domain/Run InvalidArgument/InvalidDomain with InvalidSampleStep; source
 failure may occur first, and initial NaN cannot suppress required source failure.
 For N=1 only initial is active. Empty reads nothing. Any active input edit
@@ -113,7 +113,7 @@ function's integral; exact rounding concerns the stated discrete formula.
 
 ## Implementation and executable acceptance
 
-All six registered profile keys execute Whole Result programs and preserve the
+All six registered profile keys execute Run-shared Result programs and preserve the
 `ExactCalculus` weighted-prefix arithmetic. For N=1, static specialization
 selects only input 2 (initial); samples and step metadata remain checked, but
 runtime support excludes them and their failed producers remain unstarted. Empty
@@ -130,4 +130,4 @@ Use independent exact Fraction references for temporary numerical acceptance.
 Strict results must match the final rounded reference bits. Accelerated results
 use the shared final FP32-scaled bound and need not be bit-exact. Compile the
 checker with `-fno-fast-math -frounding-math -ffp-contract=off`; execution details
-and validation cases are in [NUM-15 Whole execution](../calculus-whole.md).
+and validation cases are in [NUM-15 Run-shared complete-input computation](../calculus-whole.md).

@@ -52,17 +52,16 @@ count is 1, area row is [7,2], and bbox row is [7,0,0,1,3]. Connectivity-based
 relabeling requires an explicit separate operation and a new source association.
 Descriptors carry
 the label basis; outputs retain source ObjectId association. C produces
-count:Int64[1]. D produces a complete Result with field rows:Int64[K,2] ordered
-by ID, columns id,area. E produces rows:Int64[K,5] ordered by ID,
-columns id,y_min,x_min,y_max_exclusive,x_max_exclusive. K is RuntimeCount, can
-be zero; no ordinary `[0,...]` Value is invented. No background row. Count and
-areas are exact numbers of pixels, not summed soft coverage or floating area.
-Each table has exactly one row per distinct positive ID. RuntimeCount is the
-actual row count, independent of the maximum ID or an allocation capacity.
-Tables contain no padding rows and no implicit entries for missing IDs.
-The field schema and column count are static; K is determined at evaluation.
-An empty table has RuntimeCount=0 and no data rows, without requiring a
-zero-extent ordinary Value. These rules apply to both labeling bases.
+count:Int64[1]. Let N=H*W, checked during preparation. D returns static Tensor
+members rows:Int64[N,2] and count:Int64[1]; E returns rows:Int64[N,5] and
+count:Int64[1]. The first count[0] rows contain one record per distinct positive
+ID in ascending order. D columns are id,area; E columns are
+id,y_min,x_min,y_max_exclusive,x_max_exclusive. Remaining rows are zero-filled.
+No background or missing-ID record occurs in the effective prefix. All-background
+input has count[0]=0 and unchanged positive Tensor shapes. Count and areas are
+exact pixel counts, not summed soft coverage. Consumers read count through an
+ordinary payload Need and apply positive/sorted-ID validation to effective rows;
+padding is validated separately as zero. Both labeling bases use this contract.
 Attribute tables bind to the exact source Labels ObjectId and spatial basis.
 Consumers must reject a different source object even when shape, IDs or all
 label samples are equal. Shape checks, content hashes and caller assertions do
@@ -78,27 +77,29 @@ continuous pixel-cell edge coordinates. One pixel at (2,3) has bbox [2,3,3,4].
 Distinct disconnected regions with the
 same input ID share one enclosing bbox by the declared-label measurement rule.
 
-F consumes Binary and performs B plus complete measurements in one atomic
-Result: fields labels:Int64[N] with HW basis; rows:Int64[K,7], columns
-id,area,min_pixel,y_min,x_min,y_max_exclusive,x_max_exclusive. Both fields
-reference the same generated Labels ObjectId/basis; the precise public schema
-codec remains a registration gate. This is a proposed generic complete bundle,
-not an alias for today's `components4.labels` factory. Labels alone are A/B
-Values; F's flattened field and dynamic rows follow the existing Result concept.
+F consumes Binary and performs B plus complete measurements in one prepared
+shared stage. Its static members are labels:Int64[H,W], rows:Int64[N,7] and
+count:Int64[1], N=H*W. Effective rows have columns
+id,area,min_pixel,y_min,x_min,y_max_exclusive,x_max_exclusive; unused rows are
+zero-filled. Labels and table retain the same generated Labels ObjectId/basis.
+A CompleteBundle scope includes all three members and therefore all capacity
+tiles; requesting it may require full-capacity work and storage. The precise
+schema codec remains a registration gate. This Proposed contract is not an alias
+for the existing components4.labels factory.
 
-G consumes labels:Labels Value plus area_index:complete D Result, required
+G consumes labels:Labels Tensor plus area_index:complete D Result, required
 minimum_area Int64>=1. It verifies the exact Labels ObjectId association,
-complete sorted unique positive IDs, exact K and correct area counts against
+complete sorted unique effective positive IDs, exact payload count and correct area counts against
 labels BEFORE publication; equal bytes from another object do not suffice.
 Output Binary in required output_dtype (float32|float64): `[label!=0 && area[label]>=minimum_area]`. Missing/extra IDs,
 wrong areas or foreign associations fail. A table is not trusted because its
 shape looks right. G may skip a per-pixel lookup for background but still owes
-its declared Whole association/table validation closure. Independent outputs
+its declared complete-input association/table validation closure. Independent outputs
 from unrelated sources must never be attached by numerical coincidence.
 
-All members declare Whole input Data/Validation for nonempty output demand.
-Dynamic-table descriptor relation is static, contents/K are evaluated once and
-published CompleteBundle. C cannot use a header's maximum ID as count. D/E/G
+All members declare complete-input input Data/Validation for nonempty output demand.
+Static capacity is prepared before execution; effective count and contents are
+computed once in a Run-shared stage and published under a fixed CompleteBundle scope. C cannot use a header's maximum ID as count. D/E/G
 need complete source validation even for a requested subset of rows; no partial
 or unvalidated prefix is promised. Dirty input -> whole affected labels/tables.
 Reference BFS O(N) for A/B, O(N) queue/labels; measurements O(N+K log K), O(K)

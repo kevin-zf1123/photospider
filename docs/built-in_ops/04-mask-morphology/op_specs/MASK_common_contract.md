@@ -28,7 +28,7 @@ Inherit [NUM-common](../../01-numeric/op_specs/NUM_common_contract.md),
 and the [planar/codec boundary](../../02-format-color/op_specs/FMT_codec_boundary.md).
 Precedence: member > family > this file > inherited generic baseline; FMT's metadata-consumption policy replaces blanket facet clearing, not
 NUM numerical accuracy. References import only the named shared obligations,
-not another operation's ports, defaults or Whole callback.
+not another operation's ports, defaults or complete-input callback.
 
 ## Numerical authority
 
@@ -111,7 +111,7 @@ Selectors use NUM's canonical comma-separated nonnegative index String syntax.
 An ordered unique channel list preserves order and has exactly the declared C
 entries. Proposed custom footprint encoding is described in MASK-05. Output
 shapes and static Result schemas are inferred solely from descriptors/statics.
-Dynamic K belongs in RuntimeCount, never in an ordinary zero-extent Value.
+Effective K is an ordinary Int64[1] payload; fixed positive capacity is derived during preparation and unused rows are zero-filled.
 
 ## Boundary, demand and publication
 
@@ -126,10 +126,10 @@ specified constant, not permission to read an unprepared page.
 Elementwise members list exact same-position support. A finite footprint B
 uses union `{p+b:p in Q,b in B} intersect D`, or the explicitly defined boundary
 mapping. A composed operator must propagate support through ALL stages, not
-claim the first stage's halo. Whole means any nonempty demand requires the
+claim the first stage's halo. complete-input means any nonempty demand requires the
 specified complete input domains; it remains a global operation under tiling.
 Dirty support is the forward transpose of these same relations, including
-Control/Validation. Declared Whole closures are conservative formula demand
+Control/Validation. Declared complete-input closures are conservative formula demand
 but exact admitted payload/validation obligations; do not describe them as
 minimal mathematical dependencies. Future sparse proofs require new traits.
 
@@ -147,7 +147,7 @@ Member default `layout=materialize` is an authoring policy, not a payload enum
 accepted by every primitive. No forced-view API is promised. Copy identities
 may reuse immutable storage only if ownership, descriptor changes and all
 required validation/observations survive. Result bundles publish atomically
-where stated, with RuntimeCount and exact source ObjectId associations. There
+where stated, with static capacity, ordinary payload counts and exact source ObjectId associations. There
 are no independently valid partial tables or "all-zero means missing" shortcuts.
 
 ## Failure mapping and resources
@@ -159,7 +159,7 @@ below as new enum values. Preserve the NUM host phase/origin conventions.
 | --- | --- | --- | --- |
 | Invalid/missing static or inconsistent enum field | Compile/preflight | InvalidArgument / InvalidDomain | Schema origin; no fabricated sample atom |
 | Wrong dtype/rank/shape/basis/unsupported semantic description | Compile/preflight | TypeMismatch / None, except existing metadata codec error | Actual descriptor origin |
-| Consumed NaN or forbidden Inf, mask outside [0,1], nonbinary Binary, bad seed/marker | Evaluation | InvalidArgument / InvalidDomain | Actual dependent observation; Whole validation closure where declared |
+| Consumed NaN or forbidden Inf, mask outside [0,1], nonbinary Binary, bad seed/marker | Evaluation | InvalidArgument / InvalidDomain | Actual dependent observation; complete-input validation closure where declared |
 | Finite formula rounds to Inf; final integer overflow | Evaluation | OperationFailed / ArithmeticOverflow | Actual demanded arithmetic observation |
 | Exceeded declared component-count domain cap | Evaluation | OperationFailed / InvalidDomain | Complete component bundle |
 | Capacity/work/stage/refinement exhausted | Admission/evaluation | ResourceExhausted / CapacityLimit, WorkLimit or StageLimit | Preserve host resource scope |
@@ -178,9 +178,9 @@ Binary within flag. Field and Coverage remain finite-only.
 Distance-aware consumers MASK-07B/C and MASK-09 explicitly admit these infinities:
 finite shifts preserve sign of infinity; threshold at finite r maps -Inf to 1 and
 +Inf to 0; feather maps -Inf to 1 and +Inf to 0, including zero-width feather.
-No failed observation or incomplete global iteration publishes a success Value.
+No failed observation or incomplete global iteration publishes a success Tensor.
 Already independent host observations retain their existing terminal outcomes;
-Whole does not manufacture per-pixel isolation that the runtime cannot provide.
+complete-input does not manufacture per-pixel isolation that the runtime cannot provide.
 
 For each member charge output, scratch, index structures, exact-integer limbs,
 coefficient enclosures, retained inputs and simultaneous old/new allocations.
@@ -189,7 +189,7 @@ GPU/JFA/FFT/engine adapters are not automatically admitted. Production execution
 loops must poll at most every 1024 elementary visits and every iteration,
 including exact arithmetic refinement. Work-cap exhaustion fails, not an early
 approximate answer. Only the already existing explicit paged-components factory
-has its published disk recipe; new Whole members do not acquire implicit spill,
+has its published disk recipe; new complete-input members do not acquire implicit spill,
 unbounded workers, auto-eviction, or a paging claim.
 
 ## Independent acceptance and public implementation gate

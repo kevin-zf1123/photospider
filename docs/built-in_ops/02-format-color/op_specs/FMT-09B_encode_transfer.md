@@ -19,12 +19,12 @@ registered_operation_keys:
 
 Inherit the complete [FMT-09 contract](FMT-09_transfer_contract.md) and
 [scalar definitions](FMT-09_transfer_math.md). This direction has strict,
-accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 4 keys. The
+accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 5 keys. The
 specification remains Proposed.
 
 ## Interface and observable behavior
 
-One input Result with one tensor member and no fields produces one `values`
+One input Result with one tensor member  produces one `values`
 output Result containing one tensor. The member uses Float32 or Float64, retains
 its dtype, shape and axis positions, and preserves Result schema identity, tensor
 key and batch axes. Neither path attaches a description to the output. Both set `atomic_trailing_axes` to zero. Complete sample rank,

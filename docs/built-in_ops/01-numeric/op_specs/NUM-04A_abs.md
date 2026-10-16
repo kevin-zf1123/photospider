@@ -28,7 +28,7 @@ and in the named family contract take precedence.
 
 Compute per-element absolute value, preserving input shape and dtype. Inherit
 the [NUM-04 common contract](NUM-04_unary_contract.md) for ports, generic output,
-Whole data/validation demand, NaN handling, ownership, budgets and public
+complete-input data/validation demand, NaN handling, ownership, budgets and public
 acceptance. There are no static operation parameters.
 
 ## Selected mathematical and type contract
@@ -45,7 +45,7 @@ including subnormals. No clipping or saturating integer mode is included.
 All three versions have identical logical result bits and semantic failures.
 
 An Int64-minimum failure is OperationFailed/ArithmeticOverflow with Run scope
-and no Atom key. It fails the complete Whole invocation, including when the
+and no Atom key. It fails the complete complete-input invocation, including when the
 offending coordinate lies outside the consumer projection. UInt8 cannot produce an arithmetic error, and floating NaN/Inf is a
 successful numeric result subject to any preexisting typed-input obligations.
 
@@ -66,7 +66,7 @@ fallback is required.
 
 - UInt8: all 256 inputs return identical bits.
 - Int64: `[-7,0,7,INT64_MAX]` gives `[7,0,7,INT64_MAX]`; INT64_MIN fails only
-  anywhere in a nonempty Whole invocation, without saturation or wraparound.
+  anywhere in a nonempty complete-input invocation, without saturation or wraparound.
 - Float32: raw `0x80000000` -> `0x00000000`, `0xff800000` -> `0x7f800000`,
   and signaling NaN `0xff812345` -> quiet `0x7fc12345`.
 - Float64: `0xfff0000000000042` -> `0x7ff8000000000042`; normal/subnormal
@@ -91,6 +91,6 @@ the new target adds UInt8/Int64 and the selected nonfinite/payload semantics.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

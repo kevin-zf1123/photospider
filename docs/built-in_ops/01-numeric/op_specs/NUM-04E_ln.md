@@ -37,7 +37,7 @@ is no parameter, arbitrary-base mode or `log` alias. Integer conversion is expli
 Strict positive finite results are RN_dtype(ln(exact(x))), directly rounded
 to the output dtype. Accelerated nonzero finite results may differ by at most
 four representable steps, but NaN/infinity/zero classification and sign match
-strict. Use a verified argument-domain fast path or strict fallback, with the same Whole diagnostic boundary as exp.
+strict. Use a verified argument-domain fast path or strict fallback, with the same complete-input diagnostic boundary as exp.
 
 | Input | Output |
 | --- | --- |
@@ -77,6 +77,6 @@ the maintained public run command is documented below; local timing is recorded 
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

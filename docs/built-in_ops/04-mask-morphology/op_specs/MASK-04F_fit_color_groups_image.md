@@ -31,7 +31,7 @@ are not read; effective group-validation closure follows FMT.
 
 The admitted sample multiset is exactly the positive-ID pixels in global row-major
 order, using selected coordinates and weights. The definition is equivalent to
-MASK-04E on this table, but does not require materializing it. Whole group IDs
+MASK-04E on this table, but does not require materializing it. complete-input group IDs
 are Control/Validation; image and weights at positive IDs are Data/Validation.
 Tile order is not a rounding rule. Empty Result demand is descriptor-only.
 
@@ -45,27 +45,30 @@ Sigma_eff=Sigma+diag(epsilon^2). No rounded mean intermediate or sample correcti
 A zero-W group is skipped with diagnostic ID; validation failure is not a skip.
 No automatic grouping, reassignment, clipping or outlier rejection.
 
-Two named complete Result outputs are published together:
+Two named static Result outputs derive from one prepared shared fitting stage.
+Use capacity N equal to the input sample count (H*W for the image member),
+checked during preparation:
 
-* model: RuntimeCount=G effective groups; ids:Int64[G], mean:Float64[G,C],
-  cholesky:Float64[G,C,C]. Static schema includes C and the effective ordered
-  color-coordinate description. The upper triangle is +0. Rows are sorted by ID.
-* skipped: RuntimeCount=S; ids:Int64[S], ascending IDs with zero total weight;
-  the schema fixes reason=zero_total_weight. No invented rows for absent IDs.
+* model: count:Int64[1], ids:Int64[N], mean:Float64[N,C],
+  cholesky:Float64[N,C,C]. Effective rows are sorted by positive ID. The upper
+  Cholesky triangle is +0. Input color interpretation is explicit configuration.
+* skipped: count:Int64[1], ids:Int64[N], with an ascending effective prefix of
+  IDs having zero total weight. The reason is zero_total_weight by contract.
 
-Each output has its own RuntimeCount; G or S may be zero. These are Result fields,
-not zero-extent ordinary Values. Exact runtime schema/metadata codecs must be
-implemented and reviewed before native registration; names above are not new
-working facet IDs. Model and diagnostic publication is complete, without partial
-successful rows. Source input ownership is retained as required by the host,
-while application to another compatible image requires no source ObjectId match.
+Each count may be zero. Unused entries are zero-filled; positive-ID and positive-
+diagonal constraints apply only to effective model rows. Both counts are ordinary
+payload requiring Needs. No absent ID creates an effective row. The complete
+schema/codec and fixed publication scopes remain registration gates for these
+Proposed members. The global fitting computation is not repeated per output tile.
+Source ownership follows the host contract; applying the model to another
+compatible image requires no source ObjectId match.
 
 Compute the exact positive-diagonal Cholesky factor of Sigma_eff; emit RN64(mean)
 and RN64(each lower factor entry). This is the fitting output rounding boundary.
 An exact rational LDL^T plus correctly rounded square roots is a possible
 reference. Finite overflow or loss of a positive representable diagonal fails;
 no adaptive increase of epsilon. Sample orders and tile partitions cannot alter
-these numeric values. epsilon is a required Float64[C] Value of positive finite
+these numeric values. epsilon is a required Float64[C] Tensor of positive finite
 scales; its units match each native color coordinate. The model represents the
 actual stored mean and L, with effective covariance L*L^T.
 

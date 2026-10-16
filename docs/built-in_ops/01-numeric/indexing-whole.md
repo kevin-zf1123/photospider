@@ -1,6 +1,6 @@
-# NUM-10 Whole execution
+# NUM-10 Run-shared complete-input computation
 
-The eighteen concatenate, gather and scatter profile keys run as CPU Whole
+The eighteen concatenate, gather and scatter profile keys run as CPU complete-input
 programs over Result tensors. Each input Result supplies one tensor member under
 an arbitrary schema/member key. Its complete `sample_shape()` includes batch
 axes, has rank 1..8 and contains at most 2^40 elements. The operations support
@@ -9,8 +9,8 @@ or batch topology. Output Results use `photospider.tensor`/`samples`, publish
 the complete output shape as ordinary axes, and drop batch metadata.
 
 The compiler validates static schemas, shape relationships and parameters
-during specialization. For nonempty Whole demand, the program requests each
-active tensor with Data, Validation and Descriptor roles (role 13), which
+during specialization. For nonempty complete-input demand, the program requests each
+active tensor with ordinary member tile Needs with explicitly bound validators , which
 triggers typed-payload validation. The program reads through authorized windows
 and computes the complete output. Consumer projection limits observed
 dependencies and reads; it does not reduce preparation, validation, computation
@@ -59,7 +59,7 @@ temporary state.
 
 Concatenate can request at most 64 original ports in one Need envelope. Its
 five-stage limit accommodates four input envelopes and the publication for 256
-inputs. The Whole continuation retains owning input capabilities in a Root-accounted
+inputs. The complete-input continuation retains owning input capabilities in a Root-accounted
 map across envelopes; each poll borrows that poll's tensor map only for the
 call.
 

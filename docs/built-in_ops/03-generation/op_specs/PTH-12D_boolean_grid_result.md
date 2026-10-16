@@ -28,7 +28,7 @@ Boolean of the unquantized source.
 
 Preserve grid-coordinate output without implicit conversion to floating coordinates. Do
 not silently fall back from PTH-12C to this member. A backend/library name alone is
-insufficient to define its geometry semantics or approve feature removal. Whole
+insufficient to define its geometry semantics or approve feature removal. complete-input
 execution and complete associated publication apply. Grid scale/origin and backend
 algorithm version participate in identity; changing legal output needs a version.
 

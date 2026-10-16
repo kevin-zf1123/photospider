@@ -49,7 +49,7 @@ floating intermediate; only the final output is rounded. All hard comparisons
 are exact with actual stored inputs and Float64 thresholds. No NaN->false raw
 exception is introduced here. Zero-width endpoints precede division. Cost O(Q),
 constant scratch. Conceptual workflow: FMT gray/selected scalar -> selector ->
-MASK-05/08/17. Future public workflows must not use the old Whole threshold as
+MASK-05/08/17. Future public workflows must not use the old complete-input threshold as
 an exact-demand implementation of A.
 
 ## Sources, independent evidence and review boundary

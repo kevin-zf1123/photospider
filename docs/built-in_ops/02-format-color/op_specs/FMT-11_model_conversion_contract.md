@@ -11,7 +11,7 @@ clarification_status: complete
 
 # FMT-11: color-model conversions
 
-The family specification remains Proposed. Native members are registered as CPU Result ABI 4 operations; S is a public helper that lowers to the MASK threshold operation. Inherit the
+The family specification remains Proposed. Native members are registered as CPU Result ABI 5 operations; S is a public helper that lowers to the MASK threshold operation. Inherit the
 [FMT common contract](FMT_common_contract.md) and the confirmed
 [model coverage](FMT_model_conversion_coverage.md). Ordinary numerical behavior
 inherits NUM; the [model mathematics](FMT-11_model_math.md) is normative.
@@ -259,7 +259,7 @@ S is implemented by the registered `mask.threshold_channel_<profile>` operation.
 
 ## Static interface and interpretation
 
-Each native member accepts one Result containing one tensor and no fields, then publishes one `values` Result containing one tensor. The tensor dtype is Float32 or Float64. Input and output full sample rank, including batch and cell axes, is at most 8. Sample counts follow Result schema representability and execution resource limits. The source channel extent is at most 65536; axis-free R insertion also requires room within the rank limit. Cell-axis parameters exclude the batch prefix. Connected inputs receive Descriptor support (8). Semantic selected samples request Data (1) and Validation (4); raw T additionally validates its binary selector. Raw S and bypass-only samples request Data without Validation. R constant outputs request Descriptor only. Empty demand creates no run payload state.
+Each native member accepts one Result containing one tensor , then publishes one `values` Result containing one tensor. The tensor dtype is Float32 or Float64. Input and output full sample rank, including batch and cell axes, is at most 8. Sample counts follow Result schema representability and execution resource limits. The source channel extent is at most 65536; axis-free R insertion also requires room within the rank limit. Cell-axis parameters exclude the batch prefix. Connected inputs receive Descriptor support (8). Semantic selected samples request Data (1) and Validation (4); raw T additionally validates its binary selector. Raw S and bypass-only samples request Data without Validation. R constant outputs request Descriptor only. Empty demand creates no run payload state.
 
 | Static logical field | Requirement |
 | --- | --- |
@@ -318,11 +318,11 @@ and copy rules take precedence. Nonzero underflow retains its sign.
 ## Exact demand, layout, dirty mapping and publication
 
 Demand is the union of the same-position component sets listed in the math and
-member files. No halo, neighborhood or Whole fallback occurs. Dirty propagation
+member files. No halo, neighborhood or complete-input fallback occurs. Dirty propagation
 is their forward relation restricted to observed outputs. Constant R zero
 outputs have no sample dependency. All descriptors still undergo static checks;
 Empty reads no payload. Bypass alpha/AOV/other groups read only corresponding
-source samples. Required upstream Whole computations retain their own scope.
+source samples. Required upstream complete-input computations retain their own scope.
 
 Q may return a read-only view when the complete requested mapping is physically representable from a compatible owner. Generic mappings must be affine; spatial mappings must satisfy the Result builder's canonical spatial view proof, so sparse or noncanonical spatial mappings can be unavailable. A forced Q view then returns `ViewUnavailable`; `auto` materializes. Other members materialize output and reject forced view during preflight, including bypass-only requests.
 materialize forces new storage and computes only requested coverage. There is

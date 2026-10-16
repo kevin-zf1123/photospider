@@ -30,7 +30,7 @@ position[N,2],derivative[N,2],tangent[N,2],UInt8 tangent_valid[N].
 ## Parameters and domain
 
 degree1/2/3; Float32/64 controls/query, explicit output dtype; t in [0,1], positive
-Value extents.
+Tensor extents.
 
 ## Mathematical specialization
 

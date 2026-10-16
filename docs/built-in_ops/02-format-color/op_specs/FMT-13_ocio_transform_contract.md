@@ -194,7 +194,7 @@ layout=auto (default) and materialize both use requested regions of one legal
 full-shape planar output reservation. Reject view, including Float32 no-op cases.
 Bypass read-window reuse does not create a cross-owner output image. Changed
 source color samples invalidate all target color components at the same points;
-bypass dirty propagation is individual. Required upstream Whole failure/support
+bypass dirty propagation is individual. Required upstream complete-input failure/support
 rules remain intact, and physical page/padding access is not logical sample demand.
 
 ## Static interface and member identity
@@ -248,7 +248,7 @@ C supplies an explicit sequence or ordered alternatives; an explicitly empty
 sequence performs just its declared source/destination conversion. Each item
 contains a Look selector and direction. Serialize only unambiguous representable
 Look syntax; do not invent escaping for a name the engine grammar cannot address.
-Whole inverse reverses each sequence and flips directions while retaining
+complete-input inverse reverses each sequence and flips directions while retaining
 alternative priority. A missing inverse is not silently replaced with identity.
 
 ## Explicit configuration and selected route
@@ -291,7 +291,7 @@ current alpha is constant, or finite probes appear unchanged. Unselected config
 branches need not pass sample-processing admission. hasChannelCrosstalk is not
 an alpha proof: a 3x3 RGB matrix has legitimate cross-component dependencies.
 
-Use PlanarImageDesc with only the selected three planes and no real alpha plane.
+Use an authorized Tensor window with only the selected three planes and no real alpha plane.
 The fixed engine fills absent scratch alpha with zero. Admission makes this
 irrelevant to selected color; it is not an opacity assumption about the image.
 Real alpha/AOV bypass preserves every bit including nonfinite and signed zeros.

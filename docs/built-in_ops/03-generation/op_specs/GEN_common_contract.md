@@ -44,13 +44,13 @@ strict fallback, not only sampled agreement.
 
 PathSet controls are finite Float64; exact polygon Results use their separately
 specified rational representation. DynamicPoints use finite Float64 positions and
-associated Int64-width IDs. Zero Result counts are valid; ordinary Value extents are
+associated Int64-width IDs. Zero Result counts are valid; ordinary Tensor extents are
 positive.
 
 ## Publication, resources and error boundaries
 
 Validate shape/dtype/schema before evaluation; static parameters and input descriptors
-alone determine Value shapes. Dynamic counts use formal Results. No Python dictionary or
+alone determine Tensor shapes. Dynamic counts use formal Results. No Python dictionary or
 oracle fixture constitutes a public codec or association. Accept valid negative/zero
 strides, unaligned offsets and nonzero source origins. Return actual global Region,
 layout, owner and produced coverage; missing is not ExplicitZero. Materialize only the
@@ -90,7 +90,7 @@ and document its impact.
 ## Execution and backend scope
 
 Use exact requested-region computation for local members, necessary input halos for
-neighborhood members, and Whole execution for genuinely global algorithms. Each member
+neighborhood members, and Run-shared complete-input computation for genuinely global algorithms. Each member
 separately specifies output computation, input reads, complete input validation and
 dirty propagation. Regional output does not imply regional control validation: a local
 fill may still require complete path validation.

@@ -27,7 +27,7 @@ registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
 Negate each observed numeric value. Inherit [NUM-04 common requirements](NUM-04_unary_contract.md)
-for input/output names, shape preservation, no attached domain description, Whole and
+for input/output names, shape preservation, no attached domain description, complete-input and
 typed-validation support, ownership, resources, NaN handling and validation.
 There are no static parameters. Input and output dtype are the same, restricted
 to Int64, Float32 or Float64. UInt8 is rejected with TypeMismatch and requires
@@ -52,7 +52,7 @@ integer-minimum detection and bit rules without reading beyond the full logical 
 ## Independent acceptance
 
 - Int64 `[-7,0,7,INT64_MAX]` -> `[7,0,-7,-INT64_MAX]`; INT64_MIN fails only
-  anywhere in a nonempty Whole invocation. UInt8 inputs reject before data execution.
+  anywhere in a nonempty complete-input invocation. UInt8 inputs reject before data execution.
 - Float32 `0x00000000` -> `0x80000000`, `0xff800000` -> `0x7f800000`, and
   signaling NaN `0x7f812345` -> `0xffc12345`.
 - Float64 `0xfff0000000000042` -> `0x7ff8000000000042`; subnormal magnitude
@@ -70,6 +70,6 @@ finite-expression policy; this operation uses the maintained numeric unary regis
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

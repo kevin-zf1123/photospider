@@ -34,7 +34,7 @@ In particular, rounding is nearest/ties-to-even with gradual underflow and the
 caller floating environment is preserved. This is limited inheritance: the ports,
 output structures, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
-turn a composite template or structured Result into a generic NUM Value primitive.
+turn a composite template or structured Result into a generic NUM Tensor primitive.
 
 ## Discrete table and explicit interpolation selection
 
@@ -72,7 +72,7 @@ the exact Float64 coordinate and step-consistency rules of CRV-05. Globally
 validate every reconstructed coordinate on all three axes for strict order;
 each axis independently supports increasing or decreasing coordinates.
 Each axis extent is 2..256; unequal N0,N1,N2 are supported. Singleton axes are
-not accepted. The largest table has 256^3*3 values, 384 MiB at Float64. A Whole
+not accepted. The largest table has 256^3*3 values, 384 MiB at Float64. A complete-input
 request validates the complete table with typed/upstream support; sample access
 uses authorized Root windows rather than requiring a dense table copy.
 
@@ -123,8 +123,8 @@ to a Result. `dtype` and `out_of_domain` remain explicit parameters.
 
 Each input is a Result containing one tensor member under any schema id/version
 and member key. Use its complete `sample_shape()`: input [...,3] rank 2..8,
-table [N0,N1,N2,3], and axis [3,3]. The Whole Result program requests all three
-with Data, Validation and Descriptor (role 13), including full typed validation
+table [N0,N1,N2,3], and axis [3,3]. The Run-shared Result program requests all three
+with ordinary payload tile Needs, including full typed validation
 and upstream failures. Typed/upstream failures can precede callback numeric
 checks. Callback validation checks all axes first, then every original input
 color/query before clamp, applies clamp to valid original coordinates, then runs
@@ -136,7 +136,7 @@ complete three-component color.
 
 The output port `values` is a Result using `photospider.tensor` v1/member
 `samples`, with the complete input shape, selected Float32/Float64 dtype, `atomic_trailing_axes=1`. It publishes a packed immutable
-output with full certified coverage and global sample coordinates. The output
+output with complete internal coverage, with public coverage restricted to requested tiles and global sample coordinates. The output
 association records actual source ObjectIds. Any input edit invalidates the
 recorded output demand; dirty support follows that demand. Empty reads no payload.
 Each key has one all-or-nothing Result transaction; numeric failure scope is Run.
@@ -180,7 +180,7 @@ by these declarations; table values use the output description. No extra interpo
 mode is accepted because the methods are independent operations.
 
 Empty Q has no payload reads; static Result schemas and descriptions are still
-preflight validated. Nonempty requests request complete inputs with role 13 before
+preflight validated. Nonempty requests request complete inputs with ordinary tile Needs before
 the callback. Typed/upstream errors can therefore precede callback numeric
 validation. Among callback numeric checks, axis validation precedes every
 original input color check, input validation precedes clamp, and all query/domain
@@ -190,7 +190,7 @@ Any input edit invalidates the complete recorded output demand; dirty support
 follows that demand. Cache identity retains method, descriptions, grid, dtype,
 policy and complete typed/upstream support. The immutable packed Result contains no attached domain description and marks the trailing extent-3 component axis atomic with
 `atomic_trailing_axes=1`.
-Local requests still return full certified coverage in global sample coordinates.
+Local requests still return complete internal coverage, with public coverage restricted to requested tiles in global sample coordinates.
 Legal unaligned, offset, negative/zero-stride input/table layouts remain accepted,
 and output owners survive context teardown.
 
@@ -272,7 +272,7 @@ hue components and every supported color model.
 The six operation keys are registered in
 [`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp),
 and [`lut3d.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/lut3d.hpp) provides the
-public trilinear and tetrahedral constructors. Both are Whole Result operations.
+public trilinear and tetrahedral constructors. Both are Run-shared Result operations.
 Static preparation validates Result tensor schemas and explicit color parameters, then
 stores reusable immutable program state. Each continuation records current
 source ObjectIds and uses authorized Root read windows for input/table samples.

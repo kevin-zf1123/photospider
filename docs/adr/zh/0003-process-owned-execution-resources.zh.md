@@ -9,7 +9,7 @@
 
 ```text
                   +--> CPU workers / FIFO --+
-ExecutionContext |                           |--> Run callback --> Values/results
+ExecutionContext |                           |--> Run callback --> Results/Tensor backing
                   +--> optional GPU lane ----+
                   shared admission, allocator, caches
 
@@ -17,7 +17,7 @@ Run A: dependencies, cancellation, staging, diagnostics
 Run B: dependencies, cancellation, staging, diagnostics
 ```
 
-多个 Run 会竞争 context 配置的资源，但各自保有依赖、取消状态、绑定、中间 Value 和诊断。CPU 执行始终可用；native GPU 执行取决于主机能力和配置。
+多个 Run 会竞争 context 配置的资源，但各自保有依赖、取消状态、绑定、中间 Tensor 和诊断。CPU 执行始终可用；native GPU 执行取决于主机能力和配置。
 
 ## 3. 契约规约与接口
 

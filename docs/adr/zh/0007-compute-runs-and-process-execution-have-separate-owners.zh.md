@@ -27,7 +27,7 @@ class ExecutionContext {
 };
 ```
 
-Plan 捕获 graph 当前性与冻结 operation registry 身份。一次调用拥有自己的绑定快照和 Run 状态；返回的 Value 由调用方持有，可以比 context 活得更久。Worker 从队列取出一次尝试后，会在 transfer、资源准入或进入 operation 之前检查 cancellation 和 plan 当前性。若停止信号在此 cutoff 后出现，可能与进程内 callback 并发；callback 按协作方式排空，迟到的完成不能释放后继工作或发布结果。最终发布前还会再次检查 cancellation 和 plan 当前性。完整顺序见 [Compiler 和执行](../../kernel-architecture/Compiler-and-Execution.md)。
+Plan 捕获 graph 当前性与冻结 operation registry 身份。一次调用拥有自己的绑定快照和 Run 状态；返回的 Tensor 由调用方持有，可以比 context 活得更久。Worker 从队列取出一次尝试后，会在 transfer、资源准入或进入 operation 之前检查 cancellation 和 plan 当前性。若停止信号在此 cutoff 后出现，可能与进程内 callback 并发；callback 按协作方式排空，迟到的完成不能释放后继工作或发布结果。最终发布前还会再次检查 cancellation 和 plan 当前性。完整顺序见 [Compiler 和执行](../../kernel-architecture/Compiler-and-Execution.md)。
 
 失败时丢弃收集模式的暂存结果。Streaming 调用同步交付 tile，因此后续 callback 失败时，已被 sink 消费的 tile 无法回滚。
 

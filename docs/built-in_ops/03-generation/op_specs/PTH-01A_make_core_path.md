@@ -27,8 +27,7 @@ optional associated attributes; CoreVerbs PathSet.
 
 ## Parameters and domain
 
-pixel-xy-right-down coordinates; schema segment/control limits. Empty dynamic rows are
-Result fields, not zero-extent Values.
+pixel-xy-right-down coordinates; schema segment/control limits. Empty paths use positive static-capacity Tensor members and ordinary payload counts equal to zero, not dynamic or zero-extent tensors. Capacity derivation and zero-fill codecs must be specified before registration.
 
 ## Mathematical specialization
 
@@ -38,14 +37,14 @@ output ObjectId associations.
 
 ## Dependencies, resources and failures
 
-Execution rule: **Whole**. Read complete structural/global inputs and publish the
+Computation scope: **complete input in a Run-shared stage**. Read complete structural/global inputs and publish the
 selected complete Result atomically. Full shared-control/topology/resource changes
 conservatively invalidate dependent output; sample changes follow the actual dependency
 map. Empty requests perform static preflight without payload reads or advancing a random
 sequence. Compute only requested output mathematics, retaining required shared
 validation.
 
-Whole O(verbs+controls+attributes); no observable partial bundle.
+complete-input O(verbs+controls+attributes); no observable partial bundle.
 
 All output, scratch, indices, validation work and retained owners are accounted. Poll
 cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,

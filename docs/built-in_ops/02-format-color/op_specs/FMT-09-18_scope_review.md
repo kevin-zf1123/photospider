@@ -48,7 +48,7 @@ below supersedes the original heterogeneous-plane alternatives.
   selected color component; a requested matrix/model output may require several
   source components. Pass-through alpha/AOV-only requests must not automatically
   invoke a color engine or read all color samples. Static descriptor checks still
-  apply, and unavoidable required upstream Whole work retains its original scope.
+  apply, and unavoidable required upstream complete-input work retains its original scope.
 
 ## Per-ID review
 
@@ -74,7 +74,7 @@ below supersedes the original heterogeneous-plane alternatives.
    silently promoting the old last-axis/premultiplied codec to the new contract.
 2. **Native transform demand support.** Existing planar callback support is a
    bounded subset; implementation must verify per-port/per-component requests
-   for RGB-coupled transforms. Do not implement a Whole fallback and claim exact
+   for RGB-coupled transforms. Do not implement a complete-input fallback and claim exact
    component requests. A conforming explicit graph composition is possible only
    if its actual constituent contracts preserve the required dependencies/errors.
 3. **HDR reference and transfer versus view.** Set the common vocabulary for

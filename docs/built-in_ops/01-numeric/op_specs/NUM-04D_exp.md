@@ -28,7 +28,7 @@ and in the named family contract take precedence.
 
 For each observed Float32/Float64 x, compute the natural exponential e^x and
 preserve dtype/shape. Inherit [NUM-04 common requirements](NUM-04_unary_contract.md)
-for the parameter-free input/values interface, generic output, Whole
+for the parameter-free input/values interface, generic output, complete-input
 and typed-validation demand, NaN bits, lifetime, resource accounting and public
 acceptance. Integer inputs require explicit conversion.
 
@@ -47,7 +47,7 @@ results. There is no domain Status failure for a generic floating input.
 
 An accelerated argument range without an established bound/classification path
 falls back to strict. Formal keys retain profile identity, but per-value
-evaluation/fallback counters are unavailable (N/A) in Whole callbacks. Resource/cancellation/upstream failure cannot be erased
+evaluation/fallback counters are unavailable (N/A) in complete-input callbacks. Resource/cancellation/upstream failure cannot be erased
 by a mathematical fallback. Fixed profile, inputs and dtype must give identical
 bits across batching/SIMD widths and scheduling; platform profiles can differ
 within the accepted tolerance.
@@ -88,7 +88,7 @@ The maintained implementation and public run command are documented below; local
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 

@@ -54,7 +54,7 @@ At maximum_removed_area=10, foreground sizes 9 and 10 are removed; size 11
 survives. At maximum_area=10, enclosed holes of sizes 9 and 10 are filled;
 size 11 remains a hole. Exterior-connected background is never filled.
 
-All are Whole; no bounded halo identifies a hole or completes a connected
+All are complete-input; no bounded halo identifies a hole or completes a connected
 component. Reference BFS O(N), O(N) queue/visited scratch. A/C first classify
 exterior, then enumerate enclosed background. B computes components and areas.
 Do not apply repeated per-tile local filling/removal. Poll during flood/count

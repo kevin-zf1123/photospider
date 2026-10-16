@@ -71,7 +71,7 @@ failures. Output view availability follows the actual mapping; a reorder or
 constant insertion may require materialization. Constant-only images still use
 canonical planar page-backed storage when materialized. Output owner retention,
 copy/fill complexity, cancellation, errors and performance cases are those of
-the family and expanded graph, not those of the retired Whole implementation.
+the family and expanded graph, not those of the retired complete-input implementation.
 
 ## Independent acceptance fixtures
 

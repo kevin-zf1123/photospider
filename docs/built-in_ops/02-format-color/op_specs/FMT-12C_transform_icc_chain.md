@@ -32,7 +32,7 @@ to invert an unavailable table.
 Ordinary/abstract intent defaults to relative_colorimetric, applicable bpc to off, under
 the pinned effective rules. DeviceLink instead takes header intent and rejects
 user intent/BPC/adaptation overrides. Ordinary device_to_pcs has no BPC field;
-its internal API slot is not_applicable. Whole-chain BPC defaults apply only
+its internal API slot is not_applicable. complete-input-chain BPC defaults apply only
 to actual PCS-connection controls, as specified in the family. Use fixed
 adaptation=1.0 where applicable.
 No optional acceleration or custom intent plugins are loaded. A chain is not

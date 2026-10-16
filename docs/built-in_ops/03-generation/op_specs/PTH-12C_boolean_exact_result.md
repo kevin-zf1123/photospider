@@ -27,7 +27,7 @@ contour orientation, collinear degree-two vertices, contour rotation and orderin
 specified by PTH-12A, using exact rational comparisons. Do not round coordinates. Store
 exact rational coordinates and incidence/contour structure in the new formal Result; its
 codec, canonical rational representation and factory are schema gates. Subsequent exact
-consumers operate on these exact values, not a hidden Float64 copy. Whole execution
+consumers operate on these exact values, not a hidden Float64 copy. Run-shared complete-input computation
 reads complete geometry and associations. Allocation/large-integer limbs, events and
 retained backing must be charged; failure publishes no partial Result.
 

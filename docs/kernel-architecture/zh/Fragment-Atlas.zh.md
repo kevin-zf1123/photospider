@@ -4,7 +4,7 @@
 
 ## 范围与所有权
 
-Plan 只保留 descriptor domain、精确 sample coverage 和占用 tile 坐标。物化得到的 payload 与目录 Value 通过调用方 allocator 拥有 packed bytes；Result atlas 不保留 source Result 或 read window。Native host 在同步 invocation drain 前保留 device view。Atlas 的 scalar-width transport 不证明相应 GPU 算术已支持。通用目录规划和打包实现在 data 层。`ResultTensorInput` overload 实现在 plugin 层、Result input capability 旁，将其 coverage 和拥有型 windows 适配给通用打包器，并使用同一 packing work 策略。
+Plan 只保留 descriptor domain、精确 sample coverage 和占用 tile 坐标。物化得到的 payload 与目录 TensorSpan 通过调用方 allocator 拥有 packed bytes；Result atlas 不保留 source Result 或 read window。Native host 在同步 invocation drain 前保留 device view。Atlas 的 scalar-width transport 不证明相应 GPU 算术已支持。通用目录规划和打包实现在 data 层。`ResultTensorInput` overload 实现在 plugin 层、Result input capability 旁，将其 coverage 和拥有型 windows 适配给通用打包器，并使用同一 packing work 策略。
 
 ## 核心数据结构与内存布局
 
@@ -12,10 +12,10 @@ Plan 只保留 descriptor domain、精确 sample coverage 和占用 tile 坐标�
 class ResultTensorInput;
 
 struct FragmentAtlas final {
-  ValueDescriptor descriptor;
+  TensorDescriptor descriptor;
   std::vector<std::uint64_t> tile_shape;
   std::uint64_t slot_count = 0, payload_bytes = 0;
-  Value payload, directory;
+  TensorSpan payload, directory;
   Result<std::uint64_t> address(
       const std::vector<std::uint64_t>& coordinate) const;
 };
@@ -23,14 +23,14 @@ struct FragmentAtlas final {
 class FragmentAtlasPlan final {
  public:
   static Result<FragmentAtlasPlan> prepare(
-      const ValueFragments& input, std::vector<std::uint64_t> tile_shape = {},
+      const Tensor& input, std::vector<std::uint64_t> tile_shape = {},
       const FootprintLimits& limits = {});
   static Result<FragmentAtlasPlan> prepare(
       const ResultTensorInput& input,
       std::vector<std::uint64_t> tile_shape = {},
       const FootprintLimits& limits = {});
   Result<FragmentAtlas> materialize(
-      const ValueFragments& input, const BufferAllocator& allocator,
+      const Tensor& input, const BufferAllocator& allocator,
       const FootprintLimits& limits = {}) const;
   Result<FragmentAtlas> materialize(
       const ResultTensorInput& input, const BufferAllocator& allocator,
@@ -40,7 +40,7 @@ class FragmentAtlasPlan final {
 
 `FragmentAtlasPlan` 从精确 coverage 准备传输元数据，再通过调用方 allocator 物化。支持 rank 1..8 以及所有内建 `ElementType`：UInt8、Int64、Float64、Float32、Int8、UInt16、Int16；原始样本 bits 不转换。Plan 只持有 domain、coverage 和 tile masks，不保留 source data owner。`ResultTensorInput` overload 取得拥有型 windows，仅复制该 Need 授权的 samples；通过 `row_run()` 读取，支持负 stride、broadcast stride、碎片化 windows 和带 batch prefix 的 spatial tensor，不填补空洞或 bounding box。Atlas 物化后可独立于 input Result、poll 和 execution context 存活。Capability 未授予 payload 读取时，物化仍经过 `input.read`，因此该尝试与直接读取一样 latch `UnauthorizedRead`。
 
-`preparation_work()` 报告通用目录规划工作，`materialization_work()` 报告通用 packing 工作。`ResultTensorInput` overload 还会通过 `FootprintLimits::consume_work` 计入 window acquisition 和 read-bound 工作，因此 `materialization_work()` 不代表其完整计费。`ValueFragments` overload 保留调用方原有的外部计费方式。
+`preparation_work()` 报告通用目录规划工作，`materialization_work()` 报告通用 packing 工作。`ResultTensorInput` overload 还会通过 `FootprintLimits::consume_work` 计入 window acquisition 和 read-bound 工作，因此 `materialization_work()` 不代表其完整计费。`Tensor` overload 保留调用方原有的外部计费方式。
 
 `ResultTensorInput` 可以由单个 source Result 支持。Atlas 的准备和物化只使用该 capability 获准的 sample coverage。输入 windows 在 atlas 打包请求 samples 期间保留原始 Result owners；物化后的 atlas 独立拥有 packed buffers。此路径处理 tensor Need，不聚合 object 或 field support。
 
@@ -72,9 +72,11 @@ C Result bridge 使用相同的 Need-scoped atlas。Atlas buffer tokens 和 disp
 所需设备不可用时，这些 native tests 返回已配置的 skip code。Protocol mock 与 CPU fallback 不能证明 native execution。
 ## 算法与 wire format
 
-`prepare` 在物化前报告 payload 与目录的逻辑 allocation 大小。GPU 宿主应分别按设备实际 capacity 取整再 admission。`maximum_boxes` 限制占用 tile，`maximum_work` 限制元数据扫描、样本发现、hash/probe 和 packing；cardinality/equality 扫描前检查取消并预扣 metadata。`preparation_work()` 报告通用几何规划工作量，`materialization_work()` 报告通用 packing 工作量。`ResultTensorInput` overload 通过 `FootprintLimits::consume_work` 直接计入其工作；Result 物化还会额外计入 window acquisition 和 read-bound 工作，这些不包含在 `materialization_work()` 中。`ValueFragments` overload 保留调用方原有的外部计费方式。任一 allocation 后取消（包括 Empty）都会释放新 owner，不发布 atlas。
+`prepare` 在物化前报告 payload 与目录的逻辑 allocation 大小。GPU 宿主应分别按设备实际 capacity 取整再 admission。`maximum_boxes` 限制占用 tile，`maximum_work` 限制元数据扫描、样本发现、hash/probe 和 packing；cardinality/equality 扫描前检查取消并预扣 metadata。`preparation_work()` 报告通用几何规划工作量，`materialization_work()` 报告通用 packing 工作量。`ResultTensorInput` overload 通过 `FootprintLimits::consume_work` 直接计入其工作；Result 物化还会额外计入 window acquisition 和 read-bound 工作，这些不包含在 `materialization_work()` 中。`Tensor` overload 保留调用方原有的外部计费方式。任一 allocation 后取消（包括 Empty）都会释放新 owner，不发布 atlas。
 
-每个 tile 至多 64 个逻辑样本。可指定正值、rank 对齐且乘积不超过 64 的 tile extents； 默认从最右轴开始确定性填充。仅占用 tile 进入目录。Lookup 使用逐轴全局 tile 坐标， 不要求全局 shape 乘积可表示为 uint64。Atlas 接受 generic Value，不提供 planar image 执行支持；Result 输入的 tuple 完整性来自已按 `atomic_trailing_axes` 闭合的 tensor Need。
+每个 tile 至多 64 个逻辑样本。可指定正值、rank 对齐且乘积不超过 64 的 tile extents； 默认从最右轴开始确定性填充。仅占用 tile 进入目录。Lookup 使用逐轴全局 tile 坐标， 不要求全局 shape 乘积可表示为 uint64。通用 packer 接受提供的 Tensor 覆盖；Result 重载只打包捕获的 Need 授权覆盖。Atlas 传输 tile 独立于 plan payload tile，packing 不授予额外样本访问。
+
+Hash 对各轴的 tile 坐标字逐个执行 FNV-1a，每个字低字节在前，offset basis 为 14695981039346656037，prime 为 1099511628211。局部 row-major 坐标选择 mask bit。已存在样本的 payload offset 为该 tile 字节偏移加上此前已置位 bit 数乘 dtype 宽度。
 
 Payload 按 tile key 和有效 bit 顺序紧凑存放，孔洞不占样本。空端口使用一个惰性 payload 字节和两个空 slot，均不授权样本。
 
@@ -82,4 +84,4 @@ Payload 按 tile key 和有效 bit 顺序紧凑存放，孔洞不占样本。空
 
 通用 atlas unit suite 注册为 `test_fragment_atlas`，源码为 [`tests/unit/kernel/test_fragment_atlas.cpp`](../../../tests/unit/kernel/test_fragment_atlas.cpp)。Native SDK suite 源码为 [`tests/unit/kernel/test_fragment_atlas_gpu.cpp`](../../../tests/unit/kernel/test_fragment_atlas_gpu.cpp)；Result callback 集成路径见 [`tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp`](../../../tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp)。这些源码共同覆盖 wire layout、坐标查找、sparse holes、有符号与零 stride、rank 和 dtype transport、buffer 准入、取消与 native readback。所需 Metal device 不可用时，native tests 可 skip。
 
-`ValueFragments` overload 保留其允许的 Value coverage。`ResultTensorInput` overload 只读取 tensor Need 授权的 samples。两种 packer 均保留 holes，缺失 directory sample 返回 `NotFound`，超出 tile 或 work limits 的 plan 会失败，取消会退休新分配的 owner。Device host 必须分别准入取整后的 payload 与 directory capacity；Atlas 查找不会触发额外 read 或提供 CPU fallback。
+`Tensor` overload 保留其允许的 Tensor coverage。`ResultTensorInput` overload 只读取 tensor Need 授权的 samples。两种 packer 均保留 holes，缺失 directory sample 返回 `NotFound`，超出 tile 或 work limits 的 plan 会失败，取消会退休新分配的 owner。Device host 必须分别准入取整后的 payload 与 directory capacity；Atlas 查找不会触发额外 read 或提供 CPU fallback。

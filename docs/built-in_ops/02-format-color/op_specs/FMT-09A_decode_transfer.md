@@ -19,12 +19,12 @@ registered_operation_keys:
 
 Inherit the complete [FMT-09 contract](FMT-09_transfer_contract.md) and
 [scalar definitions](FMT-09_transfer_math.md). This direction has strict,
-accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 4 keys. The
+accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 5 keys. The
 specification remains Proposed.
 
 ## Interface and observable behavior
 
-One input Result with one tensor member and no fields produces one `values`
+One input Result with one tensor member  produces one `values`
 output Result containing one tensor. The member uses Float32 or Float64, retains
 its dtype, shape and axis positions, and preserves Result schema identity, tensor
 key and batch axes. Neither path attaches a description to the output. Both set `atomic_trailing_axes` to zero. Complete sample rank,
@@ -51,7 +51,7 @@ Inherit pointwise Data/Validation/dirty mapping and all static description check
 Static incoherence can fail even for alpha-only/Empty output; unrelated pixel
 values cannot. Source transfer mismatch, unsupported units/model/dtype, selected
 invalid samples, output overflow, resource and cancellation outcomes follow the
-family table. Whole upstream failures keep their original scope.
+family table. complete-input upstream failures keep their original scope.
 
 Auto/view/materialize and exact produced coverage follow the family. Only
 linear/gamma=1 can use a legal whole-map generic or spatial Result view; identity

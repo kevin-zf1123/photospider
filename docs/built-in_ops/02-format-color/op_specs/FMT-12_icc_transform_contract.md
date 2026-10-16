@@ -259,7 +259,7 @@ intent/BPC, output_axis and layout are static. Changes require re-inference and
 transform reconstruction. Pixel values may change under the same input schema.
 Source and destination profile/endpoint data are explicit static parameters.
 Preparation returns their resource identities for host resolution. No profile
-is selected from a Result or Value.
+is selected from a Result or Tensor.
 
 The description path selects one complete configured group; raw specifies ordered distinct source
 slots and explicit profile/endpoint parameters. Resolve axes using FMT common
@@ -301,7 +301,7 @@ preparation, plans and active execution, independently of Result storage owners.
 Validate the full static interface and construct the transform even for empty
 spatial or bypass-only requests. This reads resources, not image samples.
 Bypass samples preserve all bits, including NaN payloads and signed zeros.
-Pixel validation follows the exact point/group support above; an upstream Whole
+Pixel validation follows the exact point/group support above; an upstream complete-input
 node retains its own support/failure scope. Unproduced samples remain missing.
 Physical page/row-padding access does not enlarge logical sample validation.
 

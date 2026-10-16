@@ -5,14 +5,14 @@
 | Owner | Owns | Boundary |
 | --- | --- | --- |
 | `GraphContext` | Copied workflow source, revision, and snapshot currentness | Does not own compiler output or execution workers |
-| `Compiler` | Validation, immutable IR stages, plans, and stage identities | Does not own runtime Values, callbacks, or daemon state |
+| `Compiler` | Validation, immutable IR stages, plans, and stage identities | Does not own runtime Tensor backing, callbacks, or daemon state |
 | `ExecutionRun` | One execution's ready steps, intermediates, cancellation state, and diagnostics | Does not own shared pools or durable results |
 | `ExecutionContext` | CPU worker pool, optional native lane, frozen operation registry, caches, and resource ledger | Does not own graph mutation or daemon Jobs |
 | Operation definition | Frozen traits and callback contract | Does not own execution capacity or publication authority |
 
 ## 2. Data and memory boundaries
 
-`ExecutionPlan` contains copied operation metadata and demand geometry. It does not retain caller input addresses. `ExecutionBindings` supplies Values, regional sources, snapshots, or structural planar images for one Run. The Run retains those owners while callbacks may use them; each returned `Value` or `PlanarImage` retains its own backing and resource lease after the Run ends.
+`ExecutionPlan` retains static metadata and member tile geometry, not caller addresses. `ExecutionBindings` supplies owning Result references for one Run. Each Result consists of static Tensor members; returned Results and read windows retain backing and leases after Run completion.
 
 Estimated bytes guide planning and reservation. The resource ledger accounts admitted or allocated capacity according to the resource class; an estimate by itself is not an allocation lease. A `Region` describes logical coordinates, while `StridedLayout` maps those coordinates to byte addresses.
 

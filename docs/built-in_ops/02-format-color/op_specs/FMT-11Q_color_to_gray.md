@@ -23,7 +23,7 @@ Inherit the complete [family contract](FMT-11_model_conversion_contract.md),
 
 ## Interface and output inference
 
-One Result containing a single Float32 or Float64 tensor and no fields produces one `values` Result containing a single tensor.
+One Result containing a single Float32 or Float64 tensor produces one `values` Result containing a single tensor.
 Source: XYZ, NCL YCbCr, normalized CIELAB or OKLab. Target: linear_y, encoded_luma, cielab_l or oklab_l Gray.
 Q/R structural remapping and axis rules apply exactly as specified in the family.
 Unrelated groups, internal alpha and AOV samples pass through bit-for-bit.
@@ -52,7 +52,7 @@ publication; unrelated unobserved sample errors do not. Preserve upstream scope.
 This is a registered native Result primitive. Internal helper reuse preserves its declared support, rounding and validation.
 auto can share a legal same-owner view while retaining validation; forced view fails if that mapping cannot be represented.
 The implementation supports generic and spatial layouts. Empty demand is stateless, and publication is transactional.
-The implementation uses Result ABI 4 and the registered CPU profiles.
+The implementation uses Result ABI 5 and the registered CPU profiles.
 
 ## Independent acceptance and conceptual workflow
 

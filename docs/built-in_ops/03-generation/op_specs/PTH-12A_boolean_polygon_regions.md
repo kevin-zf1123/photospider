@@ -39,14 +39,14 @@ silent tiny-hole removal.
 
 ## Dependencies, resources and failures
 
-Execution rule: **Whole**. Read complete structural/global inputs and publish the
+Computation scope: **complete input in a Run-shared stage**. Read complete structural/global inputs and publish the
 selected complete Result atomically. Full shared-control/topology/resource changes
 conservatively invalidate dependent output; sample changes follow the actual dependency
 map. Empty requests perform static preflight without payload reads or advancing a random
 sequence. Compute only requested output mathematics, retaining required shared
 validation.
 
-Whole Result; typical arrangement O((E+I)log E), O(E^2) reference; all
+complete-input Result; typical arrangement O((E+I)log E), O(E^2) reference; all
 events/limbs/publication work charged.
 
 All output, scratch, indices, validation work and retained owners are accounted. Poll

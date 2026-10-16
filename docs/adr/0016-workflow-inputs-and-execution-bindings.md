@@ -50,9 +50,9 @@ struct ExecutionResult final {
 };
 ```
 
-These excerpts show the public fields relevant to binding and publication. The current `WorkflowDocument` schema is 6. It stores declarations, operation nodes, and named outputs. Declaration ids are unique and nonzero; names are unique, exact, case-sensitive printable ASCII strings of 1 to 128 bytes with no spaces. A document contains at most 4096 declarations, and each declaration is bound exactly once, including declarations unused by the graph.
+These excerpts show the public fields relevant to binding and publication. The current `WorkflowDocument` schema is 7. It stores declarations, operation nodes, and named outputs. Declaration ids are unique and nonzero; names are unique, exact, case-sensitive printable ASCII strings of 1 to 128 bytes with no spaces. A document contains at most 4096 declarations, and each declaration is bound exactly once, including declarations unused by the graph.
 
-A declaration's `result_schema` supplies typed tensor slots, fields and domain. Compiler input metadata carries that schema. Tensor shape, batch axes and physical layout come from each `ResultTensorSpec`. Value may back a typed tensor internally, but it is not an operation input or output contract. Static schema changes require recompilation. Input payload bytes, pointers, and allocation addresses are excluded from semantic and physical-plan identity; schema, traits, normalized output demand, and other compile-time facts determine those identities.
+A declaration fixes all named static Tensor members, their dtype, cell shape, batch/atomic axes and topology. Input structure changes require preparation and compilation again. Each Run fixes plan, binding snapshot and generation. Payload addresses are excluded from compiler identity; schemas, traits, stage declarations and normalized member requests enter the relevant identities.
 
 `ExecutionBinding` matches one declaration by name and owns a Result reference. The executor validates names as a multiset, so duplicate bindings remain visible and fail validation rather than being silently overwritten. It validates Result schema compatibility before scheduling operation work. The Run retains its binding snapshot and any admitted input owners until callbacks retire. `ExecutionContext::execute` returns named Results in `ExecutionResult::results` after callbacks retire and cancellation and graph-currentness checks allow completion.
 
@@ -65,10 +65,10 @@ A declaration's `result_schema` supplies typed tensor slots, fields and domain. 
 - Runtime input data does not become compile-time parameters or literal nodes.
 - A workflow output selects an operation-node output; direct input passthrough is not a workflow output form.
 - Result tensor backing layout does not change logical sample authorization. Planar storage is not interleaved storage.
-- The Result C operation table remains ABI 4. This ADR describes the C++ workflow binding contract, not a separate C++ Value operation protocol.
+- The Result C operation table remains ABI 5. This ADR describes the C++ workflow binding contract, not a separate C++ Tensor operation protocol.
 
 ## 5. Consequences
 
-Malformed declarations and missing, extra, duplicate, or invalid binding names fail with `InvalidArgument`; an incompatible Result schema fails with `TypeMismatch`. These checks happen before operation callbacks. A caller can reuse a compiled plan with independent Result bindings, but it must not mutate its binding container while `execute` copies it. A bound input whose declared schema contains exactly one spatial tensor and no field is requested and compared by tile; every other input is one Whole unit, as defined by [ADR 0023](0023-track-dependencies-between-fixed-tiles.md).
+Malformed declarations and missing, extra, duplicate, or invalid binding names fail with `InvalidArgument`; an incompatible Result schema fails with `TypeMismatch`. These checks happen before operation callbacks. A caller can reuse a compiled plan with independent Result bindings, but it must not mutate its binding container while `execute` copies it. Every input member has its own grid and is requested and compared by member tile, as defined by [ADR 0023](0023-track-dependencies-between-fixed-tiles.md). The same backing may serve plans with different tile extents; production progress alone is not a content edit.
 
 Cancellation is cooperative. The executor waits for entered callbacks to retire before releasing borrowed phases and owners. Each Run owns its producers; cancelling a Run stops and retires that Run's work without affecting another Run. Input Results retain their own backing owners, while Root-accounted working state, outputs, and transfers remain charged until their last owner retires.

@@ -22,7 +22,7 @@ output bits and discrete decisions are fixed.
 
 ## Interface and representation
 
-No Value inputs; image[H,W,3] Float32/64.
+No Tensor inputs; image[H,W,3] Float32/64.
 
 ## Parameters and domain
 

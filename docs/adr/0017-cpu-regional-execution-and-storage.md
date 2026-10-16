@@ -1,89 +1,30 @@
 # ADR 0017: Execute Regional Work with Bounded CPU Storage
 
 - Status: Accepted
-- Current boundary: in 0.34.0 the Value facets and Value resource owners of the original decision are superseded. Values hold structure and storage only; operation preparation selects immutable resources by explicit identity. See [ADR 0020](0020-composable-operation-foundations.md).
+- Reader mirror: [Chinese](zh/0017-cpu-regional-execution-and-storage.zh.md)
 
-## 1. Core Summary (TL;DR)
+## 1. Core summary (TL;DR)
 
-Callers request outputs by tile index or as whole outputs, and the execution context schedules the resulting tile and Whole tasks with bounded CPU workers and memory accounting. Dense `Value` storage remains immutable and region-addressable; structural images use `PlanarImage` owners and publish only completed writes. Callers can collect requested outputs or synchronously consume ordered output tiles.
+Every Result member has a static tile grid. Tiles are the payload scheduling, authorization, publication, cache and invalidation units. A continuation is the execution entity and may span several polls, request several input tiles and produce several result tiles through a shared stage. Full coverage is an ordinary compact tile selection.
 
-## 2. Mental Model & Intuition
+## 2. Mental model and intuition
 
-```text
-requested output tiles or whole outputs
-          |
-          v
-planner creates one task per tile or Whole output
-          |
-          v
-bounded admission -> CPU workers -> operation callbacks
-       |                   / \
-queue or budget      successful output    failure/cancel/stale
-limit rejects               |                 |
-                          v                 v
-                     publish result    stop admissions
-                          |            drain admitted work
-                    collect / sink          |
-                                      return failure
-```
+One Run fixes plan, bindings and generation. Ordinary output actors publish one complete member tile. Prepared shared stages perform global algorithms once per original node/stage in that Run; waiters yield without blocking execution workers. State, wait records, terminal records and backing remain Root-accounted. No active continuation crosses Runs.
 
-The planner creates one task for each requested tile of a Tiled output and one task for each requested Whole output; each task requests its inputs through Needs. The execution context admits work only when queue and allocation limits permit it. CPU workers invoke callbacks over their tiles or Whole outputs, publish immutable results, and release storage when its final owner retires. A streaming sink applies synchronous backpressure because the executor returns from one sink call before delivering the next tile.
+## 3. Formal contracts and APIs
 
-## 3. Formal Contracts & APIs
+`ExecutionContext::execute` returns named Results; `execute_fragments` and demand handles select member-local tile sets. `ExecutionOptions::result_publication` observes certified publications and may retain their owners. There is no Tensor-based streaming sink interface.
 
-```cpp
-struct RegionDimension { std::uint64_t offset; std::uint64_t extent; };
-class Region;
-class Value;
-class PlanarImage;
-struct ExecutionPlan;
-struct ExecutionBindings;
-struct ExecutionOptions;
-struct ExecutionContextConfig;
+The plan-wide tile extent is a positive power of two, default 128. Spatial grids split H/W and cover other cell axes; nonspatial grids split the last two non-atomic cell axes. Explicit batch axes and earlier free cell axes form coordinates. Atomic axes remain complete. See [ADR 0023](0023-track-dependencies-between-fixed-tiles.md).
 
-using ExecutionSink =
-    std::function<Status(const std::string&, ValueView)>;
+Tensor provides uniform immutable backing and view mappings. Host allocation defaults to tiled planar with actual edge sizes and sparse directories; a full logical canvas reservation is unnecessary. Owning read windows and restricted write windows expose actual strides. Negative strides, broadcast and external buffers remain valid after structural checks. Dense collection and native packing/transfer are explicit, capacity-admitted and charged.
 
-class ExecutionContext {
- public:
-  [[nodiscard]] Result<ExecutionResult> execute(
-      const ExecutionPlan& plan, ExecutionBindings bindings = {},
-      const CancellationToken& cancellation = CancellationToken(),
-      const ExecutionOptions& options = {});
-  [[nodiscard]] Result<ExecutionDiagnostics> execute_stream(
-      const ExecutionPlan& plan, ExecutionBindings bindings,
-      const ExecutionSink& sink,
-      const CancellationToken& cancellation = CancellationToken(),
-      const ExecutionOptions& options = {});
-};
-```
+CPU ordinary callbacks use range service ABI 2; staged coordinators use tile service ABI 2. Eligibility follows callback role and worker grant, not coverage size. Nested submission is forbidden and each service joins work before return. Kernel guards save/restore floating state; operations establish their numerical mode on each executing thread.
 
-These declarations reproduce the current public member signatures; enclosing headers and unrelated methods are omitted.
+## 4. Non-goals and explicit boundaries
 
-`Region` stores half-open logical intervals in descriptor axis order. Coordinates describe samples, not byte offsets. Work is requested, computed and published in square tiles of one plan-wide extent over the height and width axes of spatial tensors, as defined by [ADR 0023](0023-track-dependencies-between-fixed-tiles.md); outputs without a tile grid are computed whole. Each tile covers the complete channel group. Collected outputs contain the requested tiles, while the descriptor continues to describe the full logical value.
-
-`Value` holds a logical descriptor (element type and shape), a valid region, a strided byte layout, and a shared owner of immutable `CpuStorage`; these structural members are its complete content. `Value::view(region)` returns an owning `Value` that shares the storage owner without copying. `ValueView` instead borrows a `Value` and owns no storage; its referenced value must outlive the view. `MutableBuffer` is exclusive and move-only; `freeze()` transfers its storage into immutable ownership. A published allocation remains alive while any owning `Value` retains it. Tiled operations copy only the requested tiles into host-managed output storage.
-
-`PlanarImageLayout` defines height, width, optional channel axes, component groups, row pitch, and continuous or tiled physical order. Logical axis order does not imply interleaved physical storage. `PlanarImage` owns immutable-published samples; writers use unpublished write windows and commit completed regions. `PlanarPageBudget` accounts backed image pages independently from the maximum virtual reservation. Page owners and their accounting leases may outlive the execution context. The ordinary `execute_stream` entry points accept Value-based regional output and return `TypeMismatch` for plans that require structural planar output; planar execution uses the structural image result path.
-
-Operation plugins use the standalone Result C ABI 4 (`PS_RESULT_OPERATION_ABI_VERSION_4`) declared in [`result_operation_plugin_api.h`](../../include/photospider/plugin/result_operation_plugin_api.h). Result callbacks receive validated metadata, requested tensor coverage, host services, and borrowed views of the immutable resources that operation preparation selected by explicit resource identity; the registry rejects missing or mismatched Result tables before import, and callback exceptions are fenced at the host boundary.
-
-`ExecutionContextConfig` bounds CPU worker count, queued callbacks, controlled live bytes, and optional caches. Ordinary callback submissions release their waiting slot when a worker starts the callback. A `CPU_STAGES` job keeps its admission until every submitted tile retires and the job is unlinked, so a running staged job can still prevent another submission when the waiting limit is full. See the [parallel execution model](../kernel-architecture/Parallel-Execution-Model.md) for the shared scheduler queue. `maximum_live_bytes` accounts controlled computation payloads, including regional reads and managed outputs, scratch, intermediates, and transfers. It does not represent process RSS or count caller-preexisting input storage. An allocation must reserve its budget before payload allocation, and its lease remains until the last storage owner releases it.
-
-## 4. Non-Goals & Explicit Boundaries
-
-- CPU regional execution is required; GPU backends are optional and operation-specific. GPU availability does not imply every operation can execute there.
-- The controlled byte limit covers instrumented payload allocations. It does not bound caller allocations, uninstrumented metadata, thread stacks, or operating-system overhead.
-- `Region` describes logical coverage. It does not promise that a general strided `Value` is physically contiguous.
-- `Value` and Result carry no attached domain label or facet, and a `Value` holds no `ImmutableResource` owner. An operation reads interpretation from its explicit static parameters and prepared resources, so the executor accepts two structurally identical inputs alike.
-- A planar image's channel grouping describes logical samples and semantic components; it does not convert planar storage into interleaved bytes.
-- The executor does not roll back tiles already consumed by a streaming sink. Streaming has no persistent commit protocol.
-- Trusted in-process operation code is not sandboxed. Allocation services and ABI checks enforce the callback contract but do not contain arbitrary native code.
+No separate whole-result mode, default layout/straight-alpha certification, automatic dense copy, dynamic field extent or live-backing eviction/recomputation is added. Resource limits account controlled capacity and work, not total process RSS. Native modules remain trusted in-process code.
 
 ## 5. Consequences
 
-Invalid, empty, or out-of-bounds output requests fail during planning. A callback may be rejected when queue admission, workspace reservation, or output allocation cannot be satisfied. Work that can proceed within current leases waits for worker capacity. Cancellation is cooperative; after valid entry, observed cancellation takes precedence over stale graph state and ordinary operation failure. An operation failure does not publish its incomplete output, and execution failure prevents ordinary `execute` from returning a partial collected result.
-
-Large whole-operation working sets can require more memory than a small requested output because the operation establishes a full-materialization boundary. Callers should select Tiled operations and a suitable tile extent when the operation contract permits them, configure realistic resource limits, and release retained results when they no longer need them. Shared storage is charged once while shared; externally retained results keep their accounting lease alive.
-
-`execute_stream` delivers named Value-based output tiles in deterministic name and spatial order, one synchronous sink call at a time. The `ValueView` expires when the sink returns; the sink can copy bytes or call `ValueView::retain()` to keep an owning `Value`. Retained outputs keep their storage leases alive and can exhaust the execution budget. Sink failure, cancellation, or staleness stops further delivery, and admitted callbacks retire before the call returns. Previously consumed tiles remain consumed even if a later tile fails. Memory limits do not bound process RSS, and operation/backend support depends on each operation's registered traits and configured backend.
+Empty payload requests are legal and do not start production; descriptor-only requests are explicit. Out-of-range tile indices fail. Cancellation stops new admission and drains entered callbacks. Failed tile transactions expose no partial payload or dependency evidence. Global algorithms may require full-output work and capacity for one requested tile; their prepared shared stage makes that cost explicit and prevents per-tile repetition. Returned Results and windows retain backing leases until their final owner retires.

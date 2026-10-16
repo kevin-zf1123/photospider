@@ -7,7 +7,7 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 result_operation_abi: 4
-kernel_package: "0.34.0"
+kernel_package: "0.35.0"
 ---
 
 # FMT-01: extract tensor channels
@@ -29,8 +29,8 @@ duplicates and replacement; FMT-02 owns explicit channel assembly.
 
 Each A/B node accepts one Result input named `input` and publishes one Result
 output named `values`. Input and output schemas contain one tensor member and no
-fields. Package 0.34.0 uses Result operation ABI 4, WorkflowDocument 6 and
-OperationTraits 26. The six CPU registry keys are:
+fields. Package 0.35.0 uses Result operation ABI 5, WorkflowDocument 6 and
+OperationTraits 27. The six CPU registry keys are:
 
 | Member | Strict | Apple Silicon profile | x86-64 profile |
 | --- | --- | --- | --- |
@@ -69,7 +69,7 @@ once at compile time. Matching is case-sensitive and exact, with no aliases,
 normalization, trimming or pattern matching. Zero or multiple matches fail.
 B without `input_description` is rejected.
 
-The input is a Result with one tensor member and no fields. Static preparation
+The input is a Result with one tensor member . Static preparation
 checks dtype, descriptor rank, selected axis/index, the supplied description and
 `keepdims` shape. Nothing is guessed from the channel count.
 Direct A/B nodes may include `expected_source_schema` and

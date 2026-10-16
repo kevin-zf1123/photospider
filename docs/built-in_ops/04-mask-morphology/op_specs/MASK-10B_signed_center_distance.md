@@ -26,7 +26,7 @@ input: Binary[H,W] -> distance: Float32/64[H,W]
 
 Required static parameters: metric,sy,sx,output_dtype,exterior; no feature or squared parameter. Values and controls use the stated
 port order. Infer ordinary output dimensions from descriptors/statics only;
-Result RuntimeCount and association rules, where relevant, are those of the family.
+Static Tensor capacities, payload counts and source-association rules, where relevant, are those of the family.
 No hidden default, conversion, color/alpha inference or optional port is added.
 
 Authoring recommendation: exterior=background. Both none and background are
@@ -36,7 +36,7 @@ supported; the node must explicitly serialize exterior.
 
 Foreground uses negative distance to background; background positive distance to foreground; no-feature -Inf for foreground and +Inf for background.
 
-Whole Binary input for any nonempty output demand. Empty Q has no runtime sample/control/validation reads. Descriptor
+complete-input Binary input for any nonempty output demand. Empty Q has no runtime sample/control/validation reads. Descriptor
 checks still run. The family defines validation closure, border extension,
 stage rounding, dynamic witnesses and the forward dirty relation. A bounding
 rectangle may not replace a smaller declared sparse support.
@@ -48,7 +48,7 @@ CPU is the initial target; no implicit accelerated/GPU/third-party fallback is
 registered. Exact choices/copies stay exact; arithmetic uses the inherited
 rounding boundary and finite-domain error rules. Account for output, scratch,
 exact state, retained source owners and all simultaneous intermediates. Poll
-inside long loops/refinement. Whole or CompleteBundle members do not publish
+inside long loops/refinement. complete-input or CompleteBundle scopes do not expose
 partially converged or partially associated results. Preserve the host's
 upstream/cancellation/resource scope and immutable owner lifetime.
 

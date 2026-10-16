@@ -2,7 +2,7 @@
 
 ## 1. 核心摘要 (TL;DR)
 
-Photospider 通过精确大小的版本化 C 表在宿主进程中加载受信任的 operation module，并在发布前复制声明；内置 operations 则通过 C++ `OperationRegistry` 注册。Structured Result C ABI 的每个 port 对应一个 Result object；typed tensor members 保存数值或图像 samples，fields 保存 primitive records。Result 只存储结构与数据：callback 通过显式 tile Need 请求输入，宿主在 Result 之外记录每个已完成计算单元的 Needs。当前 package 为 0.34.0，使用 Result operation C ABI 4，OperationTraits 为 26。ABI 4 提供校验器与诊断注册、metadata resolution 期间的显式资源选择、授权的校验读取以及 `fail_domain`；Result 记录不携带 facet 或领域 metadata。
+Photospider 通过精确大小的版本化 C 表在宿主进程中加载受信任的 operation module，并在发布前复制声明；内置 operations 则通过 C++ `OperationRegistry` 注册。Structured Result C ABI 的每个 port 对应一个 Result object，每个 Result 都是由 1..16 个 typed Tensor 成员组成的静态目录，成员保存数值或图像 samples。Result 只存储结构与数据：callback 通过显式的成员 tile Need 请求输入，宿主在 Result 之外记录每个已完成计算单元的 Needs。Package 0.35.0 使用 Result operation C ABI 5 与 OperationTraits 27。ABI 5 提供成员局部的 tile 区间、静态 publication scope、Run 共享 stage、校验器与诊断注册、metadata resolution 期间的显式资源选择、授权的校验读取以及 `fail_domain`；Result 记录不携带 facet 或领域 metadata。
 
 ## 2. 架构心智模型 (Mental Model & Intuition)
 
@@ -12,41 +12,43 @@ sequenceDiagram
     participant Module
     participant Callback
     participant Services
-    Host->>Module: 读取 Result operation table
-    Host->>Host: 校验并复制声明
-    Host->>Host: 发布不可变定义和 library lease
-    Host->>Callback: 借出 query 和 phase 作用域 services
-    Callback->>Services: 请求 tile Needs、Result facts 和 tensor 读取
-    Services-->>Callback: 返回授权读取和 owning windows
-    Callback-->>Host: 返回状态、Need yield 或 publication
-    Host->>Host: 检查取消、sticky failures 和 publication
-    Host->>Host: 将该单元已准入的 Needs 记录为 TileRecord
+    Host->>Module: Read Result operation table
+    Host->>Host: Validate and copy declarations
+    Host->>Host: Publish immutable definition and library lease
+    Host->>Callback: Lend query and phase-scoped services
+    Callback->>Services: Request member tile or stage Needs, Result facts, tensor reads
+    Services-->>Callback: Return authorized reads and owning windows
+    Callback-->>Host: Return status, a Need yield, or a publication
+    Host->>Host: Check cancellation, sticky failures, and publication
+    Host->>Host: Record the unit's admitted Needs as a TileRecord
 ```
 
-Registry 持有每个不可变定义及其动态库 lease。Invocation snapshot 在 callback 运行期间保留定义。Result coordinator 解析具名 outputs、input projections、field I/O、input tile Needs 和 backend services，并把每个已完成计算单元已准入的 Needs 记录在一个 `TileRecord` 中。Result 持有 schema 与 tensor storage；tensor 可使用 affine CPU storage 或由 physical layout 描述的其他 backing。
+Registry 拥有每个不可变 definition 及其动态库租约。Invocation snapshot 在 callback 运行期间保留该 definition。Result 协调器解析具名输出、输入投影、输入 tile Need、共享 stage 与后端服务，并把每个已完成计算单元的已准入 Need 记录在 `TileRecord` 中。Result 拥有 schema 与 tensor 存储；tensor 可以使用 tiled CPU 存储、affine CPU 存储，或由其物理布局描述的其他 backing。
+
+## 3. 契约规约与接口 (Formal Contracts & APIs)
 
 ### 入口与核心模型
 
 ```c
 #include "photospider/plugin/result_operation_plugin_api.h"
 
-typedef struct ps_result_operation_plugin_api_v4 {
+typedef struct ps_result_operation_plugin_api_v5 {
   uint32_t struct_size, abi_version;
-  const ps_result_operation_v4* operations;
+  const ps_result_operation_v5* operations;
   uint32_t operation_count;
   void* context;
   void (*destroy)(void*);
-  const ps_result_validation_definition_v4* validators;
+  const ps_result_validation_definition_v5* validators;
   uint32_t validator_count;
-  const ps_result_diagnostic_definition_v4* diagnostics;
+  const ps_result_diagnostic_definition_v5* diagnostics;
   uint32_t diagnostic_count;
-} ps_result_operation_plugin_api_v4;
+} ps_result_operation_plugin_api_v5;
 
-const ps_result_operation_plugin_api_v4*
-ps_result_operation_plugin_get_api_v4(void);
+const ps_result_operation_plugin_api_v5*
+ps_result_operation_plugin_get_api_v5(void);
 ```
 
-`result_operation_plugin_api.h` 是独立的 C11 operation-plugin header。它定义 Result element type 与 parameter type enums、parameter descriptor/value records、extension identity 与 resource identity/view records、校验器与诊断定义以及 capability flags。`PS_RESULT_EXPORT` 也在此定义，并使用共享的 `PHOTOSPIDER_OPERATION_PLUGIN_BUILD` producer switch。Native GPU 声明位于独立的 `native_gpu_api.h`，使用自己的 ABI 版本。
+`result_operation_plugin_api.h` 是独立的 C11 operation-plugin 头文件。它拥有 Result element-type 与 parameter-type 枚举、参数 descriptor/value 记录，schema、tensor、tile-grid、tile-Need 与 shared-stage 记录，extension identity 与 resource identity/view 记录，校验器与诊断定义，以及能力标志。`PS_RESULT_EXPORT` 在此定义，并使用共享的 `PHOTOSPIDER_OPERATION_PLUGIN_BUILD` 生产方开关。Native GPU 声明来自独立的 `native_gpu_api.h`，使用各自的 ABI 版本。`result_tile_helpers.h` 中的 C tile 辅助函数依据借用的网格记录构造成员 Need。
 
 ```cpp
 #include <utility>
@@ -56,90 +58,109 @@ ps::SchemaTemplate schema;
 ps::ResultTensorSpec pixels;
 pixels.key = "pixels";
 pixels.batch_axes = {2, 3};
-pixels.descriptor = {ps::ElementType::Float32, {1080, 1920, 4}};
+pixels.descriptor = {ps::ElementType::Float32, {4, 1080, 1920}};
 pixels.layout.spatial = true;
-pixels.layout.height_axis = 0;
-pixels.layout.width_axis = 1;
-pixels.layout.channel_axis = 2;
+pixels.layout.channel_axis = 0;
+pixels.layout.height_axis = 1;
+pixels.layout.width_axis = 2;
 schema.tensors.push_back(std::move(pixels));
 ```
 
-Result schema 声明 tensor members、primitive fields 和 domain；tensor members 与 fields 合计最多 16 个。Tensor descriptor 描述 cell axes 与 element type；`batch_axes` 位于这些 axes 前面，构成完整 sample shape，完整 rank 最多为 8。`ResultTensorLayout` 中的空间轴索引相对于 cell axes。Storage order 和 row pitch 描述 physical layout，不属于 semantic schema identity。Tensor payload 与打包的 field records 分开存储。对于 non-spatial tensor，所有 batch 与 cell extents 都必须为正数，完整 sample rank 为 1 至 8；schema validation 不要求 dense byte allocation，也不要求所有 extents 的乘积可表示。Packed field 的 record rank 最多为 7。Schema validation 会计算每行字节数，并在乘积超过 `INT64_MAX` 时拒绝 schema，但不会为该 field 的全部 rows 分配 dense storage。
+Result schema 声明 1..16 个 Tensor 成员、一个 domain 和可选的 publication scope。Tensor descriptor 描述 cell 轴与元素类型；`batch_axes` 作为前缀与这些轴组成完整样本形状，rank 至多为八。`ResultTensorLayout` 中的 spatial 轴索引相对于 cell。存储顺序与行 pitch 描述物理布局，不属于语义 schema 身份；默认的 `TensorStorageOrder::Tiled` 分别存储每个 tile，并在 tile 内以 planar 方式排布 spatial 通道。每个 batch 与 cell extent 必须为正，每个成员形状在执行前固定；schema 校验不要求稠密字节分配，也不要求所有 extent 的乘积可表示。类型为 `PS_RESULT_EXTENT_INPUT_AXIS_V5` 或 `PS_RESULT_EXTENT_INPUT_ELEMENTS_V5` 的 extent 在准备阶段依据输入的静态 domain 求值。
 
-Result object identity、schema、descriptor facts、fields 和 tensor members 由 owning Result reference 持有。算子资源属于 prepared operation 和 plan，不属于 Result。Association 按顺序保留 source ObjectIds 作为历史记录。依赖事实属于 execution 的 `TileRecord` 表，该表记录每个计算单元实际发出的 Needs；Result 不携带依赖记录。Association 本身不保留 source payload。保留的 Result、tensor window 或已发布 view 会持有读取所需的 backing owners。
+Result 对象身份、schema、descriptor 事实与 tensor 成员属于拥有所有权的 Result 引用。Operation 资源属于已准备的 operation 与 plan，而不属于 Result。关联以历史形式保留有序的来源 ObjectId。依赖事实属于执行的 `TileRecord` 表，该表记录每个计算单元实际的 Need；Result 不携带依赖记录。关联本身不保留来源 payload。保留的 Result、tensor 窗口或已发布 view 保留其读取所需的 backing owner。
 
-Result operation ABI 4 是独立 C table。Module 导出 `ps_result_operation_plugin_get_api_v4`；loader 在接管 table destroy hook 前检查 table alignment、精确结构大小和 ABI version。只识别 ABI 4 getter；没有兼容头文件或转发入口。导入阶段校验 pointer/count 配对与 alignment、record 大小（读取任何嵌套指针前先检查外层记录大小）、operation constraints，以及有界且严格合法的 UTF-8 operation 和 parameter 名称。Table 中的校验器与诊断定义随 operations 一起注册。每个端口的 `validators` 数组和每个 operation 的 `diagnostics` 数组命名 extension identity（key、version、implementation），它们必须解析到同一次导入或 registry 中的定义；identity 缺失或 version/implementation 冲突会拒绝导入。Loader 会先将全部 records 导入并校验到私有 registry candidate，再将完整 candidate 一次性替换进 live registry。设置 `repeated_maximum` 时，如果 `repeated_match` 和 `resolve_metadata` 都缺失，导入会拒绝该 repeated input。任何校验或 duplicate-key 失败都会保持 live registry 不变。成功导入后，只要已注册定义仍可能使用其 records，host 就保留 plugin table owner；保留的生命周期结束时调用 table destroy callback。导入失败、重复 key 或 owner 分配失败时，loader 先通过已接管的 destroy hook 释放 table，再关闭 native library。Loader 接受 Result ABI 4 入口，并拒绝不提供该入口的 module。`Value` 是 Result storage 与 codecs 使用的 typed numeric backing，不定义 operation 或 workflow 的 input/output 类型。C++ 与 C operation interface 都使用 Result ports 和同一套 tile Need 模型。`test_result_plugin.cpp::continuation_owns_library` 启动一个发出 Whole input Need 的 Result continuation，然后让 registry 离开作用域，期间没有 publication observer，随后 continuation 仍能成功继续；导入的 definition 会将 module owner 保留到 callback 完成。
+Result operation ABI 5 是独立的 C 表。Module 导出 `ps_result_operation_plugin_get_api_v5`；loader 在挂接表的 destroy hook 前检查表对齐、精确结构大小与 ABI 版本。只识别 ABI 5 getter；不存在兼容头文件或转发入口，旧记录布局也没有兼容前缀。导入校验指针/计数对与对齐、记录大小（读取任何嵌套指针之前先检查外层记录大小）、operation 约束，以及有界的严格 UTF-8 operation 与参数名称。表中的校验器与诊断定义与 operations 一起注册。每个 port 的 `validators` 数组、每个共享 stage 的 `validators` 数组和每个 operation 的 `diagnostics` 数组都命名 extension identity（key、version、implementation），它们必须解析到同一次导入或 registry 中的定义；缺失的身份或 version/implementation 冲突会使导入被拒绝。Loader 先把每条记录导入并校验到私有 registry 候选中，再把完整候选整体换入实时 registry。设置了 `repeated_maximum` 的重复输入，若 `repeated_match` 与 `resolve_metadata` 都缺失则被拒绝。任何校验或重复 key 失败都不改变实时 registry。成功导入的 definition 在其记录可能被使用期间保留插件表 owner；保留的生命周期结束时运行表的 destroy 回调。导入失败、重复 key 或 owner 分配失败时，先通过 destroy hook 释放已挂接的表，再关闭 native 库。C++ 与 C operation 接口都使用 Result port 与同一 tile Need 模型。
 
-每个 Result output descriptor 声明名称、Result port、input projection、计算粒度及 output policy。`execution` 字段选择粒度：1（`PS_RESULT_WHOLE_V4`）运行一个发布完整 output 的 task；2 为 resolved output 的已编译空间网格中的每个 tile 运行一个 task，每个 task 完整计算其选中的 tile。Header 将值 2 命名为 `PS_RESULT_REGIONAL_V4`；importer 将它映射为 `OperationRegionRule::Tiled`，其他取值都会拒绝导入。只有两个 purity flags 都存在时，C import 才设置 `cacheable`。非纯 operation 只在 Whole output 且 delivery 为 RequestFailureOnly 时被接受，此时不可缓存；具有多个 outputs 的 operation 必须 deterministic 且 side-effect-free。Input ports 约束 Result schema 或选定的 tensor-member predicate。可选的 `resolve_metadata` callback 接收借用的已编译 input metadata、parameters 和 output prototypes。它按 output index 对每个 output 调用一次同步 metadata sink；sink 在返回前复制并校验嵌套 schema records。Resolver 可细化 Result port/schema，但不能改变 output flags 或 payload bound。每次 `start` 和 `poll` 收到的 `output` view 反映这些已注册的 policy。Sink failures 为 sticky；有 output 未提供时 preparation 失败。Sink 的 `set_resources` 调用列出 operation 需要的 `ps_result_resource_identity_v4` 条目（字节长度与 SHA-256）；compiler 从调用方的 `ResourceSet` 中选择这些条目，之后 `start`、`poll` 和校验器 `prepare` 以借用的 `ps_result_resource_view_v4` 记录接收这些字节。不存在隐式资源查找。Operation keys、output names 和 projections、Result schema identity 及已声明约束保持固定。
+### 输出、共享 stage 与元数据
 
-Output flags 选择 view 与 payload policy：
+每个 `ps_result_output_v5` 声明其名称、Result port、输入投影、标志与 payload 上限。每个输出都按其编译期网格中每个成员 tile 一个计算单元执行；不存在执行粒度字段。C 导入仅当两个纯度标志都存在时才设置 `cacheable`。没有 side-effect-free 标志的 operation 必须声明至少一个 mandatory 共享 stage，此时它不可缓存。输入 port 约束 Result schema 或所选 tensor 成员谓词。
 
-| Flag | 契约 |
-| --- | --- |
-| `PS_RESULT_OUTPUT_PRESERVE_VIEWS_V4` | 允许仅 CPU 的 operation（设置 CPU flag、未设置 GPU flag）的 output 发布兼容的不可变 input view；Whole 与 Tiled output 都适用。对于 compiled structured Whole output，coordinator 还会在下一次 computation poll 前准备每个 payload-authorized tensor Need box。Auto 仅在 affine view 不可用时收集。Direct callback entry 不会自动生成 Need，也不会准备 view。 |
-| `PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V4` | 要求 `PRESERVE_VIEWS` 和 Whole execution。affine view 不可用时，coordinator 在 computation callback 前返回 `InvalidArgument`/`InvalidDomain`（`ViewUnavailable`）。 |
-| `PS_RESULT_OUTPUT_PAYLOAD_BOUND_V4` | 为仅 CPU 的 operation 的 Whole 或 Tiled output 启用 `maximum_output_payload_bytes`；零表示显式的零字节上限。 |
+`ps_result_shared_stage_v5` 声明一个 Run 共享 stage：key、schema、有序输入投影、后端、`mandatory`，以及累计的 `state_bytes`、`workspace_bytes`、`maximum_work`、`maximum_output_payload_bytes`、`maximum_stages` 和校验器。Stage 没有公开的输出身份。Host 在注册与准备期间复制这些声明，并为每个 Run、node 与 stage 至多创建一个 producer。`start` 与 `poll` callback 通过 `ps_result_query_v5::shared_stage` 选择 stage；tile callback 在该字段看到 `UINT32_MAX`。Stage callback 忽略 `output_index`、`tensor_slot` 与 `tile_unit`。执行器的 stage 契约见 [Run 共享 stage](Global-Results.zh.md#run-共享-stage)。
 
-未知 bits 会被拒绝。`PAYLOAD_BOUND` 清零时，字节字段必须为零。Host 检查每个已发布 Result 的物理 backing，对 owners 去重，并排除由已暴露 Result 或已授权 tensor grant 保活的 backing。Root 仍计量 source 与收集后的 input backing、workspace、metadata 和算子资源。检查发生在 publication 时，因此不会阻止 callback 更早的分配。Singleton callback query 会暴露已注册的 output policy。
+可选的 `resolve_metadata` callback 接收借用的编译期输入元数据、参数与输出原型。它对每个输出索引调用同步 metadata sink 一次；sink 在返回前复制并校验嵌套 schema 记录。Resolver 可以细化 Result port/schema，但不能改变输出标志或 payload 上限。`set_shared_stages` 以拥有所有权的静态声明一次性替换全部 stage 原型。`set_resources` 列出 operation 需要的 `ps_result_resource_identity_v5` 条目（字节长度与 SHA-256）；编译器从调用方的 `ResourceSet` 中选择它们，随后 `start`、`poll` 与校验器 `prepare` 以借用的 `ps_result_resource_view_v5` 记录接收这些字节。不存在环境式资源查找。Sink 失败是 sticky 的，遗漏任一输出时准备失败。Operation key、输出名称与投影、Result schema 身份和声明的约束保持固定。
 
-嵌套的 `ps_result_output_v4` 记录在 operation table ABI 4 中携带这些输出字段。Importer 要求当前输出结构的精确大小，拒绝 `struct_size` 不同的记录，因此 C module 按当前 header 构建。开发阶段的 package 版本未冻结。
+`PS_RESULT_OUTPUT_PAYLOAD_BOUND_V5` 是唯一的输出标志。它启用 `maximum_output_payload_bytes`；显式的零上限只允许借用存储。未知位被拒绝。标志清除时，字节字段必须为零。Host 在每个 Run 中对每个输出跨 tile actor 累计，并对每个唯一物理 owner 只计一次，排除输入与共享 stage 的 owner。Root 仍计费来源 backing、workspace、元数据与 operation 资源。检查发生在发布时，因此不能阻止 callback 更早的分配。
 
-`start` 或 `poll` callback 接收一个 `ps_result_query_v4`，其中包含解析后的 ports、选中的 output index、backend、已编译粒度（`tiled`）、选中的 `tile_unit` 与 `tile_extent`、output request（Whole、恰好一个等于 `tile_unit` 的 tile，或 Empty）、每个 input 一份已编译 tile grid 以及 output grid、parameters 和所选资源 views。Whole task 的 `tile_unit` 为零。`present == 0` 的 grid 记录表示 producer 没有空间网格。`read_tensor` 复制已授权 samples。Retained tensor handles 会保留已认证的 tensor capability，直到释放或 operation state 销毁。
+### Query 与 tile Need
 
-Callback 通过 `need_tiles` 请求输入，然后返回 `PS_RESULT_NEED_V4`。每个 `ps_result_tile_need_v4` 指定一个 input 和恰好一种请求形式：
+`start` 或 `poll` callback 接收一个 `ps_result_query_v5`，其中包括解析后的 port、所选输出索引、后端、所选成员的 `tensor_slot`、`tile_unit` 与 `tile_extent`、共享 stage 选择器与声明、每个输入一个编译期网格组以及输出网格组、参数和所选资源 view。网格组按 schema 顺序为每个成员保存一个 `ps_result_tile_grid_v5`。网格记录给出成员的完整形状、batch rank 与 `batch_axis_mask`、height 与 width 轴（取值等于 rank 表示该切分轴不存在）、tile extent、tile 行数与列数，以及 tile 数。`read_tensor` 复制已授权样本。保留的 tensor 句柄在释放或 operation 状态销毁前保留其已认证的 tensor capability。
+
+Callback 通过 `need_tiles` 请求输入，然后返回 `PS_RESULT_NEED_V5`：
+
+```c
+typedef struct ps_result_tile_interval_v5 {
+  uint64_t begin, end;
+} ps_result_tile_interval_v5;
+
+typedef struct ps_result_tile_need_v5 {
+  uint32_t struct_size, input, tensor_slot, descriptor_only;
+  const ps_result_tile_interval_v5* intervals;
+  uint64_t interval_count;
+} ps_result_tile_need_v5;
+```
 
 | 形式 | 授权 |
 | --- | --- |
-| `whole = 1` | Input Result 的全部 tensors 与 fields。读取 field（`read_field`）需要 Whole 授权，包括从 tile 请求规范化得到的 Whole 授权。 |
-| `tile_count > 0` | 编号通过网格边界校验后，Tiled producer 为每个 tensor 授予所列 tile 的 samples，并按 `atomic_trailing_axes` 闭合；Whole producer 则把请求规范化为整个 Result 的 Whole 授权。 |
-| `descriptor_only = 1` | 仅授予 captured descriptor facts；不允许 payload 读取。 |
+| `descriptor_only = 0`，`interval_count > 0` | 经网格边界校验后，所列成员 tile 的样本（按 `atomic_trailing_axes` 闭合），以及该输入的 descriptor 事实。 |
+| `descriptor_only = 0`，`interval_count = 0` | 不授予任何内容。Host 不创建依赖、不授予 descriptor，也不产生 producer 工作。 |
+| `descriptor_only = 1` | 仅捕获的 descriptor 事实。`tensor_slot` 必须为零，且没有区间。 |
 
-每种形式都同时授权对该 input 调用 `result_descriptor`。Tile 编号首先按 producer 的已编译网格校验。对于 Whole producer，合法编号随后规范化为 tile 集合为空的 Whole Need：其单元 0 提供全部 tensors 与 fields，授权范围不裁剪到所列 tiles。Tiled producer 则保留选中的 tile 集合。单次调用最多接受 65,536 个编号。重复编号合法，越出网格的编号会失败。Host 在返回前按 Root work 与 capacity 限制复制并规范化这些编号，失败的请求为 sticky。Coordinator 自身不转换 sample 矩形：C module 从借用的 grid 记录推导编号，C++ operation 可以使用 `photospider/plugin/tile_helpers.hpp`。单元完成时，host 把它已准入的 Needs 合并为一个 `TileRecord`；对同一 producer，Whole 覆盖 tile 与 descriptor 请求。
+区间是 producer 成员编译期网格中的半开局部 tile 索引。一次调用至多接受 65,536 个区间。重叠与相邻区间会合并；反向或超出网格的区间失败。Host 在 Root work 与容量上限下复制并规范化区间，并在启动任何 producer 之前校验完整 envelope。失败的请求是 sticky 的。协调器本身不转换样本矩形：C module 依据借用的网格记录推导区间，C++ operation 可以使用 `photospider/plugin/tile_helpers.hpp`。单元完成时，host 把其已准入 Need 合并为一个 `TileRecord`，区间只在同一 producer 成员内合并。
 
-普通 Result C callback 和 service 返回 `int`，其 0 至 6 状态码由 `ps_result_status_v4` 定义，依次表示 success、failure、cancelled、backend unavailable、resource exhausted、type mismatch 和 invalid argument。Poll yield code 与 `VIEW_UNAVAILABLE` 遵循各自的 service 契约。Native GPU service 使用独立的 GPU result code。Operation capability flags 为 `PS_RESULT_FLAG_DETERMINISTIC_V4`、`PS_RESULT_FLAG_SIDE_EFFECT_FREE_V4`、`PS_RESULT_FLAG_CPU_V4`、`PS_RESULT_FLAG_GPU_V4` 和 `PS_RESULT_FLAG_CPU_FALLBACK_V4`。Fallback flag 要求同时声明 CPU 和 GPU capability。
+`result_tile_helpers.h` 提供 `ps_result_need_descriptor_v5`、`ps_result_to_whole_v5`（以完整区间请求全部成员）和 `ps_result_need_regions_v5`（请求与一个成员的显式矩形相交的 tile）。`ps_result_need_regions_v5` 闭合 atomic 轴，把连续的行与 batch 转为区间，并在分配 scratch 之前至多准入 65,536 个区间。当提供的每个矩形都为空时，它提交一个零区间 Need，即不请求任何内容。`ps_result_output_region_v5` 解析所选输出成员的 tile。`ps_result_to_whole_v5` 只提交 Need：外层 poll 返回 Need，后续 poll 再获取已授权的拥有型窗口。C API 通过窗口的 acquire/retain/release 和 `publish_tensor_view` 提供等价的 tile 发布能力，没有名为 `ps_result_to_tile_v5` 的便捷函数。
 
-Result C table 的两个 callbacks `start` 与 `poll` 都在 structured executor 的 poll-phase fallback gate 中执行。重试要求显式启用 CPU fallback，traits 为 deterministic 且 side-effect-free，attempt 可安全重试：尚无已发布 output、checkpoint、block 或 discovery callback、native dispatch，也没有不可重试的 sticky operation/service failure、取消或 stale-state failure。其他错误为终止错误。重试会丢弃该 attempt 的 continuation、input capabilities、已记录的 Needs 和 input facts，再在 CPU 上重启同一计算单元；已完成的 producer 单元、已花费的 Root work 和 stage 计数保持不变。重试的单元带有 fallback taint，不进入 checkpoint、block-state 或 completed-result 缓存。独立的 C++ `OperationRegistry::start_result` 入口会在创建 continuation 前验证 operation 声明的 backend 支持，但不会判断 execution context 是否具有可用 GPU lane 或 device。Structured execution 会在进入 GPU-targeted start factory 前检查 GPU lane 与 device 是否可用，再按普通 fallback 规则处理 `BackendUnavailable`。成功发布 tensor/view/field/Result 后若 callback 返回 `BackendUnavailable`，会被转换为 `OperationFailed`；单独调用 `begin_result` 不算 publication。`publish_result` 的 `complete` 只能为 0 或 1，每个 poll 只能成功 publication 一次；下一 poll 可再发布一个 prefix。同一 poll 中有效的重复 publication 会锁存 `OperationFailed`。较早的非法 service failure 在 callback 随后尝试有效 publication 或报告成功时仍保持 sticky。实际 host cancellation 可在 execution 边界覆盖有效重复 publication 的失败；callback 自行返回 `Cancelled` 不会覆盖。
+### 共享 stage 服务
+
+`need_shared_stage(stage)` 请求一个已准备 stage 的每个成员 tile。`need_shared_tiles(stage, slot, intervals, count)` 请求 stage 成员局部的 tile 区间；对不同成员重复调用。零区间的调用不授予样本，也不启动该 stage。一次 poll 中两种调用不能命名同一个 stage，重复或未知的序号失败。`acquire_shared_window(stage, slot, region, ...)` 从已提供的 stage Result 返回一个保留窗口。它不授予访问 stage 原始输入的权限，窗口遵循普通的 retain 与 release 生命周期。当当前 query 本身是共享 stage 时，host 依据该 stage 已准备的 `input_indices` 投影检查每个 C tile Need。
+
+### 状态、fallback 与发布
+
+普通 Result C callback 与服务返回 `ps_result_status_v5` 定义的 `int` 值：代码 0 到 6 依次表示成功、失败、取消、后端不可用、资源耗尽、类型不匹配与非法参数。Poll 让出代码（`PS_RESULT_NEED_V5`、`PS_RESULT_PUBLISH_V5`）与 `PS_RESULT_VIEW_UNAVAILABLE_V5` 遵循各自的服务契约。Native GPU 服务使用其独立的 GPU 结果码。Operation 能力标志为 `PS_RESULT_FLAG_DETERMINISTIC_V5`、`PS_RESULT_FLAG_SIDE_EFFECT_FREE_V5`、`PS_RESULT_FLAG_CPU_V5`、`PS_RESULT_FLAG_GPU_V5`、`PS_RESULT_FLAG_CPU_FALLBACK_V5` 与 `PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V5`。Fallback 标志要求同时具备 CPU 与 GPU 能力标志。
+
+Result C 表的两个 callback `start` 与 `poll` 都在结构化执行器的 poll 阶段 fallback 闸门内执行。重试要求显式的 CPU fallback 选项、确定且无副作用的 trait，以及一次可安全重试的尝试：没有已发布输出、checkpoint、block 或 discovery callback、native dispatch、不可重试的 sticky operation/服务失败、取消或过期状态失败。其他错误保持终止。重试丢弃该尝试的 continuation、输入 capability、已记录 Need 与输入事实，然后在 CPU 上重新启动同一计算单元；已完成的 producer 单元、已消耗的 Root work 与 stage 计费保持不变。重试的单元带 fallback 污染，不进入 checkpoint、block 状态或 completed-result 缓存。进入 factory 之后，stage 计算从不重试。独立的 C++ `OperationRegistry::start_result` 入口在创建 continuation 之前校验 operation 声明的后端支持；它不判断执行上下文是否有可用的 GPU lane 或设备。结构化执行期间，协调器在进入面向 GPU 的 start factory 之前检查 GPU lane 与设备可用性，然后按普通 fallback 规则处理 `BackendUnavailable`。成功发布 tensor、view 或 Result 之后，callback 返回的 `BackendUnavailable` 被转换为 `OperationFailed`；仅调用 `begin_result` 不算发布。`publish_result` 只接受 `complete` 取值 0 或 1，每次 poll 允许一次成功发布；共享 stage continuation 可以在后续 poll 发布另一个前缀。普通 tile 发布必须完整且恰好覆盖其所选成员 tile，其他成员为空。同一 poll 中合法的重复发布锁存 `OperationFailed`。若 callback 之后尝试合法发布或报告成功，更早的非法服务失败仍保持 sticky。实际的 host 取消可以在执行边界取代合法的重复发布失败；callback 返回的 `Cancelled` 不能。
 
 ### Callback 生命周期、资源与执行
 
-Query 和 service table 在一次 `start` 或 `poll` callback 期间借用；callback 返回后保存的 phase context 过期，C services 也只能在该 callback 内调用。Poll lease 会在 callback 返回时使转换后的 service handles 失效，并将 tombstones 保留到 continuation 销毁，以便拒绝过期 handle 且不复用其地址。Operation state 由 continuation 持有；它们销毁后，保留的 operation definition 才释放 DSO lease。Retained tensor windows 各自有明确的释放与销毁生命周期。Entry-thread services 在 callback entry thread 上运行。CPU range 和 tile workers 可调用 `cancelled` 并写入已准入的 scratch；owning window 的 `row` 和 `rectangle` access 也可由 CPU workers 并发执行，且不会重新进入 execution services。Window data pointers 在最后一个对应 handle 释放前有效；释放必须发生在 worker 完成后。Metadata sink 仅在 resolver entry 期间借用。即使 callback 随后报告成功，host 仍保留 service failures。
+Query 与服务表在一次 `start` 或 `poll` callback 中借用。保存的 phase 上下文在该 callback 返回时失效；C 服务只能在该 callback 期间调用。Poll 租约在 callback 返回时使其转换后的服务句柄失效，并保留墓碑直到 continuation 销毁，从而在不复用其地址的前提下拒绝过期句柄。Operation 状态由 continuation 拥有，并在保留的 operation definition 释放其 DSO 租约之前销毁。保留的 tensor 窗口保持各自显式的释放与销毁生命周期。入口线程服务在 callback 入口线程上运行。CPU range 与 tile worker 可以调用 `cancelled` 并写入已准入的 scratch；拥有型窗口的 `row` 与 `rectangle` 访问也可以在 CPU worker 上并发运行，而不重入执行服务。窗口数据指针在最后一个对应句柄释放前保持有效；释放发生在 worker 完成之后。Metadata sink 只在 resolver 入口期间借用。即使 callback 之后报告成功，host 也保持服务失败为 sticky。
 
-C++ Result operation factory 及 scalar poll callback 会在 registry 与 continuation 边界捕获异常。`std::bad_alloc` 转为 `ResourceExhausted`；标准异常转为带 `HostException` 的 `OperationFailed`，并保留 `what()` 文本；若 `what()` 为 null，则 message 为空。非标准异常转为带固定 `HostException` 诊断的 `OperationFailed`。Phase service 已记录的 failure 优先；host failure observer 抛出的异常不会替换该已选错误。
+C++ Result operation factory 与标量 poll callback 在其 registry 与 continuation 边界处有异常栅栏。`std::bad_alloc` 变为 `ResourceExhausted`；标准异常变为带 `HostException` 及其 `what()` 文本的 `OperationFailed`，`what()` 为 null 时消息为空。非标准异常变为带固定 `HostException` 诊断的 `OperationFailed`。Phase 服务已记录的失败具有优先权；host 失败观察者抛出的异常不会替换已选定的失败。若直接共享 stage continuation 的校验器拒绝后续 tile，host 以最终受保护 poll 的失败使其投影 producer 退役；已逃逸的较早前缀通过 `production_status()` 报告该失败，并仍可读取其已认证 tile。
 
-`ResultProgramPhase::acquire_native_tensor` 与 C service `acquire_native_tensor_window` 将当前 GPU callback 已授权的 tensor Need 转为供 native access 使用的 owning window。GPU callback 再将其 row 或 rectangle 绑定到 native dispatch；API 不会代替调用者执行 dispatch。没有 GPU lane 时返回 `BackendUnavailable`。缺少 slot、coverage 不足或仅有 Descriptor 授权时，会产生 sticky `InvalidArgument` protocol errors。CPU 或不兼容设备的 backing 会按需 packing 并在 Root 计费后上传。兼容的同设备 affine backing 可直接复用而无需上传。Fragmented backing 可能同时需要 materialize 和 upload，两者分别计数。Window 会跨 callback phases 和外部 owner 释放继续保留 source Result owner、schema、descriptor、cancellation state 与 native storage。C caller 使用普通 window release service 释放返回的 handle。Executor 可在同一 Run 内复用 raw native backing，前提是仍存活的 weak proof 指向同一 CPU storage，且完整 physical view key 匹配；该复用不保留 source CPU owner、Result schema 或 association。跨 Run 的可选 byte-bounded content cache 使用 device instance/build 以及 logical samples、Region、dtype 和 shape 作为 key。Key 不包含 Result schema 与 association；命中后会按当前 Result schema 和 association 重新绑定。可选 hashing 使用 coordinator 共享的 cache-work budget；可选工作不足时会跳过 cache 查找或保留。容量压力可先回收可重新传输的 Run entries，再驱逐 context 保留的 native entries。`host_access_count` 记录 live native-backed storage 实际暴露给 CPU 的次数，并在 callback scope 内去重；普通 metadata 检查、native address 获取、view 转发和上传 hashing 均不计为 host read。
+`ResultProgramPhase::acquire_native_tensor` 与 C 服务 `acquire_native_tensor_window` 把当前 GPU callback 已授权的 tensor Need 暴露为由 native 访问支持的拥有型窗口。GPU callback 随后把其 row 或 rectangle 绑定到 native dispatch；该 API 不会代替调用方 dispatch。没有 GPU lane 时获取返回 `BackendUnavailable`。缺失的 slot、未覆盖的区域与 descriptor-only 授权作为 sticky `InvalidArgument` 协议错误失败。CPU 或不兼容设备上的 backing 按需打包，并在 Root 计费下上传。兼容的同设备 affine backing 可以不经上传而复用。碎片化 backing 可能同时需要物化与上传，两者分别计数。窗口让来源 Result owner、schema、descriptor、取消状态与 native 存储在 callback 阶段之间和外部 owner 释放后保持存活。C 调用方通过普通窗口释放服务释放返回的句柄。Native 上传复用与缓存见 [Native GPU 输入访问](Global-Results.zh.md#native-gpu-输入访问)。
 
-Whole CPU callbacks 可以使用 CPU range service。CPU tile callbacks 使用 coordinator 的 tile service。存在 native GPU lane 时，callback 根据 operation capability 获得相应 native services。GPU 调用在 active callback thread 上执行，dispatch 会保留引用的 owners 直到完成。C++ `ResultProgramPhase::gpu_status` 读取 active invocation 的 host status，并随 phase 过期。CPU tile callback 作为不可分割的 tile task 运行。
+普通 CPU poll callback 可以使用 CPU range 服务 `ps_cpu_parallel_service_v2`。CPU 分阶段的协调器通过 `ps_cpu_tiles_service_v2` 提交 tile 计算；CPU tile callback 作为不可分割的 tile 任务运行。CPU tile worker 和 GPU callback 不获得 range 服务。并行工作在服务调用返回之前完成，禁止嵌套提交并行工作。内核 callback 继承其 worker 的浮点环境，并在返回时恢复；数值 operation 在执行它们的 worker 内部建立自己的环境。当 native GPU lane 可用时，callback 依据 operation 能力接收其 native 服务。GPU 调用在活动 callback 线程上运行，dispatch 在完成前保留引用的 owner。C++ `ResultProgramPhase::gpu_status` 读取活动 invocation 的 host 状态，并随 phase 失效。
 
-Execution Root 计量准入的 work、stages、metadata、payload capacity 和 retained owners。超出限制时 callback 收到 resource 或 stage failure；已发放的 work 不退款。Result publication 在公开 immutable result 前校验 schema、sample 坐标、cancellation 和 resource ownership。
+执行 Root 计费已准入的 work、stage、元数据、payload 容量与保留的 owner。超出上限的 callback 收到资源或 stage 失败；已发出的 work 不退还。Result 发布在暴露不可变结果之前校验 schema、样本坐标、取消与资源所有权。
 
-Owning tensor-window reads 也会从捕获的 execution Root 扣除 work。C row 与 rectangle services 在读取前按 `ResultWindowAccess::read_work` 计算并扣除上界；row 的系数为 1，rectangle 为 2。Retained window 的寿命超过 borrowed poll phase，因此这部分属于 Root-lifetime work，与单次 execution 配置的 per-run dependency/program work limit 分开。
+拥有型 tensor 窗口的读取也从捕获的执行 Root 扣费。C row 与 rectangle 服务在读取前扣除由 `ResultWindowAccess::read_work` 计算的上界；row 的系数为 1，rectangle 为 2。这是 Root 生命周期内的 work，因为保留的窗口比借用的 poll phase 存活更久。它独立于为一次执行配置的每 Run 依赖/程序 work 上限。
 
 ### C 校验器、诊断与领域失败
 
-`ps_result_validation_definition_v4` 提供 extension identity、`scratch_bytes`、`requires_complete` 和三个回调。`prepare` 接收 `ps_result_validation_preparation_v4`（端口 schema、parameters、所选资源 views）并返回拥有所有权的状态指针；`destroy_prepared` 释放该状态（包括 `prepare` 失败之后），并且总在 module owner 退休前执行。`validate` 接收 `ps_result_validation_context_v4`，其服务只在入口线程上、调用返回前有效：`tensor_regions` 与 `field_range` 描述新授权的 coverage，`read_tensor` 与 `read_field` 每次按逻辑顺序最多复制 65,536 字节，`consume_work`/`cancelled` 连接宿主预算。授权 coverage 之外的读取失败且保持 sticky，即使回调忽略返回码。C bridge 让第一次服务失败或 `fail_domain` 失败优先于之后的回调状态或异常。
+`ps_result_validation_definition_v5` 提供一个 extension identity、`scratch_bytes`、`requires_complete` 和三个 callback。`prepare` 接收 `ps_result_validation_preparation_v5`（输出标志、port、共享 stage 序号、schema、参数、所选资源 view），并返回拥有所有权的状态指针；`destroy_prepared` 释放它（包括 `prepare` 失败后），并总在 module owner 退役前运行。`validate` 接收 `ps_result_validation_context_v5`，其服务只在入口线程上存在到调用返回为止：`tensor_regions` 描述某成员新授权的覆盖，`read_tensor` 每次按逻辑顺序至多复制 65,536 字节，`consume_work`/`cancelled` 连接到 host 预算。`complete` 报告已校验覆盖是否完整，定义见[端口校验器](Global-Results.zh.md#端口校验器与诊断报告)。授权覆盖之外的读取失败，即使 callback 忽略返回码也保持 sticky。C 桥接让第一个服务或 `fail_domain` 失败优先于之后的 callback 状态或异常。
 
-`ps_result_diagnostic_definition_v4` 声明固定 `payload_bytes` 的记录及 `validate` 与 `merge` 回调；`merge` 写出完整目标，且不得修改输入。Operation 在 `ps_result_operation_v4::diagnostics` 中列出可能产生的诊断 identity，并通过运行服务上的 `report_diagnostic(type_index, bytes, size)` 报告。
+`ps_result_diagnostic_definition_v5` 声明一条定长 `payload_bytes` 记录及 `validate` 与 `merge` callback；`merge` 写入完整的目标且不得修改其输入。Operation 在 `ps_result_operation_v5::diagnostics` 中列出它可能发出的诊断身份，并通过其 run 服务上的 `report_diagnostic(type_index, bytes, size)` 报告。
 
-运行服务和校验 context 上的 `fail_domain(status_code, domain_code)` 记录第一次领域失败，包含非零状态码和不透明的 64 位领域码。宿主把该码复制到 `FailureDetail::domain_code`，不作解释。
+Run 服务与校验 context 上的 `fail_domain(status_code, domain_code)` 记录第一个领域失败，其状态码非零，并带一个不透明的 64 位领域代码。Host 把该代码复制到 `FailureDetail::domain_code` 中而不解释。
 
 ### SDK targets
 
-共享的 `Photospider::operation_sdk` target 提供 C++ Result helpers，包括 `ps::plugin::element_type_value`。Result operation table 仍是独立的 C11 interface，其 DSO callback 不要求使用 C++。Native GPU services 在 `native_gpu_api.h` 中单独声明，ABI 为 1；CPU parallel 与 tile services 也保持 ABI 1。Callback outcome codes 不携带 C callback 提供的 error string；host status、timing 和 count diagnostics 与通过 `report_diagnostic` 提供的有界报告分开。
+共享的 `Photospider::operation_sdk` target 提供 C++ Result 辅助函数，包括 `ps::plugin::element_type_value`、`tile_helpers.hpp`、`tensor_helpers.hpp`（`sdk::to_whole`、`sdk::to_tile`、`sdk::collect`、`sdk::publish_dense_tensor`）以及 `whole_stage.hpp`（`sdk::with_whole_stage`、`sdk::shared_result_tile`）。这些辅助函数见 [SDK 获取辅助函数](Global-Results.zh.md#sdk-获取辅助函数)。Result operation 表仍是独立的 C11 接口，其 DSO callback 不需要 C++。Native GPU 服务在 `native_gpu_api.h` 中以 ABI 1 单独声明，CPU parallel 与 CPU tiles 服务为 ABI 2。Callback 结果码不携带 C 提供的错误字符串；host 状态、计时与计数诊断与通过 `report_diagnostic` 提供的有界报告相互独立。
 
-`Photospider::ops_sdk` 是算子领域 SDK。它只链接 `Photospider::kernel`，公开头文件安装在 `include/photospider/ops/` 下（导出宏 `PHOTOSPIDER_OPS_SDK_API`）：颜色描述与 ICC/OCIO 资源、transfer/RGB/white codec、精确领域算术、描述编辑、3D LUT bake 契约与质量报告、数值诊断以及 Layer 合成类型。CMake 选项 `PHOTOSPIDER_BUILD_OPS_SDK` 默认取 `PHOTOSPIDER_BUILD_OPS` 的值；bundled operations 需要它。`PHOTOSPIDER_BUILD_OPS` 默认为 `OFF`，因此默认的仅内核配置两者都不构建。内核本身不包含这些领域类型。
+`Photospider::ops_sdk` 是算子领域 SDK。它只链接 `Photospider::kernel`，并在 `include/photospider/ops/` 下安装公开头文件（导出宏 `PHOTOSPIDER_OPS_SDK_API`）：颜色描述与 ICC/OCIO 资源、显式 `TensorColorGroup` 配置、transfer/RGB/white 编解码、精确领域算术、描述编辑、`ops.scalar-range` 校验器、3D LUT bake 契约与质量报告、数值诊断以及 Layer 复合类型。CMake 选项 `PHOTOSPIDER_BUILD_OPS_SDK` 默认取 `PHOTOSPIDER_BUILD_OPS` 的值；内置 operations 需要它。`PHOTOSPIDER_BUILD_OPS` 默认为 `OFF`，因此默认的仅内核配置二者都不构建。内核本身不含任何这些领域类型。
 
 ## 4. 负面清单与边界 (Non-Goals & Explicit Boundaries)
 
-- Operation module 是同进程受信任代码。ABI 校验不提供 sandbox 或 authentication。
-- C++ consumers 针对已安装的 package 0.34.0 headers 构建。Resource facilities 声明在 `photospider/core/`：`core/cancellation.hpp`、`core/resources.hpp`、`core/resource_allocator.hpp` 和存放 data-movement enums 的 `core/data_movement.hpp`。WorkflowDocument schema 6 和 OperationTraits 26 定义当前 compiler contract。Result operation C table 为 ABI 4。C import boundary 拒绝非法外部记录，内部 execution states 只在校验后表示。
-- 内置 operations 通过已安装头文件中未冻结的 C++ `OperationDefinition` 注册路径注册，C importer 只接受与 ABI 4 精确相等的结构体大小。C operation 没有持久的准备状态、准备阶段推导的 input projection 或准备阶段推导的 workspace 上界；对 operation 而言，这些只存在于 C++ `OperationPreparation`。C 校验器保留各自的 prepared 状态。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md)（Proposed）记录目标契约：内置与外部模块共用一套按前缀协商的 C ABI，服务表各自带版本，并提供模块侧 header-only C++ SDK。
-- ABI 不携带 semantic kind、facet 或附着描述。领域解释是算子参数，领域合法性由绑定的校验器证明。
-- Production image operation 的可用性按[图像 operations](Image-Operations.zh.md)中的源码与 registry 分类确定。
-- GPU 执行需要 native-backend build 和可用设备。Table 或 capability 声明本身不能证明硬件执行。
-- Result C table 仅提供 Result ports 与 tensor members。IPC plugin loading 和 daemon protocol 不属于该 ABI。
+- Operation module 是受信任的进程内代码。ABI 校验不对其做沙箱隔离或认证。
+- C++ consumer 针对已安装的 package 0.35.0 头文件构建。资源设施在 `photospider/core/` 中声明：`core/cancellation.hpp`、`core/resources.hpp` 与 `core/resource_allocator.hpp`。WorkflowDocument schema 7 与 OperationTraits 27 定义当前编译器契约。Result operation C 表为 ABI 5。C 导入边界拒绝无效的外部记录，内部执行状态只在校验之后表示。
+- 内置 operations 通过已安装头文件中未冻结的 C++ `OperationDefinition` 注册路径注册，C importer 只接受精确的 ABI 5 结构大小。C operation 没有由算子持有的持久准备状态。其 metadata resolver 可以通过 `set_shared_stages` 替换静态共享 stage 声明，包括输入投影和 workspace 上限。C 校验器保留各自的准备状态。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md)（Proposed）记录目标：内置与外部 module 共用一个按前缀协商的 C ABI、单独版本化的服务表，以及 module 侧的 header-only C++ SDK。
+- ABI 不携带 semantic kind、facet 或附着描述。领域解释是 operation 参数或算子领域配置，领域合法性由绑定的校验器检查。
+- ABI 没有整体 Result 执行模式、运行期成员计数或动态 tile End。需要完整输入的算法请求每个成员 tile 或使用共享 stage。
+- 生产级图像 operation 的可用性遵循 [Image operations](Image-Operations.zh.md) 中的源码与 registry 分类。
+- GPU 执行需要 native 后端构建和可用设备。仅凭表或能力声明不能证明硬件执行。
+- Result C 表只暴露 Result port 与 tensor 成员。IPC 插件加载与 daemon 协议不属于该 ABI。
 
 ## 5. 后果与代价 (Consequences)
 
-格式错误或不兼容的 table 在 registry 发布前失败。Native loading 后被拒绝的 module 会释放 library owner。已发布定义在最后一个 invocation 或 state owner 退役前保持动态库加载。Service、资源和取消失败均为终止错误。Backend failure 也为终止错误，只有上文说明的显式 opt-in、attempt 可安全重试的 GPU `BackendUnavailable` 情形会例外。
+格式错误或不兼容的表在 registry 发布之前失败。针对不兼容旧 ABI（例如 ABI 4）构建的 module 被拒绝，必须针对 ABI 5 头文件重建。在 native 加载之后被拒绝的 module 释放其库 owner。已发布的 definition 让库保持加载，直到其最后一次 invocation 或状态 owner 退役。服务、资源与取消失败保持终止。后端失败同样保持终止，上文所述显式选择启用且可安全重试的 GPU `BackendUnavailable` 情形除外。
 
-同步 native dispatch 会保留 input owners 直到设备完成，因此取消可能等待正在执行的调用。长 CPU callback 必须通过 services 观察取消。Native modules 具有宿主进程权限，只能加载受信任代码。
+同步 native dispatch 在设备完成前保留输入 owner，因此取消可能需要等待进行中的调用。长时间运行的 CPU callback 必须通过服务观察取消。Native module 以宿主进程权限运行，因此只应加载受信任的代码。

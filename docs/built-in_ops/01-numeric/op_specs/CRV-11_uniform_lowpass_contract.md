@@ -25,7 +25,7 @@ In particular, rounding is nearest/ties-to-even with gradual underflow and the
 caller floating environment is preserved. This is limited inheritance: the ports,
 output structures, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
-turn a composite template or structured Result into a generic NUM Value primitive.
+turn a composite template or structured Result into a generic NUM Tensor primitive.
 A stated four-ULP final bound uses the shared FP32-scaled contract for both
 Float32 and Float64 outputs.
 Classification, exact landmarks and signed-zero rules are checked separately.
@@ -62,7 +62,7 @@ exactly under non-zero-padding boundaries; approximate kernel normalization
 cannot introduce DC drift. Host budget exhaustion remains explicit failure.
 
 Skip exact mathematical zero coefficients entirely. Numerical operands are samples reached by
-nonzero taps after boundary mapping; Whole role-13 validation still covers the complete Result input. Input NaN propagates by the first tap in
+nonzero taps after boundary mapping; complete-input ordinary tile Needs validation still covers the complete Result input. Input NaN propagates by the first tap in
 offset order -R..R, preserving payload/sign and quieting sNaN. Otherwise combine
 infinite contributions with coefficient signs: both signs yield canonical quiet
 NaN, one sign yields that infinity. Generated canonical NaN is positive quiet
@@ -110,7 +110,7 @@ Use its complete `sample_shape()`, including batch axes, for rank, axis and
 extent checks. Input rank is 1..8, Float32/64, positive extents and a product at
 most 2^40. The `values` output port is an immutable Result using
 `photospider.tensor` v1/member `samples`, with the same full shape and dtype and
-no attached domain description. The output retains its backing owners; the schema carries no operation resource configuration. Every nonempty Whole output has full certified
+no attached domain description. The output retains its backing owners; the schema carries no operation resource configuration. Every nonempty complete-input output has full certified
 coverage and retains global coordinates and the source Result association.
 
 Input rank is 1..8 with positive extents and count <=2^40; axis is a nonnegative
@@ -126,8 +126,8 @@ does not define an invalid kernel. Avoid it or refine at adequate precision.
 
 ## Demand, mapping, resources and error contract
 
-All 15 formal profile keys use Whole Result programs. A nonempty request declares
-Data, Validation and Descriptor needs (role 13) for the complete input tensor.
+All 15 formal profile keys use Run-shared Result programs. A nonempty request declares
+ordinary payload tile Needs  for the complete input tensor.
 Typed/upstream validation therefore covers the full member, while the callback
 reads authorized Root windows directly without collecting or copying the input.
 The callback computes every output position and preserves the exact zero-tap
@@ -135,7 +135,7 @@ omission, logical tap order and IEEE rules. Empty demand completes static
 preflight without reading sample payload.
 
 The Result writer publishes the complete same-shape/dtype `samples` tensor in one
-transaction, with full certified coverage and global coordinates. Any input edit
+transaction, with complete internal coverage, with public coverage restricted to requested tiles and global coordinates. Any input edit
 invalidates the complete recorded output demand. Arbitrary strides, offsets and
 unaligned source access remain supported; the Result retains its owner after
 context teardown. Cache-off and request partitioning do not alter mathematical
@@ -145,8 +145,8 @@ For N total elements, work is O(N*(2R+1)) plus certified arithmetic. The complet
 output requires N*sizeof(dtype); Root source windows, fixed arithmetic workspace,
 2R+1 sample bits, accelerated R+1 coefficient enclosures, and allocator metadata
 are budgeted. No per-output dependency records are retained. Coefficients are
-prepared once per Whole invocation. Sparse requests still require the full output
-and can exhaust capacity. Whole numerical/fallback counters are unavailable.
+prepared once per complete-input invocation. Sparse requests still require the full output
+and can exhaust capacity. complete-input numerical/fallback counters are unavailable.
 
 Poll cancellation during coefficient/refinement work and at least every 64 tap
 contributions or simpler outputs. Terminal work/capacity/cancellation failures
@@ -157,7 +157,7 @@ or nonpositive exact normalizer is InvalidArgument/InvalidDomain; inability to
 decide under available work is ResourceExhausted, not the same error. Source
 NaN/Inf and final arithmetic overflow are successful numeric values as specified.
 BackendUnavailable, stale, upstream/typed, cancellation and budget failures retain
-the NUM common categories; the Whole invocation publishes no partial output
+the NUM common categories; the complete-input invocation publishes no partial output
 on failure. Dynamic numerical failures have Run scope.
 
 ## Numerical and antialias acceptance
@@ -218,9 +218,9 @@ This shared contract covers five uniform kernels and 15 profile keys; it is not
 itself a registered operation. Static preparation stores immutable kernel,
 boundary, axis, radius and profile state. The public low-pass helpers and
 implementation use exact tap support and certified whole sums. Accelerated keys
-prepare 128-bit coefficient enclosures in managed per-Whole callback state, then
+prepare 128-bit coefficient enclosures in managed per-complete-input callback state, then
 bound the complete hardware convolution and normalization before final-error
 acceptance. Unresolved coefficients or outputs dispatch strict convolution.
 Certified strict precision is 128..4096 bits and may fail `ResourceExhausted`. Use an independent directed-MPFR reference for temporary numerical checks.
 Strict matches exact reference bits; accelerated profiles use the shared final
-FP32 bound. Whole numerical/fallback counters are unavailable. See [CRV-11 umbrella](CRV-11_resample_signal.md).
+FP32 bound. complete-input numerical/fallback counters are unavailable. See [CRV-11 umbrella](CRV-11_resample_signal.md).

@@ -36,7 +36,7 @@ RES-10B uses the same recurrence and separate early-stop profile. Both projected
 
 The image and gradient stages have their declared per-stage rounding. Exact rational PSF projection entails numerator/denominator limb growth, which is charged to execution resources. Strict resource shortage is a failure; do not lower precision, omit a projection, silently adapt step sizes, or change the algorithm. Work is `O(T*P*C*A)` plus `O(A log A)` for each support simplex sort, where T is iteration count, P image pixels, C planes (this profile requires C=1), and A PSF taps. Sorting and projection ties are deterministic; ties in sorted values use original tap order.
 
-Whole image and PSF are needed; support is control data. Image and PSF outputs belong to the same iteration result. Errors do not publish partial outputs. Cancellation, ownership and budgets follow FILTER common contracts. Ordinary numerical NaN/Inf/overflow behavior follows NUM, while parameter, support, initialization and constrained-model validation remain explicit.
+complete-input image and PSF are needed; support is control data. Image and PSF outputs belong to the same iteration result. Errors do not publish partial outputs. Cancellation, ownership and budgets follow FILTER common contracts. Ordinary numerical NaN/Inf/overflow behavior follows NUM, while parameter, support, initialization and constrained-model validation remain explicit.
 
 ## Acceptance
 

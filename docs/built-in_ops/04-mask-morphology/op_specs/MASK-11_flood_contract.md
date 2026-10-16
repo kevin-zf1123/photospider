@@ -31,7 +31,7 @@ image determines numeric input coordinates. Output is Binary[H,W]. All
 channels participate; extract/reorder first for a subset. Tolerance is a single
 finite Float64>=0 in the image's explicitly chosen raw coordinate units, not
 an implicit color-distance standard. Connectivity is required Int64 4 or 8.
-A zero-seed mask is legal and yields an all-zero output, but the Whole admission
+A zero-seed mask is legal and yields an all-zero output, but the complete-input admission
 still validates the declared input domains for any nonempty Q. Seeds lying on
 barrier=1 are invalid, not silently ignored or relocated.
 
@@ -46,7 +46,7 @@ mean or scan-order-dependent update of the reference color is permitted.
 C consumes only seeds,barrier and marks seeded connected components of barrier=0.
 No input layer is painted/mutated; applying color is a separate MASK-17 workflow.
 
-All members are Whole on every declared input for nonempty output demand,
+All members are complete-input on every declared input for nonempty output demand,
 including full finite validation of A/B image. Seed/barrier masks are Control
 and topology Data; tolerance statics affect graph identity. Output ROI is merely
 a projection after global closure, not a local flood from cropped seeds.

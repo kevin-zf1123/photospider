@@ -28,7 +28,7 @@ and in the named family contract take precedence.
 
 Compute 1/x on Float32/Float64, preserving dtype and shape. Inherit the
 [NUM-04 common contract](NUM-04_unary_contract.md) for the parameter-free
-input/values interface, generic output, Whole and typed-validation support,
+input/values interface, generic output, complete-input and typed-validation support,
 NaN handling, ownership, budgets and public acceptance. Integer input rejects
 with TypeMismatch and requires explicit conversion.
 
@@ -62,6 +62,6 @@ claimed here; executable targets, commands and platform evidence are delivery wo
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

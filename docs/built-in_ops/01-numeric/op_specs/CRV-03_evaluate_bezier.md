@@ -79,12 +79,12 @@ Destination overflow and nonfinite demanded data fail the Run.
 
 All inputs are Results containing one tensor member under any schema id/version
 and member key; `sample_shape()` supplies the complete dimensions, including
-batch axes. The Whole Result program requests every input with Data, Validation
-and Descriptor (role 13), then validates every segment_indices/t row before any
+batch axes. The Run-shared Result program requests every input with Data, Validation
+and Descriptor , then validates every segment_indices/t row before any
 component arithmetic. It evaluates all N*D output cells and publishes an
 immutable dense Result using schema `photospider.tensor` v1 / member `samples`,
 shape [N,D], selected dtype and no attached domain description. Output association records current
-source ObjectIds. A nonempty local request returns full certified coverage in
+source ObjectIds. A nonempty local request returns complete internal coverage, with public coverage restricted to requested tiles in
 global sample coordinates; coordinates are not rebased to the request. Empty
 produces empty coverage and does not poll a failing handle producer; static
 metadata and remaining execution stages still apply. For nonempty work,
@@ -94,13 +94,10 @@ arithmetic.
 Mathematical selection is unchanged: t=0/1 reads only the selected anchor
 component for the polynomial; an interior uses both anchors and all relative
 handles of that segment and component. Generic numeric data outside every
-evaluated stencil is not additionally finite-checked. Complete typed and
-upstream validation still covers unused active inputs. A typed RGBA handle
-Result with spatial layout and channel axis 2 can fail validation on an invalid
-alpha value. Whole execution computes all D columns even when the query requests
-only one component, so that sparse request still evaluates the alpha component.
-At t=0 the endpoint polynomial skips handles, while complete typed validation
-still checks the handle Result and can reject that alpha value. All rows and
+evaluated stencil is not additionally finite-checked. Explicitly bound validators and upstream execution apply to admitted inputs.
+Spatial metadata or four channels do not automatically install RGBA or alpha
+validation. The shared stage evaluates all output columns; endpoint mathematics
+can skip handle values, and any extra validation needs an explicit contract. All rows and
 components are evaluated, so a bad index/t or evaluated component can fail the
 Run. No partial successful output is published. There is no global mathematical
 topology/monotonicity scan.
@@ -146,7 +143,7 @@ Endpoint shortcuts never perform unneeded handle reconstruction.
 At the same demanded inputs, accelerated and strict share finite/nonfinite
 success classification and zero signs; the four-ULP allowance applies to nonzero
 finite results. If a fast path cannot guarantee error, range and special cases,
-fall back to strict. Per-value Whole counters are unavailable. Work/capacity exhaustion
+fall back to strict. Per-value complete-input counters are unavailable. Work/capacity exhaustion
 fails explicitly. Results for a fixed profile/input/query do not depend on the
 request partition, neighboring queries, thread order or cache state.
 
@@ -217,7 +214,7 @@ scope, identifying offending port/index where available. Invalid segment/t is
 InvalidArgument/InvalidDomain; used nonfinite controls are OperationFailed/
 InvalidDomain; actual RN64 reconstruction or final conversion overflow is
 OperationFailed/ArithmeticOverflow. Typed, upstream, stale, backend and
-cancellation errors preserve their categories. Whole numeric counters are not
+cancellation errors preserve their categories. complete-input numeric counters are not
 available; zero counters must not be interpreted as zero arithmetic/fallbacks.
 Public constant-node composition with D=2^39 and N=2^40 requests one cell but
 requires full output capacity and fails at the parametric node with
@@ -251,7 +248,7 @@ For temporary validation, source Values may supply immutable Referenced storage
 for source Results; bindings, output values and reads use Results. Cover admitted
 profiles, Float32/Float64, quadratic/cubic curves, all 16 reversed/unaligned input
 combinations, zero strides, caller/worker fenv, invalid static metadata, typed
-Whole validation, unused generic values, error ordering, endpoint selection,
+complete-input validation, unused generic values, error ordering, endpoint selection,
 overflow, Empty, associations, dirty mapping, preparation reuse, work limits,
 cancellation and Root release. Use independent Fraction goldens for CRV-02 and
 CRV-03 rather than comparing two paths through the same implementation.
@@ -260,7 +257,7 @@ Production retains RN64 reconstruction and exact integer power-Horner with one
 final rounding. All current profiles use the same exact numerical calculation;
 NEON/AVX2 supply integer helpers. ExactPolynomial's fixed arena is reused with a
 5329-bit numerator bound for degree<=3 and t in [0,1]. No inverse or global
-mathematical topology pass is performed. Whole retains one row and fixed scratch
+mathematical topology pass is performed. complete-input retains one row and fixed scratch
 instead of per-output associations. See implementation notes for public/core
 performance and its limits.
 

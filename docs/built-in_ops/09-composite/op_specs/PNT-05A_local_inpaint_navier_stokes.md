@@ -2,7 +2,7 @@
 
 ## Proposed backends
 
-No PNT-05A operation is currently registered. The two proposed backends share the Result input/output, mask, Whole, Float32
+No PNT-05A operation is currently registered. The two proposed backends share the Result input/output, mask, complete-input, Float32
 reference, error and numerical acceptance contracts below. Both expose named
 output port `image` and required static Int64 parameter `radius`.
 
@@ -48,8 +48,8 @@ pixel compatibility are outside scope. No implicit algorithm substitution.
 
 The public keys are listed above; each has only the named output port `image`.
 PNT-05 is the existing family; PNT-05A is this concrete profile.
-The operations use Result operation ABI 3 with WorkflowDocument 4,
-OperationTraits 22, and Photospider package 0.30.0. There is no GPU backend.
+The proposed integrations target Result operation ABI 5, WorkflowDocument 7,
+OperationTraits 27 and Photospider package 0.35.0. There is no GPU backend.
 Accepted public Result and runtime contracts take precedence over research pages.
 
 Normative discrete reference: OpenCV tag `4.12.0`,
@@ -68,10 +68,10 @@ Relevant current contracts: [Plugin ABI](../../../kernel-architecture/Plugin-ABI
 
 | Order / name | dtype / shape | Semantics | Sample domain |
 | --- | --- | --- | --- |
-| 0 / image | Result with one `photospider.image` v1 tensor member `pixels`; Float32 `[H,W,4]` and batch axes `[N,L]` | ordered RGBA; linear sRGB primaries, D65; premultiplied alpha; scene or display reference preserved | finite signed/HDR RGB; alpha exactly 1 |
+| 0 / image | Result with one `photospider.image` v1 tensor member `pixels`; Float32 `[H,W,4]` and batch axes `[N,L]` | ordered RGBA; linear sRGB primaries, D65; straight alpha; scene or display reference preserved | finite signed/HDR RGB; alpha exactly 1 |
 | 1 / hole_mask | Result with one `photospider.image` v1 tensor member `pixels`; Float32 `[H,W]` and matching batch axes `[N,L]` | canonical typed coverage; non-color; same logical grid | exactly numeric 0 or 1; both signed zeros are known |
 
-Both Results have exactly one tensor and no fields; both use sample batch axes
+Both Results have exactly one tensor; both use sample batch axes
 `[N,L]`. The image and mask batch extents and H/W must match exactly. Their
 complete sample shapes are `[N,L,H,W,4]` and `[N,L,H,W]`. No broadcasting,
 quantization, implicit conversion, thresholding or unassociation. Require
@@ -86,8 +86,8 @@ ResultTensorInput window using checked origin-relative logical addressing. Direc
 bindings retain the host's Result binding validation. No input writes,
 borrowed-pointer retention, in-place publication or escaping mutable aliases.
 
-Whole execution requests the full logical domain of both inputs with Data,
-Validation, and Descriptor roles before numerical work. Validate every RGB
+A prepared Run-shared stage requests the full logical domain of both inputs
+through ordinary member tile Needs before numerical work. Validate every RGB
 placeholder inside holes, all alpha, and every mask sample across every batch
 plane. Mask 0.5 is invalid for this operator even though it is valid coverage.
 An all-zero mask does not skip validation.
@@ -171,8 +171,9 @@ OpenCV allocation/thread settings or create a private thread pool.
 Route through named port `image`, publish one immutable `CompleteBundle` Result
 after completion, and release unpublished buffers on failure. Descriptor support
 for image and mask is recorded independently. The first Need requests both full
-sample domains with Data, Validation and Descriptor roles; the output relation
-conservatively records Data and Validation support from both complete inputs.
+sample domains through ordinary member tile Needs. Immutable shared evidence
+records both complete input tile sets, and public output actors expose requested
+complete tiles subject to the fixed CompleteBundle scope.
 There is no regional algorithm or transitive halo because newly filled values
 propagate across the plane. A downstream ROI may collect a region from the
 complete output. A change to any input sample dirties the full output; relevant
@@ -254,7 +255,7 @@ absent evidence. A test name alone is not proof that every clause is covered.
 | T07 | 0.5/out-of-range/NaN mask; nonopaque alpha; NaN/Inf RGB | host Need Validation errors retain priority; operator-specific invalid-value checks return OperationFailed for direct or generated bindings |
 | T08 | radius 1/32, 0/33, absent/wrong type/unknown parameter | exact closed schema |
 | T09 | size 3, 1/2, 32768, 32769 and UINT64_MAX extents | bounds and resource rejection without huge real allocations |
-| T10 | nonzero ROI and different tile geometry | Whole crop equality; distant invalid input still fails global validation |
+| T10 | nonzero ROI and different tile geometry | complete-input crop equality; distant invalid input still fails global validation |
 | T11 | padded/offset/origin/negative/zero-stride Result input windows | packed equivalence and immutable input Results |
 | T12 | repetitions, changed caller rounding mode | deterministic output, restored floating state |
 | T13 | signed/HDR constants and extreme values | no clamp; nonfinite computation fails |

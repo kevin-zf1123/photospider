@@ -1,38 +1,25 @@
-# 具名 outputs 与混合 Result ports
+# 具名输出与 Result 端口
 
-## 范围与 ownership
+## 范围与所有权
 
-一个 operation node 可声明多个具名 outputs。每个 output 拥有自己的 port kind、descriptor 或 Result schema、input projection 和 execution demand。Workflow edge 同时指定 node 和 output port。Compiler 在执行前专门化选中的 output。
+一个节点可以暴露多个具名 Result 输出。每个输出具有静态 Tensor-only schema、输入投影、可见性策略和独立 demand。Workflow 边指定节点和输出端口。`ExecutionResult::results` 保存具名 Result owner，不再区分数值端口种类。
 
-Output 可以是 numeric `Value` 或 structured `Result`。Result schema 可组合 typed image slots 和 primitive fields。Node 可以混合 Result 图像 inputs、numeric Value controls 和不同类型的 outputs。所有图像语义与 ownership 都经 `ResultRef`；`PlanarImage` 是 Result image slot 内的 backing。
+`WorkflowNodeOutput` 指定 `source_node` 和 `source_port`；`WorkflowOutput` 指定公开的 `name`、`node_id` 和 `port`。默认端口名是 `value`。一个 Result 本身也可以包含多个具名静态 Tensor 成员，这与节点的多个输出不同。
 
-```cpp
-struct WorkflowNodeOutput final {
-  std::uint64_t source_node = 0;
-  std::string source_port = "value";
-};
+## 输出选择与依赖
 
-struct WorkflowOutput final {
-  std::string name;
-  std::uint64_t node_id = 0;
-  std::string port = "value";
-};
-```
+`OperationTraits::outputs` 声明输出，`select_operation_output` 选择其 traits，`ResultProgramQuery::output_index` 在 callback 中标识输出。Tile Need 分别选择 Result 成员的 `tensor_slot` 和局部索引。
 
-片段省略了无关字段。Public execution 将具名 Value outputs 放入 `ExecutionResult::values`，将 structured outputs 放入 `ExecutionResult::results`。
+输出只执行准备后输入投影内的依赖。共享 stage 声明具有自己的准备后投影和依赖。Stage 在 Run 内由原始节点和 stage 标识，不依赖第一个请求的输出或 tile。需要联合计算的算法可以发布多成员 stage Result，输出 actor 从中发布已授权的 tile view。纯且未请求的 stage 不启动；mandatory stage 遵循 Run 的副作用根规则。
 
-## Output selection 与 dependency
+所有样本读取，包括控制值，都需要普通 payload Need。消费者继承其消费的共享提交所冻结的证据，并添加局部 Need。继承证据不授予读取 stage 输入的权限。
 
-`OperationTraits::outputs` 声明可用 outputs。`select_operation_output` 解析所选 output 的 traits 和 index；`ResultProgramQuery::output_index` 将该选择传递给 structured callback。所选 output contract、query、schema 和 input projection 定义它的 demand 与 identity。
+## 身份与资源影响
 
-Coordinator 只解析所选 projection 中的 inputs。Result callback 可请求 numeric Control sample，在下一 stage 检查它，再请求由该值选择的 Data image samples。Result relation 记录已消费的 Control 与 Data support，dirty transpose 使用同一 relation。不属于该 output projection 的 inputs 不会为该 output 执行。
+输出契约、stage 声明、参数、资源和输入 schema 进入准备后的 operation identity。普通 actor 的 key 包含所选输出、成员和 tile。活动共享状态不跨 Run 复用。可选 completed-result、checkpoint 和 block 缓存有独立的纯度和 actor 资格规则；见 [Global Results](Global-Results.zh.md)。
 
-## Identity 与资源影响
-
-Structured producer 的 identity 包含所选 output、output contract、captured query、parameters 和有序 input bundle。物理 tile 尺寸不改变 semantic output identity。Relation traversal、reads、publication payload、continuation state 和 retained input owners 共用 execution-root budget。
-
-所选 output 失败时，请求返回 typed error。未请求的 output 不会启动。Result owners 在最后一个 owning reference 释放前保持存活。
+每个 tile 以事务提交 payload、coverage 和依赖证据。`CompleteBundle` 使用准备后的固定成员范围，并推进所有必需兄弟 tile；`StablePrefix` 遵循显式的成员局部 tile 顺序。Bundle 可以扩大单次请求触发的工作范围，默认存储布局不创建 bundle。
 
 ## 可执行 fixture
 
-Focused `test_multi_output_execution` 和 `test_unified_result_images` 覆盖 output selection、混合 ports 和图像执行。Production operation catalog 与图像限制见[图像 operations](Image-Operations.zh.md)。
+当前行为注册由 `cmake/KernelTests.cmake` 定义，保留回归包括共享 stage 和成员 tile 执行场景。注册本身不证明某次执行结果。测试生命周期遵循[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。

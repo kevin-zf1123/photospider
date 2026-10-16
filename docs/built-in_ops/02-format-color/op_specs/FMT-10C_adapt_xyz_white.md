@@ -18,13 +18,13 @@ registered_operation_keys:
 # FMT-10C: adapt an XYZ reference white
 
 Inherit the complete [FMT-10 family](FMT-10_rgb_basis_contract.md) and
-[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 4
+[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 5
 operations under the strict, accelerated Apple Silicon and accelerated x86-64
 CPU profiles.
 
 ## Interface and matrix
 
-One input Result with one Float32 or Float64 tensor and no fields produces one
+One input Result with one Float32 or Float64 tensor produces one
 `values` output Result containing one tensor. The output preserves Result schema
 identity, tensor key, logical shape and batch axes; it carries no description and sets `atomic_trailing_axes` to zero. Complete sample rank,
 including batch and cell axes, is at most 8; sample count is at most 2^40.

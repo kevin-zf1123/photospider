@@ -7,7 +7,7 @@
 1. [概览](Overview.zh.md)：模块所有权、执行上下文与结果生命周期。
 2. [术语](Terminology.zh.md)：架构指南中的统一用语。
 3. [Compiler 与执行](Compiler-and-Execution.zh.md)：源文档校验、规划、调度和运行推进。
-4. [数据模型](Data-Model.zh.md)：Value、Region、布局与保留的存储。
+4. [数据模型](Data-Model.zh.md)：Tensor、Region、布局与保留的存储。
 5. [Graph 生命周期](Graph-Lifecycle.zh.md)：图版本与编译阶段的生命周期。
 6. [Compute 边界](Compute-Boundaries.zh.md)：CPU/GPU 放置与回退规则。
 7. [Cache 模型](Cache-Model.zh.md)：冻结输入与有界本地结果复用。

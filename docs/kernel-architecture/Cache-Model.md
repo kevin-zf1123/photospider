@@ -2,34 +2,34 @@
 
 ## Scope and ownership
 
-The kernel keeps separate identities for compiled plans, immutable input snapshots, completed structured Result reuse, and native backend input-copy caches. Cache membership grants reuse eligibility; active Results, snapshots, typed backing Values, and read windows retain their own owners and resource leases after an entry is cleared or evicted.
+The kernel keeps separate identities for compiled plans, immutable input snapshots, completed structured Result reuse, and native backend input-copy caches. Cache membership grants reuse eligibility; active Results, snapshots, Tensor backing, and read windows retain their own owners and resource leases after an entry is cleared or evicted.
 
 
 Each structured Run owns a compiled `StructuredResultCache` component for completed-result keys, manifests, source proofs, replay, snapshot restoration, and its optional cache-work quota. The lookup takes a strong manifest candidate while it is resident. That candidate remains owned through proof, replay, and adoption even if the LRU evicts it meanwhile. Adoption does not require another LRU-residency proof; an optional lookup may promote the entry only when the same manifest is still resident. Cache closing or an epoch change can still reject adoption, and the independently held candidate keeps its Result backing alive until that attempt releases it.
 
-## Immutable Value snapshots
+## Immutable Tensor snapshots
 
 ```cpp
 #include "photospider/data/input_snapshot.hpp"
 
 namespace ps {
 Result<InputSnapshot> import_snapshot(const InputSnapshotStore& store,
-                                      const Value& value) {
-  return store.import_value(value);
+                                      const Tensor& value) {
+  return store.import_tensor(value);
 }
 }
 ```
 
-`InputSnapshotStore` retains immutable rank-1 through rank-8 blocks for supported built-in numeric Value types. Import preserves every bit pattern and checks only the Value's descriptor and coverage; it does not interpret sample values. The store bounds block count, actual payload bytes across versions, and directory metadata separately. Caller-owned Values and snapshot metadata are outside the retained-payload byte limit.
+`InputSnapshotStore` retains immutable rank-1 through rank-8 blocks for supported built-in numeric Tensor types. Import preserves every bit pattern and checks only the Tensor's descriptor and coverage; it does not interpret sample values. The store bounds block count, actual payload bytes across versions, and directory metadata separately. Caller-owned Tensors and snapshot metadata are outside the retained-payload byte limit.
 
-Patches require matching type and shape and replace one exact nonempty Region. The store copies intersecting blocks and preserves earlier versions. Reads and patches accept cancellation and sample bounds. A cancelled read may have partially written the caller's destination; only success certifies the complete result.
+Patches require matching type and shape and replace one exact nonempty Footprint. The store copies intersecting blocks and preserves earlier versions. Reads and patches accept cancellation and sample bounds. A cancelled read may have partially written the caller's destination; only success certifies the complete result.
 
 `content_identity(region)` hashes dtype, shape, requested coordinates, and exact sample bits with canonical framing. Block geometry, origin, stride, and allocation do not affect identity. Signed zeros and distinct NaN payloads remain distinct. Snapshot/session identifiers describe provenance; deterministic operations cannot derive sample values or dependencies from identifier spelling.
 
 ## Completed Result reuse
 
 
-A lookup recomputes the source proof against the current Result bindings, replays each saved Need through the ordinary Result coordinator, and compares the ready facts. If the proof and replay match and the cache epoch remains current, the replay Host rebinds the strongly held candidate Result to the current semantic key and source association. The rebound Result gets a new ObjectId and shares the cached physical backing. Cache metadata, proof traversal, hashing and retained payload are charged to their Root/cache limits. Optional proof-work exhaustion, metadata exhaustion, or insufficient retention capacity skips reuse or retention and allows computation to proceed. The completed-result cache uses Result as its semantic input/output object; Value remains typed backing and internal cache storage.
+A lookup recomputes the source proof against the current Result bindings, replays each saved Need through the ordinary Result coordinator, and compares the ready facts. If the proof and replay match and the cache epoch remains current, the replay Host rebinds the strongly held candidate Result to the current semantic key and source association. The rebound Result gets a new ObjectId and shares the cached physical backing. Cache metadata, proof traversal, hashing and retained payload are charged to their Root/cache limits. Optional proof-work exhaustion, metadata exhaustion, or insufficient retention capacity skips reuse or retention and allows computation to proceed. The completed-result cache uses Result as its semantic input/output object; Tensor remains typed backing and internal cache storage.
 
 Frozen execution pins its plan and immutable Result bindings; replacing a caller's bindings cannot change the captured inputs.
 
@@ -45,3 +45,5 @@ Borrowed-graph execution continues to enforce graph currentness. The callback mu
 - LRU eviction removes the entry from future lookup eligibility. A lookup that already acquired a strong candidate may finish replay and adoption after eviction while its cache remains open and its epoch remains valid. Adoption does not require another LRU-residency proof; an optional promotion lookup affects LRU order only when the same manifest is still resident. Cache closing or an epoch change rejects adoption, while the candidate's independent owner remains valid until the attempt releases it. Frozen executions are in-memory owners, not serialized plans.
 
 current production image operation availability is listed in [Image operations](Image-Operations.md). Snapshot and generic cache behavior is exercised by `test_input_snapshot`, `test_frozen_execution`, `test_generic_result_cache`, and `test_computed_scalar`. Result capture and owner release are covered by `test_result_image_contracts`, `test_result_objects`.
+
+Run-shared stages provide the unique producer independently of optional caches, and retain success/failure until Run end. They expose no checkpoint/block services and do not hold active state across Runs. Direct shared Need consumers and gated actors bypass completed-result caching; see [Global Results](Global-Results.md#completed-result-cache). Snapshot block geometry is independent of plan tile extent.

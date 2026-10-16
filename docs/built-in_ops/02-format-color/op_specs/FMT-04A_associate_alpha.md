@@ -18,11 +18,11 @@ registered_operation_keys:
 # FMT-04A: export one group as premultiplied numeric samples
 
 The default registry provides `alpha.associate_<profile>` for the three CPU
-profiles. The operation uses Result ABI 4 and preserves the declared tensor
+profiles. The operation uses Result ABI 5 and preserves the declared tensor
 shape, dtype and channel positions. The specification remains Proposed. Validate the public operation with temporary independent numerical and ownership checks when changing it.
 
 Inherit the complete [FMT-04 boundary contract](FMT-04_alpha_association_contract.md).
-The operation accepts one single-tensor Result without fields, with optional second input only for raw explicit plane/scalar weights.
+The operation accepts one single-tensor Result , with optional second input only for raw explicit plane/scalar weights.
 
 ## Interface and representation
 

@@ -44,10 +44,10 @@ These operations do not modify a color description or implement tone mapping.
 
 ## Execution and failures
 
-Nonempty Whole requests all three inputs with Data, Validation and Descriptor
-(role 13), including complete typed/upstream validation. The remap Result program
+Nonempty complete-input requests all three inputs with payload tile coverage with explicit validation
+, including complete typed/upstream validation. The remap Result program
 reads authorized windows directly; it does not collect or copy the complete
-input through Value. Empty reads no payload. Inherit full-output allocation,
+input through Tensor. Empty reads no payload. Inherit full-output allocation,
 full dirty scope, sparse public delivery, arbitrary input strides, ownership,
 budgets and cancellation from CRV-08.
 Account all internal guard/broadcast/remap state, not only the exported output.

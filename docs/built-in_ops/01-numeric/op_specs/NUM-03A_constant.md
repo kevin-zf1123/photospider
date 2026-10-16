@@ -30,7 +30,7 @@ and in the named family contract take precedence.
 The maintainer selected constant as a separate operator from NUM-03B broadcast.
 It consumes one scalar and fills a specified output shape. The three independently
 named strict/CPU-accelerated versions follow the common NUM bit-equivalence rule.
-Input `value` is a dynamic scalar Value of shape `[1]`, with UInt8, Int64,
+Input `value` is a dynamic scalar Tensor of shape `[1]`, with UInt8, Int64,
 Float32 or Float64 dtype. Output preserves the input dtype and every scalar bit,
 including floating NaN payloads, infinities and signed zero. No arithmetic or
 implicit conversion is performed. This draft does not authorize implementation
@@ -70,7 +70,7 @@ no output-coordinate-dependent source lookup or numeric failure. Input changes
 invalidate the complete logical output; retain its exact scalar and transitive
 validation witness. Shape/layout changes produce a new compiled identity.
 
-The default view path can return a Whole logical Value backed by one owned
+The default view path can return a complete-input logical Tensor backed by one owned
 scalar-sized copy, with byte offset zero, origin zero and all byte strides zero.
 It does not allocate or enumerate the logical element count. Any requested
 subregion addresses the same copied bits. Full logical coverage on this path
@@ -78,7 +78,7 @@ does not mean dense execution or dense storage, and the output must not claim
 `requires_dense_output`. The scalar-sized owned copy avoids requiring retention
 of an arbitrarily large source allocation solely because the input was a view.
 
-Dense mode uses one CPU Whole callback and fills the complete output before
+Dense mode uses one CPU complete-input callback and fills the complete output before
 projection to the requested global Region. Even sparse requests allocate and
 compute the full packed output. Constant View owns one scalar copy and retains
 its whole-array Atomic tuple identity, without enumerating the logical count.
@@ -152,12 +152,12 @@ helper and emits the same explicit operation key and parameters.
 
 The strict implementation performs an exact byte copy of the scalar. The two
 accelerated keys use the same bit-copy semantics and report their selected
-profile key; Whole per-atom counters are unavailable; unsupported hosts return `BackendUnavailable`. Local Clang execution
+profile key; complete-input per-atom counters are unavailable; unsupported hosts return `BackendUnavailable`. Local Clang execution
 has checked an Int64 shape `[1048576,1048576]` backed by one 8-byte payload with
 zero strides, including result ownership after context destruction, and dense
 `[2,3]` execution.
 
-The following acceptance and regional implementation record predates Whole.
+The following acceptance and regional implementation record predates complete-input.
 Coverage includes all UInt8 values, integer extrema and IEEE bit patterns,
 view/dense output, shape errors, cancellation during collection, StageLimit,
 metadata/output capacity, semantic validation, oversized unaligned source release,
@@ -172,4 +172,4 @@ status of this specification.
 - [Generation specification](../../03-generation/op_specs/GEN-01A_constant_tensor.md).
 - [Operator template](../../00-foundation/spec-template.md).
 
-Current Whole validation and timing: [array Whole](../arrays-whole.md).
+Current complete-input validation and timing: [array complete-input](../arrays-whole.md).

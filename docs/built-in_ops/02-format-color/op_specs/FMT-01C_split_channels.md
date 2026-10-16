@@ -21,7 +21,7 @@ interpretation and storage rules from [FMT-01](FMT-01_channel_extraction_contrac
 
 The helper accepts a `WorkflowDocument`, source `WorkflowInput`, inferred
 `OperationMetadata` for the source Result, and `ChannelExtractOptions`. The
-source Result must contain one tensor member and no fields. Metadata and physical
+source Result must contain one tensor member . Metadata and physical
 layout are checked against a declared workflow input when present. The helper
 appends nodes transactionally; authoring failure leaves the document unchanged.
 It reads no samples.
@@ -49,7 +49,7 @@ caller selects which handles to connect or publish.
 Expansion requires `1 <= C <= 65536` and is also subject to normal graph-node
 and output limits. It uses collision-aware node IDs and stages the complete node
 set before appending. No special multi-output ABI, registry key, pixel buffer or
-Whole split operation is created.
+complete-input split operation is created.
 
 ## Runtime demand and validation
 

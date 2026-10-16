@@ -34,12 +34,13 @@ element count is at most 2^40.
 the full sample shape, including batch-prefix axes. There is no descending,
 unstable, implicit-cast or image-semantic mode.
 
-The operation exposes two independently selectable named outputs. `values` is
-a `Result` with schema `photospider.tensor`, tensor key `samples`, source
-element type and full input shape. `indices` has the same shape and schema but
-Int64 elements; each value is the original coordinate on the sorted axis.
-Batch axes become ordinary output axes and both output tensor specs have no attached domain description. Each selected output produces its own complete Result payload. A joint
-workflow therefore has distinct Result owners for `values` and `indices`.
+The `values` output is a Result with schema `photospider.tensor` v1, member
+`samples`, the source dtype and full input sample shape. `indices` has the same
+schema and shape with Int64 elements naming original coordinates on the sorted
+axis. Batch axes become ordinary output axes. Neither output carries a domain
+description.
+
+The values and indices ports are independently selectable public outputs backed by one prepared joint stage. Within a Run, that stage sorts each line once and produces both complete internal tensors, even when only one output is selected. Output actors publish retained views of requested complete tiles. Both internal output allocations are admitted; optional cross-Run reuse does not provide the unique-producer guarantee.
 
 ## Ordering and value preservation
 
@@ -54,22 +55,18 @@ quieted or otherwise changed by sorting. The `indices` output records the
 corresponding source-axis position. All three declared CPU profiles preserve
 these discrete results.
 
-## Whole demand and execution
+## complete-input demand and execution
 
-Every nonempty selected-output request uses Whole execution. It requests the
-complete source tensor with Data, Validation and Descriptor roles, sorts every
-line, writes the complete selected output and then satisfies the consumer
+Every nonempty selected-output request uses Run-shared complete-input computation. It requests the
+complete source tensor with ordinary member tile Needs with explicitly bound validators, sorts every
+line, writes both complete internal outputs and then satisfies the consumer
 projection. An indices-only request still reads the complete source to build
 the permutation. Any source change invalidates every recorded observation for
 each selected output. An Empty request reads no input payload and performs no
 sample arithmetic; it publishes the declared schema with empty sample
 coverage.
 
-`values` and `indices` are independent outputs, not one callback that always
-allocates both. Selecting them separately invokes independent Whole callbacks;
-selecting both in one workflow produces two Results and two payloads. A callback
-builds one permutation per line and uses it to write its selected output. No
-cross-output permutation cache is promised.
+The values and indices ports are independently selectable public outputs backed by one prepared joint stage. Within a Run, that stage sorts each line once and produces both complete internal tensors, even when only one output is selected. Output actors publish retained views of requested complete tiles. Both internal output allocations are admitted; optional cross-Run reuse does not provide the unique-producer guarantee.
 
 ## Algorithm, resources and errors
 
@@ -79,14 +76,14 @@ L takes O(L log L) ordering work. Its key and permutation vectors use 16*L eleme
 allocator headers, alignment and Entries reservations. They are charged as
 Root metadata. Keys are released after sorting; the permutation is released
 after that line is written. Fixed `OrderingState` uses the phase allocator's
-Payload capacity. Authorized input read windows and the selected full output
-payload coexist with this state; the operation does not first pack the complete
+Payload capacity. Authorized input read windows and both full internal output
+payloads coexist with this state; the operation does not first pack the complete
 input.
 
 Work is O(M log L) for M total input elements and axis length L. The callback
 charges reads, comparisons, permutation construction and output writes to the
 execution Root and observes cancellation through those work calls. Capacity,
-work-limit, cancellation or source failure aborts the transactional Whole
+work-limit, cancellation or source failure aborts the transactional complete-input
 writer; unpublished output and ordering state are released, and no partial
 coverage is published.
 

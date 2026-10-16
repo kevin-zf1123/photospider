@@ -89,7 +89,7 @@ inference is introduced. The output schema is `photospider.tensor`, with tensor
 key `samples`, the preserved shape, and no attached domain description.
 
 Metadata specialization checks the input tensor dtype and shape. A nonempty
-request uses Whole execution and requires Data, Validation and Descriptor
+request uses Run-shared complete-input computation and requires payload tile coverage with explicit validation
 support for every input sample, including samples outside the consumer's
 projection. The coordinator supplies authorized tensor windows; compatible
 strided storage remains usable without requiring a full packed input copy. The
@@ -177,8 +177,8 @@ and exposed through `photospider/ops/numeric/unary.hpp`. The helpers author Resu
 workflows. Each input port accepts a Result with a supported numeric tensor in
 slot 0; metadata specialization requires matching input dtype and complete
 sample shape. It does not require a particular input schema ID.
-Every nonempty request uses a Whole continuation, requests the complete input
-with Data, Validation and Descriptor roles, and reads through authorized tensor
+Every nonempty request uses a complete-input continuation, requests the complete input
+with ordinary member tile Needs with explicitly bound validators, and reads through authorized tensor
 windows. Compatible signed and zero strides remain readable without requiring
 input packing. The operation validates all samples and writes one complete
 packed Result output; the executor applies the requested projection afterward.
@@ -188,7 +188,7 @@ explicit Float32/Float64 output selection.
 Metadata specialization requires rank 1..8, positive extents, matching sample
 shapes and at most 2^40 samples. Shape and dtype mismatch return
 `TypeMismatch/Schema`. Arithmetic overflow or an invalid rational denominator
-anywhere fails the Whole invocation with Run scope and no Atom key. IEEE
+anywhere fails the complete-input invocation with Run scope and no Atom key. IEEE
 nonfinite results succeed. Empty requests still undergo static validation and
 resource admission, then return empty tensor coverage without payload reads or
 computation. Results retain immutable backing beyond context lifetime.
@@ -200,4 +200,4 @@ checks within the [admitted ranges](NUM_accelerated_contract.md#image-budget-and
 Pi and rational-pi arguments undergo exact quadrant reduction before
 approximation. Rejected candidates use strict evaluation; unresolved rounding
 may return `ResourceExhausted`. Per-value fallback counters are not emitted by
-this Whole callback; execution-level computed-element diagnostics are separate.
+this complete-input callback; execution-level computed-element diagnostics are separate.

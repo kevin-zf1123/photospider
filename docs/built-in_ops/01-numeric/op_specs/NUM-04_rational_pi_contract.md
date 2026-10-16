@@ -108,8 +108,9 @@ and unaligned Int64 values; the operation does not require packed input
 collection. The operation writes one complete packed Result, and the executor
 projects requested global coordinates afterward. Empty Result queries retain
 static validation and resource admission, then return empty tensor coverage
-without input reads, denominator checking or arithmetic work. A nonpositive
-denominator outside Q still fails a nonempty Whole invocation. Changes to
+without input reads, denominator checking or arithmetic work. A nonpositive denominator outside Q still fails a nonempty Run-shared
+computation. Consumers may read only authorized member tiles; retaining the
+complete internal backing does not widen access. Changes to
 either source invalidate all observed outputs. Descriptor inference uses
 static metadata only. Results and their source associations keep their owners
 valid after context destruction; cache-off preserves active ownership.
@@ -125,7 +126,7 @@ Float64 quotient treated as exact. Refine until final rounding is proved.
 Accelerated evaluation may use a native pi function only with a proved combined
 argument/evaluation error meeting the final contract. At non-dyadic r, ordinary
 sinpi(float(r)) alone is not that guarantee. Unsupported ranges use strict
-fallback. This Whole callback does not emit per-value fallback counters. Runtime
+fallback. This complete-input callback does not emit per-value fallback counters. Runtime
 cancellation and resource errors are sticky failures, not fallback
 opportunities that erase them.
 
@@ -179,5 +180,5 @@ other unary operations by `numeric_unary.cpp`. Each continuation receives full
 authorized Int64 tensor windows, computes the complete output with the selected
 Float32/Float64 dtype, and publishes one packed Result. Strict and accelerated
 evaluation retain the rational contracts above; per-value fallback counters
-are not emitted by this Whole callback, while execution-level computed-element
+are not emitted by this complete-input callback, while execution-level computed-element
 diagnostics remain separate.

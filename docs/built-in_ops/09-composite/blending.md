@@ -4,7 +4,7 @@
 
 已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
 
-状态 Proposed；标准数学模式为D1，商业兼容和图层组行为为D2。输入为前景S、背景B、可选mask/opacity，尺寸/工作空间先显式对齐。计算分为颜色混合函数与coverage合成，默认输出线性premultiplied图像；选择编码域的艺术混合时必须另标空间。所有公式中S/B是unassociated颜色，a/b是有效前景/背景alpha。
+状态 Proposed；标准数学模式为D1，商业兼容和图层组行为为D2。输入为前景S、背景B、可选mask/opacity，尺寸/工作空间先显式对齐。计算分为颜色混合函数与coverage合成，普通图像输出默认 linear straight alpha，内部 coverage 合成使用 premultiplied 工作值；选择编码域的艺术混合时必须另标空间。所有公式中S/B是unassociated颜色，a/b是有效前景/背景alpha。
 
 ## coverage 合成
 
@@ -24,6 +24,8 @@
 标准source-over与颜色混合f组合时：
 
 `c_out=(1-a)c_b+(1-b)c_s+a*b*f(B,S)`，`alpha_out=a+b-a*b`。
+
+普通图像输出在 `alpha_out != 0` 时以 `c_out / alpha_out` 恢复 straight RGB；零 alpha 的 RGB 填充值由具体成员明确。上述 `c_out` 仍是关联颜色的数学工作值。显式 `CoverageRGBA`/Layer 纯值接口继续使用自身 premultiplied 契约。
 
 ## 逐通道混合
 

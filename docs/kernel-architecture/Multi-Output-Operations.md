@@ -1,38 +1,25 @@
-# Named outputs and mixed Result ports
+# Named outputs and Result ports
 
 ## Scope and ownership
 
-One operation node may declare multiple named outputs. Each output has its own port kind, descriptor or Result schema, input projection, and execution demand. A workflow edge names both the node and output port. The compiler specializes the selected output before execution.
+A node may expose several named Result outputs. Each output has a static Tensor-only schema, an input projection, a visibility policy and its own demand. A workflow edge names the node and output port. `ExecutionResult::results` holds named Result owners; there is no separate numeric port kind.
 
-An output can be a numeric `Value` or a structured `Result`. A Result schema can combine typed image slots and primitive fields. Nodes may mix Result image inputs, numeric Value controls, and different output kinds. All image semantics and ownership pass through `ResultRef`; `PlanarImage` is backing inside a Result image slot.
-
-```cpp
-struct WorkflowNodeOutput final {
-  std::uint64_t source_node = 0;
-  std::string source_port = "value";
-};
-
-struct WorkflowOutput final {
-  std::string name;
-  std::uint64_t node_id = 0;
-  std::string port = "value";
-};
-```
-
-The excerpt omits unrelated fields. Public execution places named Value outputs in `ExecutionResult::values` and structured outputs in `ExecutionResult::results`.
+`WorkflowNodeOutput` identifies `source_node` and `source_port`; `WorkflowOutput` identifies the public `name`, `node_id` and `port`. The default port name is `value`. A Result may itself contain multiple named static Tensor members. These are distinct from multiple node outputs.
 
 ## Output selection and dependency
 
-`OperationTraits::outputs` declares available outputs. `select_operation_output` resolves the selected output's traits and index; `ResultProgramQuery::output_index` carries that selection into a structured callback. The selected output contract, query, schema, and input projection define its demand and identity.
+`OperationTraits::outputs` declares outputs. `select_operation_output` selects their traits; `ResultProgramQuery::output_index` identifies the output in a callback. Tile Needs separately select each Result member's `tensor_slot` and local indices.
 
-The coordinator resolves only inputs in the selected projection. A Result callback may request a numeric Control sample, inspect it in the next stage, and then request the Data image samples selected by that value. The Result relation records consumed Control and Data support, and dirty transpose uses the same relation. Inputs outside the projection are not evaluated for that output.
+Only prepared input projections are executable for an output. Shared-stage declarations have their own prepared projections and dependencies. A stage is identified within its Run by the original node and stage, independent of the first requesting output or tile. An algorithm needing joint computation can publish a multi-member stage Result, from which output actors publish authorized tile views. A pure unrequested stage does not start; mandatory stages follow the Run's effect-root rules.
+
+All sample reads, including control values, require ordinary payload Needs. Consumers inherit frozen evidence from the shared commits they consume and add their local Needs. Inherited evidence does not authorize reading the stage's inputs.
 
 ## Identity and resource effects
 
-A structured producer's identity includes the selected output, output contract, captured query, parameters, and ordered input bundle. Physical tile dimensions do not change semantic output identity. Relation traversal, reads, publication payload, continuation state, and retained input owners consume the same execution-root budget.
+Output contracts, stage declarations, parameters, resources and input schemas enter prepared operation identity. An ordinary actor's key includes its selected output, member and tile. Active shared state is never reused across Runs. Optional completed-result, checkpoint and block caches have separate purity and actor eligibility rules; see [Global Results](Global-Results.md).
 
-A selected output failure returns a typed error for the request. Unrequested output work does not start. Result owners remain live until their last owning reference is released.
+Every tile commits payload, coverage and dependency evidence transactionally. `CompleteBundle` uses a prepared fixed member scope and drives all required siblings; `StablePrefix` follows explicit member-local tile order. A bundle can enlarge the work triggered by one request. Default storage layout does not create a bundle.
 
 ## Executable fixture
 
-The focused `test_multi_output_execution` and `test_unified_result_images` tests cover output selection, mixed ports, and image execution. The production operation catalog and image limitations are described in [Image operations](Image-Operations.md).
+Current behavior registrations are defined in `cmake/KernelTests.cmake`; retained regressions include shared-stage and member-tile execution cases. These registrations are not evidence of a particular run. Test lifetime follows [Testing and Validation](../development/Testing-and-Validation.md).

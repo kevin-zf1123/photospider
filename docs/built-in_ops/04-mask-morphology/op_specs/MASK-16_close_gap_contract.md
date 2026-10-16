@@ -95,7 +95,7 @@ coordinate-list reduction is included. Consumers can explicitly reduce a mask
 if they need counts. Any nonempty output conservatively validates both complete
 Binary inputs; no diagnostic output bypasses input-domain validation.
 
-B/C declare Whole support for all outputs; fill requires global flood, while
+B/C declare complete-input support for all outputs; fill requires global flood, while
 barrier preparation and diagnostic formulas do not themselves require flood. Reference scratch O(N) temporary, queue, visited; B work O(N*(gap+1)),
 C naive O(N|B|²), plus flood. Return selection and diagnostic masks; painting/growing under
 linework/anti-aliasing/feather are separate MASK-07/08/17 stages. A successful

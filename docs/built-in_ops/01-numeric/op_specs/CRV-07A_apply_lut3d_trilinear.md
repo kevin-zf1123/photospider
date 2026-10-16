@@ -70,13 +70,13 @@ numerically unused, but complete typed/upstream validation still applies.
 
 ## Execution, resources and errors
 
-The Whole Result program requests input, table and axis with Data, Validation
-and Descriptor (role 13). Callback numeric checks validate all axes, every
+The Run-shared Result program requests input, table and axis with Data, Validation
+and Descriptor . Callback numeric checks validate all axes, every
 original input color and query before applying clamp, then perform selected
 vertex mathematics. Typed/upstream errors may precede callback validation and
 cover complete inputs. Requested fragments close to complete three-component
 colors. Output carries ColorArray v1, records actual source ObjectIds, publishes
-full certified coverage with global sample coordinates, and has one all-or-nothing
+complete internal coverage, with public coverage restricted to requested tiles with global sample coordinates, and has one all-or-nothing
 Result transaction. Dirty mapping follows recorded output demand; Empty reads no
 payload. Result owners survive context teardown.
 
@@ -106,7 +106,7 @@ outside this Proposed specification.
 ## Maintained implementation
 
 [`apply_lut3d_trilinear_node`](../../../../plugins/ops/include/photospider/ops/numeric/lut3d.hpp)
-constructs this Whole Result primitive in
+constructs this complete-input Result primitive in
 [`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp).
 All profiles use exact product weights and a single final rounding; only
 positive-weight complete vertices participate in the mathematics. See the

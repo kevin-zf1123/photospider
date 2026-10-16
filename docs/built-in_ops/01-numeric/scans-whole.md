@@ -1,20 +1,18 @@
-# NUM-13 Whole execution
+# NUM-13 Run-shared complete-input computation
 
 The six `numeric.prefix_sum_*` and `numeric.integral_image_*` operations execute
-as Whole Result programs. Each operation accepts one tensor member under any
+as Run-shared Result programs. Each operation accepts one tensor member under any
 input key. The output port key is `values`; its Result schema is
 `photospider.tensor` with tensor member `samples`. A nonempty output demand
-requests the complete input support with Data, Validation and Descriptor (role
-13), reads through authorized Result windows, computes every output coordinate,
-and publishes the complete packed Result in global coordinates. The requested
-footprint scopes observed dependency roots. The returned Result retains its
-complete published coverage, and consumers can read any covered coordinate; the
-request does not turn it into a packed ROI. The output starts from the complete
+requests the complete input support with payload tile coverage with explicit validation , reads through authorized Result windows, computes every output coordinate,
+and retains the complete internal result in global coordinates. Public actors
+publish only requested complete tiles. Consumers read only their authorized
+coverage; retaining the shared backing does not widen access. The output starts from the complete
 input `sample_shape()`; each selected scan axis grows by one, and those extents
 form ordinary output axes with batch topology dropped. Empty demand
 schedules no input payload work and publishes empty tensor coverage.
 
-`numeric_tensor_program.hpp` supplies the Whole protocol and the operation's
+`numeric_tensor_program.hpp` supplies the complete-input protocol and the operation's
 Need-authorized tensor read window. The scan kernel receives that read capability
 and one packed Result writer. The writer borrows its window for publication; the
 Result owns immutable output storage after execution context retirement. The
@@ -38,7 +36,7 @@ aggregate's arithmetic scratch, and all columns reset for each plane.
 
 Both kernels check work and cancellation while reading, updating carries,
 converting, and publishing. Integer destination overflow at any complete output
-coordinate fails the Whole Run with that coordinate, even when it lies outside
+coordinate fails the complete-input Run with that coordinate, even when it lies outside
 the requested projection. Floating overflow is an output infinity and does not
 alter the exact carry used for later outputs. Failures discard unpublished
 output and kernel state. A WorkLimit failure releases output payload during the
@@ -78,7 +76,7 @@ into a second payload. For the generated-source case, verify one scan over all
 payload after context retirement. For the stable-prefix case, verify that a
 zero-boundary query still waits for the complete source Need and propagates its
 tail failure before performing scan arithmetic.
-Each Whole write keeps one `NumericDiagnostics` record local to the callback. `evaluated_values` increments after an authorized source word is read and immediately before it is supplied to the exact accumulator; on success it counts accumulator input attempts, not output positions. Prefix zero boundaries, carry snapshots and final output conversions do not increment it. The selected profile and exact scan accumulator identity are reported once at completion. Its ISA suffix describes the four-word output-selection helper, not SIMD execution of the scan algorithm. Do not infer strict-math or fallback counts from the selected ISA suffix.
+Each complete-input write keeps one `NumericDiagnostics` record local to the callback. `evaluated_values` increments after an authorized source word is read and immediately before it is supplied to the exact accumulator; on success it counts accumulator input attempts, not output positions. Prefix zero boundaries, carry snapshots and final output conversions do not increment it. The selected profile and exact scan accumulator identity are reported once at completion. Its ISA suffix describes the four-word output-selection helper, not SIMD execution of the scan algorithm. Do not infer strict-math or fallback counts from the selected ISA suffix.
 
 The callback reports diagnostics after normal completion or a status it handles locally, preserving the first operation failure if reporting is rejected. WorkLimit or cancellation can prevent the report from merging. A `Status` thrown during tensor-window acquisition/read or `std::bad_alloc` caught by the outer math callback can bypass this local report. Cache hits add no new accumulator attempts; Empty demand does no sample arithmetic.
 

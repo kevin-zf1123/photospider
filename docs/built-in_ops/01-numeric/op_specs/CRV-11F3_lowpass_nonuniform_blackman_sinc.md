@@ -17,7 +17,7 @@ clarification_status: complete
 
 # CRV-11F3: lowpass_nonuniform_blackman_sinc
 
-The dynamic inputs inherit the [family Result tensor-port contract](CRV-11_nonuniform_lowpass_contract.md): each port is a Result with exactly one tensor member and no fields under any structurally valid schema id/version/member key. Shapes use complete `sample_shape()` values, including batch axes.
+The dynamic inputs inherit the [family Result tensor-port contract](CRV-11_nonuniform_lowpass_contract.md): each port is a Result with exactly one tensor member  under any structurally valid schema id/version/member key. Shapes use complete `sample_shape()` values, including batch axes.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -48,8 +48,8 @@ strict fallback. All values and outputs must be finite; this
 is not the uniform family's IEEE nonfinite aggregation. A precision/work/capacity
 limit fails explicitly instead of publishing unconverged integration.
 
-All three formal keys use Whole Result programs. Nonempty requests declare Data,
-Validation and Descriptor needs (role 13) for both complete input members. Typed
+All three formal keys use Run-shared Result programs. Nonempty requests declare Data,
+Validation and Descriptor needs  for both complete input members. Typed
 and upstream validation covers all inputs. The callback reads positions through authorized windows into Root-owned
 promoted coordinate storage, then reads source values through authorized
 windows without collecting or copying the complete values tensor. It computes every output using the

@@ -38,7 +38,7 @@ No filtering, implicit uniform sampling or periodic extension is performed.
 ## Output-specific execution
 
 [CRV-11's complete template contract](CRV-11_resample_signal.md) is normative.
-Samples demand inherits the forward interpolator's Whole execution: typed and
+Samples demand inherits the forward interpolator's Run-shared complete-input computation: typed and
 upstream validation covers all active input Results, authorized Result windows
 provide sample reads, full output allocation and input invalidation apply, and
 numeric failures retain Run scope. Mathematical column independence remains;
@@ -69,4 +69,4 @@ samples/positions through Compiler/ExecutionContext.
 This template uses the public helper in `photospider/ops/numeric/resampling.hpp`
 and ordinary workflow composition. Temporary acceptance inherits CRV-01 exact-copy
 and numerical-accuracy checks and adds composition checks; it does not require
-a separate resampling formula oracle. Whole numerical/fallback counters are unavailable.
+a separate resampling formula oracle. complete-input numerical/fallback counters are unavailable.

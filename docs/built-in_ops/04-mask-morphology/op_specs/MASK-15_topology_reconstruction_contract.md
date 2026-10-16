@@ -127,9 +127,9 @@ Synchronous reference O(iterations*N*degree), O(N) double buffer. Finite-valued
 monotonic updates guarantee termination; an efficient queue algorithm must match
 this exact final numeric result (and canonical zero), despite its different
 schedule. Reconstruction by erosion is the numeric complement dual of dilation
-under neutral boundaries. Whole marker/limit validation includes inequalities
+under neutral boundaries. complete-input marker/limit validation includes inequalities
 at all pixels, even if a requested output could not be reached from that pixel.
-All A-G have Whole dependence; radius output B depends on original binary input,
+All A-G have complete-input dependence; radius output B depends on original binary input,
 not only the thinned skeleton. Independent/joint output requests are numerically
 consistent but require the same global skeleton if radius is requested.
 

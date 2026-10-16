@@ -1,6 +1,6 @@
-# NUM-07 Whole execution
+# NUM-07 Run-shared complete-input computation
 
-All 24 formal NUM-07 profile keys use synchronous Whole Result execution: six
+All 24 formal NUM-07 profile keys use synchronous complete-input Result execution: six
 ordinary predicates, `is_close`, and `select`, each with strict, Apple and x86
 profiles. Each input is a single-tensor Result in slot 0, and all inputs must
 have the same complete `sample_shape()`, including batch axes. Each predicate
@@ -12,19 +12,14 @@ dtype.
 
 The output is a `photospider.tensor` v1 Result with tensor key `samples`, full
 `sample_shape()` and no input batch-axis metadata. Predicates return
-UInt8 0/1; `select` retains the branch dtype and copies selected bits. The Whole
-program requests every active input with Data, Validation and Descriptor roles
+UInt8 0/1; `select` retains the branch dtype and copies selected bits. The complete-input
+program requests every active input with ordinary member tile Needs with explicitly bound validators
 (13), then reads through authorized Result windows. It does not collect or copy
 complete input payloads. The comparison kernel handles up to four samples per
-batch; it uses the admitted `ComparisonMath` workspace and the shared Whole
+batch; it uses the admitted `ComparisonMath` workspace and the shared complete-input
 program's bounded phase scratch.
 
-The `ResultRelation` records each input's descriptor and full-domain Data
-support. An input edit can therefore dirty every observed output sample, while
-the requested footprint still scopes the dependency query. A sparse consumer
-does not turn the published Result into a packed ROI: Whole execution publishes
-the complete output in global coordinates. Published Result owners survive
-context destruction; uncommitted output is released on error or cancellation.
+The shared stage freezes the ordinary input tile Needs as dependency evidence. Input edits can invalidate every dependent output tile. The complete internal result remains owned by the stage; public actors expose only requested complete tiles in global coordinates. Retained Result owners survive context destruction, while failed transactions release unpublished backing.
 
 `select` eagerly requires and typed-validates both full branches, even when a
 condition selects only one. Source or typed failures can precede condition
@@ -36,7 +31,7 @@ binary-rational `is_close` threshold arithmetic remain unchanged. Scalar/NEON/AV
 comparison facilities remain; no NUM-14 certificate is used, and existing
 matrix Scalar/Accelerate/SME comparisons are unchanged.
 
-An Empty request still runs the small Whole poll that seals a zero-coverage
+An Empty request still runs the small complete-input poll that seals a zero-coverage
 Result and descriptor constant witness. It issues no tensor Need, starts no
 computed input producer and performs no sample arithmetic; static schema and
 tolerance validation still applies.

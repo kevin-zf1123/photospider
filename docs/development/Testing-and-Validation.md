@@ -1,102 +1,42 @@
 # Testing and Validation
 
-This guide describes the registered behavior tests. CMake declarations in `cmake/KernelTests.cmake`, `cmake/PackageTests.cmake` and
-`cmake/BehaviorTests.cmake` define the executable, fixtures, dependencies, command, labels, timeout, and skip code for each test.
+CMake registrations in `cmake/KernelTests.cmake`, `cmake/PackageTests.cmake`, `cmake/BehaviorTests.cmake` and optional `cmake/BenchmarkTools.cmake` define executable tests, dependencies, labels, timeouts and skips. Registration is not evidence that a test has run.
 
 ## Test ownership and lifetime
 
-Permanent tests cover kernel behavior and package contracts. Kernel unit tests
-live in `tests/unit/kernel/`; kernel integration tests live in
-`tests/integration/kernel/`. They use synthetic operations and fixtures to test
-compiler, execution, ABI, resource and ownership behavior, and build with
-`PHOTOSPIDER_BUILD_OPS=OFF`. Package contract tests live in `tests/package/`.
-The package version check evaluates the generated SameMinorVersion configuration;
-it does not install the package or compile an external consumer.
+For new or remigrated permanent cases, retain only minimal regressions for confirmed defects and existing package contracts. A necessary positive control must directly support the defect witness. Review historical cases individually: renaming a file, moving directories or adapting an ABI neither creates nor proves a historical defect. A mixed file does not justify retaining every scenario. Failure to compile against a removed API and failure after an artificial mutation alone are insufficient evidence.
 
-Bundled-operation numerical tests, operation execution integration tests,
-cross-operation workflows, examples and benchmarks are not retained as a permanent
-suite. When implementing or changing an operation, create the necessary
-public-path checks for that change. Keep temporary test sources
-and generated test data under ignored build/output directories. Remove the temporary
-checker, data and any build/test registrations as soon as validation and the
-operation change are complete. Keep mathematical definitions, tolerances and
-behavioral acceptance criteria in the operation specification.
+General feature coverage, preventive negative cases, combinations and performance comparisons may be temporary acceptance checks. Remove their source, data, hooks, fixture targets and CMake/CTest registrations after validation. Ordinary ABI coverage cannot evade this policy by being renamed a package contract. Keep independent operation oracles, mathematical references, tolerances and existing reference data under `oracle/ops`; do not change them to fit an implementation.
 
-A kernel fixture may perform simple arithmetic to expose scheduling or Result
-behavior; that does not make it a numerical acceptance test for a bundled operator.
-Tests must check program behavior, not migration status, deleted-file inventories,
-workflow process text or source-quality scores.
+Kernel regressions live under `tests/unit/kernel` and `tests/integration/kernel` and build without bundled ops. Existing package contracts live under `tests/package`. The version contract checks generated SameMinorVersion behavior without installing or building an external consumer. Do not add, restore or run installation-consumer tests while kernel development remains incomplete.
 
-Independent operation oracles and their reference data are retained for future
-operator implementation, including Proposed specifications. The temporary-test
-lifetime above applies to tests of the implementation. Oracle references live in
-[`oracle/ops/`](../../oracle/ops/README.md).
+Bundled-operation numerical checks, cross-operation workflows and example checks are written locally when needed and removed when the change is validated. Acceptance scenarios in a specification are not a permanent-test checklist. Deleted whole-result, dynamic-field and default semantic-certification assertions are not mechanically replaced by equally broad preventive coverage.
+
+Benchmark runner/oracle/report types belong to optional `Photospider::benchmark_tools`, disabled by default. Tool regressions under `tests/tools` follow the same confirmed-defect policy; enabling the target does not authorize retaining every benchmark scenario. The kernel keeps raw timing, counters and resource observations.
 
 ## Configure and run
 
-A standard local build uses:
+Reuse an existing configured build and select affected targets and tests:
 
 ```sh
-cmake -S . -B build/check -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON -DPHOTOSPIDER_BUILD_OPS=OFF
-cmake --build build/check --target photospider_kernel_tests -j8
-ctest --test-dir build/check -L '^(kernel|package)$' --output-on-failure
+cmake --build build/kernel-dev --target <affected-targets> -j 8
+ctest --test-dir build/kernel-dev -R '<focused-test-regex>' --output-on-failure
 ```
 
-The build's `photospider_tests` target builds the registered test executables. CTest labels let you run a behavior family with `ctest --test-dir build/check -L 'kernel|package' --output-on-failure`, or inspect label membership with `ctest --test-dir build/check --print-labels`. Suite labels are `kernel` and `package`; level labels are `unit`, `integration` and
-`contract`. GPU, mock, native, backend and ABI labels are explicit registrations,
-not guesses from test names. Unit tests have 120-second timeouts, integration tests
-600 seconds and package contract tests 60 seconds. Sanitizer builds multiply each applicable timeout by three.
+Build the actual test targets before interpreting CTest results. Configure only when needed. Full CTest, clean builds, sanitizers and platform matrices are not default steps. They require explicit user authorization or a task directly targeting the corresponding validation artifact. Reviewed-mode risk assessment alone does not authorize them. Formatting of changed C++ files uses ClangFormat 21 and cpplint.
 
-Tests that require private symbols link a noninstalled static test library built from the normal kernel objects; fault-injection variants replace only translation units that contain the relevant test seam. That library also compiles the private execution test hooks, which let concurrency tests wait for real events instead of timing. A phase work gate pauses the callback thread at a selected positive work charge inside an executor poll. The operation fixture DSO exports private arm, wait and release symbols, outside the operation ABI, that hold a native callback until the test releases it; the callback then calls the real cancellation service.
-
-Repository `MODULE` fixtures receive the matching sanitizer instrumentation. C11 operation fixtures remain compiled as C. On macOS ASAN builds, each module also contains a test-only C++ atexit owner that unregisters compiler-rt image globals during module retirement by `dlclose`, before the image is unmapped; see the [module instrumentation helper](../../cmake/BehaviorTests.cmake) and [retirement owner](../../tests/support/asan_module_retirement.cpp).
+Concurrency regressions use events or condition-variable gates to establish interleavings, not guessed sleeps. Remove orphan helpers, hooks and DSO targets only after retained regressions no longer depend on them. Private test seams do not enter the public plugin ABI.
 
 ## C Result table rejection
 
-Bad Result table fixtures are compiled as C11 `MODULE` libraries by the shared [`photospider_add_result_table_fixture` helper](../../cmake/BehaviorTests.cmake). Two selector-driven DSOs cover 20 malformed-table cases: operation (14), repeated input (6). The two base fixtures are [`result_operation_fixture.c`](../../tests/fixtures/result_operation_fixture.c), [`result_repeated_fixture.c`](../../tests/fixtures/result_repeated_fixture.c); they share [bad-table selector support](../../tests/fixtures/bad_result_table_support.h). The [test helper](../../tests/support/bad_result_table_fixture.hpp) selects one case and calls the real `OperationRegistry::load_plugin`; each case checks the expected `Status.code`, an empty registry key list, and the exact plugin-destroy count. The registry and any candidate are destroyed before the observer handle is closed, so retirement is checked while the DSO is still mapped.
+Retained C11 fixtures exercise actual importer defects through `OperationRegistry::load_plugin`. `test_result_repeated` retains a valid-table control and the historical missing-resolver case 6. Other retained table cases follow their own confirmed history; fixture case counts are not a compatibility promise. See `cmake/KernelTests.cmake` for current fixture dependencies.
 
-The root integration tests are [`test_result_plugin`](../../tests/integration/kernel/test_result_plugin.cpp), [`test_result_repeated`](../../tests/integration/kernel/test_result_repeated.cpp). Their fixture dependencies come from the [root CMake registrations](../../CMakeLists.txt). To build and run this focused set:
-
-```sh
-cmake --build build/check --target \
-  test_result_plugin test_result_repeated -j8
-ctest --test-dir build/check \
-  -R '^(test_result_plugin|test_result_repeated)$' \
-  --output-on-failure
-```
+Module tables and state retire before their DSO owner. Lifecycle assertions must observe real destruction while the observer module is still mapped. ABI-size rejection alone does not prove a previously reported behavioral defect.
 
 ## Behavior boundaries
 
-The registered suite covers compiler validation and planning, Result operations and C ABI loading, execution and cancellation, dependency relations, resource limits, and native backend dispatch.
+Tests assert observable values, coverage, errors, cancellation, ownership and resource effects. Tile Needs and immutable shared evidence define dependencies; restoring evidence does not restore read authority. Cache hits alone are not a correctness oracle. Before/after failure evidence and the smallest input/assertion identify a retained regression.
 
-Mock/service checks and native GPU checks have separate registrations. Only
-hardware-dependent entries use skip return code 77; a native skip does not
-replace a passing mock/service result. Their software contract may still be covered by deterministic CPU or fault-injection tests, but those do not establish native device execution. Report CPU/mock coverage and actual hardware execution separately.
+Report CPU, mock, native pass, native failure and native skip separately. Hardware-dependent tests may use skip code 77 when the backend/device is unavailable. Once native work is admitted, unexpected failure remains a failure. A mock or mathematical oracle does not establish native GPU execution. Report only commands actually run, with untested backends stated explicitly.
 
-`test_gpu_c_abi_bridge` runs `test_gpu_c_abi_execution --bridge-only` with
-`kernel`, `integration`, `mock`, `abi` and `gpu` labels. It needs no GPU and has
-no skip code. It checks that invalid writable flags and forged or expired tokens
-are rejected before host callbacks, with valid token translation as a positive
-control. The separate `test_gpu_c_abi_execution` registration covers native
-execution. Run the software bridge check with:
-
-```sh
-cmake --build build/check --target test_gpu_c_abi_execution -j8
-ctest --test-dir build/check -R '^test_gpu_c_abi_bridge$' -LE native --output-on-failure
-```
-
-The MSL integration tests in `tests/integration/kernel/gpu/` run their preceding
-CPU checks on other builds, then skip the native phase unless Metal is compiled
-(`PHOTOSPIDER_ENABLE_METAL` and `APPLE`) and the context has an available GPU.
-Metal unit tests check the actual device backend. Once a native phase is admitted,
-unexpected backend failures remain test failures; they are not converted to skips.
-
-Tests assert observable values, error categories, resource limits, cancellation, publication, and ownership behavior. Cache internals such as block-cache hit counts are implementation details; performance benchmarking is tracked separately from this behavior suite.
-
-Negative cases isolate one invalid condition while keeping other inputs valid,
-so another rejection cannot satisfy the same structured error assertion. Error
-propagation tests compare the captured original `Status`, including its message,
-instead of hard-coding generated English text. Exact counts remain appropriate for
-specified charges and direct lifecycle events. Where the contract specifies only
-an upper bound, assert that bound and exercise an explicit rejection; use actual
-computation and ownership observations to establish reuse and retirement.
+Error regressions isolate the relevant condition and compare the original structured status where propagation is the contract. Exact counts are appropriate for specified charges or lifecycle events; implementation-only hit-rate or scheduler timing expectations are not permanent behavior guarantees.

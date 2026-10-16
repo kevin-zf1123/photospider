@@ -24,7 +24,7 @@ In particular, rounding is nearest/ties-to-even with gradual underflow and the
 caller floating environment is preserved. This is limited inheritance: the ports,
 output structures, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
-turn a composite template or structured Result into a generic NUM Value primitive.
+turn a composite template or structured Result into a generic NUM Tensor primitive.
 A stated four-ULP final bound uses the shared FP32-scaled contract for both
 Float32 and Float64 outputs.
 Classification, exact landmarks and signed-zero rules are checked separately.
@@ -102,13 +102,13 @@ classification/sign must match strict. No GPU implementation is specified.
 
 ## Demand, dirty propagation and storage
 
-Empty Q reads no payload. All six formal profile keys use Whole. Nonempty Q collects complete x/y/query Results with Data, Validation and Descriptor (role 13), validates global x/y topology, then prechecks every query control before inverse arithmetic. The unchanged
+Empty Q reads no payload. All six formal profile keys use complete-input. Nonempty Q collects complete x/y/query Results with ordinary payload tile Needs, validates global x/y topology, then prechecks every query control before inverse arithmetic. The unchanged
 linear pair or PCHIP stencil is selected from complete inputs. Any input change
 invalidates the complete output. Full typed/upstream validation can fail even
 outside delivered Q. Dynamic numerical failures have Domain/Run scope.
 
 Cache identity includes method, dtype, policy, profile and complete inputs.
-The program publishes one immutable dense Result with full certified coverage; sample coordinates remain global rather than being rebased to Q. Its association records the actual source ObjectIds. Arbitrary legal strides, offsets, unaligned and zero/negative
+The program publishes one immutable dense Result with complete internal coverage, with public coverage restricted to requested tiles; sample coordinates remain global rather than being rebased to Q. Its association records the actual source ObjectIds. Arbitrary legal strides, offsets, unaligned and zero/negative
 strides are supported. Output ownership survives context destruction.
 
 Lookup work is O(K+N log K) plus exact arithmetic/refinement. Promoted x/y use
@@ -118,7 +118,7 @@ N*sizeof(dtype), and collected input storage is also budgeted. Sparse demand can
 therefore exhaust capacity that regional execution previously accepted. Work and
 cancellation checks cover topology/query scans, search, each root refinement and
 publication. Failure releases temporary storage and publishes no partial output.
-DependencySession numeric/fallback counters are unavailable for Whole callbacks;
+DependencySession numeric/fallback counters are unavailable for complete-input callbacks;
 N/A is not a claim of zero fallback. Scalar/NEON/AVX2 math paths remain available.
 
 ## Errors and acceptance
@@ -129,7 +129,7 @@ x/y, invalid global monotonicity, nonfinite query or reject-domain
 failure uses OperationFailed/InvalidDomain. Final narrowing overflow uses
 OperationFailed/ArithmeticOverflow. ResourceExhausted, BackendUnavailable,
 cancellation, stale and upstream errors retain their shared categories/provenance.
-Whole output publication is atomic. A final output overflow anywhere fails the run;
+complete-input output publication is atomic. A final output overflow anywhere fails the run;
 an unused endpoint that would narrow to infinity does not reject a finite root.
 
 Linear fixture x=[0,1,3],y=[0,2,4],query=[3,1,3] -> [2,0.5,2]. PCHIP fixture
@@ -156,7 +156,7 @@ x/y/query and static dtype/policy through Compiler/ExecutionContext. Create this
 
 
 
-`plugins/ops/01-numeric/curve_inverse.cpp` registers the six Whole Result keys; the public constructors are `invert_linear_node` and `invert_pchip_node` in [`inverse_curves.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/inverse_curves.hpp). Linear inversion uses an exact rational path across profiles. Strict and general Float64 PCHIP use the exact polynomial/lattice algorithm. Accelerated Float32 PCHIP uses a certified bracket and accepts only a uniquely rounded result, otherwise it falls back to the strict scalar solver. Exact cross products reduce collinear PCHIP stencils to linear inversion; K=2, knot and clamp paths remain direct. Scalar integer comparison temporarily selects the strict inverse math profile and restores the surrounding numeric profile afterward. The execution floating-environment guard independently preserves the caller environment.
+`plugins/ops/01-numeric/curve_inverse.cpp` registers the six complete-input Result keys; the public constructors are `invert_linear_node` and `invert_pchip_node` in [`inverse_curves.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/inverse_curves.hpp). Linear inversion uses an exact rational path across profiles. Strict and general Float64 PCHIP use the exact polynomial/lattice algorithm. Accelerated Float32 PCHIP uses a certified bracket and accepts only a uniquely rounded result, otherwise it falls back to the strict scalar solver. Exact cross products reduce collinear PCHIP stencils to linear inversion; K=2, knot and clamp paths remain direct. Scalar integer comparison temporarily selects the strict inverse math profile and restores the surrounding numeric profile afterward. The execution floating-environment guard independently preserves the caller environment.
 
 For temporary validation, bind immutable source Results and read outputs through
 authorized windows. Cover caller/worker floating environments, mixed dtypes,
@@ -166,6 +166,6 @@ polling a failing producer, SampledSignal errors attributed to input 2,
 cancellation and source-owner retirement. A three-element Float32/Float64 output
 and its windows retain 12/24 Payload bytes after source retirement; releasing
 the last window releases that payload. A constant View with N=2^40 must fail
-`ResourceExhausted/CapacityLimit` when complete Whole output storage exceeds the
+`ResourceExhausted/CapacityLimit` when complete complete-input output storage exceeds the
 configured Payload cap. This case checks admission, not numerical execution at
 that logical size.

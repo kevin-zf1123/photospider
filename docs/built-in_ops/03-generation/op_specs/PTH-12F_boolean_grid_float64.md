@@ -26,7 +26,7 @@ Distinct grid points collapsing in Float64 cannot silently count as successful
 publication. Do not claim original-input exactness. Canonical output must agree with an
 explicit compatible grid-result publication path, once that codec/conversion is frozen.
 
-Whole execution; no partial Result on failure. Tests include large grid indices,
+Run-shared complete-input computation; no partial Result on failure. Tests include large grid indices,
 non-power-of-two scale, topology-preserving and topology-breaking publication,
 scale/origin identity, overflow and cancellation. Backend and codec remain gates.
 

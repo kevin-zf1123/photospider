@@ -40,7 +40,7 @@ There is no successful early iteration cutoff. At most H*W successful cycles
 are possible, followed by the terminating cycle. A work/stage budget failure
 returns ResourceExhausted, and cancellation publishes no partial skeleton.
 
-Any nonempty output request requires Whole input validation and iterative
+Any nonempty output request requires complete-input input validation and iterative
 computation; an empty Region requires descriptors only. Input changes may dirty
 all output pixels. Charge the input retention, output/state and deletion mask;
 reference work is O(iterations*H*W), scratch O(H*W). Poll at the common cancellation

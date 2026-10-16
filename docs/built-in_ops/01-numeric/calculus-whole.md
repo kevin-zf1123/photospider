@@ -1,20 +1,20 @@
-# NUM-15 Whole execution
+# NUM-15 Run-shared complete-input computation
 
 The six `numeric.derivative_1d_*` and `numeric.integrate_1d_*` operations execute
-as Whole Result programs. Each input is one tensor member under any key. Samples
+as Run-shared Result programs. Each input is one tensor member under any key. Samples
 use Float32 or Float64 `sample_shape()` [N]; step and initial use the same dtype
 and shape [1]. Each output uses port key `values` and has a `photospider.tensor`
-Result schema with tensor member `samples`, shape [N], input dtype, and no attached domain description. Whole computes and publishes the
+Result schema with tensor member `samples`, shape [N], input dtype, and no attached domain description. complete-input computes and publishes the
 complete output before applying the consumer projection.
 
-`numeric_tensor_program.hpp` supplies the Whole protocol. The writer borrows its window during publication; published Result
+`numeric_tensor_program.hpp` supplies the complete-input protocol. The writer borrows its window during publication; published Result
 storage remains owned after context retirement. Logical row reads support
 strided and negative-stride input storage.
 
 `derivative_1d` requires N>=2. The kernel reads the two endpoint samples for
 one-sided differences and the two neighboring samples for each interior central
 difference. The center sample does not enter its own interior result, though
-Whole input preparation still validates all samples. `ExactCalculus` evaluates
+complete-input input preparation still validates all samples. `ExactCalculus` evaluates
 the exact quotient for the discrete formula and converts once to the output
 dtype. The endpoint, NaN, infinity, zero, and rounding rules are specified in
 [NUM-15A](op_specs/NUM-15A_derivative_1d.md).
@@ -23,7 +23,7 @@ dtype. The endpoint, NaN, infinity, zero, and rounding rules are specified in
 specialized output selects only input port 2 (initial) at runtime. The operation
 copies its raw bits to output[0], including signaling NaN and signed zero; it
 does not start the samples or step producers. Metadata for every input remains
-statically checked, including matching shape and dtype. For N>1, Whole requests
+statically checked, including matching shape and dtype. For N>1, complete-input requests
 all three inputs even when the consumer requests only output[0], and validates
 step as finite and nonzero. Negative finite step is valid. `ExactCalculus` keeps
 the exact weighted sample prefix across output conversions and rounds the full
@@ -33,7 +33,7 @@ initial-plus-area formula once per positive output index. See
 Empty demand schedules no payload work or producer execution. A nonempty
 failure publishes no partial output. Work and cancellation checks apply during
 input reads, exact arithmetic, stores, and publication; resource or cancellation
-errors retain their runtime categories. Nonempty Whole execution requires a
+errors retain their runtime categories. Nonempty Run-shared complete-input computation requires a
 complete dense output and fixed exact arithmetic state, except that N=1
 integration copies initial directly without constructing `ExactCalculus` state.
 
@@ -52,7 +52,7 @@ auto integral = ps::numeric::integrate_1d_node(
 
 For temporary public-path validation, declare source Results backed by immutable
 storage, bind them to a WorkflowDocument, and execute through the public kernel API. A nonempty sparse query still computes and publishes the complete
-output with full tensor coverage. Whole input preparation reads the complete
+output with full tensor coverage. complete-input input preparation reads the complete
 active sources. The query scopes the recorded output dependency observation and
 dirty mapping; it does not trim Result coverage. An interior derivative center
 may be absent from that output's stencil while an edit to it still invalidates

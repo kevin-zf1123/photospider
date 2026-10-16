@@ -36,7 +36,7 @@ CPU/GPU先按每个算法的数值与内存协议实现。窗口长度和状态�
 | AUX-01 AOV select/transform | named depth/normal/position/motion/ID/coverage→AOV | data角色，不做颜色transfer；normal变换/normalize，整数ID保持 |
 | AUX-02 Cryptomatte extract | ID/coverage channels+manifest+selection→mask | hash编码、重叠、AA、名称查找与缺manifest；不能用RGB色键替代 |
 | AUX-03 deep select/sort | offsets+samples→deep | front/back depth、surface/volume、排序tie、最大sample数 |
-| AUX-04 deep merge/holdout | deep inputs→deep | 交错深度、重叠体积、opacity区间规则；可用 Result 零 rows；Deep sample/schema 与算法仍待定义 |
+| AUX-04 deep merge/holdout | deep inputs→deep | 交错深度、重叠体积、opacity区间规则；使用静态 samples/offsets 容量及普通有效 count；Deep sample/schema 与算法仍待定义 |
 | AUX-05 deep flatten | deep→flat color/alpha/depth | 给定view/样本解释与积分；透明层与终止条件 |
 | AUX-06 geometric attributes | depth/normal/position+camera→derived data | reconstruct position、normal、depth compare、relight输入；无数据不猜单位 |
 

@@ -11,7 +11,7 @@ The kernel exposes compiler, data, execution, and plugin contracts without expos
 consumer document / values
           |
           v
- Photospider public contracts <----> operation/provider ABI
+ Photospider public contracts <----> operation ABI
                                           |
                                           v
                               implementation-private libraries
@@ -23,13 +23,13 @@ The kernel owns the typed workflow and execution boundary. A plugin owns its int
 
 ```cpp
 struct WorkflowDocument;
-class Value;
+class Tensor;
 class Region;
 class OperationRegistry;
 struct ExecutionContextConfig;
 ```
 
-These public C++ types define the kernel-facing data model. The Result operation and data-provider C interfaces are declared in `photospider/plugin/result_operation_plugin_api.h` and `photospider/plugin/data_provider_api.h`. Operation plugins pass fixed-width Result records and borrowed buffers; third-party objects and exceptions stay inside the plugin. The installed kernel's required external runtime dependency is C++ and Threads; optional native backends and integrations are build choices.
+These public C++ types define the kernel-facing data model. The Result operation C interface is declared in `photospider/plugin/result_operation_plugin_api.h`; no separate data-provider C interface is exposed. Operation plugins pass fixed-width Result records and borrowed buffers; third-party objects and exceptions stay inside the plugin. The installed kernel's required external runtime dependency is C++ and Threads; optional native backends and integrations are build choices.
 
 ## 4. Non-Goals & Explicit Boundaries
 - The kernel does not define file discovery, document parsing, persistence, codecs, UI, networking, or cryptographic services.

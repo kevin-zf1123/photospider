@@ -71,8 +71,8 @@ disjoint, typed-validation, lifetime, cache and budget/cancellation cases;
 resource exhaustion must fail rather than guess a near-threshold predicate.
 
 The default registry implements all three profile keys using a bounded exact
-4352-bit predicate workspace with Whole input/output execution.
+4352-bit predicate workspace with complete-input input/output execution.
 The specification remains Proposed; these are manual checks outside integration
 tests, with no performance claim.
 
-Current Whole execution, capacity and validation: [NUM-07 measurements](../comparison-whole.md).
+Current Run-shared complete-input computation, capacity and validation: [NUM-07 measurements](../comparison-whole.md).

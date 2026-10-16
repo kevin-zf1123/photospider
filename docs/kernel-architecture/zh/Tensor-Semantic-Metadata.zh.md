@@ -2,7 +2,7 @@
 
 英文权威文档：[Tensor-Semantic-Metadata.md](../Tensor-Semantic-Metadata.md)。
 
-本页说明算子 SDK 中的一种配置类型。内核不存储、不传播、也不校验 tensor 描述：Result 与 Value 只携带结构、数据和存储 owner。`TensorDescription` 只作为读取它的算子的显式静态参数存在。
+本页说明算子 SDK 中的一种配置类型。内核不存储、不传播、也不校验 tensor 描述：Result 与 Tensor 只携带结构、数据和存储 owner。`TensorDescription` 只作为读取它的算子的显式静态参数存在。
 
 ## 1. 模块边界与所有权
 
@@ -45,10 +45,10 @@ Result<std::string> tensor_description_parameter(const TensorDescription&);
 Result<TensorDescription> tensor_description_from_parameter(
     const std::string&);
 Status validate_tensor_description(const TensorDescription&,
-                                   const ValueDescriptor&);
+                                   const TensorDescriptor&);
 ```
 
-`TensorDescription` 记录可选 channel axis 上的有序 channel、一个选中的 component、逻辑轴、全局解释默认值和完整 color group。`validate_tensor_description` 不读取样本，只把描述与 `ValueDescriptor` 比对。校验要求 rank 为 1 到 8，channel axis 位于该 rank 内，axes 表为空或每个逻辑轴恰有一项。每个轴有 name、unit、有限 origin 和正有限 step。完整 group 列出有序且互异的 component 索引及对应 channel 描述；可选 alpha 索引位于同一 tensor 内，且不在颜色索引中。Group 声明与显式提供的 channel 声明必须一致。
+`TensorDescription` 记录可选 channel axis 上的有序 channel、一个选中的 component、逻辑轴、全局解释默认值和完整 color group。`validate_tensor_description` 不读取样本，只把描述与 `TensorDescriptor` 比对。校验要求 rank 为 1 到 8，channel axis 位于该 rank 内，axes 表为空或每个逻辑轴恰有一项。每个轴有 name、unit、有限 origin 和正有限 step。完整 group 列出有序且互异的 component 索引及对应 channel 描述；可选 alpha 索引位于同一 tensor 内，且不在颜色索引中。Group 声明与显式提供的 channel 声明必须一致。
 
 `TensorEncoding` 按下式把存储值映射为解码值：
 
@@ -81,7 +81,7 @@ struct MetadataOptions final {
   std::string missing = "error";       // "error" 或 "ignore"
 };
 Result<TensorDescription> edit_description(
-    const TensorDescription& source, const ValueDescriptor& descriptor,
+    const TensorDescription& source, const TensorDescriptor& descriptor,
     const MetadataOptions& options = {});
 }  // namespace ps::format
 ```
@@ -125,7 +125,7 @@ source description + descriptor
 
 ## 5. 限制与非目标
 
-- 描述是静态算子配置。它不附着在 Result 或 Value 上，不沿图的边流动，任何算子输出都不会继承输入的描述。
+- 描述是静态算子配置。它不附着在 Result 或 Tensor 上，不沿图的边流动，任何算子输出都不会继承输入的描述。
 - 内核不会因两个 Result 的预期描述不同而拒绝连线；端口兼容只由结构决定。算子在 preparation 时把显式描述与输入 descriptor 比对，绑定的校验器可以检查样本值。
 - Tensor 描述说明逻辑轴和解释，不定义物理 stride、planar/tiled 存储或图像所有权。
 - Profile identity 不携带资源字节。调用方必须在传给 compiler 的 `ResourceSet` 中提供资源。

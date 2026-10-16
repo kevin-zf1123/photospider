@@ -21,7 +21,7 @@ Inherit the complete [FMT-18 family](FMT-18_softproof_contract.md) and applicabl
 
 ## Ports, parameters and output inference
 
-One input Float32/Float64 tensor Value, one selected complete group (or explicit
+One input Float32/Float64 tensor Tensor, one selected complete group (or explicit
 raw ordered slots). Source profile and endpoint interpretation are explicit static parameters. Proof/display profiles are mandatory. rendering_intent defaults to relative, proofing_intent to absolute, bpc to off, execution to optimized. Output values uses the display profile and preserves/remaps alpha and AOVs according to FMT-12.
 All settings/resources are static. The described and finite-only raw paths
 retain the family's explicit parameter, unit and structural requirements. No profile or

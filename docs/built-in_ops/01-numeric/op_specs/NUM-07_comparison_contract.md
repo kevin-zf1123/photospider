@@ -32,7 +32,7 @@ representing false by 0 and true by 1. Output carries no domain description; com
 results do not implicitly acquire image mask, alpha or color semantics.
 Use explicit cast/broadcast for type and shape adaptation.
 
-Inherit [binary execution requirements](NUM-05_binary_contract.md) for Whole
+Inherit [binary execution requirements](NUM-05_binary_contract.md) for complete-input
 full-input demand, typed validation, invalidation, strides, returned
 output projections, immutable ownership, resources, cancellation, errors and public
 acceptance. The explicit exception is output dtype UInt8 for all input dtypes.
@@ -74,20 +74,20 @@ strided/disjoint demands and shared resource/ownership checks.
 
 The six predicates and `is_close` are registered under their three explicit
 profile keys. Per-node specialization validates matching dtype/shape, parses
-the `is_close` tolerances, and registers synchronous Whole execution with
+the `is_close` tolerances, and registers a Run-shared complete-input computation with
 no dependency maps or continuation. The implementation uses raw IEEE classification and integer order keys;
 the exact `is_close` predicate uses bounded dyadic arithmetic and does not
 perform floating subtraction or tolerance rounding.
 
-`numeric.select` also uses Whole for its three profiles. It collects and validates
+`numeric.select` also uses complete-input for its three profiles. It collects and validates
 condition and both complete branches before checking condition bytes. Selected
 bits are copied unchanged. Unselected source/typed failures are visible, and
 collection/typed failure may precede InvalidCondition. Any input edit invalidates
 all observations. Invalid condition anywhere fails with Run scope and no Atom key.
-All NUM-07 Whole callbacks have per-value numeric diagnostics N/A.
+All NUM-07 complete-input callbacks have per-value numeric diagnostics N/A.
 
 Validate source support, typed closure, sNaN floating-environment preservation,
 condition/error isolation, source replacement and resource cleanup separately
 from numerical comparisons. Specification status remains Proposed.
 
-Current Whole validation and timing are recorded in [NUM-07 measurements](../comparison-whole.md).
+Current complete-input validation and timing are recorded in [NUM-07 measurements](../comparison-whole.md).

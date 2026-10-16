@@ -26,7 +26,7 @@ registration, shared execution and acceptance requirements; explicit rules
 below and in the named family contract take precedence. This specification
 remains Proposed; its status does not describe runtime registration.
 
-## Tensor ports and Whole execution
+## Tensor ports and Run-shared complete-input computation
 
 The three input ports are `input`, `lower` and `upper`, in that order. Each is a
 `Result` containing exactly one tensor member at index zero; its
@@ -41,14 +41,13 @@ input `sample_shape()` as the output cell shape. Batch axes become ordinary
 output axes, and output carries no domain description. Input shape rank is 1..8 and its
 complete logical element count is at most 2^40.
 
-The three formal clamp profile keys use one Whole continuation. A nonempty
-request issues one Need covering every sample on all three inputs with Data,
-Validation and Descriptor roles (13). The continuation reads owning tensor
+The three formal clamp profile keys use one complete-input continuation. A nonempty
+request issues one Need covering every sample on all three inputs through ordinary member tile Needs. The continuation reads owning tensor
 windows, validates every bound, then publishes the complete output through one
 direct tensor writer. Sparse output demand does not narrow input validation or
 the arithmetic domain. Any bound failure invalidates the complete invocation.
-The output relation carries complete Data support from every input and retains
-the full-input validation and descriptor obligations.
+The shared stage freezes complete input tile evidence. Public output actors
+publish only requested complete member tiles and do not widen read authorization.
 
 An Empty request publishes the declared output schema with empty sample
 coverage. It issues no input payload Need and performs no sample arithmetic;
@@ -79,7 +78,7 @@ not relabeled as a numeric bounds error. Numeric bound failure returns
 and no Atom key. Its diagnostic identifies the bound port and raw bits and
 includes the complete logical coordinate, including any former batch prefix.
 
-The Whole callback owns one fixed `RangeMath` workspace through the phase
+The complete-input callback owns one fixed `RangeMath` workspace through the phase
 allocator and charges work to the execution root. Complete input windows,
 output payload and workspace coexist during execution. Capacity, work-limit,
 cancellation or numeric failure publishes no partial output and releases
@@ -88,15 +87,15 @@ and sample work.
 
 Temporary public Result acceptance should cover Float32/Float64 paths, all four
 clamp dtypes, integer extrema, negative/zero strides, batch-axis flattening, negative
-zero, invalid bounds outside sparse demand, typed validation, Whole support,
+zero, invalid bounds outside sparse demand, typed validation, complete-input support,
 Empty, resource exhaustion, cancellation, binding changes and global-coordinate
 projection. Use independent UInt8/Int64 boundary values. Execution behavior is
-described in [NUM-06 Result Whole execution](../range-whole.md).
+described in [NUM-06 Result Run-shared complete-input computation](../range-whole.md).
 
 Input values `[-1, 0.5, 2]`, lower `[0,0,0]` and upper `[1,1,1]` produce
 `[0,0.5,1]`.
 
 The code declares strict, Apple Silicon and x86-64 profile keys. Execution behavior and temporary acceptance cases are described in
-[NUM-06 Result Whole execution](../range-whole.md). Validate each admitted profile
+[NUM-06 Result Run-shared complete-input computation](../range-whole.md). Validate each admitted profile
 against independent Fraction references. The specification remains Proposed;
 its cases do not report current hardware or performance results.

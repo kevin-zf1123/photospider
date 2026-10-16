@@ -48,7 +48,7 @@ class PHOTOSPIDER_API ExecutionContext final {
 
 这些代码还原公开 compiler 和 execution 方法的签名；省略了头文件与无关声明。`Compiler::analyze` 接收 graph snapshot 和可选的 `ResourceSet`，后者由按内容寻址的 `ImmutableResource` 句柄组成。Operation preparation 通过显式 `ResourceIdentity` 从该集合中选取资源；prepared operation、plan 和执行状态持有所选 owner，Result 只持有它实际保存的存储。`ExecutionPlan` 是公开 class。
 
-内核拥有 `WorkflowDocument` 的解释、图验证、语义与优化 IR、算子 traits、规划、`Value` 和 `Region` 契约、本地执行、资源计账、取消、后端选择、fallback 与结果发布。`GraphContext` 和 `ExecutionContext` 是独立对象，既不是 daemon session，也不是全局注册表条目。阶段 digest 和 plan/cache key 是用于复现与可丢弃派生数据的非安全身份。
+内核拥有 `WorkflowDocument` 的解释、图验证、语义与优化 IR、算子 traits、规划、`Tensor` 和 `Region` 契约、本地执行、资源计账、取消、后端选择、fallback 与结果发布。`GraphContext` 和 `ExecutionContext` 是独立对象，既不是 daemon session，也不是全局注册表条目。阶段 digest 和 plan/cache key 是用于复现与可丢弃派生数据的非安全身份。
 
 daemon 拥有本地 IPC，以及围绕已安装内核软件包的临时进程编排。内核通过公开 API 拥有编译器 IR、执行资源、值和执行结果。本 ADR 规定组件边界；daemon session、job、取消和清理的实现细节由 daemon 仓库维护。
 

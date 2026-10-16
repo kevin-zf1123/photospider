@@ -1,59 +1,33 @@
-# 逻辑 Region 与 Result 图像 samples
+# 逻辑区域与 Result 图像样本
 
-英文权威文档：[Region-Semantics.md](../Region-Semantics.md)。
+## 范围与所有权
 
-## 模块边界与所有权
+`Region` 描述逻辑 descriptor 域内的 offset/extent 区间。`Footprint` 表示精确样本覆盖，包括不连续 box 和空洞。二者都不描述物理字节位置。`Tensor` 拥有不可变 backing 片段；Result 和捕获的 descriptor 限定读 capability 可用的覆盖。
 
-`Region` 描述 descriptor domain 中的逻辑 samples。`Footprint` 保存这些 samples 的精确集合，包括不相邻的 boxes 和 holes。Storage origin、byte offsets、strides、padding、planar pages 和 tile geometry 描述物理访问方式，不会重新定义逻辑坐标或有效 coverage。
+## 数据布局与内存
 
-对图像而言，descriptor domain 外加 tensor 的 batch axes（例如 frame 和 layer）。`ResultRef` 拥有图像结构、descriptor、已发布 coverage、dependency relation 和生命周期；颜色与 alpha 含义来自算子参数。`PlanarImage` 为 Result image slot 提供 backing，并读取获准的 samples。Planner 确定请求范围，operation 声明输入 support，coordinator 只准入请求所需的读取和发布。
+`ResultTensorSpec` 包含成员 key、dtype 与 cell shape、显式 `batch_axes`、`atomic_trailing_axes` 和可选空间布局。完整样本坐标由 batch 与 cell 轴拼接。空间 H/W 和 channel 索引相对于 cell，轴顺序显式指定。通道数量不隐含颜色或 alpha 解释。
 
-## 核心数据结构与内存布局
+`close_samples` 把样本区域闭包到末尾 atomic cell 轴。Tile 授权是另一项几何操作：空间 tile 完整覆盖所有非 H/W cell 轴，包括 channel，即使没有 atomic 轴也如此。非空间 tile 切分最后两个非 atomic cell 轴；更前面的此类轴和显式 batch 轴形成独立坐标。Atomic 轴保持完整。
 
-```cpp
-struct ResultTensorSpec final {
-  ResourceLease metadata_owner;
-  ResourceString key;
-  ResourceVector<std::uint64_t> batch_axes;
-  std::uint32_t atomic_trailing_axes = 0;
-  ValueDescriptor descriptor;
-  ResultTensorLayout layout;
-  std::vector<std::uint64_t> sample_shape() const;
-  Result<Footprint> close_samples(const Footprint& samples,
-                                  const FootprintLimits& limits = {}) const;
-};
-```
+所有逻辑 extent 都为正。空 Footprint 不选择样本，也不改变 schema。数据依赖的有效数量是静态容量 schema 内的普通 payload 成员。Padding、空洞和未提交样本不可读。拥有型读窗口保留实际的负、零或正 stride，并在物理和授权边界截断 run。
 
-图像是 `layout.spatial` 为 true 的 tensor slot。其逻辑 sample 形状为 `batch_axes` 后接 cell descriptor，例如 `{N,L,H,W}` 或 `{N,L,H,W,C}`：`N` 与 `L` 是 frame、layer 之类的 batch axes，`H/W` 选择空间 sample，可选的 `C` 选择 channel。Cell descriptor 的 rank 为 2 或 3。四通道像素可以放在分离的 planes 中；逻辑 tuple 完整不代表物理字节交错。
+## 请求、执行与状态
 
-`close_samples` 把请求扩展到末尾 `atomic_trailing_axes` 个 cell axes 上。对 `atomic_trailing_axes = 1` 的 HWC 图像，请求某像素的一个 channel 会得到该像素的全部 channel；若 alpha 存储在 channel axis 上，也包含 alpha。Structural layout groups、schema id 和 channel 数量都不会扩展 sample set。`atomic_trailing_axes = 0` 的 slot 严格按 descriptor sample 坐标访问。Padding、plane gaps 和尚未发布的 samples 仍不可读。Storage views 保留 backing owner；Result coverage 及 captured descriptor 则授权 callback 可读范围。
+Payload 请求使用成员 slot 和紧凑 tile 区间。算法可以先通过普通 Need 读取控制值，再选择后续 tile Need。内核记录这些 payload 依赖，不使用 data/control 角色标签。Descriptor-only 请求必须显式提出，不授予样本，也不启动 payload producer。空 payload 集合不建立依赖或授权。
 
-普通 Value descriptors 和结构化 Result image descriptors 遵循不同契约。Value 的 extent 非零；在保留非零 descriptor 时，其请求 Footprint 可以为空。Result 的动态 structured field 可以有零行，image slot 的请求 footprint 也可以为空。两种空状态都不能伪造 samples 或省略 descriptor/count obligations。
+要求完整覆盖的输入 validator 仅在算子请求完整授权范围后运行，不扩大 Need。完整输入算法使用 `sdk::to_whole`；全局工作可以在 Run 共享 stage 内执行一次。完整覆盖不构成另一种执行模式。
 
-## Demand、执行与状态
+Dirty 表示可能受到影响，不表示数值必然不同。成员 tile 记录和冻结的共享证据决定失效传播。增加已提交覆盖属于生产进度，不属于内容编辑。精确样本 Footprint 仍用于窗口和 view，依赖与失效粒度为成员 tile。
 
-编译器解析每个具名 output 的请求 `Q`。对 image output，Result continuation 收到 captured output footprint 和 image slot。Callback 可分阶段请求 input needs：先取 Control samples，再根据 control 值选择 Data image samples。每个 Need 都依据 Result schema、slot、逻辑 sample domain 和 input 已发布 coverage 校验。Callback 不能同步取回空洞或当前 capability 以外的 sample。
+## Tile 投影运算
 
-Whole operations 保持 Whole dependencies。只有 `atomic_trailing_axes` 参与 sample closure；channel roles 和颜色解释是算子参数，不改变 dependency support。物理 `PlanarImageLayout::groups` 不会暗中新增 dependency edges。绑定了 `requires_complete` 校验器的输入端口需要 Whole Need，因此其算子不能在该端口上使用 tile Need。
+正 tile extent `T` 和逻辑 extent `E` 对应 tile 数 `E / T + (E % T != 0)`，避免 `E + T - 1` 溢出。Plan 要求 T 为二次幂，默认 128。乘积、tile 索引和区间端点都检查溢出。完整覆盖保持为紧凑区间，实际任务按有界批次展开。
 
-Dirty 表示可能受影响，不表示数值不同。Footprint transformations 有界，并计入 execution root；超出 work 或 metadata 限额时返回错误。
-
-## Tile 投影的算术
-
-对正数 tile extent `T` 和逻辑 extent `E`，tile 数量为：
-
-$$
-C = \left\lceil \frac{E}{T} \right\rceil,
-\qquad
-C = E / T + (E \bmod T \ne 0).
-$$
-
-该整数表达式避免计算可能溢出的 `E + T - 1`。Tile projection 仅为物理调度分组精确请求的 samples，不扩展其 dependency support 或 coverage。
+逻辑网格独立于 backing 几何。同一 backing 可用于不同 T 的 plan，逻辑授权随之改变，不必仅为匹配 tile 边界而重新打包。
 
 ## 限制与错误处理
 
-越界 regions、未授权读取、不完整发布和重叠 image writes 均会校验失败。请求在访问前沿 atomic trailing axes 扩展；`atomic_trailing_axes` 大于 cell rank，或 closure 超出 slot domain 时校验失败。Resource exhaustion、取消、stale binding replacement、sticky callback failure 和 protocol errors 保留各自状态，不会变成 Empty coverage。Coordinator 复用借用存储前，所有已准入 callbacks 都会退出。
+越界索引、未授权读取、不兼容的重叠写入和不完整的普通 tile 发布均失败。普通发布必须完整，恰好覆盖所选成员 tile，其他成员为空。共享 stage 可以逐步发布多个完整 tile。固定 bundle 可见性可延迟公开并主动调度兄弟 tile；见 [Global Results](Global-Results.zh.md)。
 
-空 output demand 不执行 image sample 工作，但 descriptor 和 control obligations 仍需明确记录。成功的 image publication 必须覆盖 captured output demand，并提供 relation evidence。已发布的 Result prefix 保持不可变；之后的 producer failure 不会扩大旧 descriptor 的授权。
-
-C11 fixture 覆盖 runtime Field rows，包括零行与非零行之间的替换。跨 frame support 和各 slot 独立 dirty 由 `test_result_image_contracts` 覆盖。
+取消、资源耗尽和过期 generation 保留各自错误状态。失败事务不安装部分 payload 或不完整依赖证据。此前已提交 tile 保持不可变。显式空输出 demand 不执行 payload 工作；mandatory 副作用遵循 [Global Results](Global-Results.zh.md) 中普通执行与显式 DemandQuery 的区别。

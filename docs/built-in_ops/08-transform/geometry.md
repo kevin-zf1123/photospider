@@ -24,7 +24,7 @@
 | GEO-14 reproject/panorama | source/target projection→map | orientation、FOV、chart、pixel aspect | seam/cubemap面边界、未知视角无数据 |
 | GEO-15 mip pyramid/sample footprint | image+map/Jacobian→sampled | reconstruction、max anisotropy、lod规则 | minification与各向异性，质量档误差 |
 
-首版默认图像sampler可采用bilinear+域外transparent，resize缩小时必须明确低通；标签/ID采用nearest，normal插值后按语义归一化，flow按数据向量处理。image v2 已支持 finite signed/HDR；具体端口输入子集仍须核验，负瓣核还需明确 alpha 越界和 association 失败规则，不隐式 clip。
+首版默认图像sampler可采用bilinear+域外transparent，resize缩小时必须明确低通；标签/ID采用nearest，normal插值后按语义归一化，flow按数据向量处理。image v1 已支持 finite signed/HDR；具体端口输入子集仍须核验，负瓣核还需明确 alpha 越界和 association 失败规则，不隐式 clip。
 
 ## 重采样方法
 
@@ -55,7 +55,7 @@ Nuke官方STMap以归一化U/V表示绝对源位置，左下(0,0)、右上(1,1)�
 
 affine可映射矩形顶点后扩大filter footprint；homography须排除分母零点；任意非线性映射有内部极值、缝和跨面采样，只看四角不保证输入bbox保守。某tile指向全源图时真实需求可以很大。`image.stmap` 的 Result 实现按 map 值发现精确源 tap 的读取与 dirty 关系；G4 radius workflow 展示 Result 输入上的 radius 编辑、demand 替换和保留输出行为。更一般的 warp 仍须实现各自支持和校验逻辑。精确映射不保证读取区域小，也不自动生成其他 warp 算法。
 
-验收包括整数排列bit保持、identity map、已知点、map合成反例、bilinear解析2×2、常量保持、zero/negative scale、极点、odd尺寸、alpha边缘与zone plate缩小频谱。Whole/ROI/tile一致与前向dirty传播分别检查；局部编辑map不总意味着只读局部源。
+验收包括整数排列bit保持、identity map、已知点、map合成反例、bilinear解析2×2、常量保持、zero/negative scale、极点、odd尺寸、alpha边缘与zone plate缩小频谱。complete-input/ROI/tile一致与前向dirty传播分别检查；局部编辑map不总意味着只读局部源。
 
 典型链路：`grid→noise/brush deformation→compose→remap original→validity→composite`；`lens calibration→undistort map→复用多个帧/图像`。
 
@@ -65,3 +65,9 @@ affine可映射矩形顶点后扩大filter footprint；homography须排除分母
 [^pbr]: Pharr、Jakob、Humphreys，[*Image Texture*](https://www.pbr-book.org/4ed/Textures_and_Materials/Image_Texture)，PBRT4，2023。
 [^mls]: Schaefer、McPhail、Warren，[*Image Deformation Using Moving Least Squares*](https://people.engr.tamu.edu/schaefer/research/mls.pdf)，SIGGRAPH2006。
 [^nuke]: Foundry，[*STMap*](https://learn.foundry.com/nuke/content/reference_guide/transform_nodes/stmap.html)，滚动参考；[SplineWarp](https://learn.foundry.com/nuke/content/reference_guide/transform_nodes/splinewarp.html)记录不同warp版本的影响范围差异。
+
+## 当前 STMap 实现边界
+
+`image.stmap(source,map,boundary)` 当前接收单 Tensor Float32 HWC RGBA source 和 Float64 `[Ho,Wo,2]` map。Source batch 保留到输出；无 batch map 广播，带 batch map 必须匹配 source。输出仅有 `value`，使用 `photospider.image` v1/member `pixels`。UV 为绝对来源像素中心坐标，filter 固定 bilinear，boundary 必填且支持 constant/clamp/wrap/reflect/mirror。Normalized UV、其他 filter、map alpha decode 和 validity 输出仍属于提议目录，不是此接口参数。
+
+默认 straight alpha 的重采样在算子内部计算 `A=ΣwᵢAᵢ` 和 `RGB=ΣwᵢAᵢRGBᵢ/A`；A 为零时 RGB 为正零。Kernel 不转换或认证 association。STMap 不执行颜色空间转换，data map 不作为颜色处理。来源 tap 转为当前 plan 的成员 tile Need，授权、依赖与失效按 tile 记录；同 tile 内非法 UV 仍可使请求失败。当前实现契约见[依赖采样](../../kernel-architecture/Dependency-Sampling.md)。

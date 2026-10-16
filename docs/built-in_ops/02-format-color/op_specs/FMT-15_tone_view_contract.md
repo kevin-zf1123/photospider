@@ -35,7 +35,7 @@ calibration. A lossy view cannot recover its original scene samples.
 
 ## Native ports, units and common parameters
 
-A/B each receive one `input` tensor Value and produce `values` with unchanged
+A/B each receive one `input` tensor Tensor and produce `values` with unchanged
 Float32/Float64 dtype, shape, channel axis and slots. Select one complete linear
 RGB group or Gray `linear_y`. Axis-free Gray remains axis-free. RGB uses the
 exact basis Y row; A requires all three Y weights strictly positive, excluding
@@ -184,7 +184,7 @@ A: any selected RGB output <- full source RGB at the same position; Gray <- Gray
 B: each selected component <- corresponding source component. A/B bypass <-
 corresponding bypass sample only, no color validation. Union demands and transpose
 for dirty mapping; no halo, image statistics, alpha-zero skip or frame history.
-C follows its expanded graph, including unavoidable upstream Whole operations.
+C follows its expanded graph, including unavoidable upstream complete-input operations.
 
 A/B materialize requested values into the kernel's canonical planar owner and
 full virtual reservation. Prepare/retain pages explicitly; do not publish padding

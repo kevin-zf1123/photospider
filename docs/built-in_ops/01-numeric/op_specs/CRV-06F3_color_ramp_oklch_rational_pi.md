@@ -19,7 +19,7 @@ clarification_status: complete
 # CRV-06F3: color_ramp_oklch_rational_pi
 
 The five dynamic ports inherit the family sole-tensor Result rule: each has
-exactly one tensor member and no fields under any structurally valid schema id,
+exactly one tensor member  under any structurally valid schema id,
 version and member key. Use complete `sample_shape()` values including batch axes:
 `input` is S, `stops` is [K], the model-specific color pair array is [K,2], and
 `hue_numerator` and `hue_denominator` are [K].
@@ -57,7 +57,7 @@ Exact hit/clamp directly converts the original hue; no source hue is discarded
 because chroma is zero. A mismatched platform is not silently redirected.
 
 Inherit CRV-06F's complete-color observation expansion, global stops validation,
-Whole Result validation and one/two selected-row mathematics, descriptor matching, whole-input dirty support,
+complete-input Result validation and one/two selected-row mathematics, descriptor matching, whole-input dirty support,
 authorized source windows, full-shape transactional output, owner lifetime,
 capacity/work/stage accounting and cancellation are inherited from the family contract.
 Complete typed/upstream validation covers all numerator and denominator inputs; unused q<=0 rows receive no additional mathematical-domain check, while a selected q<=0 fails even if C=0.
@@ -81,7 +81,7 @@ The maintained public workflow and current validation boundary are documented be
 The public helper `color_ramp_oklch_rational_pi_node` is declared in
 [`color_ramps.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/color_ramps.hpp).
 `color_ramps.cpp` prepares immutable model/unit/profile state and executes the
-Whole Result operation. Original hue values use exact rational interpolation;
+Run-shared Result operation. Original hue values use exact rational interpolation;
 Cross-unit conversion in either direction multiplies or divides by certified pi,
 with a 4096-bit precision ceiling. Same-unit RationalPi expressions cancel pi
 symbolically. Validate the Result path and numerical profile independently for each change. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation)

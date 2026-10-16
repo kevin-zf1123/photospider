@@ -21,7 +21,7 @@ Inherit the complete [family contract](FMT-11_model_conversion_contract.md),
 
 ## Interface and output inference
 
-One Result containing a single Float32 or Float64 tensor and no fields produces one `values` Result containing a single tensor.
+One Result containing a single Float32 or Float64 tensor produces one `values` Result containing a single tensor.
 Source: one explicitly described native Gray component. Target: binary Black/White; the caller retains Gray origin in configuration.
 Preserve shape, channel axis/count and slots; target roles follow the selected source role order.
 Unrelated groups, internal alpha and AOV samples pass through bit-for-bit.
@@ -47,7 +47,7 @@ publication; unrelated unobserved sample errors do not. Preserve upstream scope.
 
 ## Storage, resources and implementation identity
 
-The helper appends the registered MASK threshold Result operation. The lowering target uses Result ABI 4. This operation materializes output and rejects forced view. Empty demand is stateless and publication is transactional.
+The helper appends the registered MASK threshold Result operation. The lowering target uses Result ABI 5. This operation materializes output and rejects forced view. Empty demand is stateless and publication is transactional.
 
 ## Independent acceptance and conceptual workflow
 

@@ -10,7 +10,7 @@ Two include roots are installable. Both install under the `photospider/` prefix:
 include/photospider/
   compiler/      WorkflowDocument, typed IR, plan, typed identities, compiler
   execution/     context, cancellation, result, raw diagnostics
-  data/          Value, Region, explicit layout and immutable bytes
+  data/          Tensor, Region, explicit layout and immutable bytes
   plugin/        operation ABI/registry
   core/          status, resources, cancellation and symbol export
   benchmark/     raw compile/plan/execute benchmark runner

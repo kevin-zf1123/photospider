@@ -42,7 +42,7 @@ and signed zero. This is copying: it does not apply arithmetic NaN quieting.
 All three CPU versions are bitwise equivalent; platform-specific keys require
 their named CPU platform.
 
-## Whole execution and invalidation
+## Run-shared complete-input computation and invalidation
 
 Both branches' dtype/shape metadata is checked at compile/preflight. Every
 nonempty request collects and validates condition and both complete branches
@@ -81,6 +81,6 @@ fails the invocation, and edits to either branch invalidate cache reuse.
 Cover all-true/all-false/alternating conditions, all four branch dtypes, distinct
 sNaN payloads, strides, output budgets, cancellation and escaped output owners.
 
-Validate these Whole rules through a temporary public workflow on each admitted
+Validate these complete-input rules through a temporary public workflow on each admitted
 profile. See [NUM-07 execution](../comparison-whole.md) for the behavior and
 validation boundary. Specification status remains Proposed.

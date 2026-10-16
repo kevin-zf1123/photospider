@@ -5,14 +5,14 @@
 | Owner | 持有 | 边界 |
 | --- | --- | --- |
 | `GraphContext` | 复制的 workflow source、revision 和 snapshot currentness | 不持有 compiler 输出或执行 worker |
-| `Compiler` | 校验、不可变 IR 阶段、plan 和阶段 identity | 不持有 runtime Value、callback 或 daemon state |
+| `Compiler` | 校验、不可变 IR 阶段、plan 和阶段 identity | 不持有 runtime Tensor、callback 或 daemon state |
 | `ExecutionRun` | 单次执行的就绪 step、中间值、取消状态和诊断 | 不拥有共享 pool 或持久结果 |
 | `ExecutionContext` | CPU worker pool、可选原生 lane、冻结的 operation registry、缓存和资源 ledger | 不管理 graph mutation 或 daemon Job |
 | Operation definition | 冻结的 traits 和 callback 契约 | 不拥有执行容量或发布权限 |
 
 ## 2. 数据与内存边界
 
-`ExecutionPlan` 包含复制的 operation metadata 与 demand 几何，不保留调用方输入地址。`ExecutionBindings` 为单次 Run 提供 Value、regional source、snapshot 或结构化 planar image。Run 在 callback 可能访问期间保留这些 owner；返回的 `Value` 或 `PlanarImage` 在 Run 结束后继续持有自己的 backing 和资源租约。
+`ExecutionPlan` 保留静态元数据和成员 tile 几何，不保留调用方地址。`ExecutionBindings` 为一个 Run 提供拥有型 Result 引用。每个 Result 由静态 Tensor 成员组成；返回 Result 和读窗口在 Run 完成后继续保留 backing 和租约。
 
 Estimated bytes 用于规划和预留。Resource ledger 按资源类别计入已准入或已分配容量；估算值本身不是分配租约。`Region` 描述逻辑坐标，`StridedLayout` 将坐标映射到字节地址。
 

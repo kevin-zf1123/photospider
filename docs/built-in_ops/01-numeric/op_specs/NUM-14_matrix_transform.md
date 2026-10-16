@@ -66,16 +66,16 @@ Final floating overflow is the correctly signed infinity, a successful result.
 Fixed NaN patterns and floating-environment restoration follow
 [NUM-04](NUM-04_unary_contract.md).
 
-## Whole demand and invalidation
+## complete-input demand and invalidation
 
 All profiles use the `WholeTensorProgram` Result path. Every nonempty request
-requires Data, Validation and Descriptor (role 13) for all three complete
+requires ordinary payload tile Needs for all three complete
 inputs, then computes one complete dense output. Sparse or partial consumers
 receive a projection of that output. Empty requests read no payload and perform
 no matrix arithmetic.
 
 Any change to vectors, matrix or bias invalidates all observed output samples
-through the generic Whole dependency mapping. There is no matrix-specific
+through the generic complete-input dependency mapping. There is no matrix-specific
 dependency mapping or partial failure atom.
 Zero coefficients do not remove input requirements. A failed invocation
 publishes no partial output. Published storage owns its lifetime independently
@@ -111,7 +111,7 @@ are the oracle. Include rectangular 2->4 and 4->3 transforms, multiple batches,
 identity and singular matrices, cancellation after huge products, subnormals,
 all NaN priorities, 0*Inf, infinity cancellation and signed-zero terms.
 
-A partial component request must show Whole support on all input ports and
+A partial component request must show complete-input support on all input ports and
 whole-observation invalidation for changes anywhere in those inputs. Check
 Empty, arbitrary direct-input strides/offsets, typed validation, metadata errors,
 low budgets, cancellation and owner lifetime through public execution.
@@ -133,8 +133,8 @@ from the replacement samples.
 
 `exact_dot.hpp` uses a host-owned 4352-bit accumulator in units of 2^-2148; at
 most four binary64 products plus bias require 4198 magnitude bits. No product
-is independently rounded. The Whole kernel requests Data, Validation, and
-Descriptor (role 13) for each complete input, reads through authorized Result
+is independently rounded. The complete-input kernel requests Data, Validation, and
+Descriptor  for each complete input, reads through authorized Result
 tensor windows, caches the small matrix and bias, traverses vectors in blocks
 of at most 64, and writes through one packed Result writer. It publishes a
 complete dense output before consumers project sparse or partial requests;
@@ -153,7 +153,7 @@ individual Accelerate or SME hardware instruction dispatch.
 
 ## Apple matrix candidate backends
 
-The Apple profile reuses the complete matrix and bias within the Whole callback
+The Apple profile reuses the complete matrix and bias within the complete-input callback
 and reads each vector once. Blocks contain at most 64 vectors, including a tail;
 arbitrary valid direct-input strides and offsets are supported.
 

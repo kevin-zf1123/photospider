@@ -9,7 +9,7 @@ An `ExecutionContext` owns bounded local workers, callback admission, caches, an
 
 ```text
                   +--> CPU workers / FIFO --+
-ExecutionContext |                           |--> Run callback --> Values/results
+ExecutionContext |                           |--> Run callback --> Results/Tensor backing
                   +--> optional GPU lane ----+
                   shared admission, allocator, caches
 

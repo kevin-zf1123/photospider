@@ -63,3 +63,5 @@ carry model ids/mean/cholesky only; real metadata codecs, public graph execution
 Region reads, budgets and ownership require separate native validation.
 
 Oracle entry: `apply_color_groups` in [reference.py](../../../../oracle/ops/mask_morphology/mask04/reference.py).
+
+The consumer first requests the model count payload and uses only that effective prefix. Padding entries are zero and do not participate in positive-diagonal validation or response evaluation. The fixed capacity and zero-fill contract are inherited from MASK-04E/F.

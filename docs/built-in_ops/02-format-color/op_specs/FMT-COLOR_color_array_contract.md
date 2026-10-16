@@ -63,7 +63,7 @@ therefore has rank 1..7. Arbitrary strides do not change that logical layout.
 
 `ColorArrayDescriptor` and its codec belong to `Photospider::ops_sdk`, with the
 public API in [`photospider/ops/color_array.hpp`](../../../../include/photospider/ops/color_array.hpp).
-It is owned static configuration, independent of a `ValueDescriptor` or Result
+It is owned static configuration, independent of a `TensorDescriptor` or Result
 schema. Generic containers establish structure and storage validity. Callers use
 `validate_color_array_descriptor` and `validate_color_array_value`, or an
 operation's explicitly declared validation contract, to establish color-domain
@@ -148,7 +148,7 @@ supported RGBA association values are straight and premultiplied. Premultiplied
 means alpha times encoded RGB under the specified transfer, not transfer encoding
 of an already premultiplied linear value. A consumer must restore straight encoded
 RGB before decoding when alpha is nonzero. RGB ramps declare input/output formats
-independently and default output to premultiplied. Existing linear-only Image/Layer
+independently and default RGBA output to straight; premultiplied output is an explicit option. Existing linear-only Image/Layer
 contracts are unchanged by this proposed general encoded representation.
 
 For RGBA, alpha is finite in [0,1]. At zero alpha, premultiplied storage requires
@@ -294,7 +294,7 @@ The `color-array-v1` codec uses a canonical bounded payload of at most 4096
 bytes. SDK encode/decode/parameter helpers own their returned data. The static
 `color_description` String is the canonical lowercase hexadecimal payload, at
 most 8192 bytes, emitted by `color_array_parameter`. This is operation
-configuration; it is never attached to a Value or Result. The codec preserves
+configuration; it is never attached to a Tensor or Result. The codec preserves
 its existing units and byte layout independently of the removed tag system.
 
 Use an explicit model-tagged fixed-field binary record, with little-endian fixed

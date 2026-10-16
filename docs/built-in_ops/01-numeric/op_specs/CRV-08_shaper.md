@@ -24,7 +24,7 @@ In particular, rounding is nearest/ties-to-even with gradual underflow and the
 caller floating environment is preserved. This is limited inheritance: the ports,
 output structures, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
-turn a composite template or structured Result into a generic NUM Value primitive.
+turn a composite template or structured Result into a generic NUM Tensor primitive.
 A stated four-ULP final bound uses the shared FP32-scaled contract for both
 Float32 and Float64 outputs.
 Classification, exact landmarks and signed-zero rules are checked separately.
@@ -80,7 +80,7 @@ Accelerated Apple Silicon and x86-64 versions obey the shared final FP32 4 ULP
 contract, including its strict fallback range, while matching
 strict NaN/Inf/zero classification and signs. Exact source endpoints return
 0/1, and inverse t=0/1 returns lower/upper exactly, on every profile. Use the strict path
-when the bound cannot be guaranteed; Whole counters are unavailable and host
+when the bound cannot be guaranteed; complete-input counters are unavailable and host
 budget exhaustion remains an explicit failure.
 
 Accelerated log2 forward and inverse must also be monotone nondecreasing in
@@ -95,14 +95,14 @@ Each Result input has one tensor under an arbitrary schema id/version/key.
 `sample_shape()` includes all batch and cell axes. Bounds have shape [1] and the
 same dtype as `input`; output port `values` uses `photospider.tensor` v1/member
 `samples`, preserving input shape and dtype with no attached domain description. There is no output
-dtype conversion parameter. All six log primitive keys execute with Whole Result
-programs. The linear templates expand to the existing Whole Result remap and
+dtype conversion parameter. All six log primitive keys execute with complete-input Result
+programs. The linear templates expand to the existing complete-input Result remap and
 constant nodes, including the inverse scalar order guard.
 
-A nonempty request requires Data, Validation and Descriptor (role 13) for all
+A nonempty request requires ordinary payload tile Needs for all
 three inputs, including complete typed/upstream validation. The log Result
 program reads authorized windows directly; it does not collect the full input
-through a Value or make a copy of that input. Bounds are checked before input
+through a Tensor or make a copy of that input. Bounds are checked before input
 IEEE handling inside the callback; typed/upstream failures can occur first.
 Empty reads no payload. Any input or bound change dirties the complete recorded
 output demand. Numeric bound errors have Run scope and publish no output.
@@ -111,7 +111,7 @@ Static log2 primitive keys select strict/apple_silicon/x86_64 independently;
 there is no runtime mode parameter. Linear authoring templates take static
 profile=strict/apple_silicon/x86_64, default strict, and expand the corresponding
 NUM operation keys. Log `prepare_static` records the direction and profile in
-immutable state, which the Whole callback reuses. No template computation occurs
+immutable state, which the complete-input callback reuses. No template computation occurs
 at construction and no result is automatically materialized or persisted.
 
 Log forward checks bounds before source special values; NaN quieting and generated
@@ -132,7 +132,7 @@ For M=product(input.sample_shape()), output payload is M*sizeof(dtype); basic
 work is O(M) plus certified numerical refinement for log functions. Account
 authorized input windows, owners, broadcast views, template intermediates, full
 output capacity, exact arithmetic and overlapping scratch growth under host
-capacity/work limits. Even a small public request requires the full Whole output.
+capacity/work limits. Even a small public request requires the full complete-input output.
 Log callbacks retain fixed admitted exact state plus an O(rank) coordinate
 counter, with no per-output point or dependency records. Poll cancellation at
 least every 64 simple samples and during each extended arithmetic refinement.
@@ -144,7 +144,7 @@ input NaN. Compile/preflight checks shape/dtype/static profile, using TypeMismat
 for port incompatibility and InvalidArgument/InvalidDomain for malformed statics.
 Numerical domain/overflow outcomes described above are successful IEEE values.
 ResourceExhausted, BackendUnavailable, cancellation, stale and upstream failures
-retain the NUM shared error categories and provenance. Whole callbacks do not expose DependencySession fallback counters.
+retain the NUM shared error categories and provenance. complete-input callbacks do not expose DependencySession fallback counters.
 
 ## Linear composition and order guard
 
@@ -173,7 +173,7 @@ Exercise near-equal positive bounds, extreme finite bounds, exact endpoint bits,
 NaN payloads/signaling, signed zero, infinities, subnormals and output overflow.
 Accelerated acceptance verifies per-result 4 ULP, classifications, monotonicity
 and cross-fallback/request-partition consistency. Test invalid bound precedence,
-partial delivery, complete reads, shape/strides, Whole dirty support, cache-off, resource cancellation
+partial delivery, complete reads, shape/strides, complete-input dirty support, cache-off, resource cancellation
 and owners after context destruction.
 
 The public workflow and oracle exercise these Proposed interfaces through

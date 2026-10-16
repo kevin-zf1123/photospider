@@ -33,7 +33,7 @@ parameters or implicit cast/broadcast is provided.
 
 Inherit the [exact comparison contract](NUM-07_comparison_contract.md) in full:
 floating numeric relations, NaN behavior, signed-zero equality, exact integer
-comparison, bitwise equivalence of the three CPU profiles, two-port Whole support,
+comparison, bitwise equivalence of the three CPU profiles, two-port complete-input support,
 typed validation, invalidation, returned storage, resource/error and lifetime
 requirements. This is numerical comparison, not bit-pattern comparison.
 
@@ -47,8 +47,8 @@ comparison helper. Include Int64 extrema and values above 2^53, signed zeros,
 subnormal neighbors, infinities, signaling/quiet NaNs in either input position
 and the shared disjoint/strided/resource/typed-validation acceptance cases.
 
-The default registry implements all three Whole profile keys. Temporary acceptance should check source
+The default registry implements all three complete-input profile keys. Temporary acceptance should check source
 support, special bits, typed validation, strided inputs, cancellation/resources
 and composition with select. The specification remains Proposed; these requirements do not report a test or performance result.
 
-Current Whole execution, capacity and validation: [NUM-07 measurements](../comparison-whole.md).
+Current Run-shared complete-input computation, capacity and validation: [NUM-07 measurements](../comparison-whole.md).

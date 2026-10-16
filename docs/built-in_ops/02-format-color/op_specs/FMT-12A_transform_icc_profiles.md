@@ -61,7 +61,7 @@ Any requested target color component depends on all source colors at that point;
 bypass depends only on its own source. Hidden color does not depend on alpha.
 Empty/bypass-only observations still require valid static parameters/resources.
 auto/materialize use requested output regions; forced view is invalid.
-Resource/cancellation and failure scope inherit the family without Whole pixel
+Resource/cancellation and failure scope inherit the family without complete-input pixel
 scans or fallback copies.
 
 ## Acceptance and conceptual public workflow

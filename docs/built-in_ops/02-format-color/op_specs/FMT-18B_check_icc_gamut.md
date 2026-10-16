@@ -21,7 +21,7 @@ Inherit the complete [FMT-18 family](FMT-18_softproof_contract.md) and applicabl
 
 ## Ports, parameters and output inference
 
-One input Float32/Float64 tensor Value, one selected complete group (or explicit
+One input Float32/Float64 tensor Tensor, one selected complete group (or explicit
 raw ordered slots). Source profile and endpoint interpretation are explicit static parameters. Proof profile is mandatory. source_intent defaults to relative; no display profile, BPC, alarm color, execution switch or user threshold. Output mask uses family keepdims rules and exactly +0/1 diagnostic samples.
 All settings/resources are static. The described and finite-only raw paths
 retain the family's explicit parameter, unit and structural requirements. No profile or

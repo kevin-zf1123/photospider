@@ -17,7 +17,7 @@ implemented_operation_keys:
 
 # FMT-02B: concatenate existing channel axes
 
-Runtime contract: A/B/C are registered as twelve Result operation ABI 4 CPU
+Runtime contract: A/B/C are registered as twelve Result operation ABI 5 CPU
 keys: `assemble`, `concatenate`, `assemble_mapped`, and `scalar_literal`, each
 with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
 The public authoring helpers are installed in

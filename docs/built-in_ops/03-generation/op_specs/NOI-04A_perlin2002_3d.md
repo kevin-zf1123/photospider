@@ -28,11 +28,11 @@ The implementation uses the fixed 256-entry permutation, exact floor and modulo-
 
 ## Execution contracts
 
-The CPU Whole and GPU operations request and validate the complete coordinate tensor. A source change dirties the complete output. CPU Whole uses host range parallelism when available; worker count does not change result bits.
+The CPU complete-input and GPU operations request and validate the complete coordinate tensor. A source change dirties the complete output. CPU complete-input uses host range parallelism when available; worker count does not change result bits.
 
 The CPU tiled operation uses a Result Dependency-v2 map. Each requested output sample reads the corresponding three coordinate components as Data and Validation support. Descriptor support is declared independently. It partitions requested boxes into bounded tiles and publishes completed output in traversal order, so a Result prefix can exist while later tiles remain. The host cpu_tiles service schedules the granted stage; tile callbacks do not create their own threads. An empty request reads no coordinate payload and performs no Perlin arithmetic.
 
-All three operations reject nonfinite coordinates. The native GPU operation requires a supported native backend and has no CPU fallback. Metal and Vulkan use integer shaders. The independent Fraction oracle covers CPU Whole, CPU tiled and Metal GPU outputs.
+All three operations reject nonfinite coordinates. The native GPU operation requires a supported native backend and has no CPU fallback. Metal and Vulkan use integer shaders. The independent Fraction oracle covers CPU complete-input, CPU tiled and Metal GPU outputs.
 
 ## Resources and failures
 
@@ -42,4 +42,4 @@ Shape/type errors fail specialization. Nonfinite data, work exhaustion, allocati
 
 ## Acceptance and implementation evidence
 
-The CPU Whole and tiled integration tests exercise Result bindings, output schema, exact reads, nonzero and disjoint regions, outside-region NaN, finite work and scratch failures, and cancellation/error paths. For a 17-by-35 Float64 field, the tiled ROI y=[3,14), x=[5,32) yields 12 source reads totaling 7,128 bytes and 12 ordered publications covering 297 samples. The native Metal Result test covers dispatch, affine native input, cancellation, bitwise CPU comparison, and result lifetime. The oracle covers a finite fixture set rather than the complete input domain or every GPU device.
+The CPU complete-input and tiled integration tests exercise Result bindings, output schema, exact reads, nonzero and disjoint regions, outside-region NaN, finite work and scratch failures, and cancellation/error paths. For a 17-by-35 Float64 field, the tiled ROI y=[3,14), x=[5,32) yields 12 source reads totaling 7,128 bytes and 12 ordered publications covering 297 samples. The native Metal Result test covers dispatch, affine native input, cancellation, bitwise CPU comparison, and result lifetime. The oracle covers a finite fixture set rather than the complete input domain or every GPU device.

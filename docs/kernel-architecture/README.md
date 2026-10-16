@@ -7,7 +7,7 @@ These guides describe the kernel's current contracts and runtime behavior. Engli
 1. [Overview](Overview.md): module ownership, execution contexts, and result lifetimes.
 2. [Terminology](Terminology.md): names used across the architecture guides.
 3. [Compiler and Execution](Compiler-and-Execution.md): source validation, planning, scheduling, and run progression.
-4. [Data Model](Data-Model.md): Values, Regions, layouts, and retained storage.
+4. [Data Model](Data-Model.md): Tensors, Regions, layouts, and retained storage.
 5. [Graph Lifecycle](Graph-Lifecycle.md): graph revisions and compiled-stage lifetimes.
 6. [Compute Boundaries](Compute-Boundaries.md): CPU/GPU placement and fallback.
 7. [Cache Model](Cache-Model.md): frozen inputs and bounded local result reuse.

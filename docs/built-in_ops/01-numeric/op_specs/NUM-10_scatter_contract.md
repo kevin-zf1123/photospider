@@ -40,8 +40,8 @@ Repeated targets are valid. `scatter_replace` selects the greatest matching
 increasing `j`; that order defines exceptional-value priority, not a sequence of
 rounded additions. A coordinate with no matching update copies the base bits.
 
-Every nonempty Whole request asks for complete data, validation and descriptor
-support (role 13) from all three inputs. It validates every index against the
+Every nonempty complete-input request asks for complete data, validation and descriptor
+support  from all three inputs. It validates every index against the
 base axis and computes the complete output before consumer projection. Thus an
 invalid index or an upstream/typed failure outside the requested output region
 can fail the run. Empty demand requests no input payload and performs no sample
@@ -102,4 +102,4 @@ update hits the coordinate.
 | [NUM-10F scatter_maximum](NUM-10F_scatter_maximum.md) | Maximum including base, NaN propagating |
 
 The shared execution and current behavior evidence are summarized in
-[NUM-10 Whole execution](../indexing-whole.md).
+[NUM-10 Run-shared complete-input computation](../indexing-whole.md).

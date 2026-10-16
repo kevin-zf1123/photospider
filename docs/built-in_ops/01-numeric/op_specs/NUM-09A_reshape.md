@@ -51,10 +51,10 @@ Let input shape be I and target shape O. For an output coordinate o, define
 k = sum_j o[j] * product_{m>j} O[m]
     s[j] = floor(k / product_{m>j} I[m]) mod I[j]
 
-The mapping defines numerical selection; execution uses CPU Whole for all formal
+The mapping defines numerical selection; execution uses CPU complete-input for all formal
 profile keys. The compiler validates the static shape and schema before runtime.
 On nonempty work, the program requests the source with a full Tensor Need using
-Data, Validation and Descriptor roles (role 13), which triggers typed-payload
+ordinary member tile Needs with explicitly bound validators , which triggers typed-payload
 validation. It publishes the complete Result
 in global output coordinates. A query `Q` limits observed dependencies and
 downstream reads; it does not produce a packed ROI Result. Edits to observed
@@ -98,6 +98,6 @@ input, reversed axes, zero strides, unaligned offsets and owner-fragmented sourc
 Check whole versus regional logical equality and explicit view success/failure,
 auto fallback and dense results without comparing incidental physical addresses.
 
-All nine formal profile keys use Whole and disable cross-run content caching
+All nine formal profile keys use complete-input and disable cross-run content caching
 because content alone does not establish physical owner/stride identity;
-same-Run sharing remains available. Execution behavior and temporary numerical/resource acceptance cases are in [NUM-09 Whole execution](../layouts-whole.md).
+same-Run sharing remains available. Execution behavior and temporary numerical/resource acceptance cases are in [NUM-09 Run-shared complete-input computation](../layouts-whole.md).

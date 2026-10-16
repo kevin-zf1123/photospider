@@ -68,7 +68,7 @@ FMT-03 emits `expected_inputs` as `result-inputs-v1:` followed by 64 lowercase
 hexadecimal SHA-256 characters (81 characters total). The digest uses domain
 separation and covers the complete ordered canonical schema and physical layout
 for every connected input, including repeated and unused inputs. It hashes no
-sample payload and is not a validity proof. The zero-input Whole literal path
+sample payload and is not a validity proof. The zero-input complete-input literal path
 uses output shape `[1]` and prepared native bits.
 
 A takes a base tensor and a static ordered output-slot list. Each slot selects
@@ -87,7 +87,7 @@ base pixels. Unchanged B slots read the corresponding base samples. Replaced
 slots do not read overwritten base values unless another requested mapping also
 selects them. All static shape/dtype and consumed metadata checks remain in
 Descriptor support. There is no new full-color or alpha sample validation scan.
-Necessary upstream Whole work and intrinsic producer failure retain their scope.
+Necessary upstream complete-input work and intrinsic producer failure retain their scope.
 
 An output alias requires a legal retained mapping under the kernel contract.
 Sharing an owner or having equal sample values alone is insufficient. Constant
@@ -229,7 +229,7 @@ rules rather than silently restoring legacy typed-scalar validation.
 Lowering is conforming only when view availability, exact Data/dirty support,
 output structure, ownership, errors and publication match these definitions.
 Inlining/fusion may remove intermediates if it preserves those observations.
-Do not fall back to an old Whole packed-image operation to make the graph run.
+Do not fall back to an old complete-input packed-image operation to make the graph run.
 
 Use collision-aware graph ID allocation and transactional expansion as in
 [FMT-01C](FMT-01C_split_channels.md): verify supplied descriptors against actual

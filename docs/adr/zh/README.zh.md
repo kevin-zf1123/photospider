@@ -9,7 +9,7 @@ ADR 记录长期有效的架构约束及其理由。了解边界为何存在时�
 | [0005](0005-graph-document-ingestion-is-a-classified-transaction.zh.md) | 分开发布 workflow 源文档与编译阶段。 |
 | [0006](0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md) | 将当前行为文档与架构决策分开维护。 |
 | [0007](0007-compute-runs-and-process-execution-have-separate-owners.zh.md) | 分开每次运行的状态与共享执行上下文资源。 |
-| [0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md) | 将 Value、输入绑定、布局和 Region 定义为显式契约。 |
+| [0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md) | 将 Tensor、输入绑定、布局和 Region 定义为显式契约。 |
 | [0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md) | 为可信 operation 与 data provider 模块使用版本化 C 契约。 |
 | [0014](0014-compiler-document-and-plan-versions-are-independent.zh.md) | 区分文档、编译阶段、plan 与 ABI 的标识。 |
 | [0015](0015-breaking-product-boundary-scope-reset.zh.md) | 将编译与执行保留在可嵌入 kernel 中。 |

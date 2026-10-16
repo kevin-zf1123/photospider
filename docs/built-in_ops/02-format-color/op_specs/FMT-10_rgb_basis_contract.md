@@ -18,7 +18,7 @@ The family contains registered [A RGB->XYZ](FMT-10A_rgb_to_xyz.md),
 [B XYZ->RGB](FMT-10B_xyz_to_rgb.md) and [C adapt XYZ white](FMT-10C_adapt_xyz_white.md)
 operations, plus the compile-time [D RGB->RGB](FMT-10D_convert_linear_rgb.md)
 helper. Each native member has strict, accelerated Apple Silicon and accelerated
-x86-64 CPU keys under Result ABI 4. [Exact matrix definitions](FMT-10_basis_math.md)
+x86-64 CPU keys under Result ABI 5. [Exact matrix definitions](FMT-10_basis_math.md)
 remain normative. The specifications remain Proposed; runtime implementation
 status is separate.
 
@@ -47,7 +47,7 @@ and their immutable preparations can be executed concurrently.
 ## Tensor interface and group mapping
 
 Each native member accepts one input Result containing one Float32 or Float64
-tensor and no fields, then publishes one `values` output Result containing one
+tensor , then publishes one `values` output Result containing one
 tensor. The output preserves Result schema identity, tensor key, logical shape
 and batch axes, carries no description, and
 sets `atomic_trailing_axes` to zero. The dtype and complete sample shape remain
@@ -211,7 +211,7 @@ output components at p for nonidentity nodes, even for exact zero coefficients.
 Bypass dirty maps are identity. D composes actual per-node support; a requested
 RGB component usually needs all intermediate XYZ components, so required A/C
 rows cannot be pruned because the final product has zero entries. Required
-upstream Whole work and its failures retain their original scope.
+upstream complete-input work and its failures retain their original scope.
 
 If one native node's exact matrix is I, the selected contract is a bit-copy
 identity before dot/nonfinite classification. It reads only the requested source

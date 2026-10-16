@@ -2,24 +2,24 @@
 
 ## 1. Core summary (TL;DR)
 
-An `ExecutionContext` owns a fixed CPU worker pool, separate CPU and GPU callback lanes, and one shared waiting-callback bound. Whole CPU callbacks can share range work with idle pool workers, while planar staged callbacks submit single-threaded tiles and join each stage. Cancellation stops future claims and publication, then waits for work already running or submitted to the device.
+An `ExecutionContext` owns a fixed CPU worker pool, separate CPU and GPU callback lanes, and one shared waiting-callback bound. ordinary CPU callbacks can share range work with idle pool workers, while planar staged callbacks submit single-threaded tiles and join each stage. Cancellation stops future claims and publication, then waits for work already running or submitted to the device.
 
 ## 2. Mental model & intuition
 
-Independent Runs compete for the same context worker capacity. A Whole callback's calling thread processes range blocks while idle workers may claim other blocks; a worker occupied by another callback cannot help until it returns. The shared scheduler alternates ordinary callback and range-block opportunities and rotates eligible range jobs after claims.
+Independent Runs compete for the same context worker capacity. A ordinary callback's calling thread processes range blocks while idle workers may claim other blocks; a worker occupied by another callback cannot help until it returns. The shared scheduler alternates ordinary callback and range-block opportunities and rotates eligible range jobs after claims.
 
 ```mermaid
 flowchart LR
     A[Run A callback] --> Q[CPU callback FIFO]
     B[Run B callback] --> Q
     Q --> S[Shared scheduler and pool mutex]
-    R[Whole range jobs] --> JQ[Shared range and stage job queue]
+    R[ordinary range jobs] --> JQ[Shared range and stage job queue]
     JQ --> S
     S --> W1[Worker 1]
     S --> W2[Worker 2]
     S --> WN[Worker W]
     W1 -->|helper claims disjoint block| J[Range barrier]
-    Caller[Whole callback thread] -->|participates in range work| J
+    Caller[ordinary callback thread] -->|participates in range work| J
     WN -->|other Run work completes| O[Independent callback]
     J -->|all active blocks retire| P[Publish after final checks]
     C[Planar CPU_STAGES coordinator] -->|submit one stage job| JQ
@@ -31,28 +31,28 @@ flowchart LR
     D -->|drain before return| GQ
 ```
 
-Ordinary callbacks use the CPU callback FIFO. Whole range jobs and planar `CPU_STAGES` jobs use a separate shared range/stage job list. Both structures share the scheduler mutex and worker pool, so callbacks, range jobs, and staged jobs compete for worker capacity. The scheduler alternates callback and range opportunities; range workers claim disjoint blocks, while the stage coordinator submits tile work and waits at each stage barrier. The Whole callback thread also participates directly in its range barrier. The GPU callback lane has a separate queue but shares the context's aggregate waiting allowance. Range blocks and stage tiles can increase an ordinary callback's wait.
+Ordinary callbacks use the CPU callback FIFO. ordinary range jobs and planar `CPU_STAGES` jobs use a separate shared range/stage job list. Both structures share the scheduler mutex and worker pool, so callbacks, range jobs, and staged jobs compete for worker capacity. The scheduler alternates callback and range opportunities; range workers claim disjoint blocks, while the stage coordinator submits tile work and waits at each stage barrier. The ordinary callback thread also participates directly in its range barrier. The GPU callback lane has a separate queue but shares the context's aggregate waiting allowance. Range blocks and stage tiles can increase an ordinary callback's wait.
 
-### CPU Whole range service
+### CPU range service
 
 ```c
 #include <stdint.h>
 
-typedef int (*ps_cpu_range_callback_v1)(
+typedef int (*ps_cpu_range_callback_v2)(
     void* user, uint64_t begin, uint64_t end, uint32_t slot);
 
-typedef struct ps_cpu_parallel_service_v1 {
+typedef struct ps_cpu_parallel_service_v2 {
   uint32_t struct_size;
   uint32_t abi_version;
   uint32_t maximum_workers;
   void* context;
   int (*run)(void* context, uint64_t count, uint64_t grain,
-             uint32_t workers, ps_cpu_range_callback_v1 callback,
+             uint32_t workers, ps_cpu_range_callback_v2 callback,
              void* user);
-} ps_cpu_parallel_service_v1;
+} ps_cpu_parallel_service_v2;
 ```
 
-The service is borrowed by a CPU Whole callback. It partitions `[0, count)` into finite, disjoint intervals no larger than `grain`. `workers == 0` selects the grant maximum; a positive value requests between one and that maximum participants, including the calling thread. The service may run fewer blocks concurrently than the grant. Each active block receives a unique live scratch slot. Inputs and callback user data remain borrowed until the synchronous barrier returns; scratch must not escape the call.
+The service is borrowed by a CPU ordinary callback. It partitions `[0, count)` into finite, disjoint intervals no larger than `grain`. `workers == 0` selects the grant maximum; a positive value requests between one and that maximum participants, including the calling thread. The service may run fewer blocks concurrently than the grant. Each active block receives a unique live scratch slot. Inputs and callback user data remain borrowed until the synchronous barrier returns; scratch must not escape the call.
 
 Before a nonempty run starts any block callback, the host reserves the job record against Root Host and Metadata capacity and one Root Entry, then charges `work=count` and `stages=ceil(count/grain)`. These charges use the same Root budget as work already issued by the execution, so prior work reduces the remaining allowance. If reservation or charging fails, the run returns a sticky resource failure and invokes zero block callbacks. A zero-count run creates no job and charges no work or stages; the ordinary argument and cancellation checks still apply.
 
@@ -65,7 +65,7 @@ N_{blocks}=N/B + (N\bmod B\ne0),\qquad
 end=begin+\min(B,N-begin).
 $$
 
-Structured CPU Result Whole polls receive this borrowed service as `ResultProgramPhase::cpu_parallel`. It schedules blocks within the active Whole callback; it does not parallelize a Result dependency graph independently. `tests/integration/kernel/test_cpu_parallel.cpp` exercises a `UINT64_MAX` range after earlier Root work and verifies resource rejection before any block callback. `tests/unit/kernel/test_cpu_range.cpp` checks endpoint arithmetic without a Root budget and therefore does not establish Root admission behavior.
+Structured CPU Result ordinary polls receive this borrowed service as `ResultProgramPhase::cpu_parallel`. It schedules blocks within the active ordinary callback; it does not parallelize a Result dependency graph independently. `tests/integration/kernel/test_cpu_parallel.cpp` exercises a `UINT64_MAX` range after earlier Root work and verifies resource rejection before any block callback. `tests/unit/kernel/test_cpu_range.cpp` checks endpoint arithmetic without a Root budget and therefore does not establish Root admission behavior.
 
 ### Structured Result callback waves
 
@@ -80,28 +80,28 @@ The Run coordinator owns scheduling policy and publication order. Separate compo
 ```c
 #include <stdint.h>
 
-#define PS_CPU_TILES_ABI_VERSION_1 1U
+#define PS_CPU_TILES_ABI_VERSION_2 2U
 
-typedef struct ps_cpu_tile_v1 {
+typedef struct ps_cpu_tile_v2 {
   uint32_t struct_size, slot;
   uint64_t index, begin[3], end[3];
-} ps_cpu_tile_v1;
+} ps_cpu_tile_v2;
 
-typedef int (*ps_cpu_tile_callback_v1)(void* user,
-                                       const ps_cpu_tile_v1* tile);
+typedef int (*ps_cpu_tile_callback_v2)(void* user,
+                                       const ps_cpu_tile_v2* tile);
 
-typedef struct ps_cpu_tile_stage_v1 {
+typedef struct ps_cpu_tile_stage_v2 {
   uint32_t struct_size;
   uint64_t extent[3], tile[3];
   uint32_t workers;
-} ps_cpu_tile_stage_v1;
+} ps_cpu_tile_stage_v2;
 
-typedef struct ps_cpu_tiles_service_v1 {
+typedef struct ps_cpu_tiles_service_v2 {
   uint32_t struct_size, abi_version, maximum_workers;
   void* context;
-  int (*run)(void*, const ps_cpu_tile_stage_v1*,
-             ps_cpu_tile_callback_v1, void*);
-} ps_cpu_tiles_service_v1;
+  int (*run)(void*, const ps_cpu_tile_stage_v2*,
+             ps_cpu_tile_callback_v2, void*);
+} ps_cpu_tiles_service_v2;
 ```
 
 The coordinator submits one three-dimensional work-item grid and waits for every tile callback before starting the next stage. Each callback receives one half-open tile box and runs as one indivisible task on a shared CPU worker. The coordinator performs allocation, row access, and stage transitions. `workers == 0` uses the Run grant maximum; a positive value caps parallel participation without changing tile geometry.
@@ -116,13 +116,13 @@ Cancellation closes future range or tile claims and prevents later device submis
 
 A long CPU block observes cancellation only where it polls the token inside its own loop. For example, a block that checks `phase.query.cancellation` on each iteration of a 262,144-iteration loop and is cancelled after 64 iterations returns early. The Run then reports `Cancelled` after only part of the planned iterations; no block remains active and the Root Queue usage returns to zero. `test_cpu_parallel` covers this case. A block that never polls runs to the end of its range before the Run observes cancellation.
 
-CPU helpers save and restore the floating-point environment and execute with nearest-even rounding and gradual underflow. Each operation defines its reduction order and the block geometries compatible with that order.
+Kernel helpers save and restore the calling thread floating-point environment without imposing a numerical mode. Operations establish their required mode inside each actual poll, worker, numerical preparation or validator callback and restore it before return or suspension. Each operation defines its reduction order and the block geometries compatible with that order.
 
 `ExecutionContextConfig::collect_scheduler_timing` defaults to false. When enabled, `scheduler_statistics()` returns separately synchronized CPU and GPU lane snapshots. Accepted counts successful FIFO insertions; started counts worker removals. `submission_ns` measures entry through FIFO insertion, including mutex acquisition and queue storage. `queue_wait_ns` measures successful insertion through worker removal. Timing excludes callback runtime and device execution. FIFO statistics exclude range and tile claims, although those jobs can keep a worker busy and increase measured wait. Cumulative counters include all Runs sharing the context. Count and duration deltas can describe a selected interval only when snapshots are unsaturated; `maximum_queue_wait_ns` and `maximum_queued_callbacks` are context-lifetime maxima and cannot be differenced to obtain interval maxima. Lane snapshots can represent different instants.
 
 ## 4. Non-goals & explicit boundaries
 
-- Whole range callbacks and planar CPU staged callbacks use mutually exclusive services for one invocation.
+- ordinary range callbacks and planar CPU staged callbacks use mutually exclusive services for one invocation.
 - Tile callbacks do not receive the coordinator's row, allocation, publication, diagnostics, or preparation services.
 - The scheduler does not promise work stealing, preemption, or a worker grant equal to observed concurrent execution.
 - GPU callbacks submit synchronously through one callback lane per context; a submitted dispatch runs to completion before its owners retire.

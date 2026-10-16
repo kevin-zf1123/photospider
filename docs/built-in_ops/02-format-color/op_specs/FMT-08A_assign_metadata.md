@@ -21,7 +21,7 @@ The specification status remains Proposed.
 
 ## Interface
 
-Inputs are the source description, the target tensor's `ValueDescriptor`, and
+Inputs are the source description, the target tensor's `TensorDescriptor`, and
 `MetadataOptions`. Patch edits named fields with optional atomic deletions.
 Replace substitutes a complete description and accepts no path edits.
 

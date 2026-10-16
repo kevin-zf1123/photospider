@@ -38,7 +38,7 @@ Nuke scopes公开提供REC601/709编码、viewer transforms和full-frame开关�
 | ANA-20 PSF/MTF analysis | PSF→centroid/energy/OTF/MTF | normalize、radial/axis、cutoff/encircled energy | unit energy、对称PSF、lambda尺度 |
 | ANA-21 scope render | 数值结果+style→RGBA图 | axis/legend/grid、linear/log density、gain仅显示 | 同数据不同显示gain不改变counts，刻度与单位可读 |
 
-命名多输出与多字段 Result 已实现；统计节点应选择静态独立输出或带 count/association 的 schema，并明确发布时机。CPU参考归约有固定顺序/稳定算法；整数计数使用checked Int64或明确更大容量，weighted counts建议Float64。GPU局部histogram再合并可减少atomic竞争，但exact和近似预览是不同质量模式。已有具名分页统计与固定顺序归约；新算法仍须给 work/stage、校验和 backing 预算。Whole Value 节点继续给完整物化上界。整数 histogram factory 在 `H*ceil(W/512)*ceil(bins/512)>=1000000` 时预先拒绝；通过该下界检查仍可能耗尽实际预算。
+命名多输出与多字段 Result 已实现；统计节点应选择静态独立输出或带 count/association 的 schema，并明确发布时机。CPU参考归约有固定顺序/稳定算法；整数计数使用checked Int64或明确更大容量，weighted counts建议Float64。GPU局部histogram再合并可减少atomic竞争，但exact和近似预览是不同质量模式。已有具名分页统计与固定顺序归约；新算法仍须给 work/stage、校验和 backing 预算。complete-input Tensor 节点继续给完整物化上界。整数 histogram factory 在 `H*ceil(W/512)*ceil(bins/512)>=1000000` 时预先拒绝；通过该下界检查仍可能耗尽实际预算。
 
 ## 定义与归一化
 

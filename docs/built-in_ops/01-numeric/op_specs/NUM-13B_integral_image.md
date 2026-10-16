@@ -50,7 +50,7 @@ or correct rounding. Static dtype is explicit in direct nodes.
 Inherit [prefix_sum's arithmetic and failure rules](NUM-13A_prefix_sum.md), using
 rectangle contributors rather than line contributors. If either selected output
 boundary is zero, the rectangle is empty: return integer zero or floating +0
-while Whole still validates full input support for a nonempty demand. The kernel
+while complete-input still validates full input support for a nonempty demand. The kernel
 reads through authorized Result windows and does not pack a second full input
 payload. Nonempty rectangle NaN priority follows original
 logical row-major coordinates, independent of which selected axis is processed
@@ -61,12 +61,12 @@ fails Domain/Run, including outside the consumer projection. Internal exact sums
 can exceed the destination range. Rounded integral outputs never become exact
 carry. Strict remains reproducible; accelerated floating results retain their
 own shared bound. Empty demand reads nothing; nonempty demand requests Data,
-Validation and Descriptor (role 13) for complete input support, including
+Validation and Descriptor  for complete input support, including
 zero-boundary requests. Any source edit invalidates all recorded observations,
 including projections at zero boundaries.
-The operator publishes its complete output in global coordinates. The requested
-footprint scopes observed dependency roots; it does not restrict reads from the
-Result's complete published coverage.
+The shared stage retains the complete internal output in global coordinates.
+Public actors publish only requested complete tiles. Retaining backing or
+dependency evidence never grants access to unrequested coordinates.
 
 ## Algorithms, resources and errors
 
@@ -88,7 +88,7 @@ physical stride or assumed to be the shorter axis.
 No repeated rectangle scan, per-output descriptors or persistent table is retained.
 Work/cancellation checks cover resets, reads, merges, conversions and publication.
 
-Schema/output caps remain compile/preflight errors. Whole failures release output,
+Schema/output caps remain compile/preflight errors. complete-input failures release output,
 state and columns; floating exceptional results follow exact sum rules. Budget
 failure never changes arithmetic precision. Final output owners outlive context.
 
@@ -109,7 +109,7 @@ zero-boundary input validation.
 
 ## Implementation and executable acceptance
 
-All six registered profile keys use the exact Whole algorithm above. Current
+All six registered profile keys use the exact complete-input algorithm above. Current
 public workflow and focused Result math coverage are in
-[NUM-13 Whole execution](../scans-whole.md). Proposed specification status is
+[NUM-13 Run-shared complete-input computation](../scans-whole.md). Proposed specification status is
 unchanged.

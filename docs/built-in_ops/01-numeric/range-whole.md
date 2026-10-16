@@ -1,6 +1,6 @@
-# NUM-06 Result Whole execution
+# NUM-06 Result Run-shared complete-input computation
 
-The six formal `numeric.clamp_*` and `numeric.remap_range_*` keys consume tensor members from `Result` inputs and publish one `Result` output named `values`. They use the Whole tensor continuation; a nonempty request reads complete inputs and computes the complete output through its Need and publication stages.
+The six formal `numeric.clamp_*` and `numeric.remap_range_*` keys consume tensor members from `Result` inputs and publish one `Result` output named `values`. They use the complete-input tensor continuation; a nonempty request reads complete inputs and computes the complete output through its Need and publication stages.
 
 ## Tensor contract
 
@@ -10,7 +10,7 @@ Clamp accepts UInt8, Int64, Float32 and Float64 with three inputs in order: `inp
 
 Input sample rank is 1 through 8 and the complete logical element count is at most 2^40. Output `values` is a `Result` using schema `photospider.tensor` and tensor key `samples`. Its cell shape is the complete input `sample_shape()`; input batch prefixes become ordinary output axes. Output batch-axis topology are empty. The output retains the input element type.
 
-For every nonempty request, the continuation issues one Need for the complete tensor member on every input with roles 13 (Data, Validation and Descriptor), then publishes the complete output in its next stage. It reads through authorized tensor windows and writes through one direct tensor writer. Whole execution means sparse requested output regions do not reduce the input validation or arithmetic domain. The published Result retains the full output and its global coordinates; query coverage `Q` identifies the observed dependency footprint rather than a packed ROI publication. A bound error outside the requested projection still fails the invocation.
+For every nonempty request, the continuation issues one Need for the complete tensor member on every input through ordinary member tile Needs, then computes the complete internal output after those Needs resolve. It reads through authorized tensor windows and writes through one direct tensor writer. Run-shared complete-input computation means sparse requested output regions do not reduce the input validation or arithmetic domain. The shared stage retains the complete internal output. Public actors publish only requested complete member tiles in global coordinates, with the stage's frozen input evidence. A bound error outside the requested projection still fails the invocation.
 
 An Empty request creates the correctly typed and shaped Result with empty sample coverage. It issues no input payload Need and performs no sample arithmetic. The callback does not run.
 

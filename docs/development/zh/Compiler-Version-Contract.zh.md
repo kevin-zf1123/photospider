@@ -1,40 +1,40 @@
-# Compiler 与 Package 版本契约
+# 编译器与包版本契约
 
 ## 当前契约
 
-当前 package version 为 **0.34.0**。C++ consumers 必须针对该 package 的 headers 重建。Package 使用 `SameMinorVersion` 兼容规则，因此不同 minor version 的请求不兼容。C operation-plugin interface 保持 Result ABI 4；table 和 record 的精确大小必须与已安装 SDK 一致。
+Package 0.35.0 使用 SameMinorVersion 兼容规则。C++ consumer 和外部 C operation module 必须针对匹配头文件重建。Result ABI 5 要求 table/record 大小精确匹配，不提供兼容 shim。ADR 0022 的前缀协商冻结 ABI 仍为 Proposed。
 
-| 契约 | 当前版本 |
+| 契约 | 版本 |
 | --- | --- |
-| Package | 0.34.0 |
-| WorkflowDocument schema | 6 |
-| OperationTraits | 26 |
-| Operation plugin C table | Result ABI 4 |
-| Semantic graph identity | `semantic-graph-ir-v21` |
-| Physical plan identity | `physical-plan-v21` |
-| Outer plan cache key | `plan-cache-key-v17` |
-| Optimizer identity | `optimizer-v5-canonical-noop` |
-| Tensor-description codecs | 按当前 codec 规则选择 TDM4/TDM5 |
-| Result schema canonical encoding | Version 4 |
+| Package | 0.35.0 |
+| WorkflowDocument | 7 |
+| OperationTraits | 27 |
+| Result operation C ABI | 5, exact-size |
+| CPU parallel / tiles service ABI | 2 / 2 |
+| Native GPU service ABI | 1 |
+| Result schema encoding | `photospider.result-schema.v5` |
+| Semantic graph | `semantic-graph-ir-v22` |
+| Physical plan | `physical-plan-v22` |
+| Plan cache key | `plan-cache-key-v18` |
+| Optimizer | `optimizer-v5-canonical-noop` |
+| Ops TensorDescription codecs | TDM4/TDM5 |
 
-这些版本属于独立兼容轴。即使 C table 版本不变，C++ layout 变化仍要求 C++ consumers 重建。Package 更新以及 Result-only C++ operation 和 workflow API 都属于 breaking C++ changes。Result C table 保持 ABI 4，且是唯一的 operation-plugin C interface。ABI 4 包含 tensor-window、tensor-view、reshape services，并在具名 `ps_result_output_v4` records 中包含不可变分类字段。`failure_delivery` 为 `PS_RESULT_REQUEST_FAILURE_ONLY_V4`（0）。Importer 要求 record 大小与当前定义精确匹配；C modules 必须针对 SDK 重建。
+这些版本轴相互独立。C++ 布局改变可要求重新构建，而不改变无关 native service ABI。当前权威定义来自公共头文件、CMake package 声明和 compiler 规范编码。
 
 ## Workflow 输入与算子执行
 
-`WorkflowInputDeclaration` 由 id、精确 binding name 和必需的 `result_schema` 组成。`ExecutionBinding` 由 name 和 owning `ResultRef` 组成。`ExecutionResult` 与 `DemandResult` 提供具名 Results；Value 是 Result storage 和 codecs 使用的内部 typed backing。输入 `OperationMetadata` 携带 Result schema。Tensor shape 和 layout 属于各自的 `ResultTensorSpec`。
+Workflow 声明要求静态 Result schema，binding 按精确名称提供拥有型 ResultRef。Run 固定 plan、binding snapshot 和 generation。每个输出/成员在 plan-wide tile extent 下拥有网格，默认 128。Payload Need 使用成员 slot 和紧凑区间；descriptor-only 必须显式提出。空 payload 集合不执行工作。
 
-`OperationTraits` version 26 与 `WorkflowDocument` schema 6 标识当前 C++ 契约。算子通过 `start_result` 和其 `ResultContinuation` 执行。`ExecutionContext::execute` 返回具名 Results。增量 publication 使用 `ExecutionOptions::result_publication`，在前缀获得认证后逐步通知调用方，调用方可以保留 owning Result reference。前缀不代表整次执行成功。Callback failure 会停止 Run，并遵循现有 failure、cancellation 和 callback retirement 规则。
+Continuation 可以跨 poll 和多个 Need。准备后的共享 stage 在 Run 内按原始节点/stage 保证唯一 producer，不依赖输出选择。普通 actor 发布一个完整成员 tile。固定 bundle/prefix 可见性与执行分离。Mandatory root 和取消遵循执行契约。
 
 ## Result 与图像接口
 
-Result schema 声明 typed tensor members、primitive fields 和 domain。Tensor members 携带 element type、descriptor cell shape、可选 batch axes 和 physical layout；完整 sample coordinates 由 batch axes 后接 cell axes 构成。Spatial tensor 的 height、width 和 channel axes 相对于 cell axes。Physical storage order 与 row pitch 描述 backing；tensor payload 与 primitive field records 分开。Planar image pixels 使用由 planar pages 支撑的 typed Result tensor slots。
+Result 包含 1 到 16 个具名静态 Tensor 成员。Dtype、正 shape、rank、batch/atomic 轴和拓扑在执行前固定，包括静态推导的 extent。运行期 count 和 mask 是固定容量内的普通 payload。不提供动态 field 行、End 协议、数值端口 kind、failure-delivery selector 或内核 scalar-bounds 字段。
 
-Result schema 可以包含 tensor slots、fields 或两者。`read_tensor` 复制已授权 samples；owning tensor windows 提供授权的 rows 或 rectangles，并在释放前保留 backing owners。`publish_tensor_view` 发布授权的 source view。`make_mapping` 将 output tensor support 映射至 input tensor；其他 relation helpers 构造 tensor support witnesses。Relations 不授权 sample reads。
+Tensor 统一 backing、片段和 view 访问。宿主默认 tiled planar 分配，继续支持合法的有符号/零 stride、外部 owner 和稀疏物理覆盖。拥有型窗口暴露真实 run；显式 collection 和 packing 消耗容量与 work。普通图像的 straight alpha 默认由算子实现和 helper 体现，不通过内核合规 validator 认证。
 
-Resolver 通过同步 metadata sink 对每个 output 提供一次 schema；host 在 sink 调用返回前复制并校验嵌套 schema records。Query view 反映选中的 output 声明，metadata resolution 不能更改 failure classification。Retained tensor 和 window handles 具有显式释放或 operation-state 销毁生命周期。CPU workers 可检查取消；retained window 的 row/rectangle access 可安全地由 worker 执行，且不会重新进入 execution services。
+C metadata resolution 提供 schema、所选资源和静态共享 stage 声明。保留窗口具有显式 retain/release 生命周期。Query 和服务表在 callback 返回时失效。内核检查地址、授权、owner 与同步，不解释像素值。
 
-## Identity 与 runtime 匹配
+## Identity 与运行期匹配
 
-Semantic identity 包含 operation contracts、typed Result schema、parameters、ordered inputs，以及适用时的 selected output 和 captured query。Physical plan identity 包含影响执行的物理选择。Page offsets 和临时 addresses 不属于 semantic identity。内部 IR 和 plans 不是 serialization formats。
-
-已安装的 C++ headers、链接的 kernel library 和所选 C table 必须描述相同的 package 与 ABI。Loader 在导入 module 前验证精确的 C table 版本和大小。Native GPU 行为还要求选定 backend 和可用 device。C++ layout 和字段删除属于 breaking change；所有 C++ consumers 都必须针对已安装的 0.34.0 package 重建。Package version file 接受 0.34 minor line 内的兼容版本。版本声明本身不能证明本地 consumer build 已通过。
+规范 identity 包含准备后的算子契约、静态 schema、参数、所选资源、输入投影、共享 stage 定义和相关 backend 选择。原始指针、padding 和 allocation 地址不定义语义 identity。C import 拒绝错误 ABI 或大小；native 服务可用性还取决于构建和设备。内部 IR 和 plan 不属于序列化 wire 格式。

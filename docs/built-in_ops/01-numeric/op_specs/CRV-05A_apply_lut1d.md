@@ -153,8 +153,8 @@ coordinates, not unrounded ideal positions or a rounded fractional index.
 
 ## Exact demand and invalidation
 
-Every nonempty Whole request requests complete input, table and axis Results
-with Data, Validation and Descriptor (role 13), including typed validation and
+Every nonempty complete-input request requests complete input, table and axis Results
+with ordinary payload tile Needs, including typed validation and
 upstream failures. It validates the complete reconstructed axis first, then every
 finite/domain query before table arithmetic. It computes every output element and
 publishes one immutable packed dense Result of the complete input shape, with full
@@ -193,7 +193,7 @@ Resource failure never authorizes skipping axis validation or weaker arithmetic.
 Unpublished output/workspace is released; the output transaction is all-or-nothing.
 Numeric InvalidDomain/ArithmeticOverflow failures have Run scope. Typed, upstream,
 resource, stale, backend and cancellation failures retain their categories.
-Whole does not expose per-value fallback counters; report those as unavailable.
+complete-input does not expose per-value fallback counters; report those as unavailable.
 
 ## Acceptance and current implementation
 
@@ -219,7 +219,7 @@ may still be rejected by this consumer's stricter axis validity.
 
 Current [field.apply_lut_1d](../../../../plugins/ops/01-numeric/field_apply_lut_1d.cpp)
 instead takes a rank-2 field and same-dtype table, static increasing domain and
-reject/clip policy, validating the whole table under Whole execution. Current
+reject/clip policy, validating the whole table under Run-shared complete-input computation. Current
 [lut.apply_1d](../../../../plugins/ops/01-numeric/lut_apply_1d.cpp) uses typed
 Float32 input/table with semantic sample origin/step. Neither is this generic
 three-input dynamic-axis, versioned contract.
@@ -227,7 +227,7 @@ three-input dynamic-axis, versioned contract.
 ### Maintained implementation and verification
 
 `plugins/ops/01-numeric/lut1d_application.cpp` registers the six scalar/channels
-profile keys as Whole Result operations. `UniformAxis` validates the three axis
+profile keys as Run-shared Result operations. `UniformAxis` validates the three axis
 values and exact step, then stores the complete endpoint-weighted RN64 grid in a
 Root allocation charged to Metadata. The program validates every query before
 table arithmetic, and descending segments reorder x and y together for the
@@ -239,7 +239,7 @@ mixed dtypes, reversed unaligned inputs, zero-stride layouts, caller and worker
 floating-point modes, clamp and extrapolation, singleton axes/tables, selected
 negative zero, invalid queries and axes, typed validation, and upstream failure.
 The fixture also checks Empty, static descriptor limits, cache association after
-source replacement, static preparation reuse, sparse requests with full Whole
+source replacement, static preparation reuse, sparse requests with full complete-input
 coverage, the six CRV-04 baking chains, resource rejection, cancellation, and
 Result/read-window lifetime.
 

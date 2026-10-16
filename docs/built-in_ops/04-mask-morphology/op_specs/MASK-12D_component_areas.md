@@ -22,18 +22,18 @@ the proposed name is not a current registry entry or a compatibility alias.
 
 ## Ports, parameters and output inference
 
-labels: Int64[H,W] -> area_index: complete Result rows:Int64[K,2]
+labels: Int64[H,W] -> area_index: complete Result rows:Int64[N,2] plus count:Int64[1], N=H*W
 
 Required static parameters: None; source basis/ObjectId carried by schema association. Values and controls use the stated
 port order. Infer ordinary output dimensions from descriptors/statics only;
-Result RuntimeCount and association rules, where relevant, are those of the family.
+Static Tensor capacities, payload counts and source-association rules, where relevant, are those of the family.
 No hidden default, conversion, color/alpha inference or optional port is added.
 
 ## Mathematics and exact request behavior
 
-Count each positive ID exactly and emit ascending [id,area]; K RuntimeCount.
+Count each positive ID exactly and emit ascending [id,area]; effective count K in an Int64[1] payload.
 
-Whole labels; atomic table publication. Empty Q has no runtime sample/control/validation reads. Descriptor
+complete-input labels; atomic table publication. Empty Q has no runtime sample/control/validation reads. Descriptor
 checks still run. The family defines validation closure, border extension,
 stage rounding, dynamic witnesses and the forward dirty relation. A bounding
 rectangle may not replace a smaller declared sparse support.
@@ -45,13 +45,13 @@ CPU is the initial target; no implicit accelerated/GPU/third-party fallback is
 registered. Exact choices/copies stay exact; arithmetic uses the inherited
 rounding boundary and finite-domain error rules. Account for output, scratch,
 exact state, retained source owners and all simultaneous intermediates. Poll
-inside long loops/refinement. Whole or CompleteBundle members do not publish
+inside long loops/refinement. complete-input or CompleteBundle scopes do not expose
 partially converged or partially associated results. Preserve the host's
 upstream/cancellation/resource scope and immutable owner lifetime.
 
 ## Independent acceptance and conceptual workflow
 
-labels [[0,7],[7,42]] -> rows [[7,2],[42,1]]. All background -> K0, empty rows.
+labels [[0,7],[7,42]] -> rows [[7,2],[42,1]]. All background -> count=0 with zero-filled static rows[N,2]. The listed nonempty rows are the effective prefix only.
 
 Independent reference entry: `component_areas` in
 [`mask12/reference.py`](../../../../oracle/ops/mask_morphology/mask12/reference.py).

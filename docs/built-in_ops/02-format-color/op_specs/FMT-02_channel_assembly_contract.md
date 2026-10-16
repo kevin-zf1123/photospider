@@ -12,7 +12,7 @@ clarification_status: complete
 # FMT-02: channel assembly and concatenation family
 
 Runtime contract: A/B/C and the scalar literal provider are registered as
-twelve Result operation ABI 4 CPU keys: `assemble`, `concatenate`,
+twelve Result operation ABI 5 CPU keys: `assemble`, `concatenate`,
 `assemble_mapped`, and `scalar_literal`, each with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
 The public authoring helpers are installed in
 `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
@@ -81,7 +81,7 @@ actually uses.
 The twelve registered keys use single-tensor Result inputs and outputs. Every
 connected input contributes Descriptor support, including inputs unused by the
 selected mapping; Data support includes only mapped sources in the requested
-output footprint. Each input descriptor contains one tensor and no fields.
+output footprint. Each input descriptor contains one tensor.
 The implementation supports seven native dtypes by exact bit copy, preserves
 the first input's Result schema id, tensor key and publication policy, sets
 `atomic_trailing_axes` to zero, and attaches no description. Batch axes form a cell-independent prefix and must match exactly across
@@ -239,7 +239,7 @@ possible without a complete image/color description.
 | Input layout | Legal generic strided tensors and canonical planar image windows | Raw does not admit an interleaved image without explicit import. |
 | Output | auto/view/materialize with exact requested coverage | No cross-owner image representation or implicit packed ROI export. |
 | Backend | Portable CPU and named Apple Silicon/x86-64 CPU profiles with identical copy semantics | GPU is unpromised; unavailable named backends fail explicitly. |
-| Execution | Exact mapped components/regions with no halo | Existing Whole implementation is not a conforming replacement. |
+| Execution | Exact mapped components/regions with no halo | Existing complete-input implementation is not a conforming replacement. |
 
 ## Data, descriptor and dirty mapping
 
@@ -257,7 +257,7 @@ deduplication when multiple destinations select the same source component.
 There is no Control payload and no additional sample Validation domain. Static
 descriptor checks cover every connected input's shape/dtype, axis and supplied
 description even if its payload is unrequested. Explicit output grouping does not
-add RGB/alpha read closure. Necessary upstream Whole computation or intrinsic
+add RGB/alpha read closure. Necessary upstream complete-input computation or intrinsic
 producer failures retain their own scope; a raw consumer cannot manufacture a
 missing value from a failed producer.
 

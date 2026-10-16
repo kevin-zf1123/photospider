@@ -26,7 +26,7 @@ The compiler resolves every output's Result schema from static input metadata an
                               fail only B dependents
 ```
 
-`ValueRef` is `(node_id, output_index)`. It routes a result independently of its physical plan-step index. Each result is computed and tracked in tiles or as one Whole unit, as defined by [ADR 0023](0023-track-dependencies-between-fixed-tiles.md).
+`ValueRef` is `(node_id, output_index)`. It routes a result independently of its physical plan-step index. Each result is computed and tracked in member tiles, as defined by [ADR 0023](0023-track-dependencies-between-fixed-tiles.md).
 
 ## 3. Formal contracts and APIs
 
@@ -72,7 +72,7 @@ class ExecutionContext {
 
 The class excerpts omit unrelated members.
 
-These C++ declarations show the routing fields; surrounding types and validation are omitted. `OperationTraits` contains a declaration-ordered output vector.  Every output has a unique key and a separately inferred Result schema. The C operation descriptor has the same ordered model, with at most 64 output records. Multiple outputs require deterministic, side-effect-free behavior.
+These C++ declarations show the routing fields; surrounding types and validation are omitted. `OperationTraits` contains a declaration-ordered output vector.  Every output has a unique key and a separately inferred Result schema. The C operation descriptor has the same ordered model, with at most 64 output records. Purity constrains optional caching and retry; side-effecting operations declare mandatory shared stages.
 
 Workflow edges select an exact producer port by name. A caller-visible `WorkflowOutput` names a selected node and port, then assigns a unique result label. The compiler resolves output names to declaration-order indices and records each result as `ValueRef`. Static inference receives complete input metadata; an output's `input_indices` projection controls its executable input ancestry and callback view. Projected C callback inputs retain their original schema indices.
 
@@ -82,10 +82,7 @@ A failure of one result's task fails that result and its actual consumers. The p
 
 ## 4. Non-goals and explicit boundaries
 
-- Multiple outputs do not imply shared evaluation, shared cache keys or one callback that publishes several Values. Each demanded result follows its declared execution contract.
-- An unselected pure sibling does not execute solely because another result from its node is selected. Side-effecting operations remain singleton roots under their declared contract.
-- The coordinator does not group several results or observations into one shared callback.
-- Dynamic output counts, late-added output ports and automatic channel pruning are outside the fixed declaration-ordered output table.
+- Independent outputs retain separate projections and tile demands. Explicit prepared shared stages may compute joint results once per original node/stage within a Run. Their definition, projection and schema cannot come from the first requester. Mandatory stages and fixed publication bundles may enlarge required work. Dynamic output counts remain unsupported.
 
 ## 5. Consequences
 

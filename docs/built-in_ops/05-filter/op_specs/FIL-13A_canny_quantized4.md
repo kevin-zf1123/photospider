@@ -25,7 +25,7 @@ Inherits the [FIL-13 family contract](FIL-13_contract.md), [FILTER common contra
 
 `input` is a single-plane floating-point field → `edges` UInt8 with the same shape.
 
-Except for semantic entry points explicitly defined by this member, inputs are raw numerical fields: channel count does not imply RGB/alpha, and attached color descriptions do not broaden sample-domain validation. Axes, positive extents, explicit broadcasting, canonical planar publication, and retention or reconstruction of applicable metadata follow the shared contract. Dependencies for components and multiple outputs are declared per request; associated collections follow the FilterBands/FrequencyGrid draft.
+Unless the member defines an explicit color interpretation, ports contain raw numerical Tensor samples; channel count does not imply RGB or alpha. Color descriptions are explicit operation parameters, never attached Result metadata. Positive extents, axis validation and explicit broadcasting follow the common contract. Host-created backing defaults to tiled planar without requiring a conformance declaration. Associated FilterBands/FrequencyGrid structures remain Proposed static Tensor schemas; each requested output records its actual tile Needs.
 
 ## Static parameters and valid domains
 
@@ -43,9 +43,9 @@ When a formula calls another member, preserve the RN stages produced at the call
 
 ## Data / Control / Validation / Descriptor
 
-The edge output is Whole for each plane. Gaussian and gradient stages remain local, but hysteresis reads the complete NMS plane. Batches do not read one another.
+The edge output is complete-input for each plane. Gaussian and gradient stages remain local, but hysteresis reads the complete NMS plane. Batches do not read one another.
 
-Boundary coordinates are defined relative to the complete logical image; ROI/tile edges do not become new boundaries. Empty demand reads no payload; selection conditions retain Control dirty witnesses. Exact support must not be replaced by a convenient rectangular or Whole read; any enlargement requires an explicit Conservative plan. Output descriptors derive from static parameters and input descriptors, not input sample values.
+Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Mathematical sample support is rounded to the current plan's member tiles for payload Needs, authorization and invalidation. Control and validation samples use ordinary payload Needs and participate in the same evidence. Empty payload demand reads no samples. Output structure derives only from static parameters and input schemas. The kernel has no support-role or Exact/Conservative/Unknown dependency mode.
 
 ## Algorithm, resources, and execution
 
@@ -55,7 +55,7 @@ In complexity notation, P=HW, C is the number of independent planes, A the numbe
 
 ## Oracle, fixtures, and acceptance
 
-A constant input produces all zeros; a long weak chain connected to a strong pixel across multiple tiles is retained; plateau ties are deterministic on the same platform; low=0 is rejected; an ROI result matches the corresponding crop of Whole execution.
+A constant input produces all zeros; a long weak chain connected to a strong pixel across multiple tiles is retained; plateau ties are deterministic on the same platform; low=0 is rejected; an ROI result matches the corresponding crop of Run-shared complete-input computation.
 
 The functions below cover subformulas/stages of this construction; named workflow tests in tests.py cover only their recorded configurations. They are not Photospider DAG builders and do not claim complete metadata, Region, or resource integration. Stage RN boundaries must not disappear when nodes are fused.
 
@@ -76,7 +76,7 @@ Float64 accelerated execution still uses Float64 inputs, outputs, and exponent r
 
 `static + descriptors → preflight / demand → Data and Control declared by this member → exact expression / declared RN stages → requested owned output / complete result`
 
-This sketch adds no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-filling of missing data. Whole execution and multistage buffers follow this member and its family contract.
+This sketch adds no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-filling of missing data. Computation scope and multistage buffers follow this member and its family contract; use a Run-shared stage only for the global work that contract requires.
 
 ## Rationale and open decisions
 

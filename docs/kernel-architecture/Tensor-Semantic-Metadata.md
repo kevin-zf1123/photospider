@@ -2,7 +2,7 @@
 
 [Chinese reader version](zh/Tensor-Semantic-Metadata.zh.md).
 
-This page describes an operations-SDK configuration type. The kernel does not store, propagate, or validate tensor descriptions: Result and Value carry only structure, data, and storage owners. A `TensorDescription` exists only as an explicit static parameter of the operation that reads it.
+This page describes an operations-SDK configuration type. The kernel does not store, propagate, or validate tensor descriptions: Result and Tensor carry only structure, data, and storage owners. A `TensorDescription` exists only as an explicit static parameter of the operation that reads it.
 
 ## 1. Scope and ownership
 
@@ -45,10 +45,10 @@ Result<std::string> tensor_description_parameter(const TensorDescription&);
 Result<TensorDescription> tensor_description_from_parameter(
     const std::string&);
 Status validate_tensor_description(const TensorDescription&,
-                                   const ValueDescriptor&);
+                                   const TensorDescriptor&);
 ```
 
-`TensorDescription` records ordered channels on an optional channel axis, one selected component, logical axes, global interpretation defaults, and complete color groups. `validate_tensor_description` checks the description against a `ValueDescriptor` without reading samples. Validation requires rank 1 through 8, a channel axis inside that rank, and either an empty axes table or one entry per logical axis. Each axis has a name, unit, finite origin, and positive finite step. A complete group names ordered distinct component indices and corresponding channel descriptions; its optional alpha index is within the same tensor and outside the color indices. Group and explicitly supplied channel declarations must agree.
+`TensorDescription` records ordered channels on an optional channel axis, one selected component, logical axes, global interpretation defaults, and complete color groups. `validate_tensor_description` checks the description against a `TensorDescriptor` without reading samples. Validation requires rank 1 through 8, a channel axis inside that rank, and either an empty axes table or one entry per logical axis. Each axis has a name, unit, finite origin, and positive finite step. A complete group names ordered distinct component indices and corresponding channel descriptions; its optional alpha index is within the same tensor and outside the color indices. Group and explicitly supplied channel declarations must agree.
 
 `TensorEncoding` maps stored values to decoded values by
 
@@ -81,7 +81,7 @@ struct MetadataOptions final {
   std::string missing = "error";       // "error" or "ignore"
 };
 Result<TensorDescription> edit_description(
-    const TensorDescription& source, const ValueDescriptor& descriptor,
+    const TensorDescription& source, const TensorDescriptor& descriptor,
     const MetadataOptions& options = {});
 }  // namespace ps::format
 ```
@@ -125,7 +125,7 @@ Internally, the editor encodes the options as a bounded v1 transaction tree: at 
 
 ## 5. Limitations and non-goals
 
-- A description is static operator configuration. It is not attached to a Result or Value, it does not flow along graph edges, and no operation output carries the input's description forward.
+- A description is static operator configuration. It is not attached to a Result or Tensor, it does not flow along graph edges, and no operation output carries the input's description forward.
 - The kernel does not reject a connection because two Results have different intended descriptions; structure alone decides port compatibility. An operation checks its explicit description against the input descriptor when it prepares, and a bound validator can check sample values.
 - Tensor descriptions describe logical axes and interpretation; they do not define physical strides, planar/tiled storage, or image ownership.
 - Profile identities do not carry resource bytes. Callers must provide the resources in the `ResourceSet` given to the compiler.

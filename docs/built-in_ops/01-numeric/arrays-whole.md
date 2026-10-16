@@ -1,7 +1,7 @@
-# NUM-03 Whole execution
+# NUM-03 Run-shared complete-input computation
 
 All six `numeric.constant` and `numeric.broadcast` profile keys execute CPU
-Whole Result operations. Constant View copies one scalar into an independent
+Run-shared Result operations. Constant View copies one scalar into an independent
 zero-stride Result owner; it preserves the whole-array tuple identity without
 retaining an oversized scalar backing. Broadcast View preserves the complete
 source Result owner, including its original strides. If the source has multiple

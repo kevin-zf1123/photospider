@@ -31,7 +31,7 @@ stored in the original floating dtype. UInt8 and Int64 are exact identity.
 Shape and dtype are preserved; there are no operation parameters or implicit
 conversion to an integer output array. Inherit the
 [NUM-04 common contract](NUM-04_unary_contract.md) for the input/values interface,
-Whole/typed-validation support, output structure, resources and lifetime.
+complete-input/typed-validation support, output structure, resources and lifetime.
 
 ## Exact semantics
 
@@ -69,6 +69,6 @@ This specification alone does not claim a product test run.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

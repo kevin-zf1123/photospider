@@ -10,7 +10,7 @@ ADR 0015 定义破坏性的仓库边界。内核仓库包含可嵌入的 compile
 include/photospider/
   compiler/      WorkflowDocument、typed IR、plan、typed identity、compiler
   execution/     context、cancellation、result、raw diagnostic
-  data/          Value、Region、显式 layout 与不可变字节
+  data/          Tensor、Region、显式 layout 与不可变字节
   plugin/        operation ABI/registry
   core/          status、resources、cancellation 与符号导出
   benchmark/     原始 compile/plan/execute benchmark runner

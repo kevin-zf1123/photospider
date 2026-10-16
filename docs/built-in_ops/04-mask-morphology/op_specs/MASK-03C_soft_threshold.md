@@ -26,7 +26,7 @@ input: Field[H,W] -> values: Coverage[H,W]
 
 Required static parameters: threshold finite Float64; width finite Float64>=0; curve linear|smoothstep; authoring .5,0,smoothstep. Values and controls use the stated
 port order. Infer ordinary output dimensions from descriptors/statics only;
-Result RuntimeCount and association rules, where relevant, are those of the family.
+Static Tensor capacities, payload counts and source-association rules, where relevant, are those of the family.
 No hidden default, conversion, color/alpha inference or optional port is added.
 
 ## Mathematics and exact request behavior
@@ -45,7 +45,7 @@ CPU is the initial target; no implicit accelerated/GPU/third-party fallback is
 registered. Exact choices/copies stay exact; arithmetic uses the inherited
 rounding boundary and finite-domain error rules. Account for output, scratch,
 exact state, retained source owners and all simultaneous intermediates. Poll
-inside long loops/refinement. Whole or CompleteBundle members do not publish
+inside long loops/refinement. complete-input or CompleteBundle scopes do not expose
 partially converged or partially associated results. Preserve the host's
 upstream/cancellation/resource scope and immutable owner lifetime.
 

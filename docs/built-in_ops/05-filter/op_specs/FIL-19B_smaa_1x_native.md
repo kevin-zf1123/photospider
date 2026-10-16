@@ -34,7 +34,7 @@ The available decision establishes the native implementation and third-party com
 
 ## Demand and execution
 
-Demand, image boundaries, descriptor inference, resource admission, cancellation, output ownership, and failure behavior inherit the FILTER shared contract. The final spatial dependency class and resource cost must be derived from the pinned native sampling/search definition. Do not claim Whole, bounded halo, tileability, or resource bounds until that definition is completed.
+Demand, image boundaries, descriptor inference, resource admission, cancellation, output ownership, and failure behavior inherit the FILTER shared contract. The final spatial dependency class and resource cost must be derived from the pinned native sampling/search definition. Do not claim complete-input, bounded halo, tileability, or resource bounds until that definition is completed.
 
 ## Acceptance
 

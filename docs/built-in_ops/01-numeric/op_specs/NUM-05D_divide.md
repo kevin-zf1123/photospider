@@ -64,14 +64,14 @@ infinity successfully; all logical coordinates are evaluated for nonempty reques
 shared public execution and resource cases.
 
 The current legacy operation uses finite-only Float32/Float64 arithmetic and
-Whole execution. It does not implement this versioned IEEE-like contract or
+Run-shared complete-input computation. It does not implement this versioned IEEE-like contract or
 establish the full-input typed and numeric semantics. The maintained versioned implementation and public example are described below.
 
 ## Maintained implementation
 
 The three keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/ops/numeric/binary.hpp`.
-The shared Whole adapter retains and validates both complete inputs, including
+The shared Run-shared adapter retains and validates both complete inputs, including
 when a numeric identity determines a result.
 Floating elementary operations use controlled correctly rounded hardware
 arithmetic after exact special-value classification, with exact fallback; integer

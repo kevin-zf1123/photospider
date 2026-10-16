@@ -2,7 +2,7 @@
 
 英文权威文档：[Layer-Runtime.md](../Layer-Runtime.md)。
 
-本页说明算子 SDK 中的类型。Layer 值及其纯算术 helper 声明在 `photospider/ops/composite/layer.hpp`，实现在 `plugins/ops/09-composite/layer.cpp`，并构建进 `Photospider::ops_sdk`。内核没有 Layer 类型、Layer schema 或 Layer 专用校验。Workflow 中的图像使用 [Result Tensor 存储与区域访问](../../kernel-specs/zh/Tensor-Storage-and-Region-Access.zh.md)；`PlanarImage` 是该存储的 typed backing。
+本页说明算子 SDK 中的类型。Layer 值及其纯算术 helper 声明在 `photospider/ops/composite/layer.hpp`，实现在 `plugins/ops/09-composite/layer.cpp`，并构建进 `Photospider::ops_sdk`。内核没有 Layer 类型、Layer schema 或 Layer 专用校验。Workflow 中的图像使用 [Result Tensor 存储与区域访问](../../kernel-specs/zh/Tensor-Storage-and-Region-Access.zh.md)；`Tensor` 提供统一数值 backing。
 
 ## 1. 模块边界与所有权
 

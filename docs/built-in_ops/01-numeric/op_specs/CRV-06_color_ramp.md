@@ -36,7 +36,7 @@ mapping differs from CRV-05's independent per-input-channel table application.
 
 ## Result tensor ports
 
-Each dynamic port is a Result containing exactly one tensor member and no fields.
+Each dynamic port is a Result containing exactly one tensor member .
 Any structurally valid schema id/version/member key is accepted. Validate shapes
 against each member's complete `sample_shape()`, including batch axes. The ports
 are `input` (rank 1..7, Float32/64), `stops` (rank 1, K=1..65536, Float32/64),
@@ -145,10 +145,10 @@ maximum-shape, or performance rerun is included. CRV-06 has no GPU variant.
 The ColorArray v1 CIELAB/CIELCh implicit L* scale difference from the native
 `l=L*/100` contract remains open. See [math implementation](../math-implementation.md#crv-06-colorarray-and-color-ramps)
 for the implementation and evidence boundaries.
-## Whole execution and resources
+## Run-shared complete-input computation and resources
 
-All formal strict and accelerated keys use Whole Result programs. A nonempty
-Run declares Data, Validation and Descriptor needs (role 13) for every input, so
+All formal strict and accelerated keys use Run-shared Result programs. A nonempty
+Run declares ordinary payload tile Needs  for every input, so
 typed and upstream validation covers complete tensor members. The executor reads
 authorized windows directly; the callback does not collect or copy complete input
 arrays. It validates all stops, then every input position, before color arithmetic.
@@ -157,15 +157,7 @@ mathematics. Generic color rows outside all evaluated stencils remain numericall
 unused, while their typed/upstream validation still applies. Empty reads no sample
 payload after static preparation.
 
-The `values` port publishes an immutable `photospider.tensor` v1 Result with
-`samples` shape `sample_shape(input)+[C]`, `atomic_trailing_axes=1`. Whole writes publish the full output transactionally;
-the Result retains full certified coverage and global coordinates. Fragments expose
-requested regions while retaining the full output owner. Arbitrary immutable source
-strides, offsets and unaligned storage are supported. Result association records
-source ObjectIds, and selected ColorArray resources remain owned by the output.
-Input edits invalidate complete recorded output demand. Numeric errors have Run
-scope; failed callbacks publish no color subset. Upstream, resource and cancellation
-errors retain their categories.
+The `values` port uses `photospider.tensor` v1/member `samples`, shape `sample_shape(input)+[C]`, with one atomic trailing axis. One prepared Run-shared stage acquires complete input coverage through ordinary tile Needs and computes the complete internal output. Acquiring owning windows does not implicitly collect dense arrays. Ordinary output actors publish only their requested complete member tiles as retained views. Global coordinates and source ObjectId provenance are preserved; operation resources stay in prepared state. Shared input edits invalidate dependent output tiles. Failed computation exposes no partial tile.
 
 Lookup work remains O(K+N log K), plus exact or certified arithmetic. Full output
 payload is N*C*sizeof(dtype), even for a small request. Account source owners/windows,

@@ -13,7 +13,7 @@ clarification_status: complete
 
 # CRV-06G: HSL ramps
 
-Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member and no fields, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member , under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -45,7 +45,7 @@ accept Float32/Float64. Output is values, shape sample_shape(input)+[3], ordered
 Inherit [CIELCh CRV-06D](CRV-06D_color_ramp_cielch.md) for K=1..65536,
 input rank 1..7 and all positive logical counts <=2^40, finite strictly increasing
 stops, clamp/reject default clamp, singleton behavior, output hue units and defaults,
-static description matching, complete-color observation, Whole role-13 validation and selected-row mathematics,
+static description matching, complete-color observation, complete-input ordinary tile Needs validation and selected-row mathematics,
 whole-input dirty witnesses, layout/owner/resource accounting, cancellation and errors.
 Replace its lightness_chroma port with saturation_lightness. Output dtype defaults
 to colors dtype or saturation_lightness dtype. Required static String parameters

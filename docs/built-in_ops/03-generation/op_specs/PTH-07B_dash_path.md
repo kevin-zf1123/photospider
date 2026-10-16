@@ -40,14 +40,14 @@ positions, not a fresh normalized profile.
 
 ## Dependencies, resources and failures
 
-Execution rule: **Whole**. Read complete structural/global inputs and publish the
+Computation scope: **complete input in a Run-shared stage**. Read complete structural/global inputs and publish the
 selected complete Result atomically. Full shared-control/topology/resource changes
 conservatively invalidate dependent output; sample changes follow the actual dependency
 map. Empty requests perform static preflight without payload reads or advancing a random
 sequence. Compute only requested output mathematics, retaining required shared
 validation.
 
-Whole; charge dash count, true inverse and source mappings; hard limits never erase tiny
+complete-input; charge dash count, true inverse and source mappings; hard limits never erase tiny
 dashes.
 
 All output, scratch, indices, validation work and retained owners are accounted. Poll

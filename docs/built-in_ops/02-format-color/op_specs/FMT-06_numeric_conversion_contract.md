@@ -11,7 +11,7 @@ clarification_status: current_member_complete_extensions_pending
 
 # FMT-06: numerical dtype and interval conversion
 
-The default registry provides one native Result ABI 4 key,
+The default registry provides one native Result ABI 5 key,
 `numeric.convert_format_strict`. It accepts one single-tensor Result with no
 fields and publishes one `values` output Result containing one tensor. It supports
 all 49 source/target pairs among UInt8, UInt16, Int8, Int16, Int64, Float32 and
@@ -199,14 +199,14 @@ integer-like alpha codes into normalized coverage.
 
 ## Exact demand, layout and invalidation
 
-For requested coordinates Q, Data is exactly input[Q]. Value conversion checks
+For requested coordinates Q, Data is exactly input[Q]. Tensor conversion checks
 only those samples, including nonfinite integer errors or overflow. Do not read
 other channels, scan global extrema or close over complete color groups. All
 static dtype/shape/bounds belong to Descriptor support and are
 checked independently of Q. There is no sample-derived Control dependency.
 Dirty samples map to identical logical output coordinates. Static intervals,
 mode, dtype or applicable metadata changes invalidate inference/results; no
-old success evidence survives a changed mapping. Required upstream Whole work
+old success evidence survives a changed mapping. Required upstream complete-input work
 retains its original failure scope.
 
 Auto/view first requires same dtype and a statically proven identity for every
@@ -275,7 +275,7 @@ adds the cell-relative `channel_axis` and selected `channel`. `range_index` refe
 to the static interval table. These fields are added for numerical failures in
 `convert_one`; upstream, resource and cancellation diagnostics keep their original
 content.
-The operation is registered as one CPU strict key using Result operation ABI 4.
+The operation is registered as one CPU strict key using Result operation ABI 5.
 Eligible contiguous spans use internal AArch64 NEON or runtime-checked amd64 AVX2;
 eligible Apple arm64 Float32→UInt8 spatial tiles may use the internal SME path.
 These paths preserve the exact same numerical behavior. No GPU backend is provided.

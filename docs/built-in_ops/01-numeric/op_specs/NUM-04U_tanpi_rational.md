@@ -26,7 +26,7 @@ values remain exact.
 Compute tan(pi*p/q) with exact pi and the exact Int64 fraction p/q. Inherit the
 [rational pi contract](NUM-04_rational_pi_contract.md) in full: ordered numerator/
 denominator inputs, identical positive rank-1..8 shapes, q>0, unreduced fraction
-support, floating output dtype default Float64, Whole demand,
+support, floating output dtype default Float64, complete-input demand,
 integer range-safe reduction, errors, resources, fallback, cache and ownership.
 Output values preserves shape with no attached domain description. No implicit floating division
 or conversion of p/q defines this operation.
@@ -58,6 +58,6 @@ recorded below; local timing is recorded in the implementation notes. The existi
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

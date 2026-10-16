@@ -1,51 +1,34 @@
 # ADR 0012：Operation Plugin 使用版本化 C 契约
 
 - 状态：已接受
-- 提议中的后继：[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md) 以前缀协商取代精确大小的表规则，并让内置算子使用同一条 C 导入路径。在 ADR 0022 被接受并实现之前，本 ADR 描述 ABI 4。
+- 提议中的后继：[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md) 以前缀协商取代精确大小规则，并让内置算子使用同一条 C 导入路径。在该提案接受并实现前，当前接口为 exact-size Result ABI 5。
 
 ## 1. 核心摘要 (TL;DR)
-Operation plugin 和 data provider 通过独立版本化的 C 接口跨越 kernel 边界。Host 在发布 registry 记录前校验并复制 descriptor。这样 compiler 元数据不依赖 plugin 的 C++ 对象布局；native plugin 仍在 host 进程和信任域中运行。
+
+Operation plugin 通过版本化 C 接口跨越 kernel 边界。Host 在发布 registry 记录前校验并复制 descriptor，使编译元数据不依赖 plugin C++ 对象布局。Native plugin 仍在 host 进程和信任域内执行。
 
 ## 2. 架构心智模型
 
-```text
-startup configuration --> load library --> validate exact table --> copy traits/schemas
-                                                   |
-                                      registry frozen for compiler and runs
-                                                   |
-                                          synchronous callback
-                                                   |
-                                      host validates/copies output
-```
+宿主加载库、校验完整表、复制 traits/schema，并在 compiler 与 Run 使用前冻结 registry。Module 的 destroy callback 在卸载前执行。Host 拥有复制后的元数据，校验 Need 和 Result 发布。Callback 服务表只借用到返回；显式保留的窗口和状态 handle 遵循自己的 release 生命周期。
 
-Library 自有的表在 destroy callback 执行时仍保持映射。Host 拥有复制后的元数据，并校验 Result schema 与 publication。C++ dependency program 可将已授权的 input owner handle 保留到显式释放或 state 销毁；poll 内的指针仍是借用。Result tensor window 与 native GPU token 会在释放或 callback retirement 前保留 backing owner。生命周期详见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。
-
-## 3. 契约规约与接口
+## 3. 正式契约与 API
 
 ```c
-#define PS_RESULT_OPERATION_ABI_VERSION_4 4U
-const ps_result_operation_plugin_api_v4 *
-ps_result_operation_plugin_get_api_v4(void);
-#define PS_DATA_PROVIDER_ABI_VERSION_1 1U
-const ps_data_provider_api_v1 *ps_data_provider_get_api_v1(void);
+#define PS_RESULT_OPERATION_ABI_VERSION_5 5U
+const ps_result_operation_plugin_api_v5 *
+ps_result_operation_plugin_get_api_v5(void);
 ```
 
-Operation-plugin C 契约使用 standalone Result ABI 4 table，声明 Result ports、tensor members、fields、staged callbacks、dependency relations 和 Result publication。Data-provider C table 仍单独使用 ABI 1。当前 table 布局与 callback 契约见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。
+该表声明 Result 端口、静态 Tensor 成员、成员区间 Need、共享 stage callback 和事务发布。当前不提供 data-provider C table。详细布局、C metadata sink 和 callback 契约见 [Plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)。
 
-Result callback 借用 query 与 phase-service records。Host 校验 Needs、typed relations、publication coverage、resource limits、cancellation 和 backend fallback 后才发布 Result。GPU allocation tokens 和 owning tensor windows 在 release 或 callback retirement 前保留 backing ownership；普通 service pointers 在 callback 返回后失效。
+Loader 校验精确 ABI 版本和结构大小、自然对齐、pointer/count 配对、数量与 key 长度、UTF-8、受检运算、封闭 enum/flag、必需 callback、schema、参数和恰好一次的 destroy 所有权。多记录注册使用 copy-then-swap，失败不发布前缀。库 guard 在拒绝路径调用可安全读取的 destroy 后再关闭库。
 
-Loader 会核对准确的 Result ABI 版本和结构尺寸、自然对齐、指针与计数配对、记录数量和 key 长度上限、严格 UTF-8 key、算术溢出、封闭 enum/flag 组合、必需 callback、input/output schema 约束、parameter 限额及恰好一次的 destroy 所有权。Runtime publication 会校验实际 tensor 和 field coverage。多记录更新采用 copy-then-swap，因此分配失败或后续记录无效时不会发布部分前缀。刚打开库时取得的 guard 会在可安全读取 destroy callback 后接管它，并在任何拒绝路径关闭库。Unload 前先销毁已发布的 plugin 表。
-
-通用 operation callback 同步执行。输入 view 和输出 sink 仅在调用期间借用；接受的通用 Value 输出会在返回前复制或冻结。Sink 第一次发布尝试就占用该 sink，即使校验失败也一样；第二次尝试会留下 sticky violation。Host 先检查 cancellation，然后依次检查 sink 分配失败、malformed image output 和重复发布。若 sink 已经尝试发布后 callback 又返回 backend unavailable，则不会触发 fallback：已接受的输出变成 `OperationFailed`，第一次发布被拒绝时则返回 sink 保留的类型化错误。未知非零返回值变为 `OperationFailed`。只有 GPU attempt 在尚未尝试发布 sink 时明确报告 backend unavailable，且复制的 trait 允许时，才可请求 CPU fallback。
-
-Planar callback 通过 host 所有的 row buffer 与 invocation-local scratch service 工作；它不会通过 operation sink 返回通用 Value。GPU allocation token 会将底层 owner 保留到显式释放或 callback 结束。
-
-Dependency program 可以把授权的输入 handle 保留到释放或 continuation state 销毁；普通 service 指针只在同步 poll 调用期间有效。Registry 在 compiler 与 executor 使用前冻结。
+运行时检查成员 tile Need、输入投影、授权、发布覆盖、冻结依赖证据、资源、取消和后端同步。普通 tile 必须一次完整发布；共享 stage 可以跨 poll 提交完整 tile。GPU token 与拥有型窗口保留 backing 到显式释放或相应 callback 退役。服务失败保持 sticky，不能通过 callback 返回成功掩盖。
 
 ## 4. 非目标与明确边界
-- ABI 校验不是 sandbox、签名验证、包准入或崩溃隔离。
-- Daemon 不把 operation plugin 作为 IPC 能力加载。
-- Provider 记录描述语义 schema，不读取文件，也不创建持久 Value。
 
-## 5. 后果与代价
-版本或布局不匹配会在发布前拒绝加载/注册。格式错误的 descriptor 不会留下 registry 前缀。Callback 异常会在边界处拦截，但 native code 的崩溃或挂起仍会影响 host 进程。ABI 改动要求外部 consumer 使用匹配的 header 与 package 重新构建。
+ABI 校验不提供沙箱、签名认证、插件隔离或崩溃防护。Daemon IPC 不属于 operation ABI。数值和领域解释由算子负责，kernel 不根据 schema 或通道数绑定默认合规 validator。
+
+## 5. 影响
+
+版本或布局不匹配时在注册发布前拒绝。Callback 异常受边界栅栏处理，但 native 崩溃或挂起仍可能影响 host。外部模块必须按匹配的 package 和头文件重新构建，不提供旧 ABI 兼容层。

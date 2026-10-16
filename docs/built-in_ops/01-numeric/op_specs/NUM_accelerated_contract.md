@@ -143,7 +143,7 @@ admitted ranges are listed above. Wider legal inputs remain supported by strict.
 | Prefix/integration | Exact accumulation and at most 64 source samples per read window; every output retains its own prefix certificate. Dense association metadata can remain quadratic. Integral-image rectangles are still accumulated independently. |
 | Curves, LUT1D and inverse | Accelerated curve candidates require uniquely rounded Float32 enclosures to preserve monotonicity; Float64 uses exact formulas. Exact cross products reduce collinear PCHIP stencils to linear formulas. Float32 inverse uses bracketed refinement, then strict fallback. General nonlinear Float64 inverse retains exact lattice refinement. |
 | Uniform lowpass | Accounted per-continuation coefficient-enclosure reuse, bounded full convolution/normalization and strict fallback. Fragment and per-observation certificate work remains. |
-| Matrix | Whole callback with complete input/output and fixed block64 workspace; Apple Float32 selectable Accelerate DGEMM/direct SME FP64/scalar candidates, unique-RN32 certification and exact replay. Float64 retains exact arithmetic; all three candidate implementations are retained for comparison. See NUM-14 for configuration and resource boundaries. |
+| Matrix | complete-input callback with complete input/output and fixed block64 workspace; Apple Float32 selectable Accelerate DGEMM/direct SME FP64/scalar candidates, unique-RN32 certification and exact replay. Float64 retains exact arithmetic; all three candidate implementations are retained for comparison. See NUM-14 for configuration and resource boundaries. |
 | Other families | Shared arithmetic improvements apply where called. Nonuniform lowpass retains strict directed integration; LUT3D/parametric formulas retain exact construction; mix retains staged per-observation source selection. No private worker pool or general reduction/2D-scan rewrite is implemented. |
 
 ### Current validation
@@ -152,7 +152,7 @@ Strict acceptance uses bitwise comparisons; accelerated acceptance checks final
 FP32-scaled error directly, including Float64 error. Numerical checks do not
 establish a performance result.
 
-Temporary public checks should cover Whole/ROI, partitions and tails; negative/unaligned/zero
+Temporary public checks should cover complete-input/ROI, partitions and tails; negative/unaligned/zero
 strides; caller fenv; cache changes; typed/upstream failures; resource limits,
 cancellation and returned/unpublished owner lifetime. Include
 neighboring PCHIP queries, exact collinearity versus underflowed slopes,

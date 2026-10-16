@@ -1,6 +1,6 @@
-# NUM-09 Whole execution
+# NUM-09 Run-shared complete-input computation
 
-The nine formal reshape, transpose and slice profile keys execute CPU Whole
+The nine formal reshape, transpose and slice profile keys execute CPU complete-input
 Result programs. Each active input is a single-tensor Result, and its complete
 sample_shape() includes any batch axes. The output is a
 `photospider.tensor`/`samples` Result with the complete transformed shape as
@@ -11,7 +11,7 @@ of the published Result.
 
 The planner validates static schemas and parameters before callbacks. For
 nonempty work, the program requests each active tensor with Data, Validation and
-Descriptor roles (role 13), which supplies its typed-payload validation
+Descriptor roles , which supplies its typed-payload validation
 obligation. The callback reads through those authorized windows and computes the
 whole output. An edit to observed input support invalidates the recorded output
 dependency. Empty output has empty coverage and support. Slice ignores a
@@ -50,9 +50,9 @@ View failure and Auto/Dense output materialization, full source support/dirty, i
 slice controls, excluded all-singleton step producers, complete typed rejection,
 Empty, work/output/scratch limits and cancellation after admitted copying.
 Raw specials in all four fenv modes and escaped storage/resource lifetime pass.
-Prepared Whole view fixtures include giant zero-stride producer output,
+Prepared complete-input view fixtures include giant zero-stride producer output,
 structured consumption, original external dense owner retention, multi-owner
 rejection, same-owner singleton joining and sticky allocator failures.
 The Result operation declares zero fixed workspace
 bytes and reserves up to 4096 bytes of Host scratch for rank<=8 coordinate
-vectors. Earlier regional checks do not establish Whole behavior.
+vectors. Earlier regional checks do not establish complete-input behavior.

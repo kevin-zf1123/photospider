@@ -19,7 +19,7 @@ Context 串行化 snapshot 捕获与文档替换。Compiler 阶段在发布结�
 ## 3. 契约规约与接口
 
 ```cpp
-struct WorkflowDocument { std::uint32_t schema_version = 6; /* inputs, nodes, outputs */ };
+struct WorkflowDocument { std::uint32_t schema_version = 7; /* inputs, nodes, outputs */ };
 class GraphContext {
  public:
   explicit GraphContext(WorkflowDocument);

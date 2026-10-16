@@ -22,7 +22,7 @@ resource obligations and strict numerical reference. Proposed and unimplemented.
 
 ## Ports, parameters and output
 
-One `input` Float32/Float64 Value. Output `values` preserves dtype, shape and RGB slots; alpha and unrelated channels copy unchanged.
+One `input` Float32/Float64 Tensor. Output `values` preserves dtype, shape and RGB slots; alpha and unrelated channels copy unchanged.
 Select one native relative linear RGB group, or explicit raw ordered slots.
 Interpretation is explicit static configuration; layout defaults to auto; materialize is supported and
 view rejected. All metadata/geometry/member parameters are static. No implicit

@@ -134,7 +134,7 @@ relative linear/sRGB/gamma descriptor.
 
 Current public types:
 
-- [ElementType](../../../../include/photospider/data/value.hpp) has UInt8,
+- [ElementType](../../../../include/photospider/data/tensor_span.hpp) has UInt8,
   Int8, UInt16, Int16, Int64, Float32 and Float64. Float16 and other widths require
   a separately implemented public dtype extension or an explicitly defined
   encoding in an existing container. An interval such as 0..65535 is not itself
@@ -143,7 +143,7 @@ Current public types:
   (operations SDK) has RGB, XYZ, CIELAB, CIELCh, OKLab, OKLCh, HSL, YCbCr and
   CMYK. It has no Gray, HSV or xyY model; alpha is currently RGB-only. Transfer is
   linear/sRGB/gamma. It is a static parameter codec (`color_array_parameter`),
-  not a property of a Value or Result.
+  not a property of a Tensor or Result.
 - [TensorDescription](../../../../include/photospider/ops/tensor_description.hpp)
   (operations SDK) is the general description used by the `input_description`
   parameters of FMT-01, FMT-04/05 and FMT-09..11 and by the per-input
@@ -181,7 +181,7 @@ ColorArray consumers.
 | C10 | Validation trigger | Validate only the semantics an operation actually consumes from its explicit parameters, or a port's explicitly bound validator; ordinary numeric arithmetic consumes no color interpretation. | Confirmed 2026-09-22 |
 | C11 | Image storage | Mandatory planar and one DAG-wide tile geometry. Interior payloads are tight full blocks; edge tiles retain valid rows and pad their width to Tw. Every next tile starts page-aligned, with gaps distinct from row padding. | Revised and confirmed 2026-09-22 |
 | C12 | Virtual image backing | Reserve one full-image continuous virtual range; explicitly prepare page backing before operator access, retain produced pages until final owner retirement and fail on budget exhaustion. | Confirmed 2026-09-22 |
-| C13 | Explicit static interpretation | Result/Value carry structure, data and storage owners only. Color space, white, transfer, alpha association, sampling and LUT interpretation are explicit static parameters of each consuming operation. No attached description, automatic propagation, `metadata_mode`, or connection-time label matching. Same-structure data with different intended meanings connects without rejection; domain legality is proved by explicit SDK calls or port-bound validators. | Approved by the maintainer as a breaking boundary change |
+| C13 | Explicit static interpretation | Result/Tensor carry structure, data and storage owners only. Color space, white, transfer, alpha association, sampling and LUT interpretation are explicit static parameters of each consuming operation. No attached description, automatic propagation, `metadata_mode`, or connection-time label matching. Same-structure data with different intended meanings connects without rejection; domain legality is proved by explicit SDK calls or port-bound validators. | Approved by the maintainer as a breaking boundary change |
 
 ### Representation and source authority
 
@@ -440,7 +440,7 @@ Operation changes must satisfy at least these independent checks:
 - A numeric red-channel read and a componentwise FMT-09 red request do not
   observe unrelated alpha. A structurally complete color group does not expand
   their sample support. Unrequested alpha NaN, missing coverage or upstream
-  failure cannot fail these observations unless required upstream Whole behavior
+  failure cannot fail these observations unless required upstream complete-input behavior
   already makes that failure unavoidable. Semantic FMT-04 unassociation requests and
   validates alpha for a requested color component. Explicit alpha bypass requests
   copy its bits under the member contract without adding coverage validation.
@@ -493,7 +493,7 @@ represent three distinct support sets: `Data` (formula/copy operands),
 resource checks). Use the union of required sample sets for reads and its
 transpose for dirty propagation; descriptor checks do not imply sample reads.
 Honor member-defined static support even when a pixel-dependent branch could
-use fewer samples. Do not replace local FMT demand with an existing NUM Whole
+use fewer samples. Do not replace local FMT demand with an existing NUM complete-input
 callback merely because its arithmetic is reusable.
 
 Examples include FMT-09 R <- R, FMT-11A l <- Y, and FMT-04B color <- that color
@@ -611,3 +611,5 @@ raw calls. See the [boundary contract](FMT_codec_boundary.md).
 The maintainer also confirmed the basis-pair/explicit-composition direction in
 [model conversion coverage](FMT_model_conversion_coverage.md). It separates model descriptions, explicit conversion pairs and composable routes;
 named model entries alone do not establish complete support.
+
+The straight-alpha and host tiled-planar defaults are conventions, not Tensor certification. Ordinary operations and callers do not declare is_straight or layout conformance, and the kernel installs no default RGBA validator. Explicit descriptions, association options and conversion operators select real domain computations. Legal external, negative-stride and broadcast views remain supported after structural/ownership checks.

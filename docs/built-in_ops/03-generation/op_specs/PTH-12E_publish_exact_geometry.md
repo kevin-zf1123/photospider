@@ -28,7 +28,7 @@ distinct. Do not snap, delete holes, silently loosen epsilon or return a best gu
 Output is the rounded geometry; its later consumers do not retain implicit exact
 history.
 
-Whole input validation and complete Result publication apply. Exact owner references,
+complete-input input validation and complete Result publication apply. Exact owner references,
 publication scratch, predicates and output associations are charged and lifetime-safe.
 PTH-12A must produce the same published coordinates/report semantics as exact Boolean
 followed by this member, with equivalent explicit parameters and canonicalization.

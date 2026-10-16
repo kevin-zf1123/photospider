@@ -82,14 +82,14 @@ witnesses even when output bits do not change. Kernel-table validation is not wh
 image color validation. Boundary extension uses the full logical domain, never an
 ROI/tile edge. Exact demand is the actual admitted sample set; a radius bounding
 box is only Conservative. FFT/prefix-sum optimizations cannot silently enlarge
-Exact-only reads. Whole outputs require their complete input dependency group.
+Exact-only reads. complete-input outputs require their complete input dependency group.
 Dirty propagation transposes retained Data/Control/Validation relations; descriptor
 or static changes reinfer outputs. A local halo does not establish locality of
 connectivity, transforms or iterative solvers.
 
 Publish canonical planar owned storage with full-image virtual address reservation,
 unified DAG tile geometry, explicitly prepared pages and valid edge pixels separate
-from padding. A dense Value exposes only generated global Regions; missing data are
+from padding. A dense Tensor exposes only generated global Regions; missing data are
 not zero. Owners/read windows can outlive ExecutionContext until their final release.
 Independent outputs do not read unrelated inputs when requested jointly. Collection
 association and band-lazy payloads follow [collections](FILTER_collections_contract.md).

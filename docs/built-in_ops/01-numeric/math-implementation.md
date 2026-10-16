@@ -136,14 +136,14 @@ including domain/failure classification. The same kernel handles vector tails.
 `2*x+1` and ordinary exp can therefore avoid both per-sample continuation work
 and multiprecision math. Cancellation and all continuation storage are accounted.
 
-DependencyPath diagnostics identify the numerical implementation, compiler/OS/build identity and selected profile. The build identity includes the pinned SLEEF sources and integration module, preventing old/new accelerated cache identity reuse. In that path, evaluations are admitted before arithmetic and copied values are counted before their fixed publication store. Those counts and an attempted fallback survive later resource or cancellation failure. Cache hits add no fabricated arithmetic work. This accounting model does not describe the NUM-11/13 Whole accumulators below.
+DependencyPath diagnostics identify the numerical implementation, compiler/OS/build identity and selected profile. The build identity includes the pinned SLEEF sources and integration module, preventing old/new accelerated cache identity reuse. In that path, evaluations are admitted before arithmetic and copied values are counted before their fixed publication store. Those counts and an attempted fallback survive later resource or cancellation failure. Cache hits add no fabricated arithmetic work. This accounting model does not describe the NUM-11/13 complete-input accumulators below.
 
-NUM-04/05 now use Whole callbacks. Their arithmetic and fallback rules are
+NUM-04/05 now use complete-input callbacks. Their arithmetic and fallback rules are
 unchanged, but per-value diagnostics described above are unavailable (N/A).
 The older timing and regional acceptance tables below describe their recorded
-revisions; see [current Whole measurements](point-math-whole.md).
+revisions; see [current complete-input measurements](point-math-whole.md).
 
-NUM-11 reductions and NUM-13 scans keep one `NumericDiagnostics` object local to each Whole `write`. After `MathTensorReader` returns an input word, the callback increments `evaluated_values` immediately before passing that word to the exact accumulator. On successful execution, the count therefore matches sample words supplied to the accumulator, not output groups or positions. Prefix zero boundaries, integral-image carries and final output conversions do not add input attempts. The reducer's `implementation` identity names `photospider.reduction-exact/1;accumulator-u64x68`; scans use `photospider.scan-exact/1;accumulator-u64x68`. Both append the selected profile's `selection_implementation` and host/build identity. That ISA label describes the four-word output-selection scratch helper; it does not claim that the complete reduction or scan algorithm uses SIMD arithmetic.
+NUM-11 reductions and NUM-13 scans keep one `NumericDiagnostics` object local to each complete-input `write`. After `MathTensorReader` returns an input word, the callback increments `evaluated_values` immediately before passing that word to the exact accumulator. On successful execution, the count therefore matches sample words supplied to the accumulator, not output groups or positions. Prefix zero boundaries, integral-image carries and final output conversions do not add input attempts. The reducer's `implementation` identity names `photospider.reduction-exact/1;accumulator-u64x68`; scans use `photospider.scan-exact/1;accumulator-u64x68`. Both append the selected profile's `selection_implementation` and host/build identity. That ISA label describes the four-word output-selection scratch helper; it does not claim that the complete reduction or scan algorithm uses SIMD arithmetic.
 
 For completed exact-accumulator runs with reported diagnostics, temporary
 acceptance should verify zero `strict_math_calls`, zero `strict_fallbacks` and
@@ -156,7 +156,7 @@ The callback attempts one final report after a normal return or a status it hand
 
 The kernel has no MPFR, GMP, Boost or libbf dependency. The manual Python oracle
 uses MPFR 4.2+ in a separate process and refines downward/upward results until
-both round to the same output bits. Whole sinc and exact rational pi references
+both round to the same output bits. Whole-formula sinc and exact rational pi references
 use explicit directed compositions; special values and NaN payloads are modeled
 separately. `PHOTOSPIDER_ORACLE_MPFR` can select an explicit compatible library.
 The oracle requires LP64 macOS/Linux and prints the actual loaded MPFR version;
@@ -201,7 +201,7 @@ at most 13607 bits, and the supported decimal-exponent branch has at most
 14680 denominator bits. Larger exponents are classified as overflow or rounded
 zero only after accounting for all source digits. Division alignment and final
 midpoint comparison fit the remaining capacity. Runtime exact/math workspace
-is part of the admitted Whole workspace; work and cancellation checks occur in
+is part of the admitted complete-input workspace; work and cancellation checks occur in
 AST evaluation and inside long arithmetic/refinement. Bounded unresolved
 transcendental refinement returns ResourceExhausted.
 
@@ -209,21 +209,21 @@ Pure static preparation owns the program across compiler stages, outputs and
 dynamic runs. Sealed handles validate registry/definition identity, all static
 input metadata and exact parameter bits, including signed zeros and NaNs.
 Direct preflight prepares once per call, or reuses an explicit matching handle;
-Whole execution receives and reuses the sealed plan owner. Static plan/program
+Run-shared complete-input computation receives and reuses the sealed plan owner. Static plan/program
 allocations use ordinary host storage outside runtime managed scratch. They
 have source/program size bounds, but no separately enforced preparation budget
 or global preparation cache. The synchronous callback borrows the AST while
 holding its preparation owner. Package 0.17/traits15 requires a C++ rebuild;
 canonical framing14 and C ABI9 remain.
 
-All nonempty values requests execute Whole with static active-input projection,
+All nonempty values requests execute complete-input with static active-input projection,
 no per-index stages or dependency certificates. The selected output materializes
 all N values before consumer projection; any numerical failure is Run scoped.
 Axis-only skips coefficients, AST evaluation and adjacent-coordinate validation;
 its actual scratch omits the evaluator, while common workspace admission reserves
-the maximum values state. Count=1 excludes end. Whole numeric counters are
+the maximum values state. Count=1 excludes end. complete-input numeric counters are
 unavailable. Current migration checks and timing are in
-[expression Whole](expression-whole.md).
+[expression complete-input](expression-whole.md).
 
 The diagnostic `strict_math_calls` counts actual dispatched mathematical calls,
 including exact special paths and failed calls. Per-function fallback counters
@@ -261,14 +261,14 @@ tangent evaluation have smaller bounds. Arithmetic polls work/cancellation
 inside limb multiplication and final division. Independent scoped arithmetic
 review also compared 3208 Fraction formula expansions successfully.
 
-For every nonempty request, the CPU Whole Result continuation collects complete
+For every nonempty request, the CPU complete-input Result continuation collects complete
 x, y and query inputs, including recognized typed validation and upstream
 failures. It validates all x knots and query controls before y arithmetic,
 evaluates every query and output column, and returns one immutable dense Result
 of shape [N] or [N,C]. Empty reads no payload; static metadata validation still
 applies. Sparse demand records the requested dependency region Q, but does not
 reduce input collection, computation or the complete output owner. The Result
-can retain full computed coverage, with sample coordinates in global positions.
+retain only requested complete tile coverage while sharing the full internal backing, with sample coordinates in global positions.
 
 The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
 linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
@@ -300,7 +300,7 @@ categories. Numeric failures are OperationFailed/InvalidDomain or final-output
 ArithmeticOverflow, with Run scope and offending port/index where available.
 
 Public-path acceptance should cover Result declarations and bindings, complete
-Whole output under sparse demand, error scope, layouts and floating environments,
+complete-input output under sparse demand, error scope, layouts and floating environments,
 Empty and metadata validation, work/cancellation/resource limits, binding
 replacement, typed Mask validation, upstream failures and Result/read-window
 lifetime. Build the checks for the current change and record the actual profiles
@@ -310,15 +310,15 @@ and inputs used; the specification is not a run result.
 
 `bezier_function.cpp` registers three explicit degree-2/3 sampler profiles. `ExactSampling` shares NUM-01's exact weighted grid and RN64 addition/conversion. `ExactPolynomial` stores signed integer coefficients in units 2^-1075; `ExactBezier` validates exact derivative minima and solves the unique interior Bx root by dyadic bisection. Interval Horner bounds the whole By image. Integer pseudo-remainder GCD and exact low-degree root tests decide shared zeros and rounding midpoints; they avoid assuming that a small residual proves rounding. Nonzero half-subnormal boundaries use the boundary sign when the tie rounds to zero. Direct dyadic roots and constant ordinates use exact evaluation.
 
-The fixed arena has 640 64-bit limbs (40960 bits) per number and 96 slots, all inside the admitted Result continuation state. Initial coefficients have fewer than 2105 bits. The worst degree-three integer remainder chain grows through 4211, 10529 and fewer than 25280 bits. Horner evaluation at the 8192 fractional bit refinement cap stays below 26683 bits; final rounding temporaries fit the same arena. The static maximum live-slot bound is 44, including temporary GCD calls. Explicit work/cancellation runs inside long arithmetic; unresolved refinement or storage limits return ResourceExhausted/CapacityLimit. The solver has a finite budget, not a promise that every algebraic input resolves at any caller-selected budget. All profiles use this exact numerical path, so no numerical fallback is reported; profile-specific integer helpers supply the scalar/NEON/AVX2 operations. The Whole callback does not expose per-value solver/fallback counters.
+The fixed arena has 640 64-bit limbs (40960 bits) per number and 96 slots, all inside the admitted Result continuation state. Initial coefficients have fewer than 2105 bits. The worst degree-three integer remainder chain grows through 4211, 10529 and fewer than 25280 bits. Horner evaluation at the 8192 fractional bit refinement cap stays below 26683 bits; final rounding temporaries fit the same arena. The static maximum live-slot bound is 44, including temporary GCD calls. Explicit work/cancellation runs inside long arithmetic; unresolved refinement or storage limits return ResourceExhausted/CapacityLimit. The solver has a finite budget, not a promise that every algebraic input resolves at any caller-selected budget. All profiles use this exact numerical path, so no numerical fallback is reported; profile-specific integer helpers supply the scalar/NEON/AVX2 operations. The complete-input callback does not expose per-value solver/fallback counters.
 
-Both outputs use CPU Whole Result continuations. A nonempty `values` request collects complete anchors and handles plus start and, only when count>1, end with Data, Validation and Descriptor roles. Typed validation and upstream failures apply to all collected inputs. The continuation validates all x topology, then every generated coordinate, domain condition and adjacent-separation control before y arithmetic. It evaluates every sample and publishes a complete dense Result, including for sparse demand. The Result certifies full coverage in global sample coordinates. Empty demand reads no input payload and executes no numeric kernel; the runtime can still poll metadata and seal the Result.
+Both outputs use CPU complete-input Result continuations. A nonempty `values` request collects complete anchors and handles plus start and, only when count>1, end with ordinary member tile Needs with explicitly bound validators. Typed validation and upstream failures apply to all collected inputs. The continuation validates all x topology, then every generated coordinate, domain condition and adjacent-separation control before y arithmetic. It evaluates every sample and publishes a complete dense Result, including for sparse demand. The stage retains the full internal result; public output actors expose only requested complete tiles in global sample coordinates. Empty demand reads no input payload and executes no numeric kernel; the runtime can still poll metadata and seal the Result.
 
 Mathematical selection remains local: exact anchor/clamp uses that anchor y; interior evaluation uses the selected segment's anchor y and relative y handles. Generic y outside every evaluated stencil is not additionally finite-checked. All output samples are evaluated, so an invalid otherwise-unrequested sample can fail the complete values Run. Failure publishes no partial successful values. Each output publishes through its own all-or-nothing Result transaction. Axis collects only start and end, with count=1 excluding end, computes its 24-byte tuple and does not read controls or validate per-coordinate separation. Static metadata for all four edges is checked for either output.
 
 The Result association records actual source ObjectIds. Input changes update recorded dependency dirtiness for the requested region; anchor and handle changes affect `values`, while start/end affect outputs that depend on them. The count=1 dependency omits `end`. Complete immutable input versions, profile, metadata and parameters remain in cache identity, while binding topology can reuse the static PreparedOperation. Both outputs retain independent identities, names, dtypes and no attached domain description. Result owners and authorized read windows remain valid past context and source-handle retirement; releasing the final window releases the Root allocation.
 
-Temporary acceptance should cover Result declarations/bindings/reads, count-one and axis dependency projection, sparse full-output coverage and source association, same-demand and fresh-source cache behavior, preparation reuse, error ordering, all-port layouts, caller/worker fenv, work/cancellation/output/scratch limits, typed validation, and Result/read-window lifetime. For a three-value Float64 case in an isolated Root, retire the context, source
+Temporary acceptance should cover Result declarations/bindings/reads, count-one and axis dependency projection, sparse public tile coverage backed by a full internal result and source association, same-demand and fresh-source cache behavior, preparation reuse, error ordering, all-port layouts, caller/worker fenv, work/cancellation/output/scratch limits, typed validation, and Result/read-window lifetime. For a three-value Float64 case in an isolated Root, retire the context, source
 owners and output Result handles while retaining the values and axis windows.
 Those windows retain 48 Payload bytes; closing the values window leaves the
 24-byte axis readable, and closing the final window releases the remaining payload. Generic y data outside the mathematical stencil is not scanned; recognized typed validation still applies to the complete active Result input. For maximum-count acceptance, use a sparse request with a 1 MiB Payload cap and
@@ -334,10 +334,10 @@ execute through Compiler/ExecutionContext and read output Results through
 authorized tensor windows. Source Values can provide immutable storage, charged
 as Referenced when retained by source Results. Result tensor schemas carry structural descriptors, layout and atomic axes.
 
-The Whole Result continuation requests active inputs with Data, Validation and
-Descriptor (role 13), validates every segment/t row before component arithmetic,
+The complete-input Result continuation requests active inputs with Data, Validation and
+Descriptor , validates every segment/t row before component arithmetic,
 evaluates all N*D output cells and publishes one immutable dense [N,D] Result
-with full certified coverage in global coordinates. A sparse query restricts
+with requested complete tile coverage in global coordinates. A sparse query restricts
 recorded dependency/dirty mapping while retaining full input collection,
 computation and output allocation. Empty output coverage is empty and Empty does
 not poll a failing handle producer; static metadata and other execution stages
@@ -350,11 +350,7 @@ Endpoint t=0/1 reads only the selected anchor for the mathematical value. An
 interior reads both anchors and all relative handles for its segment and
 component. Generic numeric data outside evaluated stencils is not additionally
 finite-checked. Complete typed validation and upstream execution still cover all
-active inputs. The fixture's typed RGBA handle Result has spatial layout and
-channel axis 2. Its sparse query asks for column 0 at t=.5, but Whole execution
-computes all D=4 columns and reads the alpha handle as well. A separate t=0
-case shows that endpoint mathematics skips the handle while complete typed
-validation still checks it and rejects an invalid alpha value. Every query row
+active inputs. At t=0, endpoint mathematics may skip handle samples. Any further handle validation must come from an explicitly bound contract; no default RGBA or alpha-association validator is inferred from shape. Every query row
 and output component is evaluated, so any bad segment/t or evaluated component
 fails the Run and no partial Result is published. No global mathematical
 topology scan is performed.
@@ -388,7 +384,7 @@ overflow is OperationFailed/ArithmeticOverflow. Typed, upstream, stale and
 backend errors preserve their categories. Replacing segment or t source Results
 reuses static preparation; completed-demand repetition returns the same Result
 object, while a fresh equivalent four-source bundle demonstrates a content-cache
-hit and refreshes all four source associations. Whole execution exposes no
+hit and refreshes all four source associations. Run-shared complete-input computation exposes no
 per-value counters, so zero counters do not imply zero arithmetic or fallbacks.
 
 Temporary acceptance should run all 16 combinations of reversed, unaligned layouts across all
@@ -398,18 +394,18 @@ Verify that malformed static Result schemas and parameters reject before executi
 all four source backings expire, the escaped Result and authorized read window
 share one 24-byte or 48-byte output owner, and releasing both returns all Root
 live capacity to zero. Also cover typed
-validation, source association, static preparation, full sparse coverage,
+validation, source association, static preparation, requested tile coverage,
 upstream error ordering, work/cancellation and output/scratch cleanup. Report each admitted profile actually exercised.
 
 ## CRV-04 public LUT1D authoring
 
 `numeric/lut1d.hpp` exposes six authoring functions that append ordinary runtime nodes to a caller-owned `WorkflowDocument`: expression and Bezier samplers each produce `values` and `axis`, while linear and PCHIP interpolation templates first produce Float64 linspace queries and then interpolation values. `BakedLut1d` returns node-output references; `outputs()` creates caller-named workflow exports. Construction creates graph metadata only. It reserves existing and referenced node IDs, allocates the lowest available positive IDs, enforces the 65,536-node limit and appends nodes only after the complete expansion succeeds. A failed construction leaves the graph unchanged. The caller owns output declarations and compilation.
 
-The source operations use Result inputs and outputs. `SequenceInput` pairs a workflow edge with an immutable Result schema hint for a Float32/Float64 `[1]` endpoint; the compiler checks the actual binding independently. A temporary public checker can keep arrays as local `Value` backing, publish their
+The source operations use Result inputs and outputs. `SequenceInput` pairs a workflow edge with an immutable Result schema hint for a Float32/Float64 `[1]` endpoint; the compiler checks the actual binding independently. A temporary public checker can keep arrays as local `Tensor` backing, publish their
 storage as immutable source Results, and bind them through `ExecutionBindings`.
 Inspect the returned Results through authorized tensor windows.
 
-All expanded formal outputs use CPU Whole continuations. A nonempty `values` demand computes the full table and reports its full coverage, including for a sparse request. Interpolation templates allocate the full Float64 query array (`8*count` bytes), followed by the full table (`count*C*dtype_size` bytes), in addition to source owners and source-specific workspace. The host accounts these allocations through one Root resource budget. A sparse million-row multi-PCHIP request under a 1 MiB Payload budget checks full-output rejection; it does not demonstrate sparse success or successful maximum-size execution.
+All expanded formal outputs use CPU complete-input continuations. A nonempty `values` demand computes the full table and retains its full internal coverage and publishes only requested complete tiles. Interpolation templates allocate the full Float64 query array (`8*count` bytes), followed by the full table (`count*C*dtype_size` bytes), in addition to source owners and source-specific workspace. The host accounts these allocations through one Root resource budget. A sparse million-row multi-PCHIP request under a 1 MiB Payload budget checks full-output rejection; it does not demonstrate sparse success or successful maximum-size execution.
 
 `axis` is a separate Float64 `[3]` Result. Axis-only demand skips expression coefficients, Bezier controls and interpolation x/y. For `count=1`, the expanded source omits the end payload. For `count>1`, a first-value request still collects the end input and computes the complete grid. Each source keeps its own mathematical formula, selection, typed validation and numerical allowance. Active Result collection can propagate typed or upstream errors outside the requested numerical region, and numerical failures retain the source operation's Run scope. Empty `values` demand returns empty coverage without polling its failing numerical producer or reading payload; metadata processing and Result sealing remain ordinary execution work.
 
@@ -435,12 +431,12 @@ one-entry selections and exact whole-formula linear interpolation. Descending
 pairs reorder both x/y to satisfy ExactCurve's positive-denominator internal
 representation. Channel queries are classified independently.
 
-Every nonempty request uses a CPU Whole Result continuation. It requests input,
-table and axis with Data, Validation and Descriptor roles, including typed
+Every nonempty request uses a CPU complete-input Result continuation. It requests input,
+table and axis with ordinary member tile Needs with explicitly bound validators, including typed
 validation and upstream failures. The continuation validates the complete
 reconstructed axis, then every finite/domain query before table arithmetic. It
 computes every output element/channel and publishes an immutable packed Result
-with full coverage and global coordinates, even when the request is sparse.
+with full internal coverage and global coordinates; sparse public requests expose only requested complete tiles.
 Empty reads no payload; static metadata checks still apply.
 
 Mathematical table selection is unchanged: knot/clamp/singleton converts one
@@ -475,12 +471,12 @@ Resource failure never authorizes skipping axis validation or weaker arithmetic.
 Unpublished output/workspace is released; no partial success is published.
 Numeric InvalidDomain/ArithmeticOverflow failures have Run scope. Typed, upstream,
 resource, stale, backend and cancellation failures retain their categories.
-Whole does not expose per-value fallback counters; report those as unavailable.
+complete-input does not expose per-value fallback counters; report those as unavailable.
 
 Use independent Fraction goldens when checking each admitted numerical profile. The six CRV-04 baking chains connect to the Result LUT
 consumer; source replacement retains the same static preparation, fresh source
 Results produce cache hits with current associations, and sparse requests retain
-full Whole output coverage. Also cover typed RGBA validation,
+requested tile coverage and full internal ownership. Also cover explicitly bound validators,
 upstream failures, all-port layouts, caller/worker fenv, resource and cancellation
 rollback, output lifetime and Root release. For the maximum L=1,048,576 case, use a
 16 MiB Payload capacity; check that Root diagnostics charge the 8 MiB axis grid to
@@ -496,7 +492,7 @@ scalar Float64 output adds 8 bytes. Check these resource cases through Results.
 
 ## CRV-06 ColorArray and color ramps
 
-The 15 independent primitives provide 45 CPU-profile Whole keys. Nonempty
+The 15 independent primitives provide 45 CPU-profile complete-input keys. Nonempty
 requests collect all input arrays, validate every stop and query, then apply the
 unchanged one/two-row mathematics to every position. The complete dense Result retains sample backing and an atomic trailing
 component axis. Color interpretation comes from the explicit color_description
@@ -557,7 +553,7 @@ rounded RGB produces AssociationUnderflow; otherwise transparent black is +0.
 All profiles currently return strict bits, including the accelerated RGB entries
 whose contract allows four ULP. Profile-specific integer comparisons are used;
 there is no attempted approximate transfer backend and no fabricated fallback.
-Whole callbacks do not expose DependencySession numerical counters; attempted,
+complete-input callbacks do not expose DependencySession numerical counters; attempted,
 copy and fallback counts are N/A. Scalar and native NEON integer comparisons are
 retained; AVX2 remains registered for its platform. No Accelerate/SME floating
 backend or NUM-14 certificate is applied. Exact state and unpublished output
@@ -604,7 +600,7 @@ per-component accumulation. Original contributing bits determine all-negative-
 zero results; other exact cancellations are +0 and nonzero underflow retains
 its sign. No floating local coordinate or intermediate blend is rounded.
 
-The six registered profiles use Whole Result continuations. Static preparation
+The six registered profiles use complete-input Result continuations. Static preparation
 validates port schemas, dtypes, shapes and explicit input/output color parameters,
 then retains the immutable program state for reuse across source rebinding.
 Each nonempty execution validates all three axes and every original input
@@ -614,7 +610,7 @@ can precede callback numeric checks. Only exact positive-weight vertices enter
 the formula; zero-weight generic samples remain mathematically unused.
 
 The continuation records the current input, table, and axis ObjectIds. Its
-published Result has full certified coverage in global coordinates, including
+published Result has requested complete tile coverage in global coordinates, including
 for a sparse request, with one atomic trailing component axis and no attached description.
 Input or table replacement updates dirty mapping from the recorded source
 support; the prepared operation remains reusable across those bindings. Empty
@@ -682,23 +678,23 @@ cancellation failures are terminal, not refinement retries.
 All returned finite numeric paths correctly round the same monotone function.
 Thus their combination is monotone without sorting output requests or choosing
 a path from batch values. Accelerated keys retain the strict certified path;
-Whole does not expose DependencySession fallback/evaluation counters. Existing
+complete-input does not expose DependencySession fallback/evaluation counters. Existing
 scalar/NEON/AVX2 arithmetic identities remain; there is no new Accelerate/SME
 backend or application of NUM-14's finite four-term certificate.
 
-All six log keys use Whole callbacks with complete input/bounds collection and
+All six log keys use complete-input callbacks with complete input/bounds collection and
 full dense output. Typed/upstream errors remain observable anywhere in inputs;
-callback bounds validation precedes IEEE special handling. Whole errors have
+callback bounds validation precedes IEEE special handling. complete-input errors have
 Run scope and any input edit invalidates all recorded demand. Fixed admitted
 ExactShaper state and O(rank) traversal replace per-output points, certificates
 and publication owners. Account full collected input, full output and workspace.
-Linear templates already expand NUM Whole remap/constant nodes; no redundant
+Linear templates already expand NUM complete-input remap/constant nodes; no redundant
 linear primitive is added and inverse bound-order validation remains connected.
 
 Validate all four shaper forms and both dtypes against independent Fraction or
 directed-MPFR references. Include near-equal/extreme bounds, exact roots and
 midpoints, IEEE payloads/zero/Inf, underflow/overflow and monotonic groups. Check
-Whole support, dirty mapping, source replacement, layouts, caller/worker fenv,
+complete-input support, dirty mapping, source replacement, layouts, caller/worker fenv,
 ColorArray validation, Empty, inverse -0, refinement interruption and
 work/output/cancellation/upstream failures through the public API.
 
@@ -716,8 +712,8 @@ independence is the caller's assertion.
 
 For temporary bake validation, bind immutable source Results backed by local
 Values and charge retained source storage as Referenced. The public bake graph
-publishes Result outputs: table, axis and report. Geometry programs use Whole Result with
-role-13 validation and complete outputs. Static preparation validates metadata
+publishes Result outputs: table, axis and report. Geometry programs use complete-input Result with
+ordinary tile Needs validation and complete outputs. Static preparation validates metadata
 and stores reusable geometry or report POD state. Empty tensor demand skips
 payload evaluation; source, table, axis and report failures preserve their
 observed failure status and scope.
@@ -730,9 +726,9 @@ exported table is an immutable `photospider.tensor` Result with `samples`, the
 chosen dtype and `atomic_trailing_axes=1`. The color descriptions are explicit
 static operation parameters, not tensor attributes. Unpack supplies the
 actual table to CRV-07 with explicit `table_dtype` and reject policy. The
-CompleteBundle report stores twelve fixed fields (353 bytes) and associates observed input
-ObjectIds in port order; entry 2 identifies the owned table. Gate validates all
-report fields and the table with role 13, checks that association, then publishes
+report stores thirteen static Tensor members (361 bytes) and associates observed input
+ObjectIds as provenance. The measured_table_id UInt8[1,8] payload identifies the owned table in little-endian order. Gate validates all
+report Tensor members and the table with ordinary tile Needs, checks that table identity, then publishes
 the requested complete-color region in global coordinates. An association
 mismatch need not precede table-pixel validation.
 
@@ -745,10 +741,10 @@ if that rounded down; an unrepresentable error is diagnostic +Inf. Validate the 
 Fraction references for each admitted profile.
 
 Measurement visits row-major cell centers and then extra points. The continuation
-stores only counts, maxima and first-failure data, and seals all twelve fields
-together after complete measurement. Its Result fields retain global support
+stores only counts, maxima and first-failure data, and seals all thirteen Tensor members
+together after complete measurement. Its Tensor members retain global support
 across axis, grid, owned table, validation points, source reference and applied
-colors. An explicitly bound SDK validation contract checks the report fields and domain.
+colors. An explicitly bound SDK validation contract checks the report Tensor members and domain.
 The `configuration_id` field binds the report to the recipe, shape, interpolation,
 tolerances, dtypes, extra-point count and both color descriptions. The public
 `read_lut3d_bake_report` reader takes that `Lut3dBakeDescription` explicitly; it
@@ -769,7 +765,7 @@ all Root live capacity. Source axis owners expire after context and fixture
 retirement.
 
 All source operations, full grid colors, validation points, converted colors,
-table backing, report fields, windows and scratch consume their respective host
+table backing, report Tensor members, windows and scratch consume their respective host
 budgets. A small requested table region does not reduce the full bake or global
 measurement work. Verify that a huge grid is rejected with
 CapacityLimit at its geometry node; it does not demonstrate successful
@@ -815,7 +811,7 @@ failed arithmetic status is checked before interpreting a comparison as zero.
 The extracted shared Hermite helper retains forward interpolation's original
 1074-unit defaults and identical algebra.
 
-`curve_inverse.cpp` registers all six formal keys as Whole. Complete x/y/query
+`curve_inverse.cpp` registers all six formal keys as complete-input. Complete x/y/query
 collection precedes global topology and all-query control validation. Each query
 then selects its original pair/stencil from promoted x/y and executes the unchanged
 inverse math. Only fixed state plus 16*K promoted element bytes (and allocator
@@ -839,7 +835,7 @@ SampledSignal errors at input 2, cancellation and source-owner retirement. Inclu
 K=65536 and a three-element Float32/Float64 output retaining respectively 12/24
 Payload bytes after source retirement; releasing the final window must release
 that payload. A constant View with N=2^40 must be rejected when the complete
-Whole output exceeds the configured Payload cap.
+complete-input output exceeds the configured Payload cap.
 
 ## CRV-11 resampling and certified lowpass
 
@@ -850,7 +846,7 @@ controlled and IDs reserve declared/referenced nodes. No new interpolation
 primitive, implicit filtering or sample-rate inference is introduced.
 
 Accelerated uniform lowpass builds certified coefficient enclosures once per
-Whole invocation at 128 fractional bits, retaining them in a resource-accounted vector.
+complete-input invocation at 128 fractional bits, retaining them in a resource-accounted vector.
 The hardware convolution propagates coefficient, product, sum and normalization
 error to the final FP32 gate. Exact zero taps, constant shortcuts, special values
 and source demand remain governed by the original discrete reference. Unresolved
@@ -887,7 +883,7 @@ Continuous geometry keeps coordinates as signed integers in `2^-1074` units.
 Floor quotient/remainder select exact periods; forward segments choose the right
 piece at knots and reflected backward segments choose the left. World coordinate
 copies are clipped to positive-length support, with no wrap seam bridge. Stored
-coordinate combinations fit below 2102 bits; the common 12288-bit records and ResourceVector maps are admitted under host capacity. All 30 formal low-pass keys use Whole. A nonempty request validates the complete active inputs and reads authorized Root windows directly; the callback does not collect or copy the complete source tensors. It computes all centers and columns, then publishes one dense output. Nonuniform evaluation validates positions globally and retains one output's exact piece map for reuse. Full source access and output storage are required for partial delivery; any input edit invalidates all recorded output demand. Typed/upstream failures and nonuniform remote invalid values can fail the run. Dynamic numerical errors have Domain/Run scope. Empty requests read no sample payload after static preflight.
+coordinate combinations fit below 2102 bits; the common 12288-bit records and ResourceVector maps are admitted under host capacity. All 30 formal low-pass keys use complete-input. A nonempty request validates the complete active inputs and reads authorized Root windows directly; the callback does not collect or copy the complete source tensors. It computes all centers and columns, then publishes one dense output. Nonuniform evaluation validates positions globally and retains one output's exact piece map for reuse. Full source access and output storage are required for partial delivery; any input edit invalidates all recorded output demand. Typed/upstream failures and nonuniform remote invalid values can fail the run. Dynamic numerical errors have Domain/Run scope. Empty requests read no sample payload after static preflight.
 Uniform tap order/zero omissions and nonuniform positive-length integration
 remain mathematical rules. No per-output dependency records remain.
 
@@ -924,14 +920,14 @@ heap limbs or cached rounded weights. Global series can be expensive or fail on
 high frequencies/large beta/support-to-sigma ratios; unresolved zero/near-midpoint
 cases return ResourceExhausted rather than guessing a sign or publishing a fixed
 quadrature approximation. No arbitrary one-sided interval is declared negative
-zero. Nonuniform accelerated keys still use strict fallback. Whole numeric/fallback
+zero. Nonuniform accelerated keys still use strict fallback. complete-input numeric/fallback
 counters are unavailable (N/A).
 Every scale scan, partition piece, coefficient/refinement and limb operation has
 work/cancellation checks. The production path has no MPFR/Fraction dependency;
 those remain independent manual references.
 
 Resampling acceptance inherits CRV-01's exact-copy and numeric-accuracy
-requirements and adds public composition checks. Temporary checks should cover all-port negative, unaligned and zero strides, worker and caller floating-environment preservation, an independent two-constant oracle on a non-last axis, complete Whole input/dirty support, remote-column Run errors, uniform NaN/Inf tap order, typed validation, cache replacement and source association, static preparation reuse, real-work cancellation, 2^40-output capacity rejection, and escaped owners. Resampling additionally checks raw and typed position forwarding, output-specific support, remote-query failure, K=65536 execution, and a zero-copy mapped position view at N=2^40 while the full samples output is rejected for capacity. Float64 layout checks cover all four templates and eight source layouts under each caller/worker rounding mode; Float32 checks separately cover bit-preserving positions, typed validation, and owner lifetime. These are execution checks, not an independent resampling oracle.
+requirements and adds public composition checks. Temporary checks should cover all-port negative, unaligned and zero strides, worker and caller floating-environment preservation, an independent two-constant oracle on a non-last axis, complete complete-input input/dirty support, remote-column Run errors, uniform NaN/Inf tap order, typed validation, cache replacement and source association, static preparation reuse, real-work cancellation, 2^40-output capacity rejection, and escaped owners. Resampling additionally checks raw and typed position forwarding, output-specific support, remote-query failure, K=65536 execution, and a zero-copy mapped position view at N=2^40 while the full samples output is rejected for capacity. Float64 layout checks cover all four templates and eight source layouts under each caller/worker rounding mode; Float32 checks separately cover bit-preserving positions, typed validation, and owner lifetime. These are execution checks, not an independent resampling oracle.
 
 ## Shared rounding and regional execution
 
@@ -964,3 +960,5 @@ sin/cos/sinpi/cospi/sinc outputs with proved SIMD polynomials, and implements
 full finite-Float32 sincpi through integer-unit reduction and a central
 polynomial. Proofs include the final output conversion and strict reference;
 benchmark and independent-oracle scopes are recorded separately in those reports.
+
+Measure and Gate are nondeterministic and non-cacheable because measured_table_id is Run-local. Their dependent closure is excluded from cross-Run completed-result, checkpoint and block reuse. Report reading requires all thirteen members and the explicit matching configuration; the largest member window is 72 bytes.

@@ -12,19 +12,19 @@ indexing and arithmetic admission are charged before batch arithmetic. Exact
 work totals match the scalar path. Cancellation is checked at each batch and
 within scalar refinement, and no partial output is published.
 
-All NUM-04/05 certified point calculations now borrow one Whole callback
+All NUM-04/05 certified point calculations now borrow one complete-input callback
 nearest/gradual-underflow environment, including reduced pi/rational-pi
 calculations. CRV-10 inverse curves and CRV-11 uniform lowpass similarly borrow
 one environment over the complete output loop. Independent scalar calls still
 own a guard. These CRV changes amortize setup; they do not vectorize inverse
 bisection or reorder lowpass taps. NUM-01 already batches AST evaluation and
-forward CRV interpolation already borrows a Whole environment. Exact integer,
+forward CRV interpolation already borrows a complete-input environment. Exact integer,
 reduction, scan and nonuniform-integration arithmetic is unchanged by this
 commit; a mechanical batch wrapper would not establish an arithmetic speedup.
 
 The lowpass execution
 fixture covered ten families, negative/unaligned/zero strides, four host rounding
-modes, Whole work/output/workspace limits, active cancellation and release.
+modes, complete-input work/output/workspace limits, active cancellation and release.
 
 The new batch fixture compares scalar and batch bits for both dtypes, mixed
 special/ordinary inputs, chunks 1/3/7/64/65/257, unaligned/negative/zero strides,

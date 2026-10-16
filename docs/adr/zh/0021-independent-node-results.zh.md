@@ -26,7 +26,7 @@ Compiler 根据静态输入元数据和参数解析每个输出的 Result schema
                            只失败 B 的消费者
 ```
 
-`ValueRef` 是 `(node_id, output_index)`。它独立于物理 PlanStep 索引路由结果。每个结果按 tile 或作为一个 Whole 单元计算和记录，见 [ADR 0023](0023-track-dependencies-between-fixed-tiles.zh.md)。
+`ValueRef` 是 `(node_id, output_index)`。它独立于物理 PlanStep 索引路由结果。每个结果按成员 tile计算和记录，见 [ADR 0023](0023-track-dependencies-between-fixed-tiles.zh.md)。
 
 ## 3. 契约规约与接口（Formal Contracts & APIs）
 
@@ -72,20 +72,17 @@ class ExecutionContext {
 
 以上 class 摘录省略了其他无关成员。
 
-这些 C++ 声明展示结果路由字段，省略了外围类型和校验。`OperationTraits` 以声明顺序保存输出。每个输出都有唯一名称及独立推断的 Result schema。C operation descriptor 采用相同的有序模型，最多包含 64 项。多输出 operation 必须确定且无副作用。
+这些 C++ 声明展示结果路由字段，省略了外围类型和校验。`OperationTraits` 以声明顺序保存输出。每个输出都有唯一名称及独立推断的 Result schema。C operation descriptor 采用相同的有序模型，最多包含 64 项。纯度约束可选缓存和重试；有副作用算子声明 mandatory 共享 stage。
 
 Workflow 边按名称选择精确的 producer 端口。调用方可见的 `WorkflowOutput` 选择 node 与 port，再为结果指定唯一标签。Compiler 将输出名解析为声明顺序索引，并用 `ValueRef` 记录结果。静态推断使用完整输入元数据；输出的 `input_indices` 投影决定其可执行输入祖先和 callback 视图。投影后的 C callback 输入仍携带原始 schema 索引。
 
-每个有需求的结果由一个单输出 `PlanStep` 表示。未选择的纯输出不会增加执行需求。因此，同一个 node 在调用方请求多个输出时可以对应多个 PlanStep，每个步骤都携带该结果自己的契约和身份。C++ invocation 与 C output sink 会收到声明顺序的 `output_index`。
+每个有需求的结果由一个单输出 `PlanStep` 表示。未选择的纯输出不会增加执行需求。因此，同一个 node 在调用方请求多个输出时可以对应多个 PlanStep，每个步骤都携带该结果自己的契约和身份。C++ invocation 与 C callback query 会收到声明顺序的 `output_index`。
 
 一个结果的任务失败时，只让该结果及实际依赖它的消费者失败。公开 `execute` 对完整的请求输出集合仍返回一个聚合成功或错误。
 
 ## 4. 负面清单与边界（Non-Goals & Explicit Boundaries）
 
-- 多输出不意味着共享求值、共享缓存键或通过一次 callback 发布多个 `Value`。每个被请求结果遵循自己的执行契约。
-- 选择一个结果时，不会仅因同一 node 有纯 sibling 而执行该 sibling。带副作用的 operation 仍按声明契约保留为 singleton root。
-- 协调器不把多个结果或 observation 组合进一个共享 callback。
-- 动态输出数量、运行后添加输出端口和自动通道裁剪不属于固定的声明顺序输出表。
+- 独立输出保留各自投影与 tile demand。显式准备后的共享 stage 可在 Run 内按原始节点/stage 联合计算一次；定义、投影和 schema 不由第一个请求者决定。Mandatory stage 和固定发布 bundle 可扩大必需工作。不支持动态输出数量。
 
 ## 5. 后果与代价（Consequences）
 

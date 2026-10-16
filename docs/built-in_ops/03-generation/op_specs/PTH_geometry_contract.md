@@ -28,7 +28,7 @@ width binding semantics. Default reject_unmappable; explicit drop_unmappable rep
 removed keys/reasons and preserves the remaining mappable fields. Width is finite
 nonnegative full diameter in pixels, with exactly one explicit attached or independent
 source. Bindings distinguish whole-path normalized length, subpath normalized length and
-subpath physical arc length. Whole-path accumulation excludes jumps between subpaths.
+subpath physical arc length. complete-input-path accumulation excludes jumps between subpaths.
 Formal schema details, zero-length and seam cases must be defined before registration. PCHIP evaluation does not invent a PCHIP enum
 in an existing attribute codec.
 

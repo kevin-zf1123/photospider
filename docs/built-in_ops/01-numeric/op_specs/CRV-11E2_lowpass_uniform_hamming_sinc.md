@@ -17,7 +17,7 @@ clarification_status: complete
 
 # CRV-11E2: lowpass_uniform_hamming_sinc
 
-The dynamic inputs inherit the [family Result tensor-port contract](CRV-11_uniform_lowpass_contract.md): each port is a Result with exactly one tensor member and no fields under any structurally valid schema id/version/member key. Shapes use complete `sample_shape()` values, including batch axes.
+The dynamic inputs inherit the [family Result tensor-port contract](CRV-11_uniform_lowpass_contract.md): each port is a Result with exactly one tensor member  under any structurally valid schema id/version/member key. Shapes use complete `sample_shape()` values, including batch axes.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -46,10 +46,10 @@ Finite constants retain bits when all contributing extended samples match.
 Follow the shared IEEE NaN/Inf ordering and skip only mathematical zero taps.
 Do not drop underflowed approximate coefficients from logical dependencies.
 
-All three formal keys use Whole Result programs. Nonempty requests declare Data,
-Validation and Descriptor needs (role 13) for the complete input member. Typed and
+All three formal keys use Run-shared Result programs. Nonempty requests declare Data,
+Validation and Descriptor needs  for the complete input member. Typed and
 upstream validation covers the full tensor; authorized windows feed the callback
-directly without collecting or copying full input. Whole computes all outputs.
+directly without collecting or copying full input. complete-input computes all outputs.
 Input changes invalidate complete recorded output demand; empty demand reads no
 payload after static preflight. The Result writer publishes the complete same-
 shape/dtype output in one transaction, with full coverage and global coordinates.
@@ -76,9 +76,9 @@ does not claim ideal cutoff or zero-aliasing behavior.
 
 This primitive is registered in the five-kernel uniform low-pass family.
 Exact tap support precedes numerical evaluation. Accelerated keys cache certified
-coefficient enclosures per Whole invocation and propagate convolution/normalization
+coefficient enclosures per complete-input invocation and propagate convolution/normalization
 error to the final output gate. Unresolved coefficients or outputs use strict
-whole-sum evaluation, with Whole fallback counters unavailable. Support and special-value
+whole-sum evaluation, with complete-input fallback counters unavailable. Support and special-value
 shortcuts remain exact.
 Certified precision is bounded to 128..4096 bits; unresolved
 capacity or rounding may return `ResourceExhausted`. See [CRV-11 umbrella](CRV-11_resample_signal.md).

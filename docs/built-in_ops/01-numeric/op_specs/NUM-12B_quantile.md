@@ -86,10 +86,10 @@ exact zero mixtures produce positive zero. Nonzero exact results that underflow
 retain their mathematical sign. Infinities outside the selected pair do not by
 themselves produce NaN.
 
-## Whole demand and input projection
+## complete-input demand and input projection
 
 For N>=2, the continuation issues a Need for the complete source and complete
-q member with Data, Validation and Descriptor roles (13). It reads their
+q member with ordinary member tile Needs with explicitly bound validators. It reads their
 authorized Result windows and computes one complete keep-dimension output for
 every line. Sparse consumer demand does not reduce the source or q domain. A
 source edit or q edit invalidates all observed output coordinates. A source
@@ -119,7 +119,7 @@ output. The operation does not first pack its complete inputs. There is no
 permutation block cache shared across lines or independent invocations.
 
 Work, reads, comparisons and exact arithmetic are charged to the execution
-Root. Cancellation, work or capacity failure aborts the transactional Whole
+Root. Cancellation, work or capacity failure aborts the transactional complete-input
 writer, releases unpublished state and output, and preserves the first typed
 failure. Invalid active q returns `InvalidArgument` with
 `FailureReason::InvalidDomain`, Domain origin, Run scope and

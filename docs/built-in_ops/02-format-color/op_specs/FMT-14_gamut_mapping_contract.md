@@ -35,7 +35,7 @@ perceptually uniform compression or ACES reference gamut compression.
 
 ## Interface, parameters and interpretation
 
-One `input` tensor Value, Float32/Float64, contains one selected RGB group and
+One `input` tensor Tensor, Float32/Float64, contains one selected RGB group and
 optional same-tensor straight alpha/AOVs. A/B/C produce `values` with identical
 dtype, shape, axis and ordered R/G/B slots. D produces `mask` with the same dtype
 and non-channel shape S; `keepdims=false` by default, true keeps the original
@@ -155,7 +155,7 @@ corresponding original sample, copy every bit and do not validate color or alpha
 Union support for multiple outputs; forward dirty mapping is the transpose of
 these component relations. Pixel-dependent branches do not reduce declared
 source support. Zero alpha never skips requested hidden-color work. Required
-upstream Whole behavior remains unchanged.
+upstream complete-input behavior remains unchanged.
 
 auto/materialize produce requested valid samples in a new canonical planar owner
 with the kernel's full virtual reservation, DAG tile geometry, explicit page
@@ -192,7 +192,7 @@ Independent oracle fixtures must include:
 - B/C source NaN peers fail a single color request; alpha-only preserves arbitrary
   alpha bits. Cross-tile/nonzero/sparse requests and thread partitions agree.
 - Exercise low budgets, per-iteration cancellation, overflow in B's first XYZ,
-  multi-consumer lifetime and absence of hidden Whole or whole-image allocation.
+  multi-consumer lifetime and absence of hidden complete-input or whole-image allocation.
 
 Future public workflows explicitly compose transfer decode, FMT-10 basis/white,
 chosen mapper, transfer encode and FMT-06/codec. Runtime acceptance requires

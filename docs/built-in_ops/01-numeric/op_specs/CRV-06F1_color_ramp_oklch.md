@@ -18,7 +18,7 @@ clarification_status: complete
 
 # CRV-06F1: color_ramp_oklch
 
-Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member and no fields, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member , under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -53,7 +53,7 @@ Exact hit/clamp directly converts the original hue; no source hue is discarded
 because chroma is zero. A mismatched platform is not silently redirected.
 
 Inherit CRV-06F's complete-color observation expansion, global stops validation,
-Whole Result validation and one/two selected-row mathematics, descriptor matching, whole-input dirty support,
+complete-input Result validation and one/two selected-row mathematics, descriptor matching, whole-input dirty support,
 authorized source windows, full-shape transactional output, owner lifetime,
 capacity/work/stage accounting and cancellation are inherited from the family contract.
 Unused generic hue is mathematically ignored; complete typed validation still applies; a selected nonfinite hue fails even if C=0.
@@ -77,7 +77,7 @@ The maintained public workflow and current validation boundary are documented be
 The public helper `color_ramp_oklch_node` is declared in
 [`color_ramps.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/color_ramps.hpp).
 `color_ramps.cpp` prepares immutable model/unit/profile state and executes the
-Whole Result operation. Original hue values use exact rational interpolation;
+Run-shared Result operation. Original hue values use exact rational interpolation;
 Cross-unit conversion in either direction multiplies or divides by certified pi,
 with a 4096-bit precision ceiling. Same-unit RationalPi expressions cancel pi
 symbolically. Validate the Result path and numerical profile independently for each change. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation)

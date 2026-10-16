@@ -36,7 +36,7 @@ facts; this node produces profile coordinates, not a calibrated screen session.
 
 ## Common interface and profile admission
 
-One `input` tensor Value, same public Float32/Float64 dtype throughout. Semantic
+One `input` tensor Tensor, same public Float32/Float64 dtype throughout. Semantic
 mode selects one complete source color group; raw gives explicit ordered slots
 and source profile/units. Admit source Gray/RGB/CMYK/XYZ/Lab and ordinary classes
 under FMT-12's actual device-to-PCS direction checks. Supply source profile and endpoint configuration explicitly; an analytic input
@@ -179,7 +179,7 @@ at exactly the same spatial position. A alpha/AOV-only requests consume and
 bit-copy only the corresponding bypass samples; B has no bypass output. Dirty
 mapping follows these dependencies, with no spatial halo. Hidden colors at zero
 alpha remain processed; neither member reads alpha to classify/convert colors.
-Unavoidable upstream Whole operations retain their scope. Requested outputs only
+Unavoidable upstream complete-input operations retain their scope. Requested outputs only
 are published/validated; internal construction errors still fail the node.
 
 auto/materialize default to auto and create requested canonical planar output
@@ -192,7 +192,7 @@ profile bytes, parser/transform/CLUT allocations, numerical scratch, callbacks,
 latched failures, cache-off behavior, page windows, ancestry and final teardown.
 B additionally accounts its entire static source-domain alarm grid and all three
 construction helper transforms, even for one requested pixel. This is static
-resource preprocessing, not a Whole image scan. Complexity is O(grid_knots) for
+resource preprocessing, not a complete-input image scan. Complexity is O(grid_knots) for
 alarm construction plus O(P) bounded-dimensional interpolation; A construction
 is profile-dependent and pixel work O(P) for fixed profiles.
 

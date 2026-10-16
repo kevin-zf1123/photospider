@@ -59,7 +59,7 @@ class QualityReport final {
 - Association 标识发布前正在校验的不可变 Result ObjectId。关联字段在观察者看到该结果之前完成检查。
 - Group、Run 和 Waiter 描述操作范围，不会在任意坐标上虚构一个失败的语义值。
 
-宿主把 `node_id` 或 `input_id` 绑定到失败的实际来源。传播过程保留该身份和原始 atom。传输读取失败保持为 Io/Group，并带有其输入声明身份。失败记录没有成功 Value，也没有成功依赖证书。
+宿主把 `node_id` 或 `input_id` 绑定到失败的实际来源。传播过程保留该身份和原始 atom。传输读取失败保持为 Io/Group，并带有其输入声明身份。失败记录没有成功 Tensor，也没有成功依赖证书。
 
 `FailureReason` 只包含内核通用原因。需要更细领域含义的算子构造 `Status(code, message, DomainErrorCode{value}, detail)`，或在 C 中调用 `fail_domain(status_code, domain_code)`。内核把该值复制到 `FailureDetail::domain_code` 并原样传递；它不解释也不校验这个数字。算子 SDK 在 `photospider/ops/errors.hpp` 中定义其稳定码，例如 `ops_error::DivideByZero` 和 `ops_error::InvalidAssociation`。按这些码分支的调用方需要包含该 SDK 头文件。
 

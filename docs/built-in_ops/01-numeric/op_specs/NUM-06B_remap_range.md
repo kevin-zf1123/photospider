@@ -27,7 +27,7 @@ registration, shared execution and acceptance requirements; explicit rules
 below and in the named family contract take precedence. This specification
 remains Proposed; its status does not describe runtime registration.
 
-## Tensor ports and Whole execution
+## Tensor ports and Run-shared complete-input computation
 
 Inputs are five `Result` tensor members, in port order: `input`,
 `source_lower`, `source_upper`, `target_lower`, `target_upper`. Each input
@@ -43,9 +43,8 @@ input `sample_shape()` as the output cell shape. Batch axes become ordinary
 output axes, and output carries no domain description. Input shape rank is 1..8 and its
 complete logical element count is at most 2^40.
 
-The three formal remap profile keys use one Whole continuation. A nonempty
-request issues one Need covering every sample on all five inputs with Data,
-Validation and Descriptor roles (13). The continuation reads owning tensor
+The three formal remap profile keys use one complete-input continuation. A nonempty
+request issues one Need covering every sample on all five inputs through ordinary member tile Needs. The continuation reads owning tensor
 windows, validates all four bounds, then publishes the complete output through
 one direct tensor writer. Sparse output demand does not narrow validation or
 arithmetic. Any invalid bound fails the complete invocation, even when the
@@ -104,7 +103,7 @@ and no Atom key. Its diagnostic identifies the invalid bound port and raw bits
 and includes the complete logical coordinate, including any former batch
 prefix.
 
-The Whole callback owns a fixed `RangeMath` workspace through the phase
+The complete-input callback owns a fixed `RangeMath` workspace through the phase
 allocator and charges work to the execution root. All five complete input
 windows, complete output payload and workspace coexist during execution. Exact
 rational work can exceed the root work limit. Capacity, work-limit,
@@ -113,18 +112,18 @@ unpublished scratch and payload. Empty requests avoid input payload allocation
 and sample work.
 
 Temporary public Result acceptance should cover remap-to-clamp composition,
-invalid bounds outside sparse demand, all five input obligations, Empty, Whole
+invalid bounds outside sparse demand, all five input obligations, Empty, complete-input
 support, typed validation through clamp, binding changes and rational-work
 exhaustion. Use exact rational references for formulas and boundaries. Include
 overflowing intermediate subtraction, invalid bounds despite input NaN,
 batch-axis flattening and cancellation. Execution behavior is described in
-[NUM-06 Result Whole execution](../range-whole.md).
+[NUM-06 Result Run-shared complete-input computation](../range-whole.md).
 
 For example, Float64 input `[0,0.5,1,2]` with source bounds `[0,1]` and target
 bounds `[0,255]` explicitly broadcast to the input shape produces
 `[0,127.5,255,510]`.
 
 The code declares strict, Apple Silicon and x86-64 profile keys. Execution behavior and temporary acceptance cases are described in
-[NUM-06 Result Whole execution](../range-whole.md). Validate each admitted profile
+[NUM-06 Result Run-shared complete-input computation](../range-whole.md). Validate each admitted profile
 against independent Fraction references. The specification remains Proposed;
 its cases do not report current hardware or performance results.

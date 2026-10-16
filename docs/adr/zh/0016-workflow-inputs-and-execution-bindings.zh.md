@@ -50,13 +50,13 @@ struct ExecutionResult final {
 };
 ```
 
-这些片段展示 binding 与 publication 相关的公开字段。当前 `WorkflowDocument` schema 为 6，保存 declarations、operation nodes 和具名 outputs。Declaration id 唯一且非零；name 为唯一、精确、区分大小写的可打印 ASCII 字符串，长度为 1 至 128 字节且不含空格。每份 document 最多包含 4096 个 declarations，每个 declaration 恰好绑定一次，包括未被图消费的声明。
+这些片段展示 binding 与 publication 相关的公开字段。当前 `WorkflowDocument` schema 为 7，保存 declarations、operation nodes 和具名 outputs。Declaration id 唯一且非零；name 为唯一、精确、区分大小写的可打印 ASCII 字符串，长度为 1 至 128 字节且不含空格。每份 document 最多包含 4096 个 declarations，每个 declaration 恰好绑定一次，包括未被图消费的声明。
 
-`result_schema` 提供 typed tensor slots、fields 和 domain。Compiler input metadata 携带该 schema。Tensor shape、batch axes 和 physical layout 取自各自的 `ResultTensorSpec`。Value 可以在内部支撑 typed tensor，但不构成 operation input 或 output contract。Static schema 变化需要重新编译。Input payload bytes、pointers 和 allocation addresses 不参与 semantic 与 physical-plan identity；schema、traits、规范化 output demand 和其他编译期事实决定这些 identity。
+声明固定所有具名静态 Tensor 成员及其 dtype、cell shape、batch/atomic 轴和拓扑。输入结构改变后重新 preparation 和 compile。每个 Run 固定 plan、binding snapshot 和 generation。Payload 地址不进入编译 identity；schema、traits、stage 声明和规范化成员请求进入相应 identity。
 
 `ExecutionBinding` 按名称匹配一个 declaration，并持有 Result reference。Executor 按多重集合验证名称，因此重复 binding 会被保留并在校验时失败，不会被静默覆盖。Executor 在调度 operation work 前验证 Result schema 兼容性。Run 会将 binding snapshot 和已准入 input owners 保留到 callbacks 退出。`ExecutionContext::execute` 在 callbacks 退出，且 cancellation 与 graph-currentness checks 允许完成后，将具名 Results 放在 `ExecutionResult::results` 中返回。
 
-`ExecutionOptions::result_publication` 是每次调用独立的 certified Result prefix observer。每个 caller 有独立的串行通知流。Caller 可在 callback 返回后继续保留 owning `ResultRef`。Callback exceptions 转换为 typed execution failures；cancellation 和 callback retirement 遵循 Run 现有顺序。
+`ExecutionOptions::result_publication` 是每次调用独立的 certified Result prefix observer。每个 caller 有独立的串行通知流。Caller 可在 callback 返回后继续保留 owning `ResultRef`。Prefix 不代表整个执行成功；observer 失败停止 Run，此前已认证 prefix 继续有效。Callback exceptions 转换为 typed execution failures；cancellation 和 callback retirement 遵循 Run 现有顺序。
 
 ## 4. 负面清单与边界 (Non-Goals & Explicit Boundaries)
 
@@ -65,10 +65,10 @@ struct ExecutionResult final {
 - Runtime input data 不会成为 compile-time parameters 或 literal nodes。
 - Workflow output 选择 operation-node output；输入直接透传不是 workflow output 形式。
 - Result tensor backing layout 不改变逻辑 sample authorization。Planar storage 不等同于 interleaved storage。
-- Result C operation table 保持 ABI 4。本 ADR 描述 C++ workflow binding contract，不描述独立 C++ Value operation protocol。
+- Result C operation table 保持 ABI 5。本 ADR 描述 C++ workflow binding contract，不描述独立 C++ Tensor operation protocol。
 
 ## 5. 后果与代价 (Consequences)
 
-Malformed declarations，以及缺失、多余、重复或非法 binding names 以 `InvalidArgument` 失败；不兼容的 Result schema 以 `TypeMismatch` 失败。这些检查在 operation callbacks 之前执行。调用方可以用不同 Result bindings 重用已编译 plan，但在 `execute` 复制期间不得修改 binding container。声明 schema 恰好包含一个空间 tensor 且没有 field 的绑定输入按 tile 请求和比较；其他输入都是一个 Whole 单元，见 [ADR 0023](0023-track-dependencies-between-fixed-tiles.zh.md)。
+声明或绑定名称非法返回 InvalidArgument，schema 不兼容返回 TypeMismatch，均发生在 callback 前。每个输入成员都有独立 tile 网格，按成员 tile 请求和比较。同一 backing 可服务不同 tile extent 的 plan。增加生产覆盖或 revision 本身不表示内容编辑。调用方不得在 execute 复制 binding 时修改其容器。
 
 Cancellation 采用协作方式。Executor 会等待已进入的 callbacks 退出后再释放借用 phases 和 owners。每个 Run 拥有自己的 producer；取消一个 Run 会停止并退休该 Run 的工作，不影响其他 Run。输入 Results 保留各自的 backing owners；Root 计费的工作状态、outputs 和 transfers 会持续计费到最后一个 owner 退出。

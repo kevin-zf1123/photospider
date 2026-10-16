@@ -49,5 +49,5 @@ thread's floating-point environment is checked separately around `execute`.
 Per-lane indexing and mathematical work are still charged; checks are batched
 in groups of at most 64. Fallback owns its own admission/refinement charge,
 without double charging. Cancellation and failed work/capacity admission never
-publish a partial result. The operation executes as a Whole Result computation
+publish a partial result. The operation executes as a complete-input Result computation
 and retains source/build cache identity.
