@@ -2,7 +2,8 @@
 
 #include <cstdint>
 
-#include "execution/result_checkpoints.hpp"
+#include "photospider/compiler/compiler.hpp"
+#include "photospider/plugin/result_program.hpp"
 
 namespace ps::execution_internal {
 // Borrowed only until validate() returns. The host owns admission and current
@@ -11,7 +12,6 @@ namespace ps::execution_internal {
 class PublicationValidationServices {
  public:
   virtual ~PublicationValidationServices() = default;
-  virtual Status consume(std::uint64_t) = 0;
   virtual Status operation_work(std::uint64_t) = 0;
   virtual Status run_work(std::uint64_t) = 0;
   virtual ErrorCode stop() = 0;
@@ -21,14 +21,13 @@ class PublicationValidationServices {
 
 // All capabilities and callbacks are borrowed for one synchronous validation.
 // The coordinator has retired the producer callback before constructing this
-// view and owns the plan/query. Validation may bind producer and
-// association facts; it does not publish, freeze ancestry, retire or notify.
+// view and owns the plan/query. Validation may bind producer facts; it does
+// not publish, freeze ancestry, retire or notify.
 struct PublicationValidationView final {
   const PlanStep& step;
   const ResultProgramQuery& query;
   const ResultRef& previous;
   std::uint64_t previous_revision, node_id;
-  const ResultInputFacts& input_facts;
   const ResourceBudget& resources;
   std::uint64_t maximum_window;
   PublicationValidationServices& services;

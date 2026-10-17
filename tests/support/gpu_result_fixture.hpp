@@ -58,9 +58,6 @@ inline ps::ResultBuilder builder(const ps::ResultProgramPhase& phase) {
   auto result = take(ps::ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
-      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
-                                                     phase.association->end())
-                        : std::vector<std::uint64_t>{},
       phase.query.tile_extent));
   return result;
 }
@@ -83,7 +80,7 @@ inline ps::Result<ps::ResultProgramPoll> view(
        axis <
        phase.query.output.result_schema->tensors[0].sample_shape().size();
        ++axis)
-    transform.source_axes.push_back({static_cast<std::int32_t>(axis), 0, 1, 1});
+    transform.source_axes.push_back({static_cast<std::int32_t>(axis), 0, 1});
   for (const auto& box : demand(phase).boxes()) {
     auto window =
         take(phase.tensors->at({0, 0}).acquire(box, phase.query.cancellation));

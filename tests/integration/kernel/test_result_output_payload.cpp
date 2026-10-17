@@ -55,16 +55,13 @@ struct PayloadProbe {
     }
     auto builder = take(ps::ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        phase.association ? std::vector<uint64_t>(phase.association->begin(),
-                                                  phase.association->end())
-                          : std::vector<uint64_t>{}));
+        phase.query.semantic_key, {}));
     ps::Status status;
     if (borrow) {
       auto window =
           take(phase.tensors->at({0, 0}).acquire(ps::Region::whole({2})));
       ps::ResultTensorViewTransform transform;
-      transform.source_axes = {{0, 0, 1, 1}};
+      transform.source_axes = {{0, 0, 1}};
       status = builder.publish_tensor_view(0, ps::Region::whole({2}), window,
                                            transform);
     } else {
@@ -169,7 +166,7 @@ struct TilePayloadProbe {
     }
     auto builder = take(ps::ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, {}, phase.query.tile_extent));
+        phase.query.semantic_key, {}, phase.query.tile_extent));
     const auto at = phase.query.tile_unit;
     require(
         builder.publish_tensor(0, ps::Region({{at, 1}}), {0, {8}, {at}}, owner)

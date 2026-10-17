@@ -93,10 +93,6 @@ struct MetadataIdentityProgram {
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
         phase.query.semantic_key, {},
-        phase.association
-            ? std::vector<std::uint64_t>(phase.association->begin(),
-                                         phase.association->end())
-            : std::vector<std::uint64_t>{},
         phase.query.tile_extent));
     if (!empty) {
       check(phase.consume_work(shape.size() + 1));
@@ -210,12 +206,6 @@ int compact_identity() {
            multi_result::number(first_result) == expected &&
            multi_result::number(second_result) == expected &&
            first_result.object_id() != second_result.object_id() &&
-           first_result.association().size() == 1 &&
-           second_result.association().size() == 1 &&
-           first_result.association()[0] ==
-               first_binding.inputs[0].result.object_id() &&
-           second_result.association()[0] ==
-               second_binding.inputs[0].result.object_id() &&
            b.value().diagnostics.cache_hits == (cacheable ? 1U : 0U) &&
            calls == before + (cacheable ? 1U : 2U);
   };

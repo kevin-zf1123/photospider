@@ -28,18 +28,6 @@ bool key_valid(std::string_view key, std::size_t maximum) {
          std::all_of(key.begin(), key.end(),
                      [](unsigned char c) { return c >= 0x21 && c <= 0x7e; });
 }
-bool extent_valid(const ResultExtent& extent, bool resolved) {
-  if (!extent.divisor || extent.input >= 1024 || extent.axis >= 8)
-    return false;
-  switch (extent.kind) {
-    case ResultExtentKind::Fixed:
-      return core_internal::can_add(extent.value, extent.offset);
-    case ResultExtentKind::InputAxis:
-    case ResultExtentKind::InputElements:
-      return !resolved;
-  }
-  return false;
-}
 }  // namespace
 std::vector<std::uint64_t> ResultTensorSpec::sample_shape() const {
   std::vector<std::uint64_t> shape(batch_axes.begin(), batch_axes.end());
@@ -102,9 +90,8 @@ const ResultPublicationScope* SchemaTemplate::publication_scope(
         return &scope;
   return nullptr;
 }
-Status SchemaTemplate::validate(bool resolved) const {
-  if (!key_valid(id, 128) || !version || tensors.empty() ||
-      tensors.size() > 16 || domain.size() > 8)
+Status SchemaTemplate::validate() const {
+  if (!key_valid(id, 128) || !version || tensors.empty() || tensors.size() > 16)
     return data_internal::invalid_schema();
   std::array<std::string_view, 64> keys;
   std::size_t key_count = 0;
@@ -150,52 +137,7 @@ Status SchemaTemplate::validate(bool resolved) const {
       first_member = false;
     }
   }
-  for (const auto& extent : domain)
-    if (!extent_valid(extent, resolved))
-      return data_internal::invalid_schema();
   return Status::success();
-}
-Result<SchemaTemplate> SchemaTemplate::resolve(
-    const std::vector<std::vector<std::uint64_t>>& input_domains) const {
-  auto valid = validate();
-  if (!valid.ok())
-    return Result<SchemaTemplate>(valid);
-  auto result = *this;
-  auto resolve_extent = [&](ResultExtent* extent) -> Status {
-    if (extent->kind != ResultExtentKind::InputAxis &&
-        extent->kind != ResultExtentKind::InputElements)
-      return Status::success();
-    if (extent->input >= input_domains.size())
-      return data_internal::invalid_schema();
-    const auto& shape = input_domains[extent->input];
-    std::uint64_t count = 1;
-    if (extent->kind == ResultExtentKind::InputAxis) {
-      if (extent->axis >= shape.size())
-        return data_internal::invalid_schema();
-      count = shape[extent->axis];
-    } else {
-      if (shape.empty())
-        return data_internal::invalid_schema();
-      for (auto n : shape) {
-        if (!core_internal::can_multiply(count, n))
-          return Status{ErrorCode::ResourceExhausted,
-                        "schema input domain overflow"};
-        count *= n;
-      }
-    }
-    auto resolved_extent = data_internal::scaled(*extent, count);
-    if (!resolved_extent.ok())
-      return resolved_extent.status();
-    *extent = ResultExtent{ResultExtentKind::Fixed, resolved_extent.value()};
-    return Status::success();
-  };
-
-  for (auto& extent : result.domain) {
-    auto status = resolve_extent(&extent);
-    if (!status.ok())
-      return Result<SchemaTemplate>(status);
-  }
-  return Result<SchemaTemplate>(std::move(result));
 }
 namespace {
 template <class String>
@@ -209,15 +151,7 @@ void encode_schema(String* destination, const SchemaTemplate& schema) {
     word(value.size());
     bytes.append(value.data(), value.size());
   };
-  auto extent = [&](const ResultExtent& e) {
-    word(static_cast<std::uint32_t>(e.kind));
-    word(e.value);
-    word(e.input);
-    word(e.axis);
-    word(e.divisor);
-    word(e.offset);
-  };
-  text("photospider.result-schema.v5");
+  text("photospider.result-schema.v6");
   text(schema.id);
   word(schema.version);
 
@@ -246,23 +180,15 @@ void encode_schema(String* destination, const SchemaTemplate& schema) {
     for (auto member : scope.members)
       word(member);
   }
-  word(schema.domain.size());
-  for (const auto& e : schema.domain)
-    extent(e);
-}
-bool same_extent(const ResultExtent& a, const ResultExtent& b) {
-  return a.kind == b.kind && a.value == b.value && a.input == b.input &&
-         a.axis == b.axis && a.divisor == b.divisor && a.offset == b.offset;
 }
 }  // namespace
 std::uint64_t SchemaTemplate::canonical_size() const noexcept {
   std::uint64_t size =
-      8 + sizeof("photospider.result-schema.v5") - 1 + 8 + id.size() + 8 + 16;
+      8 + sizeof("photospider.result-schema.v6") - 1 + 8 + id.size() + 8 + 16;
   for (const auto& image : tensors) {
     size += 8 + image.key.size() + 64 +
             (image.descriptor.shape.size() + image.batch_axes.size()) * 8;
   }
-  size += 8 + domain.size() * 48;
   for (const auto& scope : publication_scopes)
     size += 16 + 8 * scope.members.size();
   return size;
@@ -348,8 +274,6 @@ Result<SchemaTemplate> SchemaTemplate::managed_copy(
           ResourceAllocator<std::uint32_t>(budget));
       copy.publication_scopes.push_back(std::move(owned));
     }
-    copy.domain = ResourceVector<ResultExtent>(
-        domain.begin(), domain.end(), ResourceAllocator<ResultExtent>(budget));
     return Result<SchemaTemplate>(std::move(copy));
   } catch (const std::bad_alloc&) {
     return Result<SchemaTemplate>(Status{ErrorCode::ResourceExhausted, {}});
@@ -358,7 +282,6 @@ Result<SchemaTemplate> SchemaTemplate::managed_copy(
 bool SchemaTemplate::same_schema(const SchemaTemplate& other) const noexcept {
   if (id != other.id || version != other.version ||
       tensors.size() != other.tensors.size() ||
-      domain.size() != other.domain.size() ||
       publication_scopes.size() != other.publication_scopes.size())
     return false;
   for (std::size_t i = 0; i < tensors.size(); ++i) {
@@ -378,9 +301,6 @@ bool SchemaTemplate::same_schema(const SchemaTemplate& other) const noexcept {
   for (std::size_t i = 0; i < publication_scopes.size(); ++i)
     if (publication_scopes[i].policy != other.publication_scopes[i].policy ||
         publication_scopes[i].members != other.publication_scopes[i].members)
-      return false;
-  for (std::size_t i = 0; i < domain.size(); ++i)
-    if (!same_extent(domain[i], other.domain[i]))
       return false;
   return true;
 }

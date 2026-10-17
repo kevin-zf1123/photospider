@@ -11,7 +11,7 @@
  * every record before attaching any Need, including member and interval bounds.
  */
 // NOLINTBEGIN(whitespace/indent_namespace)
-#define PS_RESULT_GPU_DISCOVERY_MSL_V5                                     \
+#define PS_RESULT_GPU_DISCOVERY_MSL_V6                                     \
   "#include <metal_stdlib>\nusing namespace metal;\n"                      \
   "bool ps_result_discovery_emit(device atomic_uint* table,uint capacity," \
   "uint port,uint kind,uint slot,ulong begin,ulong end) {"                 \

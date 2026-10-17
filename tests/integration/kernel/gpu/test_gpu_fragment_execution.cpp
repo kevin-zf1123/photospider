@@ -156,10 +156,10 @@ struct SparseState {
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
     if (mode >= 8 && mode <= 11) {
       if (phase.gpu->buffer(nullptr, nullptr, 1, 0, nullptr) !=
-              PS_RESULT_STATUS_FAILURE_V5 ||
+              PS_RESULT_STATUS_FAILURE_V6 ||
           phase.gpu->execute(nullptr, nullptr, 0) !=
-              PS_RESULT_STATUS_FAILURE_V5 ||
-          phase.gpu->release(nullptr, 0) != PS_RESULT_STATUS_FAILURE_V5)
+              PS_RESULT_STATUS_FAILURE_V6 ||
+          phase.gpu->release(nullptr, 0) != PS_RESULT_STATUS_FAILURE_V6)
         throw std::runtime_error("null native service context accepted");
       if (mode == 9)
         static_cast<void>(phase.consume_work(UINT64_MAX));
@@ -240,10 +240,6 @@ struct SparseState {
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
         phase.query.semantic_key, {},
-        phase.association
-            ? std::vector<std::uint64_t>(phase.association->begin(),
-                                         phase.association->end())
-            : std::vector<std::uint64_t>{},
         phase.query.tile_extent));
     auto storage = std::move(sums).freeze();
     for (std::size_t i = 0; i < outputs.size(); ++i)

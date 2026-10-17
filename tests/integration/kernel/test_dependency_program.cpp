@@ -15,7 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "data/memory_budget.hpp"
 #include "photospider/photospider.hpp"
 #include "photospider/plugin/whole_stage.hpp"
 #include "support/multi_output_result_fixture.hpp"
@@ -52,7 +51,7 @@ ExecutionBinding source(const ResourceBudget& root, const std::string& name,
       ResultBuilder::start(root,
                            schema(backing.descriptor().element_type,
                                   backing.descriptor().shape.back()),
-                           "test.source", {}, {}, 1));
+                           "test.source", {}, 1));
 
   multi_result::check(builder.publish_tensor(
       0, backing.region(), backing.layout(),
@@ -63,9 +62,6 @@ ResultBuilder builder(const ResultProgramPhase& phase) {
   auto result = multi_result::take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
-      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
-                                                     phase.association->end())
-                        : std::vector<std::uint64_t>{},
       phase.query.tile_extent));
 
   return result;
@@ -588,17 +584,19 @@ int concurrent_and_reentrant() {
   return 0;
 }
 int allocator_lifetime() {
-  auto budget = std::make_shared<data_internal::MemoryBudget>(64);
-  auto reservation = multi_result::take(budget->reserve(64));
-  auto allocator = reservation->allocator().limited(16);
+  ResourceLimits limits;
+  limits.capacity[ResourceKind::Payload] = 64;
+  auto budget = std::make_shared<ResourceBudget>(limits);
+  auto allocator = budget->allocator().limited(16);
   auto a = multi_result::take(allocator.allocate(8));
   auto b = multi_result::take(allocator.allocate(8));
-  PS_CHECK(!allocator.allocate(1).ok() && budget->live() == 16);
-  reservation->seal();
-  PS_CHECK(budget->live() == 16);
+  PS_CHECK(!allocator.allocate(1).ok() &&
+           budget->statistics().live[ResourceKind::Payload] == 16);
+  PS_CHECK(budget->statistics().live[ResourceKind::Payload] == 16);
   a = {};
   b = {};
-  PS_CHECK(budget->live() == 0 && budget->available() == 64);
+  PS_CHECK(budget->statistics().live[ResourceKind::Payload] == 0 &&
+           budget->available_capacity()[ResourceKind::Payload] == 64);
   auto counts = std::make_shared<Counts>();
   OperationRegistry registry;
   multi_result::check(registry.register_operation(probe_definition(counts)));

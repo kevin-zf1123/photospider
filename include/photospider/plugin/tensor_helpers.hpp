@@ -240,12 +240,7 @@ inline Result<ResultRef> to_tile(
   if (!source_member && !source.schema().same_schema(target))
     return Answer(
         Status{ErrorCode::TypeMismatch, "tile source schema mismatch"});
-  const auto associations = phase.association ? phase.association->size() : 0;
-  if (associations > (UINT64_MAX - 8192) / sizeof(std::uint64_t))
-    return Answer(
-        Status{ErrorCode::ResourceExhausted, "tile view metadata overflow"});
-  const auto bytes = 8192 + associations * sizeof(std::uint64_t);
-  auto scratch = phase.resources.reserve(ResourceCapacity::host(bytes, bytes));
+  auto scratch = phase.resources.reserve(ResourceCapacity::host(8192, 8192));
   if (!scratch.ok())
     return Answer(scratch.status());
   SchemaTemplate actual, expected;
@@ -271,16 +266,13 @@ inline Result<ResultRef> to_tile(
     return Answer(window.status());
   auto made = ResultBuilder::start(
       phase.resources, target, phase.query.semantic_key, {},
-      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
-                                                     phase.association->end())
-                        : std::vector<std::uint64_t>{},
       phase.query.tile_extent);
   if (!made.ok())
     return Answer(made.status());
   auto builder = made.take_value();
   ResultTensorViewTransform identity;
   for (std::uint32_t axis = 0; axis < region.value().rank(); ++axis)
-    identity.source_axes.push_back({static_cast<std::int32_t>(axis), 0, 1, 1});
+    identity.source_axes.push_back({static_cast<std::int32_t>(axis), 0, 1});
   auto status = builder.publish_tensor_view(
       slot, region.value(), window.value(), identity, phase.query.cancellation);
   if (!status.ok())

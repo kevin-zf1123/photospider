@@ -40,7 +40,7 @@ Status validate_declaration(WorkflowInputDeclaration* declaration) {
   if (!declaration->result_schema)
     return failure(ErrorCode::InvalidArgument,
                    "workflow input requires Result schema");
-  return declaration->result_schema->validate(true);
+  return declaration->result_schema->validate();
 }
 
 Status validate_port_schema(const OperationTraits& traits) {
@@ -100,7 +100,7 @@ Status validate_port_metadata(const OperationPortConstraint& port,
          metadata.result_schema->version != port.result_schema_version))
       return failure(ErrorCode::TypeMismatch,
                      "structured input schema mismatch");
-    auto valid = metadata.result_schema->validate(true);
+    auto valid = metadata.result_schema->validate();
     if (!valid.ok() || !tensor_member_predicate(port))
       return valid;
     auto slot = resolve_tensor_member(port, metadata);

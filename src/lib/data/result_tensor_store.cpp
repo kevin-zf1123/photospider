@@ -8,8 +8,6 @@
 namespace ps::data_internal {
 Status ResultTensorBacking::initialize(const ResourceBudget& budget,
                                        const ResultTensorSpec& spec,
-                                       const std::shared_ptr<TensorBudget>&,
-                                       const ResultGrowthLimits&,
                                        std::uint64_t tile_extent) {
   affine_owners =
       ResourceVector<ResultRef>(ResourceAllocator<ResultRef>(budget));

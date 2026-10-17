@@ -23,7 +23,7 @@ void numerical_tensor_windows() {
     slot.descriptor = descriptor;
     slot.atomic_trailing_axes = atomic;
     schema.tensors.push_back(std::move(slot));
-    require(schema.validate(true).ok(), "generic tensor schema");
+    require(schema.validate().ok(), "generic tensor schema");
     require(schema.canonical().size() == schema.canonical_size(),
             "tensor canonical exact size");
     auto builder = take(ResultBuilder::start(root, schema, "tensor.source"));
@@ -50,10 +50,8 @@ void numerical_tensor_windows() {
   no_spatial_axes.tensors[0].layout.channel_axis.reset();
   no_spatial_axes.tensors[0].layout.height_axis = 6;
   no_spatial_axes.tensors[0].layout.width_axis = 7;
-  no_spatial_axes.tensors[0].layout.order = TensorStorageOrder::Continuous;
-  no_spatial_axes.tensors[0].layout.row_pitch_bytes = 256;
   require(
-      canonical.validate(true).ok() && no_spatial_axes.validate(true).ok() &&
+      canonical.validate().ok() && no_spatial_axes.validate().ok() &&
           canonical.same_schema(no_spatial_axes) &&
           canonical.canonical() == no_spatial_axes.canonical(),
       "nonspatial axes and physical preferences do not change semantic schema");
@@ -354,8 +352,7 @@ void tensor_writer_reentrancy() {
               if (mode == 5) {
                 inner = {ErrorCode::OperationFailed, "callback domain failure",
                          FailureReason::InvalidDomain};
-                inner.detail = {FailureOrigin::Domain,
-                                FailureScope::ValidationDomain};
+                inner.detail = {FailureOrigin::Domain, FailureScope::Group};
                 builder.fail(inner);
               }
               transferred.emplace(std::move(builder));
@@ -472,16 +469,15 @@ void lazy_spatial_backing() {
     slot.layout.spatial = true;
     slot.layout.channel_axis.reset();
     schema.tensors.push_back(slot);
-    require(schema.validate(true).ok(), "huge spatial topology is valid");
+    require(schema.validate().ok(), "huge spatial topology is valid");
     const auto shape = slot.sample_shape();
-    require(
-        ResultBuilder::start(root, schema, "spatial.bad.tile", {}, {}, 0)
-                    .status()
-                    .code == ErrorCode::InvalidArgument &&
-            ResultBuilder::start(root, schema, "spatial.bad.tile", {}, {}, 3)
-                    .status()
-                    .code == ErrorCode::InvalidArgument,
-        "spatial physical configuration validates before backing choice");
+    require(ResultBuilder::start(root, schema, "spatial.bad.tile", {}, 0)
+                        .status()
+                        .code == ErrorCode::InvalidArgument &&
+                ResultBuilder::start(root, schema, "spatial.bad.tile", {}, 3)
+                        .status()
+                        .code == ErrorCode::InvalidArgument,
+            "spatial physical configuration validates before backing choice");
     auto builder = take(ResultBuilder::start(root, schema, "spatial.lazy"));
     require(root.statistics().live[ResourceKind::Payload] == 0,
             "spatial start does not choose a payload backing");
@@ -785,14 +781,17 @@ void window_failures() {
         root, shape, view ? "sticky.view.cancel" : "sticky.kernel.cancel"));
 
     auto window = take(reference.acquire_tensor(facts, 0, left));
+    ResultTensorViewTransform identity;
+    for (unsigned axis = 0; axis < left.rank(); ++axis)
+      identity.source_axes.push_back({static_cast<std::int32_t>(axis), 0, 1});
     CancellationSource cancelled;
     cancelled.cancel();
     const auto failure =
-        view
-            ? builder.publish_tensor_view(0, left, {&window}, cancelled.token())
-            : builder.publish_tensor_kernel(
-                  0, left, [](const auto&) { return Status::success(); },
-                  cancelled.token());
+        view ? builder.publish_tensor_view(0, left, {{&window, left, identity}},
+                                           cancelled.token())
+             : builder.publish_tensor_kernel(
+                   0, left, [](const auto&) { return Status::success(); },
+                   cancelled.token());
     require(
         failure.code == ErrorCode::Cancelled &&
             builder.publish_tensor(
@@ -855,11 +854,11 @@ void windows_and_views() {
 
   const Region target({{1, 1}, {0, 1}, {0, 3}, {0, 5}});
   ResultTensorViewTransform channel_view;
-  channel_view.source_axes = {{0, 0, 1, 1},
-                              {1, 0, 1, 1},
-                              {2, 0, 1, 1},
-                              {3, 0, 1, 1},
-                              {-1, 2, 0, 1}};
+  channel_view.source_axes = {{0, 0, 1},
+                              {1, 0, 1},
+                              {2, 0, 1},
+                              {3, 0, 1},
+                              {-1, 2, 0}};
   const auto ambient_live = source_root.statistics().live.values;
   {
     ResourceAllocationScope foreign(source_root);
@@ -938,8 +937,7 @@ void windows_and_views() {
           "window acquisition cancellation");
 }
 void spatial_backing_boundaries() {
-  for (auto order :
-       {TensorStorageOrder::Continuous, TensorStorageOrder::Tiled}) {
+  {
     ResourceBudget root;
     SchemaTemplate spec;
     spec.id = "test.spatial.physical";
@@ -947,12 +945,9 @@ void spatial_backing_boundaries() {
     tensor.key = "samples";
     tensor.descriptor = {ElementType::UInt8, {5, 19, 3}};
     tensor.layout.spatial = true;
-    tensor.layout.order = order;
-    tensor.layout.row_pitch_bytes =
-        order == TensorStorageOrder::Continuous ? 32 : 0;
     spec.tensors.push_back(tensor);
     auto builder =
-        take(ResultBuilder::start(root, spec, "physical.roi", {}, {}, 2));
+        take(ResultBuilder::start(root, spec, "physical.roi", {}, 2));
 
     const Region roi({{1, 3}, {3, 14}, {0, 3}});
     require(
@@ -1010,7 +1005,6 @@ void spatial_backing_boundaries() {
   tensor.descriptor = {ElementType::UInt8, {2, width}};
   tensor.layout.spatial = true;
   tensor.layout.channel_axis.reset();
-  tensor.layout.order = TensorStorageOrder::Continuous;
   spec.tensors.push_back(tensor);
   auto builder = take(ResultBuilder::start(root, spec, "rollback.pages"));
 

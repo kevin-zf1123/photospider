@@ -74,9 +74,8 @@ inline Region mapped_region(const Region& output,
     const auto first = take(axis.source_coordinate(dimension.offset));
     const auto last =
         take(axis.source_coordinate(dimension.offset + dimension.extent - 1));
-    source.push_back(
-        {std::min(first, last),
-         std::max(first, last) - std::min(first, last) + axis.extent});
+    source.push_back({std::min(first, last),
+                      std::max(first, last) - std::min(first, last) + 1});
   }
   return Region(std::move(source));
 }
@@ -142,9 +141,6 @@ inline Status publish(const ResultProgramPhase& phase, ResultBuilder* builder,
     transform.source_axes = axes;
     status = builder->publish_tensor_view(0, box, window, transform,
                                           phase.query.cancellation);
-    if (tensor.layout.spatial && view_unavailable(status))
-      status = builder->publish_tensor_view(0, box, {&window},
-                                            phase.query.cancellation);
   }
   if (policy != "materialize" && view_unavailable(status)) {
     const auto partitioned = window.visit_backing_regions(

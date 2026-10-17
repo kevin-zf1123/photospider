@@ -88,11 +88,9 @@ struct State {
       sample *= .5F;
       std::memcpy(output.data(), &sample, 4);
     }
-    auto builder = multi_result::take(ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        std::vector<std::uint64_t>(phase.association->begin(),
-                                   phase.association->end())));
+    auto builder = multi_result::take(
+        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
+                             phase.query.semantic_key, {}));
 
     multi_result::check(builder.publish_tensor(0, Region::whole({1}), {0, {4}},
                                                std::move(output).freeze()));

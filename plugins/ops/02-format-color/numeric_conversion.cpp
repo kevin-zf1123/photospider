@@ -518,7 +518,6 @@ Result<OperationPreparation> prepare(
   output_tensor.descriptor.element_type = state->target;
   output_tensor.atomic_trailing_axes = 0;
   if (output_tensor.layout.spatial && (!state->identity || state->materialize))
-    output_tensor.layout.row_pitch_bytes = 0;
   output.metadata.result_schema =
       std::make_shared<const SchemaTemplate>(std::move(schema));
   OperationPreparation result;
@@ -1000,9 +999,6 @@ ResultBuilder result_builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto builder = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
-      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
-                                                     phase.association->end())
-                        : std::vector<std::uint64_t>{},
       phase.query.tile_extent));
 
   return builder;

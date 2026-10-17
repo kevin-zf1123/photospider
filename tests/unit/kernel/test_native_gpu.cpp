@@ -5,7 +5,6 @@
 #include <thread>
 #include <utility>
 
-#include "data/memory_budget.hpp"
 #include "execution/execution_test_hooks.hpp"
 #include "execution/native_gpu.hpp"
 #include "photospider/core/resources.hpp"
@@ -85,34 +84,6 @@ int shared_capacity(const std::shared_ptr<ps::gpu_internal::Device>& device) {
   gpu = {};
   PS_CHECK(root.statistics().live[ResourceKind::Shared] == 0);
   PS_CHECK(host.allocate(1).ok());
-  for (bool on_demand : {false, true}) {
-    ResourceLimits limits;
-    limits.capacity[ResourceKind::Shared] = capacity;
-    auto managed = std::make_shared<ResourceBudget>(limits);
-    auto memory =
-        std::make_shared<ps::data_internal::MemoryBudget>(1 << 20, managed);
-    auto observation = std::make_shared<ps::data_internal::MemoryObservation>();
-    auto reservation =
-        memory->reserve(capacity * 4, {}, observation).take_value();
-    auto allocator =
-        device->allocator(on_demand ? memory->on_demand_allocator(observation)
-                                    : reservation->allocator());
-    auto buffer = allocator.allocate(16385).take_value();
-    const auto before = managed->statistics().live;
-    PS_CHECK(before[ResourceKind::Device] == capacity &&
-             before[ResourceKind::Shared] == capacity);
-    PS_CHECK(!allocator.allocate(1).ok());
-    PS_CHECK(managed->statistics().live.values == before.values);
-    reservation->seal();
-    PS_CHECK(managed->statistics().live[ResourceKind::Payload] == capacity);
-    auto retained = std::move(buffer).freeze();
-    reservation.reset();
-    PS_CHECK(managed->statistics().live[ResourceKind::Shared] == capacity);
-    retained.reset();
-    PS_CHECK(managed->statistics().live[ResourceKind::Device] == 0 &&
-             managed->statistics().live[ResourceKind::Shared] == 0 &&
-             managed->statistics().live[ResourceKind::Payload] == 0);
-  }
   return 0;
 }
 int token_lifetime(const std::shared_ptr<ps::gpu_internal::Device>& device) {

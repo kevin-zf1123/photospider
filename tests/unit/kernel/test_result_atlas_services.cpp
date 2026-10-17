@@ -148,9 +148,7 @@ struct State {
           return Poll(phase.gpu_status());
         auto builder = multi_result::take(ResultBuilder::start(
             phase.resources, *phase.query.output.result_schema,
-            phase.query.semantic_key, {},
-            std::vector<std::uint64_t>(phase.association->begin(),
-                                       phase.association->end())));
+            phase.query.semantic_key, {}));
 
         multi_result::check(builder.publish_tensor(
             0, Region::whole({1}), {0, {4}}, std::move(output).freeze()));

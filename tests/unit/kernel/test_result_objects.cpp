@@ -93,8 +93,7 @@ int empty_and_failure() {
     Status failure{ErrorCode::OperationFailed,
                    "domain prerequisite failed",
                    FailureReason::InvalidDomain,
-                   {FailureOrigin::Schema, FailureScope::Association}};
-    failure.detail.association = reference.object_id();
+                   {FailureOrigin::Schema, FailureScope::Group}};
     failure.detail.node_id = 77;
     builder.fail(failure);
     builder.fail(Status{ErrorCode::Cancelled, {}});
@@ -103,7 +102,8 @@ int empty_and_failure() {
           builder.seal().status()}) {
       PS_CHECK(observed.reason == failure.reason &&
                observed.message == failure.message &&
-               observed.detail.association == failure.detail.association &&
+               observed.detail.origin == failure.detail.origin &&
+               observed.detail.scope == failure.detail.scope &&
                observed.detail.node_id == 77);
     }
   }

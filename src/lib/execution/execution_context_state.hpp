@@ -4,9 +4,6 @@
 
 #include "execution/callback_pool.hpp"
 #include "photospider/execution/execution.hpp"
-namespace ps::data_internal {
-class MemoryBudget;
-}
 namespace ps::gpu_internal {
 class Device;
 }
@@ -27,7 +24,7 @@ struct ExecutionContext::Impl final {
   /** @brief Fixed resolved CPU worker count. */
   const std::uint32_t cpu_worker_count;
   /** @brief Shared exact modeled-byte capacity, retained beyond the device. */
-  std::shared_ptr<data_internal::MemoryBudget> budget;
+  std::shared_ptr<ResourceBudget> budget;
   std::shared_ptr<gpu_internal::Device> native_device;
   /** @brief Fixed optional GPU-lane availability. */
   const bool gpu_available;

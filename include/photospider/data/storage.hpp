@@ -13,10 +13,6 @@ namespace ps {
 namespace gpu_internal {
 class Device;
 }
-namespace data_internal {
-class MemoryBudget;
-class MemoryReservation;
-}  // namespace data_internal
 
 /** @brief Borrowed immutable bytes; lifetime is bounded by the storage owner.
  */
@@ -191,8 +187,6 @@ class PHOTOSPIDER_API BufferAllocator final {
  private:
   friend class gpu_internal::Device;
   friend class ResourceBudget;
-  friend class data_internal::MemoryBudget;
-  friend class data_internal::MemoryReservation;
   BufferAllocator limited_impl(std::uint64_t maximum_bytes,
                                FailureObserver failure, bool requested) const;
   using AllocationCommit =

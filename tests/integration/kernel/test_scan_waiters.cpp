@@ -187,12 +187,11 @@ int concurrent_scans(bool cancel_owner, bool finite, bool cache) {
   return 0;
 }
 // A checkpoint hit must become a miss when restoring its metadata cannot fit.
-// No restored dependency or association may escape that refused transaction.
+// No restored dependency may escape that refused transaction.
 struct CapacityProbe {
   Gate gate;
   std::uint64_t remaining = 0;
   bool hit = false, grants_empty = false;
-  std::size_t associations = 0;
   ErrorCode failure = ErrorCode::Internal;
 };
 struct CapacityScan {
@@ -214,7 +213,6 @@ struct CapacityScan {
         return Answer(saved.status());
       probe->hit = saved.value().has_value();
       probe->failure = phase.failure->load();
-      probe->associations = phase.association->size();
       probe->grants_empty = phase.tensors->empty();
     } else if (!turn++) {
       ResultProgramNeed need;
@@ -300,7 +298,7 @@ int checkpoint_restore_capacity(bool enough) {
   PS_REQUIRE_OK(first);
   PS_REQUIRE_OK(second);
   PS_CHECK(probe.hit == enough && probe.failure == ErrorCode::Ok);
-  PS_CHECK(probe.grants_empty && probe.associations == (enough ? 100U : 0U));
+  PS_CHECK(probe.grants_empty);
   PS_CHECK(probe.gate.borrowed == (enough ? 1U : 0U));
   auto record = take(second.value().dependencies.tile_record({0, 0, 0}));
   PS_CHECK(record && record->inputs.size() == (enough ? 100U : 0U));

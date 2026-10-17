@@ -439,7 +439,6 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
   normalized.cpu_tiles = phase.cpu_tiles;
   normalized.gpu = phase.gpu;
   normalized.gpu_status = phase.gpu_status;
-  normalized.association = phase.association;
   normalized.report_diagnostic = phase.report_diagnostic;
   normalized.checkpoint_before = phase.checkpoint_before;
   normalized.checkpoint_publish = phase.checkpoint_publish;
@@ -685,10 +684,8 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
             delta.members.emplace(member.first, added.take_value());
         }
         if (!visible_publication_) {
-          auto sources = publication->result.association();
           auto builder = ResultBuilder::start(
               normalized.resources, *output_schema_, semantic_key_, {},
-              std::vector<std::uint64_t>(sources.begin(), sources.end()),
               query.tile_extent);
           if (!builder.ok())
             return reject_bound(builder.status());

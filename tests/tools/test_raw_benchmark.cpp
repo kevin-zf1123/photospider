@@ -27,7 +27,7 @@ using FixtureCallback =
 FixturePoll publish_number(const ps::ResultProgramPhase& phase, double number) {
   auto builder = multi_result::take(ps::ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {}, {}, phase.query.tile_extent));
+      phase.query.semantic_key, {}, phase.query.tile_extent));
   multi_result::check(builder.publish_tensor(
       0, ps::Region::whole({1}),
       ps::ByteView(reinterpret_cast<const std::uint8_t*>(&number),

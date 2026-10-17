@@ -888,7 +888,6 @@ Result<OperationPreparation> prepare(
       }
       image.channel_axis = out.output_axis;
       if (kind != Kind::ColorToGray || out.layout == Layout::Materialize)
-        image.row_pitch_bytes = 0;
       output_tensor.layout = image;
     }
     const auto output_shape = output_tensor.sample_shape();
@@ -985,9 +984,6 @@ ResultBuilder builder_for(const ResultProgramPhase& phase, bool /*empty*/) {
   auto builder = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
-      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
-                                                     phase.association->end())
-                        : std::vector<std::uint64_t>{},
       phase.query.tile_extent));
 
   return builder;

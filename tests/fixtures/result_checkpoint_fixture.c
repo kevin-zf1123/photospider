@@ -6,59 +6,58 @@
 #include "photospider/plugin/result_operation_plugin_api.h"
 #include "photospider/plugin/result_tile_helpers.h"
 
-static const ps_result_tensor_spec_v5 tensor = {
+static const ps_result_tensor_spec_v6 tensor = {
     .struct_size = sizeof(tensor),
     .key = "samples",
     .key_size = 7,
-    .element_type = PS_RESULT_ELEMENT_FLOAT64_V5,
+    .element_type = PS_RESULT_ELEMENT_FLOAT64_V6,
     .rank = 1,
     .shape = {5},
-    .channel_axis = PS_RESULT_NO_CHANNEL_V5};
-static const ps_result_schema_v5 schema = {.struct_size = sizeof(schema),
+    .channel_axis = PS_RESULT_NO_CHANNEL_V6};
+static const ps_result_schema_v6 schema = {.struct_size = sizeof(schema),
                                            .id = "fixture.checkpoint.input",
                                            .id_size = 24,
                                            .version = 1,
                                            .tensors = &tensor,
                                            .tensor_count = 1};
-static const ps_result_tensor_spec_v5 output_tensor = {
+static const ps_result_tensor_spec_v6 output_tensor = {
     .struct_size = sizeof(output_tensor),
     .key = "samples",
     .key_size = 7,
-    .element_type = PS_RESULT_ELEMENT_FLOAT64_V5,
+    .element_type = PS_RESULT_ELEMENT_FLOAT64_V6,
     .rank = 2,
     .shape = {1, 5},
     .spatial = 1,
     .height_axis = 0,
     .width_axis = 1,
-    .storage_order = 1,
-    .channel_axis = PS_RESULT_NO_CHANNEL_V5};
-static const ps_result_schema_v5 output_schema = {
+    .channel_axis = PS_RESULT_NO_CHANNEL_V6};
+static const ps_result_schema_v6 output_schema = {
     .struct_size = sizeof(output_schema),
     .id = "fixture.checkpoint.output",
     .id_size = sizeof("fixture.checkpoint.output") - 1,
     .version = 1,
     .tensors = &output_tensor,
     .tensor_count = 1};
-static const ps_result_tensor_spec_v5 state_tensor = {
+static const ps_result_tensor_spec_v6 state_tensor = {
     .struct_size = sizeof(state_tensor),
     .key = "carry",
     .key_size = 5,
-    .element_type = PS_RESULT_ELEMENT_FLOAT64_V5,
+    .element_type = PS_RESULT_ELEMENT_FLOAT64_V6,
     .rank = 1,
     .shape = {2},
-    .channel_axis = PS_RESULT_NO_CHANNEL_V5};
-static const ps_result_schema_v5 state_schema = {
+    .channel_axis = PS_RESULT_NO_CHANNEL_V6};
+static const ps_result_schema_v6 state_schema = {
     .struct_size = sizeof(state_schema),
     .id = "fixture.checkpoint.state",
     .id_size = 24,
     .version = 1,
     .tensors = &state_tensor,
     .tensor_count = 1};
-static const ps_result_port_v5 input = {.struct_size = sizeof(input),
+static const ps_result_port_v6 input = {.struct_size = sizeof(input),
                                         .schema = &schema};
-static ps_result_output_v5 outputs[1];
-static const ps_result_parameter_descriptor_v5 mode = {
-    sizeof(mode), "mode", 4, PS_RESULT_PARAMETER_INT64_V5, 0, 1, 0, 18};
+static ps_result_output_v6 outputs[1];
+static const ps_result_parameter_descriptor_v6 mode = {
+    sizeof(mode), "mode", 4, PS_RESULT_PARAMETER_INT64_V6, 0, 1, 0, 18};
 static atomic_uint_fast64_t starts, destroys, reads, restores, publishes,
     verified_copies;
 static void (*gate_wait)(void*);
@@ -67,13 +66,13 @@ struct State {
   unsigned mode, stage, restored;
   uint64_t cursor, target, borrowed, pending_state;
   double carry;
-  ps_result_services_v5 saved;
+  ps_result_services_v6 saved;
 };
-static int start(void* user, void* raw, const ps_result_query_v5* query,
-                 const ps_result_services_v5* host) {
-  ps_result_region_v5 requested_region;
-  if (ps_result_output_region_v5(query, 0, &requested_region))
-    return PS_RESULT_STATUS_INVALID_ARGUMENT_V5;
+static int start(void* user, void* raw, const ps_result_query_v6* query,
+                 const ps_result_services_v6* host) {
+  ps_result_region_v6 requested_region;
+  if (ps_result_output_region_v6(query, 0, &requested_region))
+    return PS_RESULT_STATUS_INVALID_ARGUMENT_V6;
   (void)user;
   (void)host;
   struct State* state = raw;
@@ -82,24 +81,24 @@ static int start(void* user, void* raw, const ps_result_query_v5* query,
   atomic_fetch_add(&starts, 1);
   return 0;
 }
-static int restore(const ps_result_services_v5* host,
-                   const ps_result_checkpoint_v5* checkpoint, double* carry) {
+static int restore(const ps_result_services_v6* host,
+                   const ps_result_checkpoint_v6* checkpoint, double* carry) {
   return checkpoint->byte_size != 16 ||
          host->checkpoint_read(host->context, checkpoint->handle, 0, carry,
                                4) ||
          host->checkpoint_read(host->context, checkpoint->handle, 4,
                                (uint8_t*)carry + 4, 4);
 }
-static int prohibited_block(const ps_result_block_services_v5* block,
+static int prohibited_block(const ps_result_block_services_v6* block,
                             uint64_t incoming, uint64_t* outgoing, void* user) {
   (void)block;
-  const ps_result_services_v5* outer = user;
-  ps_result_checkpoint_v5 ignored = {.struct_size = sizeof(ignored)};
+  const ps_result_services_v6* outer = user;
+  ps_result_checkpoint_v6 ignored = {.struct_size = sizeof(ignored)};
   (void)outer->checkpoint_before(outer->context, 1, 0, &ignored);
   *outgoing = incoming;
   return 0;
 }
-static int save(const ps_result_services_v5* host, struct State* state) {
+static int save(const ps_result_services_v6* host, struct State* state) {
   double encoded[2] = {state->carry, 123.5};
   uint8_t expected[6], actual[6];
   memcpy(expected, (uint8_t*)encoded + 6, sizeof(expected));
@@ -121,7 +120,7 @@ static int save(const ps_result_services_v5* host, struct State* state) {
       host->release_block_state(host->context, handle))
     return 1;
   atomic_fetch_add(&publishes, 1);
-  ps_result_checkpoint_v5 copy = {.struct_size = sizeof(copy)};
+  ps_result_checkpoint_v6 copy = {.struct_size = sizeof(copy)};
   if (host->checkpoint_before(host->context, 1, state->cursor, &copy))
     return 1;
   if (copy.handle) {
@@ -149,8 +148,8 @@ static int save(const ps_result_services_v5* host, struct State* state) {
   }
   return 0;
 }
-static int publish(const ps_result_services_v5* host, struct State* state) {
-  const ps_result_region_v5 point = {.struct_size = sizeof(point),
+static int publish(const ps_result_services_v6* host, struct State* state) {
+  const ps_result_region_v6 point = {.struct_size = sizeof(point),
                                      .rank = 2,
                                      .offset = {0, state->target},
                                      .extent = {1, 1}};
@@ -159,16 +158,16 @@ static int publish(const ps_result_services_v5* host, struct State* state) {
                            (const uint8_t*)&state->carry,
                            sizeof(state->carry)) ||
       host->publish_result(host->context, 1))
-    return PS_RESULT_STATUS_FAILURE_V5;
-  return PS_RESULT_PUBLISH_V5;
+    return PS_RESULT_STATUS_FAILURE_V6;
+  return PS_RESULT_PUBLISH_V6;
 }
-static int poll(void* user, void* raw, const ps_result_query_v5* query,
-                const ps_result_services_v5* host) {
+static int poll(void* user, void* raw, const ps_result_query_v6* query,
+                const ps_result_services_v6* host) {
   (void)user;
   (void)query;
   struct State* state = raw;
   if (!state->stage) {
-    ps_result_checkpoint_v5 checkpoint = {.struct_size = sizeof(checkpoint)};
+    ps_result_checkpoint_v6 checkpoint = {.struct_size = sizeof(checkpoint)};
     double ignored;
     if (state->mode == 1)
       (void)host->checkpoint_publish(host->context, 1, 0, UINT64_MAX);
@@ -180,10 +179,10 @@ static int poll(void* user, void* raw, const ps_result_query_v5* query,
       checkpoint.reserved = 1;
     if (host->checkpoint_before(host->context, state->mode == 7 ? 0 : 1,
                                 state->target, &checkpoint))
-      return PS_RESULT_STATUS_FAILURE_V5;
+      return PS_RESULT_STATUS_FAILURE_V6;
     if (checkpoint.handle) {
       if (restore(host, &checkpoint, &state->carry))
-        return PS_RESULT_STATUS_FAILURE_V5;
+        return PS_RESULT_STATUS_FAILURE_V6;
       atomic_fetch_add(&restores, 1);
       state->restored = 1;
       state->cursor = checkpoint.sequence + 1;
@@ -197,19 +196,19 @@ static int poll(void* user, void* raw, const ps_result_query_v5* query,
       if (host->create_block_state(host->context, &state_schema,
                                    (const uint8_t*)retained, sizeof(retained),
                                    &state->pending_state))
-        return PS_RESULT_STATUS_FAILURE_V5;
+        return PS_RESULT_STATUS_FAILURE_V6;
     }
     state->stage = 1;
   } else {
     double value = 0;
     if (state->pending_state) {
-      ps_result_checkpoint_v5 copy = {.struct_size = sizeof(copy)};
+      ps_result_checkpoint_v6 copy = {.struct_size = sizeof(copy)};
       if (host->checkpoint_publish(host->context, 2, 17,
                                    state->pending_state) ||
           host->release_block_state(host->context, state->pending_state) ||
           host->checkpoint_before(host->context, 2, 17, &copy) ||
           !copy.handle || restore(host, &copy, &value) || value != 42)
-        return PS_RESULT_STATUS_FAILURE_V5;
+        return PS_RESULT_STATUS_FAILURE_V6;
       state->pending_state = 0;
     }
     if (state->mode == 5 && state->borrowed)
@@ -218,16 +217,16 @@ static int poll(void* user, void* raw, const ps_result_query_v5* query,
       (void)state->saved.checkpoint_read(state->saved.context, state->borrowed,
                                          0, &value, 8);
     if (host->read_tensor(host->context, 0, 0, &state->cursor, 1, &value, 8))
-      return PS_RESULT_STATUS_FAILURE_V5;
+      return PS_RESULT_STATUS_FAILURE_V6;
     atomic_fetch_add(&reads, 1);
     if (!isfinite(value))
-      return PS_RESULT_STATUS_FAILURE_V5;
+      return PS_RESULT_STATUS_FAILURE_V6;
     volatile double sum = state->carry + value;
     if (!isfinite(sum))
-      return PS_RESULT_STATUS_FAILURE_V5;
+      return PS_RESULT_STATUS_FAILURE_V6;
     state->carry = sum;
     if (save(host, state))
-      return PS_RESULT_STATUS_FAILURE_V5;
+      return PS_RESULT_STATUS_FAILURE_V6;
     ++state->cursor;
   }
   if (state->cursor > state->target) {
@@ -236,8 +235,8 @@ static int poll(void* user, void* raw, const ps_result_query_v5* query,
       gate_wait(gate_user);
     return publish(host, state);
   }
-  return ps_result_to_whole_v5(host, query, 0) ? PS_RESULT_STATUS_FAILURE_V5
-                                               : PS_RESULT_NEED_V5;
+  return ps_result_to_whole_v6(host, query, 0) ? PS_RESULT_STATUS_FAILURE_V6
+                                               : PS_RESULT_NEED_V6;
 }
 static void destroy(void* user, void* raw) {
   (void)user;
@@ -247,9 +246,9 @@ static void destroy(void* user, void* raw) {
 static void plugin_destroy(void* user) {
   (void)user;
 }
-static ps_result_operation_v5 operations[1];
-static const ps_result_operation_plugin_api_v5 api = {
-    sizeof(api),   PS_RESULT_OPERATION_ABI_VERSION_5, operations, 1, NULL,
+static ps_result_operation_v6 operations[1];
+static const ps_result_operation_plugin_api_v6 api = {
+    sizeof(api),   PS_RESULT_OPERATION_ABI_VERSION_6, operations, 1, NULL,
     plugin_destroy};
 PS_RESULT_EXPORT void ps_result_checkpoint_counts(uint64_t* counts) {
   counts[0] = atomic_load(&starts);
@@ -264,23 +263,25 @@ PS_RESULT_EXPORT void ps_result_checkpoint_set_gate(void (*wait)(void*),
   gate_wait = wait;
   gate_user = user;
 }
-PS_RESULT_EXPORT const ps_result_operation_plugin_api_v5*
-ps_result_operation_plugin_get_api_v5(void) {
+PS_RESULT_EXPORT const ps_result_operation_plugin_api_v6*
+ps_result_operation_plugin_get_api_v6(void) {
   const char* keys[] = {"fixture.result_checkpoint"};
   for (unsigned i = 0; i < 1; ++i) {
+    // NOLINTBEGIN(readability/braces): C compound literal assignment.
     outputs[i] =
-        (ps_result_output_v5){.struct_size = sizeof(outputs[i]),
+        (ps_result_output_v6){.struct_size = sizeof(outputs[i]),
                               .key = "value",
                               .key_size = 5,
-                              .port = {.struct_size = sizeof(ps_result_port_v5),
+                              .port = {.struct_size = sizeof(ps_result_port_v6),
                                        .schema = &output_schema},
                               .input_count = UINT32_MAX};
-    operations[i] = (ps_result_operation_v5){
+    // NOLINTEND
+    operations[i] = (ps_result_operation_v6){
         .struct_size = sizeof(operations[i]),
         .key = keys[i],
         .key_size = strlen(keys[i]),
-        .flags = PS_RESULT_FLAG_CPU_V5 | PS_RESULT_FLAG_DETERMINISTIC_V5 |
-                 PS_RESULT_FLAG_SIDE_EFFECT_FREE_V5,
+        .flags = PS_RESULT_FLAG_CPU_V6 | PS_RESULT_FLAG_DETERMINISTIC_V6 |
+                 PS_RESULT_FLAG_SIDE_EFFECT_FREE_V6,
         .inputs = &input,
         .input_count = 1,
         .outputs = outputs + i,

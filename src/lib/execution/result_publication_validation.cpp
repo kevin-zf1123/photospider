@@ -48,18 +48,6 @@ Status ResultPublicationValidator::validate(
       }
     }
   }
-  auto facts_work = view.services.consume(view.input_facts.size());
-  if (!facts_work.ok())
-    return facts_work;
-  ResourceVector<std::uint64_t> association{
-      ResourceAllocator<std::uint64_t>(view.resources)};
-  association.reserve(view.input_facts.size());
-  for (const auto& input : view.input_facts)
-    association.push_back(input.first.second);
-  auto retained = published.result.retain_association(
-      association, [&](auto n) { return view.services.consume(n); });
-  if (!retained.ok())
-    return retained;
   if (view.query.prepared && !view.defer_contract) {
     std::optional<ResultDescriptor> previous;
     if (view.previous.valid()) {

@@ -43,7 +43,7 @@ struct Program {
     if (!builder)
       builder = take(ResultBuilder::start(
           phase.resources, *phase.query.output.result_schema,
-          phase.query.semantic_key, {}, {}, phase.query.tile_extent));
+          phase.query.semantic_key, {}, phase.query.tile_extent));
     const double value = position + 1;
     check(builder->publish_tensor(
         0, Region({{position, 1}}),
@@ -176,7 +176,7 @@ struct PrefixProgram {
     }
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, {}, phase.query.tile_extent));
+        phase.query.semantic_key, {}, phase.query.tile_extent));
     const double value = phase.query.tile_unit;
     check(builder.publish_tensor(
         0, phase.query.tensor_outputs->boxes().front(),
@@ -353,7 +353,7 @@ struct GrantProgram {
     }
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, {}, phase.query.tile_extent));
+        phase.query.semantic_key, {}, phase.query.tile_extent));
     for (std::uint32_t slot = 0;
          slot < phase.query.output.result_schema->tensors.size(); ++slot) {
       const auto& tensor = phase.query.output.result_schema->tensors[slot];
@@ -424,7 +424,7 @@ struct InterleavedStages {
     if (!builder)
       builder = take(ResultBuilder::start(
           phase.resources, *phase.query.output.result_schema,
-          phase.query.semantic_key, {}, {}, phase.query.tile_extent));
+          phase.query.semantic_key, {}, phase.query.tile_extent));
     if (stage == 0 && turn++ == 0) {
       const double seed = 10;
       check(builder->publish_tensor(
@@ -568,7 +568,7 @@ struct PartialFallback {
     if (!builder)
       builder = take(ResultBuilder::start(
           phase.resources, *phase.query.output.result_schema,
-          phase.query.semantic_key, {}, {}, phase.query.tile_extent));
+          phase.query.semantic_key, {}, phase.query.tile_extent));
     if (turn == 1) {
       ++turn;
       ResultProgramNeed need;

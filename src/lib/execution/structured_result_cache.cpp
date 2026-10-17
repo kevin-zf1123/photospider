@@ -163,7 +163,6 @@ Result<bool> StructuredResultCache::try_reuse(std::size_t index,
     ResultObjectInputs results;
     ResultDescriptorInputs descriptors;
     TileRecord tile_record;
-    ResultInputFacts facts;
   };
   std::optional<InitialState> initial;
   const auto reset = [&]() {
@@ -173,13 +172,11 @@ Result<bool> StructuredResultCache::try_reuse(std::size_t index,
     actor.results.clear();
     actor.descriptors.clear();
     actor.tile_record.inputs.clear();
-    actor.input_facts.clear();
     if (initial) {
       actor.tensors = std::move(initial->tensors);
       actor.results = std::move(initial->results);
       actor.descriptors = std::move(initial->descriptors);
       actor.tile_record = std::move(initial->tile_record);
-      actor.input_facts = std::move(initial->facts);
     }
     return Status::success();
   };
@@ -214,16 +211,14 @@ Result<bool> StructuredResultCache::try_reuse(std::size_t index,
       }
       if (content.value() != candidate->content)
         continue;
-      charged =
-          host.charge(1 + 64 * actor.tensors.size() + actor.results.size() +
-                      actor.descriptors.size() + actor.input_facts.size());
+      charged = host.charge(1 + 64 * actor.tensors.size() +
+                            actor.results.size() + actor.descriptors.size());
       if (!charged.ok())
         return charged.code == ErrorCode::ResourceExhausted
                    ? Result<bool>(false)
                    : Result<bool>(charged);
       initial.emplace(InitialState{actor.tensors, actor.results,
-                                   actor.descriptors, actor.tile_record,
-                                   actor.input_facts});
+                                   actor.descriptors, actor.tile_record});
       bool matched = true;
       replayed = true;
       actor.busy = true;
@@ -254,12 +249,7 @@ Result<bool> StructuredResultCache::try_reuse(std::size_t index,
       }
       if (!ctx.table->structured_verified(candidate))
         break;
-      ResourceVector<std::uint64_t> association{
-          ResourceAllocator<std::uint64_t>(resources_)};
-      for (const auto& facts : actor.input_facts)
-        association.push_back(facts.first.second);
-      auto adopted =
-          host.adopt(*candidate.operator->(), association, rebound.value());
+      auto adopted = host.adopt(*candidate.operator->(), rebound.value());
       if (!adopted.ok())
         return adopted;
       if (adopted.value())

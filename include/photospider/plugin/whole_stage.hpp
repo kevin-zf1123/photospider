@@ -90,8 +90,7 @@ inline OperationDefinition with_whole_stage(OperationDefinition definition,
         (result.shared_stages && !result.shared_stages->empty()))
       return Answer(Status{ErrorCode::InvalidArgument,
                            "invalid whole-stage preparation"});
-    auto schema_status =
-        result.outputs[0].metadata.result_schema->validate(true);
+    auto schema_status = result.outputs[0].metadata.result_schema->validate();
     if (!schema_status.ok())
       return Answer(schema_status);
     const auto overflow = [] {
@@ -126,18 +125,6 @@ inline OperationDefinition with_whole_stage(OperationDefinition definition,
       if (port >= inputs.size() || !inputs[port].result_schema)
         return Answer(Status{ErrorCode::InvalidArgument,
                              "invalid whole-stage input projection"});
-      if (!traits.workspace_input_multiplier)
-        continue;
-      for (const auto& tensor : inputs[port].result_schema->tensors) {
-        auto count = tensor.sample_count();
-        const auto width =
-            TensorSpan::element_size(tensor.descriptor.element_type) *
-            traits.workspace_input_multiplier;
-        if (!count.ok() ||
-            count.value() > (UINT64_MAX - stage.workspace_bytes) / width)
-          return overflow();
-        stage.workspace_bytes += count.value() * width;
-      }
     }
     if (traits.outputs[0].maximum_output_payload_bytes) {
       stage.maximum_output_payload_bytes =
@@ -174,7 +161,6 @@ inline OperationDefinition with_whole_stage(OperationDefinition definition,
   std::sort(prototype.input_indices.begin(), prototype.input_indices.end());
   definition.traits.shared_stages = {std::move(prototype)};
   definition.traits.workspace_bytes = 0;
-  definition.traits.workspace_input_multiplier = 0;
   definition.traits.outputs[0].output_schema.validators.clear();
   definition.traits.outputs[0].continuation_bytes = 1;
   definition.traits.outputs[0].maximum_dependency_stages = 2;

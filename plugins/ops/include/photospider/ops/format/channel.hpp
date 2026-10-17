@@ -31,13 +31,11 @@ inline std::string layout_assertion(const ResultTensorLayout& layout) {
   if (!layout.spatial)
     return "none";
   std::string result =
-      std::to_string(static_cast<unsigned>(layout.order)) + ":" +
       std::to_string(layout.height_axis) + ":" +
       std::to_string(layout.width_axis) + ":" +
       std::to_string(layout.channel_axis
                          ? static_cast<std::int64_t>(*layout.channel_axis)
-                         : -1) +
-      ":" + std::to_string(layout.row_pitch_bytes);
+                         : -1);
   return result;
 }
 }  // namespace detail
@@ -109,7 +107,7 @@ inline Result<std::vector<ChannelHandle>> split_channels(
       source_metadata.result_schema->tensors.size() != 1)
     return Answer(invalid("split requires one Result tensor and no fields"));
   const auto& schema = *source_metadata.result_schema;
-  auto valid = schema.validate(true);
+  auto valid = schema.validate();
   if (!valid.ok())
     return Answer(valid);
   const auto& source = schema.tensors[0];

@@ -134,8 +134,7 @@ Result<ResourceVector<TileChange>> tile_binding_changes(
     if (!grid.ok())
       return Answer(grid.status());
     if (!dependency.tiles.empty() &&
-        (!grid.value() ||
-         *(dependency.tiles.end() - 1) >= grid.value()->tile_count()))
+        *(dependency.tiles.end() - 1) >= grid.value().tile_count())
       return Answer(Status{ErrorCode::InvalidArgument, "invalid source tiles"});
     status = sources.include(dependency, root);
     if (!status.ok())
@@ -172,8 +171,7 @@ Result<ResourceVector<TileChange>> tile_binding_changes(
     if (!grid.ok())
       return Answer(grid.status());
     if (!source.tiles.empty() &&
-        (!grid.value() ||
-         *(source.tiles.end() - 1) >= grid.value()->tile_count()))
+        *(source.tiles.end() - 1) >= grid.value().tile_count())
       return Answer(Status{ErrorCode::InvalidArgument, "invalid source tiles"});
     auto left = a->descriptor(), right = b->descriptor();
     if (!left.ok() || !right.ok())
@@ -189,7 +187,7 @@ Result<ResourceVector<TileChange>> tile_binding_changes(
         status = compare.work(1);
         if (!status.ok())
           return Answer(status);
-        auto region = grid.value()->region(tile);
+        auto region = grid.value().region(tile);
         if (!region.ok())
           return Answer(region.status());
         auto different = compare.tensor(*a, left.value(), *b, right.value(),

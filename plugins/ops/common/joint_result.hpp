@@ -37,8 +37,8 @@ inline OperationDefinition joint_result(OperationDefinition definition) {
   const auto start = definition.start_result;
   if (traits.outputs.empty() || traits.outputs.size() > 16 || !specialize ||
       definition.prepare_static || !start || !traits.supports_cpu ||
-      traits.supports_gpu || traits.workspace_input_multiplier ||
-      !traits.shared_stages.empty() || !traits.side_effect_free)
+      traits.supports_gpu || !traits.shared_stages.empty() ||
+      !traits.side_effect_free)
     throw std::invalid_argument("invalid joint numeric stage");
   for (const auto& output : traits.outputs)
     if (!output.result_schema || output.result_schema->tensors.size() != 1 ||
@@ -72,7 +72,7 @@ inline OperationDefinition joint_result(OperationDefinition definition) {
           output.metadata.result_schema->tensors.size() != 1)
         return Result<OperationPreparation>(
             Status{ErrorCode::InvalidArgument, "invalid joint member"});
-      auto valid = output.metadata.result_schema->validate(true);
+      auto valid = output.metadata.result_schema->validate();
       if (!valid.ok())
         return Result<OperationPreparation>(valid);
       const auto& selected = output.input_indices

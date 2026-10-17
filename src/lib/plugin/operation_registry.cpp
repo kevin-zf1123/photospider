@@ -141,7 +141,7 @@ class OperationLibrary final {
   [[nodiscard]] void* handle() const noexcept { return handle_; }
 
   void attach_result_api(
-      const ps_result_operation_plugin_api_v5* api) noexcept {
+      const ps_result_operation_plugin_api_v6* api) noexcept {
     result_api_ = api;
   }
 
@@ -149,7 +149,7 @@ class OperationLibrary final {
   /** @brief Platform native library handle. */
   void* handle_ = nullptr;
   /** @brief Mapped immutable plugin API table. */
-  const ps_result_operation_plugin_api_v5* result_api_ = nullptr;
+  const ps_result_operation_plugin_api_v6* result_api_ = nullptr;
 };
 
 /**
@@ -297,8 +297,7 @@ bool parameter_type_matches(const ParameterValue& value,
 Status validate_selected_traits(const OperationTraits& traits) {
   const Status schema_status =
       validate_parameter_schema(traits.parameter_schema);
-  if (traits.workspace_input_multiplier > 16 || traits.version != 27U ||
-      (!traits.supports_cpu && !traits.supports_gpu) ||
+  if (traits.version != 28U || (!traits.supports_cpu && !traits.supports_gpu) ||
       (traits.share_blocks_across_outputs &&
        (!traits.deterministic || !traits.side_effect_free)) ||
       (traits.allows_cpu_fallback &&
@@ -691,17 +690,18 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   for (const auto* symbol : {"ps_result_operation_plugin_get_api_v1",
                              "ps_result_operation_plugin_get_api_v2",
                              "ps_result_operation_plugin_get_api_v3",
-                             "ps_result_operation_plugin_get_api_v4"})
+                             "ps_result_operation_plugin_get_api_v4",
+                             "ps_result_operation_plugin_get_api_v5"})
     if (find_symbol(pending_library.handle(), symbol))
-      return Status{ErrorCode::TypeMismatch, "Result plugins require ABI 5"};
-  using ResultApiFunction = const ps_result_operation_plugin_api_v5* (*)();
+      return Status{ErrorCode::TypeMismatch, "Result plugins require ABI 6"};
+  using ResultApiFunction = const ps_result_operation_plugin_api_v6* (*)();
   ResultApiFunction result_api_function = nullptr;
   void* result_symbol = find_symbol(pending_library.handle(),
-                                    "ps_result_operation_plugin_get_api_v5");
+                                    "ps_result_operation_plugin_get_api_v6");
   std::memcpy(&result_api_function, &result_symbol,
               sizeof(result_api_function));
   if (result_api_function) {
-    const ps_result_operation_plugin_api_v5* table = nullptr;
+    const ps_result_operation_plugin_api_v6* table = nullptr;
     try {
       core_internal::CallbackEnvironment environment;
       if (!environment.active())
@@ -712,9 +712,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     }
     if (!table ||
         reinterpret_cast<std::uintptr_t>(table) %
-            alignof(ps_result_operation_plugin_api_v5) ||
+            alignof(ps_result_operation_plugin_api_v6) ||
         table->struct_size != sizeof(*table) ||
-        table->abi_version != PS_RESULT_OPERATION_ABI_VERSION_5)
+        table->abi_version != PS_RESULT_OPERATION_ABI_VERSION_6)
       return Status{ErrorCode::InvalidArgument,
                     "unsupported Result API version or size"};
     pending_library.attach_result_api(table);
@@ -792,7 +792,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
 
   return Status{ErrorCode::InvalidArgument,
-                "operation plugin must expose Result ABI 5"};
+                "operation plugin must expose Result ABI 6"};
 }
 
 /**
@@ -853,13 +853,6 @@ Result<OperationTraits> OperationRegistry::find_traits(
   return Result<OperationTraits>(definition->traits);
 }
 
-Result<OperationTraits> OperationRegistry::resolve_traits(
-    const std::string& key, const std::vector<OperationMetadata>& inputs,
-    const std::map<std::string, ParameterValue>& parameters) const {
-  auto prepared = prepare_operation(key, inputs, parameters);
-  return prepared.ok() ? Result<OperationTraits>(prepared.value()->traits())
-                       : Result<OperationTraits>(prepared.status());
-}
 Result<std::shared_ptr<const PreparedOperation>>
 OperationRegistry::prepare_operation(
     const std::string& key, const std::vector<OperationMetadata>& inputs,
@@ -1154,16 +1147,6 @@ Status PreparedOperation::validate_inputs(
             static_cast<bool>(b.result_schema) ||
         (a.result_schema && !a.result_schema->same_schema(*b.result_schema)))
       return stale();
-    if (a.result_schema) {
-      for (std::size_t slot = 0; slot < a.result_schema->tensors.size();
-           ++slot) {
-        const auto& left = a.result_schema->tensors[slot].layout;
-        const auto& right = b.result_schema->tensors[slot].layout;
-        if (left.order != right.order ||
-            left.row_pitch_bytes != right.row_pitch_bytes)
-          return stale();
-      }
-    }
   }
   auto b = stored.parameters.begin();
   for (const auto& a : parameters) {

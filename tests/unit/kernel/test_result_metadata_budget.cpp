@@ -11,7 +11,6 @@
 #include <malloc.h>
 #endif
 
-#include "execution/result_checkpoints.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
@@ -98,56 +97,6 @@ void operator delete[](void* p, std::size_t,
 #endif
 
 namespace {
-int input_facts_lifetime() {
-  using namespace ps;  // NOLINT(build/namespaces)
-  using execution_internal::ResultInputFacts;
-  ResourceLimits limits;
-  limits.capacity[ResourceKind::Host] = 65536;
-  limits.capacity[ResourceKind::Metadata] = 65536;
-  ResourceBudget root(limits);
-  {
-    ResultInputFacts facts(root);
-    for (unsigned port : {1, 0})
-      for (unsigned id = 128; id; --id)
-        facts[{port, id}] = port * 1000 + id;
-    facts[{2, 1}] = 4;
-    PS_CHECK(facts.size() == 257);
-    ResultInputFacts copied = facts;
-    copied[{1, 64}] = 9000;
-    PS_CHECK((facts[{1, 64}] == 1064 && copied.size() == facts.size()));
-    ResultInputFacts moved(std::move(copied));
-    PS_CHECK(copied.size() == 0 && !(copied.begin() != copied.end()));
-    copied[{4, 2}] = 7;
-    copied = std::move(moved);
-    PS_CHECK((moved.size() == 0 && copied[{1, 64}] == 9000));
-    copied.clear();
-    PS_CHECK(copied.size() == 0 && !(copied.begin() != copied.end()));
-    const auto free = 65536 - root.statistics().live[ResourceKind::Host] -
-                      ResourceBudget::lease_metadata_bytes();
-    auto reservation = root.reserve(ResourceCapacity::host(free, free));
-    PS_CHECK(reservation.ok());
-    bool rejected = false;
-    try {
-      facts[{3, 9}] = 9;
-    } catch (const std::bad_alloc&) {
-      rejected = true;
-    }
-    PS_CHECK(rejected && facts.size() == 257);
-    ResultInputFacts::Key previous{};
-    std::size_t count = 0;
-    for (const auto& fact : facts) {
-      PS_CHECK(previous < fact.first);
-      previous = fact.first;
-      ++count;
-    }
-    PS_CHECK(count == facts.size());
-    reservation = Result<ResourceLease>(ResourceLease{});
-    facts[{3, 9}] = 9;
-    PS_CHECK(facts.size() == 258);
-  }
-  PS_CHECK(root.statistics().live[ResourceKind::Host] == 0);
-  return 0;
-}
 int failure_copy_exhaustion() {
   using namespace ps;  // NOLINT(build/namespaces)
   ResourceBudget root;
@@ -246,7 +195,7 @@ int main() {
     tensor.descriptor = {ElementType::UInt8, {1, 1, 1, 1, 1, 1, 1, 1}};
     schema.tensors.push_back(std::move(tensor));
   }
-  PS_CHECK(schema.validate(true).ok());
+  PS_CHECK(schema.validate().ok());
   PS_CHECK(schema.canonical_size() == schema.canonical().size());
   ResourceLimits limits;
   limits.capacity[ResourceKind::Host] = 1024;
@@ -271,7 +220,7 @@ int main() {
   image.descriptor = {ElementType::Float32, {1, 1}};
   image.layout.channel_axis = {};
   image_schema.tensors.push_back(std::move(image));
-  PS_CHECK(image_schema.validate(true).ok());
+  PS_CHECK(image_schema.validate().ok());
   large_allocations = 0;
   inspect_allocations = true;
   auto refused_image = ResultBuilder::start(budget, image_schema, "scope");
@@ -281,6 +230,5 @@ int main() {
     PS_CHECK(large_allocations == 0);
   for (auto live : budget.statistics().live.values)
     PS_CHECK(live == 0);
-  PS_CHECK(input_facts_lifetime() == 0);
   return 0;
 }

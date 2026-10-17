@@ -85,7 +85,7 @@ struct Source {
     const auto& schema = *phase.query.output.result_schema;
     auto builder = take(ps::ResultBuilder::start(phase.resources, schema,
                                                  phase.query.semantic_key, {},
-                                                 {}, phase.query.tile_extent));
+                                                 phase.query.tile_extent));
 
     auto demand = phase.query.tensor_outputs.value_or(
         take(ps::Footprint::all(schema.tensors[0].sample_shape())));

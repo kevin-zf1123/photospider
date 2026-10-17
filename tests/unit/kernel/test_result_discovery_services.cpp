@@ -165,8 +165,6 @@ struct State {
     auto builder = multi_result::take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
         phase.query.semantic_key, {},
-        std::vector<std::uint64_t>(phase.association->begin(),
-                                   phase.association->end()),
         phase.query.tile_extent));
 
     const auto box = multi_result::take(

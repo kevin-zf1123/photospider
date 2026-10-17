@@ -113,7 +113,7 @@ Result<ResourceString> ResultCacheProof::tile_source_digest(
         TileGrid::from_schema(schema, plan.tile_extent(), source.tensor_slot);
     if (!grid.ok())
       return Result<ResourceString>(grid.status());
-    auto samples = grid.value()->coverage(source.tiles, limits);
+    auto samples = grid.value().coverage(source.tiles, limits);
     if (!samples.ok())
       return Result<ResourceString>(samples.status());
     selected.push_back({source.name, SourceRange::Kind::Tensor,

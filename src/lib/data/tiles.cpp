@@ -223,25 +223,22 @@ bool TileSet::intersects(const TileSet& other) const noexcept {
 bool TileSet::operator==(const TileSet& other) const noexcept {
   return storage_ == other.storage_ || intervals() == other.intervals();
 }
-Result<std::optional<TileGrid>> TileGrid::from_schema(
-    const SchemaTemplate& schema, std::uint64_t tile_extent,
-    std::uint32_t tensor_slot) {
-  using Answer = Result<std::optional<TileGrid>>;
-  auto valid = schema.validate(true);
+Result<TileGrid> TileGrid::from_schema(const SchemaTemplate& schema,
+                                       std::uint64_t tile_extent,
+                                       std::uint32_t tensor_slot) {
+  using Answer = Result<TileGrid>;
+  auto valid = schema.validate();
   if (!valid.ok())
     return Answer(valid);
   if (tensor_slot >= schema.tensors.size())
     return Answer(
         Status{ErrorCode::InvalidArgument, "missing tensor grid member"});
-  auto grid = from_tensor(schema.tensors[tensor_slot], tile_extent);
-  if (!grid.ok())
-    return Answer(grid.status());
-  return Answer(std::optional<TileGrid>{grid.take_value()});
+  return from_tensor(schema.tensors[tensor_slot], tile_extent);
 }
 Result<std::vector<TileGrid>> TileGrid::members(const SchemaTemplate& schema,
                                                 std::uint64_t tile_extent) {
   using Answer = Result<std::vector<TileGrid>>;
-  auto valid = schema.validate(true);
+  auto valid = schema.validate();
   if (!valid.ok())
     return Answer(valid);
   std::vector<TileGrid> result;

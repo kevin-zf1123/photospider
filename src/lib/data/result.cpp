@@ -88,8 +88,7 @@ Result<ResourceVector<ResultRef::CacheStorage>> ResultRef::cache_storage(
       Status{ErrorCode::ResourceExhausted, {}});
 }
 Result<ResultRef> ResultRef::rebind_cached(
-    std::string_view scope, const ResourceVector<std::uint64_t>& association,
-    const CancellationToken& cancellation,
+    std::string_view scope, const CancellationToken& cancellation,
     const std::function<Status(std::uint64_t)>& work) const try {
   if (!impl_ || !work || cancellation.cancelled())
     return Result<ResultRef>(Status{
@@ -106,12 +105,11 @@ Result<ResultRef> ResultRef::rebind_cached(
   }
   if (!impl_->complete || !impl_->status().ok())
     return Result<ResultRef>(Status{ErrorCode::NotFound, {}});
-  auto charged = work(1 + impl_->schema.canonical_size() + association.size());
+  auto charged = work(1 + impl_->schema.canonical_size());
   if (!charged.ok())
     return Result<ResultRef>(charged);
-  auto started = ResultBuilder::start(
-      impl_->budget, impl_->schema, scope, impl_->limits,
-      std::vector<std::uint64_t>(association.begin(), association.end()), 128);
+  auto started = ResultBuilder::start(impl_->budget, impl_->schema, scope,
+                                      impl_->limits, 128);
   if (!started.ok())
     return Result<ResultRef>(started.status());
   auto builder = started.take_value();
@@ -119,7 +117,6 @@ Result<ResultRef> ResultRef::rebind_cached(
   target->tensors = impl_->tensors;
   target->storage_owners = impl_->storage_owners;
   target->image_budget = impl_->image_budget;
-  target->bytes = impl_->bytes;
   lock.unlock();
   auto status = work(0);
   if (!status.ok())
@@ -146,89 +143,7 @@ const SchemaTemplate& ResultRef::schema() const {
   return impl_->schema;
 }
 bool ResultRef::matches_scope(std::string_view scope) const noexcept {
-  if (!impl_ || scope.size() > 4096 || impl_->key.size() < scope.size() + 8)
-    return false;
-  const auto offset = impl_->key.size() - scope.size() - 8;
-  if (offset != impl_->schema.canonical_size())
-    return false;
-  std::uint64_t size = 0;
-  for (unsigned i = 0; i < 8; ++i)
-    size |= static_cast<std::uint64_t>(
-                static_cast<unsigned char>(impl_->key[offset + i]))
-            << (8 * i);
-  return size == scope.size() &&
-         std::string_view(impl_->key.data() + offset + 8, scope.size()) ==
-             scope;
-}
-std::string_view ResultRef::semantic_key() const {
-  if (!impl_)
-    throw std::logic_error("invalid ResultRef");
-  return impl_->key;
-}
-Status ResultRef::retain_association(
-    const ResourceVector<std::uint64_t>& inputs,
-    const std::function<Status(std::uint64_t)>& consume_work) const {
-  if (!impl_ || !consume_work ||
-      !inputs.get_allocator().owned_by(impl_->budget))
-    return data_internal::invalid_schema();
-  std::lock_guard<std::timed_mutex> lock(impl_->mutex);
-  struct Stopped {
-    Status status;
-  };
-  try {
-    auto work = consume_work(inputs.size());
-    if (!work.ok())
-      return work;
-    for (auto input : inputs)
-      if (!input || input == impl_->object)
-        return data_internal::invalid_schema();
-    auto ids = inputs;
-    if (!impl_->association.empty()) {
-      // Successive publications usually insert facts in stable port/ID order.
-      // Verify that extension in one pass; arbitrary initial claim order still
-      // uses membership checks, including repeated claims for the same ID.
-      work = consume_work(inputs.size());
-      if (!work.ok())
-        return work;
-      auto claimed = impl_->association.begin();
-      for (auto input : inputs) {
-        if (claimed == impl_->association.end())
-          break;
-        if (*claimed == input)
-          ++claimed;
-      }
-      if (claimed != impl_->association.end()) {
-        auto sorted = inputs;
-        const auto less = [&](auto a, auto b) {
-          auto charged = consume_work(1);
-          if (!charged.ok())
-            throw Stopped{std::move(charged)};
-          return a < b;
-        };
-        if (!std::is_sorted(sorted.begin(), sorted.end(), less))
-          std::sort(sorted.begin(), sorted.end(), less);
-        for (auto prior : impl_->association)
-          if (!std::binary_search(sorted.begin(), sorted.end(), prior, less))
-            return data_internal::invalid_schema();
-      }
-    }
-    // Associations are immutable dependency facts, not physical storage edges.
-    // View publication independently retains every source whose bytes it uses.
-    impl_->association = std::move(ids);
-    impl_->owners_bound = true;
-    return Status::success();
-  } catch (const Stopped& stopped) {
-    return stopped.status;
-  } catch (const std::bad_alloc&) {
-    return Status{ErrorCode::ResourceExhausted, {}};
-  }
-}
-
-ResourceVector<std::uint64_t> ResultRef::association() const {
-  if (!impl_)
-    throw std::logic_error("invalid ResultRef");
-  std::lock_guard<std::timed_mutex> lock(impl_->mutex);
-  return impl_->association;
+  return impl_ && std::string_view(impl_->scope) == scope;
 }
 void ResultRef::bind_producer(std::uint64_t node) const noexcept {
   if (!impl_)

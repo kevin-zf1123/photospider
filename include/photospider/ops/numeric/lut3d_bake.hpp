@@ -21,7 +21,7 @@ enum class Lut3dInterpolation : std::uint32_t {
  * bound. shape extents are 2..256; extras is 0..1048576. Tolerances are finite
  * and nonnegative. Colors use the same supported three-component model. Dtypes
  * are Float32/64 and recipe_identity identifies the expanded source graph and
- * its compiler metadata. The owned table schema is version 2 and contains one
+ * its compiler metadata. The owned table schema is version 3 and contains one
  * `colors` tensor [N0,N1,N2,3] with the selected dtype.
  */
 struct Lut3dBakeDescription {
@@ -64,8 +64,8 @@ struct Lut3dBakeReport {
  */
 PHOTOSPIDER_OPS_SDK_API Result<std::string> lut3d_bake_configuration_id(
     const Lut3dBakeDescription& description);
-/** @brief Creates the SDK LUT3D bake report v2 static Tensor schema.
- * It has 13 fixed tensor members, domain [1] and 361 data bytes.
+/** @brief Creates the SDK LUT3D bake report v3 static Tensor schema.
+ * It has 13 fixed tensor members and 361 data bytes.
  * Pure/thread-safe, no runtime input; allocation may throw bad_alloc. Invalid
  * configuration fails InvalidArgument/InvalidDomain. Acceptance remains
  * measured only at the recorded centers/extras for this method/table dtype.
@@ -73,7 +73,7 @@ PHOTOSPIDER_OPS_SDK_API Result<std::string> lut3d_bake_configuration_id(
 PHOTOSPIDER_OPS_SDK_API Result<SchemaTemplate> lut3d_bake_schema(
     const Lut3dBakeDescription& description);
 /** @brief Owned sampled-table Result schema associated with its measured
- * report. Version 2 has one `colors` tensor [N0,N1,N2,3], the converted dtype,
+ * report. Version 3 has one `colors` tensor [N0,N1,N2,3], the converted dtype,
  * one atomic trailing component axis. No quality pass
  * is implied by this intermediate. Use the accepted table for
  * application.
@@ -91,7 +91,7 @@ PHOTOSPIDER_OPS_SDK_API Status validate_lut3d_bake_schema(
  * its canonical identity must match the configuration_id field. Configuration
  * is never inferred from the schema. Does not start a producer.
  * The measured_table_id member identifies the complete table object acquired
- * by measurement, independently of Result association and member projection.
+ * by measurement, independently of member projection.
  * Result and windows own backing after
  * context teardown. maximum_window must admit a complete member (at most 72
  * bytes); a smaller window fails with ResourceExhausted.

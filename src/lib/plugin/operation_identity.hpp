@@ -77,7 +77,6 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
   digest->integer(traits.supports_gpu ? 1U : 0U);
   digest->integer(traits.allows_cpu_fallback ? 1U : 0U);
   digest->integer(traits.workspace_bytes);
-  digest->integer(traits.workspace_input_multiplier);
   digest->integer(traits.shared_stages.size());
   for (const auto& stage : traits.shared_stages) {
     digest->text(stage.key);

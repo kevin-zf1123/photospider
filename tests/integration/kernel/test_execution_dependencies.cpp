@@ -70,11 +70,7 @@ struct Route {
     }
     auto builder =
         ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key, {},
-                             phase.association ? std::vector<std::uint64_t>(
-                                                     phase.association->begin(),
-                                                     phase.association->end())
-                                               : std::vector<std::uint64_t>{})
+                             phase.query.semantic_key, {})
             .take_value();
     for (const auto& box : outputs.boxes()) {
       auto bytes =

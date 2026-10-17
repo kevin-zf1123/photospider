@@ -28,7 +28,7 @@ struct Computation final {
       ++*completed;
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, {}, phase.query.tile_extent));
+        phase.query.semantic_key, {}, phase.query.tile_extent));
 
     check(builder.publish_tensor(0, Region::whole({1, 1}), {0, {1, 1}},
                                  std::move(output).freeze()));

@@ -506,7 +506,7 @@ void sole_member_contracts() {
     second.descriptor.element_type = ElementType::Float64;
     schema->tensors.push_back(second);
     ambiguous.inputs[0].result_schema = schema;
-    require(schema->validate(true).ok(),
+    require(schema->validate().ok(),
             "sole rejected source is structurally valid");
     GraphContext graph(ambiguous);
     auto refused = Compiler(registry).compile(graph);
@@ -684,7 +684,7 @@ void run() {
                 retained == 1012,
             "C view remains readable after operation continuation retires");
   }
-  for (std::int64_t mode : {1, 2, 3, 8, 10, 11, 12, 14, 15, 16}) {
+  for (std::int64_t mode : {1, 2, 3, 8, 10, 11, 12, 14, 16}) {
     GraphContext graph(document("fixture.result.view", mode));
     auto plan = Compiler(registry).compile(graph).take_value().plan;
     auto output = context.execute(plan, {{a, c}});
@@ -1375,9 +1375,6 @@ ResultBuilder native_builder(const ResultProgramPhase& phase) {
   return native_take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
-      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
-                                                     phase.association->end())
-                        : std::vector<std::uint64_t>{},
       phase.query.tile_extent));
 }
 struct ScalarImage {

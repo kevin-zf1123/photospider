@@ -219,9 +219,6 @@ FixturePoll publish_backing(const ps::ResultProgramPhase& phase,
   auto builder = multi_result::take(ps::ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
-      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
-                                                     phase.association->end())
-                        : std::vector<std::uint64_t>{},
       phase.query.tile_extent));
   const auto output_samples = fixture_outputs(phase);
   for (const auto& region : output_samples.boxes()) {
@@ -265,10 +262,7 @@ FixturePoll publish_input(const ps::ResultProgramPhase& phase,
   const auto& schema = *phase.query.output.result_schema;
   const auto shape = schema.tensors[0].sample_shape();
   auto builder = multi_result::take(ps::ResultBuilder::start(
-      phase.resources, schema, phase.query.semantic_key, {},
-      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
-                                                     phase.association->end())
-                        : std::vector<std::uint64_t>{}));
+      phase.resources, schema, phase.query.semantic_key, {}));
   const auto width =
       ps::TensorSpan::element_size(schema.tensors[0].descriptor.element_type);
   const auto output_samples = fixture_outputs(phase);

@@ -44,7 +44,7 @@ inline Status check_tensor(const OperationMetadata& metadata) {
   if (!metadata.result_schema || metadata.result_schema->tensors.size() != 1)
     return {ErrorCode::TypeMismatch,
             "operation requires one tensor member and no scalar fields"};
-  return metadata.result_schema->validate(true);
+  return metadata.result_schema->validate();
 }
 struct Identity final {
   bool started = false;
@@ -74,10 +74,6 @@ struct Identity final {
     }
     auto builder = take(ResultBuilder::start(
         phase.resources, schema, phase.query.semantic_key, {},
-        phase.association
-            ? std::vector<std::uint64_t>(phase.association->begin(),
-                                         phase.association->end())
-            : std::vector<std::uint64_t>{},
         phase.query.tile_extent));
     std::vector<ResultViewAxis> axes(shape.size());
     for (std::size_t axis = 0; axis < axes.size(); ++axis)
@@ -89,10 +85,6 @@ struct Identity final {
       transform.source_axes = axes;
       auto published = builder.publish_tensor_view(0, box, window, transform,
                                                    phase.query.cancellation);
-      if (!published.ok() && tensor.layout.spatial &&
-          published.reason == FailureReason::ViewUnavailable)
-        published = builder.publish_tensor_view(0, box, {&window},
-                                                phase.query.cancellation);
       if (!published.ok() &&
           published.reason == FailureReason::ViewUnavailable) {
         const auto width =

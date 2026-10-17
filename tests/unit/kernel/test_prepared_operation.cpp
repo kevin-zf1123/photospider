@@ -86,10 +86,6 @@ struct Computation {
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
         phase.query.semantic_key, {},
-        phase.association
-            ? std::vector<std::uint64_t>(phase.association->begin(),
-                                         phase.association->end())
-            : std::vector<std::uint64_t>{},
         phase.query.tile_extent));
     check(builder.publish_tensor(
         0, Region::whole({1}),
@@ -196,10 +192,6 @@ int compiled_reuse() {
       auto result = take(context.execute(compiled.plan, {{binding}}));
       PS_CHECK(multi_result::number(result.results.at("value")) == source + 7);
       PS_CHECK(multi_result::number(result.results.at("constant")) == 8);
-      PS_CHECK(result.results.at("value").association().size() == 1);
-      PS_CHECK(result.results.at("value").association()[0] ==
-               binding.result.object_id());
-      PS_CHECK(result.results.at("constant").association().empty());
     }
     PS_CHECK(counts->prepared == 1 && counts->started == 4);
   }

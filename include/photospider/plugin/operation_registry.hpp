@@ -221,10 +221,10 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   bool allows_cpu_fallback = false;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 27U;
+  std::uint32_t version = 28U;
   std::vector<OperationSharedStage> shared_stages;
   /** @brief Registered template requires pure per-node metadata resolution.
-   * Free inference rejects templates. OperationRegistry::resolve_traits
+   * Free inference rejects templates. OperationRegistry::prepare_operation
    * clears this flag only after validated specialization.
    */
   bool requires_metadata_specialization = false;
@@ -240,8 +240,6 @@ struct PHOTOSPIDER_API OperationTraits final {
    * declared workspace bound.
    */
   std::uint64_t workspace_bytes = 0;
-  /** @brief Additional scratch bound per demanded input byte, in 0..16. */
-  std::uint32_t workspace_input_multiplier = 0;
   /** @brief Optional trailing homogeneous group; input_count is fixed prefix.
    * @note With maximum>0, input_schema has prefix+one template. Lowering
    * expands it and sets repeated_resolved; the published registry keeps its
@@ -540,7 +538,7 @@ class PHOTOSPIDER_API OperationRegistry final {
    * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
    * @note Path rejection precedes the platform loader. The loader accepts
-   * only the exact Result operation ABI 5 entry point and full table layout;
+   * only the exact Result operation ABI 6 entry point and full table layout;
    * missing, older, and planar-only C entries are rejected. Result modules
    * publish validated tensor coverage through the structured contract.
    * No signature, trust-store, sandbox, or process isolation is applied.
@@ -572,17 +570,6 @@ class PHOTOSPIDER_API OperationRegistry final {
    */
   [[nodiscard]] Result<OperationTraits> find_traits(
       const std::string& key) const;
-  /** @brief Resolves a registered template against complete static inputs.
-   * Performs parameter/port validation and pure specialization outside the
-   * registry lock. No payload reads or registry mutation. Returns owning
-   * traits usable by ordinary inference; malformed metadata is a Schema
-   * failure, allocation exhaustion is ResourceExhausted, and callback
-   * exceptions are OperationFailed. The definition lease spans the call.
-   */
-  [[nodiscard]] Result<OperationTraits> resolve_traits(
-      const std::string& key, const std::vector<OperationMetadata>& inputs,
-      const std::map<std::string, ParameterValue>& parameters) const;
-
   /** @brief Validates complete static inputs and prepares an owning program.
    * No TensorSpan reads or registry mutation occur. The callback runs once
    * outside the registry lock; metadata-only definitions receive an empty

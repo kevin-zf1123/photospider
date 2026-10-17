@@ -489,7 +489,6 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
   }
   if (output_tensor.layout.spatial &&
       (!state->is_identity || state->materialize))
-    output_tensor.layout.row_pitch_bytes = 0;
   output.metadata.result_schema =
       std::make_shared<SchemaTemplate>(std::move(schema));
   std::vector<std::uint64_t> boundaries{0, shape[axis]};
@@ -647,9 +646,6 @@ ResultBuilder result_builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto builder = checked(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
-      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
-                                                     phase.association->end())
-                        : std::vector<std::uint64_t>{},
       phase.query.tile_extent));
 
   return builder;
@@ -1006,7 +1002,7 @@ OperationMetadata edge_metadata(const WorkflowDocument& document,
   for (const auto& declaration : document.inputs) {
     auto canonical = declaration;
     require(canonical.id && canonical.result_schema, "invalid graph input");
-    checked(canonical.result_schema->validate(true));
+    checked(canonical.result_schema->validate());
     OperationMetadata m;
     m.result_schema = canonical.result_schema;
     require(inputs.emplace(canonical.id, std::move(m)).second,

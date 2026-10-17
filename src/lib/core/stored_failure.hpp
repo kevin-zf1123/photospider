@@ -31,8 +31,6 @@ class StoredFailure final {
     if (detail_.scope == FailureScope::Unspecified) {
       detail_.scope = status.detail.scope;
       detail_.atom = status.detail.atom;
-      detail_.domain = status.detail.domain;
-      detail_.association = status.detail.association;
     }
     if (!detail_.node_id && !detail_.input_id) {
       detail_.node_id = status.detail.node_id;

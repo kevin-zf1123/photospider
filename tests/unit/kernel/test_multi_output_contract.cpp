@@ -251,10 +251,10 @@ int inference() {
     const std::map<std::string, ParameterValue> parameters = {
         {"radius", radius},
         {"split", std::int64_t{3}}};
-    auto resolved = registry.resolve_traits(op.key, inputs, parameters);
+    auto resolved = registry.prepare_operation(op.key, inputs, parameters);
     PS_CHECK(resolved.ok());
     auto outputs =
-        infer_operation_outputs(resolved.value(), inputs, parameters);
+        infer_operation_outputs(resolved.value()->traits(), inputs, parameters);
     PS_CHECK(outputs.ok() && outputs.value().size() == 2);
     PS_CHECK(outputs.value()[0].result_schema->tensors[0].sample_shape() ==
              std::vector<std::uint64_t>{4});
@@ -264,7 +264,7 @@ int inference() {
   const std::map<std::string, ParameterValue> bad = {
       {"radius", std::numeric_limits<double>::infinity()},
       {"split", std::int64_t{3}}};
-  PS_CHECK(!registry.resolve_traits(op.key, inputs, bad).ok());
+  PS_CHECK(!registry.prepare_operation(op.key, inputs, bad).ok());
   return 0;
 }
 }  // namespace

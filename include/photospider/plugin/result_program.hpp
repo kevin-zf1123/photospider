@@ -125,10 +125,6 @@ class PHOTOSPIDER_API ResultTensorInput final {
  public:
   ResultTensorInput() = default;
   std::uint64_t object_id() const noexcept { return result_.object_id(); }
-  /** @brief Owning copy of provenance identifiers; grants no payload reads. */
-  ResourceVector<std::uint64_t> association() const {
-    return result_.association();
-  }
   const ResultTensorSpec& spec() const {
     return (static_schema_ ? *static_schema_ : result_.schema())
         .tensors.at(slot_);
@@ -299,26 +295,13 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
    * errors that the numeric GPU ABI reports through its general failure code.
    * Must not be retained beyond this phase. */
   std::function<Status()> gpu_status = {};
-  /** @brief Root-accounted summary of consumed Result identities.
-   * Entries preserve input-port/ObjectId order, including repeated ids across
-   * ports, and include earlier Need stages. The list retains no payload and
-   * grants no read permission. Borrowed only until this poll returns; copy it
-   * into ResultBuilder before returning publication. ResultObjectInputs,
-   * ResultTensorInput capabilities, and retained windows have independent
-   * owner lifetimes. A successful checkpoint restore refreshes this list;
-   * references and iterators to its prior elements may be invalidated, while
-   * the borrowed vector object remains valid through the poll.
-   */
-  const ResourceVector<std::uint64_t>* association = nullptr;
   /** @brief Report opaque bytes for a type declared in operation diagnostics.
    * Borrowed during this synchronous entry-thread call; errors remain sticky.
    */
   std::function<Status(std::uint32_t, ByteView)> report_diagnostic = {};
   /** @brief Find the greatest saved sequence <= `before` in one checkpoint
    * phase. A miss, including optional cache/capacity exhaustion, returns an
-   * empty optional. A successful restore also refreshes `association` before
-   * this callback returns; references and iterators to its previous elements
-   * may be invalidated. Restoring a checkpoint restores dependency history,
+   * empty optional. Restoring a checkpoint restores dependency history,
    * not `results`, tensor capabilities, read windows, or Need authorization;
    * the callback must request current input access separately.
    */
@@ -354,11 +337,11 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
    * internal TensorSpan-backed block-state LRU.
    * The compute callback may depend only on key-covered logical schemas,
    * coverage, raw bits, and static metadata/parameters plus phase, range, and
-   * mode. It must not depend on Result ObjectIds, `semantic_key`, association,
+   * mode. It must not depend on Result ObjectIds, `semantic_key`,
    * the original output demand, or earlier windows not supplied to this call;
    * those provenance facts are deliberately outside the content key. A cache
-   * hit publishes a fresh state Result without old source association or
-   * dependency evidence. Need evidence from the current actor remains in
+   * hit publishes a fresh state Result without old dependency evidence.
+   * Need evidence from the current actor remains in
    * effect. Public output publication, checkpoints and completed-result caches
    * remain independent of block-state reuse. Optional cache-work exhaustion
    * skips caching and computes normally.

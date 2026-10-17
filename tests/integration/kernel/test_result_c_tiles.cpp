@@ -29,8 +29,6 @@ SchemaTemplate input_schema(bool spatial = true) {
 }
 ExecutionBindings bindings(const ResourceBudget& root, bool spatial) {
   auto schema = input_schema(spatial);
-  schema.tensors[0].layout.order = TensorStorageOrder::Continuous;
-  schema.tensors[0].layout.row_pitch_bytes = 128;
   auto builder = take(ResultBuilder::start(root, schema, "c.tiles.source"));
   std::vector<double> values(40);
   for (std::size_t i = 0; i < values.size(); ++i)
@@ -435,37 +433,37 @@ int direct_input_grids() {
   return 0;
 }
 int malformed_sdk_grid() {
-  ps_result_tensor_spec_v5 tensor{};
+  ps_result_tensor_spec_v6 tensor{};
   tensor.struct_size = sizeof(tensor);
   tensor.rank = 2;
   tensor.shape[0] = tensor.shape[1] = 4;
   tensor.spatial = 1;
   tensor.height_axis = 0;
   tensor.width_axis = 1;
-  ps_result_schema_v5 schema{};
+  ps_result_schema_v6 schema{};
   schema.struct_size = sizeof(schema);
   schema.tensor_count = 1;
   schema.tensors = &tensor;
-  ps_result_output_v5 output{};
+  ps_result_output_v6 output{};
   output.struct_size = sizeof(output);
   output.port.schema = &schema;
-  ps_result_tile_grid_v5 grid{};
+  ps_result_tile_grid_v6 grid{};
   grid.struct_size = sizeof(grid);
   grid.rank = 2;
   grid.width_axis = 1;
   grid.tile_extent = grid.tile_rows = grid.tile_columns = 2;
   grid.tile_count = grid.shape[0] = grid.shape[1] = 4;
   const std::uint64_t tile = 1;
-  ps_result_query_v5 query{};
+  ps_result_query_v6 query{};
   query.struct_size = sizeof(query);
   query.shared_stage = UINT32_MAX;
   query.tile_unit = tile;
   query.tile_extent = 2;
   query.output = &output;
-  ps_result_tile_grids_v5 grids{sizeof(grids), 1, &grid};
+  ps_result_tile_grids_v6 grids{sizeof(grids), 1, &grid};
   query.output_tile_grids = &grids;
-  ps_result_region_v5 region{};
-  PS_CHECK(ps_result_output_region_v5(&query, 0, &region) == 0 &&
+  ps_result_region_v6 region{};
+  PS_CHECK(ps_result_output_region_v6(&query, 0, &region) == 0 &&
            region.offset[0] == 0 && region.offset[1] == 2 &&
            region.extent[0] == 2 && region.extent[1] == 2);
   for (unsigned mode = 0; mode < 7; ++mode) {
@@ -492,8 +490,8 @@ int malformed_sdk_grid() {
     region.rank = 9;
     std::fill(std::begin(region.offset), std::end(region.offset), 66);
     std::fill(std::begin(region.extent), std::end(region.extent), 77);
-    PS_CHECK(ps_result_output_region_v5(&query, 0, &region) ==
-             PS_RESULT_STATUS_INVALID_ARGUMENT_V5);
+    PS_CHECK(ps_result_output_region_v6(&query, 0, &region) ==
+             PS_RESULT_STATUS_INVALID_ARGUMENT_V6);
     PS_CHECK(region.struct_size == 17 && region.rank == 9);
     for (unsigned axis = 0; axis < 8; ++axis)
       PS_CHECK(region.offset[axis] == 66 && region.extent[axis] == 77);
@@ -502,8 +500,8 @@ int malformed_sdk_grid() {
   }
   grids.members = &grid;
   query.tile_unit = 4;
-  PS_CHECK(ps_result_output_region_v5(&query, 0, &region) ==
-           PS_RESULT_STATUS_INVALID_ARGUMENT_V5);
+  PS_CHECK(ps_result_output_region_v6(&query, 0, &region) ==
+           PS_RESULT_STATUS_INVALID_ARGUMENT_V6);
   PS_CHECK(region.struct_size == 17 && region.rank == 9);
   for (unsigned axis = 0; axis < 8; ++axis)
     PS_CHECK(region.offset[axis] == 66 && region.extent[axis] == 77);

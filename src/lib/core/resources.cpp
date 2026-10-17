@@ -245,38 +245,6 @@ Status ResourceLease::grow(ResourceCapacity additional) {
       impl_->observation, additional[ResourceKind::Payload], 0, 0, 0);
   return Status::success();
 }
-Status ResourceLease::add_shared_payload(std::uint64_t bytes) {
-  if (!impl_)
-    return Status::failure(ErrorCode::Stale, "invalid resource lease");
-  std::unique_lock<std::mutex> lock(impl_->root->mutex);
-  if (impl_->quarantined)
-    return Status::failure(ErrorCode::Stale, "quarantined resource lease");
-  const auto payload = impl_->amount[ResourceKind::Payload];
-  const auto shared = impl_->amount[ResourceKind::Shared];
-  if (!core_internal::can_add(shared, bytes, payload))
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "native classification exceeds reserved payload");
-  ResourceCapacity additional;
-  additional[ResourceKind::Device] = bytes;
-  additional[ResourceKind::Shared] = bytes;
-  if (!impl_->root->fits(additional)) {
-    lock.unlock();
-    impl_->root->reclaim(additional);
-    lock.lock();
-    if (impl_->quarantined)
-      return Status::failure(ErrorCode::Stale, "quarantined resource lease");
-    if (!core_internal::can_add(bytes, impl_->amount[ResourceKind::Shared],
-                                impl_->amount[ResourceKind::Payload]))
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "native classification exceeds reserved payload");
-    if (!impl_->root->fits(additional))
-      return core_internal::capacity_exhausted();
-  }
-  impl_->root->add(additional);
-  impl_->amount[ResourceKind::Device] += bytes;
-  impl_->amount[ResourceKind::Shared] += bytes;
-  return Status::success();
-}
 Status ResourceLease::shrink(ResourceCapacity released) {
   if (!impl_)
     return Status::failure(ErrorCode::Stale, "invalid resource lease");

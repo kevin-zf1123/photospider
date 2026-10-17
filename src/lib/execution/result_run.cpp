@@ -8,7 +8,6 @@
 #include <vector>
 
 #include "core/resource_observation.hpp"
-#include "data/memory_budget.hpp"
 #include "execution/callback_pool.hpp"
 #include "execution/cpu_tiles.hpp"
 #include "execution/execution_bindings.hpp"
@@ -284,7 +283,6 @@ Result<StructuredSubmission> run_inline_tiles(
 Result<StructuredSubmission> submit_queued_stage(
     ThreadPool* pool, ThreadPool* gpu_pool,
     const std::shared_ptr<gpu_internal::Device>& native_device,
-    const std::shared_ptr<data_internal::MemoryBudget>& budget,
     const std::shared_ptr<ResourceBudget>& resources,
     WaitingAdmission* admission, const std::function<bool()>& current,
     const std::shared_ptr<NativeRunUploads>& uploads,
@@ -292,7 +290,7 @@ Result<StructuredSubmission> submit_queued_stage(
     CancellationToken token, StructuredTask task) {
   auto submitted = submit_result_stage(
       backend == Backend::Gpu ? gpu_pool : pool, admission,
-      [pool, native_device, budget, resources, current, backend, uploads,
+      [pool, native_device, resources, current, backend, uploads,
        dependency_cache, cache_epoch,
        native_gpu_available = gpu_lane_available(gpu_pool, native_device),
        token = std::move(token), task = std::move(task)] {
@@ -318,7 +316,7 @@ Result<ExecutionResult> run_result_plan(
     const std::shared_ptr<execution_internal::NativeUploadRegistry>&
         native_uploads,
     WaitingAdmission* admission,
-    const std::shared_ptr<data_internal::MemoryBudget>& budget,
+    const std::shared_ptr<ResourceBudget>& stage_root,
     const std::shared_ptr<OperationRegistry>& operations,
     const ExecutionPlan& plan, std::function<bool()> current,
     std::vector<ExecutionBinding> bindings,
@@ -329,29 +327,19 @@ Result<ExecutionResult> run_result_plan(
     execution_internal::ResultCheckpoints* result_checkpoints,
     std::shared_ptr<const ExecutionPlan> plan_owner) {
   auto payload_observation =
-      budget->resources()
-          ? std::allocate_shared<core_internal::PayloadObservation>(
-                ResourceAllocator<core_internal::PayloadObservation>(
-                    *budget->resources()))
-          : std::make_shared<core_internal::PayloadObservation>();
-  std::optional<core_internal::ResourcePayloadScope> payload_scope;
-  if (budget->resources())
-    payload_scope.emplace(*budget->resources(),
-                          core_internal::PayloadCapture{payload_observation});
+      std::allocate_shared<core_internal::PayloadObservation>(
+          ResourceAllocator<core_internal::PayloadObservation>(*stage_root));
+  core_internal::ResourcePayloadScope payload_scope(
+      *stage_root, core_internal::PayloadCapture{payload_observation});
   ErrorCode coordinator_metadata_failure = ErrorCode::Ok;
   std::optional<ResourceAllocationScope> coordinator_resources;
   // Frozen cache paths install their own optional-retention scopes;
   // keep their best-effort allocation failures outside this sticky fence.
-  if (budget->resources() && !dependency_cache)
-    coordinator_resources.emplace(*budget->resources(),
-                                  &coordinator_metadata_failure);
-  auto combined_cancellation =
-      budget->resources()
-          ? CancellationToken::combine(
-                {caller_cancellation, options.dependencies.sets.cancellation},
-                *budget->resources())
-          : CancellationToken::combine(
-                {caller_cancellation, options.dependencies.sets.cancellation});
+  if (!dependency_cache)
+    coordinator_resources.emplace(*stage_root, &coordinator_metadata_failure);
+  auto combined_cancellation = CancellationToken::combine(
+      {caller_cancellation, options.dependencies.sets.cancellation},
+      *stage_root);
   if (!combined_cancellation.ok())
     return Result<ExecutionResult>(combined_cancellation.status());
   const auto cancellation = combined_cancellation.take_value();
@@ -369,19 +357,13 @@ Result<ExecutionResult> run_result_plan(
     }
     return Result<ExecutionResult>(std::move(status));
   };
-  auto admitted_resources =
-      budget->resources() ? plan.resources().reference(*budget->resources())
-                          : Result<ResourceSet>(plan.resources());
+  auto admitted_resources = plan.resources().reference(*stage_root);
   if (!admitted_resources.ok())
     return fail(admitted_resources.status());
   const auto resources = admitted_resources.take_value();
-  auto retained_inputs = retain_managed_inputs(&bindings, budget);
-  if (!retained_inputs.ok())
-    return fail(retained_inputs);
-  if (!budget->resources())
-    return fail(Status{ErrorCode::InvalidArgument,
-                       "structured execution requires managed_resources"});
-  const auto stage_root = budget->resources();
+  auto owned_inputs = validate_input_ownership(bindings, *stage_root);
+  if (!owned_inputs.ok())
+    return fail(owned_inputs);
   std::shared_ptr<execution_internal::NativeRunUploads> uploads;
   if (native_device && native_device->available() &&
       std::any_of(
@@ -403,8 +385,8 @@ Result<ExecutionResult> run_result_plan(
                : current && current()   ? ErrorCode::Ok
                                         : ErrorCode::Stale;
       },
-      [pool, gpu_pool, native_device, budget, stage_root, admission, current,
-       uploads, dependency_cache, cache_epoch,
+      [pool, gpu_pool, native_device, stage_root, admission, current, uploads,
+       dependency_cache, cache_epoch,
        maximum_parallelism = options.maximum_parallelism](
           Backend backend, bool tiles, CancellationToken token,
           std::function<Status(const execution_internal::StructuredServices&)>
@@ -422,8 +404,8 @@ Result<ExecutionResult> run_result_plan(
         if (tiles)
           return run_inline_tiles(pool, gpu_pool, native_device, stage_root,
                                   current, maximum_parallelism, token, task);
-        return submit_queued_stage(pool, gpu_pool, native_device, budget,
-                                   stage_root, admission, current, uploads,
+        return submit_queued_stage(pool, gpu_pool, native_device, stage_root,
+                                   admission, current, uploads,
                                    dependency_cache, cache_epoch, backend,
                                    std::move(token), std::move(task));
       },

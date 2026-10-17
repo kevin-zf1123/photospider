@@ -324,8 +324,7 @@ Result<ReboundTileCache> TileCacheSnapshot::rebind(
             dependency.tensor_slot);
         if (!grid.ok() ||
             (!dependency.tiles.empty() &&
-             (!grid.value() || *std::prev(dependency.tiles.end()) >=
-                                   grid.value()->tile_count())))
+             *std::prev(dependency.tiles.end()) >= grid.value().tile_count()))
           return Answer(mismatch());
       }
       status = record->include({*target, dependency.producer_output,

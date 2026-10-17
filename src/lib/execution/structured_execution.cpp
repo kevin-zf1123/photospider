@@ -253,9 +253,8 @@ class StructuredExecution final {
     identity.integer(index);
     const auto key = identity.finish();
     ResultGrowthLimits empty_limits;
-    auto started =
-        ResultBuilder::start(resources_, *step.output_result_schema, key,
-                             empty_limits, {}, plan_.tile_extent());
+    auto started = ResultBuilder::start(resources_, *step.output_result_schema,
+                                        key, empty_limits, plan_.tile_extent());
     if (!started.ok())
       return Answer(started.status());
     auto builder = started.take_value();
@@ -346,7 +345,6 @@ class StructuredExecution final {
           aliases(ResourceAllocator<std::size_t>(budget)),
           tensors(std::less<std::pair<std::uint32_t, std::uint32_t>>{},
                   ResourceAllocator<ResultTensorInputs::value_type>(budget)),
-          input_facts(budget),
           shared_commits(ResourceAllocator<SharedCommit>(budget)),
           shared_grants(make_resource_map<SharedGrant>(budget)),
           tile_record(budget),
@@ -382,8 +380,6 @@ class StructuredExecution final {
     std::uint64_t wait_scan_epoch = 0;
     std::thread::id driver;
     ResultTensorInputs tensors;
-    using InputFactsMap = ResultInputFacts;
-    InputFactsMap input_facts;
     ResourceVector<SharedCommit> shared_commits;
     ResourceMap<SharedGrant> shared_grants;
     TileRequest shared_visible;
@@ -1356,7 +1352,6 @@ class StructuredExecution final {
     actor.shared_results.clear();
     actor.descriptors.clear();
     actor.tensors.clear();
-    actor.input_facts.clear();
 
     release_actor_registration(actor);
     return failure;
@@ -1720,7 +1715,7 @@ class StructuredExecution final {
   }
   Result<std::optional<ResultCheckpoint>> checkpoint_before(
       std::size_t index, Actor& actor, std::uint32_t phase,
-      std::uint64_t before, ResourceVector<std::uint64_t>& association) {
+      std::uint64_t before) {
     using Answer = Result<std::optional<ResultCheckpoint>>;
     std::unique_lock<std::recursive_mutex> lock(callback_metadata_mutex_);
     auto status = checkpoint_allowed(index, actor);
@@ -1763,7 +1758,7 @@ class StructuredExecution final {
     if (!(witness->tiles.unit == actor.tile_record.unit))
       return Answer(protocol_failure("checkpoint computation unit changed"));
     // Restore is optional until every fallible allocation is admitted. Keep
-    // the actor and the callback's association unchanged on a capacity miss.
+    // the actor unchanged on a capacity miss.
     ResourceAllocationScope optional_restore(resources_);
     const auto refused = [](const Status& failed) -> Answer {
       if (failed.code == ErrorCode::ResourceExhausted &&
@@ -1787,22 +1782,6 @@ class StructuredExecution final {
         if (!status.ok())
           return refused(status);
       }
-      status = consume(actor.input_facts.size());
-      if (!status.ok())
-        return Answer(status);
-      auto restored_facts = actor.input_facts;
-      for (const auto& entry : witness->facts) {
-        auto& revision = restored_facts[entry.first];
-        revision = std::max(revision, entry.second);
-      }
-      status = operation_work(actor, restored_facts.size());
-      if (!status.ok())
-        return Answer(status);
-      ResourceVector<std::uint64_t> refreshed{
-          ResourceAllocator<std::uint64_t>(resources_)};
-      refreshed.reserve(restored_facts.size());
-      for (const auto& input : restored_facts)
-        refreshed.push_back(input.first.second);
       // The table stages its own allocations and commits atomically. Once it
       // succeeds, only same-Root moves remain before exposing the checkpoint.
       status = tile_records_->restore_ancestry(
@@ -1811,8 +1790,6 @@ class StructuredExecution final {
       if (!status.ok())
         return refused(status);
       actor.tile_record = std::move(restored);
-      actor.input_facts = std::move(restored_facts);
-      association = std::move(refreshed);
       lock.unlock();
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
       execution_testing::notify_checkpoint_borrowed();
@@ -1855,8 +1832,6 @@ class StructuredExecution final {
       const auto add = [&](std::uint64_t units) {
         return core_internal::checked_add(weight, units, &weight, maximum);
       };
-      if (!add(actor.input_facts.size() * 3))
-        return Status::success();
       status = checkpoint_cache_work(weight);
       if (!status.ok())
         return status.code == ErrorCode::ResourceExhausted ? Status::success()
@@ -1929,7 +1904,6 @@ class StructuredExecution final {
       witness->tiles = actor.tile_record;
       witness->tile_ancestry = tile_ancestry.take_value();
       witness->scope = key.take_value();
-      witness->facts = actor.input_facts;
       witness->weight = weight;
       ResultCheckpoint checkpoint;
       checkpoint.phase_ = phase;
@@ -2055,8 +2029,7 @@ class StructuredExecution final {
                    samples.boxes().size() * (1 + 2 * samples.shape().size()));
       };
       const auto schema_cost = [&](const SchemaTemplate& schema) {
-        status = checkpoint_cache_work(1 + schema.tensors.size() +
-                                       schema.domain.size());
+        status = checkpoint_cache_work(1 + schema.tensors.size());
         if (!status.ok())
           return false;
         return add(schema.canonical_size());
@@ -2196,7 +2169,7 @@ class StructuredExecution final {
               spec.descriptor.element_type ||
           probe.cached.descriptor().shape != spec.sample_shape())
         return Answer(protocol_failure("cached Result block state mismatch"));
-      // The copy contains no old source owners, associations or witness. The
+      // The copy contains no old source owners or witness. The
       // current actor retains its current successful Needs independently.
       auto unpacked = [&]() -> Answer {
         ResourceAllocationScope optional_restore(resources_);
@@ -2577,8 +2550,6 @@ class StructuredExecution final {
     identity.text("photospider.tile-assembly.v1");
     identity.text(templates_[index]);
     identity.text(snapshot_);
-    ResourceVector<std::uint64_t> association{
-        ResourceAllocator<std::uint64_t>(resources_)};
     for (std::size_t i = 0; i < units.size(); ++i) {
       auto charged = consume(1);
       if (!charged.ok())
@@ -2587,20 +2558,12 @@ class StructuredExecution final {
       if (!object.valid() ||
           !object.schema().same_schema(*step.output_result_schema))
         return Answer(protocol_failure("incompatible tile assembly schema"));
-      auto ids = object.association();
-      association.insert(association.end(), ids.begin(), ids.end());
       const auto address = unit_index(step, request, i);
       identity.integer(address.tensor_slot);
       identity.integer(address.tile);
     }
-    auto scratch = resources_.reserve(
-        ResourceCapacity::host(association.size() * sizeof(std::uint64_t),
-                               association.size() * sizeof(std::uint64_t)));
-    if (!scratch.ok())
-      return Answer(scratch.status());
     auto made = ResultBuilder::start(
         resources_, *step.output_result_schema, identity.finish(), {},
-        std::vector<std::uint64_t>(association.begin(), association.end()),
         plan_.tile_extent());
     if (!made.ok())
       return Answer(made.status());
@@ -3053,10 +3016,9 @@ class StructuredExecution final {
             diagnostics_.dependency_cache_records_visited};
   }
   static StructuredCacheActorView cache_actor(Actor& actor) {
-    return {actor.query,       actor.cache,       actor.tensors,
-            actor.results,     actor.descriptors, actor.tile_record,
-            actor.input_facts, actor.published,   actor.fallback.taint,
-            actor.busy};
+    return {actor.query,     actor.cache,          actor.tensors,
+            actor.results,   actor.descriptors,    actor.tile_record,
+            actor.published, actor.fallback.taint, actor.busy};
   }
   Result<ResourceString> supplied_cache_facts(const Actor& actor) {
     CacheWork work(*this);
@@ -3107,10 +3069,9 @@ class StructuredExecution final {
         return provenance->capture(phase);
       }
       Result<bool> adopt(const StructuredCacheManifest& candidate,
-                         const ResourceVector<std::uint64_t>& association,
                          const ReboundTileCache& tiles) override {
         auto rebound = candidate.result.rebind_cached(
-            actor.query.semantic_key, association, owner.active_token(),
+            actor.query.semantic_key, owner.active_token(),
             [&](std::uint64_t n) { return charge(n); });
         if (!rebound.ok()) {
           if (rebound.status().code == ErrorCode::Cancelled ||
@@ -3441,20 +3402,6 @@ class StructuredExecution final {
     }
     return Status::success();
   }
-  Status validate_tensor_supply(Actor& actor, const PlanStep& step,
-                                const StructuredTensorGrant& input,
-                                const Footprint& closed,
-                                const ResultTensorInput& capability) {
-    const auto& result = capability.result_;
-    const auto& granted = capability.samples_;
-    note_cached_input_backend(actor, step.inputs[input.input], &result);
-    auto selected = closed.intersect(granted, set_limits());
-    if (!selected.ok())
-      return selected.status();
-    auto& revision = actor.input_facts[{input.input, result.object_id()}];
-    revision = std::max(revision, capability.descriptor_.revision());
-    return Status::success();
-  }
   Status supply_tensor_need(std::size_t, Actor& actor,
                             const StructuredNeedGrants& need,
                             const StructuredTensorGrant& input,
@@ -3515,12 +3462,9 @@ class StructuredExecution final {
       return fail(outside.status());
     if (!outside.value().empty())
       return fail(protocol_failure("tensor Need is outside supplied coverage"));
-    auto checked =
-        capability.static_schema_
-            ? Status::success()
-            : validate_tensor_supply(actor, step, input, closed, capability);
-    if (!checked.ok())
-      return fail(checked);
+    if (!capability.static_schema_)
+      note_cached_input_backend(actor, step.inputs[input.input],
+                                &capability.result_);
     if (existing == actor.tensors.end())
       actor.tensors.emplace(std::make_pair(input.input, input.slot),
                             std::move(capability));
@@ -3534,10 +3478,8 @@ class StructuredExecution final {
                                    const TileRequest& selected) {
     using Answer = Result<ResultRef>;
     const auto& schema = *actor.query.output.result_schema;
-    auto association = source.association();
     auto made = ResultBuilder::start(
         resources_, schema, actor.key, {},
-        std::vector<std::uint64_t>(association.begin(), association.end()),
         plan_.tile_extent());
     if (!made.ok())
       return Answer(made.status());
@@ -3665,7 +3607,7 @@ class StructuredExecution final {
       return Answer(std::optional<SharedGrant>(cached->second));
     auto made =
         ResultBuilder::start(resources_, *producer.query.output.result_schema,
-                             key, {}, {}, plan_.tile_extent());
+                             key, {}, plan_.tile_extent());
     if (!made.ok())
       return Answer(made.status());
     auto builder = made.take_value();
@@ -3686,10 +3628,6 @@ class StructuredExecution final {
           continue;
         evidence = commit.evidence;
         fallback_taint |= commit.fallback_taint;
-        auto retained = builder.reference().retain_association(
-            commit.result.association(), [&](auto n) { return consume(n); });
-        if (!retained.ok())
-          return Answer(retained);
         auto samples = producer.contract().tile_grids[member.first].coverage(
             selected.value(), set_limits());
         if (!samples.ok())
@@ -3720,7 +3658,7 @@ class StructuredExecution final {
         auto empty = ResultBuilder::start(
             resources_,
             *plan_.steps()[index].shared_stages[stage]->output_result_schema,
-            "empty-stage-grant", {}, {}, plan_.tile_extent());
+            "empty-stage-grant", {}, plan_.tile_extent());
         if (!empty.ok())
           return empty.status();
         auto empty_builder = empty.take_value();
@@ -3757,9 +3695,6 @@ class StructuredExecution final {
       }
       actor.fallback.taint |= ready.value()->fallback_taint;
       actor.shared_results[stage] = ready.value()->result;
-      actor.input_facts[{UINT32_MAX - stage,
-                         ready.value()->result.object_id()}] =
-          ready.value()->result.descriptor().value().revision();
       actor.waiting.reset();
       cursor.producer.reset();
       ++cursor.next;
@@ -3786,7 +3721,6 @@ class StructuredExecution final {
     struct Services final : PublicationValidationServices {
       Services(StructuredExecution& owner, Actor& actor)
           : owner(owner), actor(actor) {}
-      Status consume(std::uint64_t n) override { return owner.consume(n); }
       Status operation_work(std::uint64_t n) override {
         return owner.work_mode() ? owner.checkpoint_cache_work(n)
                                  : owner.operation_work(actor, n);
@@ -3807,7 +3741,6 @@ class StructuredExecution final {
         actor.published,
         actor.published_revision,
         actor.node_id,
-        actor.input_facts,
         resources_,
         options_.maximum_result_window_bytes,
         services,
@@ -3961,8 +3894,6 @@ class StructuredExecution final {
       actor.descriptors.clear();
       actor.tensors.clear();
 
-      if (!actor.is_shared())
-        actor.input_facts.clear();
       release_actor_registration(actor);
     }
     return actor.is_shared() || actor.visibility_ready
@@ -3995,7 +3926,6 @@ class StructuredExecution final {
     const ExecutionOptions& options_;
     CancellationToken token;
     bool in_block = false, in_discovery = false;
-    ResourceVector<std::uint64_t> association;
     ResourceVector<std::shared_ptr<const ResultDiscoveryReceipt>> discovered;
     std::uint64_t discovered_count = 0;
     PollInvocation(StructuredExecution& execution, std::size_t step_index,
@@ -4013,32 +3943,9 @@ class StructuredExecution final {
           resources_(execution.resources_),
           options_(execution.options_),
           token(execution.active_token()),
-          association(ResourceAllocator<std::uint64_t>(resources_)),
           discovered(
               ResourceAllocator<std::shared_ptr<const ResultDiscoveryReceipt>>(
                   resources_)) {}
-    Result<std::uint64_t> workspace_limit() {
-      auto limit = step.traits.workspace_bytes;
-      if (step.traits.workspace_input_multiplier) {
-        const auto add_input = [&](const Footprint& samples, ElementType type) {
-          auto count = samples.element_count();
-          const auto factor = TensorSpan::element_size(type) *
-                              static_cast<std::uint64_t>(
-                                  step.traits.workspace_input_multiplier);
-          if (!count.ok() ||
-              !core_internal::can_multiply_add(count.value(), factor, limit))
-            return false;
-          limit += count.value() * factor;
-          return true;
-        };
-        for (const auto& input : actor.tensors)
-          if (!add_input(input.second.coverage(),
-                         input.second.spec().descriptor.element_type))
-            return Result<std::uint64_t>(
-                Status{ErrorCode::ResourceExhausted, {}});
-      }
-      return Result<std::uint64_t>(limit);
-    }
     void observe_failure(const Status& failed) {
       if (sticky != ErrorCode::Ok)
         actor.service_failure->record(
@@ -4090,15 +3997,6 @@ class StructuredExecution final {
       }
       return result;
     }
-    Status initialize_association() {
-      auto facts_work = work(actor.input_facts.size());
-      if (!facts_work.ok())
-        return facts_work;
-      association.reserve(actor.input_facts.size());
-      for (const auto& input : actor.input_facts)
-        association.push_back(input.first.second);
-      return Status::success();
-    }
     Status report_diagnostic(std::uint32_t index, ByteView report) {
       auto status = work(1);
       if (status.ok())
@@ -4120,8 +4018,7 @@ class StructuredExecution final {
           return Answer(failed);
         }
         actor.fallback.retry_safe = false;
-        auto found =
-            owner.checkpoint_before(index, actor, kind, before, association);
+        auto found = owner.checkpoint_before(index, actor, kind, before);
         if (!found.ok())
           observe_failure(found.status());
         return found;
@@ -4322,13 +4219,10 @@ class StructuredExecution final {
     auto& stage = std::get<PollPhase>(actor.phase);
     ResourceAllocationScope metadata_scope(resources_, &stage.sticky);
     PollInvocation invocation(*this, index, actor, services, optional);
-    auto limit = invocation.workspace_limit();
-    if (!limit.ok())
-      return limit.status();
     auto allocator =
         (active_services() ? active_services()->allocator
                            : resources_.allocator())
-            .limited(limit.value(),
+            .limited(invocation.step.traits.workspace_bytes,
                      [full = actor.service_failure](const Status& status) {
                        full->record(status);
                      });
@@ -4358,14 +4252,10 @@ class StructuredExecution final {
     ResultProgramPhase phase{actor.query,    actor.results, allocator,
                              resources_,     phase_work,    actor.failure,
                              observe_failure};
-    auto facts_work = invocation.initialize_association();
-    if (!facts_work.ok())
-      return facts_work;
     phase.report_diagnostic = [&](std::uint32_t type, ByteView report) {
       return invocation.report_diagnostic(type, report);
     };
     phase.failure_latch = actor.service_failure;
-    phase.association = &invocation.association;
     phase.tensors = &actor.tensors;
     phase.shared_stages = &actor.shared_results;
     if (!actor.is_shared() && payload_bounds_[index]) {
@@ -4619,8 +4509,6 @@ class StructuredExecution final {
       actor.descriptors.clear();
 
       actor.tile_record.inputs.clear();
-      if (!actor.is_shared())
-        actor.input_facts.clear();
       actor.cache.replay.clear();
       actor.cache.disabled = true;
       actor.fallback.taint = true;

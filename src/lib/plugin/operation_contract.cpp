@@ -35,7 +35,7 @@ Result<OperationTraits> resolve_operation_traits(
   auto result = traits;
   if (std::any_of(traits.outputs.begin(), traits.outputs.end(),
                   [](const auto& output) { return !output.result_schema; }) ||
-      count > 1024 || traits.version != 27)
+      count > 1024 || traits.version != 28)
     return Result<OperationTraits>(core_internal::invalid_schema_domain(
         "invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
@@ -63,7 +63,7 @@ Result<OperationMetadata> infer_operation_output(
   if (t.requires_metadata_specialization)
     return Result<OperationMetadata>(core_internal::invalid_schema_domain(
         "operation template requires registry metadata specialization"));
-  if (t.version != 27 || t.outputs.size() != 1 || !t.outputs[0].result_schema)
+  if (t.version != 28 || t.outputs.size() != 1 || !t.outputs[0].result_schema)
     return Result<OperationMetadata>(core_internal::invalid_schema_domain(
         "select one output for singleton inference"));
   const auto mismatch = [](const char* message) {
@@ -115,43 +115,9 @@ Result<OperationMetadata> infer_operation_output(
         return mismatch("homogeneous repeated input descriptors differ");
     }
   }
-  std::vector<std::vector<std::uint64_t>> domains;
-  for (std::size_t i = 0; i < inputs.size(); ++i) {
-    const auto& input = inputs[i];
-    if (!input.result_schema->tensors.empty()) {
-      if (t.input_schema[i].tensor_key.empty() &&
-          input.result_schema->tensors.size() != 1) {
-        domains.emplace_back();
-        continue;
-      }
-      auto slot =
-          input_internal::resolve_tensor_member(t.input_schema[i], input);
-      if (!slot.ok())
-        return Result<OperationMetadata>(slot.status());
-      domains.push_back(
-          input.result_schema->tensors[slot.value()].sample_shape());
-      continue;
-    }
-    std::vector<std::uint64_t> domain;
-    for (const auto& extent : input.result_schema->domain) {
-      if (extent.kind != ResultExtentKind::Fixed) {
-        domain.clear();
-        break;
-      }
-      const auto n =
-          extent.value / extent.divisor + (extent.value % extent.divisor != 0);
-      if (!core_internal::can_add(n, extent.offset))
-        return mismatch("result domain overflows");
-      domain.push_back(n + extent.offset);
-    }
-    domains.push_back(std::move(domain));
-  }
-  auto schema = t.outputs[0].result_schema->resolve(domains);
-  if (!schema.ok())
-    return Result<OperationMetadata>(schema.status());
   OperationMetadata metadata;
   metadata.result_schema =
-      std::make_shared<const SchemaTemplate>(schema.take_value());
+      std::make_shared<const SchemaTemplate>(*t.outputs[0].result_schema);
   auto valid = input_internal::validate_port_metadata(
       t.outputs[0].output_schema, metadata);
   return valid.ok() ? Result<OperationMetadata>(std::move(metadata))
@@ -194,7 +160,7 @@ Status validate_operation_contract(const OperationTraits& t) {
   for (std::size_t i = 0; i < t.shared_stages.size(); ++i) {
     const auto& stage = t.shared_stages[i];
     if (stage.key.empty() || stage.key.size() > 128 ||
-        !stage.result_schema.validate(true).ok() || !stage.continuation_bytes ||
+        !stage.result_schema.validate().ok() || !stage.continuation_bytes ||
         !stage.maximum_work || !stage.maximum_dependency_stages ||
         stage.maximum_dependency_stages > 1048576 ||
         stage.input_indices.size() > t.input_count ||

@@ -35,36 +35,4 @@ struct AtomKey final {
     return coordinate < other.coordinate;
   }
 };
-/** @brief Fixed logical validation domain; no unbounded coordinate allocation.
- * All extents are positive and first+extent must be representable. The output
- * and rank use the same observation coordinate space as AtomKey. This range
- * names semantic scope, not an expanded physical source read.
- */
-struct AtomDomain final {
-  AtomKey first = {};
-  std::array<std::uint64_t, 8> extent{};
-  bool canonical() const noexcept {
-    if (!first.canonical())
-      return false;
-    for (std::uint32_t i = 0; i < 8; ++i) {
-      if (i < first.rank) {
-        if (!extent[i] || extent[i] > UINT64_MAX - first.coordinate[i])
-          return false;
-      } else if (extent[i]) {
-        return false;
-      }
-    }
-    return true;
-  }
-  bool contains(const AtomKey& key) const noexcept {
-    if (!canonical() || !key.canonical() ||
-        key.output_index != first.output_index || key.rank != first.rank)
-      return false;
-    for (std::uint32_t i = 0; i < first.rank; ++i)
-      if (key.coordinate[i] < first.coordinate[i] ||
-          key.coordinate[i] - first.coordinate[i] >= extent[i])
-        return false;
-    return true;
-  }
-};
 }  // namespace ps

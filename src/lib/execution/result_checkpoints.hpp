@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -16,114 +15,13 @@
 #include "photospider/plugin/result_program.hpp"
 
 namespace ps::execution_internal {
-// NOLINTBEGIN(whitespace/indent_namespace)
-// Keep every observed identity, with one admitted allocation per port's
-// growing sequence instead of one allocator header per identity. Object IDs
-// usually arrive in increasing order; checkpoint restoration also permits
-// insertion of an older ID without changing the port/ID iteration order.
-class ResultInputFacts final {
- public:
-  using Key = std::pair<std::uint32_t, std::uint64_t>;
-  using value_type = std::pair<Key, std::uint64_t>;
-  using Entry = std::pair<std::uint64_t, std::uint64_t>;
-  struct Port {
-    Port(std::uint32_t index, ResourceAllocator<Entry> allocator)
-        : input(index), facts(allocator) {}
-    std::uint32_t input;
-    ResourceVector<Entry> facts;
-  };
-  class ConstIterator {
-   public:
-    ConstIterator(const Port* port, const Port* end, std::size_t offset = 0)
-        : port_(port), end_(end), offset_(offset) {
-      skip_empty();
-    }
-    value_type operator*() const {
-      const auto& entry = port_->facts[offset_];
-      return {{port_->input, entry.first}, entry.second};
-    }
-    ConstIterator& operator++() {
-      if (++offset_ == port_->facts.size()) {
-        ++port_;
-        offset_ = 0;
-      }
-      skip_empty();
-      return *this;
-    }
-    bool operator!=(const ConstIterator& other) const {
-      return port_ != other.port_ || offset_ != other.offset_;
-    }
-
-   private:
-    void skip_empty() {
-      while (port_ != end_ && port_->facts.empty())
-        ++port_;
-    }
-    const Port* port_;
-    const Port* end_;
-    std::size_t offset_;
-  };
-  ResultInputFacts() = default;
-  ResultInputFacts(const ResultInputFacts&) = default;
-  ResultInputFacts& operator=(const ResultInputFacts&) = default;
-  ResultInputFacts(ResultInputFacts&& other) noexcept
-      : ports_(std::move(other.ports_)), size_(std::exchange(other.size_, 0)) {}
-  ResultInputFacts& operator=(ResultInputFacts&& other) noexcept {
-    if (this != &other) {
-      ports_ = std::move(other.ports_);
-      size_ = std::exchange(other.size_, 0);
-    }
-    return *this;
-  }
-  explicit ResultInputFacts(const ResourceBudget& root)
-      : ports_(ResourceAllocator<Port>(root)) {}
-  std::uint64_t& operator[](Key key) {
-    auto port = std::lower_bound(
-        ports_.begin(), ports_.end(), key.first,
-        [](const Port& entry, auto input) { return entry.input < input; });
-    if (port == ports_.end() || port->input != key.first)
-      port = ports_.insert(
-          port,
-          Port(key.first, ResourceAllocator<Entry>(ports_.get_allocator())));
-    auto& entries = port->facts;
-    auto found = std::lower_bound(
-        entries.begin(), entries.end(), key.second,
-        [](const Entry& entry, auto id) { return entry.first < id; });
-    if (found == entries.end() || found->first != key.second) {
-      found = entries.insert(found, {key.second, 0});
-      ++size_;
-    }
-    return found->second;
-  }
-  std::size_t size() const { return size_; }
-  void clear() {
-    ports_.clear();
-    size_ = 0;
-  }
-  ConstIterator begin() const {
-    return {ports_.data(),
-            ports_.empty() ? ports_.data() : ports_.data() + ports_.size()};
-  }
-  ConstIterator end() const {
-    const auto* last =
-        ports_.empty() ? ports_.data() : ports_.data() + ports_.size();
-    return {last, last};
-  }
-
- private:
-  ResourceVector<Port> ports_;
-  std::size_t size_ = 0;
-};
-// NOLINTEND
 struct ResultCheckpointWitness final {
   explicit ResultCheckpointWitness(const ResourceBudget& root)
       : scope(ResourceAllocator<char>(root)),
-        facts(root),
         tiles(root),
         tile_ancestry(
             ResourceAllocator<std::shared_ptr<const TileRecord>>(root)) {}
   ResourceString scope;
-  ResultInputFacts facts;
   TileRecord tiles;
   TileRecords::Snapshot tile_ancestry;
   std::uint64_t weight = 0;

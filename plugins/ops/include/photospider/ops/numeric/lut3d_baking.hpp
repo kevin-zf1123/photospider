@@ -57,7 +57,7 @@ struct Lut3dValidationPoints {
 /** @brief Connectable exports; table is a globally quality-gated
  * `photospider.tensor` v1 Result with `samples` shape [N0,N1,N2,3], selected
  * dtype and atomic trailing color axis. Axis is an independent Float64 tensor.
- * report is a curve.bake_lut3d.report v2 ResultRef; request it through
+ * report is a curve.bake_lut3d.report v3 ResultRef; request it through
  * `ExecutionContext::execute()` and read it with the public
  * read_lut3d_bake_report helper with description. Its measured_table_id tensor
  * identifies the complete table object acquired during measurement. This

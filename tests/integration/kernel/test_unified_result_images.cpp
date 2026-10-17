@@ -118,12 +118,6 @@ std::pair<ResultRef, ResultRef> run() {
                   .ok() &&
               pixel == 6013,
           "new branch/support executes");
-  const auto sources = updated_result.association();
-  require(sources.size() == 2 && sources[0] == b.result.object_id() &&
-              sources[1] == c.result.object_id(),
-          "image retains ordered branch and control source identities");
-  require(count_result.association().empty(),
-          "constant count has no source association");
   ResourceVector<TileChange> source_change{
       ResourceAllocator<TileChange>(budget)};
   source_change.push_back({PlanWorkflowInput{1}, 0, 0,

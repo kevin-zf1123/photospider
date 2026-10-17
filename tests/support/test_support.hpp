@@ -40,21 +40,12 @@ inline bool require_ok(const Status& status, const char* expression,
             << " origin=" << static_cast<int>(status.detail.origin)
             << " scope=" << static_cast<int>(status.detail.scope)
             << " node=" << status.detail.node_id
-            << " input=" << status.detail.input_id
-            << " association=" << status.detail.association;
+            << " input=" << status.detail.input_id;
   if (status.detail.atom) {
     const auto& atom = *status.detail.atom;
     std::cerr << " atom=" << atom.output_index << '[';
     for (std::uint32_t axis = 0; axis < atom.rank; ++axis)
       std::cerr << (axis ? "," : "") << atom.coordinate[axis];
-    std::cerr << ']';
-  }
-  if (status.detail.domain) {
-    const auto& domain = *status.detail.domain;
-    std::cerr << " domain=" << domain.first.output_index << '[';
-    for (std::uint32_t axis = 0; axis < domain.first.rank; ++axis)
-      std::cerr << (axis ? "," : "") << domain.first.coordinate[axis] << '+'
-                << domain.extent[axis];
     std::cerr << ']';
   }
   std::cerr << " message=" << status.message << '\n';

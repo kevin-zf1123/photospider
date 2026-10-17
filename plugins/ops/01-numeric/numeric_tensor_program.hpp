@@ -195,9 +195,6 @@ struct WholeTensorProgram final {
     }
     auto builder = math_take(ResultBuilder::start(
         phase.resources, schema, phase.query.semantic_key, {},
-        phase.association ? std::vector<uint64_t>(phase.association->begin(),
-                                                  phase.association->end())
-                          : std::vector<uint64_t>{},
         phase.query.tile_extent));
     if (!output.empty()) {
       // The phase container expires after each poll. These owning capabilities

@@ -11,5 +11,5 @@ struct ImportedResultPlugin {
   std::vector<DiagnosticDefinition> diagnostics;
 };
 Result<ImportedResultPlugin> import_result_plugin(
-    const ps_result_operation_plugin_api_v5*, std::shared_ptr<void> library);
+    const ps_result_operation_plugin_api_v6*, std::shared_ptr<void> library);
 }  // namespace ps::plugin_internal

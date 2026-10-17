@@ -24,13 +24,13 @@ void affine_source_views() {
     std::vector<std::uint8_t> bytes{0, 1, 2, 3, 4, 5};
     std::vector<std::uint64_t> target_shape{3, 2};
     ResultTensorViewTransform transform;
-    transform.source_axes = {{1, 0, 1, 1}, {0, 0, 1, 1}};
+    transform.source_axes = {{1, 0, 1}, {0, 0, 1}};
     std::vector<std::uint8_t> expected{0, 3, 1, 4, 2, 5};
     if (mode == 1) {
       slot.descriptor.shape = {6};
       layout = {0, {1}};
       target_shape = {3};
-      transform.source_axes = {{0, 5, -2, 1}};
+      transform.source_axes = {{0, 5, -2}};
       expected = {5, 3, 1};
     } else if (mode == 2) {
       layout = {5, {-3, -1}};
@@ -49,14 +49,14 @@ void affine_source_views() {
       layout = {0, {INT64_MIN}};
       bytes = {7};
       target_shape = {1, 1};
-      transform.source_axes = {{0, 0, -1, 1}};
+      transform.source_axes = {{0, 0, -1}};
       expected = {7};
     } else if (mode == 5) {
       slot.descriptor.shape = {1};
       layout = {0, {0}};
       bytes = {4};
       target_shape = {2, 3};
-      transform.source_axes = {{-1, 0, 0, 1}};
+      transform.source_axes = {{-1, 0, 0}};
       expected = {4, 4, 4, 4, 4, 4};
     }
     source_schema.tensors.push_back(slot);
@@ -144,7 +144,7 @@ void affine_view_failures() {
   auto facts = take(first_ref.descriptor(false));
   auto input = take(first_ref.acquire_tensor(facts, 0, left));
   ResultTensorViewTransform identity;
-  identity.source_axes = {{0, 0, 1, 1}};
+  identity.source_axes = {{0, 0, 1}};
   auto second = make();
   require(second.publish_tensor_view(0, left, input, identity).ok(),
           "first affine ownership edge");
@@ -152,7 +152,7 @@ void affine_view_failures() {
   auto second_window = take(
       second_ref.acquire_tensor(take(second_ref.descriptor(false)), 0, left));
   ResultTensorViewTransform translated;
-  translated.source_axes = {{0, 0, 1, 1, 1}};
+  translated.source_axes = {{0, 0, 1, 1}};
   require(first.publish_tensor_view(0, right, second_window, translated).code ==
               ErrorCode::TypeMismatch,
           "indirect affine ownership cycle rejected before publication");
@@ -163,7 +163,7 @@ void affine_view_failures() {
           "failed affine cycle leaves previous captured prefix readable");
   auto unauthorized = make();
   ResultTensorViewTransform outside;
-  outside.source_axes = {{0, 1, 1, 1}};
+  outside.source_axes = {{0, 1, 1}};
   const auto failed = unauthorized.publish_tensor_view(0, left, input, outside);
   require(
       failed.reason == FailureReason::UnauthorizedRead &&
@@ -190,7 +190,7 @@ void affine_view_failures() {
   auto fragmented_window = take(fragmented_ref.acquire_tensor(
       take(fragmented_ref.descriptor()), 0, Region::whole({2})));
   auto fragmented_unauthorized = make();
-  outside.source_axes = {{-1, 2, 0, 1}};
+  outside.source_axes = {{-1, 2, 0}};
   require(
       fragmented_unauthorized
                   .publish_tensor_view(0, Region::whole({2}), fragmented_window,
@@ -297,6 +297,8 @@ void view_graph_and_growth() {
   auto spec = schema(true);
   spec.tensors[0].batch_axes[0] = spec.tensors[0].batch_axes[1] = 1;
   spec.tensors[0].descriptor.shape = {1, 2};
+  ResultTensorViewTransform identity;
+  identity.source_axes = {{0, 0, 1}, {1, 0, 1}, {2, 0, 1}, {3, 0, 1}};
   auto first = take(ResultBuilder::start(root, spec, "view.graph.first"));
   auto second = take(ResultBuilder::start(root, spec, "view.graph.second"));
   const Region left({{0, 1}, {0, 1}, {0, 1}, {0, 1}});
@@ -311,11 +313,14 @@ void view_graph_and_growth() {
       first_ref.acquire_tensor(take(first_ref.descriptor(false)), 0, right));
   auto second_window = take(
       second_ref.acquire_tensor(take(second_ref.descriptor(false)), 0, left));
-  require(first.publish_tensor_view(0, left, {&second_window}).ok(),
+  require(first.publish_tensor_view(0, left, {{&second_window, left, identity}})
+              .ok(),
           "acyclic view edge");
-  require(!second.publish_tensor_view(0, right, {&first_window}).ok() &&
-              !second.seal().ok(),
-          "indirect Result view cycle rejected");
+  require(
+      !second.publish_tensor_view(0, right, {{&first_window, right, identity}})
+              .ok() &&
+          !second.seal().ok(),
+      "indirect Result view cycle rejected");
   require(
       !second_ref.acquire_tensor(take(second_ref.descriptor(false)), 0, right)
            .ok(),
@@ -352,7 +357,7 @@ void view_graph_and_growth() {
     ready.wait(lock, [&] { return entered; });
   }
   auto alias = std::async(std::launch::async, [&] {
-    return target.publish_tensor_view(0, left, {&retained});
+    return target.publish_tensor_view(0, left, {{&retained, left, identity}});
   });
   const auto completes =
       alias.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
@@ -386,7 +391,7 @@ void view_graph_and_growth() {
     const Region cell({{0, 1}, {0, 1}, {0, 1}, {x, 1}});
     auto input =
         take(source_ref.acquire_tensor(take(source_ref.descriptor()), 0, cell));
-    outcome = bounded.publish_tensor_view(0, cell, {&input});
+    outcome = bounded.publish_tensor_view(0, cell, {{&input, cell, identity}});
     if (!outcome.ok()) {
       break;
     }
@@ -439,7 +444,7 @@ void large_view() {
                                              Region::whole(shape)));
   std::vector<ResultViewAxis> axes;
   for (std::int32_t i = 0; i < 4; ++i) {
-    axes.push_back({i, 0, 1, 1});
+    axes.push_back({i, 0, 1});
   }
   auto output = take(ResultBuilder::start(root, image_schema, "large.view"));
   const auto before = root.statistics().issued.work;

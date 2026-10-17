@@ -43,14 +43,12 @@ bool same_region(const Region& actual, const Region& expected) {
 int geometry() {
   auto grid = TileGrid::from_schema(schema({129, 257, 4}, {2}));
   PS_REQUIRE_OK(grid);
-  PS_CHECK(grid.value() && grid.value()->tile_extent() == 128 &&
-           grid.value()->batch_count() == 2 && grid.value()->tile_rows() == 2 &&
-           grid.value()->tile_columns() == 3 &&
-           grid.value()->tile_count() == 12);
-  PS_CHECK(same_region(grid.value()->region(11).value(),
+  PS_CHECK(grid.value().tile_extent() == 128 &&
+           grid.value().batch_count() == 2 && grid.value().tile_rows() == 2 &&
+           grid.value().tile_columns() == 3 && grid.value().tile_count() == 12);
+  PS_CHECK(same_region(grid.value().region(11).value(),
                        Region({{1, 1}, {128, 1}, {256, 1}, {0, 4}})));
-  PS_CHECK(grid.value()->region(12).status().code ==
-           ErrorCode::InvalidArgument);
+  PS_CHECK(grid.value().region(12).status().code == ErrorCode::InvalidArgument);
   auto chw = schema({3, 5, 7}, {2, 3});
   chw.tensors[0].atomic_trailing_axes = 0;
   chw.tensors[0].layout.height_axis = 1;
@@ -58,31 +56,30 @@ int geometry() {
   chw.tensors[0].layout.channel_axis = 0;
   auto transposed = TileGrid::from_schema(chw, 4);
   PS_REQUIRE_OK(transposed);
-  PS_CHECK(transposed.value()->tile_count() == 24 &&
-           same_region(transposed.value()->region(23).value(),
+  PS_CHECK(transposed.value().tile_count() == 24 &&
+           same_region(transposed.value().region(23).value(),
                        Region({{1, 1}, {2, 1}, {0, 3}, {4, 1}, {4, 3}})));
   const std::uint64_t last[] = {1, 2, 2, 4, 6};
-  PS_CHECK(sdk::tile_for_coordinate(*transposed.value(), last, 5).value() ==
-           23);
+  PS_CHECK(sdk::tile_for_coordinate(transposed.value(), last, 5).value() == 23);
   PS_CHECK(
-      sdk::tile_for_coordinate(*transposed.value(), last, 4).status().code ==
+      sdk::tile_for_coordinate(transposed.value(), last, 4).status().code ==
       ErrorCode::InvalidArgument);
-  PS_CHECK(!sdk::tile_for_coordinate(*transposed.value(), nullptr, 5).ok());
+  PS_CHECK(!sdk::tile_for_coordinate(transposed.value(), nullptr, 5).ok());
   auto bad_channel = std::array<std::uint64_t, 5>{1, 2, 3, 4, 6};
-  PS_CHECK(!sdk::tile_for_coordinate(*transposed.value(), bad_channel.data(), 5)
+  PS_CHECK(!sdk::tile_for_coordinate(transposed.value(), bad_channel.data(), 5)
                 .ok());
   auto one = TileGrid::from_schema(chw, 1);
   PS_REQUIRE_OK(one);
-  PS_CHECK(one.value()->tile_count() == 210);
+  PS_CHECK(one.value().tile_count() == 210);
   PS_CHECK(TileGrid::from_schema(chw, 0).status().code ==
            ErrorCode::InvalidArgument);
   PS_CHECK(TileGrid::from_schema(chw, 3).status().code ==
            ErrorCode::InvalidArgument);
   auto near = TileGrid::from_schema(schema({UINT64_MAX, 1}), UINT64_C(1) << 63);
   PS_REQUIRE_OK(near);
-  PS_CHECK(near.value()->tile_count() == 2 &&
+  PS_CHECK(near.value().tile_count() == 2 &&
            same_region(
-               near.value()->region(1).value(),
+               near.value().region(1).value(),
                Region({{UINT64_C(1) << 63, (UINT64_C(1) << 63) - 1}, {0, 1}})));
   auto overflow = TileGrid::from_schema(schema({UINT64_MAX, 2}), 1);
   PS_CHECK(overflow.status().code == ErrorCode::ResourceExhausted);
@@ -90,7 +87,7 @@ int geometry() {
   PS_CHECK(batches.status().code == ErrorCode::ResourceExhausted);
   auto ordinary = schema({3, 5});
   ordinary.tensors[0].layout.spatial = false;
-  PS_CHECK(TileGrid::from_schema(ordinary).value()->tile_count() == 1);
+  PS_CHECK(TileGrid::from_schema(ordinary).value().tile_count() == 1);
   auto multiple = schema({3, 5});
   multiple.tensors.push_back(multiple.tensors[0]);
   multiple.tensors[1].key = "second";
@@ -117,8 +114,8 @@ int storage_tiles() {
       std::vector<std::uint8_t> bytes(30);
       for (std::size_t i = 0; i < bytes.size(); ++i)
         bytes[i] = static_cast<std::uint8_t>(i + 1);
-      auto builder = take(
-          ResultBuilder::start(root, image, "storage.tiles", {}, {}, extent));
+      auto builder =
+          take(ResultBuilder::start(root, image, "storage.tiles", {}, extent));
       const auto region = Region::whole(image.tensors[0].sample_shape());
       PS_CHECK(
           builder
@@ -145,10 +142,9 @@ int storage_tiles() {
           }
     }
     for (std::uint64_t invalid : {0, 3})
-      PS_CHECK(
-          ResultBuilder::start(root, image, "invalid.tiles", {}, {}, invalid)
-              .status()
-              .code == ErrorCode::InvalidArgument);
+      PS_CHECK(ResultBuilder::start(root, image, "invalid.tiles", {}, invalid)
+                   .status()
+                   .code == ErrorCode::InvalidArgument);
   }
   PS_CHECK(root.statistics().live[ResourceKind::Payload] == 0);
   return 0;
@@ -222,7 +218,7 @@ int sdk_conversion() {
     layout.tensors[0].layout.height_axis = 1;
     layout.tensors[0].layout.width_axis = 2;
     layout.tensors[0].layout.channel_axis = 0;
-    auto grid = *TileGrid::from_schema(layout, 4).take_value();
+    auto grid = TileGrid::from_schema(layout, 4).take_value();
     auto set = sdk::tiles_for_region(
         root, grid, Region({{0, 2}, {1, 1}, {2, 1}, {3, 2}, {3, 2}}));
     PS_REQUIRE_OK(set);
@@ -248,7 +244,7 @@ int sdk_conversion() {
                  .status()
                  .code == ErrorCode::InvalidArgument);
     auto enormous =
-        *TileGrid::from_schema(schema({UINT64_MAX, 1}), 1).take_value();
+        TileGrid::from_schema(schema({UINT64_MAX, 1}), 1).take_value();
     auto sparse = sdk::tiles_for_region(root, enormous,
                                         Region({{UINT64_MAX - 1, 1}, {0, 1}}));
     PS_REQUIRE_OK(sparse);

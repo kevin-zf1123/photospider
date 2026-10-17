@@ -57,12 +57,12 @@ struct TensorIdentity {
     }
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, {}, phase.query.tile_extent));
+        phase.query.semantic_key, {}, phase.query.tile_extent));
     for (const auto& region : output.boxes()) {
       auto window = take(phase.tensors->at({0, 0}).acquire(region));
       ResultTensorViewTransform transform;
       for (unsigned axis = 0; axis < region.rank(); ++axis)
-        transform.source_axes.push_back({static_cast<int>(axis), 0, 1, 1});
+        transform.source_axes.push_back({static_cast<int>(axis), 0, 1});
       auto status = builder.publish_tensor_view(0, region, window, transform);
       if (status.reason == FailureReason::ViewUnavailable) {
         const auto width =

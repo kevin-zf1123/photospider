@@ -28,7 +28,7 @@ class NativeUploadRegistry final {
 
 // Optional Run-local physical backing reuse. Source proof is weak: a live
 // immutable owner proves pointer identity without extending its lifetime.
-// Entries contain no source Result, facets, resources or association owners.
+// Entries contain no source Result, facets or resource owners.
 class NativeRunUploads final {
  public:
   NativeRunUploads(std::shared_ptr<NativeUploadRegistry> registry,

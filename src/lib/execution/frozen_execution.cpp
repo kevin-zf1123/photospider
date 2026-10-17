@@ -4,7 +4,6 @@
 #include <string>
 #include <utility>
 
-#include "data/memory_budget.hpp"
 #include "execution/demand_query.hpp"
 #include "execution/execution_bindings.hpp"
 #include "execution/execution_context_state.hpp"
@@ -59,18 +58,14 @@ Result<FrozenExecution> ExecutionContext::freeze(
       plan.operation_registry_.lock().get() != impl_->operation_registry.get())
     return Result<FrozenExecution>(
         Status::failure(ErrorCode::Stale, "invalid stale or foreign plan"));
-  if (!impl_->budget->resources())
-    return Result<FrozenExecution>(
-        Status{ErrorCode::InvalidArgument,
-               "Result capture requires managed_resources"});
-  auto validated = preflight_regional_bindings(plan, bindings, {},
-                                               *impl_->budget->resources());
+  auto validated =
+      preflight_regional_bindings(plan, bindings, {}, *impl_->budget);
   if (!validated.ok())
     return Result<FrozenExecution>(validated.status());
   auto identity = frozen_identity();
   if (!identity.ok())
     return Result<FrozenExecution>(identity.status());
-  const auto& root = *impl_->budget->resources();
+  const auto& root = *impl_->budget;
   auto state = std::allocate_shared<FrozenExecution::State>(
       ResourceAllocator<FrozenExecution::State>(root), root);
   state->execution_identity = identity.take_value();
@@ -119,9 +114,9 @@ Result<DemandResult> ExecutionContext::execute_fragments(
                           captured.state_->resources);
     if (!key.ok())
       return failure(key.status());
-    auto validated = preflight_regional_bindings(
-        captured.state_->plan, captured.state_->bindings, cancellation,
-        *impl_->budget->resources());
+    auto validated = preflight_regional_bindings(captured.state_->plan,
+                                                 captured.state_->bindings,
+                                                 cancellation, *impl_->budget);
     if (!validated.ok())
       return failure(validated.status());
     DemandResult result;

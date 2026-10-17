@@ -34,8 +34,8 @@ enum class BezierDomain { Reject, Clamp };
  * @note Helpers are pure/concurrent-safe. Compiler validates all static edges.
  * Output `values` is `photospider.tensor` v1/member `samples`, [count],
  * selected dtype, ordinary data. Output `axis` uses the same schema/member,
- * Float64 [3], atomic_trailing_axes=1, ordinary data. The Result associations
- * record active source ObjectIds. Independent Run-shared stages acquire their
+ * Float64 [3], atomic_trailing_axes=1, ordinary data.
+ * Independent Run-shared stages acquire their
  * active input tensors. Values validates global x topology and all generated
  * coordinates, computes every value once per Run and publishes requested tiles
  * in global sample coordinates. A mathematical knot or clamp reads only that

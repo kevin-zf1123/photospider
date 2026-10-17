@@ -163,7 +163,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v22");
+  digest.text("semantic-graph-ir-v23");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -246,7 +246,7 @@ std::string physical_digest(
     const std::map<std::string, TileRequest>& output_requests,
     std::uint64_t tile_extent, ExecutionMode execution_mode) {
   DigestBuilder digest;
-  digest.text("physical-plan-v22");
+  digest.text("physical-plan-v23");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
   digest.integer(tile_extent);
   digest.integer(output_requests.size());
@@ -262,15 +262,6 @@ std::string physical_digest(
       }
     }
   }
-  const auto image_storage = [&](const SchemaTemplate& schema) {
-    for (const auto& image : schema.tensors) {
-      digest.integer(static_cast<std::uint32_t>(image.layout.order));
-      digest.integer(image.layout.row_pitch_bytes);
-    }
-  };
-  for (const auto& declaration : declarations)
-    if (declaration.result_schema)
-      image_storage(*declaration.result_schema);
   append_declarations(&digest, declarations);
   digest.text(optimized);
   digest.integer(steps.size());
@@ -293,8 +284,6 @@ std::string physical_digest(
     digest.integer(static_cast<bool>(step.output_result_schema));
     if (step.output_result_schema)
       digest.text(step.output_result_schema->canonical());
-    if (step.output_result_schema)
-      image_storage(*step.output_result_schema);
     digest.integer(step.parameters.size());
     for (const auto& parameter : step.parameters) {
       digest.text(parameter.first);
@@ -876,7 +865,6 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
         stage->backend = declared.backend;
         stage->traits.cacheable = false;
         stage->traits.workspace_bytes = declared.workspace_bytes;
-        stage->traits.workspace_input_multiplier = 0;
         auto& output = stage->traits.outputs[0];
         output.result_schema = declared.result_schema;
         output.output_schema = {};

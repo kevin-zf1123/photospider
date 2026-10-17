@@ -169,8 +169,8 @@ inline Result<WorkflowNode> node(
  * `values` is a full-shape immutable Result using `photospider.tensor`
  * v1/member `samples`, shape S+[C], with explicit color configuration and
  * `atomic_trailing_axes=1`. A component request closes to its full color tuple;
- * Whole publication retains complete certified coverage, global coordinates and
- * source Result associations. Empty reads no sample payload. Input edits
+ * Whole publication retains complete certified coverage and global coordinates.
+ * Empty reads no sample payload. Input edits
  * invalidate complete recorded output demand. Numeric failures have Run scope.
  * Source windows, fixed arithmetic workspace, full output and O(K) Root-owned
  * stop storage must fit host budgets. Exact interpolation rounds only at

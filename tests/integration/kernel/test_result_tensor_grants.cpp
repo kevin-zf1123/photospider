@@ -41,7 +41,7 @@ struct TensorSource {
                  FailureReason::InvalidDomain,
                  {FailureOrigin::Domain, FailureScope::Group}});
     auto builder = take(ResultBuilder::start(phase.resources, schema,
-                                             phase.query.semantic_key, {}, {},
+                                             phase.query.semantic_key, {},
                                              phase.query.tile_extent));
 
     for (const auto& box : demand.boxes()) {
@@ -175,13 +175,9 @@ struct MetadataConsumer {
     double value = 4;
     if (mode >= 2)
       check(phase.read_tensor(0, 0, {0, 2}, &value, 8));
-    auto builder = take(ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        phase.association
-            ? std::vector<std::uint64_t>(phase.association->begin(),
-                                         phase.association->end())
-            : std::vector<std::uint64_t>{}));
+    auto builder = take(ResultBuilder::start(phase.resources,
+                                             *phase.query.output.result_schema,
+                                             phase.query.semantic_key, {}));
 
     check(builder.publish_tensor(
         0, Region::whole({1}),
@@ -245,8 +241,7 @@ int metadata_tensor_need(unsigned mode, bool denied = false,
                   << run.status().message << '\n';
       PS_CHECK(run.ok());
       held = run.value().results.at("out");
-      PS_CHECK(multi_result::number(held) == 4 &&
-               held.association().size() == (mode >= 2 ? 1u : 0u));
+      PS_CHECK(multi_result::number(held) == 4);
     }
     const auto data_calls = mode >= 2 ? 1U : 0U;
     PS_CHECK(counts->starts == data_calls && counts->polls == data_calls);
@@ -315,14 +310,9 @@ struct BroadConsumer {
     }
     const auto& input = phase.tensors->at({0, 0});
     if (!input.object_id() || input.coverage() != samples ||
-        !phase.results.empty() || !phase.association ||
-        phase.association->size() != 1)
+        !phase.results.empty())
       return Answer(Status{ErrorCode::OperationFailed,
                            "tensor grant identity or object permission"});
-    for (auto id : *phase.association)
-      if (!id)
-        return Answer(
-            Status{ErrorCode::OperationFailed, "null source in association"});
     *retained = input;
     if (mode == 2) {
       double ignored = 0;
@@ -390,14 +380,13 @@ struct BroadConsumer {
           multi_result::number(second) != total)
         return Answer(Status{ErrorCode::OperationFailed, "tensor block sum"});
     }
-    auto builder = take(ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        {phase.association->begin(), phase.association->end()}));
+    auto builder = take(ResultBuilder::start(phase.resources,
+                                             *phase.query.output.result_schema,
+                                             phase.query.semantic_key, {}));
 
     if (mode == 5) {
       ResultTensorViewTransform transform;
-      transform.source_axes.push_back({0, 0, 1, 1});
+      transform.source_axes.push_back({0, 0, 1});
       check(builder.publish_tensor_view(0, Region::whole(shape),
                                         *retained_window, transform));
     } else {
@@ -468,10 +457,9 @@ struct RichTensorSource {
         fill = take(phase.resources.reserve(ResourceCapacity::host(
             available - ResourceBudget::lease_metadata_bytes())));
       }
-      auto started = ResultBuilder::start(
-          phase.resources, *phase.query.output.result_schema,
-          phase.query.semantic_key, {},
-          {phase.association->begin(), phase.association->end()}, 128);
+      auto started = ResultBuilder::start(phase.resources,
+                                          *phase.query.output.result_schema,
+                                          phase.query.semantic_key, {}, 128);
       if (!started.ok())
         return Answer(started.status());
       builder = started.take_value();
@@ -484,8 +472,7 @@ struct RichTensorSource {
     for (const auto& window : windows) {
       ResultTensorViewTransform identity;
       for (unsigned axis = 0; axis < window.region().rank(); ++axis)
-        identity.source_axes.push_back(
-            {static_cast<std::int32_t>(axis), 0, 1, 1});
+        identity.source_axes.push_back({static_cast<std::int32_t>(axis), 0, 1});
       check(builder->publish_tensor_view(0, window.region(), window, identity));
     }
     auto result = take(builder->seal());
@@ -609,8 +596,6 @@ int broad_tensor_need(unsigned mode) {
                                                                   : mode == 5
                                                                       ? 2
                                                                       : 2210));
-      PS_CHECK(held.results.at("value").association().size() ==
-               (mode == 5 ? 65U : 1U));
       if (mode == 6 || mode == 7) {
         PS_CHECK(block_calls == (mode == 6 ? 2u : 1u));
         PS_CHECK(held.diagnostics.dependency_cache_work <=
@@ -697,13 +682,12 @@ struct ResourceViewConsumer {
     }
     *input = phase.tensors->at({0, 0});
     *window = take(input->value().acquire(Region::whole({65, 4})));
-    auto builder = take(ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        {phase.association->begin(), phase.association->end()}, 128));
+    auto builder = take(
+        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
+                             phase.query.semantic_key, {}, 128));
 
     ResultTensorViewTransform identity;
-    identity.source_axes = {{0, 0, 1, 1}, {1, 0, 1, 1}};
+    identity.source_axes = {{0, 0, 1}, {1, 0, 1}};
     check(builder.publish_tensor_view(0, Region::whole({65, 4}), *window,
                                       identity));
     return Answer(ResultPublication{take(builder.seal()), true});
@@ -785,8 +769,7 @@ int profile_owners(bool exhaust = false, bool work_exhaust = false) {
           2 * profile_bytes + 260 * 8 + 8192;
       ExecutionContext context(registry, config);
       root = take(context.resource_budget());
-      auto builder =
-          take(ResultBuilder::start(root, schema, "base", {}, {}, 128));
+      auto builder = take(ResultBuilder::start(root, schema, "base", {}, 128));
 
       std::array<double, 260> values{};
       for (unsigned i = 0; i < values.size(); ++i)
@@ -830,7 +813,6 @@ int profile_owners(bool exhaust = false, bool work_exhaust = false) {
         PS_CHECK(run.ok());
         output = run.value().results.at("value");
         PS_CHECK(counts->starts == 1);
-        PS_CHECK(output.association().size() == 1);
         PS_CHECK(retained_input && retained_input->object_id());
       }
     }

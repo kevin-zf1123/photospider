@@ -23,7 +23,6 @@ struct StructuredCacheActorView final {
   ResultObjectInputs& results;
   ResultDescriptorInputs& descriptors;
   TileRecord& tile_record;
-  ResultInputFacts& input_facts;
   const ResultRef& published;
   const bool& fallback_taint;
   bool& busy;
@@ -55,7 +54,6 @@ class StructuredCacheReplayHost : public StructuredCacheWorkServices {
  public:
   virtual Status supply(const ResultProgramNeed&) = 0;
   virtual Result<bool> adopt(const StructuredCacheManifest&,
-                             const ResourceVector<std::uint64_t>&,
                              const ReboundTileCache&) = 0;
 };
 

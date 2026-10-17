@@ -387,10 +387,6 @@ struct Program final {
     }
     auto builder = math_take(ResultBuilder::start(
         phase.resources, schema, phase.query.semantic_key, {},
-        phase.association
-            ? std::vector<std::uint64_t>(phase.association->begin(),
-                                         phase.association->end())
-            : std::vector<std::uint64_t>{},
         phase.query.tile_extent));
     if (!output.empty()) {
       plugin_internal::FloatingEnvironment environment;

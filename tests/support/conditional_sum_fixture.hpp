@@ -48,10 +48,6 @@ struct ConditionalSum {
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
         phase.query.semantic_key, {},
-        phase.association
-            ? std::vector<std::uint64_t>(phase.association->begin(),
-                                         phase.association->end())
-            : std::vector<std::uint64_t>{},
         phase.query.tile_extent));
     for (const auto& box : output.boxes()) {
       auto bytes = take(

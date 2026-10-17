@@ -134,11 +134,9 @@ struct Tile {
     for (const auto& visited : work.visited)
       if (visited != 1)
         return Answer(Status{ErrorCode::Internal, "tile partition coverage"});
-    auto builder = take(ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        std::vector<std::uint64_t>(phase.association->begin(),
-                                   phase.association->end())));
+    auto builder = take(ResultBuilder::start(phase.resources,
+                                             *phase.query.output.result_schema,
+                                             phase.query.semantic_key, {}));
 
     StridedLayout layout = probe->components == 1 ? StridedLayout{0, {8}}
                                                   : StridedLayout{0, {24, 8}};

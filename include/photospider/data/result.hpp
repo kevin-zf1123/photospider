@@ -23,28 +23,13 @@ class ResultCache;
 class StructuredResultCache;
 class ResultWindowAccess;
 }  // namespace execution_internal
-/** @brief Compile-time extent expression, resolved before execution. */
-enum class ResultExtentKind : std::uint32_t {
-  Fixed = 1,
-  InputAxis = 2,
-  InputElements = 3
-};
-struct ResultExtent final {
-  ResultExtentKind kind = ResultExtentKind::Fixed;
-  std::uint64_t value = 1;
-  std::uint32_t input = 0, axis = 0;
-  std::uint64_t divisor = 1, offset = 0;
-};
-/** @brief Tensor topology and optional physical storage preferences.
+/** @brief Tensor topology, independent of physical storage.
  * Spatial axes are cell-local and meaningful only when spatial is true.
- * Physical order and pitch are excluded from semantic schema identity.
  */
 struct ResultTensorLayout final {
   bool spatial = false;
-  TensorStorageOrder order = TensorStorageOrder::Tiled;
   std::uint32_t height_axis = 0, width_axis = 1;
   std::optional<std::uint32_t> channel_axis = 2;
-  std::uint64_t row_pitch_bytes = 0;
 };
 /** @brief One typed tensor member, independent of its backing strategy.
  * descriptor describes the cell axes. batch_axes prefixes logical samples;
@@ -84,23 +69,19 @@ struct ResultPublicationScope final {
   ResourceVector<std::uint32_t> members;
 };
 /** @brief Static compiler-visible directory of 1..16 tensor members.
- * Each member has a fixed positive shape and structural layout. Input-axis
- * expressions in the domain resolve without reading samples. Physical storage,
- * object generations and descriptor revisions do not affect schema identity.
+ * Each member has a fixed positive shape and structural layout. Physical
+ * storage, object generations and descriptor revisions do not affect schema
+ * identity.
  */
 struct PHOTOSPIDER_API SchemaTemplate final {
   ResourceString id;
   std::uint32_t version = 1;
   ResourceVector<ResultTensorSpec> tensors;
-  ResourceVector<ResultExtent> domain;
   ResourceVector<ResultPublicationScope> publication_scopes;
   const ResultPublicationScope* publication_scope(
       std::uint32_t slot) const noexcept;
   /** @brief Checks the closed bounded structural vocabulary, with no I/O. */
-  Status validate(bool resolved = false) const;
-  /** @brief Resolves input-derived extents from immutable static domains. */
-  Result<SchemaTemplate> resolve(
-      const std::vector<std::vector<std::uint64_t>>& input_domains) const;
+  Status validate() const;
   /** @brief Canonical schema bytes, independent of storage and object identity.
    */
   ResourceString canonical() const;
@@ -155,23 +136,14 @@ class PHOTOSPIDER_API ResultRef final {
    * Locking preserves captured descriptor identity.
    */
   WeakResultRef weak() const noexcept;
-  /** @brief Borrowed immutable schema/key; invalid objects throw logic_error.
+  /** @brief Borrowed immutable schema; invalid objects throw logic_error.
    */
   const SchemaTemplate& schema() const;
   /** @brief Captures certified coverage and descriptor facts at one revision.
    */
   Result<ResultRef> capture() const;
-  std::string_view semantic_key() const;
-  /** @brief Checks the framed Run scope without copying canonical metadata. */
+  /** @brief Checks the immutable Run scope without copying it. */
   bool matches_scope(std::string_view scope) const noexcept;
-  /** @brief Snapshot of the monotone ordered source-object association.
-   * Entries retain input-port/ObjectId order, including repeated ObjectIds
-   * supplied at different ports. This history is Root-accounted identity
-   * metadata, not an input payload owner or read grant. Physical views
-   * independently retain source Results, schemas, and backing until
-   * the last view releases.
-   */
-  ResourceVector<std::uint64_t> association() const;
   /** @brief Complete descriptor, or an explicitly allowed certified prefix.
    * An incomplete complete-request returns production failure or NotFound.
    * A later operational producer failure does not revoke a published prefix.
@@ -188,7 +160,7 @@ class PHOTOSPIDER_API ResultRef final {
   /** @brief Acquire an owning zero-copy window for one authorized rectangle.
    * The captured descriptor must certify every requested sample. Runs stop at
    * requested, view-publication and physical tile boundaries. The window keeps
-   * source schema, association and backing alive across producer and
+   * source schema and backing alive across producer and
    * context retirement; no sample cache or payload copy is made. Empty regions
    * return InvalidArgument. Windows may span batch coordinates; paged pieces
    * retain their complete batch prefix and queries select the matching piece.
@@ -221,14 +193,10 @@ class PHOTOSPIDER_API ResultRef final {
       const std::function<Status(std::uint64_t)>& work,
       bool require_complete = true) const;
   Result<ResultRef> rebind_cached(
-      std::string_view scope, const ResourceVector<std::uint64_t>& association,
-      const CancellationToken& cancellation,
+      std::string_view scope, const CancellationToken& cancellation,
       const std::function<Status(std::uint64_t)>& work) const;
   void retire_producer(const Status& failure) const noexcept;
   void bind_producer(std::uint64_t node) const noexcept;
-  Status retain_association(
-      const ResourceVector<std::uint64_t>& inputs,
-      const std::function<Status(std::uint64_t)>& consume_work) const;
 
   struct Impl;
   struct Capture;
@@ -342,18 +310,18 @@ class PHOTOSPIDER_API ResultTensorReadWindow final {
  * source = source_origin + step * (output - output_origin). A negative
  * output_axis or zero step fixes the coordinate. Checked arithmetic preserves
  * the complete uint64 domain, including negative steps. View publication
- * requires extent == 1 and validates the mapped corners against its source.
+ * validates the mapped corners against its source.
  */
 struct PHOTOSPIDER_API ResultViewAxis final {
   std::int32_t output_axis = -1;
   std::uint64_t source_origin = 0;
   std::int64_t step = 1;
-  std::uint64_t extent = 1, output_origin = 0;
+  std::uint64_t output_origin = 0;
   Result<std::uint64_t> source_coordinate(std::uint64_t output) const;
 };
 /** @brief A zero-copy logical tensor transform over an authorized source
  * window. source_axes has one anchored point map per complete source axis,
- * including batch axes. Each extent is one. reshape instead flattens the
+ * including batch axes. reshape instead flattens the
  * complete source window in logical row-major order and repartitions
  * signed/zero contiguous storage chunks into the complete output shape;
  * source_axes must be empty. Neither transform grants samples outside the
@@ -362,6 +330,15 @@ struct PHOTOSPIDER_API ResultViewAxis final {
 struct ResultTensorViewTransform final {
   std::vector<ResultViewAxis> source_axes;
   bool reshape = false;
+};
+/** @brief One explicit affine mapping into a target tensor rectangle.
+ * source is borrowed for the publication call. region uses target coordinates.
+ * The transform includes every source axis and must not request reshape.
+ */
+struct ResultTensorViewPiece final {
+  const ResultTensorReadWindow* source = nullptr;
+  Region region;
+  ResultTensorViewTransform transform;
 };
 /** @brief Borrowed writable runs inside one unpublished tensor rectangle.
  * Coordinates include every batch and cell axis. Only the callback's extent
@@ -424,19 +401,18 @@ class PHOTOSPIDER_API ResultBuilder final {
   ~ResultBuilder() noexcept;
   ResultBuilder(const ResultBuilder&) = delete;
   ResultBuilder& operator=(const ResultBuilder&) = delete;
-  /** @brief Start a producer with ordered source ObjectIds.
-   * Every association id must be nonzero. The builder charges work for the
-   * list and copies it into Root-accounted storage; there is no fixed item
-   * count cap. Capacity or work admission can fail with a typed status.
+  /** @brief Start a producer with a resolved schema and immutable Run scope.
+   * Scope contains 1..4096 bytes. Schema and scope are copied into
+   * Root-accounted storage with capacity and work admission.
    * Spatial backing uses square tiles of tile_extent samples per side, a
    * positive power of two. Execution callbacks pass the query tile extent.
    * An invalid spatial tile extent returns InvalidArgument before allocation.
    */
-  static Result<ResultBuilder> start(
-      ResourceBudget budget, const SchemaTemplate& schema,
-      std::string_view semantic_key, ResultGrowthLimits limits = {},
-      std::vector<std::uint64_t> association = {},
-      std::uint64_t tile_extent = 128);
+  static Result<ResultBuilder> start(ResourceBudget budget,
+                                     const SchemaTemplate& schema,
+                                     std::string_view scope,
+                                     ResultGrowthLimits limits = {},
+                                     std::uint64_t tile_extent = 128);
   ResultRef reference() const noexcept;
   /** @brief Adopt an immutable affine tensor block without copying payload.
    * Only the supplied region is certified. Signed/zero strides are checked
@@ -452,19 +428,21 @@ class PHOTOSPIDER_API ResultBuilder final {
   Status publish_tensor(std::uint32_t slot, const Region& region,
                         ByteView packed,
                         const CancellationToken& cancellation = {});
-  /** @brief Publish ordered authorized planes as an immutable zero-copy view.
-   * Sources cover one physical batch and exactly the output spatial rectangle;
-   * ordered channel ranges are concatenated through checked affine maps.
-   * Fragmented backing and distinct source owners are retained. Input and
-   * output axes must match; explicit transforms support other axis mappings.
-   * Coverage is exact; no sample pages are copied or provisioned. Other
-   * failures are sticky. Overlap fails as for publish_tensor. Source-to-output
-   * cycles are rejected.
+  /** @brief Publish an exact affine partition in one zero-copy transaction.
+   * Nonempty, disjoint piece regions must cover region exactly. Each piece has
+   * an explicit source and transform; reshaping is supported only by the
+   * single-source overload. Atomic publication constraints apply to the whole
+   * target region. Logical validation precedes physical mapping selection.
+   * Success retains all source owners and advances coverage/revision once.
+   * Source payload remains charged to its original Root; target metadata is
+   * admitted independently. Failure preserves prior coverage and captured
+   * prefixes. Only ViewUnavailable is nonsticky and permits a copy retry.
+   * Source-to-output ownership cycles are rejected. Callers synchronize
+   * producer writes; workers must not publish views.
    */
-  Status publish_tensor_view(
-      std::uint32_t slot, const Region& region,
-      const std::vector<const ResultTensorReadWindow*>& sources,
-      const CancellationToken& cancellation = {});
+  Status publish_tensor_view(std::uint32_t slot, const Region& region,
+                             const std::vector<ResultTensorViewPiece>& pieces,
+                             const CancellationToken& cancellation = {});
   /** @brief Publish an immutable affine source view without copying payload.
    * The source window is borrowed for this call. Successful publication retains
    * every Result owner and captured descriptor fact held by the window,
@@ -511,9 +489,9 @@ class PHOTOSPIDER_API ResultBuilder final {
       const std::function<
           Status(const ResourceVector<ResultTensorWriteWindow>&)>& write,
       const CancellationToken& cancellation = {});
-  /** @brief Closes all row constraints after the producer's association checks.
-   * The host checks member coverage against the current execution contract.
-   * Domain-specific numeric/association validation precedes this call.
+  /** @brief Closes structural publication constraints.
+   * The host checks member coverage and registered validators against the
+   * current execution contract.
    */
   Result<ResultRef> seal();
   void fail(Status status) noexcept;
@@ -532,6 +510,23 @@ class PHOTOSPIDER_API ResultBuilder final {
                               const ResourceVector<TensorSpan>& spans,
                               const CancellationToken& cancellation,
                               ResourceVector<ResultRef> sources);
+  Result<Footprint> validate_tensor_view_target(
+      std::uint32_t slot, const Region& region,
+      const CancellationToken& cancellation);
+  Status validate_tensor_view_source(std::uint32_t slot, const Region& region,
+                                     const ResultTensorReadWindow& source,
+                                     const ResultTensorViewTransform& transform,
+                                     const CancellationToken& cancellation);
+  Status prepare_tensor_view(std::uint32_t slot, const Region& region,
+                             const ResultTensorReadWindow& source,
+                             const ResultTensorViewTransform& transform,
+                             ResourceVector<TensorSpan>* mapped,
+                             const CancellationToken& cancellation);
+  Status finish_tensor_view(std::uint32_t slot, const Region& region,
+                            const ResourceVector<TensorSpan>& mapped,
+                            ResourceVector<ResultRef> owners,
+                            const Status& mapping_status,
+                            const CancellationToken& cancellation);
   std::shared_ptr<ResultRef::Impl> impl_;
 };
 }  // namespace ps

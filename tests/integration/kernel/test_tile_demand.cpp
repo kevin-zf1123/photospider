@@ -119,12 +119,8 @@ struct Fixture {
     root = multi_result::take(context->resource_budget());
   }
   ExecutionBindings bindings(std::vector<double> values, double control,
-                             bool padded = false, unsigned tiles = 4) {
+                             unsigned tiles = 4) {
     auto schema = data;
-    if (padded) {
-      schema.tensors[0].layout.order = TensorStorageOrder::Continuous;
-      schema.tensors[0].layout.row_pitch_bytes = 128;
-    }
     auto builder =
         multi_result::take(ResultBuilder::start(root, schema, "source"));
     if (tiles)
@@ -159,7 +155,7 @@ int overlapping_queries() {
   PS_CHECK(initial.value().generation == 1);
   auto frozen = demand.freeze();
   PS_REQUIRE_OK(frozen);
-  auto equivalent = fixture.bindings(values, 0, true);
+  auto equivalent = fixture.bindings(values, 0);
   std::reverse(equivalent.inputs.begin(), equivalent.inputs.end());
   auto equal = demand.replace_bindings(std::move(equivalent));
   PS_REQUIRE_OK(equal);
@@ -202,14 +198,14 @@ int overlapping_queries() {
 int sparse_bindings() {
   const std::vector<double> values{10, 10, 20, 20, 30, 30, 40, 40};
   Fixture sparse;
-  auto demand = multi_result::take(sparse.context->open_demand(
-      sparse.plan, sparse.bindings(values, 0, false, 1)));
+  auto demand = multi_result::take(
+      sparse.context->open_demand(sparse.plan, sparse.bindings(values, 0, 1)));
   PS_REQUIRE_OK(demand.request(sparse.query({0})));
   auto expanded = demand.replace_bindings(sparse.bindings(values, 0));
   PS_REQUIRE_OK(expanded);
   PS_CHECK(expanded.value().potential_dirty.at("result").empty());
   const auto generation = demand.generation().value();
-  auto missing = demand.replace_bindings(sparse.bindings(values, 0, false, 0));
+  auto missing = demand.replace_bindings(sparse.bindings(values, 0, 0));
   PS_CHECK(missing.status().code == ErrorCode::InvalidArgument &&
            demand.generation().value() == generation);
   return 0;

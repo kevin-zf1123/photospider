@@ -96,13 +96,9 @@ struct Program {
       ++control->sources;
     }
     check(phase.consume_work(1));
-    auto builder = take(ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        phase.association
-            ? std::vector<std::uint64_t>(phase.association->begin(),
-                                         phase.association->end())
-            : std::vector<std::uint64_t>{}));
+    auto builder = take(ResultBuilder::start(phase.resources,
+                                             *phase.query.output.result_schema,
+                                             phase.query.semantic_key, {}));
 
     auto made = phase.resources.allocator().allocate(sizeof(number));
     if (!made.ok()) {

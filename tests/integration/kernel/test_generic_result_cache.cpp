@@ -14,7 +14,6 @@
 #include <utility>
 #include <vector>
 
-#include "data/memory_budget.hpp"
 #include "execution/result_cache.hpp"
 #include "execution/structured_result_cache.hpp"
 #include "photospider/photospider.hpp"
@@ -93,7 +92,7 @@ struct CacheProgram {
     if (mode == CacheMode::First) {
       auto window = take(phase.tensors->at({0, 0}).acquire(region));
       ResultTensorViewTransform identity;
-      identity.source_axes = {{0, 0, 1, 1}};
+      identity.source_axes = {{0, 0, 1}};
       check(builder.publish_tensor_view(0, region, window, identity));
     } else {
       double value = mode == CacheMode::Constant ? 2 : 0;
@@ -274,21 +273,20 @@ int result_content_bits() {
 int fragment_lru_storage() {
   using namespace ps;                      // NOLINT(build/namespaces)
   using namespace ps::execution_internal;  // NOLINT(build/namespaces)
-  auto budget = std::make_shared<data_internal::MemoryBudget>(256);
+  ResourceLimits limits;
+  limits.capacity[ResourceKind::Payload] = 256;
+  auto budget = std::make_shared<ResourceBudget>(limits);
   ResultCache cache(24, budget);
   const TensorDescriptor descriptor{ElementType::Float32, {4}};
   const auto make = [&](Region region) {
-    auto reservation =
-        budget->reserve(region.element_count().value() * 4).take_value();
     auto writer =
-        TensorWriter::allocate(descriptor, region, reservation->allocator())
+        TensorWriter::allocate(descriptor, region, budget->allocator())
             .take_value();
     for (std::uint64_t i = 0; i < region.dimensions()[0].extent; ++i) {
       const float value =
           static_cast<float>(region.dimensions()[0].offset + i + 1);
       std::memcpy(writer.data() + i * 4, &value, 4);
     }
-    reservation->seal();
     return std::move(writer).publish().take_value();
   };
   // First fragment retains 16 backing bytes despite its 8-byte logical region.
@@ -456,68 +454,10 @@ int diamond_cache_support() {
   PS_CHECK(std::find(dirty.begin(), dirty.end(), unit) != dirty.end());
   return 0;
 }
-int concurrent_reclamation() {
-  using namespace ps;  // NOLINT(build/namespaces)
-  // Admission must reclaim entries created while it was waiting. Use exact
-  // accounted bytes and a barrier in the reclaimer, without timing sleeps.
-  std::mutex mutex;
-  std::condition_variable cv;
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  auto budget = std::make_shared<data_internal::MemoryBudget>(16);
-  auto a_work = budget->reserve(8).take_value();
-  auto make_value = [](const BufferAllocator& allocator) {
-    return TensorWriter::allocate({ElementType::Float32, {1, 1}},
-                                  Region::whole({1, 1}), allocator)
-        .take_value();
-  };
-  auto retained_a = budget->reserve(4).take_value();
-  auto a_result = make_value(retained_a->allocator());
-  retained_a->seal();
-  auto retained_b = budget->reserve(4).take_value();
-  auto b_result = make_value(retained_b->allocator());
-  retained_b->seal();
-  auto cached_value = make_value(a_work->allocator());
-  std::atomic<unsigned> reclamations{0};
-  bool first_reclaim = false, admission_continue = false;
-  auto waiting = std::async(std::launch::async, [&] {
-    return budget->reserve(
-        8,
-        [&] {
-          return std::chrono::steady_clock::now() < deadline
-                     ? ErrorCode::Ok
-                     : ErrorCode::Cancelled;
-        },
-        {},
-        [&] {
-          if (++reclamations == 1) {
-            std::unique_lock<std::mutex> lock(mutex);
-            first_reclaim = true;
-            cv.notify_all();
-            cv.wait(lock, [&] { return admission_continue; });
-          } else {
-            cached_value = {};
-          }
-        });
-  });
-  {
-    std::unique_lock<std::mutex> lock(mutex);
-    cv.wait_until(lock, deadline, [&] { return first_reclaim; });
-    a_work->seal();
-    admission_continue = true;
-  }
-  cv.notify_all();
-  auto admitted = waiting.get();
-  PS_CHECK(admitted.ok() && reclamations >= 2);
-  admitted.value()->seal();
-
-  return 0;
-}
 }  // namespace
 int main() {
   PS_CHECK(cache_retains_resource_root() == 0);
   PS_CHECK(opaque_result_cache_preservation() == 0);
-  PS_CHECK(concurrent_reclamation() == 0);
   PS_CHECK(result_content_bits() == 0);
   PS_CHECK(fragment_lru_storage() == 0);
   PS_CHECK(cache_shared_route_budget() == 0);

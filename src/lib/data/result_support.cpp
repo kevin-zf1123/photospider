@@ -7,18 +7,10 @@
 
 namespace ps::data_internal {
 Status invalid_schema() {
-  return Status{ErrorCode::TypeMismatch,
-                "invalid structured result schema or association"};
+  return Status{ErrorCode::TypeMismatch, "invalid structured result schema"};
 }
 Status unavailable() {
   return Status{ErrorCode::NotFound, "structured result range is incomplete"};
-}
-Result<std::uint64_t> scaled(const ResultExtent& extent, std::uint64_t count) {
-  count = count / extent.divisor + (count % extent.divisor != 0);
-  if (!core_internal::can_add(count, extent.offset))
-    return Result<std::uint64_t>(
-        Status{ErrorCode::ResourceExhausted, "result extent overflow"});
-  return Result<std::uint64_t>(count + extent.offset);
 }
 Status tensor_topology(const ResultTensorSpec& spec) {
   const auto rank = spec.descriptor.shape.size();

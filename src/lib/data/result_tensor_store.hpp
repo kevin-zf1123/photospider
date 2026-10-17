@@ -17,8 +17,6 @@ struct ResultTensorBacking {
   ResourceVector<ResultRef> affine_owners;
   ResourceVector<std::shared_ptr<void>> affine_growth;
   Status initialize(const ResourceBudget& budget, const ResultTensorSpec& spec,
-                    const std::shared_ptr<TensorBudget>& page_budget,
-                    const ResultGrowthLimits& limits,
                     std::uint64_t tile_extent);
 };
 }  // namespace ps::data_internal

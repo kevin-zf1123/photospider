@@ -163,8 +163,7 @@ Result<SchemaTemplate> lut3d_bake_schema(const Lut3dBakeDescription& spec) {
     return Result<SchemaTemplate>(checked);
   SchemaTemplate schema;
   schema.id = "curve.bake_lut3d.report";
-  schema.version = 2;
-  schema.domain = {{ResultExtentKind::Fixed, 1}};
+  schema.version = 3;
   const auto add = [&](const char* key, ElementType dtype,
                        std::vector<std::uint64_t> shape, unsigned atomic) {
     ResultTensorSpec member;
@@ -195,10 +194,7 @@ Result<SchemaTemplate> lut3d_bake_table_schema(
     return made;
   auto schema = made.take_value();
   schema.id = "curve.bake_lut3d.table";
-  schema.domain.clear();
-  schema.version = 2;
-  for (auto n : spec.shape)
-    schema.domain.push_back({ResultExtentKind::Fixed, n});
+  schema.version = 3;
   schema.tensors.clear();
   ResultTensorSpec tensor;
   tensor.key = "colors";

@@ -170,9 +170,8 @@ int image_pages() {
     auto seen = std::make_shared<core_internal::PayloadObservation>();
     core_internal::ResourcePayloadScope scope(root, {seen});
     {
-      auto builder =
-          ResultBuilder::start(root, image_schema(), "page", {}, {}, 1)
-              .take_value();
+      auto builder = ResultBuilder::start(root, image_schema(), "page", {}, 1)
+                         .take_value();
 
       const auto region = Region::whole({2, 4});
       bool entered = false;

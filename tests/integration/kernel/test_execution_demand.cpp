@@ -66,7 +66,7 @@ ResultRef source(const ResourceBudget& root, const TensorSpan& backing) {
   schema.tensors[0].layout.spatial = true;
   schema.tensors[0].layout.channel_axis.reset();
   auto builder = multi_result::take(
-      ResultBuilder::start(root, schema, "test.source", {}, {}, 1));
+      ResultBuilder::start(root, schema, "test.source", {}, 1));
 
   multi_result::check(builder.publish_tensor(
       0, backing.region(), backing.layout(),
@@ -327,10 +327,6 @@ struct GatedProgram {
     }
     auto builder = multi_result::take(ResultBuilder::start(
         phase.resources, schema, phase.query.semantic_key, {},
-        phase.association
-            ? std::vector<std::uint64_t>(phase.association->begin(),
-                                         phase.association->end())
-            : std::vector<std::uint64_t>{},
         phase.query.tile_extent));
 
     const double effect = effects ? ++*effects : 0;
@@ -1377,8 +1373,6 @@ int content_cache() {
                .empty());
   auto unchanged = demand.request(query);
   PS_CHECK(unchanged.ok() && unchanged.value().diagnostics.cache_hits > 0);
-  PS_CHECK(unchanged.value().results.at("sum").association() !=
-           first.value().results.at("sum").association());
   // Cached and freshly computed rows must merge under the current identity.
   auto mixed = demand.request(
       {{"sum",
@@ -1494,13 +1488,6 @@ int structured_content_cache() {
            warm.value().diagnostics.operation_timings.empty());
   auto held = warm.value().results.at("sum");
   PS_CHECK(held.object_id() != first_id);
-  const auto association = held.association();
-  PS_CHECK(association.size() == 4);
-  for (std::size_t tile = 0; tile < 2; ++tile) {
-    PS_CHECK(association[tile * 2] == bindings.inputs[0].result.object_id());
-    PS_CHECK(association[tile * 2 + 1] ==
-             bindings.inputs[1].result.object_id());
-  }
   auto window = held.acquire_tensor(held.descriptor().take_value(), 0,
                                     Region({{0, 1}, {0, 1}}))
                     .take_value();

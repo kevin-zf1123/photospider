@@ -36,8 +36,8 @@ void data_workflow() {
   const auto compiled = checked(Compiler(operations).compile(graph, options));
   ExecutionContext execution(operations, {1, false, 8, 65536});
   const auto root = checked(execution.resource_budget());
-  auto builder = checked(
-      ResultBuilder::start(root, schema, "dependency.sparse", {}, {}, 1));
+  auto builder =
+      checked(ResultBuilder::start(root, schema, "dependency.sparse", {}, 1));
   for (const auto coordinate : {UINT64_C(1), width - 2}) {
     const double value = static_cast<double>(coordinate);
     auto bytes = checked(root.allocator().allocate(sizeof(value)));

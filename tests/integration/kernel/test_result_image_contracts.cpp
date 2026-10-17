@@ -32,7 +32,7 @@ void zero(const ResourceBudget& root) {
 }
 ResultRef image(const ResourceBudget& root, const SchemaTemplate& schema,
                 float bias = 0, uint32_t biased_slot = UINT32_MAX) {
-  auto made = ResultBuilder::start(root, schema, "source", {}, {}, 1);
+  auto made = ResultBuilder::start(root, schema, "source", {}, 1);
   require(made.ok(), made.status().message);
   auto builder = made.take_value();
 
@@ -99,8 +99,8 @@ void resource_admission() {
     schema.tensors[0].batch_axes[0] = 3;
     schema.tensors[0].batch_axes[1] = 1;
     schema.tensors[0].descriptor.shape = {1, 1};
-    auto builder = ResultBuilder::start(pages, schema, "transaction", {}, {}, 1)
-                       .take_value();
+    auto builder =
+        ResultBuilder::start(pages, schema, "transaction", {}, 1).take_value();
 
     float value = 4;
     require(builder
@@ -177,7 +177,7 @@ struct Join {
     }
     auto builder = ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, {}, phase.query.tile_extent);
+        phase.query.semantic_key, {}, phase.query.tile_extent);
     if (!builder.ok())
       return Result<ResultProgramPoll>(builder.status());
     auto output = builder.take_value();
@@ -489,7 +489,6 @@ struct ChunkObserver {
   std::vector<WeakResultRef> produced;
   uint64_t maximum_live = 0;
   bool keep_first = false;
-  bool foreign_association = false;
   uint64_t fail_at = UINT64_MAX;
 };
 struct ChunkCopy {
@@ -510,11 +509,10 @@ struct ChunkCopy {
     if (at == observer->fail_at)
       return Result<ResultProgramPoll>(
           Status{ErrorCode::OperationFailed, "deliberate chunk failure"});
-    auto builder =
-        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key, {}, {},
-                             phase.query.tile_extent)
-            .take_value();
+    auto builder = ResultBuilder::start(
+                       phase.resources, *phase.query.output.result_schema,
+                       phase.query.semantic_key, {}, phase.query.tile_extent)
+                       .take_value();
     Status status;
     double value = 0;
     status = phase.read_tensor(0, 0, {0, at}, &value, 8);
@@ -588,21 +586,10 @@ struct ChunkSum {
       waiting = true;
       return Result<ResultProgramPoll>(std::move(need));
     }
-    require(
-        phase.association && phase.association->size() == count,
-        "all successful chunk object associations survive payload retirement");
-    std::vector<uint64_t> association(phase.association->begin(),
-                                      phase.association->end());
-    if (observer->keep_first) {
-      std::reverse(association.begin(), association.end());
-      association.push_back(association.front());
-    }
-    if (observer->foreign_association)
-      association.push_back(UINT64_MAX);
-    auto builder = ResultBuilder::start(
-                       phase.resources, *phase.query.output.result_schema,
-                       phase.query.semantic_key, {}, std::move(association))
-                       .take_value();
+    auto builder =
+        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
+                             phase.query.semantic_key, {})
+            .take_value();
     Status status;
     status = builder.publish_tensor(
         0, Region::whole({1}),
@@ -614,11 +601,10 @@ struct ChunkSum {
   }
 };
 void staged_input_retirement() {
-  for (const auto mode : {0U, 1U, 2U, 3U}) {
+  for (const auto mode : {0U, 1U, 2U}) {
     const uint64_t count = mode == 0 ? 1030 : 32;
     auto observer = std::make_shared<ChunkObserver>();
     observer->keep_first = mode == 1;
-    observer->foreign_association = mode == 3;
     if (mode == 2)
       observer->fail_at = 17;
     auto schema =
@@ -698,9 +684,6 @@ void staged_input_retirement() {
                     result.status().code == ErrorCode::OperationFailed &&
                     result.status().detail.node_id == 1,
                 "failed chunk preserves producer provenance");
-      } else if (mode == 3) {
-        require(!result.ok() && result.status().code == ErrorCode::TypeMismatch,
-                "unobserved association is rejected after membership check");
       } else {
         require(result.ok(), result.status().message);
         auto output = result.value().results.at("out");
@@ -708,9 +691,8 @@ void staged_input_retirement() {
         require(output.read_tensor(output.descriptor().take_value(), 0, {0},
                                    &sum, 8)
                         .ok() &&
-                    sum == count && output.association().size() == count,
-                "public workflow completes chunk sum with full historical "
-                "association");
+                    sum == count,
+                "public workflow completes chunk sum");
         for (uint64_t edited : {uint64_t{0}, count / 2, count - 1}) {
           auto units = dirty(result.value().dependencies, root, edited);
           require(units.size() == 2 && units.back() == TileUnit{1, 0, 0},
@@ -757,9 +739,9 @@ struct BlockProgram {
       auto schema = chunk_schema(1, ElementType::Float64, "test.block.state");
       if (observer->mode == 10)
         schema.tensors[0].descriptor.shape = {1, 4};
-      auto builder = ResultBuilder::start(phase.resources, schema,
-                                          "block.state", {}, {}, 128)
-                         .take_value();
+      auto builder =
+          ResultBuilder::start(phase.resources, schema, "block.state", {}, 128)
+              .take_value();
 
       const double colors[] = {number / 10, 0, 0, 0};
       require(
@@ -856,11 +838,10 @@ struct BlockProgram {
     }
     // Ignore any service error deliberately; the enclosing publication must
     // still report its original sticky cause.
-    auto builder =
-        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key, {}, {},
-                             phase.query.tile_extent)
-            .take_value();
+    auto builder = ResultBuilder::start(
+                       phase.resources, *phase.query.output.result_schema,
+                       phase.query.semantic_key, {}, phase.query.tile_extent)
+                       .take_value();
 
     require(builder
                 .publish_tensor(
@@ -1026,9 +1007,6 @@ struct CheckpointSum {
       if (!prior.ok())
         return Answer(prior.status());
       if (prior.value()) {
-        require(phase.association &&
-                    phase.association->size() == prior.value()->sequence() + 1,
-                "checkpoint restoration refreshes same-poll association");
         observer->retained = *prior.value();
         auto facts = prior.value()->state().descriptor();
         if (!facts.ok())
@@ -1099,11 +1077,10 @@ struct CheckpointSum {
       waiting = true;
       return Answer(std::move(need));
     }
-    auto builder =
-        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key, {}, {},
-                             phase.query.tile_extent)
-            .take_value();
+    auto builder = ResultBuilder::start(
+                       phase.resources, *phase.query.output.result_schema,
+                       phase.query.semantic_key, {}, phase.query.tile_extent)
+                       .take_value();
     Status status;
     status = builder.publish_tensor(
         0, region, ByteView(reinterpret_cast<const uint8_t*>(&carry), 8));
@@ -1118,11 +1095,10 @@ struct DynamicCheckpointSource {
       std::shared_ptr<std::atomic<unsigned>> counter)
       : calls(std::move(counter)) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    auto builder =
-        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key, {}, {},
-                             phase.query.tile_extent)
-            .take_value();
+    auto builder = ResultBuilder::start(
+                       phase.resources, *phase.query.output.result_schema,
+                       phase.query.semantic_key, {}, phase.query.tile_extent)
+                       .take_value();
     Status status;
     const auto base = ++*calls;
     std::array<double, 8> values{};
@@ -1536,7 +1512,7 @@ void tuple_structure() {
     image.descriptor = {ElementType::Float32, {2, 4, channels}};
     image.layout.channel_axis = 2;
     image.atomic_trailing_axes = 1;
-    require(schema.validate(true).ok(), "arbitrary channel count");
+    require(schema.validate().ok(), "arbitrary channel count");
     auto q = Footprint::from_regions(
                  {2, 2, 2, 4, channels},
                  {Region({{1, 1}, {0, 1}, {1, 1}, {2, 1}, {0, 1}})})
@@ -1550,7 +1526,7 @@ void tuple_structure() {
   image.layout.channel_axis = 0;
   image.layout.height_axis = 1;
   image.layout.width_axis = 2;
-  require(schema.validate(true).ok(), "channel-first spatial slot");
+  require(schema.validate().ok(), "channel-first spatial slot");
   auto q =
       Footprint::from_regions(
           {2, 2, 6, 2, 4}, {Region({{1, 1}, {0, 1}, {2, 1}, {1, 1}, {2, 1}})})

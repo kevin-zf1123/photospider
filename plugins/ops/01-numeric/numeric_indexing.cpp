@@ -153,7 +153,7 @@ struct ConcatenateKernel final {
         transform.source_axes.resize(rank);
         for (size_t dimension = 0; dimension < rank; ++dimension)
           transform.source_axes[dimension] = {
-              static_cast<int32_t>(dimension), 0, 1, 1,
+              static_cast<int32_t>(dimension), 0, 1,
               dimension == axis ? prefixes[port] : 0};
         auto status = builder.publish_tensor_view(
             0, Region(std::move(dimensions)), windows[port], transform,

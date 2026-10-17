@@ -35,11 +35,9 @@ struct State {
         return Result<ResultProgramPoll>(
             Status{ErrorCode::Internal, "source read"});
     }
-    auto builder = take(ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        std::vector<std::uint64_t>(phase.association->begin(),
-                                   phase.association->end())));
+    auto builder = take(ResultBuilder::start(phase.resources,
+                                             *phase.query.output.result_schema,
+                                             phase.query.semantic_key, {}));
 
     const double number = 19;
     check(builder.publish_tensor(

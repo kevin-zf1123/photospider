@@ -42,7 +42,7 @@ struct ScalarPreludeState {
         if (!window.ok())
           return Result<ResultProgramPoll>(window.status());
         ResultTensorViewTransform transform;
-        transform.source_axes = {{0, 0, 1, 1}};
+        transform.source_axes = {{0, 0, 1}};
         status = builder.publish_tensor_view(slot, Region::whole({1}),
                                              window.value(), transform);
       } else {

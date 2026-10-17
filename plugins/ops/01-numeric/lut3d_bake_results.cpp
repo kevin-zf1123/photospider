@@ -249,9 +249,9 @@ struct MeasureState {
         const auto bits = value.value();
         std::memcpy(&report.max_abs_error[c], &bits, 8);
       }
-      auto made = ResultBuilder::start(
-          phase.resources, *phase.query.output.result_schema,
-          phase.query.semantic_key, {}, {table.object_id()});
+      auto made = ResultBuilder::start(phase.resources,
+                                       *phase.query.output.result_schema,
+                                       phase.query.semantic_key, {});
       if (!made.ok())
         return Poll(made.status());
       builder = made.take_value();
@@ -344,11 +344,7 @@ struct TensorViewState {
     const auto& schema = *phase.query.output.result_schema;
     const auto& shape = schema.tensors[0].sample_shape();
     auto builder = math_take(ResultBuilder::start(
-        phase.resources, schema, phase.query.semantic_key, {},
-        phase.association
-            ? std::vector<std::uint64_t>(phase.association->begin(),
-                                         phase.association->end())
-            : std::vector<std::uint64_t>{}));
+        phase.resources, schema, phase.query.semantic_key, {}));
     if (!output.empty()) {
       const auto& input = phase.tensors->at({0, 0});
       std::uint64_t measured = 0;
@@ -547,7 +543,7 @@ OperationDefinition operation(Kind kind) {
   const auto object = [&](unsigned port, const char* id) {
     traits.input_schema[port].element_type_mask = 0;
     traits.input_schema[port].result_schema_id = id;
-    traits.input_schema[port].result_schema_version = 2;
+    traits.input_schema[port].result_schema_version = 3;
   };
   if (kind == Kind::Measure)
     object(2, "curve.bake_lut3d.table");

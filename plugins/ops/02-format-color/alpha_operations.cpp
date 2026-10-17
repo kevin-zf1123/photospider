@@ -74,8 +74,7 @@ Map mapping(const Preparation& state,
 }
 bool same_axis(const ResultViewAxis& a, const ResultViewAxis& b) {
   return a.output_axis == b.output_axis && a.source_origin == b.source_origin &&
-         a.step == b.step && a.extent == b.extent &&
-         a.output_origin == b.output_origin;
+         a.step == b.step && a.output_origin == b.output_origin;
 }
 std::optional<Map> merge_map(const Map& first, const Map& second,
                              std::uint32_t output_axis, std::uint64_t start) {
@@ -91,7 +90,7 @@ std::optional<Map> merge_map(const Map& first, const Map& second,
     } else {
       const auto delta =
           static_cast<__int128>(b.source_origin) - a.source_origin;
-      if (delta < -1 || delta > 1 || a.extent != b.extent)
+      if (delta < -1 || delta > 1)
         return {};
       if (delta) {
         result.axes[i].output_axis = output_axis;
@@ -112,8 +111,7 @@ bool matches_map(const Map& merged, const Map& item, std::uint32_t output_axis,
     if (a.output_axis == static_cast<std::int32_t>(output_axis) &&
         b.output_axis < 0) {
       auto coordinate = a.source_coordinate(channel);
-      if (!coordinate.ok() || coordinate.value() != b.source_origin ||
-          a.extent != b.extent)
+      if (!coordinate.ok() || coordinate.value() != b.source_origin)
         return false;
     } else if (!same_axis(a, b)) {
       return false;
@@ -630,9 +628,6 @@ ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto result = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
-      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
-                                                     phase.association->end())
-                        : std::vector<std::uint64_t>{},
       phase.query.tile_extent));
   return result;
 }

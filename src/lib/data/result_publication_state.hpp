@@ -19,14 +19,13 @@ struct ResultPublicationState {
   explicit ResultPublicationState(ResourceBudget value)
       : budget(std::move(value)) {}
   ResourceBudget budget;
-  ResourceLease lease, cache_metadata;
+  ResourceLease lease;
   mutable std::timed_mutex mutex;
   SchemaTemplate schema;
-  ResourceString key;
-  ResourceVector<std::uint64_t> association;
+  ResourceString scope;
   std::shared_ptr<TensorBudget> image_budget;
   ResultGrowthLimits limits;
-  std::uint64_t object = 0, revision = 1, bytes = 0;
+  std::uint64_t object = 0, revision = 1;
   core_internal::StoredFailure failure;
   std::atomic<bool> cancelled_publication{false};
   std::atomic<bool> kernel_active{false};
@@ -47,6 +46,6 @@ struct ResultPublicationState {
     return cancelled_publication.load() ? Status{ErrorCode::Cancelled, {}}
                                         : Status::success();
   }
-  bool complete = false, owners_bound = false;
+  bool complete = false;
 };
 }  // namespace ps::data_internal

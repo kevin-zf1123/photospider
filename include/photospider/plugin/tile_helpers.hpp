@@ -184,7 +184,7 @@ inline Result<TileNeed> tile_need_for_samples(const ResourceBudget& root,
         Status{ErrorCode::InvalidArgument, "invalid tile Need domain"});
   if (descriptor_only)
     return Answer(TileNeed{input, 0, true, {}});
-  std::optional<TileGrid> grid;
+  TileGrid grid;
   if (query.input_tile_grids.empty()) {
     auto declared = TileGrid::from_schema(schema, query.tile_extent, slot);
     if (!declared.ok())
@@ -198,7 +198,7 @@ inline Result<TileNeed> tile_need_for_samples(const ResourceBudget& root,
       return Answer(Status{ErrorCode::InvalidArgument, "missing member grid"});
     grid = query.input_tile_grids[input][slot];
   }
-  auto tiles = tiles_for_samples(root, *grid, samples);
+  auto tiles = tiles_for_samples(root, grid, samples);
   if (!tiles.ok())
     return Answer(tiles.status());
   return Answer(TileNeed{input, slot, false, tiles.take_value()});

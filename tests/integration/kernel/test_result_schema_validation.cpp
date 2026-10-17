@@ -14,7 +14,7 @@ struct Producer {
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, {}, phase.query.tile_extent));
+        phase.query.semantic_key, {}, phase.query.tile_extent));
     const auto region = phase.query.tensor_outputs->boxes().front();
     check(builder.publish_tensor_kernel(
         phase.query.tensor_slot, region, [](const auto& windows) {

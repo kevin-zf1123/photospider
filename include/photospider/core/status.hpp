@@ -63,27 +63,15 @@ enum class FailureOrigin {
   Cancellation,
   Protocol
 };
-enum class FailureScope {
-  Unspecified = 0,
-  Atom,
-  ValidationDomain,
-  Association,
-  Group,
-  Run,
-  Waiter
-};
+enum class FailureScope { Unspecified = 0, Atom, Group = 4, Run, Waiter };
 /** @brief Structured context paired with Status::code/reason. Unspecified is
  * the legacy category-only projection, not a claim of per-atom semantics.
  * Atom failures name exactly one key. Group/Run/Waiter failures have no atom.
- * ValidationDomain names a fixed logical domain; Association names an immutable
- * Result ObjectId. A coordinate batch validates these fields before commit.
  */
 struct FailureDetail final {
   FailureOrigin origin = FailureOrigin::Unspecified;
   FailureScope scope = FailureScope::Unspecified;
   std::optional<AtomKey> atom = {};
-  std::optional<AtomDomain> domain = {};
-  std::uint64_t association = 0;
   /** @brief Host-bound producing Workflow node; zero for a direct session or
    * Run/waiter failure outside a node. Propagation preserves this origin.
    */

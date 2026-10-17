@@ -5,7 +5,6 @@
 #include <string>
 #include <utility>
 
-#include "data/memory_budget.hpp"
 #include "execution/execution_bindings.hpp"
 #include "execution/execution_context_state.hpp"
 #include "execution/result_run.hpp"
@@ -46,7 +45,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     return failure(Status{stop(), {}});
   try {
     auto validated = preflight_regional_bindings(plan, bindings, cancellation,
-                                                 *impl_->budget->resources());
+                                                 *impl_->budget);
     if (!validated.ok())
       return failure(validated.status());
     return execution_internal::run_result_plan(

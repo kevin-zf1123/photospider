@@ -61,11 +61,9 @@ struct Scale {
                phase.query.input_tile_grids[0][0].tile_count()))});
       return Result<ResultProgramPoll>(std::move(need));
     }
-    auto builder = multi_result::take(ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        std::vector<std::uint64_t>(phase.association->begin(),
-                                   phase.association->end())));
+    auto builder = multi_result::take(
+        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
+                             phase.query.semantic_key, {}));
 
     for (const auto& box : demand.boxes()) {
       if (host) {
@@ -83,7 +81,7 @@ struct Scale {
         ResultTensorViewTransform transform;
         for (unsigned axis = 0; axis < spec.sample_shape().size(); ++axis)
           transform.source_axes.push_back(
-              {static_cast<std::int32_t>(axis), 0, 1, 1});
+              {static_cast<std::int32_t>(axis), 0, 1});
         multi_result::check(
             builder.publish_tensor_view(0, box, window, transform));
         continue;

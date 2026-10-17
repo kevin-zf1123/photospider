@@ -48,13 +48,9 @@ struct TensorProgram {
       return Result<ResultProgramPoll>(
           Status{ErrorCode::ResourceExhausted, "bounded semantic fixture"});
     check(phase.consume_work(count));
-    auto builder = take(ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        phase.association
-            ? std::vector<std::uint64_t>(phase.association->begin(),
-                                         phase.association->end())
-            : std::vector<std::uint64_t>{}));
+    auto builder = take(ResultBuilder::start(phase.resources,
+                                             *phase.query.output.result_schema,
+                                             phase.query.semantic_key, {}));
     const auto width = TensorSpan::element_size(spec.descriptor.element_type);
     for (const auto& box : demand.boxes()) {
       const auto size = take(box.element_count());
@@ -269,46 +265,44 @@ int inference() {
   for (unsigned count = 1; count <= 4; ++count) {
     std::vector<OperationMetadata> inputs(count, field);
     auto traits =
-        inference_registry.resolve_traits("test.repeated", inputs, {});
-    PS_CHECK(traits.ok() && traits.value().repeated_resolved == count);
-    auto inferred = infer_operation_output(traits.value(), inputs, {});
+        inference_registry.prepare_operation("test.repeated", inputs, {});
+    PS_CHECK(traits.ok() &&
+             traits.value()->traits().repeated_resolved == count);
+    auto inferred =
+        infer_operation_output(traits.value()->traits(), inputs, {});
     PS_CHECK(inferred.ok() &&
              inferred.value().result_schema->tensors[0].descriptor.shape ==
                  (std::vector<std::uint64_t>{2, 4, count}));
   }
-  auto resolved = inference_registry.resolve_traits("test.repeated",
-                                                    {field, field, field}, {});
-  PS_CHECK(resolved.ok() && resolved.value().input_schema.size() == 3);
+  auto resolved = inference_registry.prepare_operation(
+      "test.repeated", {field, field, field}, {});
+  PS_CHECK(resolved.ok() &&
+           resolved.value()->traits().input_schema.size() == 3);
   const auto wrong =
       metadata(multi_result::schema(ElementType::Float32, {2, 5}));
   PS_CHECK(inference_registry
-               .resolve_traits("test.repeated", {field, wrong, field}, {})
+               .prepare_operation("test.repeated", {field, wrong, field}, {})
                .status()
                .code == ErrorCode::TypeMismatch);
-  PS_CHECK(!inference_registry.resolve_traits("test.repeated", {}, {}).ok());
+  PS_CHECK(!inference_registry.prepare_operation("test.repeated", {}, {}).ok());
   PS_CHECK(!inference_registry
-                .resolve_traits("test.repeated",
-                                {field, field, field, field, field}, {})
+                .prepare_operation("test.repeated",
+                                   {field, field, field, field, field}, {})
                 .ok());
-  auto overflow_traits = resolved.value();
-  auto& overflow_schema = *overflow_traits.outputs[0].result_schema;
-  overflow_schema.domain = {
-      {ResultExtentKind::InputAxis, 1, 0, 0, 1, UINT64_MAX}};
-  PS_CHECK(infer_operation_output(overflow_traits, {field, field, field}, {})
-               .status()
-               .code == ErrorCode::ResourceExhausted);
   auto preserve =
       copy_definition("test.widen", *field.result_schema, false, true);
   PS_CHECK(inference_registry.register_operation(preserve).ok());
   auto independent =
-      inference_registry.resolve_traits("test.widen", {field}, {});
+      inference_registry.prepare_operation("test.widen", {field}, {});
   PS_CHECK(independent.ok() &&
            independent.value()
+                   ->traits()
                    .outputs[0]
                    .result_schema->tensors[0]
                    .descriptor.shape ==
                field.result_schema->tensors[0].descriptor.shape &&
            independent.value()
+                   ->traits()
                    .outputs[0]
                    .result_schema->tensors[0]
                    .descriptor.element_type == ElementType::Float64);
@@ -621,10 +615,10 @@ int c_contract() {
   }
 #ifdef PS_BAD_CONTRACT_1
   for (const auto* path :
-       {PS_BAD_CONTRACT_1, PS_BAD_CONTRACT_2, PS_BAD_CONTRACT_3,
-        PS_BAD_CONTRACT_5, PS_BAD_CONTRACT_6, PS_BAD_CONTRACT_7,
-        PS_BAD_CONTRACT_8, PS_BAD_CONTRACT_9, PS_BAD_CONTRACT_10,
-        PS_BAD_CONTRACT_11, PS_BAD_CONTRACT_12}) {
+       {PS_BAD_CONTRACT_1, PS_BAD_CONTRACT_3, PS_BAD_CONTRACT_5,
+        PS_BAD_CONTRACT_6, PS_BAD_CONTRACT_7, PS_BAD_CONTRACT_8,
+        PS_BAD_CONTRACT_9, PS_BAD_CONTRACT_10, PS_BAD_CONTRACT_11,
+        PS_BAD_CONTRACT_12}) {
     OperationRegistry malformed;
     auto rejected = malformed.load_plugin(path);
     PS_CHECK(rejected.code == ErrorCode::InvalidArgument);

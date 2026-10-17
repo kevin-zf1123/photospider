@@ -246,12 +246,8 @@ int portable_routes() {
   return 0;
 }
 ExecutionBinding input_image(const Fixture& fixture, const ResourceBudget& root,
-                             bool padded, bool edit_unused) {
+                             bool edit_unused) {
   auto schema = fixture.image;
-  if (padded) {
-    schema.tensors[0].layout.order = TensorStorageOrder::Continuous;
-    schema.tensors[0].layout.row_pitch_bytes = 64;
-  }
   auto builder =
       multi_result::take(ResultBuilder::start(root, schema, "input"));
   std::vector<double> values(8, 1);
@@ -278,7 +274,7 @@ int semantic_tile_proof() {
       ResourceAllocator<execution_internal::TileCacheSource>(root)};
   sources.push_back({ResourceString("image", ResourceAllocator<char>(root)),
                      false, TileSet::from_indices(root, {0}).take_value()});
-  auto full = input_image(fixture, root, false, false);
+  auto full = input_image(fixture, root, false);
   auto expected = proof.tile_source_digest(plan, {full}, sources);
   PS_REQUIRE_OK(expected);
   auto builder =
@@ -297,13 +293,13 @@ int semantic_tile_proof() {
   PS_CHECK(expected.value() == growing.value() &&
            growing.value() == sealed.value());
   auto edited = proof.tile_source_digest(
-      plan, {input_image(fixture, root, true, true)}, sources);
+      plan, {input_image(fixture, root, true)}, sources);
   PS_REQUIRE_OK(edited);
   PS_CHECK(edited.value() != expected.value());
   sources[0].tiles = {};
   auto descriptor = proof.tile_source_digest(plan, {full}, sources);
   auto changed_bytes = proof.tile_source_digest(
-      plan, {input_image(fixture, root, true, true)}, sources);
+      plan, {input_image(fixture, root, true)}, sources);
   auto partial_descriptor =
       proof.tile_source_digest(plan, {{"image", partial}}, sources);
   PS_REQUIRE_OK(descriptor);
@@ -317,15 +313,15 @@ int binding_changes() {
   Fixture fixture;
   const auto plan = fixture.plan(false);
   ResourceBudget root;
-  const ExecutionBindings original{{input_image(fixture, root, false, false)}};
-  const ExecutionBindings padded{{input_image(fixture, root, true, false)}};
-  const ExecutionBindings edited{{input_image(fixture, root, true, true)}};
+  const ExecutionBindings original{{input_image(fixture, root, false)}};
+  const ExecutionBindings equivalent{{input_image(fixture, root, false)}};
+  const ExecutionBindings edited{{input_image(fixture, root, true)}};
   ResourceVector<TileDependency> observed{
       ResourceAllocator<TileDependency>(root)};
   observed.push_back(
       {PlanWorkflowInput{0}, 0, 0, TileSet::range(root, 0, 2).take_value()});
-  auto equal = execution_internal::tile_binding_changes(plan, original, padded,
-                                                        observed, root, {});
+  auto equal = execution_internal::tile_binding_changes(
+      plan, original, equivalent, observed, root, {});
   PS_REQUIRE_OK(equal);
   PS_CHECK(equal.value().empty());
   auto changed = execution_internal::tile_binding_changes(
@@ -349,7 +345,7 @@ int binding_changes() {
   SnapshotAccessOptions bounded;
   bounded.maximum_samples = 1;
   auto refused = execution_internal::tile_binding_changes(
-      plan, original, padded, observed, root, bounded);
+      plan, original, equivalent, observed, root, bounded);
   PS_CHECK(refused.status().code == ErrorCode::ResourceExhausted);
   observed.clear();
   observed.push_back({PlanWorkflowInput{0}, 0, false, {}});
@@ -376,8 +372,8 @@ int binding_changes() {
   observed.resize(1);
   fixture.image.tensors[0].layout.spatial = false;
   const auto whole_plan = fixture.plan(false);
-  const ExecutionBindings a{{input_image(fixture, root, false, false)}};
-  const ExecutionBindings b{{input_image(fixture, root, false, true)}};
+  const ExecutionBindings a{{input_image(fixture, root, false)}};
+  const ExecutionBindings b{{input_image(fixture, root, true)}};
   observed[0] = {PlanWorkflowInput{0}, 0, 0,
                  TileSet::range(root, 0, 2).take_value()};
   auto whole = execution_internal::tile_binding_changes(whole_plan, a, b,
@@ -401,12 +397,12 @@ int cached_execution() {
   ExecutionContext context(fixture.operations, config);
   auto root = context.resource_budget().take_value();
   auto other = multi_result::binding(root, "other", 2, fixture.image);
-  auto first = context.execute(
-      original, {{input_image(fixture, root, false, false), other}});
+  auto first =
+      context.execute(original, {{input_image(fixture, root, false), other}});
   PS_REQUIRE_OK(first);
   PS_CHECK(fixture.consumer_starts == 1);
-  auto reused = context.execute(
-      changed, {{other, input_image(fixture, root, true, false)}});
+  auto reused =
+      context.execute(changed, {{other, input_image(fixture, root, false)}});
   PS_REQUIRE_OK(reused);
   PS_CHECK(fixture.consumer_starts == 1);
   const auto& old_value = first.value().results.at("result");
@@ -443,15 +439,15 @@ int cached_execution() {
   PS_CHECK(dirty.value().size() == 2 &&
            dirty.value()[0].step == next_producer &&
            dirty.value()[1].step == next_root);
-  auto modified = context.execute(
-      changed, {{other, input_image(fixture, root, true, true)}});
+  auto modified =
+      context.execute(changed, {{other, input_image(fixture, root, true)}});
   PS_REQUIRE_OK(modified);
   // This sample is never read by the operation, but belongs to a granted tile.
   PS_CHECK(fixture.consumer_starts == 2 &&
            modified.value().diagnostics.cache_hits > 0);
   PS_CHECK(multi_result::number(modified.value().results.at("result")) == 2);
-  auto frozen = context.freeze(
-      changed, {{other, input_image(fixture, root, false, false)}});
+  auto frozen =
+      context.freeze(changed, {{other, input_image(fixture, root, false)}});
   PS_REQUIRE_OK(frozen);
   context.clear_result_cache();
   auto seed = context.execute(frozen.value());
@@ -494,8 +490,8 @@ int cached_execution() {
   auto observed = context.execute(frozen.value(), {}, failed_observer);
   PS_CHECK(observed.status().code == ErrorCode::ResourceExhausted &&
            notifications == 1 && fixture.consumer_starts == prior_starts);
-  auto different_scope = context.freeze(
-      changed, {{other, input_image(fixture, root, false, false)}});
+  auto different_scope =
+      context.freeze(changed, {{other, input_image(fixture, root, false)}});
   PS_REQUIRE_OK(different_scope);
   bounded = {};
   bounded.maximum_dependency_cache_work = 0;

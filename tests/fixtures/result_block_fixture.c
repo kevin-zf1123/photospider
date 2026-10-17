@@ -1,4 +1,4 @@
-#include <fenv.h>
+#include <fenv.h>  // NOLINT(build/c++11): C fixture.
 #include <math.h>
 #include <stdatomic.h>
 #include <stddef.h>
@@ -7,86 +7,86 @@
 #include "photospider/plugin/result_operation_plugin_api.h"
 #include "photospider/plugin/result_tile_helpers.h"
 
-static const ps_result_tensor_spec_v5 tensor = {
+static const ps_result_tensor_spec_v6 tensor = {
     .struct_size = sizeof(tensor),
     .key = "samples",
     .key_size = 7,
-    .element_type = PS_RESULT_ELEMENT_FLOAT64_V5,
+    .element_type = PS_RESULT_ELEMENT_FLOAT64_V6,
     .rank = 1,
     .shape = {6},
-    .channel_axis = PS_RESULT_NO_CHANNEL_V5};
-static const ps_result_schema_v5 schema = {.struct_size = sizeof(schema),
+    .channel_axis = PS_RESULT_NO_CHANNEL_V6};
+static const ps_result_schema_v6 schema = {.struct_size = sizeof(schema),
                                            .id = "fixture.block.input",
                                            .id_size = 19,
                                            .version = 1,
                                            .tensors = &tensor,
                                            .tensor_count = 1};
-static const ps_result_tensor_spec_v5 output_tensor = {
+static const ps_result_tensor_spec_v6 output_tensor = {
     .struct_size = sizeof(output_tensor),
     .key = "samples",
     .key_size = 7,
-    .element_type = PS_RESULT_ELEMENT_FLOAT64_V5,
+    .element_type = PS_RESULT_ELEMENT_FLOAT64_V6,
     .rank = 2,
     .shape = {1, 6},
     .spatial = 1,
     .height_axis = 0,
     .width_axis = 1,
-    .channel_axis = PS_RESULT_NO_CHANNEL_V5};
-static const ps_result_schema_v5 output_schema = {
+    .channel_axis = PS_RESULT_NO_CHANNEL_V6};
+static const ps_result_schema_v6 output_schema = {
     .struct_size = sizeof(output_schema),
     .id = "fixture.block.output",
     .id_size = 20,
     .version = 1,
     .tensors = &output_tensor,
     .tensor_count = 1};
-static const ps_result_tensor_spec_v5 carry_tensor = {
+static const ps_result_tensor_spec_v6 carry_tensor = {
     .struct_size = sizeof(carry_tensor),
     .key = "carry",
     .key_size = 5,
-    .element_type = PS_RESULT_ELEMENT_FLOAT64_V5,
+    .element_type = PS_RESULT_ELEMENT_FLOAT64_V6,
     .rank = 1,
     .shape = {1},
-    .channel_axis = PS_RESULT_NO_CHANNEL_V5};
-static const ps_result_schema_v5 carry_schema = {
+    .channel_axis = PS_RESULT_NO_CHANNEL_V6};
+static const ps_result_schema_v6 carry_schema = {
     .struct_size = sizeof(carry_schema),
     .id = "fixture.block.state",
     .id_size = 19,
     .version = 1,
     .tensors = &carry_tensor,
     .tensor_count = 1};
-static const ps_result_port_v5 input = {.struct_size = sizeof(input),
+static const ps_result_port_v6 input = {.struct_size = sizeof(input),
                                         .schema = &schema};
-static const ps_result_output_v5 outputs[] = {
-    {.struct_size = sizeof(ps_result_output_v5),
+static const ps_result_output_v6 outputs[] = {
+    {.struct_size = sizeof(ps_result_output_v6),
      .key = "value",
      .key_size = 5,
-     .port = {.struct_size = sizeof(ps_result_port_v5),
+     .port = {.struct_size = sizeof(ps_result_port_v6),
               .schema = &output_schema},
      .input_count = UINT32_MAX},
-    {.struct_size = sizeof(ps_result_output_v5),
+    {.struct_size = sizeof(ps_result_output_v6),
      .key = "control",
      .key_size = 7,
-     .port = {.struct_size = sizeof(ps_result_port_v5),
+     .port = {.struct_size = sizeof(ps_result_port_v6),
               .schema = &output_schema},
      .input_count = UINT32_MAX}};
-static const ps_result_parameter_descriptor_v5 mode = {
-    sizeof(mode), "mode", 4, PS_RESULT_PARAMETER_INT64_V5, 0, 1, 0, 11};
+static const ps_result_parameter_descriptor_v6 mode = {
+    sizeof(mode), "mode", 4, PS_RESULT_PARAMETER_INT64_V6, 0, 1, 0, 11};
 static atomic_uint_fast64_t starts, destroys, calls;
 struct State {
   unsigned mode, stage;
   uint64_t cursor, target, incoming;
 };
-static int start(void* user, void* raw, const ps_result_query_v5* query,
-                 const ps_result_services_v5* host) {
-  ps_result_region_v5 requested_region;
-  if (ps_result_output_region_v5(query, 0, &requested_region))
-    return PS_RESULT_STATUS_INVALID_ARGUMENT_V5;
+static int start(void* user, void* raw, const ps_result_query_v6* query,
+                 const ps_result_services_v6* host) {
+  ps_result_region_v6 requested_region;
+  if (ps_result_output_region_v6(query, 0, &requested_region))
+    return PS_RESULT_STATUS_INVALID_ARGUMENT_V6;
   (void)user;
   struct State* state = raw;
   atomic_fetch_add(&starts, 1);
   if (requested_region.rank != 2 || requested_region.extent[0] != 1 ||
       requested_region.extent[1] != 1)
-    return PS_RESULT_STATUS_FAILURE_V5;
+    return PS_RESULT_STATUS_FAILURE_V6;
   state->target = requested_region.offset[1];
   state->mode = query->parameter_count ? query->parameters[0].int64_value : 0;
   const double zero = 0;
@@ -94,7 +94,7 @@ static int start(void* user, void* raw, const ps_result_query_v5* query,
                                   (const uint8_t*)&zero, sizeof(zero),
                                   &state->incoming);
 }
-static int compute_impl(const ps_result_block_services_v5* host,
+static int compute_impl(const ps_result_block_services_v6* host,
                         uint64_t incoming, uint64_t* outgoing, void* user) {
   struct State* state = user;
   atomic_fetch_add(&calls, 1);
@@ -106,7 +106,7 @@ static int compute_impl(const ps_result_block_services_v5* host,
     return 0;
   }
   if (state->mode == 9)
-    return PS_RESULT_NEED_V5;
+    return PS_RESULT_NEED_V6;
   if (state->mode == 10) {
     uint8_t* ignored = NULL;
     (void)host->allocate_scratch(host->context, UINT64_MAX, &ignored);
@@ -114,29 +114,29 @@ static int compute_impl(const ps_result_block_services_v5* host,
     return 0;
   }
   if (state->mode == 11)
-    return PS_RESULT_STATUS_FAILURE_V5;
+    return PS_RESULT_STATUS_FAILURE_V6;
   double carry = 0, value = 0;
   if (host->read_state(host->context, incoming, (uint8_t*)&carry, 8) ||
       host->read_tensor(host->context, 0, 0, &state->cursor, 1, &value, 8) ||
       !isfinite(value))
-    return PS_RESULT_STATUS_FAILURE_V5;
+    return PS_RESULT_STATUS_FAILURE_V6;
   volatile double sum = carry + value;
   if (!isfinite(sum))
-    return PS_RESULT_STATUS_FAILURE_V5;
+    return PS_RESULT_STATUS_FAILURE_V6;
   const double result = sum;
   return host->create_state(host->context, &carry_schema,
                             (const uint8_t*)&result, 8, outgoing);
 }
-static int compute(const ps_result_block_services_v5* host, uint64_t incoming,
+static int compute(const ps_result_block_services_v6* host, uint64_t incoming,
                    uint64_t* outgoing, void* user) {
   fenv_t prior;
   if (fegetenv(&prior) || fesetround(FE_TONEAREST))
-    return PS_RESULT_STATUS_FAILURE_V5;
+    return PS_RESULT_STATUS_FAILURE_V6;
   const int result = compute_impl(host, incoming, outgoing, user);
-  return fesetenv(&prior) ? PS_RESULT_STATUS_FAILURE_V5 : result;
+  return fesetenv(&prior) ? PS_RESULT_STATUS_FAILURE_V6 : result;
 }
-static int poll(void* user, void* raw, const ps_result_query_v5* query,
-                const ps_result_services_v5* host) {
+static int poll(void* user, void* raw, const ps_result_query_v6* query,
+                const ps_result_services_v6* host) {
   (void)user;
   (void)query;
   struct State* state = raw;
@@ -146,17 +146,17 @@ static int poll(void* user, void* raw, const ps_result_query_v5* query,
                     state->incoming, state->mode == 7 ? NULL : compute, state,
                     &outgoing) ||
         host->release_block_state(host->context, state->incoming))
-      return PS_RESULT_STATUS_FAILURE_V5;
+      return PS_RESULT_STATUS_FAILURE_V6;
     state->incoming = outgoing;
     ++state->cursor;
   }
   state->stage = 1;
   if (state->cursor <= state->target) {
-    return ps_result_to_whole_v5(host, query, 0) ? PS_RESULT_STATUS_FAILURE_V5
-                                                 : PS_RESULT_NEED_V5;
+    return ps_result_to_whole_v6(host, query, 0) ? PS_RESULT_STATUS_FAILURE_V6
+                                                 : PS_RESULT_NEED_V6;
   }
   double carry = 0;
-  const ps_result_region_v5 point = {.struct_size = sizeof(point),
+  const ps_result_region_v6 point = {.struct_size = sizeof(point),
                                      .rank = 2,
                                      .offset = {0, state->target},
                                      .extent = {1, 1}};
@@ -167,9 +167,9 @@ static int poll(void* user, void* raw, const ps_result_query_v5* query,
       host->publish_tensor(host->context, 0, &point, (const uint8_t*)&carry,
                            sizeof(carry)) ||
       host->publish_result(host->context, 1))
-    return PS_RESULT_STATUS_FAILURE_V5;
+    return PS_RESULT_STATUS_FAILURE_V6;
   state->incoming = 0;
-  return PS_RESULT_PUBLISH_V5;
+  return PS_RESULT_PUBLISH_V6;
 }
 static void destroy(void* user, void* raw) {
   (void)user;
@@ -179,13 +179,13 @@ static void destroy(void* user, void* raw) {
 static void plugin_destroy(void* user) {
   (void)user;
 }
-static const ps_result_operation_v5 operation = {
+static const ps_result_operation_v6 operation = {
     .struct_size = sizeof(operation),
     .key = "fixture.result_block",
     .key_size = 20,
-    .flags = PS_RESULT_FLAG_CPU_V5 | PS_RESULT_FLAG_DETERMINISTIC_V5 |
-             PS_RESULT_FLAG_SIDE_EFFECT_FREE_V5 |
-             PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V5,
+    .flags = PS_RESULT_FLAG_CPU_V6 | PS_RESULT_FLAG_DETERMINISTIC_V6 |
+             PS_RESULT_FLAG_SIDE_EFFECT_FREE_V6 |
+             PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V6,
     .inputs = &input,
     .input_count = 1,
     .outputs = outputs,
@@ -198,15 +198,15 @@ static const ps_result_operation_v5 operation = {
     .start = start,
     .poll = poll,
     .destroy = destroy};
-static const ps_result_operation_plugin_api_v5 api = {
-    sizeof(api),   PS_RESULT_OPERATION_ABI_VERSION_5, &operation, 1, NULL,
+static const ps_result_operation_plugin_api_v6 api = {
+    sizeof(api),   PS_RESULT_OPERATION_ABI_VERSION_6, &operation, 1, NULL,
     plugin_destroy};
 PS_RESULT_EXPORT void ps_result_block_counts(uint64_t* counts) {
   counts[0] = atomic_load(&starts);
   counts[1] = atomic_load(&destroys);
   counts[2] = atomic_load(&calls);
 }
-PS_RESULT_EXPORT const ps_result_operation_plugin_api_v5*
-ps_result_operation_plugin_get_api_v5(void) {
+PS_RESULT_EXPORT const ps_result_operation_plugin_api_v6*
+ps_result_operation_plugin_get_api_v6(void) {
   return &api;
 }

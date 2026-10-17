@@ -12,21 +12,21 @@ namespace {
 std::atomic<std::uint32_t> destroy_count{0};
 std::atomic<std::uint32_t> callback_count{0};
 int context_marker;
-int never(void*, void*, const ps_result_query_v5*,
-          const ps_result_services_v5*) {
+int never(void*, void*, const ps_result_query_v6*,
+          const ps_result_services_v6*) {
   ++callback_count;
   return 1;
 }
-std::array<ps_result_tensor_spec_v5, 6> make_tensors() {
+std::array<ps_result_tensor_spec_v6, 6> make_tensors() {
   const char* keys[] = {"rank1_limit", "rank1_large",   "rank2_limit",
                         "rank2_large", "float64_large", "product_overflow"};
   const std::uint32_t sizes[] = {11, 11, 11, 11, 13, 16};
-  std::array<ps_result_tensor_spec_v5, 6> tensors{};
+  std::array<ps_result_tensor_spec_v6, 6> tensors{};
   for (std::uint32_t i = 0; i < tensors.size(); ++i) {
     tensors[i] = result_registry_fixture::make_tensor();
     tensors[i].key = keys[i];
     tensors[i].key_size = sizes[i];
-    tensors[i].element_type = PS_RESULT_ELEMENT_UINT8_V5;
+    tensors[i].element_type = PS_RESULT_ELEMENT_UINT8_V6;
   }
   tensors[0].shape[0] = UINT64_C(1) << 63U;
   tensors[1].shape[0] = (UINT64_C(1) << 63U) + 1;
@@ -34,7 +34,7 @@ std::array<ps_result_tensor_spec_v5, 6> make_tensors() {
   tensors[2].shape[0] = tensors[3].shape[0] = 2;
   tensors[2].shape[1] = UINT64_C(1) << 62U;
   tensors[3].shape[1] = (UINT64_C(1) << 62U) + 1;
-  tensors[4].element_type = PS_RESULT_ELEMENT_FLOAT64_V5;
+  tensors[4].element_type = PS_RESULT_ELEMENT_FLOAT64_V6;
   tensors[4].shape[0] = UINT64_MAX;
   tensors[5].shape[0] = tensors[5].shape[1] = UINT64_MAX;
 #if PS_TENSOR_EXTENT_CASE == 2
@@ -47,7 +47,7 @@ std::array<ps_result_tensor_spec_v5, 6> make_tensors() {
   return tensors;
 }
 const auto tensors = make_tensors();
-ps_result_schema_v5 make_schema() {
+ps_result_schema_v6 make_schema() {
   auto schema = result_registry_fixture::make_schema();
   schema.tensors = tensors.data();
   schema.tensor_count = tensors.size();
@@ -55,7 +55,7 @@ ps_result_schema_v5 make_schema() {
 }
 const auto schema = make_schema();
 const auto output = result_registry_fixture::make_output(&schema);
-ps_result_operation_v5 make_operation() {
+ps_result_operation_v6 make_operation() {
   auto operation = result_registry_fixture::make_operation(
       "fixture.tensor.extents", 22, nullptr, 0, &output);
   operation.start = never;
@@ -68,15 +68,15 @@ void destroy_fixture(void* context) {
     ++destroy_count;
 }
 // NOLINTBEGIN(whitespace/indent_namespace)
-const ps_result_operation_plugin_api_v5 api = {
-    sizeof(api),     PS_RESULT_OPERATION_ABI_VERSION_5,
+const ps_result_operation_plugin_api_v6 api = {
+    sizeof(api),     PS_RESULT_OPERATION_ABI_VERSION_6,
     &operation,      1,
     &context_marker, destroy_fixture};
 // NOLINTEND
 }  // namespace
 
-extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v5*
-ps_result_operation_plugin_get_api_v5(void) {
+extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v6*
+ps_result_operation_plugin_get_api_v6(void) {
   return &api;
 }
 extern "C" PS_RESULT_EXPORT std::uint32_t

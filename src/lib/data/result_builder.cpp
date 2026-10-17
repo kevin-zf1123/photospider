@@ -37,48 +37,30 @@ ResultBuilder& ResultBuilder::operator=(ResultBuilder&& other) noexcept {
 ResultBuilder::~ResultBuilder() noexcept {
   fail(Status{ErrorCode::Cancelled, {}});
 }
-Result<ResultBuilder> ResultBuilder::start(
-    ResourceBudget budget, const SchemaTemplate& schema,
-    std::string_view semantic_key, ResultGrowthLimits limits,
-    std::vector<std::uint64_t> association, std::uint64_t tile_extent) {
+Result<ResultBuilder> ResultBuilder::start(ResourceBudget budget,
+                                           const SchemaTemplate& schema,
+                                           std::string_view scope,
+                                           ResultGrowthLimits limits,
+                                           std::uint64_t tile_extent) {
   std::optional<ResourceAllocationScope> metadata_scope;
   const auto* active_root = resource_internal::metadata_budget();
   if (!active_root || !active_root->same_owner(budget))
     metadata_scope.emplace(budget);
-  auto valid = schema.validate(true);
+  auto valid = schema.validate();
   if (!valid.ok())
     return Result<ResultBuilder>(valid);
   if (!tile_extent || (tile_extent & (tile_extent - 1)))
     return Result<ResultBuilder>(
         Status{ErrorCode::InvalidArgument,
                "tile extent must be a positive power of two"});
-  auto association_work = budget.consume({association.size()});
-  if (!association_work.ok())
-    return Result<ResultBuilder>(association_work);
-  if (semantic_key.empty() || semantic_key.size() > 4096 ||
-      std::any_of(association.begin(), association.end(),
-                  [](auto id) { return id == 0; }))
+  if (scope.empty() || scope.size() > 4096)
     return Result<ResultBuilder>(data_internal::invalid_schema());
   auto copied = schema.managed_copy(budget);
   if (!copied.ok())
     return Result<ResultBuilder>(copied.status());
-  auto encoded = schema.managed_canonical(budget);
-  if (!encoded.ok())
-    return Result<ResultBuilder>(encoded.status());
-  auto extra_work = budget.consume({semantic_key.size() + 8});
+  auto extra_work = budget.consume({scope.size()});
   if (!extra_work.ok())
     return Result<ResultBuilder>(extra_work);
-  ResourceString schema_key = encoded.take_value();
-  try {
-    const auto key_size = static_cast<std::uint64_t>(semantic_key.size());
-    schema_key.reserve(schema_key.size() + 8 + semantic_key.size());
-    for (unsigned i = 0; i < 8; ++i)
-      schema_key.push_back(static_cast<char>((key_size >> (8 * i)) & 255));
-    if (!semantic_key.empty())
-      schema_key.append(semantic_key.data(), semantic_key.size());
-  } catch (const std::bad_alloc&) {
-    return Result<ResultBuilder>(Status{ErrorCode::ResourceExhausted, {}});
-  }
   const auto metadata = sizeof(ResultRef::Impl);
   auto capacity = ResourceCapacity::host(metadata, metadata);
   capacity[ResourceKind::Entries] = 1;
@@ -89,35 +71,14 @@ Result<ResultBuilder> ResultBuilder::start(
     auto impl = std::shared_ptr<ResultRef::Impl>(new ResultRef::Impl(budget));
     impl->lease = lease.take_value();
     impl->schema = copied.take_value();
-    impl->key = std::move(schema_key);
-    impl->association = ResourceVector<std::uint64_t>(
-        association.begin(), association.end(),
-        ResourceAllocator<std::uint64_t>(impl->budget));
+    impl->scope = ResourceString(scope.data(), scope.size(),
+                                 ResourceAllocator<char>(budget));
     impl->limits = limits;
-    auto page_budget = std::make_shared<TensorBudget>(
-        limits.maximum_bytes,
-        [root = impl->budget](std::uint64_t bytes,
-                              bool metadata) -> Result<std::shared_ptr<void>> {
-          auto capacity = ResourceCapacity::host(bytes, metadata ? bytes : 0);
-          capacity[ResourceKind::Payload] = metadata ? 0 : bytes;
-          auto charged = root.reserve(capacity);
-          if (!charged.ok())
-            return Result<std::shared_ptr<void>>(charged.status());
-          return Result<std::shared_ptr<void>>(
-              std::make_shared<ResourceLease>(charged.take_value()));
-        });
-    page_budget->payload_committed_ = [](const std::shared_ptr<void>& owner,
-                                         std::uint64_t bytes) {
-      auto lease = std::static_pointer_cast<ResourceLease>(owner);
-      if (lease)
-        resource_internal::commit_payload(*lease, bytes);
-    };
-    impl->image_budget = page_budget;
+    impl->image_budget = std::make_shared<TensorBudget>(limits.maximum_bytes);
     for (std::size_t i = 0; i < impl->schema.tensors.size(); ++i) {
       const auto& spec = impl->schema.tensors[i];
       auto& image = impl->tensors[i];
-      auto initialized = image.initialize(impl->budget, spec, page_budget,
-                                          limits, tile_extent);
+      auto initialized = image.initialize(impl->budget, spec, tile_extent);
       if (!initialized.ok())
         return Result<ResultBuilder>(initialized);
     }

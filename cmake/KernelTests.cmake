@@ -265,7 +265,7 @@ target_link_libraries(operation_contract_fixture PRIVATE Photospider::operation_
 set_target_properties(operation_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_definitions(test_port_contracts PRIVATE PS_CONTRACT_FIXTURE="$<TARGET_FILE:operation_contract_fixture>")
 add_dependencies(test_port_contracts operation_contract_fixture)
-foreach(_case 1 2 3 5 6 7 8 9 10 11 12)
+foreach(_case 1 3 5 6 7 8 9 10 11 12)
   add_library(operation_bad_contract_${_case} MODULE tests/fixtures/operation_contract_fixture.c)
   target_link_libraries(operation_bad_contract_${_case} PRIVATE Photospider::operation_sdk)
   set_target_properties(operation_bad_contract_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)

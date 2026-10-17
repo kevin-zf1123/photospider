@@ -6,20 +6,20 @@
 #include "photospider/plugin/result_operation_plugin_api.h"
 
 namespace result_registry_fixture {
-inline ps_result_tensor_spec_v5 make_tensor() {
-  ps_result_tensor_spec_v5 tensor{};
+inline ps_result_tensor_spec_v6 make_tensor() {
+  ps_result_tensor_spec_v6 tensor{};
   tensor.struct_size = sizeof(tensor);
   tensor.key = "value";
   tensor.key_size = 5;
-  tensor.element_type = PS_RESULT_ELEMENT_FLOAT64_V5;
+  tensor.element_type = PS_RESULT_ELEMENT_FLOAT64_V6;
   tensor.rank = 1;
   tensor.shape[0] = 1;
-  tensor.channel_axis = PS_RESULT_NO_CHANNEL_V5;
+  tensor.channel_axis = PS_RESULT_NO_CHANNEL_V6;
   return tensor;
 }
 inline const auto tensor = make_tensor();
-inline ps_result_schema_v5 make_schema() {
-  ps_result_schema_v5 schema{};
+inline ps_result_schema_v6 make_schema() {
+  ps_result_schema_v6 schema{};
   schema.struct_size = sizeof(schema);
   schema.id = "fixture.number";
   schema.id_size = 14;
@@ -29,9 +29,9 @@ inline ps_result_schema_v5 make_schema() {
   return schema;
 }
 inline const auto schema = make_schema();
-inline ps_result_output_v5 make_output(
-    const ps_result_schema_v5* result_schema = &schema) {
-  ps_result_output_v5 output{};
+inline ps_result_output_v6 make_output(
+    const ps_result_schema_v6* result_schema = &schema) {
+  ps_result_output_v6 output{};
   output.struct_size = sizeof(output);
   output.key = "value";
   output.key_size = 5;
@@ -40,22 +40,22 @@ inline ps_result_output_v5 make_output(
   return output;
 }
 inline const auto output = make_output();
-inline int never(void*, void*, const ps_result_query_v5*,
-                 const ps_result_services_v5*) {
+inline int never(void*, void*, const ps_result_query_v6*,
+                 const ps_result_services_v6*) {
   return 1;
 }
 inline void destroy_state(void*, void*) {}
-inline ps_result_operation_v5 make_operation(
+inline ps_result_operation_v6 make_operation(
     const char* key, std::uint32_t key_size,
-    const ps_result_parameter_descriptor_v5* parameters,
+    const ps_result_parameter_descriptor_v6* parameters,
     std::uint32_t parameter_count,
-    const ps_result_output_v5* result_output = &output) {
-  ps_result_operation_v5 operation{};
+    const ps_result_output_v6* result_output = &output) {
+  ps_result_operation_v6 operation{};
   operation.struct_size = sizeof(operation);
   operation.key = key;
   operation.key_size = key_size;
-  operation.flags = PS_RESULT_FLAG_DETERMINISTIC_V5 |
-                    PS_RESULT_FLAG_SIDE_EFFECT_FREE_V5 | PS_RESULT_FLAG_CPU_V5;
+  operation.flags = PS_RESULT_FLAG_DETERMINISTIC_V6 |
+                    PS_RESULT_FLAG_SIDE_EFFECT_FREE_V6 | PS_RESULT_FLAG_CPU_V6;
   operation.outputs = result_output;
   operation.output_count = 1;
   operation.parameters = parameters;
@@ -66,10 +66,10 @@ inline ps_result_operation_v5 make_operation(
   operation.destroy = destroy_state;
   return operation;
 }
-inline ps_result_operation_plugin_api_v5 make_api(
-    const ps_result_operation_v5* operation, void (*destroy)(void*)) {
-  return {sizeof(ps_result_operation_plugin_api_v5),
-          PS_RESULT_OPERATION_ABI_VERSION_5,
+inline ps_result_operation_plugin_api_v6 make_api(
+    const ps_result_operation_v6* operation, void (*destroy)(void*)) {
+  return {sizeof(ps_result_operation_plugin_api_v6),
+          PS_RESULT_OPERATION_ABI_VERSION_6,
           operation,
           1,
           nullptr,

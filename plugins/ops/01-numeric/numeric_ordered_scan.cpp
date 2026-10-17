@@ -40,7 +40,7 @@ struct ScanState final {
           ErrorCode::InvalidArgument, "numeric environment unavailable"});
     auto made = ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, {}, phase.query.tile_extent);
+        phase.query.semantic_key, {}, phase.query.tile_extent);
     if (!made.ok())
       return Result<ResultProgramPoll>(made.status());
     auto builder = made.take_value();

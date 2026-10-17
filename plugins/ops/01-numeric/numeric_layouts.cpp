@@ -66,10 +66,7 @@ struct LayoutProgram final {
       }
     }
     auto builder = math_take(ResultBuilder::start(
-        phase.resources, schema, phase.query.semantic_key, {},
-        phase.association ? std::vector<uint64_t>(phase.association->begin(),
-                                                  phase.association->end())
-                          : std::vector<uint64_t>{}));
+        phase.resources, schema, phase.query.semantic_key, {}));
     const auto count = math_take(schema.tensors[0].sample_count());
     if (output.empty())
       return Result<ResultProgramPoll>(
@@ -118,7 +115,7 @@ struct LayoutProgram final {
         // source INT64_MIN stride with a numerically ignored negative step.
         transform.source_axes[axis] = {
             static_cast<int32_t>(axis), static_cast<uint64_t>(starts[axis]),
-            target_shape[axis] > 1 ? steps[axis] : 0, 1};
+            target_shape[axis] > 1 ? steps[axis] : 0};
       }
     }
     const auto& layout =

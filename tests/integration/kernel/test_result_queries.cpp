@@ -51,7 +51,7 @@ ExecutionPlan compile(const std::shared_ptr<OperationRegistry>& registry,
 ResultProgramPoll publication(const ResultProgramPhase& phase, double value) {
   auto builder = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {}, {}, phase.query.tile_extent));
+      phase.query.semantic_key, {}, phase.query.tile_extent));
   const auto& tensor = phase.query.output.result_schema->tensors[0];
   auto coverage = phase.query.tensor_outputs.value_or(
       take(Footprint::all(tensor.sample_shape())));

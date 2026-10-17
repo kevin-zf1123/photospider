@@ -12,7 +12,6 @@
 #include <utility>
 #include <vector>
 
-#include "data/memory_budget.hpp"
 #include "execution/structured_cache.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/execution/execution.hpp"
@@ -44,16 +43,13 @@ class ResultCache final {
     std::shared_ptr<const StructuredIdentity> identity_;
     std::uint64_t epoch_;
   };
-  ResultCache(std::uint64_t limit,
-              std::shared_ptr<data_internal::MemoryBudget> budget,
+  ResultCache(std::uint64_t limit, std::shared_ptr<ResourceBudget> budget,
               std::uint64_t dependency_metadata_limit = 65536)
       : limit_(limit),
         budget_(std::move(budget)),
         dependency_metadata_limit_(dependency_metadata_limit),
         structured_manifests_(
-            budget_->resources()
-                ? make_resource_map<StructuredCandidates>(*budget_->resources())
-                : StructuredIndex{}) {}
+            make_resource_map<StructuredCandidates>(*budget_)) {}
   ~ResultCache() { close(); }
   void close() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -87,10 +83,7 @@ class ResultCache final {
   }
   void clear() {
     decltype(entries_) retired;
-    auto structured =
-        budget_->resources()
-            ? make_resource_map<StructuredCandidates>(*budget_->resources())
-            : StructuredIndex{};
+    auto structured = make_resource_map<StructuredCandidates>(*budget_);
     {
       std::lock_guard<std::mutex> lock(mutex_);
       ++epoch_;
@@ -147,12 +140,11 @@ class ResultCache final {
       std::shared_ptr<const StructuredCacheManifest> manifest,
       const std::function<Status(std::uint64_t)>& work) noexcept {
     try {
-      if (!limit_ || !manifest || !budget_->resources() ||
-          !manifest->result.owned_by(*budget_->resources()) ||
+      if (!limit_ || !manifest || !manifest->result.owned_by(*budget_) ||
           !manifest->metadata ||
           manifest->metadata > dependency_metadata_limit_)
         return;
-      ResourceAllocationScope optional(*budget_->resources());
+      ResourceAllocationScope optional(*budget_);
       auto footprint = manifest->result.cache_storage(work);
       if (!footprint.ok())
         return;
@@ -171,8 +163,8 @@ class ResultCache final {
       // may reenter the cache. No identity is allocated for a disabled cache.
       if (!identity)
         identity = std::allocate_shared<StructuredIdentity>(
-            ResourceAllocator<StructuredIdentity>(*budget_->resources()));
-      auto extra = budget_->resources()->reserve(ResourceCapacity::host(
+            ResourceAllocator<StructuredIdentity>(*budget_));
+      auto extra = budget_->reserve(ResourceCapacity::host(
           sizeof(Entry) + 2 * (manifest->key.size() + 1) +
               footprint.value().size() * 64,
           sizeof(Entry) + 2 * (manifest->key.size() + 1) +
@@ -229,9 +221,8 @@ class ResultCache final {
           structured_manifests_.find(std::string_view(key)) ==
               structured_manifests_.end())
         return;
-      auto position = structured_manifests_.try_emplace(
-          ResourceString(key.data(), key.size(),
-                         ResourceAllocator<char>(*budget_->resources())));
+      auto position = structured_manifests_.try_emplace(ResourceString(
+          key.data(), key.size(), ResourceAllocator<char>(*budget_)));
       auto& candidates = position.first->second;
       candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
                                       [](const auto& candidate) {
@@ -288,10 +279,10 @@ class ResultCache final {
   void reclaim_capacity(const ResourceCapacity& requested) {
     decltype(entries_) retired;
     std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
-    if (!lock.owns_lock() || !budget_->resources())
+    if (!lock.owns_lock())
       return;
     auto fits = [&] {
-      const auto available = budget_->resources()->available_capacity();
+      const auto available = budget_->available_capacity();
       for (std::size_t i = 0; i < requested.values.size(); ++i)
         if (requested.values[i] > available.values[i])
           return false;
@@ -326,21 +317,16 @@ class ResultCache final {
     if (key.empty() || !value.valid())
       return;
     try {
-      std::optional<ResourceAllocationScope> optional;
-      ResourceLease metadata;
-      if (budget_->resources()) {
-        optional.emplace(*budget_->resources());
-        std::uint64_t bytes = sizeof(Entry) + key.size() * 2 + 2;
-        bytes += value.descriptor().shape.size() * sizeof(std::uint64_t) +
-                 value.region().rank() * sizeof(RegionDimension) +
-                 value.layout().origin.size() * sizeof(std::uint64_t) +
-                 value.layout().byte_strides.size() * sizeof(std::int64_t);
-        auto admitted =
-            budget_->resources()->reserve(ResourceCapacity::host(bytes, bytes));
-        if (!admitted.ok())
-          return;
-        metadata = admitted.take_value();
-      }
+      ResourceAllocationScope optional(*budget_);
+      std::uint64_t bytes = sizeof(Entry) + key.size() * 2 + 2;
+      bytes += value.descriptor().shape.size() * sizeof(std::uint64_t) +
+               value.region().rank() * sizeof(RegionDimension) +
+               value.layout().origin.size() * sizeof(std::uint64_t) +
+               value.layout().byte_strides.size() * sizeof(std::int64_t);
+      auto admitted = budget_->reserve(ResourceCapacity::host(bytes, bytes));
+      if (!admitted.ok())
+        return;
+      auto metadata = admitted.take_value();
       const auto owner = value.storage();
       const auto capacity = owner->capacity();
       if (capacity > limit_)
@@ -412,7 +398,7 @@ class ResultCache final {
     return retired;
   }
   const std::uint64_t limit_;
-  std::shared_ptr<data_internal::MemoryBudget> budget_;
+  std::shared_ptr<ResourceBudget> budget_;
   const std::uint64_t dependency_metadata_limit_;
   std::shared_ptr<const StructuredIdentity> structured_identity_;
   std::uint64_t structured_metadata_ = 0;

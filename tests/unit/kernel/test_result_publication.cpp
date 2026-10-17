@@ -24,7 +24,7 @@ int tensor_transaction() {
       schema.tensors[0].layout.spatial = spatial;
       schema.tensors[0].layout.channel_axis.reset();
       auto builder =
-          take(ResultBuilder::start(root, schema, "transaction", {}, {}, 2));
+          take(ResultBuilder::start(root, schema, "transaction", {}, 2));
       const double first = 7, next = 11;
       const Region left({{0, 1}, {0, 1}}), right({{0, 1}, {2, 1}});
       check(builder.publish_tensor(0, left, bytes(first)));
@@ -110,8 +110,7 @@ int incremental_owners() {
   ResourceBudget root(limits);
   constexpr std::uint64_t count = 2048;
   auto schema = multi_result::schema(ElementType::Float64, {count});
-  auto builder =
-      take(ResultBuilder::start(root, schema, "incremental", {}, {}, 1));
+  auto builder = take(ResultBuilder::start(root, schema, "incremental", {}, 1));
   std::vector<TensorSpan> spans;
   for (std::uint64_t i = 0; i < count; ++i) {
     auto buffer = take(root.allocator().allocate(sizeof(double)));
@@ -182,7 +181,7 @@ int affine_views() {
     auto window = take(
         input.acquire_tensor(take(input.descriptor()), 0, Region::whole({4})));
     ResultTensorViewTransform reverse;
-    reverse.source_axes = {{0, 3, -1, 1}};
+    reverse.source_axes = {{0, 3, -1}};
     auto builder = take(ResultBuilder::start(root, schema, "reverse"));
     check(builder.publish_tensor_view(0, Region::whole({4}), window, reverse));
     view = take(builder.seal());
@@ -197,11 +196,11 @@ int affine_views() {
     check(view.read_tensor(take(view.descriptor()), 0, {i}, &value, 8));
     PS_CHECK(value == expected[i]);
   }
-  ResultViewAxis axis{0, UINT64_MAX, -1, 1, UINT64_MAX};
+  ResultViewAxis axis{0, UINT64_MAX, -1, UINT64_MAX};
   PS_CHECK(take(axis.source_coordinate(UINT64_MAX)) == UINT64_MAX);
   PS_CHECK(axis.source_coordinate(UINT64_MAX - 1).status().code ==
            ErrorCode::InvalidArgument);
-  axis = {0, UINT64_MAX, INT64_MIN, 1, 0};
+  axis = {0, UINT64_MAX, INT64_MIN, 0};
   PS_CHECK(take(axis.source_coordinate(1)) == UINT64_MAX / 2);
   PS_CHECK(!axis.source_coordinate(2).ok());
 
@@ -213,14 +212,14 @@ int affine_views() {
   auto first_facts = take(first_ref.descriptor(false));
   auto window = take(first_ref.acquire_tensor(first_facts, 0, left));
   ResultTensorViewTransform identity;
-  identity.source_axes = {{0, 0, 1, 1}};
+  identity.source_axes = {{0, 0, 1}};
   auto second = take(ResultBuilder::start(root, schema, "cycle.second"));
   check(second.publish_tensor_view(0, left, window, identity));
   auto second_ref = second.reference();
   auto back = take(
       second_ref.acquire_tensor(take(second_ref.descriptor(false)), 0, left));
   ResultTensorViewTransform translated;
-  translated.source_axes = {{0, 0, 1, 1, 1}};
+  translated.source_axes = {{0, 0, 1, 1}};
   PS_CHECK(first.publish_tensor_view(0, right, back, translated).code ==
            ErrorCode::TypeMismatch);
   PS_CHECK(take(first_ref.descriptor(false)).revision() ==
@@ -229,7 +228,7 @@ int affine_views() {
   check(first_ref.read_tensor(first_facts, 0, {0}, &retained, 8));
   PS_CHECK(retained == value);
   auto unauthorized = take(ResultBuilder::start(root, schema, "unauthorized"));
-  translated.source_axes = {{-1, 1, 0, 1}};
+  translated.source_axes = {{-1, 1, 0}};
   PS_CHECK(
       unauthorized.publish_tensor_view(0, left, window, translated).reason ==
       FailureReason::UnauthorizedRead);

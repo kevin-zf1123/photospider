@@ -1,15 +1,10 @@
 #pragma once
-#include <memory>
 #include <vector>
 
 #include "photospider/execution/execution.hpp"
-namespace ps::data_internal {
-class MemoryBudget;
-}
 namespace ps::execution_internal {
-Status retain_managed_inputs(
-    std::vector<ExecutionBinding>*,
-    const std::shared_ptr<data_internal::MemoryBudget>&);
+Status validate_input_ownership(const std::vector<ExecutionBinding>&,
+                                const ResourceBudget&);
 ErrorCode binding_stop(const ExecutionPlan&, const CancellationToken&) noexcept;
 Result<std::vector<ExecutionBinding>> preflight_regional_bindings(
     const ExecutionPlan&, const ExecutionBindings&, const CancellationToken&,

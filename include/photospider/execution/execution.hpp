@@ -302,7 +302,7 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   /** @brief Optional non-security content digest of named structured Results.
    * Structured execution hashes canonical schemas and
    * certified logical tensor coverage and sample bytes in ExecutionResult's
-   * results map. It excludes object identity, associations, and physical
+   * results map. It excludes object identity and physical
    * layout; it is not authentication. Fragment execution leaves it empty.
    * Preflight omits the digest when sample, row-window, remaining-work, or
    * coverage-count representability checks cannot admit the full scan.

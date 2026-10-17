@@ -37,8 +37,8 @@ inline OperationDefinition independent_results(OperationDefinition definition) {
   const auto start = definition.start_result;
   if ((!prepare && !specialize) || !start || !traits.supports_cpu ||
       traits.outputs.empty() || traits.outputs.size() > 64 ||
-      traits.supports_gpu || traits.workspace_input_multiplier ||
-      !traits.shared_stages.empty() || !traits.side_effect_free)
+      traits.supports_gpu || !traits.shared_stages.empty() ||
+      !traits.side_effect_free)
     throw std::invalid_argument("invalid independent numeric stages");
   definition.specialize_metadata = {};
   definition.prepare_static =
@@ -69,7 +69,7 @@ inline OperationDefinition independent_results(OperationDefinition definition) {
       if (!output.metadata.result_schema)
         return Answer(
             Status{ErrorCode::InvalidArgument, "missing stage schema"});
-      auto valid = output.metadata.result_schema->validate(true);
+      auto valid = output.metadata.result_schema->validate();
       if (!valid.ok())
         return Answer(valid);
       OperationSharedStage stage;

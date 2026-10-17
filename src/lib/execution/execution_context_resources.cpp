@@ -4,7 +4,6 @@
 #include <thread>
 #include <utility>
 
-#include "data/memory_budget.hpp"
 #include "execution/demand_context.hpp"
 #include "execution/execution_context_state.hpp"
 #include "execution/execution_device.hpp"
@@ -27,25 +26,23 @@ std::uint32_t resolve_cpu_workers(std::uint32_t configured) noexcept {
   return std::max(1U, std::min(32U, hardware == 0U ? 1U : hardware));
 }
 
+std::shared_ptr<ResourceBudget> execution_resources(
+    const ExecutionContextConfig& requested) {
+  if (!requested.maximum_live_bytes)
+    throw std::invalid_argument("execution memory budget must be positive");
+  auto limits = requested.managed_resources.value_or(ResourceLimits{});
+  limits.capacity[ResourceKind::Payload] = std::min(
+      limits.capacity[ResourceKind::Payload], requested.maximum_live_bytes);
+  return std::make_shared<ResourceBudget>(std::move(limits));
+}
 }  // namespace
+// The linter misidentifies this nested-type constructor initializer list.
+// NOLINTBEGIN(whitespace/indent_namespace)
 ExecutionContext::Impl::Impl(std::shared_ptr<OperationRegistry> operations,
                              ExecutionContextConfig requested)
-    // NOLINTNEXTLINE(whitespace/indent_namespace)
     : cpu_worker_count(resolve_cpu_workers(requested.cpu_workers)),
-      // NOLINTNEXTLINE(whitespace/indent_namespace)
-      budget(std::make_shared<data_internal::MemoryBudget>(
-          requested.maximum_live_bytes,
-          [&] {
-            auto limits =
-                requested.managed_resources.value_or(ResourceLimits{});
-            limits.capacity[ResourceKind::Payload] =
-                std::min(limits.capacity[ResourceKind::Payload],
-                         requested.maximum_live_bytes);
-            return std::make_shared<ResourceBudget>(std::move(limits));
-            // NOLINTNEXTLINE(whitespace/indent_namespace)
-          }())),
-      native_device(
-          execution_device(requested.gpu_enabled, budget->resources())),
+      budget(execution_resources(requested)),
+      native_device(execution_device(requested.gpu_enabled, budget)),
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
       gpu_available(execution_testing::use_native_device()
                         ? native_device && native_device->available()
@@ -59,6 +56,7 @@ ExecutionContext::Impl::Impl(std::shared_ptr<OperationRegistry> operations,
       waiting_admission(maximum_waiting_callbacks),
       cpu_pool(cpu_worker_count, Backend::Cpu, waiting_admission,
                requested.collect_scheduler_timing) {
+  // NOLINTEND
   if (!operation_registry || !operation_registry->frozen()) {
     throw std::invalid_argument(
         "ExecutionContext requires a frozen operation registry");
@@ -83,10 +81,10 @@ ExecutionContext::Impl::Impl(std::shared_ptr<OperationRegistry> operations,
     cache = std::make_shared<execution_internal::ResultCache>(
         requested.result_cache_bytes, budget,
         requested.maximum_dependency_cache_metadata);
-  native_uploads = std::make_shared<execution_internal::NativeUploadRegistry>(
-      *budget->resources());
+  native_uploads =
+      std::make_shared<execution_internal::NativeUploadRegistry>(*budget);
   {
-    budget->resources()->set_reclaimer(
+    budget->set_reclaimer(
         [weak = std::weak_ptr<execution_internal::ResultCache>(cache),
          uploads = std::weak_ptr<execution_internal::NativeUploadRegistry>(
              native_uploads)](const ResourceCapacity& capacity) {
@@ -148,10 +146,7 @@ ResultCacheStatistics ExecutionContext::cache_statistics() const {
  * @copydetails ExecutionContext::cpu_workers
  */
 Result<ResourceBudget> ExecutionContext::resource_budget() const {
-  if (!impl_->budget->resources())
-    return Result<ResourceBudget>(Status::failure(
-        ErrorCode::NotFound, "managed resource root is not configured"));
-  return Result<ResourceBudget>(*impl_->budget->resources());
+  return Result<ResourceBudget>(*impl_->budget);
 }
 std::uint32_t ExecutionContext::cpu_workers() const noexcept {
   return impl_ ? impl_->cpu_worker_count : 0U;

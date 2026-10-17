@@ -54,8 +54,8 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
  * ordinary output axes. Compiler checks actual input edges; helpers own node
  * metadata and may be used concurrently. A nonempty request runs a shared stage
  * that acquires all three inputs, computes all queries and columns, and
- * publishes a complete dense output. The Result association names the actual
- * source ObjectIds. Allocation may throw bad_alloc. Invalid helper parameters
+ * publishes a complete dense output. Allocation may throw bad_alloc.
+ * Invalid helper parameters
  * fail InvalidArgument/InvalidDomain/Schema; invalid edge metadata fails
  * TypeMismatch. It validates all x knots before y arithmetic. Exact knot/clamp
  * uses one y; linear uses two endpoints; PCHIP uses its fixed local stencil.

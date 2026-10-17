@@ -23,17 +23,11 @@ inline Status append_publication_view(
     return window.status();
   ResultTensorViewTransform identity;
   for (unsigned axis = 0; axis < region.rank(); ++axis)
-    identity.source_axes.push_back({static_cast<std::int32_t>(axis), 0, 1, 1});
+    identity.source_axes.push_back({static_cast<std::int32_t>(axis), 0, 1});
   auto status = builder.publish_tensor_view(slot, region, window.value(),
                                             identity, cancellation);
   if (status.ok() || status.reason != FailureReason::ViewUnavailable)
     return status;
-  if (source.schema().tensors[slot].layout.spatial) {
-    status = builder.publish_tensor_view(slot, region, {&window.value()},
-                                         cancellation);
-    if (status.ok() || status.reason != FailureReason::ViewUnavailable)
-      return status;
-  }
   if (depth == 64)
     return Status{ErrorCode::InvalidArgument,
                   "publication backing partition did not terminate"};

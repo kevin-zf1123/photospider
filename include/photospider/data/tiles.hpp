@@ -134,9 +134,9 @@ class PHOTOSPIDER_API TileSet final {
  */
 class PHOTOSPIDER_API TileGrid final {
  public:
-  static Result<std::optional<TileGrid>> from_schema(
-      const SchemaTemplate& schema, std::uint64_t tile_extent = 128,
-      std::uint32_t tensor_slot = 0);
+  static Result<TileGrid> from_schema(const SchemaTemplate& schema,
+                                      std::uint64_t tile_extent = 128,
+                                      std::uint32_t tensor_slot = 0);
   static Result<std::vector<TileGrid>> members(const SchemaTemplate& schema,
                                                std::uint64_t tile_extent = 128);
   static Result<TileGrid> from_tensor(const ResultTensorSpec& tensor,

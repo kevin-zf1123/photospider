@@ -364,7 +364,6 @@ inline Result<OperationPreparation> prepare(
   output_tensor.atomic_trailing_axes = 0;
   if (output_tensor.layout.spatial &&
       (!state->program.identity || state->materialize))
-    output_tensor.layout.row_pitch_bytes = 0;
   output.metadata.result_schema =
       std::make_shared<SchemaTemplate>(std::move(schema));
   OperationPreparation result;

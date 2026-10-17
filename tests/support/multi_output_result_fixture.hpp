@@ -150,10 +150,6 @@ struct Program {
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
         phase.query.semantic_key, {},
-        phase.association
-            ? std::vector<std::uint64_t>(phase.association->begin(),
-                                         phase.association->end())
-            : std::vector<std::uint64_t>{},
         phase.query.tile_extent));
     for (const auto& box : demand.boxes()) {
       if (input >= 0) {
@@ -163,7 +159,7 @@ struct Program {
         ResultTensorViewTransform identity;
         for (unsigned axis = 0; axis < shape.size(); ++axis)
           identity.source_axes.push_back(
-              {static_cast<std::int32_t>(axis), 0, 1, 1});
+              {static_cast<std::int32_t>(axis), 0, 1});
 
         check(builder.publish_tensor_view(0, box, window, identity));
       } else {

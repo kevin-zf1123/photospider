@@ -7,17 +7,12 @@
 #include <utility>
 #include <vector>
 
-#include "data/memory_budget.hpp"
 #include "plugin/port_validation.hpp"
 namespace ps::execution_internal {
-Status retain_managed_inputs(
-    std::vector<ExecutionBinding>* bindings,
-    const std::shared_ptr<data_internal::MemoryBudget>& budget) {
-  if (!budget->resources())
-    return Status{ErrorCode::InvalidArgument,
-                  "Result execution requires managed_resources"};
-  for (const auto& binding : *bindings)
-    if (!binding.result.owned_by(*budget->resources()))
+Status validate_input_ownership(const std::vector<ExecutionBinding>& bindings,
+                                const ResourceBudget& budget) {
+  for (const auto& binding : bindings)
+    if (!binding.result.owned_by(budget))
       return Status{ErrorCode::InvalidArgument,
                     "Result binding belongs to a different resource root"};
   return Status::success();

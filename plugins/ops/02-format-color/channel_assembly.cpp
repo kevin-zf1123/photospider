@@ -16,6 +16,7 @@
 #include "02-format-color/result_mapping.hpp"
 #include "common/domain/model_coordinates.hpp"
 #include "common/registry.hpp"
+#include "photospider/core/checked_math.hpp"
 #include "photospider/core/status_helpers.hpp"
 #include "photospider/core/utf8_validation.hpp"
 #include "photospider/data/region_runs.hpp"
@@ -368,7 +369,7 @@ Result<OperationPreparation> prepare(
   assembly.by_port.resize(inputs.size());
   for (std::size_t i = 0; i < assembly.spans.size(); ++i)
     assembly.by_port[assembly.spans[i].port].push_back(i);
-  auto valid = schema.validate(true);
+  auto valid = schema.validate();
   if (!valid.ok())
     return Answer(valid);
   output.metadata.result_schema =
@@ -387,9 +388,6 @@ ResultBuilder assembly_builder(const ResultProgramPhase& phase,
   auto result = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
-      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
-                                                     phase.association->end())
-                        : std::vector<std::uint64_t>{},
       phase.query.tile_extent));
   return result;
 }
@@ -611,24 +609,40 @@ struct State final {
     }
     require(format_result::planes(spec, output, [&](const Region& box) {
       if (spec.layout.spatial && policy != "materialize") {
+        std::uint64_t piece_bytes = 0;
+        constexpr auto metadata_per_piece =
+            sizeof(ResultTensorViewPiece) +
+            8 * (sizeof(ResultViewAxis) + sizeof(RegionDimension));
+        if (!core_internal::checked_multiply(assembly->spans.size(),
+                                             metadata_per_piece, &piece_bytes))
+          return Status{ErrorCode::ResourceExhausted, {}};
+        auto piece_memory = take(phase.resources.reserve(
+            ResourceCapacity::host(piece_bytes, piece_bytes)));
         ResourceVector<ResultTensorReadWindow> windows{
             ResourceAllocator<ResultTensorReadWindow>(phase.resources)};
-        std::vector<const ResultTensorReadWindow*> sources;
+        std::vector<ResultTensorViewPiece> pieces;
+        windows.reserve(assembly->spans.size());
+        pieces.reserve(assembly->spans.size());
         for (const auto& span : assembly->spans) {
           auto clipped =
               take(Footprint::from_regions(spec.sample_shape(), {box}));
           clipped = take(clipped.intersect(take(Footprint::from_regions(
               spec.sample_shape(), {span_region(spec, *assembly, span)}))));
-          for (const auto& part : clipped.boxes())
-            windows.push_back(take(
-                ready->at({span.port, 0})
-                    .acquire(format_result::mapped_region(
-                                 part, mapping(phase.query, *assembly, span)),
-                             phase.query.cancellation)));
+          for (const auto& part : clipped.boxes()) {
+            ResultTensorViewTransform transform;
+            transform.source_axes = mapping(phase.query, *assembly, span);
+            windows.push_back(
+                take(ready->at({span.port, 0})
+                         .acquire(format_result::mapped_region(
+                                      part, transform.source_axes),
+                                  phase.query.cancellation)));
+            pieces.push_back({nullptr, part, std::move(transform)});
+          }
         }
-        for (const auto& window : windows)
-          sources.push_back(&window);
-        auto status = result.publish_tensor_view(0, box, sources,
+        // Bind borrowed pointers only after the window vector is complete.
+        for (std::size_t i = 0; i < pieces.size(); ++i)
+          pieces[i].source = &windows[i];
+        auto status = result.publish_tensor_view(0, box, pieces,
                                                  phase.query.cancellation);
         if (status.ok())
           return status;
@@ -910,8 +924,6 @@ Result<WorkflowNodeOutput> edit_channels(
   if (!axis || *axis >= base.descriptor.shape.size())
     return Answer(core_internal::invalid_schema_domain(
         "FMT-03 base axis required/in range"));
-  if (false && desc && desc->channel_axis != axis)
-    desc.reset();
   inputs[0].structure.axis = axis;
   const auto count = base.descriptor.shape[*axis];
   const auto output_count = replacements ? count : slots.size();

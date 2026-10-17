@@ -49,7 +49,7 @@ struct ArrayKernel final {
       transform.source_axes.resize(source_shape.size());
       for (size_t axis = 0; axis < source_shape.size(); ++axis)
         transform.source_axes[axis] = {static_cast<int32_t>(axes[axis]), 0,
-                                       source_shape[axis] == 1 ? 0 : 1, 1};
+                                       source_shape[axis] == 1 ? 0 : 1};
       auto window = math_take(
           input.acquire(Region::whole(source_shape), phase.query.cancellation));
       status = builder.publish_tensor_view(0, Region::whole(shape), window,

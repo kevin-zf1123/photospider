@@ -94,7 +94,7 @@ Result<ResourceVector<TileNeed>> decode_result_discovery(
                                     query.tile_extent, row.tensor_slot);
           if (!grid.ok())
             return grid.status();
-          if (!grid.value() || row.end > grid.value()->tile_count())
+          if (row.end > grid.value().tile_count())
             return core_internal::invalid_argument(
                 "GPU discovery tile outside compiled input grid");
         }

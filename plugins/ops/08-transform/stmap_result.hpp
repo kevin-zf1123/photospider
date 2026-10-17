@@ -392,18 +392,17 @@ struct Program final {
     math_require(phase.consume_work(source_coordinates.size() * 6));
     if (source_coordinates.empty())
       return TileNeed{0, 0, true, {}};
-    const auto grid =
-        phase.query.input_tile_grids.empty()
-            ? math_take(
-                  TileGrid::from_schema(*phase.query.inputs[0].result_schema,
-                                        phase.query.tile_extent))
-            : std::optional<TileGrid>{phase.query.input_tile_grids.at(0).at(0)};
+    const auto grid = phase.query.input_tile_grids.empty()
+                          ? math_take(TileGrid::from_schema(
+                                *phase.query.inputs[0].result_schema,
+                                phase.query.tile_extent))
+                          : phase.query.input_tile_grids.at(0).at(0);
     ResourceVector<TileIndex> tiles{
         ResourceAllocator<TileIndex>(phase.resources)};
     tiles.reserve(source_coordinates.size());
     for (const auto& at : source_coordinates) {
       tiles.push_back(
-          math_take(sdk::tile_for_coordinate(*grid, at.data(), rank)));
+          math_take(sdk::tile_for_coordinate(grid, at.data(), rank)));
     }
     return TileNeed{0, 0, false,
                     math_take(TileSet::from_indices(
@@ -709,10 +708,6 @@ struct Program final {
     if (stage == 1) {
       builder.emplace(math_take(ResultBuilder::start(
           phase.resources, output, phase.query.semantic_key, {},
-          phase.association
-              ? std::vector<std::uint64_t>(phase.association->begin(),
-                                           phase.association->end())
-              : std::vector<std::uint64_t>{},
           phase.query.tile_extent)));
       ResultProgramNeed need;
       need.tiles.push_back(prepare_source(phase));
