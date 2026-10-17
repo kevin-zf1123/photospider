@@ -170,7 +170,7 @@ Exterior tangent extrapolation has no interior endpoint-range bound.
 
 ## Demand, invalidation and ownership
 
-For every nonempty request, the Run-shared Result program requests complete x, y and query inputs with ordinary payload tile Needs, including typed validation and upstream failures. It validates all x knots and query controls before y arithmetic, evaluates every query and output column, and publishes a complete dense Result of shape [N] or [N,C]. The Result association records the actual source ObjectIds. Empty reads no payload; static metadata validation still applies. A nonempty local request still computes and stores the complete output. Output tile actors retain the shared backing but expose only the requested complete member tiles, and sample coordinates remain global rather than being rebased to the request.
+For every nonempty request, the Run-shared Result program requests complete x, y and query inputs with ordinary payload tile Needs, including typed validation and upstream failures. It validates all x knots and query controls before y arithmetic, evaluates every query and output column, and publishes a complete dense Result of shape [N] or [N,C]. Empty reads no payload; static metadata validation still applies. A nonempty local request still computes and stores the complete output. Output tile actors retain the shared backing but expose only the requested complete member tiles, and sample coordinates remain global rather than being rebased to the request.
 
 The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
 linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values

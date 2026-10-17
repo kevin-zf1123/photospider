@@ -65,7 +65,7 @@ A declaration fixes all named static Tensor members, their dtype, cell shape, ba
 - Runtime input data does not become compile-time parameters or literal nodes.
 - A workflow output selects an operation-node output; direct input passthrough is not a workflow output form.
 - Result tensor backing layout does not change logical sample authorization. Planar storage is not interleaved storage.
-- The Result C operation table remains ABI 5. This ADR describes the C++ workflow binding contract, not a separate C++ Tensor operation protocol.
+- The Result C operation table remains ABI 6. This ADR describes the C++ workflow binding contract, not a separate C++ Tensor operation protocol.
 
 ## 5. Consequences
 

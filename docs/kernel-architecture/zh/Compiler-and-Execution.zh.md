@@ -2,7 +2,7 @@
 
 ## 范围与 ownership
 
-Compiler 验证 schema-7 `WorkflowDocument`、解析 Result operation contracts，并生成 immutable semantic、optimized 和 physical plans。它拒绝其他任何 schema 版本，包括早期基于标签的 workflow。当前 package 为 0.35.0，OperationTraits version 为 27；规范 identity 使用 semantic graph v22、physical plan v22 和 outer plan-cache key v18。`ExecutionContext` 拥有有界 CPU pool、可选 native backend lane、caches，以及由 runs 和仍存活 owners 共享的 resource root。未设置 `managed_resources` 时，context 使用默认 `ResourceLimits`；设置后使用显式 limits。`maximum_live_bytes` 也限制 Payload。Run 拥有 continuation state，只有 callbacks 退出且 cancellation 与 graph-currentness checks 允许 publication 后才返回具名 Results。
+Compiler 验证 schema-7 `WorkflowDocument`、解析 Result operation contracts，并生成 immutable semantic、optimized 和 physical plans。它拒绝其他任何 schema 版本，包括早期基于标签的 workflow。当前 package 为 0.36.0，OperationTraits version 为 28；规范 identity 使用 semantic graph v23、physical plan v23 和 outer plan-cache key v18。`ExecutionContext` 拥有有界 CPU pool、可选 native backend lane、caches，以及由 runs 和仍存活 owners 共享的 resource root。未设置 `managed_resources` 时，context 使用默认 `ResourceLimits`；设置后使用显式 limits。`maximum_live_bytes` 也限制 Payload。Run 拥有 continuation state，只有 callbacks 退出且 cancellation 与 graph-currentness checks 允许 publication 后才返回具名 Results。
 
 `WorkflowInputDeclaration` 保存 id、精确 name 和必需的 Result schema。`ExecutionBinding` 保存 name 和 owning `ResultRef`。Tensor 是 Result storage 和 codecs 使用的 typed backing。`OperationMetadata` 只携带完整 Result schema；metadata specialization 是根据输入 schema 和静态参数对输出 schema 做的结构推导。Tensor shape 和 layout 属于 `ResultTensorSpec`。端口在结构谓词匹配时即可连接；compiler 不比较领域标签，因此结构相同但预期含义不同的 Result 可以连接到同一个端口。
 
@@ -73,13 +73,19 @@ Coordinator 在调度边界依次检查 cancellation、stale graph state 和首�
 
 ## 存储与资源
 
-Result 拥有静态 schema、descriptor coverage、数值 backing 和 ObjectId association。Capture 固定 descriptor revision 与覆盖，不保存执行 TileRecord。依赖记录和冻结 TileEvidence 属于 Run 与可选缓存结构。合法 view 单独保留其字节所需的来源 owner。Root 计费元数据、payload、work 和保留 backing；返回 Result 与窗口在 context 退役后继续保留租约。所选算子资源由 preparation、plan 和 execution 持有，不附着到 Result。
+Result 拥有静态 schema、descriptor coverage、数值 backing 和 ObjectId。Capture 固定 descriptor revision 与覆盖；Run 及其可选缓存分别保存 TileRecord。依赖记录和冻结 TileEvidence 属于 Run 与可选缓存结构。合法 view 单独保留其字节所需的来源 owner。Root 计费元数据、payload、work 和保留 backing；返回 Result 与窗口在 context 退役后继续保留租约。所选算子资源由 preparation、plan 和 execution 持有，不附着到 Result。
 
 编译时选择的算子资源保留在 plan 和执行状态中；Result 不保留它们。
 
 `OperationTiming::reports` 持有有界算子报告的 owning `DiagnosticAccumulator`；内核合并并保存这些字节，但不解释它们。Completed-result cache 命中不会为未重复的计算增加新的工作报告。
 
 `ExecutionDiagnostics::peak_live_bytes` 表示当前 Run 归属的受控 Payload backing 已提交容量峰值。并行 callback 都会计入其 Run observation；调用方执行前已有的输入 backing 与先前完成 cache 中的 storage 不计入。`planned_peak_bytes` 表示预留 Payload capacity 峰值，包括完整 CPU reservation 和增量 native allocation；这是容量预留值，不是已提交字节数。复用已完成的 cache Result 不会带入之前 producer epoch 的峰值。这些计数描述 Root 控制的 backing，包括已发布的 planar pages，不代表进程 RSS。
+
+## 公共接口与版本边界
+
+Package `0.36.0` 的 SOVERSION 为 `0.36`，`OperationTraits` 版本为 28。`SchemaTemplate` 仅含固定结构字段和 publication scopes；`ResultTensorSpec` 提供 dtype、shape、batch/atomic 轴与可选 spatial layout。View axis 包含 `output_axis`、`source_origin`、有符号 `step` 和 `output_origin`。`TileGrid::from_schema` 返回 `Result<TileGrid>`，`OperationRegistry::prepare_operation` 解析静态算子契约。`ExecutionContext` 直接拥有 `ResourceBudget`；snapshot reservation 使用独立的内部配额。Native C operation module 导出精确大小的 ABI 6 getter，带显式 Tensor-view transform 与多片事务发布。
+
+Compiler 使用 semantic graph / physical plan v23、Result schema canonical tag v6、outer plan-cache-key v18 和 optimizer `v5-canonical-noop`。WorkflowDocument 为 7；CPU parallel/tiles services 为 2，native GPU 为 1。这些版本轴彼此独立。内部 compiler IR 和 physical plan 不是持久化 wire 格式。
 
 ## 边界
 

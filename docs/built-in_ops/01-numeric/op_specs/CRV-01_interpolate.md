@@ -110,13 +110,7 @@ active input. Every query and output column is evaluated, so an invalid value in
 an unrequested row or column can fail the run. `reject` also collects all active
 inputs before classifying the domain.
 
-Cache identity includes complete input versions, profile, metadata and
-parameters. Replacing source Results updates the associations to their current
-ObjectIds; a reusable static preparation does not retain old source owners.
-Numerical failures have Run scope and publish no partial output. The operations do
-not report independent per-column Atom success. Input offsets, positive, zero
-and negative strides are supported. Published output storage and an authorized
-read window retain their owner beyond context destruction.
+Cache identity includes complete input versions, profile, metadata and parameters. When source Results are replaced, a reusable static preparation does not retain old source owners. Numerical failures have Run scope and publish no partial output. The operations do not report independent per-column Atom success. Input offsets, positive, zero and negative strides are supported. Published output storage and an authorized read window retain their owner beyond context destruction.
 
 Searching/classification costs O(K+N log K), followed by N scalar evaluations
 (or N*C for multi), with classification shared across columns. The complete

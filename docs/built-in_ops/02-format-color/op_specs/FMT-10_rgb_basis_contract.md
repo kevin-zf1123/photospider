@@ -18,7 +18,7 @@ The family contains registered [A RGB->XYZ](FMT-10A_rgb_to_xyz.md),
 [B XYZ->RGB](FMT-10B_xyz_to_rgb.md) and [C adapt XYZ white](FMT-10C_adapt_xyz_white.md)
 operations, plus the compile-time [D RGB->RGB](FMT-10D_convert_linear_rgb.md)
 helper. Each native member has strict, accelerated Apple Silicon and accelerated
-x86-64 CPU keys under Result ABI 5. [Exact matrix definitions](FMT-10_basis_math.md)
+x86-64 CPU keys under Result ABI 6. [Exact matrix definitions](FMT-10_basis_math.md)
 remain normative. The specifications remain Proposed; runtime implementation
 status is separate.
 

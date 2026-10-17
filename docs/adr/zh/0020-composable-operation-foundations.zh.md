@@ -15,7 +15,7 @@ Preparation 接收有序输入 schema 和静态参数，解析输出 schema 与�
 
 `TensorDescriptor` 指定 dtype 和正 shape。完整样本 rank 仍为 1 到 8。`SchemaTemplate` 包含 1 到 16 个具名静态 Tensor 成员，具有显式 batch/atomic 轴和可选空间拓扑。Extent 固定或由静态输入轴/元素数推导。运行期样本不选择成员数、dtype、rank 或 shape。
 
-OperationTraits 27 和 Result C ABI 5 暴露 Result-only 端口。`OperationPortConstraint` 提供结构谓词和显式 validator identity；`OperationOutputTraits` 提供每个输出 schema 和输入投影。不再具有端口 kind、内核 scalar-bounds 区间或 Region 执行规则字段。
+OperationTraits 28 和 Result C ABI 6 暴露 Result-only 端口。`OperationPortConstraint` 提供结构谓词和显式 validator identity；`OperationOutputTraits` 提供每个输出 schema 和输入投影。不再具有端口 kind、内核 scalar-bounds 区间或 Region 执行规则字段。
 
 只有算子显式绑定 ops SDK `ops.scalar-range` validator 时才检查 Float32 有限闭区间。成员 slot、上下界和 validator 实现进入准备后的校验 identity。普通 scalar `[1]` 输入不自动附加区间要求。完整 validator 要求其范围内完整授权，且不自行增加 Need。
 

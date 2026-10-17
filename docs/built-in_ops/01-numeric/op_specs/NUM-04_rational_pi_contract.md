@@ -101,19 +101,11 @@ preserve their categories. Exact poles remain successful numeric results.
 
 ## Demand, algorithm and resource bounds
 
-For nonempty output Q, both input tensors have full-input support and typed
-validation. The coordinator supplies authorized Result tensor windows that
-preserve legal immutable strides and offsets, including zero/negative strides
-and unaligned Int64 values; the operation does not require packed input
-collection. The operation writes one complete packed Result, and the executor
-projects requested global coordinates afterward. Empty Result queries retain
-static validation and resource admission, then return empty tensor coverage
-without input reads, denominator checking or arithmetic work. A nonpositive denominator outside Q still fails a nonempty Run-shared
-computation. Consumers may read only authorized member tiles; retaining the
-complete internal backing does not widen access. Changes to
-either source invalidate all observed outputs. Descriptor inference uses
-static metadata only. Results and their source associations keep their owners
-valid after context destruction; cache-off preserves active ownership.
+For nonempty output Q, both input tensors have full-input support and typed validation. The coordinator supplies authorized Result tensor windows that preserve legal immutable strides and offsets, including zero/negative strides and unaligned Int64 values; the operation does not require packed input collection. The operation writes one complete packed Result, and the executor projects requested global coordinates afterward.
+
+Empty Result queries retain static validation and resource admission, then return empty tensor coverage without input reads, denominator checking or arithmetic work. A nonpositive denominator outside Q still fails a nonempty Run-shared computation. Consumers may read only authorized member tiles; retaining the complete internal backing does not widen access.
+
+Changes to either source invalidate all observed outputs. Descriptor inference uses static metadata only. Output Results keep their owners valid after context destruction; cache-off preserves active ownership.
 
 Use exact integer reduction modulo two for sine/cosine or one for tangent,
 retaining full magnitude for sincpi. Products such as 2*q, 4*p and absolute

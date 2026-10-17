@@ -8,7 +8,7 @@ The installed `Photospider::kernel` target provides:
 
 - schema-7 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
 - typed semantic IR and optimized IR;
-- Result operation C ABI 5 and OperationTraits 27 with closed typed parameter schemas, optimization, and member-tile-demand-aware local physical planning;
+- Result operation C ABI 6 and OperationTraits 28 with closed typed parameter schemas, optimization, and member-tile-demand-aware local physical planning;
 - CPU-required and GPU-optional local execution;
 - operation support is defined by each registered contract; see [image operations](docs/kernel-architecture/Image-Operations.md) and the [built-in operations index](docs/built-in_ops/README.md);
 - static `Result` members and unified `Tensor`, explicit operation-bound validation, rank-general `Region`, strided layout, immutable bytes, Metal shared storage and bounded local caches;
@@ -46,7 +46,7 @@ cmake --install build --prefix /desired/photospider-prefix
 ```
 
 ```cmake
-find_package(Photospider 0.35 CONFIG REQUIRED COMPONENTS kernel)
+find_package(Photospider 0.36 CONFIG REQUIRED COMPONENTS kernel)
 target_link_libraries(app PRIVATE Photospider::kernel)
 ```
 
@@ -68,7 +68,7 @@ SDK target `Photospider::ops_sdk`, which uses only kernel public interfaces.
 not supply compiled implementations on its own.
 
 ```cmake
-find_package(Photospider 0.35 CONFIG REQUIRED COMPONENTS kernel ops)
+find_package(Photospider 0.36 CONFIG REQUIRED COMPONENTS kernel ops)
 target_link_libraries(app PRIVATE Photospider::ops)
 ```
 

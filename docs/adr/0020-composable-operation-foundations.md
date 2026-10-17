@@ -15,7 +15,7 @@ Preparation receives ordered input schemas and static parameters, resolves outpu
 
 `TensorDescriptor` specifies dtype and positive shape. Complete sample rank remains 1..8. `SchemaTemplate` contains 1..16 named static Tensor members with explicit batch/atomic axes and optional spatial topology. Extents are fixed or derived from static input axes/element counts. No runtime sample value chooses member count, dtype, rank or shape.
 
-OperationTraits version 27 and Result C ABI 5 expose Result-only ports. `OperationPortConstraint` supports structural predicates and explicit validator identities. `OperationOutputTraits` supplies each output schema and input projection. There is no port-kind selector, kernel scalar-bounds interval or Region execution-rule field.
+OperationTraits version 28 and Result C ABI 6 expose Result-only ports. `OperationPortConstraint` supports structural predicates and explicit validator identities. `OperationOutputTraits` supplies each output schema and input projection. There is no port-kind selector, kernel scalar-bounds interval or Region execution-rule field.
 
 A finite Float32 interval is checked only when an operation explicitly binds the ops SDK `ops.scalar-range` validator. Member slot, bounds and validator implementation enter prepared validation identity. Ordinary scalar `[1]` inputs do not automatically acquire interval requirements. Complete validators require authorized coverage of their full scope and never add Needs themselves.
 

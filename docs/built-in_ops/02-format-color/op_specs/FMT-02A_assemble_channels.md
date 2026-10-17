@@ -17,13 +17,7 @@ implemented_operation_keys:
 
 # FMT-02A: assemble single components along a new channel axis
 
-Runtime contract: A/B/C are registered as twelve Result operation ABI 5 CPU
-keys: `assemble`, `concatenate`, `assemble_mapped`, and `scalar_literal`, each
-with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
-The public authoring helpers are installed in
-`photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
-specification decision remains Proposed; implementation status is recorded
-separately.
+The default C++ `OperationRegistry` registers this member's `strict`, `accelerated_apple_silicon` and `accelerated_x86_64` CPU variants as Result operations. External C modules use Result C ABI 6, which is separate from the built-in C++ registration path. Public authoring helpers are installed in `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT specification remains Proposed independently of the registered implementation.
 
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md).
 The implemented keys are separate default-registry primitives.
@@ -41,10 +35,9 @@ and rank r+1. Its coordinate-copy rule is:
 Y[j] = X[j[a]][erase(j,a)]
 ```
 
-The result preserves element bytes. No implicit cast, broadcast, resampling,
-transfer, color conversion or alpha association occurs. `auto`, `view` and
-`materialize` follow the family/storage contract; independently owned planes do
-not automatically form a legal zero-copy output image.
+The operation copies element bytes exactly, without casting, broadcast, resampling, transfer, color conversion or alpha association. The `auto`, `view` and `materialize` policies follow the family storage contract.
+
+For spatial output, the implementation builds explicit multi-piece Result views. Independently owned source planes are eligible when their mapped pieces collectively cover the target and each passes source authorization and physical representability checks. For generic nonspatial output, the family requires a single storage owner and a single affine address expression.
 
 ## Interface and regional specialization
 

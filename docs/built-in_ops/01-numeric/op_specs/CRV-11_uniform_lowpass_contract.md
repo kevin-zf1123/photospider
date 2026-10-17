@@ -104,14 +104,9 @@ relevant kernel except boundary defaults reflect in constructors. No unused
 kernel parameter, output dtype, sample spacing or automatic quality parameter is
 accepted. The only dynamic input is input; the named output is values.
 
-The dynamic port `input` is a Result containing exactly one tensor member and
-no fields. Any structurally valid schema id/version/member key is accepted.
-Use its complete `sample_shape()`, including batch axes, for rank, axis and
-extent checks. Input rank is 1..8, Float32/64, positive extents and a product at
-most 2^40. The `values` output port is an immutable Result using
-`photospider.tensor` v1/member `samples`, with the same full shape and dtype and
-no attached domain description. The output retains its backing owners; the schema carries no operation resource configuration. Every nonempty complete-input output has full certified
-coverage and retains global coordinates and the source Result association.
+The dynamic port `input` is a Result containing exactly one tensor member and no fields. Any structurally valid schema id/version/member key is accepted. Use its complete `sample_shape()`, including batch axes, for rank, axis and extent checks. Input rank is 1..8, Float32/64, positive extents and a product at most 2^40.
+
+The `values` output port is an immutable Result using `photospider.tensor` v1/member `samples`, with the same full shape and dtype and no attached domain description. The output retains its backing owners; the schema carries no operation resource configuration. Every nonempty complete-input output has full certified coverage and retains global coordinates.
 
 Input rank is 1..8 with positive extents and count <=2^40; axis is a nonnegative
 index below rank. Axis length may be one or smaller than the kernel. For N=1,

@@ -65,7 +65,7 @@ struct ExecutionResult final {
 - Runtime input data 不会成为 compile-time parameters 或 literal nodes。
 - Workflow output 选择 operation-node output；输入直接透传不是 workflow output 形式。
 - Result tensor backing layout 不改变逻辑 sample authorization。Planar storage 不等同于 interleaved storage。
-- Result C operation table 保持 ABI 5。本 ADR 描述 C++ workflow binding contract，不描述独立 C++ Tensor operation protocol。
+- Result C operation table 保持 ABI 6。本 ADR 描述 C++ workflow binding contract，不描述独立 C++ Tensor operation protocol。
 
 ## 5. 后果与代价 (Consequences)
 

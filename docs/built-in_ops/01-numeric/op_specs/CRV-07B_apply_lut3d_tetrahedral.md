@@ -71,15 +71,9 @@ validation still applies.
 
 ## Execution, resources and errors
 
-The Run-shared Result program requests input, table and axis with Data, Validation
-and Descriptor . Callback numeric checks validate all axes, every
-original input color and query before applying clamp, then perform selected
-vertex mathematics. Typed/upstream errors may precede callback validation and
-cover complete inputs. Requested fragments close to complete three-component
-colors. Output carries ColorArray v1, records actual source ObjectIds, publishes
-complete internal coverage, with public coverage restricted to requested tiles with global sample coordinates, and has one all-or-nothing
-Result transaction. Dirty mapping follows recorded output demand; Empty reads no
-payload. Result owners survive context teardown.
+The Run-shared Result program requests input, table and axis with Data, Validation and Descriptor. Callback numeric checks validate all axes, every original input color and query before applying clamp, then perform selected vertex mathematics. Typed/upstream errors may precede callback validation and cover complete inputs.
+
+Requested fragments close to complete three-component colors. Output carries ColorArray v1, publishes complete internal coverage, with public coverage restricted to requested tiles with global sample coordinates, and has one all-or-nothing Result transaction. Dirty mapping follows recorded output demand; Empty reads no payload. Result owners survive context teardown.
 
 Work and resource limits, authorized Root windows, Root-owned 8*sum(Ni)-byte
 grid storage, full packed output allocation, cancellation and error categories

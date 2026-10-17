@@ -1,6 +1,6 @@
 # Numeric operations
 
-The default registry contains unsuffixed finite-domain arithmetic and clamp keys, staged scalar reductions, an ordered scan, and profile-specific numeric families. Their parameter, execution and output contracts differ, so choose a key by its exact name. These are bundled operations in `plugins/ops/01-numeric/`, not kernel code; the kernel supplies only the generic Result execution, resource, cancellation, and failure contracts they use. Operation plugins use the Result operation C ABI 5. Numeric work reports, LUT bake reports, and quality reports are operations-SDK types (`photospider/ops/numeric/`); see [Atom errors and quality](Atom-Errors-and-Quality.md).
+The default registry contains unsuffixed finite-domain arithmetic and clamp keys, staged scalar reductions, an ordered scan, and profile-specific numeric families. Their parameter, execution and output contracts differ, so choose a key by its exact name. These are bundled operations in `plugins/ops/01-numeric/`, not kernel code; the kernel supplies only the generic Result execution, resource, cancellation, and failure contracts they use. Operation plugins use the Result operation C ABI 6. Numeric work reports, LUT bake reports, and quality reports are operations-SDK types (`photospider/ops/numeric/`); see [Atom errors and quality](Atom-Errors-and-Quality.md).
 
 ## Unsuffixed Result numeric operations
 

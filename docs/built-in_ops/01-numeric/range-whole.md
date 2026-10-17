@@ -40,7 +40,7 @@ The strict profile rounds the exact formula directly. Accelerated profiles retai
 
 ## Current behavior checks
 
-The example wraps its original typed backing in source Results charged to the same execution Root; it does not pack a second copy of the inputs. Cache checks distinguish same-Frozen identity reuse from completed-result reuse with fresh source Results, verify that replay records the current source ObjectIds, and confirm that replacing a bound invalidates the cached result. A Result retained after context retirement remains readable, and releasing its final owner returns all Root resource dimensions to zero.
+The example wraps its original typed backing in source Results charged to the same execution Root; it does not pack a second copy of the inputs. Cache checks distinguish same-Frozen identity reuse from completed-result reuse with fresh source Results, and confirm that replacing a bound invalidates the cached result. A Result retained after context retirement remains readable, and releasing its final owner returns all Root resource dimensions to zero.
 
 Temporary acceptance should cover all four clamp dtypes, integer extrema,
 batch-axis flattening, negative zero, remap intermediate overflow, pre-cancellation

@@ -1,7 +1,7 @@
 # ADR 0012：Operation Plugin 使用版本化 C 契约
 
 - 状态：已接受
-- 提议中的后继：[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md) 以前缀协商取代精确大小规则，并让内置算子使用同一条 C 导入路径。在该提案接受并实现前，当前接口为 exact-size Result ABI 5。
+- 提议中的后继：[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md) 以前缀协商取代精确大小规则，并让内置算子使用同一条 C 导入路径。在该提案接受并实现前，当前接口为 exact-size Result ABI 6。
 
 ## 1. 核心摘要 (TL;DR)
 
@@ -14,12 +14,12 @@ Operation plugin 通过版本化 C 接口跨越 kernel 边界。Host 在发布 r
 ## 3. 正式契约与 API
 
 ```c
-#define PS_RESULT_OPERATION_ABI_VERSION_5 5U
-const ps_result_operation_plugin_api_v5 *
-ps_result_operation_plugin_get_api_v5(void);
+#define PS_RESULT_OPERATION_ABI_VERSION_6 6U
+const ps_result_operation_plugin_api_v6 *
+ps_result_operation_plugin_get_api_v6(void);
 ```
 
-该表声明 Result 端口、静态 Tensor 成员、成员区间 Need、共享 stage callback 和事务发布。当前不提供 data-provider C table。详细布局、C metadata sink 和 callback 契约见 [Plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)。
+该表声明 Result 端口、静态 Tensor 成员、成员区间 Need、共享 stage callback 和事务发布。`publish_tensor_view` 必须提供非 NULL 的显式 transform；`publish_tensor_view_pieces` 接受 1..16 条精确大小的 piece envelope，禁止在 pieces 中 reshape，并将完整、互斥的目标分区原子提交。单源 view 的 `reshape=1, source_rank=0, axes=NULL` 仍合法。跨 Root 发布视图保留来源 Result，而不在目标 Root 重复计入来源 Payload。当前不提供 data-provider C table。详细布局、C metadata sink 和 callback 契约见 [Plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)。
 
 Loader 校验精确 ABI 版本和结构大小、自然对齐、pointer/count 配对、数量与 key 长度、UTF-8、受检运算、封闭 enum/flag、必需 callback、schema、参数和恰好一次的 destroy 所有权。多记录注册使用 copy-then-swap，失败不发布前缀。库 guard 在拒绝路径调用可安全读取的 destroy 后再关闭库。
 
@@ -31,4 +31,4 @@ ABI 校验不提供沙箱、签名认证、插件隔离或崩溃防护。Daemon 
 
 ## 5. 影响
 
-版本或布局不匹配时在注册发布前拒绝。Callback 异常受边界栅栏处理，但 native 崩溃或挂起仍可能影响 host。外部模块必须按匹配的 package 和头文件重新构建，不提供旧 ABI 兼容层。
+版本或布局不匹配时在注册发布前拒绝。Callback 异常受边界栅栏处理，但 native 崩溃或挂起仍可能影响 host。外部模块必须按匹配的 package 和头文件重新构建，不提供旧 ABI 兼容层。ABI 6 不兼容 ABI 5 的记录大小或 getter，也不会对缺失的 view transform 推断隐式映射；ADR 0022 仍是未实现的 Proposed 后继。

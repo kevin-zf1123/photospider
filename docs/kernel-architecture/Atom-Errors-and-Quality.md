@@ -16,8 +16,7 @@ struct FailureDetail final {
   FailureOrigin origin = FailureOrigin::Unspecified;
   FailureScope scope = FailureScope::Unspecified;
   std::optional<AtomKey> atom = {};
-  std::optional<AtomDomain> domain = {};
-  std::uint64_t association = 0, node_id = 0, input_id = 0;
+  std::uint64_t node_id = 0, input_id = 0;
   std::uint64_t domain_code = 0;  // opaque, preserved without interpretation
 };
 struct AtomKey final {
@@ -53,9 +52,9 @@ class QualityReport final {
 `Status.code` retains the coarse error category. `reason` is a machine-readable cause, and `detail` records origin and scope. Diagnostic strings are not branch conditions. Unspecified fields are the legacy category-only projection.
 
 - Atom identifies exactly one logical producer observation.
-- ValidationDomain identifies a fixed logical range.
-- Association identifies the immutable Result ObjectId being validated before publication. Associated fields are checked before observers see that result.
 - Group, Run and Waiter describe operational extent and do not invent a failed semantic value at an arbitrary coordinate.
+
+`FailureScope` uses `Unspecified=0`, `Atom=1`, `Group=4`, `Run=5`, and `Waiter=6`. `AtomKey` identifies an output index and 1..8 coordinates, with unused coordinates zero. `FailureDetail` carries `origin`, `scope`, optional `atom`, `node_id`, `input_id`, and opaque `domain_code`. The operations SDK's `InvalidAssociation` domain error identifies a mismatch in explicit operation data, such as the ObjectId of the table measured for a LUT report. These numeric scopes classify failure extent; they do not define per-sample dependency semantics.
 
 The host binds `node_id` or `input_id` to the actual source of a failure. Propagation retains that identity and the original atom. A transport read failure remains Io/Group with its input declaration identity. Failure records have no success Tensor or success dependency certificate.
 

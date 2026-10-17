@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Reader mirror: [Chinese](zh/0023-track-dependencies-between-fixed-tiles.zh.md)
-- Current boundary: package 0.35.0 implements per-member tile grids, member-local interval Needs, and Run-shared stages as declared in §3. A producer's semantic descriptor is its resolved static Result schema; Results carry no facets or attached resource identities.
+- Current boundary: package 0.36.0 implements per-member tile grids, member-local interval Needs, and Run-shared stages as declared in §3. A producer's semantic descriptor is its resolved static Result schema; Results carry no facets or attached resource identities.
 - Related: [ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md), [ADR 0017](0017-cpu-regional-execution-and-storage.md), [ADR 0018](0018-local-result-caches-and-frozen-execution.md), [ADR 0021](0021-independent-node-results.md), [ADR 0022](0022-freeze-operation-c-abi-v3.md)
 
 ## 1. Core summary (TL;DR)
@@ -197,4 +197,4 @@ A computed tile's identity combines the existing physical identity of its step, 
 
 **Removed mechanisms.** The sample relation and its constructors, packed Gather evidence, per-sample dependency certificates, support roles and guarantee levels, exact-set normalization used as dependency evidence, tuple closure as dependency evidence, query-scoped dependency bundles and their rebinding, request-keyed actors, whole-result execution, whole Needs, and Result fields are removed. Structural and channel consistency checks that operations still need remain as schema validation. Multi-stage Needs, the static input projection, Root resource admission, cancellation and callback retirement remain.
 
-**Binary interface.** Needs carry a member slot with half-open tile intervals, or a descriptor-only request; publication carries no relation. The Result operation C ABI 5 carries these records. The frozen prefix-negotiated interface remains the separate target of ADR 0022.
+**Binary interface.** Needs carry a member slot with half-open tile intervals, or a descriptor-only request; publication carries no relation. The Result operation C ABI 6 carries these records. The frozen prefix-negotiated interface remains the separate target of ADR 0022.

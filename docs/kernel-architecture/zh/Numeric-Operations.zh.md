@@ -1,6 +1,6 @@
 # 数值算子
 
-默认 registry 提供未带后缀的有限域算术与 clamp、分阶段标量归约、有序扫描，以及带 profile 的数值算子族。各 key 的参数、执行和输出契约不同，调用方应按完整 key 选择。这些是 `plugins/ops/01-numeric/` 中的 bundled operations，不是内核代码；内核只提供它们所用的通用 Result 执行、资源、取消和失败契约。Operation plugin 使用 Result operation C ABI 5。数值工作报告、LUT bake 报告和质量报告是算子 SDK 类型（`photospider/ops/numeric/`）；见 [Atom 错误与质量](Atom-Errors-and-Quality.zh.md)。
+默认 registry 提供未带后缀的有限域算术与 clamp、分阶段标量归约、有序扫描，以及带 profile 的数值算子族。各 key 的参数、执行和输出契约不同，调用方应按完整 key 选择。这些是 `plugins/ops/01-numeric/` 中的 bundled operations，不是内核代码；内核只提供它们所用的通用 Result 执行、资源、取消和失败契约。Operation plugin 使用 Result operation C ABI 6。数值工作报告、LUT bake 报告和质量报告是算子 SDK 类型（`photospider/ops/numeric/`）；见 [Atom 错误与质量](Atom-Errors-and-Quality.zh.md)。
 
 ## 未带后缀的 Result 数值算子
 

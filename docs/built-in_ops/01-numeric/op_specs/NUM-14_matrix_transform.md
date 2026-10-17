@@ -124,12 +124,7 @@ the order `vectors`, `matrix`, `bias`; each edge has one tensor member under any
 member key. The output is the `values` Result with `photospider.tensor` schema
 and tensor member `samples`.
 
-Static preparation validates dtype, rank, component counts, shape agreement, and
-the 2^40 logical-count limit, then specializes the output schema. Rebinding
-values with unchanged schemas reuses the compiled preparation. A warm content
-cache hit for fresh source Results updates all three output associations to the
-current source identities. Replacing the matrix during an open demand recomputes
-from the replacement samples.
+Static preparation validates dtype, rank, component counts, shape agreement, and the 2^40 logical-count limit, then specializes the output schema. Rebinding values with unchanged schemas reuses the compiled preparation. Replacing the matrix during an open demand recomputes from the replacement samples.
 
 `exact_dot.hpp` uses a host-owned 4352-bit accumulator in units of 2^-2148; at
 most four binary64 products plus bias require 4198 magnitude bits. No product
@@ -212,11 +207,7 @@ See [Apple's SME platform notes](https://github.com/apple-oss-distributions/xnu/
 and [Arm ACLE streaming/ZA rules](https://arm-software.github.io/acle/main/acle.html).
 The implementation preserves `-fno-fast-math -frounding-math -ffp-contract=off`.
 
-Create temporary public Result checks for shape, exact values, typed validation,
-Empty, resource limits, cancellation, preparation reuse, fresh-source associations
-and escaped-owner lifetime. Compare matrix formulas against independent exact
-dot products. Benchmarking, when needed for a change, must report its measured
-scope separately from numerical acceptance.
+Create temporary public Result checks for shape, exact values, typed validation, Empty, resource limits, cancellation, preparation reuse and escaped-owner lifetime. Compare matrix formulas against independent exact dot products. Benchmarking, when needed for a change, must report its measured scope separately from numerical acceptance.
 
 The Fraction oracle independently checks exact dot products and source-NaN
 priority. These checks are correctness samples, not

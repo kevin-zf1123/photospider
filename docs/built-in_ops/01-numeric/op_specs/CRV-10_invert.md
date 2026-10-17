@@ -107,9 +107,7 @@ linear pair or PCHIP stencil is selected from complete inputs. Any input change
 invalidates the complete output. Full typed/upstream validation can fail even
 outside delivered Q. Dynamic numerical failures have Domain/Run scope.
 
-Cache identity includes method, dtype, policy, profile and complete inputs.
-The program publishes one immutable dense Result with complete internal coverage, with public coverage restricted to requested tiles; sample coordinates remain global rather than being rebased to Q. Its association records the actual source ObjectIds. Arbitrary legal strides, offsets, unaligned and zero/negative
-strides are supported. Output ownership survives context destruction.
+Cache identity includes method, dtype, policy, profile and complete inputs. The program publishes one immutable dense Result with complete internal coverage, with public coverage restricted to requested tiles; sample coordinates remain global rather than being rebased to Q. Arbitrary legal strides, offsets, unaligned and zero/negative strides are supported. Output ownership survives context destruction.
 
 Lookup work is O(K+N log K) plus exact arithmetic/refinement. Promoted x/y use
 16*K element bytes plus allocator/metadata overhead. Fixed arithmetic workspace
@@ -158,14 +156,6 @@ x/y/query and static dtype/policy through Compiler/ExecutionContext. Create this
 
 `plugins/ops/01-numeric/curve_inverse.cpp` registers the six complete-input Result keys; the public constructors are `invert_linear_node` and `invert_pchip_node` in [`inverse_curves.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/inverse_curves.hpp). Linear inversion uses an exact rational path across profiles. Strict and general Float64 PCHIP use the exact polynomial/lattice algorithm. Accelerated Float32 PCHIP uses a certified bracket and accepts only a uniquely rounded result, otherwise it falls back to the strict scalar solver. Exact cross products reduce collinear PCHIP stencils to linear inversion; K=2, knot and clamp paths remain direct. Scalar integer comparison temporarily selects the strict inverse math profile and restores the surrounding numeric profile afterward. The execution floating-environment guard independently preserves the caller environment.
 
-For temporary validation, bind immutable source Results and read outputs through
-authorized windows. Cover caller/worker floating environments, mixed dtypes,
-negative/zero strides, dirty scope, knot/clamp signed zero, preparation reuse,
-repeated-demand identity and current source associations. Include Empty without
-polling a failing producer, SampledSignal errors attributed to input 2,
-cancellation and source-owner retirement. A three-element Float32/Float64 output
-and its windows retain 12/24 Payload bytes after source retirement; releasing
-the last window releases that payload. A constant View with N=2^40 must fail
-`ResourceExhausted/CapacityLimit` when complete complete-input output storage exceeds the
-configured Payload cap. This case checks admission, not numerical execution at
-that logical size.
+For temporary validation, bind immutable source Results and read outputs through authorized windows. Cover caller/worker floating environments, mixed dtypes, negative/zero strides, dirty scope, knot/clamp signed zero, preparation reuse and repeated-demand identity. Include Empty without polling a failing producer, SampledSignal errors attributed to input 2, cancellation and source-owner retirement.
+
+A three-element Float32/Float64 output and its windows retain 12/24 Payload bytes after source retirement; releasing the last window releases that payload. A constant View with N=2^40 must fail `ResourceExhausted/CapacityLimit` when complete complete-input output storage exceeds the configured Payload cap. This case checks admission, not numerical execution at that logical size.

@@ -1,6 +1,6 @@
 # 公共数据与执行约定
 
-本页保留研究期数据、空间、颜色与数值设计约定。涉及当前运行行为时，以 0.35.0 package 的公开头文件和[kernel 架构指南](../../kernel-architecture/README.md)为准，尤其是[数据模型](../../kernel-architecture/Data-Model.md)、[依赖采样](../../kernel-architecture/Dependency-Sampling.md)、[资源](../../kernel-architecture/Managed-Resources.md)和[全局结果](../../kernel-architecture/Global-Results.md)。本文中的 Proposed 设计不是当前实现承诺；分类页参数仍须与已实现节点的具体规格区分。
+本页保留研究期数据、空间、颜色与数值设计约定。涉及当前运行行为时，以 0.36.0 package 的公开头文件和[kernel 架构指南](../../kernel-architecture/README.md)为准，尤其是[数据模型](../../kernel-architecture/Data-Model.md)、[依赖采样](../../kernel-architecture/Dependency-Sampling.md)、[资源](../../kernel-architecture/Managed-Resources.md)和[全局结果](../../kernel-architecture/Global-Results.md)。本文中的 Proposed 设计不是当前实现承诺；分类页参数仍须与已实现节点的具体规格区分。
 
 ## 数据对象与输出
 

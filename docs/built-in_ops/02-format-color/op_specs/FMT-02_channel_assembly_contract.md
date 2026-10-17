@@ -11,13 +11,7 @@ clarification_status: complete
 
 # FMT-02: channel assembly and concatenation family
 
-Runtime contract: A/B/C and the scalar literal provider are registered as
-twelve Result operation ABI 5 CPU keys: `assemble`, `concatenate`,
-`assemble_mapped`, and `scalar_literal`, each with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
-The public authoring helpers are installed in
-`photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
-specification decision remains Proposed; implementation status is recorded
-separately.
+The default C++ `OperationRegistry` registers twelve CPU Result-operation keys for `assemble`, `concatenate`, `assemble_mapped` and `scalar_literal`, each with `strict`, `accelerated_apple_silicon` and `accelerated_x86_64` profiles. These built-in operations use the current Result contracts; external C modules use the separately versioned Result C ABI 6 importer. Public authoring helpers are installed in `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT specification remains Proposed independently of the registered implementation.
 
 This is the operator-local clarification for the Proposed FMT-02 family. Inherit
 [FMT-common](FMT_common_contract.md), the NUM numerical/resource conventions
@@ -78,28 +72,22 @@ actually uses.
 
 ## Current Result interface and bounds
 
-The twelve registered keys use single-tensor Result inputs and outputs. Every
-connected input contributes Descriptor support, including inputs unused by the
-selected mapping; Data support includes only mapped sources in the requested
-output footprint. Each input descriptor contains one tensor.
-The implementation supports seven native dtypes by exact bit copy, preserves
-the first input's Result schema id, tensor key and publication policy, sets
-`atomic_trailing_axes` to zero, and attaches no description. Batch axes form a cell-independent prefix and must match exactly across
-nonscalar sources; a scalar literal is represented by an explicit unbatched
-shape-[1] source. The full input and output sample counts are bounded by 2^40,
-and the full sample rank, including batch and cell axes, is at most 8. `axis`,
-`input_axes`, and `output_axis` index cell axes and exclude the Result batch
-prefix. Connected ports and static maps are bounded by implementation admission.
-Forced views require one CpuStorage owner and a single affine address expression
-for the complete requested region. Planar image views require ResultBuilder
-proof of consecutive planes from one root, correct plane order and row pitch.
-A forced view that lacks that proof returns `ViewUnavailable`; `auto` falls back
-to copying only for that status. Materialization reads only the requested
-regions. Scalar row replication uses bounded batches of at most 256 samples and
-checks work and cancellation during copying.
+The twelve registered keys use single-tensor Result inputs and outputs. Every connected input contributes Descriptor support, including those unused by the selected mapping. Data support includes only mapped sources in the requested output footprint. Each input descriptor contains one tensor.
+
+The implementation supports seven native dtypes by exact bit copy, preserves the first input's Result schema id, tensor key and publication policy, sets `atomic_trailing_axes` to zero and attaches no description. Batch axes form a cell-independent prefix and must match across nonscalar sources; a scalar literal is an explicit unbatched shape-[1] source. Full input and output sample counts are bounded by 2^40, and the combined batch/cell rank is at most eight. `axis`, `input_axes` and `output_axis` address cell axes, excluding the Result batch prefix. Connected ports and static maps follow the implementation's admission limits.
+
+For nonspatial generic tensors, a zero-copy view requires **one physical `CpuStorage` owner for all supplied parts** and **one affine address expression for the entire requested region**. The `generic_view` path checks equal owner identities, compatible nonchannel strides, a consistent channel stride and the expected byte address of every mapped part. Independently owned generic sources, inconsistent strides or addresses make the physical view unavailable.
+
+For spatial output, the operation instead builds explicit `ResultTensorViewPiece` records for each mapped source part and authorized window. The builder checks the complete, disjoint target coverage and physical representability; pieces may retain different storage owners and Roots. A forced `view` policy reports `ViewUnavailable` when the physical mapping cannot be represented. `auto` copies only for that nonsticky result, while `materialize` directly copies the requested regions. Scalar row replication uses batches of at most 256 samples and checks work and cancellation during copying.
 
 The public Result workflow and implementation details are in the
 [architecture reference](../../../kernel-architecture/Channel-and-Color-Operations.md#structural-channel-operations).
+
+### Spatial view construction
+
+For each requested destination box, the operation intersects the prepared source spans with that box, resolves the affine axes and acquires an owning read window for every resulting part. It constructs all piece records before binding their borrowed `ResultTensorReadWindow*` pointers, after the windows vector is complete. This keeps the pointers valid during publication.
+
+The operation calls `ResultBuilder::publish_tensor_view(0, box, pieces)` once, so the builder either certifies the entire destination box or leaves its previous coverage unchanged. A physical `ViewUnavailable` lets `auto` materialize that box; `view` reports failure and `materialize` uses the writer directly. Source read, schema, authorization, resource and cancellation failures retain their own errors. The C++ vector overload has no fixed 16-piece limit: Root work and metadata admission bound its size, while the separate C ABI bridge accepts 1..16 pieces.
 
 ## Clarification decisions
 
@@ -287,11 +275,9 @@ map, retained ownership and authorized coverage within the applicable image
 storage contract. The kernel currently supplies no general facility for
 remapping arbitrary source pages into a new shared image reservation.
 
-A split/reassemble sequence whose components retain a common source owner may
-admit a view in some cases; that requires an explicit correspondence proof and
-supported view representation. It must not be promised for unrelated planes.
-Materialized output follows canonical planar offsets, page admission and exact
-sample publication. Packed ROI export is a separate read operation.
+For spatial output, a split/reassemble sequence can publish separate authorized pieces as one view when each mapped physical subregion is representable and the builder can certify its coverage, owners and absence of cycles. An unrelated source owner is permitted there, but arbitrary page remapping or equal sample bytes alone do not establish a valid view. Nonspatial generic output keeps the single-`CpuStorage`-owner, single-affine-expression requirement described in [Current Result interface and bounds](#current-result-interface-and-bounds).
+
+Materialized output follows canonical planar offsets, page admission and exact sample publication. Packed ROI export is a separate read operation.
 
 `auto` attempts only a legal view and otherwise materializes. It must not hide a
 source, metadata, cancellation or resource failure by retrying a different
@@ -367,7 +353,7 @@ output channels without mutating the source.
 | Zero inputs, malformed or unsorted `input_descriptions`, missing or out-of-range axis, axis that conflicts with a description, illegal rank insertion, absent or ambiguous C selector | Compile/direct preflight | InvalidArgument / InvalidDomain, schema origin. |
 | Dtype mismatch, incompatible nonchannel extents, unsupported tensor rank/type or channel-table length | Compile/direct preflight | TypeMismatch / None. |
 | Checked shape/prefix overflow, host port/graph capacity or resource/work admission failure | Inherited validation/admission phase | Preserve the shared NUM/kernel status rather than truncate or wrap. |
-| Forced view cannot represent the requested result | Requested observation evaluation | InvalidArgument / InvalidDomain; diagnostic ViewUnavailable. |
+| Forced view cannot represent the requested result | Requested observation evaluation | InvalidArgument / ViewUnavailable. |
 | Missing source coverage, required upstream failure, cancellation, stale plan, unsupported backend or allocation failure | Respective inherited phase | Preserve inherited code/reason/origin and observation scope. |
 
 Diagnostics identify the input ordinal, relevant axis/group/field and operation.

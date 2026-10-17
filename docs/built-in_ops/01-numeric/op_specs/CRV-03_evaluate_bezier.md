@@ -77,19 +77,9 @@ Destination overflow and nonfinite demanded data fail the Run.
 
 ## Confirmed requested-component support
 
-All inputs are Results containing one tensor member under any schema id/version
-and member key; `sample_shape()` supplies the complete dimensions, including
-batch axes. The Run-shared Result program requests every input with Data, Validation
-and Descriptor , then validates every segment_indices/t row before any
-component arithmetic. It evaluates all N*D output cells and publishes an
-immutable dense Result using schema `photospider.tensor` v1 / member `samples`,
-shape [N,D], selected dtype and no attached domain description. Output association records current
-source ObjectIds. A nonempty local request returns complete internal coverage, with public coverage restricted to requested tiles in
-global sample coordinates; coordinates are not rebased to the request. Empty
-produces empty coverage and does not poll a failing handle producer; static
-metadata and remaining execution stages still apply. For nonempty work,
-upstream handle failures propagate before endpoint shortcuts or invalid-query
-arithmetic.
+All inputs are Results containing one tensor member under any schema id/version and member key; `sample_shape()` supplies the complete dimensions, including batch axes. The Run-shared Result program requests every input with Data, Validation and Descriptor, then validates every segment_indices/t row before any component arithmetic. It evaluates all N*D output cells and publishes an immutable dense Result using schema `photospider.tensor` v1 / member `samples`, shape [N,D], selected dtype and no attached domain description.
+
+A nonempty local request returns complete internal coverage, with public coverage restricted to requested tiles in global sample coordinates; coordinates are not rebased to the request. Empty produces empty coverage and does not poll a failing handle producer; static metadata and remaining execution stages still apply. For nonempty work, upstream handle failures propagate before endpoint shortcuts or invalid-query arithmetic.
 
 Mathematical selection is unchanged: t=0/1 reads only the selected anchor
 component for the polynomial; an interior uses both anchors and all relative
@@ -102,16 +92,9 @@ components are evaluated, so a bad index/t or evaluated component can fail the
 Run. No partial successful output is published. There is no global mathematical
 topology/monotonicity scan.
 
-Any input edit invalidates recorded output demand. Cache identity includes all
-input versions, profile, metadata and parameters. Replacing segment/t sources
-retains the compiled static preparation. Repeating a completed demand returns
-the same Result object; an equivalent fresh four-source binding can reuse the
-content cache and refresh all four source associations. Output name, dtype,
-rank-2 shape (including D=1) and no attached domain description are unchanged. Input
-zero/negative strides, offsets and unaligned storage remain legal. Output
-storage survives its context; the output owns its published payload, so source
-backings can retire. An authorized read window shares the output owner and can
-outlive the Result.
+Any input edit invalidates recorded output demand. Cache identity includes all input versions, profile, metadata and parameters. Replacing segment/t sources retains the compiled static preparation. Repeating a completed demand returns the same Result object; an equivalent fresh four-source binding can reuse the content cache.
+
+Output name, dtype, rank-2 shape (including D=1) and no attached domain description are unchanged. Input zero/negative strides, offsets and unaligned storage remain legal. Output storage survives its context; the output owns its published payload, so source backings can retire. An authorized read window shares the output owner and can outlive the Result.
 
 ## Confirmed reconstruction and numerical versions
 
@@ -182,12 +165,7 @@ control reconstruction observe their separate rounding boundaries.
 
 ## Demand, dirty mapping and returned ownership
 
-For a nonempty request Q, the operation returns complete certified [N,D]
-coverage in global sample coordinates while dependency and dirty mappings retain
-Q. Input version, profile, metadata and parameter identity participate in cache
-validation; a source edit invalidates the corresponding recorded demand. Check that replacement segment and t Results can reuse static preparation,
-and that any content-cache reuse refreshes all four source ObjectIds for the
-active bindings.
+For a nonempty request Q, the operation returns complete certified [N,D] coverage in global sample coordinates while dependency and dirty mappings retain Q. Input version, profile, metadata and parameter identity participate in cache validation; a source edit invalidates the corresponding recorded demand. Check that replacement segment and t Results can reuse static preparation.
 
 The immutable dense output Result owns its packed payload independently of the
 four source backings and execution context. A previously acquired authorized
@@ -244,22 +222,9 @@ composition cases showing that 2^39-column and 2^40-row sparse requests still
 require the complete payload budget and fail when it is insufficient. These cases check capacity rejection for each admitted profile; they do not
 establish successful numerical execution at either maximum shape.
 
-For temporary validation, source Values may supply immutable Referenced storage
-for source Results; bindings, output values and reads use Results. Cover admitted
-profiles, Float32/Float64, quadratic/cubic curves, all 16 reversed/unaligned input
-combinations, zero strides, caller/worker fenv, invalid static metadata, typed
-complete-input validation, unused generic values, error ordering, endpoint selection,
-overflow, Empty, associations, dirty mapping, preparation reuse, work limits,
-cancellation and Root release. Use independent Fraction goldens for CRV-02 and
-CRV-03 rather than comparing two paths through the same implementation.
+For temporary validation, source Values may supply immutable Referenced storage for source Results; bindings, output values and reads use Results. Cover admitted profiles, Float32/Float64, quadratic/cubic curves, all 16 reversed/unaligned input combinations, zero strides, caller/worker fenv, invalid static metadata, typed complete-input validation, unused generic values, error ordering, endpoint selection, overflow, Empty, dirty mapping, preparation reuse, work limits, cancellation and Root release. Use independent Fraction goldens for CRV-02 and CRV-03 rather than comparing two paths through the same implementation.
 
-Production retains RN64 reconstruction and exact integer power-Horner with one
-final rounding. All current profiles use the same exact numerical calculation;
-NEON/AVX2 supply integer helpers. ExactPolynomial's fixed arena is reused with a
-5329-bit numerator bound for degree<=3 and t in [0,1]. No inverse or global
-mathematical topology pass is performed. complete-input retains one row and fixed scratch
-instead of per-output associations. See implementation notes for public/core
-performance and its limits.
+Production retains RN64 reconstruction and exact integer power-Horner with one final rounding. All current profiles use the same exact numerical calculation; NEON/AVX2 supply integer helpers. ExactPolynomial's fixed arena is reused with a 5329-bit numerator bound for degree<=3 and t in [0,1]. No inverse or global mathematical topology pass is performed. complete-input retains one row and fixed scratch. See implementation notes for public/core performance and its limits.
 
 See [implementation notes](../math-implementation.md#crv-03-parametric-bezier-evaluation)
 for the arithmetic bounds.

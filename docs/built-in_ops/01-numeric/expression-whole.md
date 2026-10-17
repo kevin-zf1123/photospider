@@ -42,13 +42,7 @@ for samples whose final error or domain classification cannot be certified.
 The shared final FP32-scaled four-ULP contract applies to both output dtypes.
 Strict and accelerated keys retain separate cache identities.
 
-Each output Result has its own ObjectId. Its association names the ObjectIds of
-the inputs active for that output: values associates its active endpoints and
-coefficients, while axis associates only active endpoints. No additional
-identity pairs the values and axis Results; workflows connect their named ports.
-Input edits invalidate the outputs that depend on those inputs. Numeric failures
-have Domain/Run scope, no Atom, and preserve the global sample index, coordinate
-and AST source span when available. A failed run publishes no partial output.
+Each output Result has its own ObjectId. No additional identity pairs the values and axis Results; workflows connect their named ports. Input edits invalidate the outputs that depend on those inputs. Numeric failures have Domain/Run scope, no Atom, and preserve the global sample index, coordinate and AST source span when available. A failed run publishes no partial output.
 
 Values owns `N * sizeof(dtype)` output bytes and a bounded evaluation workspace;
 axis owns 24 output bytes and its smaller coordinate workspace. The runtime
@@ -58,13 +52,4 @@ Published Result storage remains valid after execution context retirement.
 
 ## Focused validation
 
-Temporary validation should exercise shared AST preparation across outputs and
-dynamic runs, mixed Float32/Float64 bindings, and a balanced 128-coefficient
-expression with 255 AST nodes, height 8 and 130 declared ports. Check atomic axis
-tuple publication and source associations; whole-domain failure outside the
-requested projection; duplicate-coordinate rejection and axis-only behavior;
-N=1 exclusion of a failing end producer; invalid scalar schemas; Float32 final
-overflow; Empty output without starting failing producers; caller/worker floating
-environments; work limits; cancellation; and output lifetime after context
-retirement. Compare numeric results with independent Fraction or directed-MPFR
-references. Follow the temporary-test lifecycle in the testing guide.
+Temporary validation should exercise shared AST preparation across outputs and dynamic runs, mixed Float32/Float64 bindings, and a balanced 128-coefficient expression with 255 AST nodes, height 8 and 130 declared ports. Check atomic axis tuple publication; whole-domain failure outside the requested projection; duplicate-coordinate rejection and axis-only behavior; N=1 exclusion of a failing end producer; invalid scalar schemas; Float32 final overflow; Empty output without starting failing producers; caller/worker floating environments; work limits; cancellation; and output lifetime after context retirement. Compare numeric results with independent Fraction or directed-MPFR references. Follow the temporary-test lifecycle in the testing guide.

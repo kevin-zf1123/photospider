@@ -18,7 +18,7 @@ implementation_status: implemented_cpu
 
 ### C++ 注册中的元数据推导输出
 
-Preparation 根据静态输入 schema 和参数解析输出 schema。Extent 可以固定，或由输入轴、元素数量推导。运行期 payload 不改变结构。C ABI 5 metadata resolution 可以提供输出 schema 和静态共享 stage 声明，但不保留由算子持有的任意 prepared-state 指针。见 [Plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)。
+Preparation 根据静态输入 schema 和参数解析输出 schema。Extent 可以固定，或由输入轴、元素数量推导。运行期 payload 不改变结构。C ABI 6 metadata resolution 可以提供输出 schema 和静态共享 stage 声明，但不保留由算子持有的任意 prepared-state 指针。见 [Plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)。
 
 ## 核心数据模型与内存
 

@@ -10,6 +10,8 @@
 
 `TileUnit` 标识 producer 输出、成员 slot 和 tile 索引。`TileDependency` 保存 producer 和紧凑成员 tile 集合；依赖记录中的空集合表示 descriptor 证据，不能与不产生任何证据的空 payload Need 混淆。`TileEvidence` 冻结一次共享提交的局部 Need 和继承证据。`TileRecord` 保存普通 tile 的局部与继承依赖。见 [Global Results](Global-Results.zh.md)。
 
+运行中的 actor 持有**当前** `ResultObjectInputs` 映射以及按 Need 授权的 `ResultTensorInput` capability。这些拥有型 handle 不同于用于失效传播的无 payload TileRecord 和共享证据。Checkpoint witness 保留 TileRecord、不可变 stage evidence ancestry 与已准入 Need；completed-cache 重放仍按每个保存的 Need 检查其 supplied-facts 摘要。恢复 witness 或缓存证明均不直接授予来源读取权限；只有当前供给的 Need 与拥有型窗口能授权读取。
+
 完整成员覆盖在等待登记、依赖保存、反向索引和 checkpoint 证据中保持紧凑。实际任务按有界批次展开。共享证据以不可变对象复用，不为每个消费输出 tile 复制。几何与元数据计入 Root；实际读取、比较和计算按发生量消耗 work。
 
 ## 执行与状态机
@@ -24,7 +26,7 @@ Run 固定 plan、binding 和 generation。普通 tile actor 与 Run 共享 stag
 
 ## C 分阶段程序契约
 
-Result ABI 5 是 C operation 接口。Importer 要求表和 record 大小精确匹配，复制已校验元数据，并在 callback 或算子状态存活时保留 module。C 服务提供静态 schema、成员 tile Need、显式 descriptor-only 请求、共享 stage Need、拥有型窗口和事务发布。见 [Plugin ABI](Plugin-ABI.zh.md)。
+Result ABI 6 是 C operation 接口。Importer 要求表和 record 大小精确匹配，复制已校验元数据，并在 callback 或算子状态存活时保留 module。C 服务提供静态 schema、成员 tile Need、显式 descriptor-only 请求、共享 stage Need、拥有型窗口和事务发布。见 [Plugin ABI](Plugin-ABI.zh.md)。
 
 Callback 即使忽略服务失败，失败仍保持 sticky。Poll 准入非阻塞：并发或重入 poll 在不进入 callback、不改变已准入 invocation 的情况下失败。Factory 和 poll 有异常栅栏。`bad_alloc` 映射为 ResourceExhausted，其他异常映射为 OperationFailed/HostException；更早的服务失败仍优先。
 
@@ -32,9 +34,9 @@ Callback 即使忽略服务失败，失败仍保持 sticky。Poll 准入非阻�
 
 普通纯确定性 actor 可以使用 `checkpoint_before`、`checkpoint_read` 和 `checkpoint_publish`。共享 stage phase 不提供 checkpoint 或 block callback。普通 actor 处理直接 shared Need 后跳过可选 checkpoint/block 复用及 completed-result 缓存。资格还取决于上游纯度、fallback 状态、缓存 work 和容量；见 [Global Results](Global-Results.zh.md)。
 
-Checkpoint 查找返回不超过上限的最大 sequence，未命中返回零 handle；该 handle 只在当前 callback 借用。状态是已 seal 的普通单 Tensor Result，完整覆盖、非空间、无 batch、无 domain 和 publication scope。`create_block_state` 复制受检的规范字节；生成的算子拥有型 handle 可跨 poll 保留，直到释放或状态销毁。发布 checkpoint 不消耗该 handle。
+Checkpoint 查找返回不超过上限的最大 sequence，未命中返回零 handle；该 handle 只在当前 callback 借用。状态是已 seal 的普通 Result，其 schema 只有一个完整覆盖、非空间、无 batch 的 Tensor 成员，且没有 publication scope。`create_block_state` 复制受检的规范字节；生成的算子拥有型 handle 可跨 poll 保留，直到释放或状态销毁。发布 checkpoint 不消耗该 handle。
 
-`checkpoint_read` 按逻辑顺序复制正长度的合法字节区间，可跨元素边界。它检查 work、容量与取消，不暴露存储指针。恢复以事务暂存依赖证据、祖先、事实和 association。可选容量拒绝成为 miss，不改变 actor。成功恢复不填充当前输入 capability 或授予样本访问，必须重新提出当前 Need。
+`checkpoint_read` 按逻辑顺序复制正长度的合法字节区间，可跨元素边界。它检查 work、容量与取消，不暴露存储指针。恢复以事务暂存依赖证据、祖先。Callback 通过重新准入 Need 获取当前 phase 的 input capability。可选容量拒绝成为 miss，不改变 actor。成功恢复不填充当前输入 capability 或授予样本访问，必须重新提出当前 Need。
 
 ## 精确 demand 与不可变 binding replacement
 
@@ -60,7 +62,7 @@ Block 服务消费显式 seal 的单 Tensor 状态并返回原状态或新状态
 
 ### 跨输出纯 block 共享
 
-OperationTraits 27 保留纯确定性算子的可选 `share_blocks_across_outputs`。Block 命名空间绑定准备后的 operation/output 契约、输入元数据、参数和资源；每次转换还绑定显式 range、mode 和输入状态。兼容的已完成转换可以复用，活动 callback 不通过该缓存共享。公开输出 identity 与 checkpoint scope 保持独立。
+OperationTraits 28 保留纯确定性算子的可选 `share_blocks_across_outputs`。Block 命名空间绑定准备后的 operation/output 契约、输入元数据、参数和资源；每次转换还绑定显式 range、mode 和输入状态。兼容的已完成转换可以复用，活动 callback 不通过该缓存共享。公开输出 identity 与 checkpoint scope 保持独立。
 
 ## 限制与失败处理
 

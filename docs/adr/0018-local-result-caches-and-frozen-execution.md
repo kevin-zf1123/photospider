@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Reader mirror: [Chinese](zh/0018-local-result-caches-and-frozen-execution.zh.md)
-- Current boundary: in 0.35.0 the snapshot facets and the import rejection of image, color-array, `ImagePlane` and `Mask` Values of the original decision are superseded. Snapshots validate structure only; run data is bound as Result static Tensor members.
+- Current boundary: in 0.36.0 the snapshot facets and the import rejection of image, color-array, `ImagePlane` and `Mask` Values of the original decision are superseded. Snapshots validate structure only; run data is bound as Result static Tensor members.
 
 ## 1. Core summary (TL;DR)
 

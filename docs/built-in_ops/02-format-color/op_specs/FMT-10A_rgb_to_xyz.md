@@ -18,7 +18,7 @@ registered_operation_keys:
 # FMT-10A: linear RGB to XYZ
 
 Inherit the complete [FMT-10 family](FMT-10_rgb_basis_contract.md) and
-[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 5
+[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 6
 operations under the strict, accelerated Apple Silicon and accelerated x86-64
 CPU profiles.
 

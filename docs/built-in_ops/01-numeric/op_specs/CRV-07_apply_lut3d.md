@@ -134,12 +134,7 @@ zero-weight vertices remain mathematically unused; typed invalid data or an
 upstream failure there still fails the run. Each contributing vertex is a
 complete three-component color.
 
-The output port `values` is a Result using `photospider.tensor` v1/member
-`samples`, with the complete input shape, selected Float32/Float64 dtype, `atomic_trailing_axes=1`. It publishes a packed immutable
-output with complete internal coverage, with public coverage restricted to requested tiles and global sample coordinates. The output
-association records actual source ObjectIds. Any input edit invalidates the
-recorded output demand; dirty support follows that demand. Empty reads no payload.
-Each key has one all-or-nothing Result transaction; numeric failure scope is Run.
+The output port `values` is a Result using `photospider.tensor` v1/member `samples`, with the complete input shape, selected Float32/Float64 dtype, `atomic_trailing_axes=1`. It publishes a packed immutable output with complete internal coverage, with public coverage restricted to requested tiles and global sample coordinates. Any input edit invalidates the recorded output demand; dirty support follows that demand. Empty reads no payload. Each key has one all-or-nothing Result transaction; numeric failure scope is Run.
 
 Input `sample_shape()` has rank 2..8, last extent 3 and logical element count
 <=2^40. A single color uses [1,3]. The observation domain is the remaining input
@@ -269,17 +264,9 @@ hue components and every supported color model.
 
 ## Maintained implementation and validation
 
-The six operation keys are registered in
-[`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp),
-and [`lut3d.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/lut3d.hpp) provides the
-public trilinear and tetrahedral constructors. Both are Run-shared Result operations.
-Static preparation validates Result tensor schemas and explicit color parameters, then
-stores reusable immutable program state. Each continuation records current
-source ObjectIds and uses authorized Root read windows for input/table samples.
-It publishes complete global-coordinate coverage atomically; escaped Results
-and read windows retain storage after context retirement. `UniformAxis` owns the
-Root grids, while output and exact-arithmetic workspace use managed Root
-resources.
+The six operation keys are registered in [`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp), and [`lut3d.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/lut3d.hpp) provides the public trilinear and tetrahedral constructors. Both are Run-shared Result operations. Static preparation validates Result tensor schemas and explicit color parameters, then stores reusable immutable program state.
+
+Each continuation uses authorized Root read windows for input/table samples. It publishes complete global-coordinate coverage atomically; escaped Results and read windows retain storage after context retirement. `UniformAxis` owns the Root grids, while output and exact-arithmetic workspace use managed Root resources.
 
 The maximum 256^3 Float64 table shape succeeds with an 8-byte backing read
 window under an 8 MiB Root Payload cap, proving that the implementation does

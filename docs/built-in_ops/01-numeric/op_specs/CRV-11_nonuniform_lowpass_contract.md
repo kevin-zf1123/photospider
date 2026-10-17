@@ -114,16 +114,10 @@ endpoint outside [a,b]; zero uses +0 there. Arithmetic for x+/-R, periods and
 coordinate folds must not overflow merely because an intermediate Float64 value
 would be unrepresentable. Underlying finite inputs retain their exact values.
 
-Ordered dynamic ports are `positions` and `values`. Each is a Result containing
-exactly one tensor member  under any structurally valid schema
-id/version/member key. Use the complete `sample_shape()` including batch axes.
-`positions` has shape [K], rank 1, Float32/64, finite strictly increasing values
-and K=2..1048576. `values` has rank 1..8, positive extents and product <=2^40;
-static axis selects its extent K. The `samples` output is an immutable
-`photospider.tensor` v1 Result member with the original full shape and dtype and
-no attached domain description, evaluated at the original positions. The output retains its backing owners; the schema carries no operation resource configuration.
-Nonempty output has complete internal coverage, with public coverage restricted to requested tiles and retains global coordinates and
-source associations.
+Ordered dynamic ports are `positions` and `values`. Each is a Result containing exactly one tensor member under any structurally valid schema id/version/member key. Use the complete `sample_shape()` including batch axes. `positions` has shape [K], rank 1, Float32/64, finite strictly increasing values and K=2..1048576. `values` has rank 1..8, positive extents and product <=2^40; static axis selects its extent K.
+
+The `samples` output is an immutable `photospider.tensor` v1 Result member with the original full shape and dtype and no attached domain description, evaluated at the original positions. The output retains its backing owners; the schema carries no operation resource configuration. Nonempty output has complete internal coverage, with public coverage restricted to requested tiles, and retains global coordinates.
+
 Static support_radius is a finite positive Float64; boundary is String default
 reflect. Four sinc kernels require finite positive Float64 cutoff; Kaiser also
 requires finite Float64 beta>=0; Gaussian requires finite Float64 sigma>0.
@@ -220,15 +214,8 @@ results are linked below.
 
 ## Maintained implementation and validation
 
-This shared contract covers five nonuniform kernels and 15 profile keys; it is
-not itself a registered operation. Static preparation stores immutable kernel,
-boundary, axis and profile state. Each complete-input Run promotes positions into
-Root-owned storage and retains one reusable piece vector. The implementation
-uses exact partition and paired-affine integration plus global Taylor moments
-with a rigorous tail bound, not local adaptive quadrature. All accelerated keys
-currently use the strict fallback; 128..4096-bit precision and order <=512 may
-return `ResourceExhausted`. Temporary acceptance should cover complete input
-and dirty support, global position validation, remote-column Run errors, cache
-replacement with current source associations, static preparation reuse, active
-arithmetic cancellation and escaped Result/read-window owners.
-complete-input numerical/fallback counters are unavailable. See [CRV-11 umbrella](CRV-11_resample_signal.md).
+This shared contract covers five nonuniform kernels and 15 profile keys; it is not itself a registered operation. Static preparation stores immutable kernel, boundary, axis and profile state. Each complete-input Run promotes positions into Root-owned storage and retains one reusable piece vector.
+
+The implementation uses exact partition and paired-affine integration plus global Taylor moments with a rigorous tail bound, not local adaptive quadrature. All accelerated keys currently use the strict fallback; 128..4096-bit precision and order <=512 may return `ResourceExhausted`.
+
+Temporary acceptance should cover complete input and dirty support, global position validation, remote-column Run errors, cache replacement, static preparation reuse, active arithmetic cancellation and escaped Result/read-window owners. complete-input numerical/fallback counters are unavailable. See [CRV-11 umbrella](CRV-11_resample_signal.md).

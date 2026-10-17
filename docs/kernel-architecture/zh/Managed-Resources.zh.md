@@ -21,7 +21,11 @@ Result<ResourceLease> reserve_capacity(const ResourceBudget& budget,
 
 预算跟踪 Host、Device、Shared、Metadata、Referenced、Entries、Queue 和 Payload。部分维度描述同一物理字节：Host 包含 Metadata 与 Shared，Device 包含 Shared，不能把重叠计数相加。context 的 Payload 另受 `maximum_live_bytes` 限制；调用方原有存储通过 Referenced 单独准入，不计入 Payload 子限额。
 
-在内核内部，data 层拥有 Payload reservation：`src/lib/data/memory_budget.hpp` 中的内部类型 `MemoryBudget` 与 `MemoryReservation` 实现 Payload capacity 以及 storage 和 Result 保留的 reservation lease。借用 Run 或 context state 的准入保留在 execution 层。内部 helper `ScopedMemoryAdmission` 向 allocator 提供可复制的准入 callback，其 owner 在借用的 state 退休前关闭该 callback；payload lease 不保留它。`test_resource_internals` 直接测试该 helper。公共 resource 与 storage 头文件只前向声明这些类型，布局和签名保持不变。
+`ExecutionContext` 直接构造并持有 `ResourceBudget`。创建 context 时 `maximum_live_bytes` 必须为正，为零时构造函数抛出 `std::invalid_argument`。实际 Payload 上限取它与可选 `managed_resources` 中 Payload 容量的较小者。独立 `ResourceBudget` 可以配置零 Payload 容量；ExecutionContext 始终要求正的 `maximum_live_bytes`。调度与 Result 发布直接向 context 的 Root 预算申请容量和工作量。
+
+内部 `data_internal::MemoryBudget` 和 `MemoryReservation` 实现独立的 snapshot aggregate 容量与 working-set reservation 配额。Snapshot budget 的总容量必须为正，为零时构造函数抛出 `std::invalid_argument`。Snapshot reservation 与执行 Root 分别管理各自的计量职责。
+
+`reserve(bytes)` 预留有界工作集；存活 reservation 之和将超过总容量时返回 `ResourceExhausted`。关联 allocator 只准入该 reservation 内的分配，reservation 已 seal 或分块将超出预留工作集时返回 `ResourceExhausted`。`seal()` 退还尚未使用的容量，实际分配的块持续计费直到最后一个 storage owner 释放。
 
 ## 核心数据结构与内存布局 (Data Layout & Memory)
 
@@ -68,7 +72,7 @@ GPU context 在创建 device 时使用 execution context 的资源 root 进行 n
 
 托管 native metadata 准入失败后，device 清空 native pipeline cache 并重试一次。GPU payload 准入可先回收可丢弃的待写磁盘缓存和 result-cache owner，再原子预留实际 native capacity。这些恢复路径不会重试 operation callback。
 
-算子显式获取并发布授权 view。兼容片段映射需要检查，reshape 还要求可合并为仿射映射。Root 外部来源 owner 获得 Referenced 租约，Root 自有存储保持原计费而不重复收费。新 backing 使用活动 allocator。稠密收集和设备 packing/transfer 是具有容量、work 与取消检查的显式操作，不是协调器策略。
+算子显式获取并发布授权 view。兼容片段映射需要检查，reshape 还要求可合并为仿射映射。直接发布未附带来源 Result owner 的外部 `CpuStorage` 时，目标 Root 通过 `reference(storage)` 准入 backing（同 Root 已拥有的存储不重复计费）。单源或多片 Result view 则保留来源 `ResultRef` 及其原 Root 的 backing 租约；目标 Root 只承担视图自身的 metadata 与 publication work，不对 source-backed payload 再收一份 Referenced 配额。即使来源 Results 跨越不同 Root，也适用这一规则。新 backing 使用活动 allocator。稠密收集和设备 packing/transfer 是具有容量、work 与取消检查的显式操作，不是协调器策略。
 
 ## 算法与数学实现 (Algorithms & Math)
 
@@ -87,4 +91,4 @@ GPU context 在创建 device 时使用 execution context 的资源 root 进行 n
 - `WithinBudgetOrFail` 只覆盖已纳入计量的 allocation，不限制总 RSS、驱动私有存储和标准库外部存储。
 - 空容器及部分内部几何/重建 metadata 未被完整计量。重建的外层 `Tensor` metadata 可能独立于原 publication token 存活，但每个 `Tensor` 仍持有自身 storage owner。
 - 调用方从管理范围取出原始 `Tensor` 或 vector 并在 managed allocator 之外复制时，自行承担该副本的内存成本。
-- Result C ABI 5 在每次 bridge `poll` 结束时释放普通的 C callback scratch。已保留的 tensor handle 以及由 `create_block_state` 创建的不可变 block-state Result 可以跨 poll 存在。
+- Result C ABI 6 在每次 bridge `poll` 结束时释放普通的 C callback scratch。已保留的 tensor handle 以及由 `create_block_state` 创建的不可变 block-state Result 可以跨 poll 存在。

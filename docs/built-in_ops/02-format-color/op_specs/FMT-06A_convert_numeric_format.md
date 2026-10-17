@@ -17,7 +17,7 @@ registered_operation_keys:
 
 Inherit the complete [FMT-06 contract](FMT-06_numeric_conversion_contract.md).
 The default registry provides `numeric.convert_format_strict` as a native Result
-ABI 5 operation. It takes one single-tensor Result with publishes one `values` output
+ABI 6 operation. It takes one single-tensor Result with publishes one `values` output
 Result containing one tensor. Its default scales numeric intervals while converting dtype;
 explicit `rescale=false` gives a pure numerical cast. The specification remains
 Proposed.

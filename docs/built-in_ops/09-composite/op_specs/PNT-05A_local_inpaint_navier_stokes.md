@@ -48,8 +48,8 @@ pixel compatibility are outside scope. No implicit algorithm substitution.
 
 The public keys are listed above; each has only the named output port `image`.
 PNT-05 is the existing family; PNT-05A is this concrete profile.
-The proposed integrations target Result operation ABI 5, WorkflowDocument 7,
-OperationTraits 27 and Photospider package 0.35.0. There is no GPU backend.
+The proposed integrations target Result operation ABI 6, WorkflowDocument 7,
+OperationTraits 28 and Photospider package 0.36.0. There is no GPU backend.
 Accepted public Result and runtime contracts take precedence over research pages.
 
 Normative discrete reference: OpenCV tag `4.12.0`,

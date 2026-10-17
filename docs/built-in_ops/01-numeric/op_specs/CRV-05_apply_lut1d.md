@@ -40,17 +40,9 @@ Specification acceptance remains Proposed.
 
 ## Run-shared complete-input computation
 
-Each input is a Result containing one tensor member under any schema id/version
-and member key. Its complete `sample_shape()` supplies the input/table/axis shape.
-The Run-shared Result program requests all three inputs with Data, Validation and
-Descriptor , including recognized typed validation and upstream failure
-handling. It validates the complete reconstructed axis, then every finite/domain
-query before table arithmetic. It computes every output element/channel and
-publishes an immutable packed dense Result using `photospider.tensor` v1/member `samples`,
-with the complete input shape, selected Float32/Float64 dtype and no attached domain description.
-The Result association records actual source ObjectIds. A nonempty request returns
-complete internal coverage, with public coverage restricted to requested tiles with global sample coordinates. Empty reads no payload;
-all static metadata checks still apply.
+Each input is a Result containing one tensor member under any schema id/version and member key. Its complete `sample_shape()` supplies the input/table/axis shape. The Run-shared Result program requests all three inputs with Data, Validation and Descriptor, including recognized typed validation and upstream failure handling.
+
+It validates the complete reconstructed axis, then every finite/domain query before table arithmetic. It computes every output element/channel and publishes an immutable packed dense Result using `photospider.tensor` v1/member `samples`, with the complete input shape, selected Float32/Float64 dtype and no attached domain description. A nonempty request returns complete internal coverage, with public coverage restricted to requested tiles with global sample coordinates. Empty reads no payload; all static metadata checks still apply.
 
 Mathematical table selection is unchanged: knot/clamp/singleton converts one
 entry; interpolation/extrapolation uses its adjacent pair, independently per
@@ -87,25 +79,13 @@ complete-input does not expose per-value fallback counters; report those as unav
 
 ## Maintained implementation and validation
 
-`plugins/ops/01-numeric/lut1d_application.cpp` registers the six scalar/channel
-profile keys as Run-shared Result operations. `UniformAxis` validates all raw axis
-values and step, then stores the directly reconstructed grid in an 8*L-byte
-Root allocation charged to Metadata by the default resource allocator.
-Queries are checked before table arithmetic, and descending pairs reorder x/y
-together before `ExactCurve` applies its positive-denominator formula. Input and
-table data are read through authorized Result windows; the operation does not
-copy the entire table into dense storage. The complete-input continuation publishes the
-complete packed Result, records current source ObjectIds, and releases temporary
-state on failure or cancellation.
+`plugins/ops/01-numeric/lut1d_application.cpp` registers the six scalar/channel profile keys as Run-shared Result operations. `UniformAxis` validates all raw axis values and step, then stores the directly reconstructed grid in an 8*L-byte Root allocation charged to Metadata by the default resource allocator.
 
-Use independent Fraction goldens for temporary checks. Acceptance should include scalar and channel Float32/Float64, all-port
-reversed unaligned inputs, zero-stride aliases, caller and worker floating-point
-modes, explicit validator coverage, without automatic RGBA or alpha validation, upstream Result
-failure propagation, static metadata bounds, Empty, dirty mapping and full complete-input
-coverage after sparse queries. Check same-demand Result identity, cache hits
-for fresh equivalent source Results with associations updated to those sources,
-and reuse of static preparation after input/table/axis replacement. All six CRV-04
-baking templates feed the Result application nodes.
+Queries are checked before table arithmetic, and descending pairs reorder x/y together before `ExactCurve` applies its positive-denominator formula. Input and table data are read through authorized Result windows; the operation does not copy the entire table into dense storage. The complete-input continuation publishes the complete packed Result and releases temporary state on failure or cancellation.
+
+Use independent Fraction goldens for temporary checks. Acceptance should include scalar and channel Float32/Float64, all-port reversed unaligned inputs, zero-stride aliases, caller and worker floating-point modes, explicit validator coverage, without automatic RGBA or alpha validation, upstream Result failure propagation, static metadata bounds, Empty, dirty mapping and full complete-input coverage after sparse queries.
+
+Check same-demand Result identity, cache hits for fresh equivalent source Results, and reuse of static preparation after input/table/axis replacement. All six CRV-04 baking templates feed the Result application nodes.
 
 Temporary acceptance should cover custom Result schemas, channel batch shape
 [2,2,2], Fraction goldens, axis/query/table error precedence and cancellation

@@ -21,7 +21,11 @@ Result<ResourceLease> reserve_capacity(const ResourceBudget& budget,
 
 The budget tracks Host, Device, Shared, Metadata, Referenced, Entries, Queue, and Payload dimensions. Some dimensions describe the same physical bytes: Host includes Metadata and Shared, and Device includes Shared. Do not add these overlapping counters as if they were separate allocations. Payload is additionally limited by `maximum_live_bytes`. Referenced caller-owned storage is separately admitted under Referenced and does not consume the Payload sublimit.
 
-Inside the kernel, the data layer owns Payload reservations: the internal `MemoryBudget` and `MemoryReservation` types in `src/lib/data/memory_budget.hpp` implement the Payload capacity and the reservation leases that storage and Results retain. Admission that borrows Run or context state stays in the execution layer. The internal `ScopedMemoryAdmission` helper hands allocators a copyable admission callback, and its owner closes that callback before the borrowed state retires; payload leases never retain it. `test_resource_internals` exercises this helper directly. Public resource and storage headers only forward-declare these types and keep their layouts and signatures.
+`ExecutionContext` constructs and owns a `ResourceBudget` directly. Its `maximum_live_bytes` must be positive; the constructor throws `std::invalid_argument` for zero. The effective Payload limit is the smaller of that value and the optional `managed_resources` Payload capacity. A standalone `ResourceBudget` may have zero Payload capacity; an execution context always requires a positive `maximum_live_bytes`. Scheduling and Result publication charge and admit work directly against the context's Root budget.
+
+The internal `data_internal::MemoryBudget` and `MemoryReservation` implement an independent quota for snapshot aggregate capacity and reserved working sets. A snapshot budget requires positive aggregate capacity, and its constructor throws `std::invalid_argument` for zero. Snapshot reservations and the execution Root maintain separate accounting responsibilities.
+
+`reserve(bytes)` sets aside a bounded working set or returns `ResourceExhausted` when live reservations would exceed the aggregate capacity. Its allocator admits only blocks within that reservation and returns `ResourceExhausted` after sealing or when a block would exceed the reserved working set. Sealing releases unused capacity, while allocated blocks stay charged until their last storage owners retire.
 
 ## Data Layout & Memory
 
@@ -66,7 +70,7 @@ GPU contexts use the execution context resource root for native allocations when
 
 When managed native metadata admission fails, the device clears its native pipeline cache and retries once. GPU payload admission can first reclaim eligible pending disk writes and result-cache owners, then reserves actual native capacity atomically. These recovery paths do not retry operation callbacks.
 
-Operations explicitly acquire and publish authorized views. Compatible fragment mappings are checked; reshape additionally requires an affine join. Source owners outside the Root receive Referenced leases, while Root-owned storage retains its original accounting without duplicate charges. New backing uses the active allocator. Dense collection and device packing/transfer are explicit operations with capacity, work and cancellation checks, not coordinator policy.
+Operations explicitly acquire and publish authorized views. Compatible fragment mappings are checked; reshape additionally requires an affine join. Directly publishing a caller-owned `CpuStorage` without source Result owners admits that backing through the target Root's `reference(storage)` path (unless the same Root already owns it). A single-source or multi-piece Result view instead retains its source `ResultRef` owners and their original Root backing leases: the target Root charges its own view metadata and publication work, but does not create a second Referenced charge for source-backed payload. This also holds when those Results originate from different Roots. New backing uses the active allocator. Dense collection and device packing/transfer are explicit operations with capacity, work and cancellation checks, not coordinator policy.
 
 ## Algorithms & Math
 
@@ -85,4 +89,4 @@ A capacity check accepts a request that exactly fills the remaining capacity; fo
 - Managed capacity is a `WithinBudgetOrFail` guarantee for accounted allocations; it does not cap total RSS or opaque driver and standard-library storage.
 - Empty containers and some internal geometry/reconstruction metadata are not comprehensively charged. Reconstructed outer `Tensor` metadata may outlive its original publication token, while each `Tensor` retains its storage owner.
 - A caller that extracts a raw `Tensor` or vector and copies it outside the managed allocator assumes that copy's memory cost.
-- Result C ABI 5 releases ordinary C callback scratch when each bridge `poll` ends. Retained tensor handles and immutable block-state Results created by `create_block_state` persist across polls.
+- Result C ABI 6 releases ordinary C callback scratch when each bridge `poll` ends. Retained tensor handles and immutable block-state Results created by `create_block_state` persist across polls.

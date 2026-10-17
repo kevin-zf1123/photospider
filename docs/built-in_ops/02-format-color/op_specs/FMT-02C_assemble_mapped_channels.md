@@ -17,13 +17,7 @@ implemented_operation_keys:
 
 # FMT-02C: assemble explicitly mapped components
 
-Runtime contract: A/B/C are registered as twelve Result operation ABI 5 CPU
-keys: `assemble`, `concatenate`, `assemble_mapped`, and `scalar_literal`, each
-with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
-The public authoring helpers are installed in
-`photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
-specification decision remains Proposed; implementation status is recorded
-separately.
+The default C++ `OperationRegistry` registers this member's `strict`, `accelerated_apple_silicon` and `accelerated_x86_64` CPU variants as Result operations. External C modules use Result C ABI 6, which is separate from the built-in C++ registration path. Public authoring helpers are installed in `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT specification remains Proposed independently of the registered implementation.
 
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md) for
 exact copying, same dtype, spatial agreement, explicit input descriptions, planar storage,
@@ -121,11 +115,9 @@ source channels dirty nothing. Descriptor changes invalidate affected selector,
 mapping, shape or interpretation evidence. Static validation still covers all
 connected inputs; necessary upstream computation/failures retain their scope.
 
-No mapped result is assumed to be a view. Reorder, duplicate or independently
-owned source planes may require materialization under the canonical output
-image layout. `auto` follows the family representability proof/fallback, `view`
-fails if unavailable, and `materialize` prepares canonical result pages. Shared
-provenance or equal bytes alone is not a legal physical alias proof.
+Mapped channels require a physical representability check before the operation can publish a view. For nonspatial generic output, sources with different storage owners make the view unavailable, and reordering or duplication does so when no single affine channel stride describes the mapped parts. `view` reports a physically unavailable mapping, while `materialize` prepares output storage directly; equal source bytes alone do not establish an alias.
+
+For spatial output, the operation supplies explicit target-region pieces for each source/destination mapping. Repeated sources may appear in several disjoint destination pieces. The builder validates each source authorization and the union of target coverage, and retains every contributing owner. A source may belong to another Root without copying its backing; the target charges its own metadata. `auto` retries by materializing the requested region only after physical `ViewUnavailable`. Nonspatial generic views retain the single-owner, single-affine-expression constraint defined by the family.
 
 ## Reference algorithm, resources and errors
 

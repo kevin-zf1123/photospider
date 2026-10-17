@@ -17,13 +17,7 @@ implemented_operation_keys:
 
 # FMT-02B: concatenate existing channel axes
 
-Runtime contract: A/B/C are registered as twelve Result operation ABI 5 CPU
-keys: `assemble`, `concatenate`, `assemble_mapped`, and `scalar_literal`, each
-with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
-The public authoring helpers are installed in
-`photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
-specification decision remains Proposed; implementation status is recorded
-separately.
+The default C++ `OperationRegistry` registers this member's `strict`, `accelerated_apple_silicon` and `accelerated_x86_64` CPU variants as Result operations. External C modules use Result C ABI 6, which is separate from the built-in C++ registration path. Public authoring helpers are installed in `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT specification remains Proposed independently of the registered implementation.
 
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md).
 The implemented keys are separate default-registry primitives.
@@ -59,11 +53,9 @@ checks still cover all connected inputs; no Control or additional sample
 Validation payload is needed. Dirty mapping moves ai to output_axis and adds
 pi, then intersects the observed output. Preserve gaps and global coordinates.
 
-Use the family's algorithm, resource/error rules and performance cases. Prefix
-construction is O(n); do not search all n inputs for each sample. Account source
-aliases once at backing identity, retaining each port's logical contribution.
-For one input with equal source/output axes, shape and samples are identical;
-materialization may change backing. No description is attached to the result.
+Use the family's algorithm, resource/error rules and performance cases. For spatial output, the implementation builds an affine view piece for each selected source channel block, binds it to an owning window, and submits one target-box transaction. Different source owners are permitted when every piece is representable and the aggregate mapping is complete. `auto` copies only after a physical `ViewUnavailable`; `view` fails and `materialize` writes a new destination directly.
+
+Prefix construction costs O(n); the implementation does not search all n inputs for every sample. It counts source aliases once per backing identity while retaining each input port's logical contribution. For one input with matching source/output axes, shape and samples are identical, although materialization may change backing. The result carries no attached description.
 
 ## Independent analytic fixture
 

@@ -153,14 +153,7 @@ coordinates, not unrounded ideal positions or a rounded fractional index.
 
 ## Exact demand and invalidation
 
-Every nonempty complete-input request requests complete input, table and axis Results
-with ordinary payload tile Needs, including typed validation and
-upstream failures. It validates the complete reconstructed axis first, then every
-finite/domain query before table arithmetic. It computes every output element and
-publishes one immutable packed dense Result of the complete input shape, with full
-certified coverage and global coordinates. The Result association records the
-actual source ObjectIds. Empty reads no payload; static metadata checks still
-apply.
+Every nonempty complete-input request requests complete input, table and axis Results with ordinary payload tile Needs, including typed validation and upstream failures. It validates the complete reconstructed axis first, then every finite/domain query before table arithmetic. It computes every output element and publishes one immutable packed dense Result of the complete input shape, with full certified coverage and global coordinates. Empty reads no payload; static metadata checks still apply.
 
 Mathematical table selection is unchanged: knot/clamp/singleton converts one
 entry; interpolation/extrapolation uses its adjacent pair, independently per
@@ -234,14 +227,7 @@ table arithmetic, and descending segments reorder x and y together for the
 positive-denominator `ExactCurve` formula. It reads input and table data through
 authorized Result windows and publishes one complete immutable packed Result.
 
- Scalar coverage includes ascending and descending axes, input/table
-mixed dtypes, reversed unaligned inputs, zero-stride layouts, caller and worker
-floating-point modes, clamp and extrapolation, singleton axes/tables, selected
-negative zero, invalid queries and axes, typed validation, and upstream failure.
-The fixture also checks Empty, static descriptor limits, cache association after
-source replacement, static preparation reuse, sparse requests with full complete-input
-coverage, the six CRV-04 baking chains, resource rejection, cancellation, and
-Result/read-window lifetime.
+Scalar coverage includes ascending and descending axes, input/table mixed dtypes, reversed unaligned inputs, zero-stride layouts, caller and worker floating-point modes, clamp and extrapolation, singleton axes/tables, selected negative zero, invalid queries and axes, typed validation, and upstream failure. The fixture also checks Empty, static descriptor limits, static preparation reuse after source replacement, sparse requests with full complete-input coverage, the six CRV-04 baking chains, resource rejection, cancellation, and Result/read-window lifetime.
 
 The maximum L=1,048,576 dynamic grid succeeds with its 8*L-byte allocation
 charged to Metadata and Payload below 8*L, confirming no dense table copy. A

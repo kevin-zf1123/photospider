@@ -52,7 +52,7 @@ publication; unrelated unobserved sample errors do not. Preserve upstream scope.
 This is a registered native Result primitive. Internal helper reuse preserves its declared support, rounding and validation.
 This member materializes transformed output and rejects forced view even for a bypass-only request.
 The implementation supports generic and spatial layouts. Q permits a physical view when the complete requested mapping is representable; other members materialize and reject forced view. Empty demand is stateless, and publication is transactional.
-The implementation uses Result ABI 5 and the registered CPU profiles.
+The implementation uses Result ABI 6 and the registered CPU profiles.
 
 ## Independent acceptance and conceptual workflow
 

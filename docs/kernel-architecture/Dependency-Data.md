@@ -10,6 +10,8 @@ The kernel records dependencies between static member tiles. `Footprint` remains
 
 `TileUnit` identifies a producer output, member slot and tile index. `TileDependency` stores a producer and a compact set of member tiles; an empty set in a dependency record denotes descriptor evidence. This record representation must not be confused with an empty payload Need, which produces no evidence. `TileEvidence` freezes one shared commit's local Needs and inherited evidence. `TileRecord` stores an ordinary tile's local and inherited dependencies. See [Global Results](Global-Results.md#tile-records-and-frozen-evidence).
 
+A running actor holds its **current** `ResultObjectInputs` map and Need-specific `ResultTensorInput` capabilities. These owning handles are distinct from the payload-free TileRecords and shared evidence used for dirty propagation. Checkpoint witnesses retain TileRecords, immutable stage-evidence ancestry and the admitted Needs, while completed-cache replay still checks its supplied-facts digest against each saved Need. Restoring a witness or cache proof never grants a source read: only a currently supplied Need and its owning window provide that authority.
+
 Full member coverage stays compact through wait registration, dependency storage, reverse indexing and checkpoint evidence. Actual tasks expand in bounded batches. Shared evidence is reused as immutable objects; it is not copied for every consuming output tile. Geometry and metadata are Root-accounted; actual reads, comparisons and computation consume work as performed.
 
 ## Execution and state machine
@@ -24,7 +26,7 @@ There are no automatic input-view preparation policies. Operations explicitly us
 
 ## C staged-program contract
 
-Result ABI 5 is the C operation interface. The importer requires exact table and record sizes, copies validated metadata and retains the module while callbacks or operation state exist. C services provide static schemas, member tile Needs, explicit descriptor-only requests, shared-stage Needs, owning window access and transactional publication. See [Plugin ABI](Plugin-ABI.md).
+Result ABI 6 is the C operation interface. The importer requires exact table and record sizes, copies validated metadata and retains the module while callbacks or operation state exist. C services provide static schemas, member tile Needs, explicit descriptor-only requests, shared-stage Needs, owning window access and transactional publication. See [Plugin ABI](Plugin-ABI.md).
 
 Service failures remain sticky even if ignored by a callback. Poll admission is nonblocking: concurrent or reentrant polls fail without entering the callback or altering the admitted invocation. Factories and polls are exception-fenced. `bad_alloc` maps to ResourceExhausted; other exceptions map to OperationFailed/HostException while an earlier service failure keeps precedence.
 
@@ -32,9 +34,9 @@ Service failures remain sticky even if ignored by a callback. Poll admission is 
 
 Ordinary pure deterministic actors can use `checkpoint_before`, `checkpoint_read` and `checkpoint_publish`. Shared-stage phases expose no checkpoint or block callbacks. Once an ordinary actor handles a direct shared Need, it skips optional checkpoint/block reuse and completed-result caching. Eligibility additionally depends on upstream purity, fallback state, cache work and capacity; see [Global Results](Global-Results.md#checkpoints).
 
-A checkpoint lookup returns the greatest sequence no greater than the bound, or handle zero on a miss. Its handle is borrowed for the current callback. State is a sealed ordinary Result containing one fully covered, nonspatial, unbatched Tensor, no domain and no publication scopes. `create_block_state` copies checked canonical bytes; the resulting operation-owned handle survives polls until release or state destruction. Publishing a checkpoint does not consume that handle.
+A checkpoint lookup returns the greatest sequence no greater than the bound, or handle zero on a miss. Its handle is borrowed for the current callback. State is a sealed ordinary Result whose schema has one fully covered, nonspatial, unbatched Tensor member and no publication scopes. `create_block_state` copies checked canonical bytes; the resulting operation-owned handle survives polls until release or state destruction. Publishing a checkpoint does not consume that handle.
 
-`checkpoint_read` copies a positive in-bounds byte interval in logical order, including intervals crossing element boundaries. It checks work, capacity and cancellation and exposes no storage pointer. Restore stages dependency evidence, ancestry, facts and association transactionally. Optional capacity refusal becomes a miss without changing the actor. Successful restore does not populate current input capabilities or grant sample access; current Needs must be issued again.
+`checkpoint_read` copies a positive in-bounds byte interval in logical order, including intervals crossing element boundaries. It checks work, capacity and cancellation and exposes no storage pointer. Restore stages dependency evidence and ancestry transactionally. The callback reacquires its current phase's input capabilities through newly admitted Needs. Optional capacity refusal becomes a miss without changing the actor. Successful restore does not populate current input capabilities or grant sample access; current Needs must be issued again.
 
 ## Exact demands and immutable binding replacement
 
@@ -60,7 +62,7 @@ Committed tiles and retained read windows have independent backing owners. Share
 
 ### Cross-output pure block sharing
 
-OperationTraits 27 retains optional `share_blocks_across_outputs` for pure deterministic operations. The block namespace binds prepared operation/output contracts, input metadata, parameters and resources. Each transition also binds its explicit range, mode and incoming state. Compatible completed transitions may be reused; active callbacks are not shared through this cache. Published output identities and checkpoint scopes remain separate.
+OperationTraits 28 retains optional `share_blocks_across_outputs` for pure deterministic operations. The block namespace binds prepared operation/output contracts, input metadata, parameters and resources. Each transition also binds its explicit range, mode and incoming state. Compatible completed transitions may be reused; active callbacks are not shared through this cache. Published output identities and checkpoint scopes remain separate.
 
 ## Limits and failure handling
 

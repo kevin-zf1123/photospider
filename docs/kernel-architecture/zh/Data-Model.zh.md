@@ -42,4 +42,4 @@ Workflow 输入 id 和 node id 分属不同命名空间。最多 4096 个输入�
 
 ## 5. 限制与非目标
 
-Result 不具有持久序列化或恢复契约。静态 schema 和 tile 几何不意味着稠密驻留。Batch 轴不携带时间含义。内核不提供动态 field 行或独立的整体 Result 执行模式。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) 仍为 Proposed，其目标 ABI 设计与已实现的 ABI 5 分开描述。
+Result 不具有持久序列化或恢复契约。静态 schema 和 tile 几何不意味着稠密驻留。Batch 轴不携带时间含义。内核不提供动态 field 行或独立的整体 Result 执行模式。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) 仍为 Proposed，其目标 ABI 设计与已实现的 ABI 6 分开描述。

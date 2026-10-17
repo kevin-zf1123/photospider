@@ -18,7 +18,7 @@ registered_operation_keys:
 # FMT-04B: import premultiplied numeric samples as straight
 
 The default registry provides `alpha.unassociate_<profile>` for the three CPU
-profiles. The operation uses Result ABI 5 and preserves the declared tensor
+profiles. The operation uses Result ABI 6 and preserves the declared tensor
 shape, dtype and channel positions. The specification remains Proposed. Validate the public operation with temporary independent numerical and ownership checks when changing it.
 
 Inherit the complete [FMT-04 boundary contract](FMT-04_alpha_association_contract.md).

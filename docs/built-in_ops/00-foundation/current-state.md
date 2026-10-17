@@ -1,6 +1,6 @@
 # 当前实现与规格前置条件
 
-当前 package 为 Photospider 0.35.0，operation plugin 使用 Result C ABI 5，OperationTraits 为 27。本文概括当前包内可核对的注册入口、数据类型和执行边界；单个算子的端口、参数、数值行为和 Region 规则以对应实现契约为准。公共 C++ 契约有破坏性变更，consumer 必须重建。
+当前 package 为 Photospider 0.36.0，operation plugin 使用 Result C ABI 6，OperationTraits 为 28。本文概括当前包内可核对的注册入口、数据类型和执行边界；单个算子的端口、参数、数值行为和 Region 规则以对应实现契约为准。公共 C++ 契约有破坏性变更，consumer 必须重建。
 
 ## 默认 registry 与类型边界
 

@@ -18,8 +18,7 @@ struct FailureDetail final {
   FailureOrigin origin = FailureOrigin::Unspecified;
   FailureScope scope = FailureScope::Unspecified;
   std::optional<AtomKey> atom = {};
-  std::optional<AtomDomain> domain = {};
-  std::uint64_t association = 0, node_id = 0, input_id = 0;
+  std::uint64_t node_id = 0, input_id = 0;
   std::uint64_t domain_code = 0;  // 不透明，原样保留且不解释
 };
 struct AtomKey final {
@@ -55,9 +54,9 @@ class QualityReport final {
 `Status.code` 保留粗粒度错误类别。`reason` 是机器可读的原因，`detail` 记录 origin 与 scope。诊断字符串不是分支条件。未指定的字段是仅含类别的旧投影。
 
 - Atom 精确标识一个逻辑 producer 观测。
-- ValidationDomain 标识一个固定的逻辑范围。
-- Association 标识发布前正在校验的不可变 Result ObjectId。关联字段在观察者看到该结果之前完成检查。
 - Group、Run 和 Waiter 描述操作范围，不会在任意坐标上虚构一个失败的语义值。
+
+`FailureScope` 的数值为 `Unspecified=0`、`Atom=1`、`Group=4`、`Run=5`、`Waiter=6`。`AtomKey` 标识 output index 和 1..8 维坐标，未使用坐标为零。`FailureDetail` 保存 `origin`、`scope`、可选 `atom`、`node_id`、`input_id` 和不透明的 `domain_code`。算子 SDK 的领域码 `InvalidAssociation` 表示显式操作数据身份不匹配，例如 LUT 报告测量表的 ObjectId。这些数值范围用于失败分类，不定义逐样本依赖语义。
 
 宿主把 `node_id` 或 `input_id` 绑定到失败的实际来源。传播过程保留该身份和原始 atom。传输读取失败保持为 Io/Group，并带有其输入声明身份。失败记录没有成功 Tensor，也没有成功依赖证书。
 

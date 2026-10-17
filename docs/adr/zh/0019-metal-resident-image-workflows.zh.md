@@ -51,7 +51,7 @@ struct ExecutionContextConfig {
 };
 ```
 
-Result operation callback 使用 operation ABI 5。Native GPU service 在独立的 C header `photospider/plugin/native_gpu_api.h` 中使用 ABI 1；C Result service 与 C++ Result phase 会为当前 invocation 提供该表。包含 native GPU header 不要求包含 operation plugin header。
+Result operation callback 使用 operation ABI 6。Native GPU service 在独立的 C header `photospider/plugin/native_gpu_api.h` 中使用 ABI 1；C Result service 与 C++ Result phase 会为当前 invocation 提供该表。包含 native GPU header 不要求包含 operation plugin header。
 
 ```c
 #include <photospider/plugin/native_gpu_api.h>
@@ -88,4 +88,4 @@ Execution context 按原生分配的实际容量计量 GPU 输入副本、输出
 
 设备不可用时，GPU-only operation 无法运行。允许 CPU 实现的 operation 可在 GPU 于发布前报告不可用时使用 CPU 路径。普通 operation 错误和已提交的设备错误会返回调用方，内核不会将其作为 CPU 工作自动重试。调用方可以查看 fallback 原因和实际 dispatch/submission 计数，区分设备工作与 CPU 执行。
 
-同步 lane 明确了缓冲区寿命和发布顺序，但较长的 GPU callback 会占用 lane，直到其命令排空。取消会停止新准入，并等待已提交命令退出后再释放 callback 资源。Result operation ABI 5 与 native GPU service ABI 1 是独立的 plugin 边界。按 `native_gpu_api.h` 编译的 C module 必须在该 header 变化后重新构建；不提供旧 GPU service alias。
+同步 lane 明确了缓冲区寿命和发布顺序，但较长的 GPU callback 会占用 lane，直到其命令排空。取消会停止新准入，并等待已提交命令退出后再释放 callback 资源。Result operation ABI 6 与 native GPU service ABI 1 是独立的 plugin 边界。按 `native_gpu_api.h` 编译的 C module 必须在该 header 变化后重新构建；不提供旧 GPU service alias。

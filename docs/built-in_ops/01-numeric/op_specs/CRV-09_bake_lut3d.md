@@ -68,7 +68,7 @@ shape=[N0,N1,N2]. Inherit CRV-07's
 Float64 coordinates and complete axis validation. Evaluate the source at those
 grid colors. The exported table is a `photospider.tensor` Result with `samples`
 of shape [N0,N1,N2,3], selected table dtype and one atomic trailing component axis;
-its internal owned table uses `curve.bake_lut3d.table` v2 with tensor member
+its internal owned table uses `curve.bake_lut3d.table` v3 with tensor member
 `colors`. Axis is an immutable Float64 Result tensor independent of source
 execution, and its coordinates follow the input description.
 
@@ -171,10 +171,7 @@ workflow contract rather than a new opaque runtime composition primitive.
 
 ## Structured report schema
 
-The SDK defines SchemaTemplate id `curve.bake_lut3d.report`, version 2,
-observation domain [1], and thirteen static Tensor members. Measurement publishes
-the report after complete measurement; its explicitly bound validator requires
-complete report coverage.
+The SDK defines SchemaTemplate id `curve.bake_lut3d.report` at version 3 with thirteen static Tensor members. The measurement stage publishes the report after evaluating the complete validation set, and the explicitly bound validator requires complete report coverage.
 
 | Tensor member | Dtype and shape |
 | --- | --- |
@@ -189,19 +186,11 @@ complete report coverage.
 | configuration_id | UInt8 [1,64], lowercase hexadecimal SHA-256 |
 | measured_table_id | UInt8 [1,8], little-endian ObjectId |
 
-The fixed payload is 361 bytes. Configuration identity covers shape,
-interpolation, tolerances, source/table dtypes, extra-point count, explicit color
-descriptions and source recipe; its hash domain remains
-`photospider.bake-configuration.v1`. It is ordinary payload. The reader and gate
-receive matching `Lut3dBakeDescription` explicitly. `measured_table_id` binds the
-complete owned table acquired for measurement. It is process-local object
-identity, not a content digest; equal bytes do not authorize another object.
-Result association is provenance and is not the authoritative table binding.
+The thirteen members contain 361 bytes of fixed payload. `configuration_id` is the lowercase hexadecimal SHA-256 of the shape, interpolation, tolerances, source/table dtypes, extra-point count, explicit color descriptions and source recipe, under the `photospider.bake-configuration.v1` hash domain. The reader and gate receive the expected `Lut3dBakeDescription` explicitly.
 
-Use `ExecutionContext::execute()` or request all thirteen report members through
-`execute_fragments()` before `read_lut3d_bake_report(result, description)`. The
-reader does not start production; its window limit must admit the largest member,
-72 bytes. Axis values are ordinary payload, not dynamic schema extents.
+`measured_table_id` is an ordinary `UInt8[1,8]` payload encoding the ObjectId of the complete owned table read during measurement, in little-endian order. The gate compares it with the ObjectId of the current complete owned-table input. ObjectId is process-local identity, not a content digest: two tables with identical bytes but different ObjectIds are not interchangeable for this quality report.
+
+Use `ExecutionContext::execute()` or request all thirteen report members through `execute_fragments()` before calling `read_lut3d_bake_report(result, description)`. The reader accesses completed data without starting production; its window limit must admit the largest member, 72 bytes. Axis values are ordinary payload rather than dynamic schema extents.
 
 Compare errors and tolerances using exact arithmetic before report rounding.
 Choose maxima by exact absolute error, breaking ties with the earliest ordinal.
@@ -302,7 +291,7 @@ one frozen binding snapshot, including shared inputs and optional
 plus an owning `description` configuration value for the caller. No payload is
 computed during authoring. The exported table is `photospider.tensor` v1/member
 `samples`, shape [N0,N1,N2,3], selected dtype and atomic_trailing_axes=1. The
-internal table is `curve.bake_lut3d.table` v2/member `colors` with the same shape
+internal table is `curve.bake_lut3d.table` v3/member `colors` with the same shape
 and dtype. Neither contains a domain description or quality metadata.
 
 The public SDK header is `photospider/ops/numeric/lut3d_bake.hpp`. Read a report
@@ -315,40 +304,19 @@ if (!measured.ok()) return measured.status();
 const bool passed = measured.value().passed;
 ```
 
-The gate compares the measured_table_id payload with the complete owned-table input ObjectId. Association records provenance only. A foreign object fails with OperationFailed/InvalidAssociation even when bytes match; passed=false instead fails the gate with OperationFailed/InvalidDomain and diagnostic LutApproximationToleranceExceeded. The report itself remains valid.
+The gate compares `measured_table_id` with the complete owned-table input ObjectId. Different ObjectIds fail with `OperationFailed`/`InvalidAssociation` even for byte-identical tables; `passed=false` instead fails the gate with `OperationFailed`/`InvalidDomain` and diagnostic `LutApproximationToleranceExceeded`. The report remains available for inspection.
 
-All 15 formal `curve.bake_lut3d_{axis,grid,points,points_extra,color}` profile
-keys execute Run-shared Result programs with ordinary tile Needs input validation, complete output
-coverage and numeric Run failure scope. Any participating input edit invalidates
-the complete recorded demand. Axis remains independent from source/extra data.
-Static `prepare_static` validates geometry parameters and Result metadata, then
-stores immutable geometry and bake POD state for reuse during execution; runtime
-callbacks do not reparse static parameters. The four unsuffixed keys
-`curve.pack_lut3d`, `curve.measure_lut3d`, `curve.unpack_lut3d` and
-`curve.gate_lut3d` are Result-only operations. Their schemas, report ordering,
-quality gate and ObjectId association are explicit Result contracts.
+All 15 `curve.bake_lut3d_{axis,grid,points,points_extra,color}` profile keys run shared Result stages with ordinary tile Needs for input validation, complete output coverage and numeric Run failure scope. Changes to a participating input invalidate the relevant complete recorded demand; the axis output remains independent of source and extra-point data.
 
-Pack, Unpack and Gate first request authorized Result tensor views. Legal
-common-owner mappings remain views. A physical `ViewUnavailable` causes
-transactional materialization of only the requested region, preserving
-dependency support and sample bits while charging Root Payload. Pack requests
-the complete table, so its fallback may materialize the full table. Acceptance should cover Float32/Float64 across the supported geometries with
-reversed and unaligned layouts; retained views reuse the admitted backing. Pack uses two Result polls on this path, without the former
-Tensor-copy poll.
+`prepare_static` checks geometry parameters and Result metadata, then stores immutable geometry and bake state for reuse. The four unsuffixed Result operations are `curve.pack_lut3d`, `curve.measure_lut3d`, `curve.unpack_lut3d` and `curve.gate_lut3d`. Their schemas, report ordering, quality gate and explicit measured-table ObjectId field define the output contracts.
 
-The gate validates the complete owned-table input and compares its ObjectId with the report's measured_table_id payload. Association entries retain provenance only. A foreign table fails even when its bytes match; passed=false remains a valid report but makes the gate return OperationFailed/InvalidDomain with diagnostic LutApproximationToleranceExceeded.
+Pack, Unpack and Gate acquire authorized Result tensor views first. Physically representable mappings retain source backing; `ViewUnavailable` leads to explicit transactional materialization of the requested region, preserving sample bits and dependency support while charging Root Payload. Pack requests the complete table, so its fallback can materialize the full table.
 
-Axis grid storage, prepared report/geometry state, source program state, table
-output, read-window ancestry, exact arithmetic workspace, metadata and allocator
-overhead remain managed. Table, axis and report Results can be held independently;
-a retained table read window may keep its backing alive after output handles are
-released. A small requested table ROI does not reduce source evaluation,
-complete-input outputs or global measurement work. Validate owner retirement, both table
-dtypes, geometry/layout combinations, source-error ordering, Empty requests,
-configuration mismatch, cache association, preparation reuse and rebinding with
-temporary public workflows. Delete those programs after validation and retain
-the independent mathematical oracle. No successful maximum-grid execution or
-current performance count is asserted by this document.
+Acceptance covers Float32/Float64 across supported geometries, including reversed and unaligned layouts, and checks the backing owner of retained views. Pack uses two Result polls along the view path.
+
+Managed accounting covers the axis grid, prepared report/geometry state, source program state, table output, read-window ancestry, exact arithmetic workspace, metadata and allocator overhead. Table, axis and report Results can be retained independently; an owning table read window can keep backing alive after output handles are released. Requesting a small table ROI does not reduce source evaluation, complete-input outputs or global measurement work.
+
+Acceptance workflows should check owner retirement, both table dtypes, geometry/layout variations, source-error ordering, empty requests, configuration mismatch, measured-table ObjectId binding, preparation reuse and rebinding. Temporary programs are discarded after validation, while the independent mathematical oracle is retained. This specification does not claim measured performance or a successful maximum-grid execution.
 
 - [3D LUT application](CRV-07_apply_lut3d.md).
 - [1D baking templates](CRV-04_bake_lut1d.md).

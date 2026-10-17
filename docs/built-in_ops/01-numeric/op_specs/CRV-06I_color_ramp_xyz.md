@@ -75,15 +75,9 @@ mathematics. Generic color rows outside all evaluated stencils remain numericall
 unused, while their typed/upstream validation still applies. Empty reads no sample
 payload after static preparation.
 
-The `values` port publishes an immutable `photospider.tensor` v1 Result with
-`samples` shape `sample_shape(input)+[C]`, `atomic_trailing_axes=1`. the shared stage publishes the full internal output transactionally;
-the shared stage retains full internal coverage; public actors expose only requested complete tiles and global coordinates. Fragments expose
-requested regions while retaining the full output owner. Arbitrary immutable source
-strides, offsets and unaligned storage are supported. Result association records
-source ObjectIds, and selected operation resources remain owned by preparation and execution; the output retains its data backing.
-Input edits invalidate complete recorded output demand. Numeric errors have Run
-scope; failed callbacks publish no color subset. Upstream, resource and cancellation
-errors retain their categories.
+The `values` port publishes an immutable `photospider.tensor` v1 Result with `samples` shape `sample_shape(input)+[C]`, `atomic_trailing_axes=1`. The shared stage publishes the full internal output transactionally; the shared stage retains full internal coverage; public actors expose only requested complete tiles and global coordinates. Fragments expose requested regions while retaining the full output owner.
+
+Arbitrary immutable source strides, offsets and unaligned storage are supported. Selected operation resources remain owned by preparation and execution; the output retains its data backing. Input edits invalidate complete recorded output demand. Numeric errors have Run scope; failed callbacks publish no color subset. Upstream, resource and cancellation errors retain their categories.
 
 Lookup work remains O(K+N log K), plus exact or certified arithmetic. Full output
 payload is N*C*sizeof(dtype), even for a small request. Account source owners/windows,

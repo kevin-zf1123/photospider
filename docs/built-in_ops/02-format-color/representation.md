@@ -5,7 +5,7 @@
 [FMT-09～18 范围审查](op_specs/FMT-09-18_scope_review.md)记录已完成的成员设计及实现前置条件。
 FMT-14/15/18 按维护者 2026-09-24 的委托完成设计；规格仍保持 Proposed。
 
-各规格的 Proposed 状态表示目标契约尚未接受，不等同于实现状态。当前内置 Result FMT families 包括 FMT-01 channel extraction、FMT-02 channel assembly、FMT-03 channel editing、FMT-04 alpha association、FMT-05A alpha setting、FMT-06 numeric conversion、FMT-08 SDK 描述编辑、FMT-09 transfer conversion、FMT-10 RGB basis conversion，以及 `numeric.convert_format_strict`、`channel.literal_like_<profile>` 和 `channel.scalar_literal_<profile>` primitives。FMT-04A/B 的 alpha association operations、FMT-05A `alpha.set_<profile>`、FMT-09 transfer 与 FMT-10 A/B/C native operations 均作为 Result ABI 5 CPU keys 注册；FMT-05B/C helpers 编译为现有已注册 Result operations 的组合，FMT-10D 编译为 A/可选 C/B。`literal_like` 提供 FMT-05B opaque fallback；`scalar_literal` 是 FMT-03 无输入 shape-[1] provider。当前已有实现的 FMT source families 均提供 Result CPU operations，或提供可降低为已注册 operations 的公共 helper；Proposed 或尚无实现的规格成员不因此视为已实现。其他 FMT 成员的运行状态分别按对应规格记录。ICC/OCIO 转换使用独立外部引擎契约，Float64 端口不代表完整 Float64 内部精度。整数主要用于输入输出编码；跨通道 shape、资源输入与当前端口的限制见 G1..G5。
+各规格的 Proposed 状态表示目标契约尚未接受，不等同于实现状态。当前内置 Result FMT families 包括 FMT-01 channel extraction、FMT-02 channel assembly、FMT-03 channel editing、FMT-04 alpha association、FMT-05A alpha setting、FMT-06 numeric conversion、FMT-08 SDK 描述编辑、FMT-09 transfer conversion、FMT-10 RGB basis conversion，以及 `numeric.convert_format_strict`、`channel.literal_like_<profile>` 和 `channel.scalar_literal_<profile>` primitives。FMT-04A/B 的 alpha association operations、FMT-05A `alpha.set_<profile>`、FMT-09 transfer 与 FMT-10 A/B/C native operations 均作为 Result ABI 6 CPU keys 注册；FMT-05B/C helpers 编译为现有已注册 Result operations 的组合，FMT-10D 编译为 A/可选 C/B。`literal_like` 提供 FMT-05B opaque fallback；`scalar_literal` 是 FMT-03 无输入 shape-[1] provider。当前已有实现的 FMT source families 均提供 Result CPU operations，或提供可降低为已注册 operations 的公共 helper；Proposed 或尚无实现的规格成员不因此视为已实现。其他 FMT 成员的运行状态分别按对应规格记录。ICC/OCIO 转换使用独立外部引擎契约，Float64 端口不代表完整 Float64 内部精度。整数主要用于输入输出编码；跨通道 shape、资源输入与当前端口的限制见 G1..G5。
 
 ## 算子目录
 
@@ -25,17 +25,17 @@ NUM/CRV 通过显式参数使用该配置；FMT 的任意轴、Gray/HSV/xyY 使�
 
 | ID / 提议操作 | 输入 → 输出 | 关键参数和建议默认 | 实现/支持与验收 |
 | --- | --- | --- | --- |
-| [FMT-01 通道提取族](op_specs/FMT-01_channel_extraction_contract.md) | 单 tensor Result→选定 cell-axis 分量或独立 channel handles | A 静态索引；B 静态名称／角色；C 编译期展开 A 节点；batch axes 保留；rank-one 要求 `keepdims=true` | Result operation ABI 5；exact selected-channel Data + Descriptor；auto/view/materialize；输入可显式提供 TensorDescription v4/v5；输出无描述；CPU A/B/C 当前注册。其他 FMT 家族状态以各自规格为准 |
-| [FMT-02 通道组装与拼接族](op_specs/FMT-02_channel_assembly_contract.md) | A 单分量插轴组装；B 通道轴拼接；C 显式映射组装 | 非通道 shape 严格相同；A/B 顺序固定，C 源可复用；三者逐位复制；下游目标解释另行显式配置 | CPU A/B/C 已注册，决策状态保持 Proposed；single-tensor Result ABI 5；精确请求与失效映射；auto/view/materialize |
+| [FMT-01 通道提取族](op_specs/FMT-01_channel_extraction_contract.md) | 单 tensor Result→选定 cell-axis 分量或独立 channel handles | A 静态索引；B 静态名称／角色；C 编译期展开 A 节点；batch axes 保留；rank-one 要求 `keepdims=true` | Result operation ABI 6；exact selected-channel Data + Descriptor；auto/view/materialize；输入可显式提供 TensorDescription v4/v5；输出无描述；CPU A/B/C 当前注册。其他 FMT 家族状态以各自规格为准 |
+| [FMT-02 通道组装与拼接族](op_specs/FMT-02_channel_assembly_contract.md) | A 单分量插轴组装；B 通道轴拼接；C 显式映射组装 | 非通道 shape 严格相同；A/B 顺序固定，C 源可复用；三者逐位复制；下游目标解释另行显式配置 | CPU A/B/C 已注册，决策状态保持 Proposed；single-tensor Result ABI 6；精确请求与失效映射；auto/view/materialize |
 | [FMT-03 通道重排与替换族](op_specs/FMT-03_channel_editing_contract.md) | A 重排／子集／重复／常量槽位；B 定点替换，其他槽位直通 | A/B 都只改数据映射；不继承源或目标描述；同 dtype 标量及有类型字面量；原输入同时取值 | CPU helpers 已安装，规格仍 Proposed；公开编译期组合复用 FMT-02C，scalar literal 使用 prepared native bits；精确请求与失效映射，auto/view/materialize |
-| [FMT-04 alpha 边界适配族](op_specs/FMT-04_alpha_association_contract.md) | A straight 图像→预乘数值；B 预乘数值→straight 图像 | 语义适配输入输出均含内置 alpha，shape／通道位置不变；预乘结果仅用于显式边界 | 三个 CPU profiles 均注册 Result ABI 5；保持 Proposed；保留 NUM 乘除与零 alpha 数学规则，不保留外部持久关联 |
-| [FMT-05 alpha 编辑族](op_specs/FMT-05_alpha_editing_contract.md) | A 设置／添加内置 alpha；B 提取；C 移除 | 颜色逐位保留，零 alpha 不清除隐藏 straight 颜色；共享通道局部编辑 | Proposed；A 的三个 CPU profiles 注册为 Result ABI 5 keys；B/C helpers 可执行地组合现有 Result operations，逐位处理七种 dtype，不做样本域验证。`channel.literal_like_<profile>` 是 opaque fallback 的 lowering primitive；`channel.scalar_literal_<profile>` 为 FMT-03 的无输入 shape-[1] provider |
-| [FMT-06 数值类型与区间转换](op_specs/FMT-06_numeric_conversion_contract.md) | 单 tensor Result→目标 dtype 的同坐标 `values` | 默认按 dtype 区间缩放，可显式关闭；完整 channel table 用 cell-relative axis | 单一 strict Result ABI 5 key；七种 dtype 的 49 个转换对；Data (1)+Descriptor (8)，无 Validation/Control；完整 identity map 支持合法 generic/spatial view；Proposed |
+| [FMT-04 alpha 边界适配族](op_specs/FMT-04_alpha_association_contract.md) | A straight 图像→预乘数值；B 预乘数值→straight 图像 | 语义适配输入输出均含内置 alpha，shape／通道位置不变；预乘结果仅用于显式边界 | 三个 CPU profiles 均注册 Result ABI 6；保持 Proposed；保留 NUM 乘除与零 alpha 数学规则，不保留外部持久关联 |
+| [FMT-05 alpha 编辑族](op_specs/FMT-05_alpha_editing_contract.md) | A 设置／添加内置 alpha；B 提取；C 移除 | 颜色逐位保留，零 alpha 不清除隐藏 straight 颜色；共享通道局部编辑 | Proposed；A 的三个 CPU profiles 注册为 Result ABI 6 keys；B/C helpers 可执行地组合现有 Result operations，逐位处理七种 dtype，不做样本域验证。`channel.literal_like_<profile>` 是 opaque fallback 的 lowering primitive；`channel.scalar_literal_<profile>` 为 FMT-03 的无输入 shape-[1] provider |
+| [FMT-06 数值类型与区间转换](op_specs/FMT-06_numeric_conversion_contract.md) | 单 tensor Result→目标 dtype 的同坐标 `values` | 默认按 dtype 区间缩放，可显式关闭；完整 channel table 用 cell-relative axis | 单一 strict Result ABI 6 key；七种 dtype 的 49 个转换对；Data (1)+Descriptor (8)，无 Validation/Control；完整 identity map 支持合法 generic/spatial view；Proposed |
 | [FMT-07 已退休](op_specs/FMT-07_retired.md) | 不再定义本族成员 | 数值编码约束归 FMT-06 后续成员；抖动／半色调归 GRD-29/30；opaque 补值规则归 FMT-05B | 保留编号，不新增运行时接口 |
 | [FMT-08 描述编辑](op_specs/FMT-08_metadata_assignment_contract.md) | 显式 TensorDescription→新配置对象 | patch/replace；dependencies=error/cascade；missing=error/ignore | SDK 纯函数 edit_description；无 workflow key、样本读取或图节点；下游显式接收返回配置 |
-| [FMT-09 transfer 编码／解码](op_specs/FMT-09_transfer_contract.md) | A 解码、B 编码；Float32/64 单 tensor Result，单 RGB/Gray 组或显式 raw components | 十类静态曲线；PQ/1886 为绝对 nits；按曲线明确 reference／定义域；cell-relative axis | 六个 Result ABI 5 CPU keys；Selected semantic Data+Validation、passthrough/raw Data、Descriptor；完整恒等映射可 view generic/spatial storage；Proposed；无 GPU |
-| [FMT-10 RGB 基底／XYZ／白点适应](op_specs/FMT-10_rgb_basis_contract.md) | A RGB→XYZ、B XYZ→RGB、C 适应；D 编译期 A→可选 C→B | 七预设＋自定义 xy；四种完全适应；显式 preserve_xyz／adapt；相对／绝对尺度不隐式换算；Result 单 tensor inputs/outputs | 九个 Result ABI 5 CPU keys 注册 A/B/C；D 使用已注册成员；Data+Validation 精确三分量、Descriptor、无 Control；完整精确 I 支持 view；Proposed；无 GPU |
-| [FMT-11 颜色模型转换族](op_specs/FMT-11_model_conversion_contract.md) | A～P 八组方向对；Q/R Gray 提取／中性重建；S/T 二值化／两级展开 | 原生浮点、精确分量依赖；Lab/LCh 使用 l=L*/100；NCL YCbCr，显式路径 | 澄清完成，A-R/T 共 57 个 strict/Apple/x86 CPU keys，S helper 降低为 MASK threshold；Result ABI 5；Float32/64；Q 支持合法 generic/spatial view，其他成员物化；Proposed |
+| [FMT-09 transfer 编码／解码](op_specs/FMT-09_transfer_contract.md) | A 解码、B 编码；Float32/64 单 tensor Result，单 RGB/Gray 组或显式 raw components | 十类静态曲线；PQ/1886 为绝对 nits；按曲线明确 reference／定义域；cell-relative axis | 六个 Result ABI 6 CPU keys；Selected semantic Data+Validation、passthrough/raw Data、Descriptor；完整恒等映射可 view generic/spatial storage；Proposed；无 GPU |
+| [FMT-10 RGB 基底／XYZ／白点适应](op_specs/FMT-10_rgb_basis_contract.md) | A RGB→XYZ、B XYZ→RGB、C 适应；D 编译期 A→可选 C→B | 七预设＋自定义 xy；四种完全适应；显式 preserve_xyz／adapt；相对／绝对尺度不隐式换算；Result 单 tensor inputs/outputs | 九个 Result ABI 6 CPU keys 注册 A/B/C；D 使用已注册成员；Data+Validation 精确三分量、Descriptor、无 Control；完整精确 I 支持 view；Proposed；无 GPU |
+| [FMT-11 颜色模型转换族](op_specs/FMT-11_model_conversion_contract.md) | A～P 八组方向对；Q/R Gray 提取／中性重建；S/T 二值化／两级展开 | 原生浮点、精确分量依赖；Lab/LCh 使用 l=L*/100；NCL YCbCr，显式路径 | 澄清完成，A-R/T 共 57 个 strict/Apple/x86 CPU keys，S helper 降低为 MASK threshold；Result ABI 6；Float32/64；Q 支持合法 generic/spatial view，其他成员物化；Proposed |
 | [FMT-12 ICC 转换族](op_specs/FMT-12_icc_transform_contract.md) | A 双 profile；B DeviceLink；C 显式有序 profile 链 | Little CMS 2.19.1 CPU；ICC v2/v4；optimized 默认，reference 显式 | 澄清完成，Proposed/未实现；浮点原生单位适配、profile 定义空间、实际 intent/BPC 路径明确 |
 | [FMT-13 OCIO 转换族](op_specs/FMT-13_ocio_transform_contract.md) | A 空间；B display/view；C Looks；D NamedTransform；E 文件；F 变换树 | OCIO 2.5.2 CPU；optimized 默认，reference 显式；资源／属性冻结 | 澄清完成，Proposed/未实现；三分量、F32 引擎边界、精确区域；alpha 独立直通 |
 | [FMT-14 色域映射](op_specs/FMT-14_gamut_mapping_contract.md) | A 分量裁剪；B OKLab 降色度；C 线性 RGB knee 压缩；D 越界 mask | 显式目标线性 RGB 0..1；固定算法与迭代次数，无隐式 tone/transfer | 设计完成，Proposed/未实现；原生 strict CPU，精确区域与分量依赖 |
@@ -100,11 +100,18 @@ alpha 运算、零 alpha 输出及工作色彩空间。独立 emission 不自动
 
 Softproof 与 gamut alarm 以 [FMT-18 固定源码及修正规则](op_specs/FMT-18_softproof_contract.md)为准，继承 FMT-12 的 LCMS 2.19.1 引擎边界。
 
+## FMT-02 组装策略与视图所有权
+
+FMT-02A/B/C 提供 `auto`、`view` 和 `materialize` 三种静态布局策略，均遵循同一精确通道来源映射。对非 spatial 的 generic tensor，零复制要求所有被映射部分共享**同一个物理 `CpuStorage` owner**，且非通道 stride、通道 stride 与各分片偏移符合**一个覆盖整个请求的仿射地址表达式**。不同 owner 或无法统一地址式的 generic 输入在 `view` 下返回 `ViewUnavailable`。
+
+对 spatial 输出，算子为每个请求区域收集来源授权窗口及显式 `ResultTensorViewPiece`。各片使用目标绝对坐标，互不重叠并联合覆盖目标；可包含不同 Root 的来源 owner。调用方先完成窗口 vector，再绑定借用指针并一次交给 `ResultBuilder` 认证发布。成功的 view 保留所有来源 owner 而不复制 payload。
+
+映射逻辑合法但物理不可表示时，`auto` 为当前请求区域显式物化，`view` 报错，`materialize` 直接分配并写入新 backing。来源授权、资源、取消和 ownership cycle 错误维持原失败，不触发复制回退。接口、费用和实例见 [FMT-02 族契约](op_specs/FMT-02_channel_assembly_contract.md)。
+
 ## 同尺寸平面与 codec 边界
 
 已确认 DAG 内 Y/Cb/Cr 等颜色平面始终同尺寸、同采样网格，保持 1:1:1 的平面尺寸关系，
-即 full-resolution 4:4:4。alpha 仍为同张量内的同尺寸平面。所有内核图像算子严格遵守
-planar，显式描述与 raw 参数都不能变更存储约束。
+即 full-resolution 4:4:4。alpha 仍为同张量内的同尺寸平面。由宿主分配的图像 backing 默认采用 tile 内 planar 布局；符合授权及地址约束的外部 affine/signed-stride 视图仍可接入。显式颜色描述和 raw 参数不负责改变图像的采样拓扑。
 
 输入 codec 负责外部子采样重建与布局解包，输出 codec 负责显式选定的子采样、打包和压缩。
 RGB↔YCbCr 数学转换仍归 FMT-11；不再需要在 DAG 内引入异尺寸颜色平面 carrier。

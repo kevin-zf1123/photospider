@@ -133,9 +133,7 @@ resource selection, ICC ownership, and cancellation during actual exact work
 cancellation paths return Root resources to baseline after context teardown.
 Successful ICC and Result-lifetime cases retain their valid owners.
 
-Use independent Fraction/Machin-pi references for hue interpolation and exact
-rational/root references for RGB cases. Check repeated-request values and
-associations after rebinding. Equal values alone do not establish a warm-cache hit.
+Use independent Fraction/Machin-pi references for hue interpolation and exact rational/root references for RGB cases. Check repeated-request values after rebinding. Equal values alone do not establish a warm-cache hit.
 
 Reproduce the focused suite, Strict/Apple manual groups and independent oracles
 with:
@@ -157,7 +155,7 @@ mathematics. Generic color rows outside all evaluated stencils remain numericall
 unused, while their typed/upstream validation still applies. Empty reads no sample
 payload after static preparation.
 
-The `values` port uses `photospider.tensor` v1/member `samples`, shape `sample_shape(input)+[C]`, with one atomic trailing axis. One prepared Run-shared stage acquires complete input coverage through ordinary tile Needs and computes the complete internal output. Acquiring owning windows does not implicitly collect dense arrays. Ordinary output actors publish only their requested complete member tiles as retained views. Global coordinates and source ObjectId provenance are preserved; operation resources stay in prepared state. Shared input edits invalidate dependent output tiles. Failed computation exposes no partial tile.
+The `values` port uses `photospider.tensor` v1/member `samples`, shape `sample_shape(input)+[C]`, with one atomic trailing axis. One prepared Run-shared stage acquires complete input coverage through ordinary tile Needs and computes the complete internal output. Acquiring owning windows does not implicitly collect dense arrays. Ordinary output actors publish only their requested complete member tiles as retained views. Global coordinates are preserved; operation resources stay in prepared state. Shared input edits invalidate dependent output tiles. Failed computation exposes no partial tile.
 
 Lookup work remains O(K+N log K), plus exact or certified arithmetic. Full output
 payload is N*C*sizeof(dtype), even for a small request. Account source owners/windows,

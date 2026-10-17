@@ -341,23 +341,16 @@ participate in values input reads.
 | axis, N=1 | start | finite start, `[start,start,+0]` |
 | Empty | none | static metadata and parameter checks only |
 
-### Invalidation, association, ownership and cache
+### Invalidation, ownership and cache
 
 An active endpoint change invalidates all observations of the selected output.
 A coefficient edit invalidates all values and never axis; count=1 end edits
 invalidate neither output. Static projections enter compiled identity. Transitive
 upstream witnesses remain authoritative even if numbers coincide after an edit.
 
-Values retain their `[N]` sample coordinates and axis retains one trailing-axis
-atomic tuple. Each output Result has its own Result ObjectId and an association
-to the ObjectIds of its actual active inputs. Values associates its active
-endpoint and coefficient inputs; axis associates only active endpoints. The two
-outputs have no additional identity that pairs them; workflows connect the
-intended named outputs explicitly. Consumers receive requested global Regions
-without rebasing coordinates. Both outputs have no attached domain description. Partial requests
-own count*4/8 bytes for values or 24 bytes for axis, plus fixed arithmetic
-workspace. Published storage survives invocation/context lifetime; unpublished
-output and scratch release on failure/cancellation.
+Values retain their `[N]` sample coordinates and axis retains one trailing-axis atomic tuple. Each output Result has its own Result ObjectId. The two outputs have no additional identity that pairs them; workflows connect the intended named outputs explicitly. Consumers receive requested global Regions without rebasing coordinates. Both outputs have no attached domain description.
+
+Partial requests own count*4/8 bytes for values or 24 bytes for axis, plus fixed arithmetic workspace. Published storage survives invocation/context lifetime; unpublished output and scratch release on failure/cancellation.
 
 Scalar inputs accept legal offset, signed/zero-stride and unaligned layouts.
 Cache identity retains exact parameters, metadata and active input witnesses.
@@ -554,14 +547,7 @@ acceleration.
 
 ### Current focused validation
 
-Temporary acceptance should check preparation shared across outputs and dynamic
-runs, mixed dtypes, a balanced 128-coefficient expression with 255 AST nodes and
-height 8 across 130 declared ports, atomic axis publication and source associations.
-Cover failures outside requested values, duplicate coordinates with axis-only
-behavior, N=1 end-producer exclusion, invalid scalar schemas, Float32 overflow,
-Empty queries, caller/worker floating environments, work limits, cancellation
-and output lifetime. See [NUM-01 Run-shared complete-input computation](../expression-whole.md) for the
-execution behavior and validation scope.
+Temporary acceptance should check preparation shared across outputs and dynamic runs, mixed dtypes, a balanced 128-coefficient expression with 255 AST nodes and height 8 across 130 declared ports, and atomic axis publication. Cover failures outside requested values, duplicate coordinates with axis-only behavior, N=1 end-producer exclusion, invalid scalar schemas, Float32 overflow, Empty queries, caller/worker floating environments, work limits, cancellation and output lifetime. See [NUM-01 Run-shared complete-input computation](../expression-whole.md) for the execution behavior and validation scope.
 
 ## 9. Related requirements
 

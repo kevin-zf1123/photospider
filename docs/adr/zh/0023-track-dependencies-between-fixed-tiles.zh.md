@@ -2,7 +2,7 @@
 
 - 状态：Accepted
 - 英文权威文档：[ADR 0023](../0023-track-dependencies-between-fixed-tiles.md)
-- 当前边界：package 0.35.0 实现了 §3 所述的逐成员 tile 网格、成员局部区间 Need 和 Run 共享 stage。生产者的语义 descriptor 是其解析后的静态 Result schema；Result 不携带 facet 或附着的资源身份。
+- 当前边界：package 0.36.0 实现了 §3 所述的逐成员 tile 网格、成员局部区间 Need 和 Run 共享 stage。生产者的语义 descriptor 是其解析后的静态 Result schema；Result 不携带 facet 或附着的资源身份。
 - 相关：[ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)、[ADR 0017](0017-cpu-regional-execution-and-storage.zh.md)、[ADR 0018](0018-local-result-caches-and-frozen-execution.zh.md)、[ADR 0021](0021-independent-node-results.zh.md)、[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md)
 
 ## 1. 核心摘要（TL;DR）
@@ -197,4 +197,4 @@ coordinator 维护从每个生产者成员 tile、以及每个共享证据节点
 
 **删除的机制。** 样本级 relation 及其构造器、packed Gather 证据、逐样本依赖证书、支撑角色和保证等级、用作依赖证据的精确集合规范化、用作依赖证据的元组闭包、query 作用域的依赖 bundle 及其重绑定、按请求键控的 actor、整体 Result 执行、whole Need 以及 Result field 都被删除。operation 仍需要的结构与通道一致性检查保留为 schema 校验。多阶段 Need、静态输入投影、Root 资源准入、取消和 callback 退役保留。
 
-**二进制接口。** Need 携带成员 slot 与半开 tile 区间，或仅 descriptor 请求；发布不携带 relation。Result operation C ABI 5 承载这些记录。冻结的前缀协商接口仍是 ADR 0022 的独立目标。
+**二进制接口。** Need 携带成员 slot 与半开 tile 区间，或仅 descriptor 请求；发布不携带 relation。Result operation C ABI 6 承载这些记录。冻结的前缀协商接口仍是 ADR 0022 的独立目标。

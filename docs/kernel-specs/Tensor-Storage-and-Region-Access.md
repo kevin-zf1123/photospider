@@ -18,7 +18,7 @@ The single numerical representation is `Tensor`, composed of owned rectangular `
 
 ### Metadata-derived Result outputs in C++ registrations
 
-Preparation resolves each output schema from static input schemas and parameters. Extents can be fixed or derived from input axes or element counts. Runtime payload values cannot change structure. C ABI 5 metadata resolution can supply output schemas and static shared-stage declarations; it cannot preserve an operation-owned arbitrary prepared-state pointer. See [Plugin ABI](../kernel-architecture/Plugin-ABI.md).
+Preparation resolves each output schema from static input schemas and parameters. Extents can be fixed or derived from input axes or element counts. Runtime payload values cannot change structure. C ABI 6 metadata resolution can supply output schemas and static shared-stage declarations; it cannot preserve an operation-owned arbitrary prepared-state pointer. See [Plugin ABI](../kernel-architecture/Plugin-ABI.md).
 
 ## Core data model and memory
 

@@ -95,15 +95,9 @@ values are rejected before runtime input reads, including axis-only requests.
 
 ## Sampling and dynamic outputs
 
-The maintainer selected NUM-01's sampling/output contract unchanged: dynamic
-Float32/Float64 `[1]` start/end inputs, static count in `[1,1048576]`, increasing
-or decreasing endpoint-inclusive grids, and N=1 at start with no end read.
-Output port `values` is a Result using schema `photospider.tensor` v1 and member
-`samples`, shape [N], selected Float32/Float64 dtype (default Float64), and no attached domain description. Output port `axis` is a Result using the same schema/member, Float64
-shape [3], `atomic_trailing_axes=1`, and no attached domain description; its samples are
-`[start,end,step]` or `[start,start,0]` for N=1. The output association records
-the actual active source ObjectIds. Units are interpreted by downstream users.
-Coordinate rounding and local duplicate-coordinate checks follow NUM-01.
+The maintainer selected NUM-01's sampling/output contract unchanged: dynamic Float32/Float64 `[1]` start/end inputs, static count in `[1,1048576]`, increasing or decreasing endpoint-inclusive grids, and N=1 at start with no end read.
+
+Output port `values` is a Result using schema `photospider.tensor` v1 and member `samples`, shape [N], selected Float32/Float64 dtype (default Float64), and no attached domain description. Output port `axis` is a Result using the same schema/member, Float64 shape [3], `atomic_trailing_axes=1`, and no attached domain description; its samples are `[start,end,step]` or `[start,start,0]` for N=1. Units are interpreted by downstream users. Coordinate rounding and local duplicate-coordinate checks follow NUM-01.
 
 Anchors and handles are dynamic Result inputs with metadata-defined shapes.
 Changing their values or start/end reuses the compiled plan; changing degree,
@@ -462,19 +456,11 @@ runs are additional coverage.
 
 ## Current implementation and verification
 
-The maintained implementation registers the three profile keys in `plugins/ops/01-numeric/bezier_function.cpp` as Run-shared Result operations. Each input is a sole tensor member under any schema id/version/key; shapes derive from `sample_shape()`. Output ports use `photospider.tensor` v1 / `samples`, with `values[count]` and atomic Float64 `axis[3]`, no attached domain description and source associations. Input needs use ordinary tile Needs. For count=1, the values dependency omits end and the axis dependency contains only start. Nonempty requests return complete internal coverage, with public coverage restricted to requested tiles in global sample coordinates; Empty reads no payload. It performs exact x topology and monotonicity validation, RN64 control reconstruction, an inverse solver with up to 8192 fractional bits of dyadic refinement, exact polynomial/Horner evaluation and direct output rounding. The polynomial workspace is 40,960 bits with a 96-slot arena; the static live-slot bound is at most 44. All profiles use the same exact mathematical path with scalar/NEON/AVX2 integer helpers; the numerical contract retains the shared accelerated allowance. complete-input eliminates per-sample dependency certificates and staged read windows. Fixed state is allocator-owned; topology has 8*(K+(degree-1)*(K-1)) element bytes plus metadata overhead. Complete values cost b*count; axis costs 24 bytes. The common operation workspace declaration conservatively bounds the larger values state even for axis, whose actual callback allocates only its smaller state.
+The maintained implementation registers the three profile keys in `plugins/ops/01-numeric/bezier_function.cpp` as Run-shared Result operations. Each input is a sole tensor member under any schema id/version/key; shapes derive from `sample_shape()`. Output ports use `photospider.tensor` v1 / `samples`, with `values[count]` and atomic Float64 `axis[3]` and no attached domain description. Input needs use ordinary tile Needs. For count=1, the values dependency omits end and the axis dependency contains only start. Nonempty requests return complete internal coverage, with public coverage restricted to requested tiles in global sample coordinates; Empty reads no payload. It performs exact x topology and monotonicity validation, RN64 control reconstruction, an inverse solver with up to 8192 fractional bits of dyadic refinement, exact polynomial/Horner evaluation and direct output rounding. The polynomial workspace is 40,960 bits with a 96-slot arena; the static live-slot bound is at most 44. All profiles use the same exact mathematical path with scalar/NEON/AVX2 integer helpers; the numerical contract retains the shared accelerated allowance. complete-input eliminates per-sample dependency certificates and staged read windows. Fixed state is allocator-owned; topology has 8*(K+(degree-1)*(K-1)) element bytes plus metadata overhead. Complete values cost b*count; axis costs 24 bytes. The common operation workspace declaration conservatively bounds the larger values state even for axis, whose actual callback allocates only its smaller state.
 
-Acceptance should cover count-one and axis projection, complete complete-input coverage
-under sparse requests, current source associations, preparation reuse, layouts,
-caller/worker floating environments, typed validation, work/output/scratch limits,
-cancellation, upstream failures and owner retirement. In a three-value Float64
-case with an isolated Root, values and axis windows retain 48 Payload bytes
-after the context, source owners and output Result handles retire; closing values leaves the 24-byte axis readable, and closing the final
-window releases all payload. Empty reads no payload and performs no numeric
-kernel work, although metadata polling and sealing can occur. Axis reads only
-start/end, with count=1 excluding end, and never reads controls. Generic y values
-outside the mathematical stencil are not scanned; recognized typed validation
-covers each active input.
+Acceptance should cover count-one and axis projection, complete complete-input coverage under sparse requests, preparation reuse, layouts, caller/worker floating environments, typed validation, work/output/scratch limits, cancellation, upstream failures and owner retirement.
+
+In a three-value Float64 case with an isolated Root, values and axis windows retain 48 Payload bytes after the context, source owners and output Result handles retire; closing values leaves the 24-byte axis readable, and closing the final window releases all payload. Empty reads no payload and performs no numeric kernel work, although metadata polling and sealing can occur. Axis reads only start/end, with count=1 excluding end, and never reads controls. Generic y values outside the mathematical stencil are not scanned; recognized typed validation covers each active input.
 
 Use independently rounded function-sampling and parametric-Bezier expected values;
 shared implementation output is not an independent golden.

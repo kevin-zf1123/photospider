@@ -126,7 +126,7 @@ policy rather than NUM-04's IEEE-style successful NaN/Inf outputs.
 
 ## Confirmed requested-data support
 
-For every nonempty request, the Run-shared Result program requests complete x, y and query inputs with ordinary payload tile Needs, including typed validation and upstream failures. It validates all x knots and query controls before y arithmetic, evaluates every query and output column, and publishes a complete dense Result of shape [N] or [N,C]. The Result association records the actual source ObjectIds. Empty reads no payload; static metadata validation still applies. A nonempty local request still computes and stores the complete output. Output tile actors retain the shared backing but expose only the requested complete member tiles, and sample coordinates remain global rather than being rebased to the request.
+For every nonempty request, the Run-shared Result program requests complete x, y and query inputs with ordinary payload tile Needs, including typed validation and upstream failures. It validates all x knots and query controls before y arithmetic, evaluates every query and output column, and publishes a complete dense Result of shape [N] or [N,C]. Empty reads no payload; static metadata validation still applies. A nonempty local request still computes and stores the complete output. Output tile actors retain the shared backing but expose only the requested complete member tiles, and sample coordinates remain global rather than being rebased to the request.
 
 The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
 linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
@@ -209,12 +209,7 @@ acceptance obligations. These cases remain acceptance requirements.
 
 ## Actual focused validation
 
-For temporary public-path acceptance, compare all four interpolation forms with
-independent small-input references. Cover exact linear and nonlinear PCHIP
-results, admitted profiles, Float32/Float64, knot/clamp signed zero, typed complete-input
-validation, query/domain error precedence, limits, cancellation, associations
-and output lifetime. Include `linspace -> bake_lut1d_pchip` and `resample_linear`
-compositions when changing the corresponding helpers.
+For temporary public-path acceptance, compare all four interpolation forms with independent small-input references. Cover exact linear and nonlinear PCHIP results, admitted profiles, Float32/Float64, knot/clamp signed zero, typed complete-input validation, query/domain error precedence, limits, cancellation and output lifetime. Include `linspace -> bake_lut1d_pchip` and `resample_linear` compositions when changing the corresponding helpers.
 
 Create and run these checks for the current operation change, then remove the
 temporary checker and its build registration.

@@ -11,7 +11,7 @@ clarification_status: complete
 
 # FMT-11: color-model conversions
 
-The family specification remains Proposed. Native members are registered as CPU Result ABI 5 operations; S is a public helper that lowers to the MASK threshold operation. Inherit the
+The family specification remains Proposed. Native members are registered as CPU Result ABI 6 operations; S is a public helper that lowers to the MASK threshold operation. Inherit the
 [FMT common contract](FMT_common_contract.md) and the confirmed
 [model coverage](FMT_model_conversion_coverage.md). Ordinary numerical behavior
 inherits NUM; the [model mathematics](FMT-11_model_math.md) is normative.

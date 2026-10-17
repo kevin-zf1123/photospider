@@ -2,24 +2,24 @@
 
 ## 当前契约
 
-Package 0.35.0 使用 SameMinorVersion 兼容规则。C++ consumer 和外部 C operation module 必须针对匹配头文件重建。Result ABI 5 要求 table/record 大小精确匹配，不提供兼容 shim。ADR 0022 的前缀协商冻结 ABI 仍为 Proposed。
+Package 0.36.0 使用 SameMinorVersion 兼容规则。C++ consumer 和外部 C operation module 必须针对匹配头文件重建。Result ABI 6 要求 table/record 大小精确匹配，不提供兼容 shim。ADR 0022 的前缀协商冻结 ABI 仍为 Proposed。
 
 | 契约 | 版本 |
 | --- | --- |
-| Package | 0.35.0 |
+| Package | 0.36.0 |
 | WorkflowDocument | 7 |
-| OperationTraits | 27 |
-| Result operation C ABI | 5, exact-size |
+| OperationTraits | 28 |
+| Result operation C ABI | 6, exact-size |
 | CPU parallel / tiles service ABI | 2 / 2 |
 | Native GPU service ABI | 1 |
-| Result schema encoding | `photospider.result-schema.v5` |
-| Semantic graph | `semantic-graph-ir-v22` |
-| Physical plan | `physical-plan-v22` |
+| Result schema encoding | `photospider.result-schema.v6` |
+| Semantic graph | `semantic-graph-ir-v23` |
+| Physical plan | `physical-plan-v23` |
 | Plan cache key | `plan-cache-key-v18` |
 | Optimizer | `optimizer-v5-canonical-noop` |
 | Ops TensorDescription codecs | TDM4/TDM5 |
 
-这些版本轴相互独立。C++ 布局改变可要求重新构建，而不改变无关 native service ABI。当前权威定义来自公共头文件、CMake package 声明和 compiler 规范编码。
+这些版本轴相互独立。Package `0.36.0` 使用 SOVERSION `0.36`。`SchemaTemplate` 定义结构成员和 scopes；`ResultTensorSpec` 定义 shape、dtype、batch/atomic 轴及可选 spatial layout。`ResultViewAxis` 使用锚点仿射坐标与有符号步长。`TileGrid::from_schema` 返回 `Result<TileGrid>`；`OperationRegistry::prepare_operation` 准备静态契约。`ExecutionContext` 以 `ResourceBudget` 准入 Root，snapshot reservation 使用独立的有界预算。外部 C DSO 导出 `ps_result_operation_plugin_get_api_v6`，必须提供 ABI 6 精确记录大小、非 NULL 显式 Tensor-view transform 与支持 1..16 片的 C 事务服务。导入时拒绝版本或记录大小不匹配。ADR 0022 是独立的 Proposed、未实施契约。当前权威定义来自公共头文件、CMake package 声明和 compiler 规范编码。
 
 ## Workflow 输入与算子执行
 

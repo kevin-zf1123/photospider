@@ -2,7 +2,7 @@
 
 - 状态：Accepted
 - 英文权威文档：[ADR 0018](../0018-local-result-caches-and-frozen-execution.md)
-- 当前边界：0.35.0 中，原决定里的快照 facets，以及 import 拒绝图像、color-array、`ImagePlane` 和 `Mask` Tensor 的规则已被取代。快照只校验结构；运行数据以 Result 静态 Tensor 成员 绑定。
+- 当前边界：0.36.0 中，原决定里的快照 facets，以及 import 拒绝图像、color-array、`ImagePlane` 和 `Mask` Tensor 的规则已被取代。快照只校验结构；运行数据以 Result 静态 Tensor 成员 绑定。
 
 ## 1. 核心摘要（TL;DR）
 

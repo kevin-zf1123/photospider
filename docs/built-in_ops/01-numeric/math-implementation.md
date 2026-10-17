@@ -316,14 +316,13 @@ Both outputs use CPU complete-input Result continuations. A nonempty `values` re
 
 Mathematical selection remains local: exact anchor/clamp uses that anchor y; interior evaluation uses the selected segment's anchor y and relative y handles. Generic y outside every evaluated stencil is not additionally finite-checked. All output samples are evaluated, so an invalid otherwise-unrequested sample can fail the complete values Run. Failure publishes no partial successful values. Each output publishes through its own all-or-nothing Result transaction. Axis collects only start and end, with count=1 excluding end, computes its 24-byte tuple and does not read controls or validate per-coordinate separation. Static metadata for all four edges is checked for either output.
 
-The Result association records actual source ObjectIds. Input changes update recorded dependency dirtiness for the requested region; anchor and handle changes affect `values`, while start/end affect outputs that depend on them. The count=1 dependency omits `end`. Complete immutable input versions, profile, metadata and parameters remain in cache identity, while binding topology can reuse the static PreparedOperation. Both outputs retain independent identities, names, dtypes and no attached domain description. Result owners and authorized read windows remain valid past context and source-handle retirement; releasing the final window releases the Root allocation.
+Input changes update recorded dependency dirtiness for the requested region; anchor and handle changes affect `values`, while start/end affect outputs that depend on them. The count=1 dependency omits `end`. Complete immutable input versions, profile, metadata and parameters remain in cache identity, while binding topology can reuse the static PreparedOperation. Both outputs retain independent identities, names, dtypes and no attached domain description. Result owners and authorized read windows remain valid past context and source-handle retirement; releasing the final window releases the Root allocation.
 
-Temporary acceptance should cover Result declarations/bindings/reads, count-one and axis dependency projection, sparse public tile coverage backed by a full internal result and source association, same-demand and fresh-source cache behavior, preparation reuse, error ordering, all-port layouts, caller/worker fenv, work/cancellation/output/scratch limits, typed validation, and Result/read-window lifetime. For a three-value Float64 case in an isolated Root, retire the context, source
-owners and output Result handles while retaining the values and axis windows.
-Those windows retain 48 Payload bytes; closing the values window leaves the
-24-byte axis readable, and closing the final window releases the remaining payload. Generic y data outside the mathematical stencil is not scanned; recognized typed validation still applies to the complete active Result input. For maximum-count acceptance, use a sparse request with a 1 MiB Payload cap and
-check that complete dense-output admission fails at the operation node. This
-checks capacity rejection, not successful million-element numerical execution.
+Temporary acceptance should cover Result declarations/bindings/reads, count-one and axis dependency projection, sparse public tile coverage backed by a full internal result, same-demand and fresh-source cache behavior, preparation reuse, error ordering, all-port layouts, caller/worker fenv, work/cancellation/output/scratch limits, typed validation, and Result/read-window lifetime.
+
+For a three-value Float64 case in an isolated Root, retire the context, source owners and output Result handles while retaining the values and axis windows. Those windows retain 48 Payload bytes; closing the values window leaves the 24-byte axis readable, and closing the final window releases the remaining payload. Generic y data outside the mathematical stencil is not scanned; recognized typed validation still applies to the complete active Result input.
+
+For maximum-count acceptance, use a sparse request with a 1 MiB Payload cap and check that complete dense-output admission fails at the operation node. This checks capacity rejection, not successful million-element numerical execution.
 
 ## CRV-03 parametric Bezier evaluation
 
@@ -334,17 +333,9 @@ execute through Compiler/ExecutionContext and read output Results through
 authorized tensor windows. Source Values can provide immutable storage, charged
 as Referenced when retained by source Results. Result tensor schemas carry structural descriptors, layout and atomic axes.
 
-The complete-input Result continuation requests active inputs with Data, Validation and
-Descriptor , validates every segment/t row before component arithmetic,
-evaluates all N*D output cells and publishes one immutable dense [N,D] Result
-with requested complete tile coverage in global coordinates. A sparse query restricts
-recorded dependency/dirty mapping while retaining full input collection,
-computation and output allocation. Empty output coverage is empty and Empty does
-not poll a failing handle producer; static metadata and other execution stages
-remain active. Nonempty requests preserve upstream handle failures before
-endpoint or invalid-query arithmetic. Each output transaction publishes
-atomically; a failure releases unpublished state. Output association records the
-current input ObjectIds.
+The complete-input Result continuation requests active inputs with Data, Validation and Descriptor, validates every segment/t row before component arithmetic, evaluates all N*D output cells and publishes one immutable dense [N,D] Result with requested complete tile coverage in global coordinates. A sparse query restricts recorded dependency/dirty mapping while retaining full input collection, computation and output allocation.
+
+Empty output coverage is empty and Empty does not poll a failing handle producer; static metadata and other execution stages remain active. Nonempty requests preserve upstream handle failures before endpoint or invalid-query arithmetic. Each output transaction publishes atomically; a failure releases unpublished state.
 
 Endpoint t=0/1 reads only the selected anchor for the mathematical value. An
 interior reads both anchors and all relative handles for its segment and
@@ -374,28 +365,15 @@ parametric node with ResourceExhausted/CapacityLimit because the complete output
 does not fit. These cases verify complete-output capacity rejection. No per-cell
 dependency certificates or full coefficient table is retained.
 
-The host worker and resource ledger account computation. Cancellation is polled
-on reads, row controls, exact arithmetic and before publication. Computation
-WorkLimit, output/scratch capacity failure and cancellation propagate their
-categories and release unpublished output and all Root resources. Invalid
-segment/t is InvalidArgument/InvalidDomain; used nonfinite controls are
-OperationFailed/InvalidDomain; actual RN64 reconstruction or output conversion
-overflow is OperationFailed/ArithmeticOverflow. Typed, upstream, stale and
-backend errors preserve their categories. Replacing segment or t source Results
-reuses static preparation; completed-demand repetition returns the same Result
-object, while a fresh equivalent four-source bundle demonstrates a content-cache
-hit and refreshes all four source associations. Run-shared complete-input computation exposes no
-per-value counters, so zero counters do not imply zero arithmetic or fallbacks.
+The host worker and resource ledger account computation. Cancellation is polled on reads, row controls, exact arithmetic and before publication. Computation WorkLimit, output/scratch capacity failure and cancellation propagate their categories and release unpublished output and all Root resources.
 
-Temporary acceptance should run all 16 combinations of reversed, unaligned layouts across all
-four inputs and a separate zero-stride source composition. Under each caller
-rounding mode, verify the actual computation worker's floating environment.
-Verify that malformed static Result schemas and parameters reject before execution. Lifetime checks cover Float32 and Float64 3x2 outputs:
-all four source backings expire, the escaped Result and authorized read window
-share one 24-byte or 48-byte output owner, and releasing both returns all Root
-live capacity to zero. Also cover typed
-validation, source association, static preparation, requested tile coverage,
-upstream error ordering, work/cancellation and output/scratch cleanup. Report each admitted profile actually exercised.
+Invalid segment/t is InvalidArgument/InvalidDomain; used nonfinite controls are OperationFailed/InvalidDomain; actual RN64 reconstruction or output conversion overflow is OperationFailed/ArithmeticOverflow. Typed, upstream, stale and backend errors preserve their categories.
+
+Replacing segment or t source Results reuses static preparation; completed-demand repetition returns the same Result object, while a fresh equivalent four-source bundle demonstrates a content-cache hit. Run-shared complete-input computation exposes no per-value counters, so zero counters do not imply zero arithmetic or fallbacks.
+
+Temporary acceptance should run all 16 combinations of reversed, unaligned layouts across all four inputs and a separate zero-stride source composition. Under each caller rounding mode, verify the actual computation worker's floating environment. Verify that malformed static Result schemas and parameters reject before execution.
+
+Lifetime checks cover Float32 and Float64 3x2 outputs: all four source backings expire, the escaped Result and authorized read window share one 24-byte or 48-byte output owner, and releasing both returns all Root live capacity to zero. Also cover typed validation, static preparation, requested tile coverage, upstream error ordering, work/cancellation and output/scratch cleanup. Report each admitted profile actually exercised.
 
 ## CRV-04 public LUT1D authoring
 
@@ -409,9 +387,9 @@ All expanded formal outputs use CPU complete-input continuations. A nonempty `va
 
 `axis` is a separate Float64 `[3]` Result. Axis-only demand skips expression coefficients, Bezier controls and interpolation x/y. For `count=1`, the expanded source omits the end payload. For `count>1`, a first-value request still collects the end input and computes the complete grid. Each source keeps its own mathematical formula, selection, typed validation and numerical allowance. Active Result collection can propagate typed or upstream errors outside the requested numerical region, and numerical failures retain the source operation's Run scope. Empty `values` demand returns empty coverage without polling its failing numerical producer or reading payload; metadata processing and Result sealing remain ordinary execution work.
 
-Source associations contain the active Result ObjectIds, while dependency support and dirty mapping follow the output request. Repeated identical demand retains the completed Result identity. A fresh same-content source bundle reuses cached outputs with current associations. Each output association follows its direct producer inputs: an interpolated table points to x, y and the current query Result; the query Result and independent axis point to current endpoint Results. Temporary cache checks should inspect values and associations for every exported
-output, including `query_values` in an interpolation graph. Hit counts depend on
-the cache configuration and graph; they are not part of the numerical contract. Replacing bindings reuses static `PreparedOperation` objects and recomputes outputs for the new endpoints. Function controls affect values demand; they do not dirty the independent axis.
+Dependency support and dirty mapping follow the output request. Repeated identical demand retains the completed Result identity. A fresh same-content source bundle reuses cached outputs rebound to the current execution. Replacing bindings reuses static `PreparedOperation` objects and recomputes outputs for the new endpoints. Function controls affect values demand; they do not dirty the independent axis.
+
+Temporary cache checks should inspect values for every exported output, including `query_values` in an interpolation graph. Hit counts depend on the cache configuration and graph; they are not part of the numerical contract.
 
 Ownership acceptance should cover all six templates for Float32 and Float64
 outputs. Retire each source backing while retaining separate values and axis
@@ -439,18 +417,11 @@ computes every output element/channel and publishes an immutable packed Result
 with full internal coverage and global coordinates; sparse public requests expose only requested complete tiles.
 Empty reads no payload; static metadata checks still apply.
 
-Mathematical table selection is unchanged: knot/clamp/singleton converts one
-entry; interpolation/extrapolation uses its adjacent pair, independently per
-channel. Generic entries outside all evaluated stencils receive no additional
-finite scan. Typed validation and upstream collection cover the complete table.
-Errors in otherwise-unrequested queries or evaluated channels can fail the Run.
-The Result association retains the actual source ObjectIds. Dirty mapping follows
-the recorded query region, while an input/table/axis replacement invalidates that
-demand. Static preparation remains reusable across those bindings. Cache identity
-retains all input versions, profile, metadata and parameters. There is no
-per-channel Atom success isolation. Output dtype, shape and no attached domain description remain
-unchanged; arbitrary input offsets, unaligned and signed/zero strides remain
-legal. The complete immutable owner survives context destruction.
+Mathematical table selection is unchanged: knot/clamp/singleton converts one entry; interpolation/extrapolation uses its adjacent pair, independently per channel. Generic entries outside all evaluated stencils receive no additional finite scan. Typed validation and upstream collection cover the complete table. Errors in otherwise-unrequested queries or evaluated channels can fail the Run.
+
+Dirty mapping follows the recorded query region, while an input/table/axis replacement invalidates that demand. Static preparation remains reusable across those bindings. Cache identity retains all input versions, profile, metadata and parameters. There is no per-channel Atom success isolation.
+
+Output dtype, shape and no attached domain description remain unchanged; arbitrary input offsets, unaligned and signed/zero strides remain legal. The complete immutable owner survives context destruction.
 
 For M input elements, work is O(L+M log L) plus exact arithmetic and typed
 validation. Singleton lookup is constant time per query. The continuation retains
@@ -473,15 +444,9 @@ Numeric InvalidDomain/ArithmeticOverflow failures have Run scope. Typed, upstrea
 resource, stale, backend and cancellation failures retain their categories.
 complete-input does not expose per-value fallback counters; report those as unavailable.
 
-Use independent Fraction goldens when checking each admitted numerical profile. The six CRV-04 baking chains connect to the Result LUT
-consumer; source replacement retains the same static preparation, fresh source
-Results produce cache hits with current associations, and sparse requests retain
-requested tile coverage and full internal ownership. Also cover explicitly bound validators,
-upstream failures, all-port layouts, caller/worker fenv, resource and cancellation
-rollback, output lifetime and Root release. For the maximum L=1,048,576 case, use a
-16 MiB Payload capacity; check that Root diagnostics charge the 8 MiB axis grid to
-Metadata while peak Payload remains below 8 MiB, confirming no dense table copy.
-A 2^39-channel sparse request fails with CapacityLimit at the LUT node.
+Use independent Fraction goldens to check each admitted numerical profile. The six CRV-04 baking chains connect to the Result LUT consumer. Source replacement retains static preparation, and new Results may hit the cache when currently reached input content matches the stored proof. Sparse requests retain their requested tile coverage and full internal ownership.
+
+Acceptance also covers bound validators, upstream failures, all-port layouts, caller/worker floating environments, resource and cancellation rollback, output lifetime and Root release. For maximum L=1,048,576, use 16 MiB Payload capacity and check that Root diagnostics charge the 8 MiB axis grid to Metadata while peak Payload remains below 8 MiB, confirming that no dense table copy occurs. A 2^39-channel sparse request fails with CapacityLimit at the LUT node.
 
 LUT1D acceptance cases include custom Result schemas, channel batch shape [2,2,2],
 independent Fraction goldens, axis/query/table error precedence and cancellation
@@ -609,34 +574,18 @@ Typed validation and upstream failures cover the complete active Results and
 can precede callback numeric checks. Only exact positive-weight vertices enter
 the formula; zero-weight generic samples remain mathematically unused.
 
-The continuation records the current input, table, and axis ObjectIds. Its
-published Result has requested complete tile coverage in global coordinates, including
-for a sparse request, with one atomic trailing component axis and no attached description.
-Input or table replacement updates dirty mapping from the recorded source
-support; the prepared operation remains reusable across those bindings. Empty
-demand performs no numerical producer poll. Each invocation publishes through
-an all-or-nothing Result transaction, and numeric failures have Run scope.
-Input/table samples use authorized zero-copy Root windows. Escaped Results and
-windows retain their storage after source owners or the context retire; releasing
-the final window returns the corresponding Root allocation. `UniformAxis` owns
-Float64 grids costing 8*(N0+N1+N2) bytes, in addition to the packed output and
-fixed exact workspace. Capacity, work, cancellation, and allocation failures
-release unpublished output state.
+The continuation's published Result has requested complete tile coverage in global coordinates, including for a sparse request, with one atomic trailing component axis and no attached description. Input or table replacement updates dirty mapping from the recorded source support; the prepared operation remains reusable across those bindings. Empty demand performs no numerical producer poll. Each invocation publishes through an all-or-nothing Result transaction, and numeric failures have Run scope.
+
+Input/table samples use authorized zero-copy Root windows. Escaped Results and windows retain their storage after source owners or the context retire; releasing the final window returns the corresponding Root allocation. `UniformAxis` owns Float64 grids costing 8*(N0+N1+N2) bytes, in addition to the packed output and fixed exact workspace. Capacity, work, cancellation, and allocation failures release unpublished output state.
 
 All profiles use exact integer arithmetic and the existing scalar/NEON/AVX2
 integer helpers. The implementation adds no approximate backend or NUM-14
 certificate; numerical counters from the former dependency session do not
 apply to this Result continuation.
 
-The independent `oracle/ops/numeric/crv07/reference.py` reference reconstructs
-RN64 grids, cells and simplexes, then rounds rational sums with separate integer IEEE logic. Temporary acceptance
-should exercise Result declarations and bindings, sparse full-color
-coverage, source associations and cache reuse, preparation reuse, Empty and
-failed table producers, typed ColorArray validation, reversed/unaligned layouts,
-caller and worker floating environments, owner retirement, and window lifetime.
-For one RGB sample with shape [1,3], Float32 and Float64 output windows retain
-12 and 24 Payload bytes respectively after context, source and output Result
-handles retire. Releasing the final windows releases those output allocations.
+The independent `oracle/ops/numeric/crv07/reference.py` reference reconstructs RN64 grids, cells and simplexes, then rounds rational sums using separate integer IEEE logic. Temporary acceptance covers Result declarations and bindings, sparse full-color coverage, current source bindings and cache reuse, preparation reuse, empty and failing table producers, typed ColorArray validation, reversed/unaligned layouts, caller/worker floating environments, owner retirement and window lifetime.
+
+For one RGB sample with shape [1,3], Float32 and Float64 output windows retain 12 and 24 Payload bytes respectively after the context, source and output Result handles retire. Releasing the final windows releases those output allocations.
 
 For LUT3D resource validation, use a Float64 table with 256^3 grid shape and an
 8-byte zero-stride backing under an 8 MiB Root Payload cap. Verify that execution
@@ -718,19 +667,9 @@ and stores reusable geometry or report POD state. Empty tensor demand skips
 payload evaluation; source, table, axis and report failures preserve their
 observed failure status and scope.
 
-The axis and grid generators use `UniformAxis`; center coordinates average the
-actual neighboring Float64 endpoints and round once. Every grid color remains a
-global report dependency even when a constant source ignores its generated
-color input. The owned table is a `curve.bake_lut3d.table` v2 Result, and the
-exported table is an immutable `photospider.tensor` Result with `samples`, the
-chosen dtype and `atomic_trailing_axes=1`. The color descriptions are explicit
-static operation parameters, not tensor attributes. Unpack supplies the
-actual table to CRV-07 with explicit `table_dtype` and reject policy. The
-report stores thirteen static Tensor members (361 bytes) and associates observed input
-ObjectIds as provenance. The measured_table_id UInt8[1,8] payload identifies the owned table in little-endian order. Gate validates all
-report Tensor members and the table with ordinary tile Needs, checks that table identity, then publishes
-the requested complete-color region in global coordinates. An association
-mismatch need not precede table-pixel validation.
+The axis and grid generators use `UniformAxis`; center coordinates average the actual neighboring Float64 endpoints and round once. Every grid color remains a global report dependency even when a constant source ignores its generated color input. The owned table is a `curve.bake_lut3d.table` v3 Result; the exported table is an immutable `photospider.tensor` Result with `samples`, the chosen dtype and `atomic_trailing_axes=1`. Color descriptions are explicit static operation parameters rather than tensor attributes. Unpack supplies the actual table to CRV-07 using explicit `table_dtype` and reject policy.
+
+The report has thirteen static Tensor members containing 361 payload bytes. `measured_table_id` is a UInt8[1,8] field encoding the measured owned table's ObjectId in little-endian order. Gate requests and validates all report members and the complete table through ordinary tile Needs, checks that explicit identity and publishes the requested complete-color region in global coordinates. A table-pixel validation failure can precede a measured-table ObjectId mismatch.
 
 Per-component error and `atol+rtol*abs(reference)` are compared as exact
 integers in `2^-2148` units. Error needs fewer than 3173 bits; the threshold
@@ -740,29 +679,13 @@ reported maximum is rounded to Float64, then advanced by one positive IEEE step
 if that rounded down; an unrepresentable error is diagnostic +Inf. Validate the error/threshold comparison and outward rounding with independent
 Fraction references for each admitted profile.
 
-Measurement visits row-major cell centers and then extra points. The continuation
-stores only counts, maxima and first-failure data, and seals all thirteen Tensor members
-together after complete measurement. Its Tensor members retain global support
-across axis, grid, owned table, validation points, source reference and applied
-colors. An explicitly bound SDK validation contract checks the report Tensor members and domain.
-The `configuration_id` field binds the report to the recipe, shape, interpolation,
-tolerances, dtypes, extra-point count and both color descriptions. The public
-`read_lut3d_bake_report` reader takes that `Lut3dBakeDescription` explicitly; it
-does not reconstruct configuration from a schema. Gate and reader reject a
-mismatched configuration. Structural schema, explicit parameters, resources and
-validation contract identities participate in graph, plan and cache identity.
+Measurement visits cell centers in row-major order, followed by extra points. The continuation stores counts, maxima and first-failure data, and seals all thirteen Tensor members together after measurement completes. The members retain global support across axis, grid, owned table, validation points, source reference and applied colors. An explicitly bound SDK contract validates the report members.
 
-Pack, Unpack and Gate first request authorized Result tensor views. Legal mappings
-retain the existing common storage owner; a physical `ViewUnavailable` triggers
-transactional materialization of the requested region, preserving sample bits
-and dependency support while charging Root Payload. Temporary baking acceptance should check
-Float32/Float64 across all five geometries, reversed and unaligned layouts, and
-verifies the mapped row address equals the source backing address with zero Root
-Payload. Pack uses two polls for this path. Report reads use bounded windows;
-table or report results can be retained and released independently, while table
-read-window ancestry may keep backing alive. Releasing the final window releases
-all Root live capacity. Source axis owners expire after context and fixture
-retirement.
+`configuration_id` binds the report to its recipe, shape, interpolation, tolerances, dtypes, extra-point count and both color descriptions. `read_lut3d_bake_report` takes the expected `Lut3dBakeDescription` explicitly. The reader and gate reject a mismatched configuration. Structural schema, static parameters, resources and validation-contract identities enter graph, plan and cache identity.
+
+Pack, Unpack and Gate acquire authorized Result tensor windows before publishing views. Legal physical mappings retain source storage; a physical `ViewUnavailable` triggers explicit materialization of the requested region, preserving sample bits and dependency support while charging target Root Payload. Acceptance should cover Float32/Float64 across the supported geometries, including reversed and unaligned backing, and verify that a zero-copy view's mapped row addresses match its source backing without allocating target Payload.
+
+Pack uses two polls for the view path. Report reads use bounded owning windows; table and report Results can be retained independently, and a table read window may keep its backing alive beyond the output handles. Releasing the final owner releases its remaining managed capacity. Axis owners retire with the corresponding context and source fixtures.
 
 All source operations, full grid colors, validation points, converted colors,
 table backing, report Tensor members, windows and scratch consume their respective host
@@ -776,11 +699,7 @@ report with `passed=false`, while a dependent table request fails with
 `LutApproximationToleranceExceeded`. Axis remains independent. Source, invalid
 data, cancellation, stale binding and resource failures remain execution errors.
 
-For cache acceptance, configure explicit payload, dependency-cache metadata and
-work budgets and verify current values and associations after rebinding.
-`maximum_dependency_cache_metadata` counts proof units, not bytes. Observed hit
-counts depend on the chosen graph and budget and are not a numerical guarantee.
-Report actual backend and shape coverage separately.
+For cache acceptance, configure explicit Payload, dependency-cache metadata and work budgets; verify current input values, configuration id and measured-table ObjectId after rebinding. `maximum_dependency_cache_metadata` counts proof units rather than bytes. Cache-hit counts depend on the chosen graph and limits and are not a numerical guarantee. Report actual backend and shape coverage separately.
 
 ## CRV-10 inverse curves
 
@@ -827,15 +746,9 @@ Collinear stencils still bypass lattice search; noncollinear wide-integer
 comparison is scalar and restores the surrounding profile. Scalar/NEON/AVX2
 implementations remain; no Accelerate/SME inverse backend is introduced.
 
-Inverse-curve acceptance should bind immutable source Results and read outputs
-through authorized windows. Check caller/worker floating environments, mixed
-dtypes, negative/zero strides, dirty scope, knot/clamp signed zero, preparation
-reuse, current source associations, Empty without polling a failing producer,
-SampledSignal errors at input 2, cancellation and source-owner retirement. Include
-K=65536 and a three-element Float32/Float64 output retaining respectively 12/24
-Payload bytes after source retirement; releasing the final window must release
-that payload. A constant View with N=2^40 must be rejected when the complete
-complete-input output exceeds the configured Payload cap.
+Inverse-curve acceptance binds immutable source Results and reads outputs through authorized windows. Check caller/worker floating environments, mixed dtypes, negative/zero strides, dirty scope, knot/clamp signed zero, preparation reuse, current source binding, an empty request without polling a failing producer, SampledSignal errors at input 2, cancellation and source-owner retirement.
+
+Include K=65536 and three-element Float32/Float64 outputs that retain 12/24 Payload bytes respectively after the source retires; releasing the final window must release that payload. Reject a constant View with N=2^40 when the complete output exceeds the configured Payload cap.
 
 ## CRV-11 resampling and certified lowpass
 
@@ -926,8 +839,9 @@ Every scale scan, partition piece, coefficient/refinement and limb operation has
 work/cancellation checks. The production path has no MPFR/Fraction dependency;
 those remain independent manual references.
 
-Resampling acceptance inherits CRV-01's exact-copy and numeric-accuracy
-requirements and adds public composition checks. Temporary checks should cover all-port negative, unaligned and zero strides, worker and caller floating-environment preservation, an independent two-constant oracle on a non-last axis, complete complete-input input/dirty support, remote-column Run errors, uniform NaN/Inf tap order, typed validation, cache replacement and source association, static preparation reuse, real-work cancellation, 2^40-output capacity rejection, and escaped owners. Resampling additionally checks raw and typed position forwarding, output-specific support, remote-query failure, K=65536 execution, and a zero-copy mapped position view at N=2^40 while the full samples output is rejected for capacity. Float64 layout checks cover all four templates and eight source layouts under each caller/worker rounding mode; Float32 checks separately cover bit-preserving positions, typed validation, and owner lifetime. These are execution checks, not an independent resampling oracle.
+Resampling acceptance inherits CRV-01's exact-copy and numeric-accuracy requirements and adds public composition checks. Temporary tests cover negative, unaligned and zero strides at every port, preservation of caller/worker floating environments, an independent two-constant oracle on a non-last axis, complete-input demand and dirty support, remote-column Run failures, uniform NaN/Inf tap order and typed validation. Also cover cache replacement with current source binding, static preparation reuse, work cancellation, 2^40-output capacity rejection and escaped owners.
+
+Resampling additionally checks raw/typed position forwarding, output-specific support, remote-query failure, K=65536 execution, and a zero-copy mapped position view at N=2^40 while the full samples output is rejected for capacity. Float64 layout checks cover all four templates and eight source layouts under each caller/worker rounding mode. Float32 checks separately cover bit-preserving positions, typed validation and owner lifetime. These are execution checks rather than an independent resampling oracle.
 
 ## Shared rounding and regional execution
 

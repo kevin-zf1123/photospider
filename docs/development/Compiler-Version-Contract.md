@@ -2,24 +2,24 @@
 
 ## Current contract
 
-Package 0.35.0 uses SameMinorVersion compatibility. C++ consumers and external C operation modules must rebuild against the matching headers. Result ABI 5 requires exact table/record sizes and provides no compatibility shim. The prefix-negotiated frozen ABI in ADR 0022 remains Proposed.
+Package 0.36.0 uses SameMinorVersion compatibility. C++ consumers and external C operation modules must rebuild against the matching headers. Result ABI 6 requires exact table/record sizes and provides no compatibility shim. The prefix-negotiated frozen ABI in ADR 0022 remains Proposed.
 
 | Contract | Version |
 | --- | --- |
-| Package | 0.35.0 |
+| Package | 0.36.0 |
 | WorkflowDocument | 7 |
-| OperationTraits | 27 |
-| Result operation C ABI | 5, exact-size |
+| OperationTraits | 28 |
+| Result operation C ABI | 6, exact-size |
 | CPU parallel / tiles service ABI | 2 / 2 |
 | Native GPU service ABI | 1 |
-| Result schema encoding | `photospider.result-schema.v5` |
-| Semantic graph | `semantic-graph-ir-v22` |
-| Physical plan | `physical-plan-v22` |
+| Result schema encoding | `photospider.result-schema.v6` |
+| Semantic graph | `semantic-graph-ir-v23` |
+| Physical plan | `physical-plan-v23` |
 | Plan cache key | `plan-cache-key-v18` |
 | Optimizer | `optimizer-v5-canonical-noop` |
 | Ops TensorDescription codecs | TDM4/TDM5 |
 
-These axes are independent. A C++ layout change can require rebuilding without changing an unrelated native service ABI. Current authoritative definitions are the public headers, CMake package declaration and compiler canonical encoders.
+These axes are independent. Package `0.36.0` uses SOVERSION `0.36`. `SchemaTemplate` defines structural members and scopes; `ResultTensorSpec` defines shape, dtype, batch/atomic axes and optional spatial layout. `ResultViewAxis` uses anchored affine coordinates and signed steps. `TileGrid::from_schema` returns `Result<TileGrid>`; `OperationRegistry::prepare_operation` prepares the static contract. `ExecutionContext` uses `ResourceBudget` for Root admission, while snapshot reservations have an independent bounded budget. External C DSOs export `ps_result_operation_plugin_get_api_v6` with ABI 6's exact sizes, explicit non-NULL tensor-view transforms, and a 1..16-piece C transaction service. A version or record-size mismatch is rejected during import. ADR 0022 remains a Proposed, unimplemented separate contract. Current authoritative definitions are the public headers, CMake package declaration and compiler canonical encoders.
 
 ## Workflow inputs and operation execution
 
