@@ -4,7 +4,7 @@
 
 ## 1. Core Summary (TL;DR)
 
-Photospider separates embedded graph compilation and execution from local process orchestration. The kernel owns typed workflow data, planning, execution, resources, cancellation, and results; the daemon owns local sessions, jobs, and IPC. This boundary keeps the kernel embeddable and lets the daemon consume only the installed public package.
+Photospider separates embedded graph compilation and execution from local process orchestration. The kernel owns typed workflow data, planning, execution, resources, cancellation, and results; the daemon owns local sessions, jobs, and IPC. This boundary keeps the kernel embeddable and lets the daemon consume public kernel and operation targets.
 
 ## 2. Mental Model & Intuition
 
@@ -17,23 +17,29 @@ Application -> WorkflowDocument -> Compiler -> ExecutionPlan
                                                        v
                                                   named results
 
-Client -> local IPC -> daemon Session / Job -> installed kernel API
-                              |                    (no internal IR on wire)
+Client -> local IPC -> daemon Session / Job -> public kernel API
+                              |                    (versioned kernel artifact text)
                               +-> job lifecycle and temporary result lifetime
 ```
 
-The compiler turns a caller-owned document into typed semantic and optimized stages, then a physical plan. An `ExecutionContext` runs that plan using bounded local workers and resources. The daemon submits work through the installed kernel facade and owns the lifetime of its ephemeral job records and results.
+The compiler turns a caller-owned document into typed semantic and optimized stages, then a physical plan. An `ExecutionContext` runs that plan using bounded local workers and resources. The daemon submits work through the public kernel facade and owns the lifetime of its ephemeral job records and results.
 
 ## 3. Formal Contracts & APIs
 
 ```cpp
 class Compiler final {
  public:
-  explicit Compiler(std::shared_ptr<OperationRegistry> operations);
-  Result<SemanticGraphIR> analyze(const GraphSnapshot& snapshot,
-                                  ResourceSet resources = {}) const;
-  Result<OptimizedGraphIR> optimize(const SemanticGraphIR& semantic) const;
-  Result<ExecutionPlan> plan(const OptimizedGraphIR& optimized,
+  explicit Compiler(std::shared_ptr<OperationRegistry> operations,
+                    std::shared_ptr<const OptimizerRegistry> optimizers = {},
+                    std::shared_ptr<const PlannerRegistry> planners = {},
+                    std::shared_ptr<const FrontendRegistry> frontends = {});
+  Result<ValidatedIR> analyze(const GraphSnapshot& snapshot,
+                             ResourceSet resources = {},
+                             const std::string& frontend = "dag") const;
+  Result<ValidatedIR> optimize(
+      const ValidatedIR& ir,
+      const OptimizerInvocation& invocation = {"optimize", {}}) const;
+  Result<ExecutionPlan> plan(const ValidatedIR& ir,
                              const PlanningOptions& options = {}) const;
 };
 
@@ -50,7 +56,7 @@ These declarations reproduce the public compiler and execution method signatures
 
 The kernel owns `WorkflowDocument` interpretation, graph validation, semantic and optimized IR, operation traits, planning, `Tensor` and `Region` contracts, local execution, resource accounting, cancellation, backend selection, fallback, and result publication. `GraphContext` and `ExecutionContext` are independent objects; neither is a daemon session or a global registry entry. Stage digests and plan/cache keys are non-security identities for reproducibility and disposable derived data.
 
-The daemon owns local IPC and ephemeral process orchestration around the installed kernel package. The kernel owns compiler IR, execution resources, values, and execution results under its public API. This ADR assigns these component boundaries; implementation details for daemon sessions, jobs, cancellation, and cleanup belong to the daemon repository.
+The daemon owns local IPC and ephemeral process orchestration around the public kernel package. The kernel owns compiler IR, execution resources, values, and execution results under its public API. This ADR assigns these component boundaries; implementation details for daemon sessions, jobs, cancellation, and cleanup belong to the daemon repository.
 
 Operations and data providers are loaded into the host process through their public C interfaces. The configured operation registry is frozen for execution. ABI validation, bounds checks, exception fencing, and cleanup protect correctness; they do not isolate untrusted code.
 
@@ -65,12 +71,12 @@ Maintained benchmarks report raw compile/plan/execute/operation timings, selecte
 - Neither component provides network service, authentication, authorization, multi-tenant quotas, remote execution, or distributed devices.
 - Durable jobs, checkpoints, recovery journals, durable results, artifact authority, receipts, release evidence, and operational SLO verdicts are outside the current product. The daemon's ephemeral jobs remain part of local orchestration.
 - Operation and provider DSOs run with host-process authority. The system does not provide sandboxing, process isolation, cryptographic admission, or a policy-plugin product.
-- Internal semantic IR, optimized IR, and physical plans are not stable wire formats.
+- Native IR/Plan object layouts are not wire formats. `CompilerArtifact` owns explicitly versioned `.psir` and `.psxp` text, validates import against the frozen registry and resources, and promises no cross-version compatibility. Daemon IPC may carry that public text without copying compiler serialization logic.
 
 ## 5. Consequences
 
 Kernel callers manage their own graph and execution contexts, input allocations, concurrent calls, and result lifetimes. Controlled execution buffers are bounded by context configuration; caller-owned inputs and uninstrumented process overhead are not an RSS limit. Ordinary execution observes cooperative cancellation and rejects publication from a stale graph revision. Captured frozen work follows its own captured-plan lifetime contract.
 
-Daemon callers integrate through the installed kernel's public package and API. This kernel repository does not establish compatibility with a particular daemon revision or specify daemon cleanup and restart behavior.
+Daemon callers integrate through public package targets and APIs. This kernel repository does not establish compatibility with a particular daemon revision or specify daemon cleanup and restart behavior.
 
-Consumers must build against the installed package and match its public package and ABI versions. Kernel or ABI changes require consumer rebuilds when the public contract changes. Plugin validation can reject incompatible or malformed tables, but cannot make an accepted in-process DSO safe to execute.
+Consumers match public package and ABI versions. During kernel development, daemon builds can consume the kernel's own public build-tree export; installation-consumer validation remains suspended. Kernel or ABI changes require consumer rebuilds when the public contract changes. Plugin validation can reject incompatible or malformed tables, but cannot make an accepted in-process DSO safe to execute.
