@@ -4,6 +4,25 @@
 - 英文权威文档：[ADR 0018](../0018-local-result-caches-and-frozen-execution.md)
 - 当前边界：0.36.0 中，原决定里的快照 facets，以及 import 拒绝图像、color-array、`ImagePlane` 和 `Mask` Tensor 的规则已被取代。快照只校验结构；运行数据以 Result 静态 Tensor 成员 绑定。
 
+## 当前实现：内容身份与 call activation
+
+静态 Plan 的完整结果键包含 operation、参数、固定 schema、资源、输出
+member/tile、backend/mode、固定读取范围和输入样本内容，排除物理 node、step
+及 Plan 标识；编译摘要仍包含程序 ID。复用时为当前 Plan 重建 evidence，不重放
+旧物理依赖记录。这明确了下文原决策中物理键术语所指的内容身份。
+
+纯确定性闭包与完整结果可缓存性分别判断：关闭完整结果保留时，block/checkpoint
+服务仍可能具备资格。Checkpoint 按内容身份匹配，不要求旧物理 TileUnit 相同；
+当前 grants 与 evidence 继续有效。Shared-stage 和 block-parameter 路径按
+[缓存模型](../../kernel-architecture/zh/Cache-Model.zh.md)保守绕过可选复用。
+GPU block 保留要求 compute 期间发生原生 dispatch；`native_retained_bytes`
+同时包含被保留的 GPU 输出和 block state。带 fallback 标记的结果绕过复用。
+
+共享计算在一次 call activation 内唯一。重新进入 block 会清空该 block 的值和
+共享 stage 状态，因此循环重新计算下一次 activation，不会为整个 Run 保留一次
+producer 结果。编译产物只保存编译阶段；冻结 bindings 和可丢弃 caches 仍属于
+内存状态。
+
 ## 1. 核心摘要（TL;DR）
 
 可变 workflow 图和编辑中的输入需要稳定的执行输入，tile 计算也需要在记录的依赖未改变时复用 tile。内核拥有不可变输入快照、冻结执行包和有界的派生结果缓存。内容身份与 tile 依赖记录允许复用，同时缓存仍只是加速器。

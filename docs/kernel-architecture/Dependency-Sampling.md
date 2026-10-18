@@ -2,7 +2,7 @@
 
 ## Scope and execution paths
 
-Operations own algorithms and sample interpretation. The kernel schedules and authorizes member tiles, freezes actual Need evidence and commits immutable outputs. A continuation may read control payload first and request source tiles in a later poll. No data/control role or sample-level relation is encoded in the kernel protocol.
+Operations own algorithms and sample interpretation. Each operation also owns a static mapper (`OperationDefinition::map_dependencies`) that the planner calls once per output tile or shared-stage target. The mapper receives the fixed output query, schemas, tile grids, parameters, resource identities and publication target, and returns the input and shared-stage tiles that the tile may read. The planner merges and validates those reads into the instruction's fixed grants; the VM binds them before the first poll and commits immutable outputs. A data-dependent read, such as a gather whose addresses come from another input, must declare a finite static superset: the mapper returns every tile the data could address, and the callback chooses samples inside that grant at run time. A frontend that needs to skip whole branches based on runtime data expresses that choice with an explicit IR conditional jump. No data/control role or sample-level relation is encoded in the kernel protocol.
 
 ## STMap Result contract
 
@@ -31,9 +31,9 @@ A rounding witness with opaque alpha uses u=2^-56, v=0.5, wrap, and a 1-by-2 sou
 
 ### Publication and parallel arithmetic
 
-For each requested output member tile, the program requests corresponding map tiles, reads UV and discovers source taps. Every existing tap, including a zero-weight tap, contributes to tile discovery. Source sample support is rounded to member tiles. Mathematical tap precision does not imply sample-level authorization or invalidation.
+The `image.stmap` mapper grants, for each output tile, the map tiles that cover the tile's output pixels and every tile of the source member. UV values are only known at run time, so the complete source is the finite superset; the callback reads its map tiles, computes the bilinear taps, and reads only the taps it needs from that grant, all within one poll. Every existing tap, including a zero-weight tap, is read from the source grant. Mathematical tap precision does not imply sample-level authorization or invalidation.
 
-The coordinator prepares bounded pixel spans and writes through Result write windows. Large admitted work can use the CPU staged tile service; work-item geometry is separate from plan payload tiles. Tile workers read retained immutable inputs and write disjoint prepared spans. Allocation, Needs, work admission and publication stay with the coordinator, which joins workers before committing. Operations establish their numerical environment inside each executing callback; the kernel only saves and restores thread state.
+The coordinator prepares bounded pixel spans and writes through Result write windows. Large admitted work can use the CPU staged tile service; work-item geometry is separate from plan payload tiles. Tile workers read retained immutable inputs and write disjoint prepared spans. Allocation, input reads, work admission and publication stay with the coordinator, which joins workers before committing. Operations establish their numerical environment inside each executing callback; the kernel only saves and restores thread state.
 
 ### Map coordinate storage
 

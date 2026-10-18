@@ -2,7 +2,7 @@
 
 ## 范围与执行路径
 
-算子负责算法和样本解释。内核调度并授权成员 tile，冻结实际 Need 证据并提交不可变输出。Continuation 可以先读取控制 payload，再在后续 poll 请求来源 tile。内核协议不编码 data/control 角色或样本级 relation。
+算子负责算法和样本解释。每个算子还拥有一个静态 mapper（`OperationDefinition::map_dependencies`），planner 对每个输出 tile 或共享 stage 目标调用一次。Mapper 接收固定的输出查询、schema、tile grid、参数、资源 identity 和 publication 目标，返回该 tile 可以读取的输入 tile 与共享 stage tile。Planner 把这些读取合并、验证为指令的固定授权；VM 在第一次 poll 前绑定授权并提交不可变输出。数据相关的读取（例如地址来自另一个输入的 gather）必须声明有限的静态超集：mapper 返回数据可能寻址的每个 tile，callback 在运行时于该授权内选择 sample。需要根据运行时数据跳过整个分支的前端，用显式 IR conditional jump 表达这一选择。内核协议不编码 data/control 角色或样本级 relation。
 
 ## STMap Result 契约
 
@@ -31,9 +31,9 @@ RGB'_c=\begin{cases}P_c/A&A\ne0\\+0&A=0.\end{cases} $$
 
 ### 发布与并行算术
 
-对每个请求的输出成员 tile，程序请求对应 map tile、读取 UV 并发现 source tap。所有存在的 tap（包括零权重 tap）都参与 tile 发现。来源样本支持取整到成员 tile；数学 tap 精确不意味着样本级授权或失效。
+`image.stmap` 的 mapper 为每个输出 tile 授权覆盖该 tile 输出像素的 map tile，以及 source 成员的全部 tile。UV 值只有在运行时才知道，因此完整 source 就是有限超集；callback 在同一次 poll 内读取其 map tile、计算 bilinear tap，并只从该授权中读取所需 tap。所有存在的 tap（包括零权重 tap）都从 source 授权中读取。数学 tap 精确不意味着样本级授权或失效。
 
-协调器准备有界像素 span，通过 Result 写窗口写入。足够大的已准入工作可使用 CPU staged tile 服务；work-item 几何独立于 plan payload tile。Tile worker 读取保留的不可变输入并写入互不相交的准备后 span。分配、Need、work 准入和发布由协调器完成，并在提交前等待 worker 结束。算子在每个实际 callback 内建立数值环境；kernel 只保存和恢复线程状态。
+协调器准备有界像素 span，通过 Result 写窗口写入。足够大的已准入工作可使用 CPU staged tile 服务；work-item 几何独立于 plan payload tile。Tile worker 读取保留的不可变输入并写入互不相交的准备后 span。分配、输入读取、work 准入和发布由协调器完成，并在提交前等待 worker 结束。算子在每个实际 callback 内建立数值环境；kernel 只保存和恢复线程状态。
 
 ### Map 坐标存储
 

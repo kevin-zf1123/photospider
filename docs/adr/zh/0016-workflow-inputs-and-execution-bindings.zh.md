@@ -2,6 +2,21 @@
 
 - 状态：Accepted
 
+## 当前实现：固定授权与 CFG 返回
+
+静态 Plan 在执行前固定每项输入读取。运行时 payload 可以选择 CFG 后继或
+已编译授权内的样本，不能增加 producer task 或扩大授权。Bindings 仍由每个
+Run 持有，不写入产物文件。导入 Plan 保留相同的 binding preflight 规则，并
+必须使用其链接的冻结 registry 执行。
+
+下文 DAG workflow output 的限制适用于 `WorkflowDocument`。直接构造
+`IRProgram` 的前端可以返回 schema 匹配的 SSA value，包括输入或 block
+parameter。命名返回使用 synthetic dependency record；消费者应读取
+`plan.output(name).record_index`，不能把返回索引当作物理 step。允许部分校验的
+独立输出 tile 在认证完成时通知 observer，包括 cache hit；bundle/prefix 和
+完整校验闭包在所需 coverage 就绪后通知。Observer 的 Result 与最终返回的投影
+不保证拥有相同 ObjectId。
+
 ## 1. 核心摘要 (TL;DR)
 
 工作流声明提供名称和 Result schema；每次执行按名称绑定一个 owning `ResultRef`。Tensor shape 与 layout 保留在 Result schema 中，payload owners 不进入 compiler identity。每个 operation 都通过 staged Result continuation protocol 执行。
@@ -65,7 +80,7 @@ struct ExecutionResult final {
 - Runtime input data 不会成为 compile-time parameters 或 literal nodes。
 - Workflow output 选择 operation-node output；输入直接透传不是 workflow output 形式。
 - Result tensor backing layout 不改变逻辑 sample authorization。Planar storage 不等同于 interleaved storage。
-- Result C operation table 保持 ABI 6。本 ADR 描述 C++ workflow binding contract，不描述独立 C++ Tensor operation protocol。
+- Result C operation table 保持 ABI 7。本 ADR 描述 C++ workflow binding contract，不描述独立 C++ Tensor operation protocol。
 
 ## 5. 后果与代价 (Consequences)
 

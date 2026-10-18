@@ -2,7 +2,7 @@
 
 ## 1. Core summary (TL;DR)
 
-An `ExecutionContext` owns a fixed CPU worker pool, separate CPU and GPU callback lanes, and one shared waiting-callback bound. ordinary CPU callbacks can share range work with idle pool workers, while planar staged callbacks submit single-threaded tiles and join each stage. Cancellation stops future claims and publication, then waits for work already running or submitted to the device.
+An `ExecutionContext` owns a fixed CPU worker pool, separate CPU and GPU callback lanes, and one shared waiting-callback bound. Inside one Run, the static VM executes plan instructions one at a time in plan order. Parallel work comes from independent Runs sharing the context, from ordinary CPU callbacks that share range work with idle pool workers, from planar staged callbacks that submit single-threaded tiles and join each stage, and from native GPU dispatch. Cancellation stops future claims and publication, then waits for work already running or submitted to the device.
 
 ## 2. Mental model & intuition
 
@@ -65,15 +65,15 @@ N_{blocks}=N/B + (N\bmod B\ne0),\qquad
 end=begin+\min(B,N-begin).
 $$
 
-Structured CPU Result ordinary polls receive this borrowed service as `ResultProgramPhase::cpu_parallel`. It schedules blocks within the active ordinary callback; it does not parallelize a Result dependency graph independently. `tests/integration/kernel/test_cpu_parallel.cpp` exercises a `UINT64_MAX` range after earlier Root work and verifies resource rejection before any block callback. `tests/unit/kernel/test_cpu_range.cpp` checks endpoint arithmetic without a Root budget and therefore does not establish Root admission behavior.
+Structured CPU Result ordinary polls receive this borrowed service as `ResultProgramPhase::cpu_parallel`. It schedules blocks within the active ordinary callback; it does not run plan instructions in parallel. `tests/integration/kernel/test_cpu_parallel.cpp` exercises a `UINT64_MAX` range after earlier Root work and verifies resource rejection before any block callback. `tests/unit/kernel/test_cpu_range.cpp` checks endpoint arithmetic without a Root budget and therefore does not establish Root admission behavior.
 
-### Structured Result callback waves
+### Static plan execution order
 
-The structured coordinator registers requested named Result roots and advances their dependency Actors. A validated Need adds eligible computed inputs to the pending frontier. Each Need input has an independent cursor; the coordinator rotates among inputs that can make progress, and an Actor is visited at most once per traversal. This keeps a deep dependency chain from being recursively revisited for every peer input.
+A Run follows the instruction order stored in each `PlanBlock` and the CFG between blocks. The coordinator submits one instruction's start or poll callback to the CPU callback FIFO or the GPU lane, waits for it to retire, applies its result, and only then moves to the next instruction. There is no frontier, ready queue, producer task or wave; independent branches of a DAG run one after another in plan order, and a tile used by several consumers runs once because the planner deduplicated it. `ExecutionDiagnostics::peak_active_tasks` is 1 for this path. `ExecutionOptions::maximum_parallelism` no longer bounds plan instructions; it caps the workers of the planar staged tile service (zero selects the CPU pool's worker count).
 
-When the frontier has queued callback work, the coordinator submits up to `maximum_parallelism` tasks from its Root-owned pending list. It waits for submitted callbacks to retire before reading their phase results and applying them serially, then advances the next dependency frontier. The limit applies to submitted callback tasks, not a second scheduler for the Result graph. CPU staged-tile coordination and GPU callbacks keep their existing inline/controller and single-lane paths.
+Separate Runs on the same context are independent. Each Run has its own coordinator, so a second Run's CPU callback can execute and finish while the first Run waits on a GPU callback. `tests/integration/kernel/test_result_plan_order.cpp` checks that a forked plan keeps one active callback, deduplicates a shared source, skips unselected nodes, observes cancellation and releases the exact payload bound; `tests/integration/kernel/test_execution.cpp` checks that an independent CPU Run completes while another Run's GPU callback is active.
 
-The Run coordinator owns scheduling policy and publication order. Separate components own the Run cache quota and checkpoint scopes, actor phase/continuation state, Need producer cursor, and per-submission stage data. The Need cursor owns its producer and per-input request state; the coordinator validates and registers each supplied envelope before advancing that cursor. Submission-local transfer, tile and native observations remain with each task until retirement, when the coordinator merges them. Result poll timing spans phase creation through coordinator retirement, including queue and wave waiting, so it is not a compute-only duration. Shutdown and synchronous Run completion drain submitted work before releasing borrowed callback state.
+The Run coordinator owns execution order and publication order. Submission-local transfer, tile and native observations remain with each callback until retirement, when the coordinator merges them. Result poll timing spans phase creation through coordinator retirement, including queue waiting, so it is not a compute-only duration. Shutdown and synchronous Run completion drain submitted work before releasing borrowed callback state.
 
 ### Planar staged tile service
 
@@ -125,6 +125,7 @@ Kernel helpers save and restore the calling thread floating-point environment wi
 - ordinary range callbacks and planar CPU staged callbacks use mutually exclusive services for one invocation.
 - Tile callbacks do not receive the coordinator's row, allocation, publication, diagnostics, or preparation services.
 - The scheduler does not promise work stealing, preemption, or a worker grant equal to observed concurrent execution.
+- One Run does not execute plan instructions concurrently; independent calls inside one plan run in plan order.
 - GPU callbacks submit synchronously through one callback lane per context; a submitted dispatch runs to completion before its owners retire.
 - Planar GPU callbacks use host row windows at graph boundaries. Device-resident planar pages shared across graph nodes are outside this interface.
 - Managed accounting excludes thread stacks, driver-private allocations, and unmodeled container storage.

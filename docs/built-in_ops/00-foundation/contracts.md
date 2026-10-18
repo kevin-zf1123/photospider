@@ -1,6 +1,6 @@
 # 公共数据与执行约定
 
-本页保留研究期数据、空间、颜色与数值设计约定。涉及当前运行行为时，以 0.36.0 package 的公开头文件和[kernel 架构指南](../../kernel-architecture/README.md)为准，尤其是[数据模型](../../kernel-architecture/Data-Model.md)、[依赖采样](../../kernel-architecture/Dependency-Sampling.md)、[资源](../../kernel-architecture/Managed-Resources.md)和[全局结果](../../kernel-architecture/Global-Results.md)。本文中的 Proposed 设计不是当前实现承诺；分类页参数仍须与已实现节点的具体规格区分。
+本页保留研究期数据、空间、颜色与数值设计约定。涉及当前运行行为时，以 0.37.0 package 的公开头文件和[kernel 架构指南](../../kernel-architecture/README.md)为准，尤其是[数据模型](../../kernel-architecture/Data-Model.md)、[依赖采样](../../kernel-architecture/Dependency-Sampling.md)、[资源](../../kernel-architecture/Managed-Resources.md)和[全局结果](../../kernel-architecture/Global-Results.md)。本文中的 Proposed 设计不是当前实现承诺；分类页参数仍须与已实现节点的具体规格区分。
 
 ## 数据对象与输出
 
@@ -19,9 +19,9 @@
 静态命名多输出使用 `WorkflowNodeOutput{node, port}` 和
 `WorkflowOutput{name, node, port}`，各输出可有不同 shape、Region 和依赖。
 pure 算子的未请求端口不执行。
-所有端口都传递 Result，每个 Result 的 Tensor 成员名称、数量、dtype、rank 和正 extent 在 preparation 后固定。数据依赖数量使用静态容量与普通 payload，例如 `records[N,R]` 和 `count:Int64[1]`，或同形状数据加 mask。Count、mask、offsets 没有内核特殊含义，读取它们需要普通 payload Need；descriptor-only 不提供这些值。有效数量可以为零，shape 仍保持正 extent。每个公开 tile 完整初始化，未使用位置按算子规则填充。未生产 tile 不缩短数组，要求完整结果的算子在容量不足时失败。
+所有端口都传递 Result，每个 Result 的 Tensor 成员名称、数量、dtype、rank 和正 extent 在 preparation 后固定。数据依赖数量使用静态容量与普通 payload，例如 `records[N,R]` 和 `count:Int64[1]`，或同形状数据加 mask。Count、mask、offsets 没有内核特殊含义，读取它们需要编译后的 payload grant；descriptor-only 不提供这些值。有效数量可以为零，shape 仍保持正 extent。每个公开 tile 完整初始化，未使用位置按算子规则填充。未生产 tile 不缩短数组，要求完整结果的算子在容量不足时失败。
 
-普通 actor 事务发布一个完整成员 tile。`CompleteBundle` 使用准备后的固定成员范围并主动推进兄弟 tile；`IndependentChunks` 允许完整 tile 独立公开；`StablePrefix` 使用明确的成员局部 tile 顺序。旧 descriptor 不随之后生产增长。共享全局计算由 Run 内唯一 stage producer 完成，消费者复用其不可变提交及依赖证据；证据不授予上游读取权限。见[全局结果](../../kernel-architecture/Global-Results.md)。
+普通 tile 指令事务发布一个完整成员 tile。Planner 为 `CompleteBundle` 编译准备后的固定成员闭包；`IndependentChunks` 允许完整 tile 独立公开；`StablePrefix` 使用明确的成员局部 tile 顺序。旧 descriptor 不随之后生产增长。共享全局计算由每次 call activation 内唯一的 stage 计算完成，消费者复用其不可变提交及依赖证据；证据不授予上游读取权限。见[全局结果](../../kernel-architecture/Global-Results.md)。
 
 ## 颜色、alpha 与 emission
 
@@ -59,13 +59,13 @@ Response 只保存 Q=P+E、T=1−A，不能恢复原 P/A/E；两种代数的数�
 | 简记 | 数学依赖 | 当前落地约束 |
 | --- | --- | --- |
 | E | 同像素/样本 | Elementwise 仍服从 shape 规则；多输出按各端口定义 observation |
-| H(r) | 有限邻域 | 静态 Halo 或 staged 精确邻域；radius 不自动等于全算法 halo |
-| W | 全局计算 | 完整输入经普通 tile Need 获取；全局计算使用 Run 共享 stage，显式物化和临时 backing 均需预算 |
-| R | 任意源采样 | 已有 STMap、radius gather/scatter 和按端口 staged reads；其他 sampler/warp 需自己的 data/control/validation 关系 |
+| H(r) | 有限邻域 | 编译期固定 Halo 或有限邻域并集；radius 不自动等于全算法 halo |
+| W | 全局计算 | 完整输入由静态 mapper 授权；全局计算使用 call 共享 stage，显式物化和临时 backing 均需预算 |
+| R | 任意源采样 | STMap 使用完整 source 静态授权；其他 sampler/warp 需证明合法地址的有限静态范围 |
 | S | scan/reduce/递推 | 已有 ordered scan 和具名全局 recipe；跨 tile 状态、顺序和发布 finality 逐算法证明 |
 | T | 多时间点 | 仍需专用序列、时间窗与边界帧契约 |
 
-数学支持集用于推导要请求的成员 tile。内核依赖协议只记录实际 tile Needs 和显式 descriptor 证据，不提供 data/control/validation 角色或 Exact/Conservative/Unknown 模式。算法可以说明精确数学 stencil 或保守数学界，但授权和失效按当前 plan 的 tile 网格取整。完整输入范围使用紧凑区间，不形成另一种执行模式。每个输出说明自己的输入投影、Needs、view 映射和共享 stage；不能因分页而宣称局部重算。
+数学支持集用于在编译期推导固定成员 tile grants。每个输出或共享 stage 的 mapper 明确返回 input/shared reads；input projection 只限定可选端口，不能替代读取边。运行时 Need 只检查既有 grants，不调度 producer、不收窄授权，也不扩张依赖。数据相关地址必须由有限静态 superset 覆盖。内核不提供 data/control/validation 角色或 Exact/Conservative/Unknown 模式；授权和失效按固定 tile 网格记录。完整输入范围可使用紧凑区间。每个输出说明自己的静态 mapper、view 映射与共享 stage；数值上只使用局部 stencil 不代表依赖范围同样局部。
 
 ## 资源、缓存与生命周期
 

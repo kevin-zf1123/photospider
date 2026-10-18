@@ -58,7 +58,15 @@ void allocate_with_quotas(BufferAllocator allocator,
 
 `consume(ResourceWork)` 原子准入 work 和 stage 计数。work 超限返回 `ResourceExhausted` 和 `WorkLimit`；stage 超限返回 `StageLimit`。失败不增加已发放计数，已发放工作不会因失败、回退或取消退款。回调提交还会消耗跨 Run 累计的 root stage。普通 callback 提交使用 Queue 计量等待 worker 开始的回调，worker 取走 callback 时释放 Queue slot；callback envelope metadata 保留到回调退出。CPU tile job 会保留等待准入和 managed Queue lease，直到所有已提交 tile 退出且 job 从队列摘除。
 
-Coordinator 在提供 capability 前，会按 input schema 和已发布 coverage 校验每个 `TileNeed`。`ResultTensorInput` 只授权读取请求的 samples。Tensor window acquisition 保留获准的 backing owners 与 leases；只要 owning handle 仍存活，window 可在 callback 返回后继续使用。
+Coordinator 先检查被授权的 samples 已经认证且 input schema 匹配，再绑定每条指令的已编译授权并提供相应 capability。`ResultTensorInput` 只授权读取已编译的 samples。Tensor window acquisition 保留获准的 backing owners 与 leases；只要 owning handle 仍存活，window 可在 callback 返回后继续使用。
+
+### 编译期展开与 Run work
+
+依赖展开的代价在编译期支付。`Compiler::plan` 把每条生成的指令计入 `PlanningOptions::maximum_instructions`（默认 4,194,304），把每条依赖边计入 `maximum_dependency_edges`（默认 16,777,216），超出任一上限时在发布 plan 之前以 `ResourceExhausted` 失败。Planning 期间和文本导入期间构建的 tile 集合几何使用 4,194,304 个 box 和 268,435,456 个 work 单位的静态上限。这些上限限制 plan 的规模；它们不消耗 Root，因为此时还没有 Run。过大的 plan 必须在规划之前缩小，例如使用原子 cell、仿射广播，或稀疏的 `PlanningOptions::output_requests` 选择。
+
+Run 从不展开依赖。它为自身簿记扣除 `ExecutionOptions::maximum_dependency_work`（默认 1,048,576）：每次进入 block、每条指令和每次 callback dispatch 一单位，每条授权声明记录一单位，每条合并的证据记录一单位，以及投影与结果组装所需的单位。没有指令的循环每轮仍消耗一单位，因此 `execute` 返回带 `WorkLimit` 的 `ResourceExhausted`，而不会空转。Callback 通过 `consume_work` 报告的算子工作计入 Root work 预算和任何共享 stage 的 `maximum_work`；GPU selection 还会扣除指令的 discovery 额度。每次扣费也检查取消、plan currentness 和宿主 stop 信号。
+
+诊断保持在其上限之内，且不会使合法工作失败。进入算子 callback 之前，VM 为下一条 `OperationTiming` 记录预留容量，因此填满 Host 容量后失败的 callback 仍报告其自身的错误（例如 `ShortIo`），而不是在记录计时时出现分配失败。`OperationTiming::computed_elements` 在每条记录中分别统计新认证的共享 stage 覆盖和公开 tile 发布的逻辑样本数；当逻辑基数或累计和超过 `uint64_t` 时，计数在 `UINT64_MAX` 处饱和并设置 `computed_elements_saturated`。精确等于 `UINT64_MAX` 的计数不是溢出，该标志保持 false。饱和从不拒绝合法的大型广播发布。
 
 结构化 Result 缓存和 checkpoint 缓存状态各自保存一份从执行 root 复制而来的 `ResourceBudget` handle。副本共享同一个 root，因此即使 coordinator 的包装对象被重新赋值或销毁，这两个组件仍向该 root 计费，其正确性也不依赖 coordinator 中成员的声明顺序。
 
@@ -91,4 +99,4 @@ GPU context 在创建 device 时使用 execution context 的资源 root 进行 n
 - `WithinBudgetOrFail` 只覆盖已纳入计量的 allocation，不限制总 RSS、驱动私有存储和标准库外部存储。
 - 空容器及部分内部几何/重建 metadata 未被完整计量。重建的外层 `Tensor` metadata 可能独立于原 publication token 存活，但每个 `Tensor` 仍持有自身 storage owner。
 - 调用方从管理范围取出原始 `Tensor` 或 vector 并在 managed allocator 之外复制时，自行承担该副本的内存成本。
-- Result C ABI 6 在每次 bridge `poll` 结束时释放普通的 C callback scratch。已保留的 tensor handle 以及由 `create_block_state` 创建的不可变 block-state Result 可以跨 poll 存在。
+- Result C ABI 7 在每次 bridge `poll` 结束时释放普通的 C callback scratch。已保留的 tensor handle 以及由 `create_block_state` 创建的不可变 block-state Result 可以跨 poll 存在。

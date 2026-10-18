@@ -2,6 +2,23 @@
 
 - Status: Accepted
 
+## Current implementation: fixed grants and CFG returns
+
+The static Plan fixes every input read before execution. Runtime payload can
+select a CFG successor or a sample within a compiled grant; it cannot add
+producer tasks or widen that grant. Bindings remain per-Run owners and do not
+enter artifact files. Imported plans keep the same binding preflight rules and
+must execute with their linked frozen registry.
+
+The DAG workflow-output restriction below applies to `WorkflowDocument`.
+Direct `IRProgram` frontends can return a matching SSA value, including an input
+or block parameter. Named returns have synthetic dependency records; consumers
+use `plan.output(name).record_index` rather than treating the return index as a
+physical step. Independent partially verifiable output tiles notify the observer
+as they are certified, including cache hits; bundle/prefix and complete-validation
+closures notify after their required coverage is ready. The observer's Result
+and the final returned projection need not share an ObjectId.
+
 ## 1. Core Summary (TL;DR)
 
 Workflow declarations provide a name and Result schema; each execution binds an owning `ResultRef` under that name. This keeps tensor shape and layout in the Result schema while keeping payload owners out of compiler identity. Every operation executes through the staged Result continuation protocol.
@@ -65,7 +82,7 @@ A declaration fixes all named static Tensor members, their dtype, cell shape, ba
 - Runtime input data does not become compile-time parameters or literal nodes.
 - A workflow output selects an operation-node output; direct input passthrough is not a workflow output form.
 - Result tensor backing layout does not change logical sample authorization. Planar storage is not interleaved storage.
-- The Result C operation table remains ABI 6. This ADR describes the C++ workflow binding contract, not a separate C++ Tensor operation protocol.
+- The Result C operation table remains ABI 7. This ADR describes the C++ workflow binding contract, not a separate C++ Tensor operation protocol.
 
 ## 5. Consequences
 

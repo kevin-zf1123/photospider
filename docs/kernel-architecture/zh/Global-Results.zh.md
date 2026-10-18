@@ -8,9 +8,9 @@
 
 Result 只携带结构、数据以及存储所需的 owner。它没有附着的领域描述、semantic kind 或 facet 列表。内核不会把颜色、alpha、transfer 或采样描述从输入传播到输出，也不会在连线上匹配这类标签。结构相同的两个 Result 可以连接到同一个端口，即使调用方赋予它们不同含义。需要领域解释的算子以显式静态参数或显式的算子领域配置接收该解释，并可通过绑定的校验器检查样本合法性（见[端口校验器与诊断报告](#端口校验器与诊断报告)）。
 
-当前 package 为 0.36.0。WorkflowDocument schema 为 7，OperationTraits version 为 28，Result C operation ABI 为 6，CPU parallel 与 CPU tiles 服务为 version 2，native GPU 服务为 version 1。这些版本号描述彼此独立的契约。C++ operation interface 使用 `start_result` 与 `ResultContinuation`。Result C operation table 是唯一的 C operation-plugin 接口；consumer 必须针对已安装 package 重建，因为 C++ API 与精确大小的 C 声明是契约。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md)（Proposed）记录所有 operation 共用的按前缀协商 C ABI；package 0.36.0 尚未实现。
+当前 package 为 0.37.0。WorkflowDocument schema 为 7，OperationTraits version 为 29，Result C operation ABI 为 7，CPU parallel 与 CPU tiles 服务为 version 2，native GPU 服务为 version 1。这些版本号描述彼此独立的契约。C++ operation interface 使用 `start_result`、`ResultContinuation` 和静态 `map_dependencies` mapper。Result C operation table 是唯一的 C operation-plugin 接口；consumer 必须针对已安装 package 重建，因为 C++ API 与精确大小的 C 声明是契约。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md)（Proposed）记录所有 operation 共用的按前缀协商 C ABI；package 0.37.0 尚未实现。
 
-编译器把不可变 schema 复制到 plan。执行协调器拥有 producer 状态，并调度回调与 I/O。`ResultRef` 拥有其 schema、单调 descriptor 事实、已认证 backing。引用的副本共享这份所有权。外部引用或读窗口在执行上下文结束后仍让所需 backing 保持存活。依赖事实不属于 Result：执行把每个计算单元实际的 Need 记录在 `TileRecord` 中（见[计算单元与 tile 记录](#计算单元与-tile-网格)）。
+编译器把不可变 schema 复制到 plan，并编译每条 tile 指令及其固定读取授权。执行协调器按 plan 顺序执行这些指令，拥有 Run 的值与状态，并执行回调与 I/O。`ResultRef` 拥有其 schema、单调 descriptor 事实、已认证 backing。引用的副本共享这份所有权。外部引用或读窗口在执行上下文结束后仍让所需 backing 保持存活。依赖事实不属于 Result：执行把每个已执行 tile 的已编译读取记录在 `TileRecord` 中（见[Tile 记录与冻结证据](#tile-记录与冻结证据)）。
 
 ```cpp
 struct ResultTensorLayout final {
@@ -77,11 +77,11 @@ class ResultRef {
 };
 ```
 
-`ResultBuilder::start` 接受长度为 1..4096 字节的 scope，将其字节复制到 Root 计费的存储，计入复制工作量，并分配新的 ObjectId。`ResultRef::matches_scope` 把已存储的字节与传入字符串做精确比较。执行宿主还会分别校验 Root ownership、结构 schema、actor scope、revision 递增以及发布 coverage；只匹配 scope 不足以准入 Result。这里的 actor scope 与控制成员 tile 可见性的 `SchemaTemplate::publication_scopes` 不同。
+`ResultBuilder::start` 接受长度为 1..4096 字节的 scope，将其字节复制到 Root 计费的存储，计入复制工作量，并分配新的 ObjectId。`ResultRef::matches_scope` 把已存储的字节与传入字符串做精确比较。执行宿主还会分别校验 Root ownership、结构 schema、producer scope、revision 递增以及发布 coverage；只匹配 scope 不足以准入 Result。这里的 producer scope 与控制成员 tile 可见性的 `SchemaTemplate::publication_scopes` 不同。
 
-在编译执行中，actor scope 编码 structured template（operation 契约、参数与有序输入）、冻结的 snapshot identity 以及计算单元。物理页大小、文件偏移、descriptor revision 和资源上限不改变语义身份。`ResultRef::capture()` 在某个 revision 捕获已认证 descriptor，因此早期 capture 的覆盖不会随生产进度扩大。`ResultRef::read_tensor()` 使用该 descriptor 并仅读取已认证样本。`ResultDescriptor` 为最多 16 个成员分别保存覆盖 `Footprint`。`ResultTensorInput` 把 tensor Need、成员 slot、descriptor 与授权的样本集带入回调；phase 仅在一次 poll 中借用，拥有型 capability 遵循各自的生命周期规则。
+在编译执行中，producer scope 是 Run 局部的调用 key，由 plan digest、冻结的 snapshot identity、Run、block activation，以及指令的 call、stage、输出、成员和 tile 派生。它标识一次发布尝试；内容复用使用下文独立的缓存 identity。物理页大小、文件偏移、descriptor revision 和资源上限不改变语义身份。`ResultRef::capture()` 在某个 revision 捕获已认证 descriptor，因此早期 capture 的覆盖不会随生产进度扩大。`ResultRef::read_tensor()` 使用该 descriptor 并仅读取已认证样本。`ResultDescriptor` 为最多 16 个成员分别保存覆盖 `Footprint`。`ResultTensorInput` 把已编译授权、成员 slot、descriptor 与授权的样本集带入回调；phase 仅在一次 poll 中借用，拥有型 capability 遵循各自的生命周期规则。
 
-`ResultObjectInputs` 另外跨 poll 保存每个输入端口当前拥有的 ResultRef；actor 完成或退役时 host 清空该映射。已存储的 `ResultTensorInput` capability 拥有其 ResultRef 与捕获 descriptor，获取的读窗口拥有该 Need 授权的 backing。物理 tensor view 独立保留其来源 Result、schema 与 backing。
+`ResultObjectInputs` 另外跨 poll 保存每个输入端口当前拥有的 ResultRef；指令完成或退役时 host 清空该映射。已存储的 `ResultTensorInput` capability 拥有其 ResultRef 与捕获 descriptor，获取的读窗口拥有该授权覆盖的 backing。物理 tensor view 独立保留其来源 Result、schema 与 backing。
 
 ### 显式 Tensor view 与发布所有权
 
@@ -104,7 +104,7 @@ struct ResultTensorViewPiece {
 };
 ```
 
-`ResultBuilder::publish_tensor_view(slot, region, source, transform)` 接收借用的、已获 Need 授权的 `ResultTensorReadWindow` 与显式 `ResultTensorViewTransform`。`reshape=false` 时，`source_axes` 必须为包括 batch 轴在内的每个完整来源样本轴提供一个 `ResultViewAxis`。映射根据目标**绝对坐标** `output` 计算 `source = source_origin + step * (output - output_origin)`，并检查算术边界。`output_axis=-1` 或 `step=0` 时，来源坐标固定为 `source_origin`。坐标包含目标区域的非零 offset：例如 `source_origin=10`、`step=-2`、`output_origin=5`，则目标坐标 5、6 分别读取来源坐标 10、8。恒等、通道置换与广播使用同一显式映射。
+`ResultBuilder::publish_tensor_view(slot, region, source, transform)` 接收借用的、已获授权的 `ResultTensorReadWindow` 与显式 `ResultTensorViewTransform`。`reshape=false` 时，`source_axes` 必须为包括 batch 轴在内的每个完整来源样本轴提供一个 `ResultViewAxis`。映射根据目标**绝对坐标** `output` 计算 `source = source_origin + step * (output - output_origin)`，并检查算术边界。`output_axis=-1` 或 `step=0` 时，来源坐标固定为 `source_origin`。坐标包含目标区域的非零 offset：例如 `source_origin=10`、`step=-2`、`output_origin=5`，则目标坐标 5、6 分别读取来源坐标 10、8。恒等、通道置换与广播使用同一显式映射。
 
 `reshape=true` 时 `source_axes` 为空，完整来源窗口与目标的逻辑样本数一致，且物理的有符号/零 stride 块必须能够合并成仿射映射。逻辑合法但物理布局需要复制时，可返回 `ViewUnavailable`。
 
@@ -112,7 +112,7 @@ struct ResultTensorViewPiece {
 
 **Atomic closure 约束整个 `total_region` 和所有 pieces 的并集，不要求每个 piece 单独闭合。** 例如形状 `[1,2]`、最后一轴为 atomic 的目标，允许两片分别填入通道 `[0,1)` 与 `[1,2)`，两片各自都不是完整的双通道 tuple，但联合后完整。每片仍必须分别通过来源授权和仿射映射检查；多片重载不支持 reshape。
 
-C++ vector 重载没有固定的 piece 数量上限，其规模由 Root 的 work 与 metadata 准入约束；C ABI 6 bridge 接受 1..16 片。piece vector 为空、`source` 为 NULL、piece 中 `reshape=true`，或某片区域超出 `total_region`、与其他片重叠、未覆盖 `total_region` 的一部分时，返回 sticky `TypeMismatch`。
+C++ vector 重载没有固定的 piece 数量上限，其规模由 Root 的 work 与 metadata 准入约束；C ABI 7 bridge 接受 1..16 片。piece vector 为空、`source` 为 NULL、piece 中 `reshape=true`，或某片区域超出 `total_region`、与其他片重叠、未覆盖 `total_region` 的一部分时，返回 sticky `TypeMismatch`。
 
 Builder 先校验完整逻辑分区、dtype、来源授权和逐片映射，然后准备物理 spans。之后统一检查所有来源 Result owner（允许来自不同 Roots）的 ownership cycle，并只调用一次 `publish_tensor_spans`。成功时一次认证覆盖并推进 revision，借用窗口释放后仍保留来源 backing。中间 piece 不会单独发布。
 
@@ -124,7 +124,7 @@ View 路径不复制 payload。目标 Root 计入 metadata、几何/work 和 pub
 
 ### 计算单元与 tile 网格
 
-每个 plan step 以各自解析后的输出契约计算一个选定的具名输出。该输出的每个成员都有自己的固定 tile 网格，每个被请求成员的每个 tile 都是一个计算单元。内核执行没有整体 Result 模式：需要完整输入或输出的算法通过普通的成员 tile 请求或 Run 共享 stage 表达该需求（见 [Run 共享 stage](#run-共享-stage)）。
+每个 plan step 以各自解析后的输出契约声明一个选定的具名输出。该输出的每个成员都有自己的固定 tile 网格，成员的每个已编译 tile 都是一条 plan 指令。内核执行没有整体 Result 模式：需要完整输入或输出的算法通过映射的成员 tile 或 Run 共享 stage 表达该需求（见 [Run 共享 stage](#run-共享-stage)）。
 
 `PlanningOptions::tile_extent` 为整个 plan 设置一个正方形 tile extent。默认值为 128，必须是 2 的正整数次幂（包括 1）。`TileGrid::from_tensor()` 依据 schema 与该 extent 为每个成员推导一个网格：
 
@@ -159,19 +159,21 @@ struct ResultProgramNeed final {
 
 摘录省略了构造函数与成员函数；声明位于 `photospider/data/tiles.hpp`、`photospider/execution/tile_dependencies.hpp` 与 `photospider/plugin/result_program.hpp`。`TileSet` 存储规范化的半开区间 `[begin, end)`；构造、合并与复制的开销随区间数而非 tile 数增长。`TileRequest` 把成员 slot 映射到 tile 集合；`TileRequest::all()` 依据静态网格构造完整的成员区间。
 
-协调器为每个计算单元运行一个 actor。Actor key 拼接 step 的 structured template、冻结 snapshot 身份，以及 step 索引、输出索引、成员 slot、tile 索引与 tile extent 的摘要。Template 是所选输出契约及其上游 template 或 workflow 输入名称与 schema 的静态摘要；它不含 graph、node 或 step ID。在一个 Run 内，对同一单元的重复请求复用其 actor。索引不同的 step 即使 template 相同也保持各自的 actor；只有下文的 completed-result cache 能复用相同 template。Actor 的 query 携带 `tensor_slot`、`tile_unit`、`tile_extent`，以及等于该单元 tile 区域的 `tensor_outputs` footprint。普通 tile actor 的每次 `ResultPublication` 必须设置 `complete = true`，恰好覆盖所选成员的 query tile，并让其他成员的覆盖为空。部分或非最终发布无法通过校验。Need 可以跨多次 poll；渐进式 Result 发布属于共享 stage 执行。
+Planner 为每个可达单元 `(step, shared stage, member, tile)` 生成一条指令，并对同一单元的重复请求去重，因此被多个消费方读取的 tile 在每次 block activation 中只运行一次。指令的 query 携带 `tensor_slot`、`tile_unit`、`tile_extent`，以及等于该单元 tile 区域的 `tensor_outputs` footprint。普通 tile 指令的每次 `ResultPublication` 必须设置 `complete = true`，恰好覆盖所选成员的 query tile，并让其他成员的覆盖为空。部分或非最终发布无法通过校验。Continuation 可以使用多次 poll；渐进式 Result 发布属于共享 stage 执行。
+
+`ExecutionPlan::structured_templates()` 为每个 step 保存一个静态 template，由编译器计算一次。Template 摘要 tile extent、执行模式、后端、operation key、输出索引、解析后的 traits、所选资源 identity、参数和输入 schema。它不含 graph、node、step 或 plan 标识符，因此位于不同 step 的两个等价 call 共享同一个 template。
 
 ### Need 与授权
 
-回调返回 `ResultProgramNeed` 来请求输入数据。每个 `TileNeed` 恰有一种形式：
+算子的静态 mapper 在编译期返回 `TileNeed` 记录，planner 把它们转换为指令的 `PlanTensorRead` 授权。每个 `TileNeed` 恰有一种形式：
 
-- Payload Need 指定一个输入、一个成员 slot 和成员局部的 tile 区间。Host 依据该 producer 成员的编译期网格校验区间。Payload Need 同时授权该输入的静态 descriptor 事实。
-- Descriptor-only Need 的 `tensor_slot = 0` 且没有区间。它授予该输入的 descriptor 事实，不授予 payload。
-- 区间数为零的 payload Need 合法，表示不请求任何内容。Host 跳过它：不创建依赖、不授予 descriptor、不授予样本，也不启动 producer。
+- Payload 记录指定一个输入、一个成员 slot 和成员局部的 tile 区间。Planner 依据该 producer 成员的编译期网格校验区间。Payload 授权同时授权该输入的静态 descriptor 事实。
+- Descriptor-only 记录的 `tensor_slot = 0` 且没有区间。它授予该输入的编译期 descriptor 事实，object id 为 0，不授予 payload。
+- 区间数为零的 payload 记录合法，表示不请求任何内容。Planner 丢弃它：不创建依赖、不授予 descriptor，也不授予样本。
 
-Host 在启动任何 producer 工作之前校验完整的 Need envelope，包括区间数和成员 slot。对每个 payload Need，协调器获取每个被请求 producer tile 的 actor，把各单元的 Result 组装为一个由 tensor view 构成的 Result，并授予被请求 tile 区域的并集，该并集按 `atomic_trailing_axes` 闭合。单元完成时，协调器把其已准入 Need 的并集安装为该单元的 `TileRecord`。区间只在同一 producer 与成员内合并；记录不保留 payload。`ExecutionDependencies::tile_record()` 返回已完成单元的记录，`dirty_units()` 从变化的 producer tile 或 descriptor 沿反向边找到消费过它们的已记录单元。
+Planner 合并同一输入与成员的记录，把每个授权按 publication scope 和完整校验要求闭合，并把 producer tile 记录为指令依赖。运行时，协调器把被授权的 producer tile 组装为一个由 tensor view 构成的 Result，并授予这些区域的并集，该并集按 `atomic_trailing_axes` 闭合。Callback 仍可以返回 `ResultProgramNeed`，但协调器只检查其记录位于这些授权之内，从不启动 producer。指令完成时，协调器把其授权的并集、本次 activation 的控制证据以及其读取的 block 参数证据安装为该 tile 的 `TileRecord`。区间只在同一 producer 与成员内合并；记录不保留 payload。`ExecutionDependencies::tile_record()` 返回已完成 tile 的记录，`dirty_units()` 从变化的 producer tile 或 descriptor 沿反向边找到消费过它们的已记录 tile。每个具名 return 还在索引 `steps().size()` 加其 return 序号处有一条 synthetic 记录。
 
-完整 tile 的发布是原子的：一个单元的 tile 要么以完整覆盖变为可见，要么完全不可见。仅凭 producer 单元完成并不能确立其输出的完整覆盖；覆盖是已发布 tile 的并集。单元的实际 Need 随其发布一起冻结，因此之后的 Need 不能改变已发布 tile 的依赖记录。
+完整 tile 的发布是原子的：一个 tile 要么以完整覆盖变为可见，要么完全不可见。仅凭一个 producer tile 完成并不能确立其输出的完整覆盖；覆盖是已发布 tile 的并集。已发布 tile 的依赖记录由其已编译授权固定，之后不能改变。
 
 ### Publication scope
 
@@ -183,7 +185,9 @@ Host 在启动任何 producer 工作之前校验完整的 Need envelope，包括
 | `CompleteBundle` | 一个或多个 | 所列成员的每个 tile 全部完成后，这些成员一起变为可见。 |
 | `StablePrefix` | 恰好一个 | 完整 tile 按局部 tile 索引顺序变为可见。 |
 
-Scope 控制可见性，不控制读取权限，也不控制回调调度。协调器在发布时还校验预期 schema、Root ownership、actor scope、revision 递增和输出 tile coverage；仅 actor scope 匹配不足以准入一个 Result。当请求触及某个 `CompleteBundle` 的成员时，可见性闸门驱动整个 bundle 的每个 tile，包括未被请求的成员。聚合校验与依赖认证先于一次原子安装完成；bundle 成员不会提前可见。Bundle 的所有单元继承同一份冻结的 bundle 依赖并集，任一成员的 fallback 来源都作用于每个成员，因此读取单个成员的 sink 不能把与带 fallback 污染的兄弟成员一起认证的结果当作干净结果。`StablePrefix` 闸门在可见后仍保留其 producer actor，因此之后对更早 tile 的请求复用它们已认证的状态。返回的 Result 仍只包含被请求的选择。
+Scope 控制可见性，不控制读取权限。Planner 把它们转换为已编译闭包：触及某个 `CompleteBundle` 成员的读取依赖整个 bundle 的每个 tile，包括未被请求的成员；读取 `StablePrefix` 的某个 tile 依赖其之前的每个 tile。协调器在发布时还校验预期 schema、Root ownership、producer scope、revision 递增和输出 tile coverage；仅 producer scope 匹配不足以准入一个 Result。聚合校验与依赖认证先于消费方可见；bundle 成员不会提前可见。返回的 Result 仍只包含被请求的选择。
+
+设置 `ExecutionOptions::result_publication` 时，所有 scope 都是 `IndependentChunks` 且没有完整覆盖输出校验器的输出，会在每条指令认证时逐 tile 校验并通知，包括从 completed-result 缓存采用的 tile。校验或 observer 失败会在下一条指令之前停止 Run。`CompleteBundle`、`StablePrefix` 和完整校验输出在 call 的已编译聚合认证后通知一次。被通知的对象与之后以输出名返回的投影对象不一定共享 `object_id`；消费方应比较覆盖范围、内容和 owner 语义。
 
 ### Run 共享 stage
 
@@ -203,19 +207,19 @@ struct OperationSharedStage final {
 };
 ```
 
-Stage 契约是静态的。准备阶段固定其 schema、输入投影、后端、状态、workspace、work 与输出 payload 上限，这些都进入 operation 身份。在一个 Run 内，协调器为每个原始 node 实例与 stage 至多创建一个 producer，与请求它的 tile 或输出数量无关。输入投影声明潜在依赖，不授予读取权限。Stage 在读取前发出普通的成员 Need。所有 stage 上限都是该 stage 在该 Run 内的累计值，work 上限包括输入校验器与发布校验器。
+Stage 契约是静态的。准备阶段固定其 schema、输入投影、后端、状态、workspace、work 与输出 payload 上限，这些都进入 operation 身份。Planner 把 stage 单元规范化到该 call 的第一个 step，因此同一 call 的所有输出和 tile 到达相同的 stage 指令。在一次 block activation 内，协调器为每个 call 和 stage 保留一份 stage 状态；再次进入该 block 时清空它，因此每轮循环都会重新运行其 stage。输入投影限制 stage 的 mapper 可以指名哪些输入，不授予读取权限。Stage 只读取它自己的 mapper 产生的授权。所有 stage 上限都是该 stage 在一次 activation 内的累计值，work 上限包括输入校验器与发布校验器。
 
-消费方通过 `ResultSharedNeed` 请求 stage。`tiles` 选择缺省时请求该 stage 的每个成员 tile；显式空选择不授予 payload，也不启动 producer。协调器先尝试从不可变的已提交 stage 覆盖中授予被请求的 tile。只有缺失的覆盖才登记等待边并推进 producer。因此，正在等待另一个 stage 的 continuation 仍可作为其已提交 tile 的有效来源；需要在未提交 tile 之间形成环的等待返回 `Cycle`。每次可见的 stage 提交都在提交时冻结其依赖证据与 fallback 来源。消费方获得 stage Result 和这份冻结历史，但不获得读取该 stage 原始输入的权限。之后被污染的提交不会回溯污染更早的干净提交。
+只有当消费方的 mapper 为某个 stage 返回 `ResultSharedNeed` 时，消费方才读取该 stage。`tiles` 选择缺省时请求该 stage 的每个成员 tile；显式空选择不授予 payload。Planner 按 stage 的 publication scope 和完整校验要求闭合该选择，并让消费方依赖这些 stage 指令，它们在同一 block 中更早运行。Stage 单元与 tile 单元之间的依赖环使 planning 以 `Cycle` 失败。每次可见的 stage 提交都在提交时冻结其依赖证据。消费方获得限定在其授权内的 stage Result 和这份冻结历史，但不获得读取该 stage 原始输入的权限。
 
-Stage 的成功或失败保留到 Run 结束。失败的 stage 使请求受影响 tile 的每个消费方失败，Run 取消时 producer 在已准入回调返回后退役。Stage 不会溢出、在 Run 内不会重算，也不会跨 Run 共享。普通执行运行每个 `mandatory` stage，即使 plan 没有选择任何输出 tile。使用显式 `DemandQuery` 的执行仅在其全部选择为空时跳过 mandatory stage。非无副作用的算子必须声明至少一个 mandatory stage；不同时满足确定性与无副作用的算子不能声明为可缓存。一个算子至多声明 64 个 stage。
+Stage 失败会使执行它的指令失败，从而使 Run 失败；取消会在已准入回调返回后使 stage 退役。Stage 不会溢出，也不会跨 Run 共享。Planner 把每个 call 的每个 `mandatory` stage 作为副作用根编译，即使 plan 没有选择任何输出 tile，`select_outputs` 也会保留它们；只要包含其 call 的 block 执行，mandatory stage 就会运行。非无副作用的算子必须声明至少一个 mandatory stage；不同时满足确定性与无副作用的算子不能声明为可缓存。一个算子至多声明 64 个 stage。
 
-当 `ExecutionMode::CpuExact` 下的执行请求 GPU stage producer 时，协调器在该处返回 `BackendUnavailable`。只读取 stage 元数据的 plan 不受影响。当普通 step 或 stage 使用 GPU 后端时，Run 创建其 native 上传状态。CPU fallback 仅限于 stage 计算开始之前的准入阶段；进入 stage factory 后，不会通过切换后端重试 stage 算术。
+在 `ExecutionMode::CpuExact` 下，planner 为 GPU stage 生成指令时以 `BackendUnavailable` 失败。只读取 stage 元数据的 plan 不受影响。当普通 step 或 stage 使用 GPU 后端时，Run 创建其 native 上传状态。GPU stage 没有编译期 CPU 回退；stage 算术从不在另一后端上重试。
 
 直接调用的 stage `ResultContinuation` 遵循相同的静态可见性规则。隐藏的中间提交返回空 Need，以便 host 再次 poll。返回的非最终发布是某个 revision 上的 `capture()`，因此之后被拒绝的增量不会通过更早的 `ResultRef` 出现。若校验器拒绝后续 tile，host 以该失败使投影 producer 退役：已逃逸前缀的 `production_status()` 在 continuation 销毁前后都报告该失败，而此前已认证的 tile 仍可读取。
 
 ### SDK 获取辅助函数
 
-C++ SDK 头文件 `photospider/plugin/tensor_helpers.hpp`、`tile_helpers.hpp` 和 `whole_stage.hpp` 提供非阻塞辅助函数。每个辅助函数要么返回一个 Need 供回调从 poll 中返回，要么返回就绪值；它们都不会执行 producer、等待、填充缺失样本或隐式收集稠密字节。
+C++ SDK 头文件 `photospider/plugin/tensor_helpers.hpp`、`tile_helpers.hpp` 和 `whole_stage.hpp` 提供非阻塞辅助函数。每个辅助函数要么返回一个 Need 供回调从 poll 中返回，要么返回就绪值；它们都不会执行 producer、等待、填充缺失样本或隐式收集稠密字节。在静态 VM 下，授权在第一次 poll 前已经绑定，因此辅助函数通常在第一次调用时就返回就绪值；返回的 Need 只声明已编译授权。`tile_helpers.hpp` 还提供静态 mapper 辅助函数 `sdk::static_query_view`、`sdk::tile_need_for_samples(const ResultStaticQuery&, ...)` 和 `sdk::pointwise_dependencies`。
 
 | 辅助函数 | 就绪值 | 用途 |
 | --- | --- | --- |
@@ -226,9 +230,9 @@ C++ SDK 头文件 `photospider/plugin/tensor_helpers.hpp`、`tile_helpers.hpp` �
 | `sdk::collect(phase, input, region)` | `TensorSpan` | 显式稠密复制一个已授权矩形。 |
 | `sdk::publish_dense_tensor(...)` | 通过 `ResultBuilder` 发布 | 为一个矩形显式分配稠密输出。 |
 
-`to_whole` 的 ROI 重载在入口拒绝已取消的 query，并在每个被选样本都获得授权之前返回紧凑的 tile Need。完整获取不意味着稠密收集；稠密复制是算子的显式决定。
+`to_whole` 的 ROI 重载在入口拒绝已取消的 query；只要有被选样本位于已绑定授权之外，就返回紧凑的 tile Need，已编译授权足够时立即就绪。完整获取不意味着稠密收集；稠密复制是算子的显式决定。
 
-`sdk::with_whole_stage(definition, work_bound)` 把一个算法需要完整输出的单输出 CPU 算子适配为一个 Run 共享 stage。当 stage 被请求时，原 factory 在该 Run 内至多运行一次，具有完整输出 schema 且没有所选 tile；它仍负责自己的非阻塞输入 Need、数值策略和资源上限。随后输出 tile 回调通过 `sdk::shared_result_tile` 发布 stage Result 的保留 view。这是算子作者选择的 SDK 适配器，不是内核执行模式。有多个独立输出的算子使用各自的 stage 和更窄的输入投影；输出需联合计算的算子（如稳定排序）使用一个联合 stage。
+`sdk::with_whole_stage(definition, work_bound)` 把一个算法需要完整输出的单输出 CPU 算子适配为一个 Run 共享 stage。它包装 definition 的 mapper，使 stage 获得原始输入读取，而每个输出 tile 读取完整 stage。当 block activation 执行该 stage 时，原 factory 以完整输出 schema 且没有所选 tile 运行一次；它仍负责自己的数值策略和资源上限。随后输出 tile 回调通过 `sdk::shared_result_tile` 发布 stage Result 的保留 view。这是算子作者选择的 SDK 适配器，不是内核执行模式。有多个独立输出的算子使用各自的 stage 和更窄的输入投影；输出需联合计算的算子（如稳定排序）使用一个联合 stage。
 
 ### Tile 记录与冻结证据
 
@@ -253,77 +257,65 @@ struct TileRecord final {
 };
 ```
 
-每个 payload 依赖也观察 descriptor 变化。`TileEvidence` 是一次 stage 提交的不可变依赖证据：它拥有该提交的局部 Need，并引用更早的冻结证据。它从不是读取 capability。Stage tile 的消费方只保留对该节点的一个引用。执行表把每个不同节点导入目标 Root 一次并保留其身份，为每个节点只建立一次反向边索引，并从一个加锁的表状态枚举 workflow 依赖。节点按引用计数退役。这些规则避免把 P 个 stage tile 的证据复制到 Q 个消费方中的每一个。
+每个 payload 依赖也观察 descriptor 变化。`TileEvidence` 是一次 stage 提交的不可变依赖证据：它拥有该提交的输入授权，并引用更早的冻结证据。它从不是读取 capability。Stage tile 的消费方只保留对该节点的一个引用。执行表把每个不同节点导入目标 Root 一次并保留其身份，为每个节点只建立一次反向边索引，并从一个加锁的表状态枚举 workflow 依赖。节点按引用计数退役。这些规则避免把 P 个 stage tile 的证据复制到 Q 个消费方中的每一个。
 
 ### Mandatory 副作用与重复输入
 
-普通执行运行每个 mandatory 共享 stage，包括 plan 的输出选择为空的情况。显式 `DemandQuery` 在至少一个选择非空时运行 mandatory stage，在全部选择为空时跳过它们。Mandatory stage 在收集具名输出之前达到终态。有副作用的工作不跨 Run 共享或缓存。Mandatory stage 失败或取消会使 Run 失败。
+Planner 把每个非 side-effect-free 的 call 和每个 mandatory 共享 stage 作为副作用根编译，包括 plan 的输出选择为空的情况。`select_outputs` 和显式 `DemandQuery` 保留这些根，以及每个分支条件和边参数，因此空选择会省略纯输出计算，而实际执行路径上的控制流与 mandatory 副作用仍会运行。未被选中分支中的副作用不会运行。一个 block 中的 mandatory stage 在该 block 的 terminator 求值之前完成。有副作用的工作不跨 Run 共享或缓存。已执行的 mandatory stage 失败或取消会使 Run 失败。
 
-Result C ABI operation 定义可以声明一个固定输入前缀和一个重复的尾部组。`input_count` 与 `inputs` 只描述前缀；`repeated_input` 提供原型约束，在元数据解析和 `start`/`poll` query 校验时应用于每个实际尾部输入。非零 `repeated_maximum` 启用该组，并要求 `1 <= repeated_minimum <= repeated_maximum`，前缀加最大值不超过 1,024 个输入。禁用时，所有重复字段为零或 null。`repeated_match` 为 0 或 1：取值 1 要求每个重复 tensor 与第一个重复 tensor 的 dtype 和完整逻辑 `sample_shape()` 一致；取值 0 要求为展开后的输入列表提供纯元数据解析器。C++ registry 保留未展开的模板，并在准备期间解析实际输入数。该声明只约束元数据；算子仍要为它读取的每个实际输入请求 tile Need。
+Result C ABI operation 定义可以声明一个固定输入前缀和一个重复的尾部组。`input_count` 与 `inputs` 只描述前缀；`repeated_input` 提供原型约束，在元数据解析和 `start`/`poll` query 校验时应用于每个实际尾部输入。非零 `repeated_maximum` 启用该组，并要求 `1 <= repeated_minimum <= repeated_maximum`，前缀加最大值不超过 1,024 个输入。禁用时，所有重复字段为零或 null。`repeated_match` 为 0 或 1：取值 1 要求每个重复 tensor 与第一个重复 tensor 的 dtype 和完整逻辑 `sample_shape()` 一致；取值 0 要求为展开后的输入列表提供纯元数据解析器。C++ registry 保留未展开的模板，并在准备期间解析实际输入数。该声明只约束元数据；算子的 mapper 仍要授权它读取的每个实际输入。
 
 ### Native GPU 输入访问
 
-Native GPU 回调可以对 payload 已授权的 tensor Need 调用 `ResultProgramPhase::acquire_native_atlas(input, slot)`。它返回一个不可变 `FragmentAtlas`，恰好包含该 Need 的覆盖；如何 dispatch 与发布仍由算子决定。一次 poll 内对同一端口和 slot 的调用复用同一个 atlas。CPU 访问、缺失 Need 或 descriptor-only Need 会产生 sticky `InvalidArgument`，且不扩大授权。Root 支持的 payload 与目录存储独立于算子 workspace，atlas 拥有这些缓冲区，但不保留来源 Result 或读窗口。调用方持有的共享 atlas 可以在 poll、来源与执行上下文结束后继续存活。
+Native GPU 回调可以对已编译的 payload 授权调用 `ResultProgramPhase::acquire_native_atlas(input, slot)`。它返回一个不可变 `FragmentAtlas`，恰好包含该授权的覆盖；如何 dispatch 与发布仍由算子决定。一次 poll 内对同一端口和 slot 的调用复用同一个 atlas。CPU 访问、缺失授权或 descriptor-only 授权会产生 sticky `InvalidArgument`，且不扩大授权。Root 支持的 payload 与目录存储独立于算子 workspace，atlas 拥有这些缓冲区，但不保留来源 Result 或读窗口。调用方持有的共享 atlas 可以在 poll、来源与执行上下文结束后继续存活。
 
 Native GPU 输入传输仅当弱证明仍标识同一个存活的 CPU 存储且完整 view key 匹配时，才在 Run 内复用原始物理 backing。可选的按字节有界上下文缓存可以按设备实例/构建以及逻辑输入位、Region、dtype 和形状跨 Run 复用上传；它不包含 Result schema，命中后重新绑定到当前 schema。缓存哈希消耗协调器共享的缓存 work 预算，可选 work 耗尽时跳过缓存路径。容量回收先清除可重传的 Run 局部条目，再逐出保留的上下文条目。`host_access_count` 在一个回调范围内对每个存储只记录一次存活 native 支持存储的实际 CPU 暴露；元数据检查、native 地址获取、view 转发和哈希不计数。Native GPU 服务失败在服务调用返回时锁存。之后的 `consume_work` 耗尽或回调状态不能替换这个更早的服务错误；若 work 耗尽先发生，之后的服务错误也不会替换它。
 
-Result atlas 打包接受 `Tensor` 或 `ResultTensorInput` capability。底层的 `FragmentAtlasPlan` 可以在不读取来源样本的情况下打包覆盖为空的 `Tensor`。Result 重载通过 Need 授权的拥有型窗口读取，因此无需稠密转换即可处理有符号与 broadcast stride、碎片化覆盖和带 batch 前缀的 spatial tensor。`preparation_work()` 与 `materialization_work()` 报告通用的几何与打包单位。Result 准备通过 `FootprintLimits::consume_work` 预扣其通用 work；Result 物化还通过该回调预扣窗口获取与读取上限 work。`materialization_work()` 不是 Result 重载的完整扣费。
+Result atlas 打包接受 `Tensor` 或 `ResultTensorInput` capability。底层的 `FragmentAtlasPlan` 可以在不读取来源样本的情况下打包覆盖为空的 `Tensor`。Result 重载通过已授权的拥有型窗口读取，因此无需稠密转换即可处理有符号与 broadcast stride、碎片化覆盖和带 batch 前缀的 spatial tensor。`preparation_work()` 与 `materialization_work()` 报告通用的几何与打包单位。Result 准备通过 `FootprintLimits::consume_work` 预扣其通用 work；Result 物化还通过该回调预扣窗口获取与读取上限 work。`materialization_work()` 不是 Result 重载的完整扣费。
 
 ### 跨输出 block 状态共享
 
 当当前请求与证明匹配时，block 状态保留可以复用已完成的状态。保留状态是执行实现细节；缓存命中数与 block 转换不是公开的性能保证。
 
-纯确定性 Result 算子可以选择启用 `share_blocks_across_outputs`；对不同时满足确定性与无副作用的算子，注册拒绝该选项。C Result ABI 6 以 `PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V6`（标志位 5）提供相同选项。
+纯确定性 Result 算子可以选择启用 `share_blocks_across_outputs`；对不同时满足确定性与无副作用的算子，注册拒绝该选项。C Result ABI 7 以 `PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V7`（标志位 5）提供相同选项。
 
 共享命名空间包括算子及其所有解析后的输出契约、后端、执行模式、所选资源身份、静态参数和实际输入元数据。每个 block key 还包括其 kind、range、mode、输入状态的 schema/覆盖/内容，以及当前提供的 tensor 元数据、覆盖和字节。所选输出索引与输出特定元数据不会单独附加。因此由不同输出共享的计算必须与输出无关，或把差异编码在状态或 mode 中。公开输出 Result、tile 记录、checkpoint 和 completed-result 缓存仍按输出划分且彼此独立。
 
-共享 stage 不提供 checkpoint 或 block 回调。对普通 actor，block 状态查找与保留要求纯、确定且可缓存的算子、纯且确定的所选输入 producer 闭包、无 fallback 污染且没有直接 shared Need。处理 shared Need 后，该 actor 的可选 block 复用被禁用。保留是可选的，计入有界缓存 work 与 Root 容量。若查找或保留不可用，回调正常计算该 block。若查找命中但缓存状态因容量不足无法解包，则视为 block 未命中：协调器释放候选及其 key 租约并正常计算。解包期间的 work 上限、取消和协议失败仍是致命错误。每个输出仍完成自己的 Need 并记录自己的 `TileRecord`。该标志不对并发 producer 去重，也不保证每个 Run 只计算一次。
+共享 stage 不提供 checkpoint 或 block 回调。对普通 tile 指令，block 状态查找与保留要求纯指令：确定且无副作用的算子、对已授权 payload 输入纯的 producer 闭包、纯的控制证据、无 fallback 污染、没有共享 stage 读取，且不读取 block 参数的 payload。Block 复用不要求算子或其祖先可缓存；该要求只适用于 completed-result 保留。Block key 从 block 契约（算子、执行模式、后端、tile extent、非共享时的输出索引、traits、资源、参数与输入 schema）开始，再加入指令的固定授权内容证明（`photospider.fixed-block-inputs.v2`）、block kind、range、mode 和输入状态。保留是可选的，计入有界缓存 work 与 Root 容量。只有当 compute 回调在该 block 期间确实 dispatch 了原生工作时，GPU block 才会被保留，因此没有原生计算证明的 GPU 路径从不被存储。若查找或保留不可用，回调正常计算该 block。若查找命中但缓存状态因容量不足无法解包，则视为 block 未命中并正常计算。解包期间的 work 上限、取消和协议失败仍是致命错误。每个输出仍执行自己的指令并记录自己的 `TileRecord`。该标志不保证每个 Run 只计算一次。
 
 ### CPU fallback
 
-当一次 GPU 尝试符合 CPU fallback 条件时，协调器为重试提供新的失败锁存，丢弃该尝试的 continuation、tensor 与对象 capability、descriptor 输入、已记录 Need和 completed-cache 重放日志，并在 CPU 上重新启动同一计算单元。已完成的 producer 单元保留其已发布的 Result 与记录，因此重试会再次获得它们而无需重算。已消耗的 Root work 与 stage 不退还。重试的单元带 fallback 污染；当提供给消费方的 producer 单元或 stage 提交带污染，或运行在计划外的后端时，消费方也被污染。被污染的单元跳过 checkpoint 查找与发布、block 状态复用和 completed-result 保留。
+CPU fallback 只存在于 planner 编译了它的位置：当放置在 GPU 的算子允许回退、支持 CPU、确定且无副作用、没有共享 stage 读取，并且其 CPU mapping 落在 GPU 授权之内时，指令的 `cpu_fallback` 标志才被设置。之后若 GPU start 或 poll 在任何发布、输入读取、native dispatch、checkpoint、block 或 GPU selection 之前以可重试的 `BackendUnavailable` 失败，协调器为重试提供新的失败锁存，丢弃该尝试的 continuation，并以相同的已绑定授权在 CPU 上重新启动同一条指令。已完成的 producer tile 保留其已发布的 Result 与记录。已消耗的 Root work 不退还。被拒绝的 GPU 尝试保留其 `OperationTiming` 记录，CPU 尝试添加自己的记录。重试的 tile 带 fallback 污染，在可选复用中视为不纯，因此其值以及读取它的每个消费方都跳过 checkpoint 查找与发布、block 状态复用和 completed-result 保留。
 
 ### Checkpoint
 
-Checkpoint witness 保留实际准入的成员 tile/descriptor Need、producer TileRecord、冻结的继承 stage 证据及 ancestry。恢复 witness 提供依赖证明；callback 通过新发起的授权 Need 重新获取当前输入 Result owner 与窗口。
+纯确定性 Result 程序的普通 tile 指令可以使用 C++ `ResultProgramPhase::checkpoint_publish` 与 `checkpoint_before` 回调保留 continuation 状态；从共享 stage 或不同时具备两项纯度 trait 的算子调用任一回调都是协议失败。查找与保留还要求纯指令（producer 闭包与控制证据纯、无 fallback 污染、没有共享 stage 读取、不读取 block 参数的 payload）以及剩余的可选缓存 work。否则查找未命中、发布被拒绝，但不使算子失败。Checkpoint 不要求算子或其祖先可缓存。
 
-纯确定性 Result 程序的普通 actor 可以使用 C++ `ResultProgramPhase::checkpoint_publish` 与 `checkpoint_before` 回调保留 continuation 状态；不同时具备两项纯度 trait 的算子调用任一回调都是协议失败。共享 stage 不提供这些回调。查找与保留还要求所选输入的 producer 闭包纯且确定、actor 未处理直接 shared Need 且未被 fallback 污染，并有剩余的可选缓存 work。否则查找未命中、发布被拒绝，但不使算子失败。已发布的 checkpoint 拥有一个已封存的状态 Result 和一个不含 payload 的 witness：该单元至今已准入 Need 的 `TileRecord`、其 producer 闭包已记录的 `TileRecord`、按不同节点各计一次的继承共享证据。
+Checkpoint 范围是内容 identity。其 key 是指令的固定授权内容 key（`photospider.fixed-grant-cache.v2`，覆盖 step 的 structured template、后端、成员、tile、publication samples、descriptor 授权的端口，以及已授权输入的 schema 与样本字节）加 `/checkpoint` 后缀。它不含物理 step、node 或 plan 标识符，因此位于不同物理 step 的两个等价 call，或同一 call 在重新编号或重新加载的 plan 中，共享同一个范围。`checkpoint_before(phase, before)` 返回该 phase 中不大于 `before` 的最大已发布序号。已发布的 checkpoint 拥有一个已封存的状态 Result 和一个不含 payload 的 witness，witness 保存发布方 tile 的 `TileRecord`。
 
-Checkpoint 范围属于一个计算单元：其 key 是 actor key 加 `/checkpoint` 后缀，因此绑定 structured template、冻结 snapshot 身份、step 与输出索引、成员 slot、tile 索引和 tile extent。`checkpoint_before(phase, before)` 返回该 phase 中不大于 `before` 的最大已发布序号。恢复要求同一计算单元。协调器先在可选分配栅栏内暂存 witness Need、producer 记录、继承证据。只有暂存成功后，它才恢复祖先关系，并以同一 Root 内的移动提交暂存值。暂存期间的容量拒绝返回空 checkpoint，且不改变 actor 状态与读取授权。Work 上限、取消和协议失败仍是错误。成功恢复会把 witness Need 合并进当前单元的 `TileRecord`（本次执行中已存在的记录仍具权威）。恢复不会填充当前 phase 的 `results` 或 `tensors`，不会重建读窗口，也不授予 Need 授权。回调必须再次请求当前输入访问。
+恢复 checkpoint 只恢复状态内容。当前指令保留自己的固定授权、依赖证据和 `TileRecord`；更早的 witness 从不替换它们，也不会引入另一个 call 的物理 tile 身份。恢复不会填充当前 phase 的 `results` 或 `tensors`，不会重建读窗口，也不授予读取权限；回调通过已绑定的授权读取当前输入。容量拒绝返回空 checkpoint，且不改变该指令。Work 上限、取消和协议失败仍是错误。
 
-上下文目录持有 checkpoint 范围的弱引用，活动执行持有其范围的强引用；`ExecutionContextConfig::maximum_result_checkpoint_scopes` 限制存活范围数。每个范围至多保留 64 个条目，一个范围的 witness 总权重不超过依赖 `maximum_boxes` 上限；最旧条目先退役。运行时在构造查找 key、遍历 producer 闭包或复制 Need 记录之前先扣除可选 checkpoint work。可选缓存 work 为零或不足时跳过查找或拒绝发布；不会复制未准入的 witness 数据。复制得到的 `ResultCheckpoint` 在索引或上下文清除后仍拥有其状态与 witness。C Result ABI 通过 poll 作用域的不透明句柄和已封存的通用状态 Result 提供 `checkpoint_before`、`checkpoint_read` 与 `checkpoint_publish`；见 [C checkpoint 服务](Dependency-Data.zh.md#c-checkpoint-服务)契约。
+上下文目录持有 checkpoint 范围的弱引用，活动执行持有其范围的强引用；`ExecutionContextConfig::maximum_result_checkpoint_scopes` 限制存活范围数。每个范围至多保留 64 个条目，一个范围的 witness 总权重不超过依赖 `maximum_boxes` 上限；最旧条目先退役。运行时在构造查找 key 或复制 witness 记录之前先扣除可选 checkpoint work。可选缓存 work 为零或不足时跳过查找或拒绝发布；不会复制未准入的 witness 数据。复制得到的 `ResultCheckpoint` 在索引或上下文清除后仍拥有其状态与 witness。C Result ABI 通过 poll 作用域的不透明句柄和已封存的通用状态 Result 提供 `checkpoint_before`、`checkpoint_read` 与 `checkpoint_publish`；见 [C checkpoint 服务](Dependency-Data.zh.md#c-checkpoint-服务)契约。
 
-Checkpoint 资格取决于纯度，与 completed-result 缓存无关；block 保留还要求算子可缓存。二者仍受上述 actor 限制。声明 `deterministic = false` 的算子（例如其输出包含 Run 局部 ObjectId）会把每个依赖它的消费方排除在 checkpoint 查找与保留以及 block 缓存准入之外。不可缓存但确定的算子保留自身的 checkpoint 资格。
+Checkpoint 与 block 资格取决于纯度，与 completed-result 缓存无关：即使算子或其某个祖先以 `cacheable = false` 关闭 completed-result 保留，纯指令仍可使用这两项服务。二者仍受上述指令限制。声明 `deterministic = false` 的算子（例如其输出包含 Run 局部 ObjectId）会使每个依赖它的消费方变为不纯，并把它排除在 checkpoint 查找与保留以及 block 缓存准入之外。
 
 ### Completed-result 缓存
 
-Completed-cache manifest 依赖实际 TileRecord/Need 闭包、不可变 shared-evidence ancestry、相对契约的 producer/source route、已触及 workflow-input tile 内容和 Need 重放日志来证明复用资格。协调器将记录重新绑定到当前 plan、重算来源内容摘要，并检查每个重放 Need 所存的 supplied-facts 摘要，才以当前 owner 和授权接纳缓存的 Result。
+当指令的固定输入内容相同时，completed Result 缓存跨 Run、绑定 generation 和等价 plan 复用一条 tile 指令的已封存 Result。查找 key 是固定授权内容 key（`photospider.fixed-grant-cache.v2`）。它摘要 step 的 structured template、指令的后端、成员 slot、tile 索引与 publication samples、descriptor-only 授权的端口，以及每个 payload 授权的端口、成员、规范 schema 和已授权样本字节。它不含物理 node、step 或 plan 标识符，因此重命名、重新编号或重新加载的 plan，或另一 step 上的等价 call，都可以复用条目。编辑后 descriptor 授权指向不同端口的 plan 会产生不同的 key，不会与另一个 plan 的条目碰撞。每个 key 至多保留八个候选，且只考虑后端相同的候选。
 
-当某计算单元实际触及的 workflow 输入内容不变时，completed Result 缓存在冻结执行身份之间（包括绑定 generation 和等价 plan 的不同 Run）复用该单元的已封存 Result。Completed-cache key 摘要 structured template、所选输出索引、计划后端、tile extent、成员 slot 与 tile 索引。Key 不含 step 索引或 graph ID，因此另一 step 上相同的 template 可以复用条目。每个 key 至多保留八个候选。保留的条目（manifest）包含：
+匹配的候选以新 ObjectId 和当前 producer scope 重新绑定，并像计算所得发布一样校验，包括输出 payload 上限。输入校验器已在指令的已绑定授权上运行，因此无效的 workflow 输入仍会在使用缓存输出之前以 `InvalidArgument` 失败。随后 Run 安装该 tile，其依赖证据由当前 plan 的固定授权重建；缓存条目只提供内容。缓存命中不产生 `OperationTiming` 记录，`computed_elements` 增加为零。缓存条目保留其引用的物理 backing owner；重新绑定不会让旧 Result 包装或旧执行范围成为新输出的身份。内容 identity 并不使阶段 digest 稳定：semantic、optimized 和 plan digest 包含程序标识符，call 或 value 重新编号时会改变。
 
-- 已封存的 Result；
-- 不含 payload 的 tile 快照：该单元的 `TileRecord`、其 producer 闭包已记录的 `TileRecord`、它继承的共享证据与来源路由，以及以契约术语表示的从每个 producer 到输入端口的路由；
-- 经该闭包触及的 workflow 输入来源，每个来源是带成员 tile 集合的具名绑定，以及其当前内容的摘要；
-- 重放日志：该单元每个已准入的 Need，配以该 Need 之后所提供事实的摘要（规范 schema 与已授权 tensor footprint，不含样本字节）；
-- 后端、冻结的 fallback 来源与缓存 epoch。
+结构化 Result 条目共享有界缓存 LRU 与托管 Root 容量。LRU 至多持有 4,096 个条目，`ExecutionContextConfig::result_cache_bytes` 限制保留的 backing（零表示禁用保留与 block 复用），`maximum_dependency_cache_metadata` 限制 manifest 元数据。容量计算对物理 backing owner 去重（包括通过 tensor view 和 affine owner 触及的 backing），而不是累加逻辑 tensor 大小。`ResultCacheStatistics::native_retained_bytes` 统计缓存持有的唯一原生分配，同时覆盖保留的 GPU 输出和保留的 GPU block 状态；它不是仅 block 的容量。逐出会释放缓存持有的 owner 引用；持有 Result 或读窗口的调用方继续拥有其 backing。`clear()` 推进缓存 epoch，因此上一 epoch 中进行中的 producer 不能重新填充已清空的缓存。Key 构造、样本哈希与重新绑定消耗 Run 的可选缓存 work（`ExecutionOptions::maximum_dependency_cache_work`）。可选 work 或 Root 容量不足时跳过保留或产生未命中，不改变本应成功的计算。
 
-来源摘要对每个已记录来源覆盖绑定的规范 schema 和被触及成员 tile 的 tensor 样本。没有被任何已记录 Need 触及的字节不影响证明。
-
-查找按契约把每个候选的 tile 快照与共享证据重新绑定到当前 plan。若一个已记录 producer 会映射到不同的当前 producer step，或上下文重排改变了证据路由，则候选未命中，而不会对任意 step 发出 Need。协调器在当前绑定上重新计算来源摘要并与存储的摘要比较。然后通过普通供给路径（包括输入校验器）重放每个已保存 Need，并要求每个已提供事实摘要匹配。通过的候选被采用：协调器以新 ObjectId、当前执行范围重新绑定缓存的 Result，把重新绑定的 `TileRecord` 合并进该单元，并像计算所得输出一样校验发布。缓存条目保留其引用的物理 backing owner；重新绑定不会让旧 Result 包装或旧执行范围成为新输出的身份。
-
-结构化 Result 条目共享有界缓存 LRU 与托管 Root 容量。LRU 至多持有 4,096 个条目，`ExecutionContextConfig::result_cache_bytes` 限制保留的 backing（零表示禁用保留），`maximum_dependency_cache_metadata` 限制 manifest 元数据。容量计算对物理 backing owner 去重（包括通过 tensor view 和 affine owner 触及的 backing），而不是累加逻辑 tensor 大小。缓存候选只暂存计费增量；若候选会在当前额度之外保留旧输入 owner，则作为未命中处理，不改变实时账本。逐出会释放缓存持有的 owner 引用；持有 Result 或读窗口的调用方继续拥有其 backing。`clear()` 推进缓存 epoch，因此上一 epoch 中进行中的 producer 不能重新填充已清空的缓存。缓存证明构造、Need 重放与重新绑定消耗 Run 的可选缓存 work（`ExecutionOptions::maximum_dependency_cache_work`）。可选 work 或 Root 容量不足时跳过保留或产生未命中，不改变本应成功的计算。
-
-每个 Run 拥有的 `StructuredResultCache` 构造 completed-result key 与 manifest、构建来源证明、恢复重放快照，并消耗可选缓存 work 配额。它在每次同步调用中接收借用的上下文与 actor 视图。Run 局部 Host 通过协调器供给 Need，并在重放成功后采用候选；重放失败时恢复 actor 先前的输入与 Need 记录。查找一旦获得强引用候选，就在重放与采用过程中一直持有该 owner；采用不需要再次证明其仍驻留在 LRU 中。可选的提升查找仅当同一 manifest 仍驻留时才把条目移到 LRU 尾部。缓存关闭或 epoch 变化会拒绝采用，而候选 owner 保持存活直到该尝试结束。
-
-保留要求纯且可缓存的算子、纯且可缓存的所选输入 producer 闭包、未被 fallback 污染且在计划后端上运行的单元，以及剩余的可选缓存 work。重放日志超出元数据上限的单元不被保留。每个条目恰好覆盖一个计算单元，不同 tile 的条目不合并。共享 stage 和处理直接 shared Need 的普通 actor 绕过 completed-result 缓存。经 `CompleteBundle`、`StablePrefix` 或完整输出校验器安装的输出也绕过 completed-result 保留。C Result ABI 不暴露该缓存；其实现属于 C++ 执行运行时的私有部分。
+保留与查找要求可缓存指令：纯指令（见上文 block 状态共享），其算子为 `cacheable`，其 payload 输入来自 workflow 输入或可缓存的 producer，其控制证据可缓存，且不读取 block 参数的 payload。协调器在 call 的值认证后保留 tile，对单独认证的 tile 则立即保留。共享 stage、带共享 stage 读取的指令、带 fallback 污染的 tile 以及经 block 参数传递的值绕过 completed-result 缓存。C Result ABI 不暴露该缓存；其实现属于 C++ 执行运行时的私有部分。
 
 ### Result builder
 
 `ResultBuilder` 拥有发布。Producer 通过 `publish_tensor`、`publish_tensor_view` 或 `publish_tensor_kernel` 写入 tensor 区域。Tensor 区域依据成员的逻辑样本 domain 检查。重叠、越界访问或资源准入失败会以错误使 producer 退役。`ResultBuilder::start()` 接收 query 的 tile extent；非法的 spatial tile extent 在分配前返回 `InvalidArgument`。
 
-发布把物理数组与 backing owner 保存在源自 Result 的存储 owner 中，而发布状态拥有 Root、资源租约与 schema。销毁时先退役数组 backing，再由发布状态释放其 Root 租约。存储 owner 索引避免每次发布都重新扫描此前已发布的 backing；当成员分区允许时，`acquire_tensor` 通过区间查找定位分块，否则使用有界扫描。`acquire_tensor` 在持有发布互斥锁时复制不可变 backing 句柄，然后先解锁再构造拥有型读窗口。`publish_tensor_kernel` 在互斥锁之外准备回调工作，然后重新获取锁，在提交前校验 owner、revision 与 sticky 失败。读取 capability 保留其已授权的 Result 与 backing，但只在捕获的 descriptor 和被请求的 Need 范围内授予读取。
+发布把物理数组与 backing owner 保存在源自 Result 的存储 owner 中，而发布状态拥有 Root、资源租约与 schema。销毁时先退役数组 backing，再由发布状态释放其 Root 租约。存储 owner 索引避免每次发布都重新扫描此前已发布的 backing；当成员分区允许时，`acquire_tensor` 通过区间查找定位分块，否则使用有界扫描。`acquire_tensor` 在持有发布互斥锁时复制不可变 backing 句柄，然后先解锁再构造拥有型读窗口。`publish_tensor_kernel` 在互斥锁之外准备回调工作，然后重新获取锁，在提交前校验 owner、revision 与 sticky 失败。读取 capability 保留其已授权的 Result 与 backing，但只在捕获的 descriptor 和已编译授权范围内授予读取。
 
-发布校验器在一次同步校验中接收 `PublicationValidationView` 和借用的 `PublicationValidationServices` 接口。协调器拥有取消、work 准入、当前上限和 actor。校验检查发布身份、revision；它不保留服务，也不执行调度、发布、退役或通知。校验完成后，协调器应用返回的状态与退役意图。
+发布校验器在一次同步校验中接收 `PublicationValidationView` 和借用的 `PublicationValidationServices` 接口。协调器拥有取消、work 准入、当前上限和指令状态。校验检查发布身份、revision；它不保留服务，也不执行调度、发布、退役或通知。校验完成后，协调器应用返回的状态与退役意图。
 
 `publish_tensor_kernel` 为被请求区域出借可写窗口。Builder 在成员 tile 与 batch 边界处划分请求，并为 spatial 成员提供 tile 内的 planar 字节。它不预留全 domain backing，因此巨大逻辑 domain 上的稀疏请求按实际可写 tile 计费。回调必须使用每个窗口的 `spec()`、`region()`、`sample_axis()` 以及 `row_run()` 或 `rectangle_run()` 返回的 stride。回调不得假定跨窗口的 planar backing 或连续行。
 
@@ -392,13 +384,13 @@ Status OperationRegistry::register_diagnostic(DiagnosticDefinition);
 
 | 位置 | `validate` 可见的覆盖 | `complete` | 失败类别 |
 | --- | --- | --- | --- |
-| 输入 tensor 授权 | 一个 Need envelope 授予某输入端口的成员。 | 输入 schema 的每个成员都被完整授予。 | Workflow 输入：`InvalidArgument`。产出输入：`OperationFailed`。Origin `Domain`。 |
-| 输出发布 | 自上次已校验 revision 以来新增的覆盖。 | 已校验覆盖等于每个成员的完整 domain。 | `OperationFailed`，origin `Domain`。 |
+| 输入 tensor 授权 | 为一条指令绑定的某输入端口的 payload 授权，在其第一次 poll 之前。 | 输入 schema 的每个成员都被完整授予。 | Workflow 输入：带外部 `input_id` 的 `InvalidArgument`。产出输入：带上游 `node_id` 的 `OperationFailed`。Origin `Domain`。 |
+| 输出发布 | call 的值首次组装时的已编译聚合，或在逐 tile 通知时每个已认证 tile。 | 已校验覆盖等于每个成员的完整 domain。 | `OperationFailed`，origin `Domain`。 |
 | 共享 stage 提交 | 每次新可见的 stage 提交，在供给消费方之前。 | 可见的 stage 覆盖完整。 | `OperationFailed`，origin `Domain`。 |
 
-带 `requires_complete` 的校验器只看到完整覆盖；不完整的 context 返回 `TypeMismatch`。对完整输出校验器，只有在应用被触发的静态 publication scope 之后 producer 的请求是完整的，协调器才准入 work 与可见性。它依据在收集任何输出之前已合并的、针对该 producer 特化输出的请求判断完整性：该输出所有别名的根输出请求的并集，以及在一个消费方 Need envelope 内对同一 producer step 的 payload 授权并集。Workflow 输入、descriptor-only Need 和空 payload Need 不增加完整性，对不同 producer 或不同特化输出的请求不合并。因此覆盖整个 Result 的 `CompleteBundle` 允许只请求一个成员。闸门组装该 scope 并调用校验器一次。校验器从不扩大调用方的请求或 producer 的输入 Need，每个别名或端口仍只获得自己所选的覆盖。仍不完整的请求不启动 producer，也不调用校验器。完整 stage 校验器把可见性推迟到 stage 静态覆盖完整之后；以不完整覆盖结束的 stage 失败。
+带 `requires_complete` 的校验器只看到完整覆盖；不完整的 context 返回 `TypeMismatch`。完整性在编译期确定。当消费方端口带有完整输入校验器时，planner 把该输入每个成员的每个 tile 都授予读取它的任何指令。当 producer 输出带有完整输出校验器时，planner 让对该输出的任何非空读取都依赖 producer 的每个 tile，因此校验器观察的是全部已执行 tile 的实际已编译聚合，从不根据不完整发布推断额外的 producer 工作。Descriptor-only 与空 payload 授权不增加完整性。完整 stage 校验器把可见性推迟到 stage 静态覆盖完整之后；以不完整覆盖结束的 stage 失败。已存授权缺少所需完整覆盖的 plan 在导入验证时失败。
 
-Completed-result 缓存命中仍会对重放的 Need 运行输入校验器，但不重复计算。因此无效的 workflow 输入会在返回缓存输出之前以 `InvalidArgument` 失败；校验器据以准备的静态参数发生变化时，会产生不同的 plan cache key。
+Completed-result 缓存命中仍会在指令的已绑定授权上运行输入校验器，但不重复计算。因此无效的 workflow 输入会在返回缓存输出之前以 `InvalidArgument` 失败；校验器据以准备的静态参数发生变化时，会产生不同的 plan cache key。
 
 一次 `validate` 调用中的第一个服务失败具有优先权：若读取失败而回调忽略它，该调用仍返回那个读取失败。失败的校验器服务不能发布结果。`prepare` 或 `validate` 抛出的异常变为 typed 失败。`ValidationDefinition::owner` 保留回调代码；host 只在回调对象与已准备的校验器状态之后销毁它，因此调用方释放 registry 句柄后，已准备的算子仍可工作。
 
@@ -412,7 +404,7 @@ Completed-result 缓存命中仍会对重放的 Need 运行输入校验器，但
 
 执行 Root 在配置的资源维度下计费 payload/backing、work、stage、continuation、队列条目、元数据和保留的 owner。上限都是有限的。过大的 payload 或 owner 准入以资源错误失败，而不是返回不完整的 witness。这一托管容量模型覆盖已插桩的资源；它不是 RSS 上限。
 
-输出可以声明 `maximum_output_payload_bytes`，共享 stage 声明自己的上限。Host 在一个 Run 内对一个逻辑输出的各 tile actor 累计新拥有的 payload，每个唯一物理 owner 只计一次。它排除借用的已授权 owner：通过已暴露 Result、已授权 tensor 授予或已提供的 stage Result 仍存活的来源分配。检查只保留来源的弱引用，因此上限不会让输入 payload 保持存活。第一次符合条件的 poll 在进入回调前从 Result Root 分配上限守卫及其共享控制块；Metadata 容量不足时在进入回调前拒绝该 poll。Owner 枚举与比较消耗普通的 Run 与 Root work。超出上限返回带 `CapacityLimit` 的 `ResourceExhausted`。Workspace、元数据与算子资源准入保持独立。检查在 Result 发布时运行，因此可信回调更早的 Root 分配仍被计费，且不会被该上限阻止。
+输出可以声明 `maximum_output_payload_bytes`，共享 stage 声明自己的上限。Host 在一个 Run 内对一个逻辑输出的各 tile 指令累计新拥有的 payload，每个唯一物理 owner 只计一次。它排除借用的已授权 owner：通过已暴露 Result、已授权 tensor 授予或已提供的 stage Result 仍存活的来源分配。检查只保留来源的弱引用，因此上限不会让输入 payload 保持存活。第一次符合条件的 poll 在进入回调前从 Result Root 分配上限守卫及其共享控制块；Metadata 容量不足时在进入回调前拒绝该 poll。Owner 枚举与比较消耗普通的 Run 与 Root work。超出上限返回带 `CapacityLimit` 的 `ResourceExhausted`。Workspace、元数据与算子资源准入保持独立。检查在 Result 发布时运行，因此可信回调更早的 Root 分配仍被计费，且不会被该上限阻止。
 
 Result 发布错误是 sticky 的。取消与过期执行只在已准入回调返回后才使活动状态退役。失败的追加或 tensor 发布不能被之后成功的回调修复；此前已认证的前缀保持不可变，并可在其捕获的 descriptor 下读取。最后一个拥有型 Result/读窗口释放时，backing随之退役。
 

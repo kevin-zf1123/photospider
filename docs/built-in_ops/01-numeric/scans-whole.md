@@ -3,17 +3,19 @@
 The six `numeric.prefix_sum_*` and `numeric.integral_image_*` operations execute
 as Run-shared Result programs. Each operation accepts one tensor member under any
 input key. The output port key is `values`; its Result schema is
-`photospider.tensor` with tensor member `samples`. A nonempty output demand
-requests the complete input support with payload tile coverage with explicit validation , reads through authorized Result windows, computes every output coordinate,
-and retains the complete internal result in global coordinates. Public actors
-publish only requested complete tiles. Consumers read only their authorized
+`photospider.tensor` with tensor member `samples`. Each operation is a `sdk::with_whole_stage` program: the planner grants the
+stage every tile of the input, the bound validators run on that grant before the
+first poll, and the stage reads through authorized Result windows, computes every
+output coordinate, and retains the complete internal result in global
+coordinates. Output tile instructions publish only requested complete tiles. Consumers read only their authorized
 coverage; retaining the shared backing does not widen access. The output starts from the complete
 input `sample_shape()`; each selected scan axis grows by one, and those extents
-form ordinary output axes with batch topology dropped. Empty demand
-schedules no input payload work and publishes empty tensor coverage.
+form ordinary output axes with batch topology dropped. An empty output
+selection compiles no tile or stage instruction for a pure scan, so no input
+payload work runs.
 
 `numeric_tensor_program.hpp` supplies the complete-input protocol and the operation's
-Need-authorized tensor read window. The scan kernel receives that read capability
+grant-authorized tensor read window. The scan kernel receives that read capability
 and one packed Result writer. The writer borrows its window for publication; the
 Result owns immutable output storage after execution context retirement. The
 input reader follows logical coordinates through the authorized row runs, so
@@ -74,8 +76,8 @@ read through authorized windows; the fixture does not pack the complete source
 into a second payload. For the generated-source case, verify one scan over all
 4,096 values, complete 4,097-element output coverage and the output's 32,776-byte
 payload after context retirement. For the stable-prefix case, verify that a
-zero-boundary query still waits for the complete source Need and propagates its
-tail failure before performing scan arithmetic.
+zero-boundary query still depends on the complete source grant, so the source's
+tail failure fails the Run before scan arithmetic.
 Each complete-input write keeps one `NumericDiagnostics` record local to the callback. `evaluated_values` increments after an authorized source word is read and immediately before it is supplied to the exact accumulator; on success it counts accumulator input attempts, not output positions. Prefix zero boundaries, carry snapshots and final output conversions do not increment it. The selected profile and exact scan accumulator identity are reported once at completion. Its ISA suffix describes the four-word output-selection helper, not SIMD execution of the scan algorithm. Do not infer strict-math or fallback counts from the selected ISA suffix.
 
 The callback reports diagnostics after normal completion or a status it handles locally, preserving the first operation failure if reporting is rejected. WorkLimit or cancellation can prevent the report from merging. A `Status` thrown during tensor-window acquisition/read or `std::bad_alloc` caught by the outer math callback can bypass this local report. Cache hits add no new accumulator attempts; Empty demand does no sample arithmetic.

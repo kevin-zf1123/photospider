@@ -1,6 +1,6 @@
 # 当前实现与规格前置条件
 
-当前 package 为 Photospider 0.36.0，operation plugin 使用 Result C ABI 6，OperationTraits 为 28。本文概括当前包内可核对的注册入口、数据类型和执行边界；单个算子的端口、参数、数值行为和 Region 规则以对应实现契约为准。公共 C++ 契约有破坏性变更，consumer 必须重建。
+当前 package 为 Photospider 0.37.0，operation plugin 使用 Result C ABI 7，OperationTraits 为 29。本文概括当前包内可核对的注册入口、数据类型和执行边界；单个算子的端口、参数、数值行为和 Region 规则以对应实现契约为准。公共 C++ 契约有破坏性变更，consumer 必须重建。
 
 ## 默认 registry 与类型边界
 
@@ -23,9 +23,18 @@
 | Image 与 mask | 内置图像 operation 通过 Result tensor storage 执行；当前清单与各 key 的输入约束见[图像操作](../../kernel-architecture/Image-Operations.md)。 | 图像样本使用 typed `photospider.image` Result；空间与非空间成员使用统一 Tensor backing。 |
 | Layer 纯值计算 | `LayerPixel` 及纯计算 helper 位于 SDK 的 [`ops/composite/layer.hpp`](../../../include/photospider/ops/composite/layer.hpp)。 | 当前没有 Layer operation factory 或 Result schema helper；kernel 不按 Layer schema 名称分派或拒绝。调用者选择一致的线性空间；见 [Layer runtime](../../kernel-architecture/Layer-Runtime.md)。 |
 
+## 编译与产物
+
+`analyze` 将 DAG 翻译为静态 CFG/SSA；`bind_ir` 接收其他前端构造的 IR。
+`optimize` 当前为独立 no-op 阶段；planner 展开固定 tile 指令和输入授权，Run
+沿已选 CFG 路径顺序执行。Mapper 在编译时确定所有读取范围，运行时 Need 只
+验证既有 grants。`.psir` 与 `.psxp` v2 分别保存 IR 与完整 Plan；导入需要宿主
+提供冻结 registry 和资源，不自动查找 DSO，也不保存每次 Run 的输入 payload。
+完整 API 和错误处理示例见[编译与执行](../../kernel-architecture/Compiler-and-Execution.md#compiler-artifacts)。
+
 ## Result、资源与错误边界
 
-Result 的全部成员为编译后固定的静态 Tensor。有效数量由普通 count/mask payload 表示，零有效数量不改变正 extent。每个公开 tile 完整且不可变。`CompleteBundle` 按准备后的固定范围统一公开，`IndependentChunks` 允许完整 tile 独立公开，`StablePrefix` 按成员局部 tile 顺序公开。共享 stage 在 Run 内复用完整计算，失败不公开当前事务。见 [Global Results](../../kernel-architecture/Global-Results.md)。
+Result 的全部成员为编译后固定的静态 Tensor。有效数量由普通 count/mask payload 表示，零有效数量不改变正 extent。每个公开 tile 完整且不可变。`CompleteBundle` 按准备后的固定范围统一公开，`IndependentChunks` 允许完整 tile 独立公开，`StablePrefix` 按成员局部 tile 顺序公开。共享 stage 在一次 call activation 内复用完整计算；循环重新进入 block 时清空旧 stage 状态。失败不公开当前事务。见 [Global Results](../../kernel-architecture/Global-Results.md)。
 
 受管资源预算限制内核声明并计量的 managed capacity、work 和 stage，不构成进程 RSS 上限；调用方输入和未计量的系统/驱动分配不因此受限。见[Managed Resources](../../kernel-architecture/Managed-Resources.md)。普通 `execute` 对执行错误保持 fail-fast。见[Atom errors and quality](../../kernel-architecture/Atom-Errors-and-Quality.md)。
 

@@ -2,6 +2,25 @@
 
 - Status: Accepted
 
+## Current implementation: SSA IR and artifacts
+
+The DAG frontend lowers to CFG/SSA through `analyze`; another frontend can bind
+an `IRProgram` directly with `bind_ir`. The separately callable optimizer is a
+no-op. Planning expands fixed tile instructions and grants; a Run interprets
+that program without dependency mapping or instruction reordering.
+
+`CompilerArtifact` adds a separate text-format axis: `.psir` and `.psxp` use
+version 2, and version 1 is rejected. These files persist IR or a complete static
+Plan independently of the source `GraphContext`. Import links against a frozen
+registry and explicit resource identities, validates saved contracts and
+instructions, and produces a standalone stage at revision 1. Plan import does
+not rerun the mapper or planner. Execution still requires the same registry
+instance. Artifacts contain no DSO paths, callback code or resource bytes, and
+contract digests do not authenticate native code. The original distinction
+between compiler objects and daemon wire protocols remains in force. Current
+identity domains and file error/lifetime rules are in
+[Compiler and execution](../kernel-architecture/Compiler-and-Execution.md#compiler-artifacts).
+
 ## 1. Core Summary (TL;DR)
 The compiler builds distinct immutable semantic, optimized, and physical-plan values from a versioned workflow document. Document schema, plugin ABI, package API, planner behavior, and daemon IPC versions describe different contracts. Keeping them separate avoids implying compatibility where none is promised.
 
@@ -32,13 +51,13 @@ struct ExecutionPlanDigest { std::string value; };
 struct PlanCacheKey { std::string value; };
 ```
 
-The current WorkflowDocument schema is 7, OperationTraits version is 28, package version is 0.36.0, and the operation-plugin C table is Result ABI 6. Digests identify canonical content in separate domains; the plan cache key identifies disposable derived lookup. The compiler encodes the closed document fields, normalized parameters, copied operation traits, static preparation identity fields, output/input demands, optimizer identity, and target capability facts in their corresponding stage domains.
+The current WorkflowDocument schema is 7, OperationTraits version is 29, package version is 0.37.0, and the operation-plugin C table is Result ABI 7. Digests identify canonical content in separate domains; the plan cache key identifies disposable derived lookup. The compiler encodes the closed document fields, normalized parameters, copied operation traits, static preparation identity fields, output/input demands, optimizer identity, and target capability facts in their corresponding stage domains.
 
 Each stage also carries a private weak identity for the exact frozen operation registry; optimizer, planner, and executor reject a foreign-registry stage even if operation keys match. That runtime identity is excluded from canonical digests and serialized data. Runtime addresses, allocation IDs, timings, cancellation, queue state, and daemon identifiers are excluded. Float parameter identity preserves copied binary64 bits in fixed little-endian order, including signed zero and non-finite payloads accepted by schema validation.
 
 Thus sign-sensitive operations do not collide across semantic, optimized, plan, or cache identities. Static prepared state and library pointers remain outside digest bytes; their resolved metadata and declared workspace bounds participate where specified.
 
-The independent axes include WorkflowDocument schema, OperationTraits, operation-plugin C ABI, semantic IR, optimizer rules, physical planner, installed package/API, and daemon IPC. WorkflowDocument schema 7, OperationTraits 28, package 0.36.0, and Result ABI 6 identify their current contracts; changing one does not assert compatibility in another.
+The independent axes include WorkflowDocument schema, OperationTraits, operation-plugin C ABI, semantic IR, optimizer rules, physical planner, installed package/API, and daemon IPC. WorkflowDocument schema 7, OperationTraits 29, package 0.37.0, and Result ABI 7 identify their current contracts; changing one does not assert compatibility in another.
 
 Internal IR and plan objects are in-memory contracts, not daemon wire formats. Their registry identity prevents use with an incompatible frozen operation set. A matching cache key never replaces plan validation and stale checks. Embedding-provided cache hits are revalidated; malformed or stale entries become misses. See [Compiler and execution](../kernel-architecture/Compiler-and-Execution.md) for current identity fields and stage validation.
 

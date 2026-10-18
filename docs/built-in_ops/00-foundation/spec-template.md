@@ -58,7 +58,7 @@ oracle 通过也不表示 runtime 已实现。文档只描述当前功能或当�
 | 数学语义 | 公式、坐标方向、端点、颜色域、归一化、精度 | 只写“使用 OpenCV” |
 | 算法 | CPU 参考、优化方案、复杂度、临时内存、并行与取消点 | 将近似算法标成精确 |
 | 支持矩阵 | 通道、dtype、HDR/负值、CPU/GPU、平面/交错 | “支持所有格式” |
-| 空间/时间需求 | 按成员的 payload tile Needs、显式 descriptor-only、数学 halo/边界、实际读取证据和 tile 失效传播 | 把任意变换当 Elementwise |
+| 空间/时间需求 | 静态 mapper 的成员 tile grants、显式 descriptor-only、数学 halo/边界、有限地址 superset 和 tile 失效传播 | 把任意变换当 Elementwise |
 | 返回映射 | 输出 Region、坐标原点、layout/stride、owner、缺失/ExplicitZero、发布范围与关联完整性 | 将 nominal plane origin 当实际 source support |
 | 资源与寿命 | output/scratch/state/page/临时 backing/校验成本、同时存活 ancestry、root capacity/work/stage、cache-off、取消与最终释放 | 将 managed peak 当 RSS 上界 |
 | 错误模型 | 除零/NaN/Inf/overflow/association underflow，发生阶段、Status code/reason/detail/scope、前缀是否保留 | 每次 silently clamp |
@@ -91,4 +91,4 @@ oracle 通过也不表示 runtime 已实现。文档只描述当前功能或当�
 
 `S` 为已公开标准公式；`F` 为官方描述确认功能存在；`B` 为指定产品版本和设置的黑盒结果；`U` 为未核验。F 不推导 B。黑盒差异应固定颜色 profile、传递函数、位深、alpha、图层顺序、mask、是否 linear blending、缩放、CPU/GPU 和输出编码。
 
-当前实现遵循 Photospider 0.36.0 与 Result C ABI 6 的[公共契约索引](contracts.md)及公开头文件；本模板用于组织规格，不会替代当前 API 定义。D2 转为 D1 前必须清除影响可观测结果的未决项。涉及公共数据类型、ABI、缓存身份或输入需求的选择，应走仓库现有 reviewed 流程；本研究不直接接受这些契约。
+当前实现遵循 Photospider 0.37.0 与 Result C ABI 7 的[公共契约索引](contracts.md)及公开头文件；本模板用于组织规格，不会替代当前 API 定义。D2 转为 D1 前必须清除影响可观测结果的未决项。涉及公共数据类型、ABI、缓存身份或输入需求的选择，应走仓库现有 reviewed 流程；本研究不直接接受这些契约。

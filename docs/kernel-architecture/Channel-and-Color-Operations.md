@@ -2,7 +2,7 @@
 
 [Chinese reader version](zh/Channel-and-Color-Operations.zh.md).
 
-Bundled format operations use Result ports and the current Result C ABI 6. A Result carries structure and samples, with no attached color, alpha, transfer, sampling or encoding description. Every operation receives the interpretation it needs as explicit static parameters. An explicit description is configuration, not proof of sample validity. The kernel does not reject a connection solely because callers assign different meanings to structurally compatible data.
+Bundled format operations use Result ports and the current Result C ABI 7. A Result carries structure and samples, with no attached color, alpha, transfer, sampling or encoding description. Every operation receives the interpretation it needs as explicit static parameters. An explicit description is configuration, not proof of sample validity. The kernel does not reject a connection solely because callers assign different meanings to structurally compatible data.
 
 Public workflow helpers and runtime operations belong to `Photospider::ops`. Consumers link that target, which depends on `Photospider::ops_sdk`, `Photospider::ops_headers` and the kernel. Shared descriptions, codecs, resource wrappers, exact domain mathematics and `format::edit_description` belong to `Photospider::ops_sdk`. The SDK uses only kernel public interfaces. The `TensorDescription` codec selects canonical TDM4 or TDM5 according to its coordinate records; see [Tensor descriptions](Tensor-Semantic-Metadata.md).
 

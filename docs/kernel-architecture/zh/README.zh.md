@@ -6,7 +6,7 @@
 
 1. [概览](Overview.zh.md)：模块所有权、执行上下文与结果生命周期。
 2. [术语](Terminology.zh.md)：架构指南中的统一用语。
-3. [Compiler 与执行](Compiler-and-Execution.zh.md)：源文档校验、规划、调度和运行推进。
+3. [Compiler 与执行](Compiler-and-Execution.zh.md)：DAG/SSA 阶段、固定 tile 规划、顺序 VM 执行与可编辑产物。
 4. [数据模型](Data-Model.zh.md)：Tensor、Region、布局与保留的存储。
 5. [Graph 生命周期](Graph-Lifecycle.zh.md)：图版本与编译阶段的生命周期。
 6. [Compute 边界](Compute-Boundaries.zh.md)：CPU/GPU 放置与回退规则。
@@ -17,10 +17,13 @@
 
 ## 工作流与专题
 
+- [Compiler 产物](Compiler-and-Execution.zh.md#compiler-产物)：`.psir`/`.psxp` v2 保存与加载 API、manifest 链接、校验和完整错误处理示例。
+- [版本契约](../../development/zh/Compiler-Version-Contract.zh.md)：package、ABI、schema、artifact 和 identity 的独立版本。
+
 - [GPU 集成测试](../../../tests/integration/kernel/gpu/)：已注册的 GPU 行为覆盖；硬件相关用例在设备不可用时明确 skip。
 - [基础算子](Basic-Operations.zh.md)：内置数值、颜色和图像算子的输入输出与执行规则。
 - [受管资源](Managed-Resources.zh.md)：资源预算、所有权、保留和释放。
 - [Atom 错误与质量](Atom-Errors-and-Quality.zh.md)：原子执行错误范围与数值质量等级。
-- [全局结果](Global-Results.zh.md)：分页结果、发布策略和结果生命周期。
+- [全局结果](Global-Results.zh.md)：静态 Tensor 成员、发布、固定授权与结果生命周期。
 
 算子专题指南分别说明其输入、输出和执行规则。[内置算子索引](../../built-in_ops/README.md)提供这些契约的导航。

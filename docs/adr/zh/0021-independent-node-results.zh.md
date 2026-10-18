@@ -4,6 +4,22 @@
 - 英文权威文档：[ADR 0021](../0021-independent-node-results.md)
 - 当前边界：原决策中每个输出的 facet 集已被取代；每个输出携带解析后的结构化 Result schema。参见 [数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、[结构化 Result 与 tensor slot](../../kernel-architecture/zh/Global-Results.zh.md) 和 [Tensor 描述](../../kernel-architecture/zh/Tensor-Semantic-Metadata.zh.md)。
 
+## 当前实现：声明与静态指令
+
+静态编译器保留全部 call 和输出声明，包括未使用的 sibling。
+`ExecutionPlan::steps()` 是完整物理契约表；`blocks()[i].instructions` 保存
+可执行 tile 工作。因此，未选择的纯输出可以有 step 而没有指令。输入投影限定
+静态 mapper 可以授权的端口，不能替代显式 read edge。这细化了下文原决策中
+有需求 step 和 task 的描述。
+
+SSA value、block parameter 和显式 terminator 表达控制流。Run 沿已选 CFG
+路径逐条执行指令；一条指令失败会停止后续工作，聚合调用返回错误。此前已经
+认证的 observer 结果继续有效；调用不返回部分成功输出集合。共享 stage 在
+一次 call activation 内唯一，重新进入 block 时清空。空输出选择仍保留条件
+与 mandatory effects。命名返回通过 `plan.output(name).record_index` 访问
+synthetic record，与 step 声明索引分开。见
+[多输出算子](../../kernel-architecture/zh/Multi-Output-Operations.zh.md)。
+
 ## 1. 核心摘要（TL;DR）
 
 一个 operation node 可以产生多个命名结果，每个结果都有自己的元数据、依赖和错误路径。Compiler 和 executor 用 `ValueRef` 标识每个结果，因此未使用的 sibling 不会为已选结果增加工作。

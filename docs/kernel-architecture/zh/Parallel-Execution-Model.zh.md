@@ -2,7 +2,7 @@
 
 ## 1. 核心摘要 (TL;DR)
 
-`ExecutionContext` 拥有固定 CPU worker pool、独立的 CPU/GPU callback lane，以及共享的等待 callback 上限。ordinary CPU callback 可与空闲 pool worker 共同执行 range work；planar staged callback 提交单线程 tile，并在每个 stage 等待完成。取消会停止后续领取和发布，再等待已运行的工作及已提交设备任务结束。
+`ExecutionContext` 拥有固定 CPU worker pool、独立的 CPU/GPU callback lane，以及共享的等待 callback 上限。在一个 Run 内，静态 VM 按 plan 顺序一次执行一条 plan 指令。并行工作来自共享 context 的独立 Runs、与空闲 pool worker 共同执行 range work 的 ordinary CPU callback、提交单线程 tile 并在每个 stage 等待完成的 planar staged callback，以及 native GPU dispatch。取消会停止后续领取和发布，再等待已运行的工作及已提交设备任务结束。
 
 ## 2. 架构心智模型 (Mental Model & Intuition)
 
@@ -65,15 +65,15 @@ N_{blocks}=N/B + (N\bmod B\ne0),\qquad
 end=begin+\min(B,N-begin).
 $$
 
-Structured CPU Result ordinary poll 会通过 `ResultProgramPhase::cpu_parallel` 收到此借用 service。它只在当前 ordinary callback 内调度 block，不会独立并行化 Result dependency graph。`tests/integration/kernel/test_cpu_parallel.cpp` 在 Root 已发行 work 后请求 `UINT64_MAX` range，并检查资源拒绝发生在任何 block callback 之前。`tests/unit/kernel/test_cpu_range.cpp` 在没有 Root 预算时检查端点算术，因此不能证明 Root admission 行为。
+Structured CPU Result ordinary poll 会通过 `ResultProgramPhase::cpu_parallel` 收到此借用 service。它只在当前 ordinary callback 内调度 block，不会并行执行 plan 指令。`tests/integration/kernel/test_cpu_parallel.cpp` 在 Root 已发行 work 后请求 `UINT64_MAX` range，并检查资源拒绝发生在任何 block callback 之前。`tests/unit/kernel/test_cpu_range.cpp` 在没有 Root 预算时检查端点算术，因此不能证明 Root admission 行为。
 
-### Structured Result callback wave
+### 静态 plan 执行顺序
 
-Structured coordinator 登记请求的 named Result roots，并推进其 dependency Actor。经过验证的 Need 会把符合条件的计算型输入加入 pending frontier。Need 中每个 input 都有独立 cursor；coordinator 在可推进的 input 之间轮转，并保证每个 Actor 在一次 traversal 中最多访问一次。这避免深层 dependency chain 随 peer input 被重复递归遍历。
+Run 遵循每个 `PlanBlock` 中保存的指令顺序以及 block 之间的 CFG。Coordinator 把一条指令的 start 或 poll callback 提交到 CPU callback FIFO 或 GPU lane，等待其退役并应用结果，之后才转到下一条指令。不存在 frontier、ready queue、producer task 或 wave；DAG 中相互独立的分支按 plan 顺序依次运行，被多个消费者使用的 tile 只运行一次，因为 planner 已对其去重。此路径下 `ExecutionDiagnostics::peak_active_tasks` 为 1。`ExecutionOptions::maximum_parallelism` 不再限制 plan 指令；它限制 planar staged tile 服务的 worker 数（为零时使用 CPU pool 的 worker 数）。
 
-Frontier 有 queued callback work 时，coordinator 从 Root-owned pending list 提交最多 `maximum_parallelism` 个 task。它等待已提交 callback 退出，再读取 phase result 并串行应用，然后推进下一个 dependency frontier。该上限作用于已提交的 callback task，不是另建 Result graph scheduler。CPU staged-tile controller 与 GPU callback 仍使用各自的 inline/controller 和 single-lane 路径。
+同一 context 上的不同 Run 相互独立。每个 Run 有自己的 coordinator，因此当第一个 Run 等待 GPU callback 时，第二个 Run 的 CPU callback 可以执行并完成。`tests/integration/kernel/test_result_plan_order.cpp` 检查分叉 plan 保持单个活动 callback、对共享来源去重、跳过未选节点、观察取消并释放精确的 payload 上限；`tests/integration/kernel/test_execution.cpp` 检查当另一个 Run 的 GPU callback 处于活动状态时，独立的 CPU Run 能够完成。
 
-Run coordinator 拥有调度策略和发布顺序。独立组件分别拥有每 Run cache quota 与 checkpoint scopes、actor phase/continuation state、Need producer cursor和每次 submission 的 stage 数据。Need cursor 拥有 producer 和每个输入的请求状态；coordinator 校验并登记每个已提供 envelope 后才推进 cursor。每个 submission 的 transfer、tile 和 native observations 保留至 task 退出，再由 coordinator 合并。Result poll timing 从 phase 创建计至 coordinator 退休，包括 queue 与 wave 等待，因此不是纯计算时长。同步 Run 完成和 shutdown 会先排空已提交工作，再释放借给 callback 的状态。
+Run coordinator 拥有执行顺序和发布顺序。每次提交的 transfer、tile 和 native observations 保留在各自 callback 中直到退役，再由 coordinator 合并。Result poll timing 从 phase 创建计至 coordinator 退休，包括排队等待，因此不是纯计算时长。同步 Run 完成和 shutdown 会先排空已提交工作，再释放借给 callback 的状态。
 
 ### Planar staged tile service
 
@@ -125,6 +125,7 @@ Kernel helper 保存和恢复调用线程浮点环境，不强制数值模式。
 - 同一 invocation 的 ordinary range callback 与 planar CPU staged callback 使用互斥服务。
 - Tile callback 不拥有 coordinator 的行、分配、发布、诊断或准备服务。
 - 调度器不承诺 work stealing、抢占，也不保证实际并发数等于 worker grant。
+- 一个 Run 不会并发执行 plan 指令；同一 plan 中相互独立的 call 按 plan 顺序运行。
 - GPU callback 经每 context 单 lane 同步提交；已提交 dispatch 完成后才能释放 owner。
 - Planar GPU callback 在图边界使用 host row window。跨图节点共享的 device-resident planar page 不属于当前接口。
 - Managed accounting 不包括线程栈、driver 私有分配和未建模容器存储。

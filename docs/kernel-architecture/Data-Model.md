@@ -42,4 +42,4 @@ Logical schemas need not fit one dense allocation. Actual allocations and addres
 
 ## 5. Limitations and non-goals
 
-Results have no durable serialization or recovery contract. Static schema and tile geometry do not imply dense residency. Batch axes carry no temporal meaning. The kernel provides neither dynamic field rows nor a separate whole-result execution mode. [ADR 0022](../adr/0022-freeze-operation-c-abi-v3.md) remains Proposed; its target ABI design is distinct from the implemented ABI 6.
+Results have no durable serialization or recovery contract. Static schema and tile geometry do not imply dense residency. Batch axes carry no temporal meaning. The kernel provides neither dynamic field rows nor a separate whole-result execution mode. [ADR 0022](../adr/0022-freeze-operation-c-abi-v3.md) remains Proposed; its target ABI design is distinct from the implemented ABI 7.

@@ -2,7 +2,7 @@
 
 [英文权威页面](../Channel-and-Color-Operations.md)。
 
-内置格式算子使用 Result 端口和当前 Result C ABI 6。Result 只携带结构与样本，不附着颜色、alpha、transfer、采样或 encoding 描述。每个算子通过显式静态参数接收所需解释。描述是配置，不是样本有效性的证明；内核不会仅因调用者对结构相容的数据赋予不同含义而拒绝连线。
+内置格式算子使用 Result 端口和当前 Result C ABI 7。Result 只携带结构与样本，不附着颜色、alpha、transfer、采样或 encoding 描述。每个算子通过显式静态参数接收所需解释。描述是配置，不是样本有效性的证明；内核不会仅因调用者对结构相容的数据赋予不同含义而拒绝连线。
 
 公开 workflow helper 与运行算子属于 `Photospider::ops`。消费者链接该目标，它依赖 `Photospider::ops_sdk`、`Photospider::ops_headers` 与 kernel。共享描述、codec、资源封装、精确领域数学和 `format::edit_description` 属于 `Photospider::ops_sdk`；SDK 只使用 kernel 公共接口。`TensorDescription` codec 按坐标记录选择规范 TDM4/TDM5，见[张量描述](Tensor-Semantic-Metadata.zh.md)。
 

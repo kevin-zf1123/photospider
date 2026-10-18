@@ -9,6 +9,24 @@ it is not a claim that every input succeeds under every resource budget.
 Current measurements and coverage limits are in the
 [accelerated specification](op_specs/NUM_accelerated_contract.md#current-implementation).
 
+## Static execution and input grants
+
+The planner invokes each registered static mapper before execution and stores
+its input and shared-stage reads in the Plan. Complete-input algorithms use
+`sdk::with_whole_stage`: the original callback receives the complete active-input
+grants, computes its full internal result once per call activation, and output
+tile instructions publish views of that result. A loop creates a new activation.
+The output projection bounds which ports may be mapped; the mapper fixes the
+actual reads. Descriptor-only grants expose schema facts without payload.
+
+Runtime `ResultProgramNeed` validates an existing grant and never schedules a
+producer. `to_whole` may be ready on its first call. Window batching limits local
+read state; it does not narrow the compiled dependency or invalidation scope.
+Sparse output requests preserve complete-input work and storage requirements.
+An empty selection omits pure output instructions, while executed CFG conditions
+and mandatory effects remain. The kernel's [compiler and execution guide](../../kernel-architecture/Compiler-and-Execution.md)
+defines the current stage and artifact contracts.
+
 ## Exact elementary paths
 
 `exact_elementary.hpp` performs integer transforms in signed 128-bit scratch,
@@ -213,8 +231,8 @@ Run-shared complete-input computation receives and reuses the sealed plan owner.
 allocations use ordinary host storage outside runtime managed scratch. They
 have source/program size bounds, but no separately enforced preparation budget
 or global preparation cache. The synchronous callback borrows the AST while
-holding its preparation owner. Package 0.17/traits15 requires a C++ rebuild;
-canonical framing14 and C ABI9 remain.
+holding its preparation owner. Current package, traits, C ABI and compiler identity
+versions are listed in the [version contract](../../development/Compiler-Version-Contract.md).
 
 All nonempty values requests execute complete-input with static active-input projection,
 no per-index stages or dependency certificates. The selected output materializes
@@ -312,7 +330,7 @@ and inputs used; the specification is not a run result.
 
 The fixed arena has 640 64-bit limbs (40960 bits) per number and 96 slots, all inside the admitted Result continuation state. Initial coefficients have fewer than 2105 bits. The worst degree-three integer remainder chain grows through 4211, 10529 and fewer than 25280 bits. Horner evaluation at the 8192 fractional bit refinement cap stays below 26683 bits; final rounding temporaries fit the same arena. The static maximum live-slot bound is 44, including temporary GCD calls. Explicit work/cancellation runs inside long arithmetic; unresolved refinement or storage limits return ResourceExhausted/CapacityLimit. The solver has a finite budget, not a promise that every algebraic input resolves at any caller-selected budget. All profiles use this exact numerical path, so no numerical fallback is reported; profile-specific integer helpers supply the scalar/NEON/AVX2 operations. The complete-input callback does not expose per-value solver/fallback counters.
 
-Both outputs use CPU complete-input Result continuations. A nonempty `values` request collects complete anchors and handles plus start and, only when count>1, end with ordinary member tile Needs with explicitly bound validators. Typed validation and upstream failures apply to all collected inputs. The continuation validates all x topology, then every generated coordinate, domain condition and adjacent-separation control before y arithmetic. It evaluates every sample and publishes a complete dense Result, including for sparse demand. The stage retains the full internal result; public output actors expose only requested complete tiles in global sample coordinates. Empty demand reads no input payload and executes no numeric kernel; the runtime can still poll metadata and seal the Result.
+Both outputs use CPU complete-input Result continuations. For a nonempty `values` request, the planner grants complete anchors and handles plus start and, only when count>1, end to the shared stage, with explicitly bound validators. Typed validation and upstream failures apply to all collected inputs. The continuation validates all x topology, then every generated coordinate, domain condition and adjacent-separation control before y arithmetic. It evaluates every sample and publishes a complete dense Result, including for sparse demand. The stage retains the full internal result; output tile instructions expose only requested complete tiles in global sample coordinates. An empty selection emits no instruction for this pure sampler; static metadata validation still applies.
 
 Mathematical selection remains local: exact anchor/clamp uses that anchor y; interior evaluation uses the selected segment's anchor y and relative y handles. Generic y outside every evaluated stencil is not additionally finite-checked. All output samples are evaluated, so an invalid otherwise-unrequested sample can fail the complete values Run. Failure publishes no partial successful values. Each output publishes through its own all-or-nothing Result transaction. Axis collects only start and end, with count=1 excluding end, computes its 24-byte tuple and does not read controls or validate per-coordinate separation. Static metadata for all four edges is checked for either output.
 
@@ -333,7 +351,7 @@ execute through Compiler/ExecutionContext and read output Results through
 authorized tensor windows. Source Values can provide immutable storage, charged
 as Referenced when retained by source Results. Result tensor schemas carry structural descriptors, layout and atomic axes.
 
-The complete-input Result continuation requests active inputs with Data, Validation and Descriptor, validates every segment/t row before component arithmetic, evaluates all N*D output cells and publishes one immutable dense [N,D] Result with requested complete tile coverage in global coordinates. A sparse query restricts recorded dependency/dirty mapping while retaining full input collection, computation and output allocation.
+The complete-input shared stage receives statically compiled grants for every active input and its bound validators, validates every segment/t row before component arithmetic, evaluates all N*D output cells and publishes one immutable dense [N,D] Result with requested complete tile coverage in global coordinates. A sparse query restricts recorded dependency/dirty mapping while retaining full input collection, computation and output allocation.
 
 Empty output coverage is empty and Empty does not poll a failing handle producer; static metadata and other execution stages remain active. Nonempty requests preserve upstream handle failures before endpoint or invalid-query arithmetic. Each output transaction publishes atomically; a failure releases unpublished state.
 
@@ -385,7 +403,7 @@ Inspect the returned Results through authorized tensor windows.
 
 All expanded formal outputs use CPU complete-input continuations. A nonempty `values` demand computes the full table and retains its full internal coverage and publishes only requested complete tiles. Interpolation templates allocate the full Float64 query array (`8*count` bytes), followed by the full table (`count*C*dtype_size` bytes), in addition to source owners and source-specific workspace. The host accounts these allocations through one Root resource budget. A sparse million-row multi-PCHIP request under a 1 MiB Payload budget checks full-output rejection; it does not demonstrate sparse success or successful maximum-size execution.
 
-`axis` is a separate Float64 `[3]` Result. Axis-only demand skips expression coefficients, Bezier controls and interpolation x/y. For `count=1`, the expanded source omits the end payload. For `count>1`, a first-value request still collects the end input and computes the complete grid. Each source keeps its own mathematical formula, selection, typed validation and numerical allowance. Active Result collection can propagate typed or upstream errors outside the requested numerical region, and numerical failures retain the source operation's Run scope. Empty `values` demand returns empty coverage without polling its failing numerical producer or reading payload; metadata processing and Result sealing remain ordinary execution work.
+`axis` is a separate Float64 `[3]` Result. Axis-only demand skips expression coefficients, Bezier controls and interpolation x/y. For `count=1`, the expanded source omits the end payload. For `count>1`, a first-value request still collects the end input and computes the complete grid. Each source keeps its own mathematical formula, selection, typed validation and numerical allowance. Active Result collection can propagate typed or upstream errors outside the requested numerical region, and numerical failures retain the source operation's Run scope. An empty `values` selection emits no pure numerical producer instruction and reads no payload; static preparation and CFG control requirements still apply.
 
 Dependency support and dirty mapping follow the output request. Repeated identical demand retains the completed Result identity. A fresh same-content source bundle reuses cached outputs rebound to the current execution. Replacing bindings reuses static `PreparedOperation` objects and recomputes outputs for the new endpoints. Function controls affect values demand; they do not dirty the independent axis.
 
@@ -409,9 +427,9 @@ one-entry selections and exact whole-formula linear interpolation. Descending
 pairs reorder both x/y to satisfy ExactCurve's positive-denominator internal
 representation. Channel queries are classified independently.
 
-Every nonempty request uses a CPU complete-input Result continuation. It requests input,
-table and axis with ordinary member tile Needs with explicitly bound validators, including typed
-validation and upstream failures. The continuation validates the complete
+Every nonempty request uses a CPU complete-input shared stage. Its static mapper
+grants all tiles of input, table and axis, with explicitly bound validators.
+Typed validation and upstream failures apply to the complete grant. The continuation validates the complete
 reconstructed axis, then every finite/domain query before table arithmetic. It
 computes every output element/channel and publishes an immutable packed Result
 with full internal coverage and global coordinates; sparse public requests expose only requested complete tiles.
@@ -661,15 +679,15 @@ independence is the caller's assertion.
 
 For temporary bake validation, bind immutable source Results backed by local
 Values and charge retained source storage as Referenced. The public bake graph
-publishes Result outputs: table, axis and report. Geometry programs use complete-input Result with
-ordinary tile Needs validation and complete outputs. Static preparation validates metadata
+publishes Result outputs: table, axis and report. Geometry programs use complete-input shared stages with statically compiled
+input grants, bound validators and complete internal outputs. Static preparation validates metadata
 and stores reusable geometry or report POD state. Empty tensor demand skips
 payload evaluation; source, table, axis and report failures preserve their
 observed failure status and scope.
 
 The axis and grid generators use `UniformAxis`; center coordinates average the actual neighboring Float64 endpoints and round once. Every grid color remains a global report dependency even when a constant source ignores its generated color input. The owned table is a `curve.bake_lut3d.table` v3 Result; the exported table is an immutable `photospider.tensor` Result with `samples`, the chosen dtype and `atomic_trailing_axes=1`. Color descriptions are explicit static operation parameters rather than tensor attributes. Unpack supplies the actual table to CRV-07 using explicit `table_dtype` and reject policy.
 
-The report has thirteen static Tensor members containing 361 payload bytes. `measured_table_id` is a UInt8[1,8] field encoding the measured owned table's ObjectId in little-endian order. Gate requests and validates all report members and the complete table through ordinary tile Needs, checks that explicit identity and publishes the requested complete-color region in global coordinates. A table-pixel validation failure can precede a measured-table ObjectId mismatch.
+The report has thirteen static Tensor members containing 361 payload bytes. `measured_table_id` is a UInt8[1,8] field encoding the measured owned table's ObjectId in little-endian order. The default complete-input mapper grants Gate all report members and the complete table before its first poll. Gate validates the report, checks that explicit identity and publishes the requested complete-color region in global coordinates. A table-pixel validation failure can precede a measured-table ObjectId mismatch.
 
 Per-component error and `atol+rtol*abs(reference)` are compared as exact
 integers in `2^-2148` units. Error needs fewer than 3173 bits; the threshold
@@ -685,7 +703,7 @@ Measurement visits cell centers in row-major order, followed by extra points. Th
 
 Pack, Unpack and Gate acquire authorized Result tensor windows before publishing views. Legal physical mappings retain source storage; a physical `ViewUnavailable` triggers explicit materialization of the requested region, preserving sample bits and dependency support while charging target Root Payload. Acceptance should cover Float32/Float64 across the supported geometries, including reversed and unaligned backing, and verify that a zero-copy view's mapped row addresses match its source backing without allocating target Payload.
 
-Pack uses two polls for the view path. Report reads use bounded owning windows; table and report Results can be retained independently, and a table read window may keep its backing alive beyond the output handles. Releasing the final owner releases its remaining managed capacity. Axis owners retire with the corresponding context and source fixtures.
+Pack computes its complete table view in the shared-stage callback using already-bound grants; each requested output tile then publishes a view of the stage result. No initial Need poll is required. Measurement processes bounded row windows across polls within its complete grant. Report reads use bounded owning windows; table and report Results can be retained independently, and a table read window may keep its backing alive beyond the output handles. Releasing the final owner releases its remaining managed capacity. Axis owners retire with the corresponding context and source fixtures.
 
 All source operations, full grid colors, validation points, converted colors,
 table backing, report Tensor members, windows and scratch consume their respective host
@@ -853,12 +871,13 @@ Small-divisor interval operations visit active limbs. Interval multiplication
 shares floor/ceiling products and uses two endpoint products for positive ranges.
 All strict outputs retain their original bits.
 
-Range operations and smoothstep publish requested regions in a single continuation.
-Sort projects requested boxes onto unique logical lines, reuses one permutation
-per line and output, and writes dense offsets without changing stable order or
-source witnesses. Prefix and cumulative integral scans request up to 64 source
-samples per stage, while each published observation retains only its actual
-prefix support. No private thread pool is used.
+Range, smoothstep and sorting retain the numerical ordering specified by their
+complete-input implementations. Prefix and cumulative integral scans use a
+shared stage with the complete active-input grant and a complete internal output;
+requested output tiles project that result. Window batching does not create
+per-prefix dependency scope. See [scans](scans-whole.md) and
+[layouts](layouts-whole.md) for the current storage and failure boundaries.
+No private thread pool is used.
 
 Accelerated Float32 exp now uses an IQK-derived NEON/AVX2 polynomial on [-80,80],
 with one callback floating-environment guard, a fixed batch workspace and a

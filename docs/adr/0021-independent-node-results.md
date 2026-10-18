@@ -4,6 +4,25 @@
 - Reader mirror: [Chinese](zh/0021-independent-node-results.zh.md)
 - Current boundary: per-output facet sets of the original decision are superseded; each output carries a resolved structural Result schema. See [Data Model](../kernel-architecture/Data-Model.md), [Structured Results and tensor slots](../kernel-architecture/Global-Results.md), and [Tensor descriptions](../kernel-architecture/Tensor-Semantic-Metadata.md).
 
+## Current implementation: declarations and static instructions
+
+The static compiler preserves every call and output declaration, including unused
+siblings. `ExecutionPlan::steps()` is the complete physical contract table;
+`blocks()[i].instructions` contains executable tile work. An unselected pure
+output can therefore have a step and no instruction. Input projections delimit
+which ports a static mapper may grant; they do not replace explicit read edges.
+This refines the demanded-step/task description in the original decision below.
+
+SSA values, block parameters and explicit terminators route control flow. A Run
+executes one instruction at a time on the selected CFG path; an instruction
+failure stops later work and the aggregate call returns an error. Already
+certified observer results remain valid. No partial successful output set is
+returned. Shared stages are unique per call activation and are cleared on block
+re-entry. Conditions and mandatory effects remain in empty output selections.
+Named returns have synthetic records indexed by `plan.output(name).record_index`,
+separate from the step declaration index. See
+[Multi-output operations](../kernel-architecture/Multi-Output-Operations.md).
+
 ## 1. Core summary (TL;DR)
 
 One operation node can produce several named results, each with its own metadata, dependencies and failure path. The compiler and executor identify every result by `ValueRef`, so an unused sibling does not add work to a selected result.

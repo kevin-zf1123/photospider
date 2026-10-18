@@ -1,6 +1,6 @@
 # 内建图像算子需求与研究规格
 
-本文是内建算子规格与主题页的中文导航。当前已实现接口以公开头文件、[kernel 架构指南](../kernel-architecture/README.md)及[当前实现状态](00-foundation/current-state.md)为准；本目录中标为 Proposed 的内容是目标需求，不代表已注册能力。当前 package 为 0.33.0，OperationTraits 为 25，Result operation C ABI 为 2。旧研究快照中的版本和实现状态仅描述其记录时点。
+本文是内建算子规格与主题页的中文导航。当前已实现接口以公开头文件、[kernel 架构指南](../kernel-architecture/README.md)及[当前实现状态](00-foundation/current-state.md)为准；本目录中标为 Proposed 的内容是目标需求，不代表已注册能力。当前 package、OperationTraits、Result C ABI 和产物格式的独立版本见[版本契约](../development/Compiler-Version-Contract.md)。旧研究快照中的版本和实现状态仅描述其记录时点。
 
 本目录面向 Photospider 算子实现者、workflow 作者和使用这些能力的图像应用。目标是覆盖 Photoshop、Lightroom、Camera Raw、DaVinci Resolve、Clip Studio Paint、Nuke、After Effects 中主要的图像处理与分析能力，并拆解为可组合、可验证的计算接口。
 
@@ -13,6 +13,7 @@
 | 目录 / 文档 | 内容 |
 | --- | --- |
 | [文档组织与规格模板](00-foundation/spec-template.md) | 类别目录、英文契约、实现说明、示例的职责及每份规格的验收内容 |
+| [编译阶段与产物 API](../kernel-architecture/Compiler-and-Execution.md#compiler-artifacts) | CFG/SSA、静态 Plan、`.psir`/`.psxp` 保存与加载及错误处理 |
 | [独立算子 oracle](../../oracle/ops/README.md) | 数值、生成、蒙版和滤镜参考程序及复现入口 |
 | [综合研究报告](00-foundation/research-report.md) | 主要结论、设计取舍、专项核验与实施建议 |
 | [候选依赖](00-foundation/dependencies.md) | 第三方库的职责、版本、许可标识和适配要求 |

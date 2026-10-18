@@ -4,6 +4,31 @@
 - Reader mirror: [Chinese](zh/0018-local-result-caches-and-frozen-execution.zh.md)
 - Current boundary: in 0.36.0 the snapshot facets and the import rejection of image, color-array, `ImagePlane` and `Mask` Values of the original decision are superseded. Snapshots validate structure only; run data is bound as Result static Tensor members.
 
+## Current implementation: content identity and call activation
+
+In the static Plan implementation, a completed-result key includes the operation,
+parameters, fixed schemas, resources, output member/tile, backend/mode and fixed
+read ranges plus input sample content. Physical node, step and Plan identifiers
+are excluded; compilation digests still include program IDs. Reuse reconstructs
+evidence for the current Plan instead of replaying old physical dependency
+records. This specifies the content identity behind the physical-key terminology
+in the original decision below.
+
+Pure deterministic closure and completed-result cacheability are separate:
+block/checkpoint services can be eligible when completed-result retention is
+disabled. Checkpoints match content identity without requiring the old physical
+TileUnit; current grants and evidence remain authoritative. Shared-stage and
+block-parameter paths conservatively bypass optional reuse as described in
+[Cache model](../kernel-architecture/Cache-Model.md). GPU block retention requires
+native dispatch during compute; `native_retained_bytes` includes retained GPU
+outputs as well as block state. Fallback-tainted results bypass reuse.
+
+Shared computation is unique within one call activation. Entering a block again
+clears that block's values and shared-stage state, so a loop recomputes the next
+activation rather than retaining one producer result for the whole Run. Compiler
+artifacts persist compiled stages only; frozen bindings and disposable caches
+remain in-memory state.
+
 ## 1. Core summary (TL;DR)
 
 Mutable workflow graphs and edited inputs need stable execution inputs, while tiled work benefits from reusing tiles whose recorded dependencies have not changed. The kernel owns immutable input snapshots, frozen execution bundles and bounded disposable result caches. Content identity and tile dependency records permit reuse without making cache state authoritative.

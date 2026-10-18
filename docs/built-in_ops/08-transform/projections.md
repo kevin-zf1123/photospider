@@ -55,7 +55,9 @@ nz≠0为圆，圆心(nx/nz,ny/nz)，半径`sqrt(1+(nx²+ny²)/nz²)`；nz=0为�
 
 已实际尝试读取 [ShaderToy wcGBDD](https://www.shadertoy.com/view/wcGBDD) 和 [s3XGz4](https://www.shadertoy.com/view/s3XGz4)，均未取得源码，工具返回无法打开。保留为待核验参考，不描述其shader算法、不声称与它们兼容。以后取得源码后应核对坐标、许可、投影模型、边界与采样，独立重建fixture。
 
-本篇2D验收是方向→投影→逆方向的angular error、calibrated点的reprojection error、identity和跨缝图；CPU Float64几何作参考，GPU Map/Sampler分别验证。任意projection的输入ROI仍受G4约束。
+本篇 2D 验收包括方向→投影→逆方向的 angular error、calibrated 点的 reprojection error、identity 和跨缝图；CPU Float64 几何作为参考，GPU Map/Sampler 分别验证。
+
+接入当前静态 Plan 时，projection 或 sampler 的 mapper 必须依据固定 schema、参数和输出范围，计算包含全部合法输入地址的有限授权。运行时 map payload 不能用于扩张 Plan 依赖；跨缝或跨面的保守范围需要在编译期覆盖。当前 `image.stmap` 使用完整 source 授权和对应输出的 map tiles，数值采样在该授权内进行，见[几何变换](geometry.md#当前-stmap-实现边界)。本页的投影和光栅化目录仍为 Proposed；静态映射接口不表示这些算子已注册或已有 GPU 实现。
 
 ## 来源
 
