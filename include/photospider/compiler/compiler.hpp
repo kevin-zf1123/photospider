@@ -57,10 +57,10 @@ struct PHOTOSPIDER_API PlanCacheKey final {
 };
 
 /**
- * @brief Immutable normalized and typed semantic graph.
+ * @brief Immutable typed semantic graph or raw dependency-path program.
  *
- * @note Call-table order is deterministic metadata order; blocks own execution
- * order.
+ * @note Call-table order is deterministic metadata order. Blocks own path
+ * requests or executable control flow as selected by form().
  */
 class PHOTOSPIDER_API SemanticGraphIR final {
  public:
@@ -131,7 +131,9 @@ class PHOTOSPIDER_API SemanticGraphIR final {
     return current_check_ && current_check_();
   }
 
-  /** @brief Explicit control flow; call-table order is not execution order. */
+  /** @brief Interpretation of blocks; dependency paths may repeat call IDs. */
+  IRForm form() const noexcept { return form_; }
+  /** @brief Ordered dependency paths or explicit control-flow blocks. */
   const std::vector<IRBlock>& blocks() const noexcept { return blocks_; }
   IRBlockId entry() const noexcept { return entry_; }
   const std::vector<IRInputBinding>& input_bindings() const noexcept {
@@ -145,13 +147,15 @@ class PHOTOSPIDER_API SemanticGraphIR final {
             nodes_,
             blocks_,
             entry_,
-            outputs_};
+            outputs_,
+            form_};
   }
 
  private:
   friend class Compiler;
   friend class CompilerArtifact;
 
+  IRForm form_ = IRForm::ControlFlow;
   std::vector<IRBlock> blocks_;
   IRBlockId entry_ = 0;
   std::vector<IRInputBinding> input_bindings_;
@@ -177,8 +181,8 @@ class PHOTOSPIDER_API SemanticGraphIR final {
 /**
  * @brief Immutable semantics-equivalent optimized graph IR.
  *
- * @note The current conservative optimizer is an explicit no-op stage that
- * preserves stable source ids while establishing independent stage identity.
+ * @note Dependency paths are resolved to unique call sites. Control-flow input
+ * is preserved. Both forms retain stable call IDs and independent identity.
  */
 class PHOTOSPIDER_API OptimizedGraphIR final {
  public:
@@ -719,6 +723,12 @@ class PHOTOSPIDER_API Compiler final {
    * @return Semantic IR or complete graph/operation validation failure.
    * @throws std::bad_alloc If staging allocation fails.
    * @note Failure publishes no partial IR.
+   * DependencyPaths preserves every path in input-ordered DFS postorder,
+   * starting at named outputs in name order, then unreachable nodes in ID
+   * order. Shared ancestors appear in every referencing path with the same
+   * call and SSA IDs. Branch switches, multi-input joins and new roots split
+   * chains. Cycles fail with ErrorCode::Cycle; expansion beyond 1,048,576 call
+   * occurrences or 65,536 chains fails with ErrorCode::ResourceExhausted.
    */
   [[nodiscard]] Result<SemanticGraphIR> analyze(
       const GraphSnapshot& snapshot, ResourceSet resources = {}) const;
@@ -727,13 +737,18 @@ class PHOTOSPIDER_API Compiler final {
    * No runtime callback runs here. All schemas, dominance, operation contracts
    * and edge transfers are validated before returning an immutable stage.
    * The caller retains its program; callback exceptions become typed failures.
+   * DependencyPaths must be a linear, parameterless chain with a final return.
+   * Repeated requests share one definition; each input must already be defined
+   * on first use. Handwritten paths need not reproduce canonical DAG expansion.
    */
   [[nodiscard]] Result<SemanticGraphIR> bind_ir(
       IRProgram program, ResourceSet resources = {}) const;
 
   /**
    * @brief Produces the independently identified optimized IR stage.
-   * The current optimizer preserves all calls, values and control flow.
+   * DependencyPaths retains the first request for each call, removes empty
+   * chains and reconnects the remaining blocks as ControlFlow. Existing
+   * ControlFlow programs preserve all calls, values and control flow.
    * @param semantic Valid semantic IR.
    * @return Optimized IR or stale/invalid-stage failure.
    * @throws std::bad_alloc If staging allocation fails.

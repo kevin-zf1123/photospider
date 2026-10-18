@@ -6,7 +6,7 @@
 
 `WorkflowInputDeclaration` 保存 id、精确 name 和必需的 Result schema。`ExecutionBinding` 保存 name 和 owning `ResultRef`。Tensor 是 Result storage 和 codecs 使用的 typed backing。`OperationMetadata` 只携带完整 Result schema；metadata specialization 是根据输入 schema 和静态参数对输出 schema 做的结构推导。Tensor shape 和 layout 属于 `ResultTensorSpec`。端口在结构谓词匹配时即可连接；compiler 不比较领域标签，因此结构相同但预期含义不同的 Result 可以连接到同一个端口。
 
-每个算子的静态 preparation 列出所需的 `ResourceIdentity`。`analyze`、`bind_ir` 和 artifact 导入函数从调用方的 `ResourceSet` 中精确选择这些条目，缺失时失败，并在之后每个阶段保留所选 owner。Semantic identity 覆盖 declarations、operation keys、有序输入、静态参数、operation traits（包括绑定的校验器与声明的诊断 identity）、所选资源 identity、输出 schema 和控制流图。地址、回调指针和诊断内容不参与。
+每个算子的静态 preparation 列出所需的 `ResourceIdentity`。`analyze`、`bind_ir` 和 artifact 导入函数从调用方的 `ResourceSet` 中精确选择这些条目，缺失时失败，并在之后每个阶段保留所选 owner。Semantic identity 覆盖 declarations、operation keys、有序输入、静态参数、operation traits（包括绑定的校验器与声明的诊断 identity）、所选资源 identity、输出 schema、程序形式及其有序 blocks 和 terminators。地址、回调指针和诊断内容不参与。
 
 ## Compiler 阶段
 
@@ -16,7 +16,7 @@ flowchart LR
     FE[其他前端的 IRProgram] -->|Compiler::bind_ir| S
     PSIR[.psir 文件] -->|CompilerArtifact::import_ir| S
     PSIR -->|import_ir, stage optimized| O
-    S -->|Compiler::optimize, no-op| O[OptimizedGraphIR]
+    S -->|Compiler::optimize| O[OptimizedGraphIR: ControlFlow]
     O -->|Compiler::plan| P[ExecutionPlan]
     PSXP[.psxp 文件] -->|CompilerArtifact::import_plan| P
     P -->|select_outputs / tile_plan| P2[过滤后的 ExecutionPlan]
@@ -29,11 +29,36 @@ flowchart LR
 
 `Compiler::compile(context, options, resources)` 以“发布前失败”的单一流程依次运行 `analyze`、`optimize` 和 `plan`，返回三个阶段及原始阶段计时。每个阶段也可以单独调用，调用方可以保存、检查或替换任一中间对象。
 
-- **DAG 前端。** `analyze(snapshot, resources)` 只接受当前有效的 schema-7 `WorkflowDocument`，最多 65,536 个节点、4,096 个输入和 1 到 4,096 个具名输出；其他版本（包括早期基于标签的 workflow）失败。前端按名称排序具名输出，从每个被返回的节点出发，按端口顺序沿输入做迭代深度优先遍历，然后按 id 顺序从其余每个节点出发继续遍历。因此每个前端 call 在 IR 中恰好出现一次，包括没有任何输出使用的 call；共享的上游 call 只保留一个定义。每个 call 自成一个 basic block，显式 jump 按遍历顺序把每个 block 连到下一个 block。最后一个 block 返回具名输出。存在环时返回 `Cycle`。
+- **DAG 前端。** `analyze(snapshot, resources)` 只接受当前有效的 schema-7 `WorkflowDocument`，最多 65,536 个节点、4,096 个输入和 1 到 4,096 个具名输出；其他版本失败。它生成 `IRForm::DependencyPaths`。具名输出按名称顺序访问，从每个被返回的节点出发，按输入端口顺序执行迭代 DFS。一个节点在其全部上游路径之后追加。共享祖先在每条引用它的路径中重新展开，并使用相同的 Call 和 SSA ID。具名输出遍历完成后，以尚未覆盖的节点为根，按 ID 顺序继续遍历，保留未使用的 calls 和副作用。已经生成 calls 后切换到另一上游路径、到达多输入汇合节点或开始新的根，都会结束当前非空 chain。Jump 连接各 chain，最后一条 chain 返回具名输出。存在环时返回 `Cycle`；展开超过 1,048,576 次 call 引用或 65,536 条 chain 时返回 `ResourceExhausted`。
 - **IR 绑定。** `bind_ir(program, resources)` 接受任意前端产生的 `IRProgram` 并返回 `SemanticGraphIR`。它与 `analyze` 使用同一个校验与准备流程。绑定忽略调用方提供的 traits 和 preparation，从 registry 重新绑定两者；每个 call 只准备一次。
-- **Optimizer。** `optimize(semantic)` 原样复制每个 call、value、block 和 terminator，并计算独立的 optimized digest。这个阶段让以后的优化 pass 能改写 IR 而不改变 DAG 前端；前端降级不做语义裁剪。
+- **Optimizer。** 对 `DependencyPaths`，`optimize(semantic)` 按顺序访问原始 blocks，保留每个 Call ID 的首次请求，移除后续请求和空 chain，并重新连接剩余 blocks。即使最终 return 原来所在的 chain 变空，该 return 也会保留。结果采用 `IRForm::ControlFlow`，每个 call 有一个调用位置，并具有独立的 optimized digest。Call 声明、SSA ID 和所有唯一 call 都保留。已经采用 `ControlFlow` 的输入保持其 calls、values、blocks 和 terminators 不变。
 - **Planner。** `plan(optimized, options)` 把每个可达结果展开为固定 tile 指令，把每条指令放到其 call 所在的 block，并在返回前验证整个程序。
 - **执行。** `ExecutionContext::execute(plan, bindings, cancellation, options)` 按顺序解释 plan 的 blocks。它从不映射依赖、展开 tile 或重排指令。
+
+### 依赖路径示例
+
+对于 `B(A)`、`C(A)`、`D(B,C)`、`E(D)`、`G(B)` 和最终输出 `F(G,E)`，输入端口顺序使前端先访问 G，再访问 E：
+
+```mermaid
+flowchart LR
+    A --> B
+    A --> C
+    B --> D
+    C --> D
+    D --> E
+    B --> G
+    G --> F
+    E --> F
+```
+
+| 阶段 | 有序 chains |
+| --- | --- |
+| 原始语义 IR，`DependencyPaths` | `ABG / AB / AC / DE / F` |
+| 优化 IR，`ControlFlow` | `ABG / C / DE / F` |
+
+每个字母表示一个 Call ID。原始 call 表包含七个声明，路径列表包含十次引用。第二条 `AB` 和 `AC` 中的 `A` 前缀一直保留到优化阶段。重复引用请求同一次调用及其 SSA 结果，具有副作用的调用也遵循这一规则。不同 Call ID 始终表示不同调用，即使它们的算子和参数相同。Chain 表示一段依赖路径，因此 A 同时向 B 和 C 提供输入的分叉不会强制 A 单独成块。
+
+优化后的示例包含四个 blocks 和三个无条件 jumps。每个上游定义都先于其消费者。把 F 的输入顺序改为 `F(E,G)` 后，原始路径变为 `AB / AC / DE / ABG / F`，优化后的 chains 变为 `AB / C / DE / G / F`。选择上游分支无需运行时执行状态查询；前端遍历确定路径顺序，优化在规划前消除重复请求。
 
 ## IR 数据模型
 
@@ -42,6 +67,7 @@ namespace ps {
 using IRValueId = std::uint64_t;  // zero is never valid
 using IRBlockId = std::uint64_t;
 using IRCallId = std::uint64_t;
+enum class IRForm { ControlFlow, DependencyPaths };
 
 struct SemanticNode {             // one static operation call
   IRCallId id;
@@ -61,7 +87,7 @@ using IRTerminator = std::variant<IRJump, IRConditionalJump, IRReturn>;
 struct IRBlock {
   IRBlockId id;
   std::vector<IRBlockParameter> parameters;  // {value, result_schema}
-  std::vector<IRCallId> calls;               // execution order inside the block
+  std::vector<IRCallId> calls;               // requests or call sites, by form
   IRTerminator terminator;
 };
 struct IRProgram {
@@ -71,20 +97,22 @@ struct IRProgram {
   std::vector<IRBlock> blocks;
   IRBlockId entry;
   std::vector<IRReturnDeclaration> returns;    // ordered result signature
+  IRForm form = IRForm::ControlFlow;
 };
 }  // namespace ps
 ```
 
-Block 的 `calls` 列表定义执行顺序；`IRProgram::calls` 的顺序只决定 metadata 准备顺序。`SemanticGraphIR::program()` 和 `OptimizedGraphIR::program()` 返回一份拥有所有权的可编辑副本，其他 pass 或前端可以修改后重新绑定。
+`IRProgram::calls` 按 metadata 准备顺序保存唯一的 call 声明。在 `DependencyPaths` 中，block 的 `calls` 列表保存有序请求，可以重复引用相同的 Call ID。在 `ControlFlow` 中，它们定义可执行调用顺序，每个 call 有一个调用位置。`SemanticGraphIR::form()` 返回所采用的解释方式；`SemanticGraphIR::program()` 在拥有所有权的可编辑副本中保留该形式。`OptimizedGraphIR::program()` 始终返回 `ControlFlow`。其他 pass 或前端可以修改任一副本后重新绑定。
 
 只有以下条件全部成立时，`bind_ir` 才接受程序：
 
-- Call、value 和 block 标识符非零，并在各自命名空间内唯一。每个 call 恰好属于一个 block，每个 declaration 恰好有一个 input binding。
+- Call 声明、SSA 定义和 block 标识符非零，并在各自命名空间内唯一。每个 call 至少有一个引用位置，每个输入声明恰好有一个 binding。`ControlFlow` 要求每个 call 恰好有一个调用位置；`DependencyPaths` 允许对同一声明重复请求。
+- `DependencyPaths` 要求非空、无参数的 blocks 按存储顺序排列。首个 block 为 entry，中间每个 terminator 都以无参数 jump 指向下一个 block，最后一个 terminator 为 return。一个 call 的首次请求位置是其输出的定义位置，全部使用都必须被定义支配。绑定接受合法的手写路径，不要求它们复现 `analyze()` 的完整树展开。
 - Entry block 存在且没有参数。每个 block 都能从 entry 到达，每条边指向已存在的 block，且参数个数匹配。
 - 每个 SSA 使用都被其定义支配：同一 block 中更早的 call、支配当前位置的 block、block 参数或外部输入。经过循环递归的值必须通过 block 参数传递；直接或经由其他 call 消费自身结果的 call 会绑定失败。
 - 边参数 schema 与目标参数 schema 完全相等。每个 return 提供完整签名，每个 return schema 与声明一致。Block 参数必须带有已验证的 schema，循环回边也是如此。
 - 分支条件是恰好含一个 tensor、该 tensor 只有一个 `UInt8` sample 的 Result。零选择 `if_false`，其他任何字节选择 `if_true`。其他形状和隐式真值判断返回 `TypeMismatch`。
-- 满足数量上限：最多 65,536 个 calls 和 blocks；declarations、returns 以及每个 block 的参数最多 4,096 个；每个 call 的输入和参数最多 1,024 个。
+- 满足数量上限：call 声明、blocks 以及每个 block 的 call 引用各最多 65,536 个；call 引用总计最多 1,048,576 次；输入声明、returns 以及每个 block 的参数各最多 4,096 个；每个 call 的输入和参数各最多 1,024 个。
 
 Shape 和 tile grid 在编译期固定。循环或分支选择运行哪些固定形状的 call，不会产生形状依赖运行时数据的 tensor。
 
@@ -139,6 +167,10 @@ struct PlanOutput {
 
 Planner 对每个 block 按以下顺序展开 root：分支条件（全部 tile）、每个边参数（全部 tile），以及按归一化后的 `output_requests` 条目限定的每个具名 return。随后加入每个非 side-effect-free 的 call 和每个 mandatory 共享 stage。对每个 root tile，planner 以 `ResultStaticQuery` 调用一次算子的静态 mapper，按 producer 的网格解析返回的读取，并在构建消费者之前递归构建 producer tile。键 `(step, shared stage, member, tile)` 对单元去重，因此被多个消费者共享的 tile 只生成一次。在每个 block 内，稳定排序恢复 IR call 顺序，同时保持每个 call 的 tile 依赖顺序。
 
+共享 stage 单元归一化到该 call 的首个输出 step，使同一调用的不同输出可以共享相同的 stage 指令。这里的去重记录编译期间已经安排的单元；运行时缓存状态单独处理。Planner 在消费者之前构建所需依赖，并在展开时抑制重复单元。它不会先生成每个 call 的全部 tile 再删除重复任务，也不会把一个源 tile 沿全部下游 calls 流水执行到最终输出。原始路径请求的消除属于 IR 优化；tile 需求选择和单元去重属于规划。
+
+`complete_input_dependencies` 只覆盖选定的普通输入。每个共享 stage 读取都需要显式的 `ResultStaticMapping::shared_stages` 条目；仅声明 `OperationSharedStage` 不会增加读取边。Stage 之间的依赖和 tile 依赖环在规划期间解析。运行时 `ResultProgramNeed` 检查无法增加边或改变固定授权。
+
 认证闭包被编译进读取。读取 `CompleteBundle` scope 覆盖的成员会变为读取整个 bundle；`StablePrefix` 读取延伸到前缀末端；producer 带有完整覆盖校验器时，任何非空读取都依赖该 producer 的全部 tile。消费者带有完整覆盖输入校验器时，会获得该输入的全部 tile。
 
 `tile_extent` 必须是正的 2 的幂。指令数超过 `maximum_instructions` 或依赖边数超过 `maximum_dependency_edges` 时，planner 在发布前返回 `ResourceExhausted`，并对每个中间 tile 集合施加静态集合与工作量上限。极大的逻辑 tensor 可以通过原子 cell、仿射广播，或在调用 `plan` 时给出稀疏的 `output_requests` 选择来保持可规划；事后过滤一个已完全展开的 plan 不会降低规划代价。
@@ -152,12 +184,14 @@ Planner 对每个 block 按以下顺序展开 root：分支条件（全部 tile�
 ```mermaid
 stateDiagram-v2
     [*] --> Enter: pc = entry
-    Enter --> Instructions: 计 1 单位 work、新 activation、清空 block 值、赋值参数
+    Enter --> Call: 计 1 单位 work、新 activation、清空 block 值、赋值参数
+    Call --> Instructions: 下一个 call
     Instructions --> Instructions: 执行下一条指令
-    Instructions --> Certify: block 指令完成
-    Certify --> Branch: conditional jump
-    Certify --> Jump: jump
-    Certify --> Return: return
+    Instructions --> Certify: 当前 call 的指令完成
+    Certify --> Call: 在下一个 call 前认证已产出的输出
+    Call --> Branch: 无剩余 calls，conditional jump
+    Call --> Jump: 无剩余 calls，jump
+    Call --> Return: 无剩余 calls，return
     Branch --> Capture: 读取一个 UInt8，选择一个后继
     Jump --> Capture
     Capture --> Enter: 先捕获全部参数，再 pc = target
@@ -172,7 +206,9 @@ stateDiagram-v2
 
 对每条指令，coordinator 绑定预编译授权，检查每个被授权的输入 sample 都已认证，可选地复用缓存结果，必要时启动 continuation 并 poll。返回 `ResultProgramNeed` 的 poll 只按该指令的固定授权检查：检查会计入 work，任何超出授权的请求都以 protocol 错误失败，但不会启动 producer、收窄授权，也不会把 descriptor-only 授权变成 payload 访问。返回 `ResultPublication` 的 poll 经验证后作为该 tile 的结果保存。因此 `to_whole` 等 helper 可能在第一次 poll 就就绪；消费者不能假定第一次结果一定是 Need。
 
-一个 block 的全部指令完成后，coordinator 组装并认证在该 block 中产出 tile 的每个 call，包括无人读取的有副作用 call。Conditional jump 读取条件 sample，只执行所选后继；两条分支都不会投机执行。边在修改任何目标参数之前先捕获每个参数值及其依赖证据，因此交换和自环都看到一致的来源。Return 把每个具名输出投影到其请求的 samples，记录 synthetic return 证据，计算可选 result digest，并发布 Results。
+一个 call 的全部指令完成后，包括其多个输出和共享 stages 的指令，coordinator 组装并认证该 call 中每个已产出 tile 的输出。这项检查在同一 block 的下一个 call 开始前完成，下一个 call 只读取描述信息或具有副作用时也如此。因此，上游输出失败会在后续 calls 开始前终止执行。共享 stage 的发布验证仍在每次 stage 提交时执行。没有产出输出 tile 的 call 无需进行输出组装认证。
+
+Block 中的 calls 完成后，conditional jump 读取条件 sample，只执行所选后继；两条分支都不会投机执行。边在修改任何目标参数之前先捕获每个参数值及其依赖证据，因此交换和自环都看到一致的来源。Return 把每个具名输出投影到其请求的 samples，记录 synthetic return 证据，计算可选 result digest，并发布 Results。共享 stage 状态持续到下一次 block activation；把 calls 合并到一条 chain 可能延长该生命周期，本身不保证降低内存用量。
 
 Coordinator 每次计入 work 时都检查取消、plan 有效性、observer 失败和宿主 stop 信号：进入 block 时、每条指令处，以及算子 work 回调内部。它不会抢占进程内 callback。Callback 进入后，Run 等它退出再释放借用 phase 和 owners。失败的 Run 不返回部分输出集合。指令失败时携带产出 call 的 `node_id`；输入校验器失败保留外部 `input_id`（错误为 `InvalidArgument`）或上游 `node_id`（错误为 `OperationFailed`），使非法调用方数据与非法算子输出保持可区分。
 
@@ -180,7 +216,7 @@ Coordinator 每次计入 work 时都检查取消、plan 有效性、observer 失
 
 ## Compiler 产物
 
-`CompilerArtifact` 以可编辑 UTF-8 文本保存阶段。`.psir` 保存语义或优化后的 IR 程序；`.psxp` 保存完整执行 plan。两者都使用文本格式版本 2；版本 1 文件被拒绝。
+`CompilerArtifact` 以可编辑 UTF-8 文本保存阶段。`.psir` 保存语义或优化后的 IR 程序；`.psxp` 保存完整执行 plan。两者都使用文本格式版本 3。更早的版本（包括 v2）会被拒绝，必须使用当前 compiler 从源 workflow 或 IR 重新生成。
 
 ```cpp
 namespace ps {
@@ -188,7 +224,7 @@ enum class ArtifactKind { SemanticIR, OptimizedIR, ExecutionPlan };
 struct ArtifactOperation { std::string key; std::string contract_digest; };
 struct ArtifactManifest {
   ArtifactKind kind;
-  std::uint32_t format_version = 2;
+  std::uint32_t format_version = 3;
   std::vector<ArtifactOperation> operations;
   std::vector<ResourceIdentity> resources;
 };
@@ -211,7 +247,9 @@ class CompilerArtifact {
 }  // namespace ps
 ```
 
-两种格式都以 magic 与版本行（`psir 2` 或 `psxp 2`）和父阶段 digest 开头。`.psir` 文件随后记录 `stage semantic` 或 `stage optimized`、operation manifest、资源、输入声明与绑定、带有每 call 资源使用的 calls、return 签名、entry block 以及各 block。`.psxp` 文件另外记录执行模式与 `tile_extent`、每个 step 的 backend 放置、具名输出请求，以及包含每个 block 指令的 `code` 段：publication 目标、已发布 samples、固定的输入与共享授权、block 内依赖序号和 `cpu_fallback` 标记。Tile grids 不另存；导入时根据固定 schema 和 `tile_extent` 重建。
+两种格式都以 magic 与版本行（`psir 3` 或 `psxp 3`）开头。`.psir` 文件记录 `stage semantic` 或 `stage optimized`，然后记录父阶段 digest、operation manifest、资源、输入声明与绑定、带有每 call 资源使用的 calls、return 签名、entry block、必需的 `form` 字段以及各 block。只有语义 IR 接受 `form dependency_paths`；语义 IR、优化 IR 和 plan 均接受 `form control_flow`。语义依赖路径在导出导入后保留重复引用，期间不执行优化。声明 dependency paths 的优化产物或 plan 会被拒绝。
+
+`.psxp` 文件记录其父阶段 digest、执行模式与 `tile_extent`、相同的控制流声明、每个 step 的 backend 放置、具名输出请求，以及包含每个 block 指令的 `code` 段：publication 目标、已发布 samples、固定的输入与共享授权、block 内依赖序号和 `cpu_fallback` 标记。Tile grids 不另存；导入时根据固定 schema 和 `tile_extent` 重建。
 
 文本支持 `;` 行注释、转义字符串和显式类型参数（`i64`、`f64`、`f64_bits`、`bool`、`string`）。Writer 把有限正规 double 写成可往返的十进制，把 NaN、无穷和次正规值写成带十六位十六进制数字的 `f64_bits`。解析和写出使用 classic locale、默认浮点环境和 round-to-nearest，结果不依赖调用方的 locale 或舍入模式。
 
@@ -296,9 +334,9 @@ Result 拥有静态 schema、descriptor coverage、数值 backing 和 ObjectId�
 | `OperationTraits::version` | 29 |
 | C Result operation ABI | 7（`ps_result_operation_plugin_get_api_v7`） |
 | WorkflowDocument schema | 7 |
-| `.psir` / `.psxp` 文本格式 | 2 |
-| Semantic identity domain | `semantic-ssa-ir-v24` |
-| Optimizer identity domain | `optimizer-v6-ssa-noop` |
+| `.psir` / `.psxp` 文本格式 | 3 |
+| Semantic identity domain | `semantic-ssa-ir-v25` |
+| Optimizer identity domain | `optimizer-v7-dependency-paths` |
 | Physical plan identity domain | `static-tile-program-v26` |
 | Plan cache key domain | `plan-cache-key-v19` |
 | Saved operation contract domain | `artifact-static-operation-contract-v2` |
@@ -306,10 +344,12 @@ Result 拥有静态 schema、descriptor coverage、数值 backing 和 ObjectId�
 
 这些版本轴彼此独立。CPU parallel 与 tiles 服务为版本 2，native GPU 服务为版本 1。`TileGrid::from_schema` 返回 `Result<TileGrid>`，`OperationRegistry::prepare_operation` 解析静态算子契约。Semantic、optimized 和 plan digest 包含程序标识符，因此即使计算相同，重新编号 call 或 value 也会改变这些 digest。
 
+新增的程序形式状态改变了 public C++ IR 对象布局；消费者必须使用匹配的头文件与库重新构建。此次变化不改变 WorkflowDocument schema 7 或 C Result operation ABI 7。
+
 ## 限制与非目标
 
 - 内核只附带 WorkflowDocument DAG 前端。Python 或文本语言前端、机器码 backend、JIT 编译以及根据产物自动查找算子库都不存在；`bind_ir` 和 `.psir` 导入是这类前端将来使用的入口。
-- Optimizer 不做任何变换，保留每个 call、value 和 block。
+- 当前优化消除重复的依赖路径请求并移除空 chain，保留每个唯一 call，并保持显式 ControlFlow 输入不变。它不会按相同算子或参数合并不同 calls、移除未使用的 call 声明或融合算子。
 - Tensor shape、schema 和 tile grid 在编译期固定。控制流在固定形状的 call 之间选择，不提供动态 shape。
 - 一个 Run 同一时刻只执行一条 plan 指令，没有 ready queue、producer task 或 work stealing。并行来自并发的 Runs，以及单个算子回调内部的 CPU range、CPU tile 和 GPU 工作；见[并行执行模型](Parallel-Execution-Model.zh.md)。
 - 产物 digest 是可复现辅助，不是签名。Native operation module 作为受信任的进程内代码执行；ABI 校验不提供沙箱。Kernel 不拥有 daemon IPC、durable jobs、process isolation 或 recovery。已注册的 production image operation 只有在实现所需 typed Result contract 后，才能使用统一 Result image 路径；详见[图像 operations](Image-Operations.zh.md)。

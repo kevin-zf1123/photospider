@@ -27,7 +27,7 @@ struct ArtifactOperation final {
  */
 struct ArtifactManifest final {
   ArtifactKind kind = ArtifactKind::SemanticIR;
-  std::uint32_t format_version = 2;
+  std::uint32_t format_version = 3;
   std::vector<ArtifactOperation> operations;
   std::vector<ResourceIdentity> resources;
 };
@@ -36,8 +36,9 @@ using ImportedIR = std::variant<SemanticGraphIR, OptimizedGraphIR>;
 
 /** @brief Editable, versioned .psir and .psxp compiler artifacts.
  *
- * .psir stores typed SSA calls, block parameters and explicit control flow
- * before or after optimization. .psxp additionally stores ordered tile and
+ * Format v3 .psir stores typed SSA calls and an explicit program form: raw
+ * dependency paths or control flow. Optimized IR and .psxp require control
+ * flow. Earlier artifact versions are rejected. .psxp stores ordered tile and
  * shared-stage instructions, read grants, publication targets, instruction
  * dependencies, backend/fallback choices and output selections. Import links
  * against the compiler's frozen registry, validates contracts/schemas/resources

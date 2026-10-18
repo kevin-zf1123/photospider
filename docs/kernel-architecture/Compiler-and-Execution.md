@@ -6,7 +6,7 @@ The callable pipeline has five stages: DAG frontend, `SemanticGraphIR`, `Optimiz
 
 `WorkflowInputDeclaration` stores an id, exact name, and required Result schema. `ExecutionBinding` stores a name and owning `ResultRef`. Tensor remains typed backing used by Result storage and codecs. `OperationMetadata` carries only the complete Result schema; metadata specialization is structural inference of output schemas from input schemas and static parameters. Tensor shape and layout belong to `ResultTensorSpec`. Ports connect when their structural predicates match; the compiler does not compare domain labels, so Results with the same structure but different intended meanings connect to the same port.
 
-Each operation's static preparation lists the `ResourceIdentity` values it needs. `analyze`, `bind_ir` and the artifact importers select exactly those entries from the caller's `ResourceSet`, fail if one is missing, and retain the selected owners in every later stage. Semantic identity covers declarations, operation keys, ordered inputs, static parameters, operation traits (including bound validator and declared diagnostic identities), selected resource identities, output schemas and the control-flow graph. Addresses, callback pointers, and diagnostic contents are not part of it.
+Each operation's static preparation lists the `ResourceIdentity` values it needs. `analyze`, `bind_ir` and the artifact importers select exactly those entries from the caller's `ResourceSet`, fail if one is missing, and retain the selected owners in every later stage. Semantic identity covers declarations, operation keys, ordered inputs, static parameters, operation traits (including bound validator and declared diagnostic identities), selected resource identities, output schemas, the program form and its ordered blocks and terminators. Addresses, callback pointers, and diagnostic contents are not part of it.
 
 ## Compiler stages
 
@@ -16,7 +16,7 @@ flowchart LR
     FE[Other frontend IRProgram] -->|Compiler::bind_ir| S
     PSIR[.psir file] -->|CompilerArtifact::import_ir| S
     PSIR -->|import_ir, stage optimized| O
-    S -->|Compiler::optimize, no-op| O[OptimizedGraphIR]
+    S -->|Compiler::optimize| O[OptimizedGraphIR: ControlFlow]
     O -->|Compiler::plan| P[ExecutionPlan]
     PSXP[.psxp file] -->|CompilerArtifact::import_plan| P
     P -->|select_outputs / tile_plan| P2[Filtered ExecutionPlan]
@@ -29,11 +29,36 @@ flowchart LR
 
 `Compiler::compile(context, options, resources)` runs `analyze`, `optimize` and `plan` as one fail-before-publication flow and returns all three stages plus raw stage timings. Each stage is also callable on its own, so a caller can save, inspect or replace any intermediate object.
 
-- **DAG frontend.** `analyze(snapshot, resources)` accepts only a current schema-7 `WorkflowDocument` with at most 65,536 nodes, 4,096 inputs and 1 to 4,096 named outputs; other versions, including earlier label-based workflows, fail. The frontend sorts named outputs by name and runs an iterative depth-first walk from each returned node through its inputs in port order, then from every remaining node in id order. Every frontend call therefore appears exactly once in IR, including calls that no output uses; a shared upstream call keeps one definition. Each call becomes its own basic block, and an explicit jump links each block to the next in walk order. The last block returns the named outputs. A cycle fails `Cycle`.
+- **DAG frontend.** `analyze(snapshot, resources)` accepts only a current schema-7 `WorkflowDocument` with at most 65,536 nodes, 4,096 inputs and 1 to 4,096 named outputs; other versions fail. It produces `IRForm::DependencyPaths`. Named outputs are visited in name order, with an iterative, input-port-ordered DFS from each returned node. A node is appended after all its upstream paths. Shared ancestors are expanded again on every referencing path, using the same Call and SSA IDs. After the named outputs, nodes not yet covered are used as roots in ID order, retaining unused calls and effects. Switching to another upstream path after emitting calls, reaching a multi-input join, or starting a new root ends the current nonempty chain. Jumps connect chains and the last chain returns the named outputs. Cycles fail `Cycle`; expansion beyond 1,048,576 call occurrences or 65,536 chains fails `ResourceExhausted`.
 - **IR binding.** `bind_ir(program, resources)` accepts an `IRProgram` from any frontend and returns a `SemanticGraphIR`. It is the same validator and preparer that `analyze` uses. Binding ignores caller-supplied traits and preparation and rebinds both from the registry; each call is prepared once.
-- **Optimizer.** `optimize(semantic)` copies every call, value, block and terminator unchanged and computes a separate optimized digest. The stage exists so later passes can rewrite IR without changing the DAG frontend; frontend lowering performs no semantic pruning.
+- **Optimizer.** For `DependencyPaths`, `optimize(semantic)` visits raw blocks in order, retains the first request for each Call ID, removes subsequent requests and empty chains, and reconnects the remaining blocks. The final return is preserved even if its original chain becomes empty. The result has `IRForm::ControlFlow`, one site per call, and a separate optimized digest. Call declarations, SSA IDs and all unique calls are retained. An input already in `ControlFlow` keeps its calls, values, blocks and terminators unchanged.
 - **Planner.** `plan(optimized, options)` expands every reachable result into fixed tile instructions, places each instruction in the block of its call, and validates the program before returning it.
 - **Execution.** `ExecutionContext::execute(plan, bindings, cancellation, options)` interprets the plan's blocks in order. It never maps dependencies, expands tiles, or reorders instructions.
+
+### Dependency-path example
+
+For `B(A)`, `C(A)`, `D(B,C)`, `E(D)`, `G(B)` and final output `F(G,E)`, input-port order makes the frontend visit G before E:
+
+```mermaid
+flowchart LR
+    A --> B
+    A --> C
+    B --> D
+    C --> D
+    D --> E
+    B --> G
+    G --> F
+    E --> F
+```
+
+| Stage | Ordered chains |
+| --- | --- |
+| Raw semantic IR, `DependencyPaths` | `ABG / AB / AC / DE / F` |
+| Optimized IR, `ControlFlow` | `ABG / C / DE / F` |
+
+Each letter denotes a Call ID. The raw call table contains seven declarations, while the path lists contain ten references. The second `AB` and the `A` prefix of `AC` remain visible until optimization. A repeated reference requests the same invocation and its SSA results, including when that invocation has effects. Distinct Call IDs remain distinct invocations even if their operation and parameters match. A chain is a dependency-path segment, so a fan-out such as A feeding both B and C does not force A into a separate block.
+
+The optimized example has four blocks and three unconditional jumps. Every upstream definition precedes its consumer. Changing F's input order to `F(E,G)` changes the raw paths to `AB / AC / DE / ABG / F` and the optimized chains to `AB / C / DE / G / F`. No runtime execution-state query is needed to select an upstream branch; the frontend traversal determines the path order and optimization resolves repeated requests before planning.
 
 ## IR data model
 
@@ -42,6 +67,7 @@ namespace ps {
 using IRValueId = std::uint64_t;  // zero is never valid
 using IRBlockId = std::uint64_t;
 using IRCallId = std::uint64_t;
+enum class IRForm { ControlFlow, DependencyPaths };
 
 struct SemanticNode {             // one static operation call
   IRCallId id;
@@ -61,7 +87,7 @@ using IRTerminator = std::variant<IRJump, IRConditionalJump, IRReturn>;
 struct IRBlock {
   IRBlockId id;
   std::vector<IRBlockParameter> parameters;  // {value, result_schema}
-  std::vector<IRCallId> calls;               // execution order inside the block
+  std::vector<IRCallId> calls;               // requests or call sites, by form
   IRTerminator terminator;
 };
 struct IRProgram {
@@ -71,20 +97,22 @@ struct IRProgram {
   std::vector<IRBlock> blocks;
   IRBlockId entry;
   std::vector<IRReturnDeclaration> returns;    // ordered result signature
+  IRForm form = IRForm::ControlFlow;
 };
 }  // namespace ps
 ```
 
-The block's `calls` list defines execution order; the order of `IRProgram::calls` only fixes metadata preparation order. `SemanticGraphIR::program()` and `OptimizedGraphIR::program()` return an owning editable copy that another pass or frontend can modify and bind again.
+`IRProgram::calls` contains unique call declarations in metadata preparation order. In `DependencyPaths`, block `calls` lists contain ordered requests and may repeat the same Call ID. In `ControlFlow`, they define executable call order and each call has one site. `SemanticGraphIR::form()` reports the interpretation; `SemanticGraphIR::program()` preserves it in an owning editable copy. `OptimizedGraphIR::program()` always returns `ControlFlow`. Another pass or frontend may edit either copy and bind it again.
 
 `bind_ir` accepts the program only when all of these hold:
 
-- Call, value and block identifiers are nonzero and unique in their own namespaces. Every call belongs to exactly one block, and every declaration has exactly one input binding.
+- Call declarations, SSA definitions and block identifiers are nonzero and unique in their own namespaces. Every call has at least one site and every input declaration has exactly one binding. `ControlFlow` requires exactly one site per call; `DependencyPaths` permits repeated requests for that declaration.
+- `DependencyPaths` requires nonempty, parameterless blocks in stored order. The first block is the entry, every intermediate terminator jumps to the next block without arguments, and the last terminator returns. Its first request is the definition position of a call's outputs. All uses must be dominated by their definitions. Binding accepts valid handwritten paths without requiring them to reproduce `analyze()`'s complete tree expansion.
 - The entry block exists and has no parameters. Every block is reachable from entry, and every edge names an existing block with matching argument count.
 - Every SSA use is dominated by its definition: an earlier call in the same block, a dominating block, a block parameter, or an external input. A value that recurses through a loop must travel through a block parameter; a call that consumes its own result, directly or through other calls, fails binding.
 - Edge argument schemas equal the destination parameter schemas exactly. Every return supplies the full signature, and each return schema matches the declaration. Block parameters must carry a validated schema, including on loop backedges.
 - A branch condition is a Result with exactly one tensor holding one `UInt8` sample. Zero selects `if_false`; any other byte selects `if_true`. Other shapes and implicit truthiness fail `TypeMismatch`.
-- Count bounds hold: at most 65,536 calls and blocks, 4,096 declarations, returns and parameters per block, and 1,024 inputs and parameters per call.
+- Count bounds hold: at most 65,536 call declarations, blocks and call references per block; at most 1,048,576 call references in total; 4,096 input declarations, returns and parameters per block; and 1,024 inputs and parameters per call.
 
 Shapes and tile grids stay fixed at compile time. A loop or branch selects which fixed-shape calls run; it does not create tensors whose shape depends on runtime data.
 
@@ -139,6 +167,10 @@ struct PlanOutput {
 
 The planner expands roots in this order for every block: the branch condition (all tiles), every edge argument (all tiles), and each named return restricted to its normalized `output_requests` entry. It then adds every call that is not side-effect-free and every mandatory shared stage. For each root tile, it builds an instruction by calling the operation's static mapper once with a `ResultStaticQuery`, resolves the returned reads against the producers' grids, and recursively builds producer tiles before the consumer. The key `(step, shared stage, member, tile)` deduplicates units, so a tile shared by several consumers is emitted once. Inside each block, a stable sort restores IR call order while keeping each call's tiles in dependency order.
 
+Shared-stage units are canonicalized to the call's primary output step so sibling outputs can share the same stage instructions. This deduplication records units already scheduled during compilation; runtime cache state is separate. The planner builds requested dependencies before consumers and suppresses duplicate units as it expands them. It does not first materialize every tile of every call and then delete duplicates, and it does not pipeline one source tile through all downstream calls to the final output. Raw path-request elimination belongs to IR optimization; tile demand selection and unit deduplication belong to planning.
+
+`complete_input_dependencies` covers the selected ordinary inputs only. Each shared-stage read needs an explicit `ResultStaticMapping::shared_stages` entry; declaring an `OperationSharedStage` alone adds no read edge. Stage-to-stage dependencies and cyclic tile dependencies are resolved during planning. Runtime `ResultProgramNeed` checks cannot add an edge or change the fixed grants.
+
 Certification closures are compiled into the reads. A read of a member covered by a `CompleteBundle` scope becomes a read of the whole bundle; a `StablePrefix` read extends to the prefix end; a producer with complete-coverage validators makes any nonempty read depend on every producer tile. A consumer with complete-coverage input validators receives all tiles of that input.
 
 `tile_extent` must be a positive power of two. The planner fails `ResourceExhausted` before publication when instructions exceed `maximum_instructions` or dependency edges exceed `maximum_dependency_edges`, and it applies static set and work bounds to every intermediate tile set. A very large logical tensor stays plannable through atomic cells, affine broadcast, or a sparse `output_requests` selection given to `plan`; filtering a fully expanded plan later does not shrink the planning cost.
@@ -152,12 +184,14 @@ Certification closures are compiled into the reads. A read of a member covered b
 ```mermaid
 stateDiagram-v2
     [*] --> Enter: pc = entry
-    Enter --> Instructions: charge 1 work, new activation, clear block values, assign parameters
+    Enter --> Call: charge 1 work, new activation, clear block values, assign parameters
+    Call --> Instructions: next call
     Instructions --> Instructions: execute next instruction
-    Instructions --> Certify: block instructions done
-    Certify --> Branch: conditional jump
-    Certify --> Jump: jump
-    Certify --> Return: return
+    Instructions --> Certify: current call instructions done
+    Certify --> Call: certify produced outputs before next call
+    Call --> Branch: no remaining calls, conditional jump
+    Call --> Jump: no remaining calls, jump
+    Call --> Return: no remaining calls, return
     Branch --> Capture: read one UInt8, choose one successor
     Jump --> Capture
     Capture --> Enter: capture all arguments, then pc = target
@@ -172,7 +206,9 @@ A Run executes one plan instruction at a time. On each block entry, the coordina
 
 For each instruction, the coordinator binds the precompiled grants, checks that every granted input sample is already certified, optionally reuses a cached result, starts the continuation if needed and polls it. A poll that returns `ResultProgramNeed` is only checked against the instruction's fixed grants: the check charges work and fails with a protocol error for any request outside the grants, but it never starts producers, narrows a grant, or turns a descriptor-only grant into payload access. A poll that returns `ResultPublication` is validated and stored for this tile. Helpers such as `to_whole` can therefore return ready on the first poll; consumers must not assume the first result is a Need.
 
-After all instructions of a block, the coordinator assembles and certifies each call that produced tiles in that block, including effectful calls that nobody reads. A conditional jump reads the condition sample and executes only the chosen successor; neither arm runs speculatively. An edge captures every argument value and its dependency evidence before any destination parameter changes, so swaps and self-loops see consistent sources. A return projects each named output to its requested samples, records synthetic return evidence, computes the optional result digest, and publishes the Results.
+After all instructions belonging to one call, including its multiple outputs and shared stages, the coordinator assembles and certifies each of that call's outputs that produced tiles. It completes this check before starting the next call in the block, including when the next call only reads descriptors or has effects. A failed upstream output therefore stops execution before later calls start. Shared-stage publication validation still runs when each stage commits. Calls with no produced output tiles require no assembled-output certification.
+
+After the block's calls, a conditional jump reads the condition sample and executes only the chosen successor; neither arm runs speculatively. An edge captures every argument value and its dependency evidence before any destination parameter changes, so swaps and self-loops see consistent sources. A return projects each named output to its requested samples, records synthetic return evidence, computes the optional result digest, and publishes the Results. Shared-stage state lasts until the next block activation; combining calls into a chain can extend that lifetime and does not by itself guarantee lower memory use.
 
 The coordinator checks cancellation, plan currentness, observer failure and the host stop signal whenever it charges work: at block entry, at every instruction, and inside operation work callbacks. It does not preempt in-process callbacks. Once a callback enters, the Run waits for it to retire before releasing borrowed phases and owners. A failed Run returns no partial output set. A failure in an instruction carries the producing call's `node_id`; an input validator failure keeps the external `input_id` (with `InvalidArgument`) or the upstream `node_id` (with `OperationFailed`), so invalid caller data and invalid operator output stay distinguishable.
 
@@ -180,7 +216,7 @@ The coordinator checks cancellation, plan currentness, observer failure and the 
 
 ## Compiler artifacts
 
-`CompilerArtifact` stores stages as editable UTF-8 text. `.psir` holds a semantic or optimized IR program; `.psxp` holds a complete execution plan. Both use text format version 2; version 1 files are rejected.
+`CompilerArtifact` stores stages as editable UTF-8 text. `.psir` holds a semantic or optimized IR program; `.psxp` holds a complete execution plan. Both use text format version 3. Earlier versions, including v2, are rejected and must be regenerated from the source workflow or IR using the current compiler.
 
 ```cpp
 namespace ps {
@@ -188,7 +224,7 @@ enum class ArtifactKind { SemanticIR, OptimizedIR, ExecutionPlan };
 struct ArtifactOperation { std::string key; std::string contract_digest; };
 struct ArtifactManifest {
   ArtifactKind kind;
-  std::uint32_t format_version = 2;
+  std::uint32_t format_version = 3;
   std::vector<ArtifactOperation> operations;
   std::vector<ResourceIdentity> resources;
 };
@@ -211,7 +247,9 @@ class CompilerArtifact {
 }  // namespace ps
 ```
 
-Both formats begin with a magic and version line (`psir 2` or `psxp 2`) and a parent digest. A `.psir` file then records `stage semantic` or `stage optimized`, the operation manifest, resources, input declarations and bindings, calls with their per-call resource uses, the return signature, the entry block and the blocks. A `.psxp` file additionally records the execution mode and `tile_extent`, each step's backend placement, the named output requests, and a `code` section with every block's instructions: publication target, published samples, fixed input and shared grants, block-local dependency ordinals and the `cpu_fallback` flag. Tile grids are not stored; import rebuilds them from the fixed schemas and `tile_extent`.
+Both formats begin with a magic and version line (`psir 3` or `psxp 3`). A `.psir` file records `stage semantic` or `stage optimized`, then a parent digest, the operation manifest, resources, input declarations and bindings, calls with their per-call resource uses, the return signature, the entry block, the mandatory `form` field and the blocks. `form dependency_paths` is accepted only for semantic IR; `form control_flow` is accepted for semantic IR, optimized IR and plans. Exporting and importing semantic dependency paths preserves their repeated references without running optimization. An optimized artifact or plan that declares dependency paths is rejected.
+
+A `.psxp` file records its parent digest, execution mode and `tile_extent`, the same control-flow declarations, each step's backend placement, the named output requests, and a `code` section with every block's instructions: publication target, published samples, fixed input and shared grants, block-local dependency ordinals and the `cpu_fallback` flag. Tile grids are not stored; import rebuilds them from the fixed schemas and `tile_extent`.
 
 The text accepts `;` line comments, escaped strings and explicitly typed parameters (`i64`, `f64`, `f64_bits`, `bool`, `string`). The writer emits finite normal doubles as round-trip decimal and NaN, infinity and subnormal values as `f64_bits` with sixteen hexadecimal digits. Parsing and writing use the classic locale with a default floating environment and round-to-nearest, so the result does not depend on the caller's locale or rounding mode.
 
@@ -296,9 +334,9 @@ A Result owns its static schema, descriptor coverage, numerical backing, and Obj
 | `OperationTraits::version` | 29 |
 | C Result operation ABI | 7 (`ps_result_operation_plugin_get_api_v7`) |
 | WorkflowDocument schema | 7 |
-| `.psir` / `.psxp` text format | 2 |
-| Semantic identity domain | `semantic-ssa-ir-v24` |
-| Optimizer identity domain | `optimizer-v6-ssa-noop` |
+| `.psir` / `.psxp` text format | 3 |
+| Semantic identity domain | `semantic-ssa-ir-v25` |
+| Optimizer identity domain | `optimizer-v7-dependency-paths` |
 | Physical plan identity domain | `static-tile-program-v26` |
 | Plan cache key domain | `plan-cache-key-v19` |
 | Saved operation contract domain | `artifact-static-operation-contract-v2` |
@@ -306,10 +344,12 @@ A Result owns its static schema, descriptor coverage, numerical backing, and Obj
 
 These version axes are independent. CPU parallel and tile services are version 2; native GPU services are version 1. `TileGrid::from_schema` returns `Result<TileGrid>`, and `OperationRegistry::prepare_operation` resolves the static operation contract. Semantic, optimized and plan digests include program identifiers, so renumbering calls or values changes them even when the computation is the same.
 
+The added program-form state changes public C++ IR object layouts; consumers must be rebuilt with matching headers and libraries. This change does not alter WorkflowDocument schema 7 or C Result operation ABI 7.
+
 ## Limitations and non-goals
 
 - The only frontend shipped in the kernel is the WorkflowDocument DAG. A Python or text-language frontend, a machine-code backend, JIT compilation and automatic operation-library discovery from artifacts do not exist; `bind_ir` and `.psir` import are the entry points such frontends would use.
-- The optimizer performs no transformation. It preserves every call, value and block.
+- Optimization currently resolves repeated dependency-path requests and removes empty chains. It retains every unique call, and preserves explicit ControlFlow input. It does not merge distinct calls by equal operation or parameters, remove unused call declarations, or fuse operations.
 - Tensor shapes, schemas and tile grids are fixed at compile time. Control flow selects among fixed-shape calls; it does not provide dynamic shapes.
 - One Run executes one plan instruction at a time and has no ready queue, producer task or work stealing. Parallelism comes from concurrent Runs and from CPU range, CPU tile and GPU work inside one operation callback; see [Parallel execution model](Parallel-Execution-Model.md).
 - Artifact digests are reproducibility aids, not signatures. Native operation modules execute as trusted in-process code; ABI validation does not sandbox them. The kernel does not own daemon IPC, durable jobs, process isolation, or recovery. A registered production image operation is usable through the unified Result image path only when its implementation provides the required typed Result contract; see [Image operations](Image-Operations.md).

@@ -13,7 +13,7 @@ WorkflowDocument -> GraphContext -> GraphSnapshot      IRProgram (other frontend
                          analyze -----------------> SemanticGraphIR <---- .psir
                                                           |
                                                           v
-                                          optimize (no-op) -> OptimizedGraphIR <---- .psir
+                                     optimize: resolve paths -> OptimizedGraphIR <---- .psir
                                                           |
                                                           v
                                    plan: static mapping, tile expansion,
@@ -67,9 +67,11 @@ class ExecutionContext {
 };
 ```
 
-These are abbreviated public signatures; unrelated members are omitted. Each stage returns a complete immutable value or a typed failure. `analyze` lowers the DAG into SSA IR with one call per basic block and explicit jumps; `bind_ir` accepts IR from any other frontend, including loops and conditional branches on one `UInt8` sample. `plan` calls each operation's static mapper, expands the reachable output tiles into deduplicated instructions with fixed read grants, and validates the result. Execution checks plan currentness and the frozen operation-registry identity before callbacks, then follows the instructions and CFG without mapping dependencies or reordering work. `analyze` accepts an immutable `ResourceSet` of content-addressed resources; each operation's preparation selects the identities it needs, such as an ICC profile named by an explicit color parameter. Result and Tensor carry structure and data only; domain interpretation is an explicit operation parameter, and the kernel performs no label matching on connections.
+These are abbreviated public signatures; unrelated members are omitted. Each stage returns a complete immutable value or a typed failure. `analyze` expands the DAG from named outputs into `DependencyPaths`, preserving shared ancestors in every referencing path with the same Call and SSA IDs. `optimize` keeps the first request for each call, removes empty chains and connects the retained chains as executable `ControlFlow`. For example, raw `ABG / AB / AC / DE / F` becomes `ABG / C / DE / F`. `bind_ir` also accepts explicit ControlFlow, including loops and conditional branches on one `UInt8` sample; that form is preserved by optimization.
 
-`CompilerArtifact` saves and loads every stage as editable text (`.psir` for IR, `.psxp` for plans). A loaded stage is independent of any `GraphContext`, requires the same frozen registry for execution, and is fully revalidated on import. See [Compiler and local execution](Compiler-and-Execution.md#compiler-artifacts).
+`plan` calls each operation's static mapper, expands the reachable output tiles into deduplicated instructions with fixed read grants, and validates the result. Its tile deduplication tracks work already scheduled in the plan independently of runtime caches. Execution checks plan currentness and the frozen operation-registry identity before callbacks, then follows the instructions and CFG. Each call's produced outputs are certified before the next call starts. `analyze` accepts an immutable `ResourceSet` of content-addressed resources; each operation's preparation selects the identities it needs, such as an ICC profile named by an explicit color parameter. Result and Tensor carry structure and data only; domain interpretation is an explicit operation parameter, and the kernel performs no label matching on connections.
+
+`CompilerArtifact` saves and loads every stage as editable format-v3 text (`.psir` for IR, `.psxp` for plans). Semantic IR may preserve dependency paths; optimized IR and plans require control flow. Earlier artifact versions are rejected. A loaded stage is independent of any `GraphContext`, requires the same frozen registry for execution, and is fully revalidated on import. See [Compiler and local execution](Compiler-and-Execution.md#compiler-artifacts).
 
 `CpuExact` is the default execution mode. `NativeGpu` permits placement only for operations that declare a native implementation and match the configured backend. CPU work uses the fixed context pool; native callbacks use the configured backend lane. Cancellation is cooperative, and callbacks already entered may finish before the Run returns.
 
@@ -77,12 +79,14 @@ These are abbreviated public signatures; unrelated members are omitted. Each sta
 
 - The kernel does not own daemon sessions, IPC, persistent jobs, or process lifecycle.
 - The kernel ships only the WorkflowDocument DAG frontend. There is no Python or text-language frontend, machine-code backend, JIT, or automatic library discovery from artifacts.
-- The optimizer is a no-op stage. Tensor shapes and tile grids are fixed at compile time; control flow does not provide dynamic shapes.
+- The optimizer resolves repeated dependency-path requests while retaining every unique call; it preserves explicit ControlFlow input. Tensor shapes and tile grids are fixed at compile time; control flow does not provide dynamic shapes.
 - Compiler artifacts are editable, versioned text files without signatures; their digests are reproducibility aids.
 - Native operation modules are trusted in-process code; ABI validation is not sandboxing.
 - GPU availability does not imply that every operation has a native implementation.
 - Results are in-memory owners, not durable identities or recovery records.
 
 ## 5. Consequences
+
+Complete dependency-path expansion can grow exponentially with DAG sharing. The frontend limits raw IR to 1,048,576 call occurrences and 65,536 chains, returning `ResourceExhausted` when expansion exceeds either bound. Fewer executable blocks reduce block transitions, but shared-stage state remains alive until the next block activation; block compaction alone does not guarantee lower memory use.
 
 Plans can be reused with new bindings, saved and reloaded, but runtime input addresses are not part of a plan. Planning cost and plan size grow with the number of reachable output tiles; `PlanningOptions` bounds instructions and dependency edges, and a very large logical output should be planned with a sparse request rather than filtered afterward. Queue admission and resource limits can reject a Run when configured bounds are exhausted; callers should use the returned status as the authoritative outcome. Retaining a Result retains its storage lease, so callers control how long that capacity remains charged. Native placement, compiled fallback, transfers, and optional completed-result retention can change the work and memory cost of a Run. Block-state cache-hit counts are implementation observations, not performance guarantees.

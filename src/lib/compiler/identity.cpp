@@ -183,7 +183,8 @@ void append_edge(DigestBuilder* d, const PlanEdge& edge) {
 
 std::string semantic_digest(const IRProgram& program) {
   DigestBuilder digest;
-  digest.text("semantic-ssa-ir-v24");
+  digest.text("semantic-ssa-ir-v25");
+  digest.integer(static_cast<std::uint64_t>(program.form));
   append_declarations(&digest, program.input_declarations);
   digest.integer(program.input_bindings.size());
   for (const auto& binding : program.input_bindings) {
@@ -245,7 +246,7 @@ std::string semantic_digest(const IRProgram& program) {
 std::string optimized_digest(const std::string& semantic,
                              const IRProgram& program) {
   DigestBuilder digest;
-  digest.text("optimizer-v6-ssa-noop");
+  digest.text("optimizer-v7-dependency-paths");
   digest.text(semantic);
   digest.text(semantic_digest(program));
   return digest.finish();

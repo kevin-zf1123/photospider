@@ -71,10 +71,20 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
       document.outputs.empty())
     return Result<SemanticGraphIR>(invalid("unsupported DAG version/counts"));
   IRProgram program;
+  program.form = IRForm::DependencyPaths;
   program.input_declarations = document.inputs;
-  program.entry = 1;
-  IRBlock entry;
-  entry.id = 1;
+  IRBlock chain;
+  auto finish_chain = [&]() {
+    if (chain.calls.empty())
+      return;
+    chain.id = program.blocks.size() + 1;
+    if (program.blocks.empty())
+      program.entry = chain.id;
+    else
+      program.blocks.back().terminator = IRJump{{chain.id, {}}};
+    program.blocks.push_back(std::move(chain));
+    chain = IRBlock{};
+  };
   IRValueId next_value = 1;
   std::map<std::uint64_t, IRValueId> external;
   auto declarations = document.inputs;
@@ -137,56 +147,53 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
     returned.values.push_back(found->second);
     roots.push_back(output.node_id);
   }
-  // Preserve every frontend call in raw IR. Starting at named results gives
-  // input-ordered depth-first lowering, while subsequent roots retain unused
-  // calls and effects without cloning shared invocations.
+  // Raw paths retain repeated requests for shared DAG invocations. Remaining
+  // roots also preserve calls and effects unreachable from named outputs.
+  const auto named_roots = roots.size();
   for (const auto& source : sources)
     roots.push_back(source.first);
   std::map<IRCallId, unsigned> color;
-  for (auto root : roots) {
-    if (color[root] == 2)
+  std::size_t occurrences = 0;
+  for (std::size_t ri = 0; ri < roots.size(); ++ri) {
+    const auto root = roots[ri];
+    if (ri >= named_roots && color[root] == 2)
       continue;
+    finish_chain();
     std::vector<std::pair<IRCallId, std::size_t>> stack{{root, 0}};
     color[root] = 1;
     while (!stack.empty()) {
       auto& frame = stack.back();
       const auto& inputs = sources.at(frame.first)->inputs;
       if (frame.second == inputs.size()) {
+        // A join starts its continuation only after every input branch has
+        // been emitted. Unary successors can stay in that continuation.
+        if (inputs.size() > 1)
+          finish_chain();
         color[frame.first] = 2;
-        entry.calls.push_back(frame.first);
+        if (++occurrences > 1048576 || program.blocks.size() >= 65536)
+          return Result<SemanticGraphIR>(
+              {ErrorCode::ResourceExhausted, "DAG dependency path limit"});
+        chain.calls.push_back(frame.first);
         stack.pop_back();
         continue;
       }
       const auto& input = inputs[frame.second++];
       const auto* upstream = std::get_if<WorkflowNodeOutput>(&input);
-      if (!upstream || color[upstream->source_node] == 2)
+      if (!upstream)
         continue;
       if (color[upstream->source_node] == 1)
         return Result<SemanticGraphIR>(
             {ErrorCode::Cycle, "DAG contains a cycle"});
+      // Descending after emitting calls switches to another dependency path.
+      // Shared ancestors are expanded again without cloning their call IDs.
+      finish_chain();
       color[upstream->source_node] = 1;
       stack.push_back({upstream->source_node, 0});
     }
   }
-  if (entry.calls.empty()) {
-    entry.terminator = std::move(returned);
-    program.blocks.push_back(std::move(entry));
-  } else {
-    // The DFS continuation after each upstream call is an explicit jump.
-    // A multi-input node is reached only after all of its input branches;
-    // shared frontend invocations keep one definition and one call site.
-    program.entry = entry.calls.front();
-    for (std::size_t i = 0; i < entry.calls.size(); ++i) {
-      IRBlock block;
-      block.id = entry.calls[i];
-      block.calls = {entry.calls[i]};
-      if (i + 1 < entry.calls.size())
-        block.terminator = IRJump{{entry.calls[i + 1], {}}};
-      else
-        block.terminator = std::move(returned);
-      program.blocks.push_back(std::move(block));
-    }
-  }
+  finish_chain();
+  // A validated named output always supplies at least one reachable call.
+  program.blocks.back().terminator = std::move(returned);
   auto bound = bind_ir(std::move(program), std::move(resources));
   if (!bound.ok())
     return bound;
@@ -207,6 +214,33 @@ Result<SemanticGraphIR> Compiler::bind_ir(IRProgram program,
       program.blocks.size() > 65536 ||
       program.input_declarations.size() > 4096 || program.returns.size() > 4096)
     return Result<SemanticGraphIR>(invalid("IR count bounds are invalid"));
+  if (program.form != IRForm::ControlFlow &&
+      program.form != IRForm::DependencyPaths)
+    return Result<SemanticGraphIR>(invalid("unknown IR form"));
+  const bool paths = program.form == IRForm::DependencyPaths;
+  std::size_t occurrences = 0;
+  for (std::size_t bi = 0; bi < program.blocks.size(); ++bi) {
+    const auto& block = program.blocks[bi];
+    if (block.calls.size() > 1048576 - occurrences)
+      return Result<SemanticGraphIR>(
+          {ErrorCode::ResourceExhausted, "IR call occurrence limit"});
+    occurrences += block.calls.size();
+    if (!paths)
+      continue;
+    if (!block.parameters.empty() || block.calls.empty() ||
+        program.entry != program.blocks.front().id)
+      return Result<SemanticGraphIR>(invalid("invalid dependency path block"));
+    if (bi + 1 < program.blocks.size()) {
+      const auto* jump = std::get_if<IRJump>(&block.terminator);
+      if (!jump || !jump->edge.arguments.empty() ||
+          jump->edge.target != program.blocks[bi + 1].id)
+        return Result<SemanticGraphIR>(
+            invalid("dependency paths require a linear continuation"));
+    } else if (!std::holds_alternative<IRReturn>(block.terminator)) {
+      return Result<SemanticGraphIR>(
+          invalid("dependency paths require return"));
+    }
+  }
   // Freeze mutable frontend owners before validating or preparing any call.
   std::map<const SchemaTemplate*, std::shared_ptr<const SchemaTemplate>> frozen;
   auto freeze = [&](std::shared_ptr<const SchemaTemplate>& schema) {
@@ -278,7 +312,9 @@ Result<SemanticGraphIR> Compiler::bind_ir(IRProgram program,
         return Result<SemanticGraphIR>(invalid("duplicate block parameter"));
     }
     for (std::size_t ci = 0; ci < block.calls.size(); ++ci)
-      if (!location.emplace(block.calls[ci], std::make_pair(bi, ci + 1)).second)
+      if (!location.emplace(block.calls[ci], std::make_pair(bi, ci + 1))
+               .second &&
+          !paths)
         return Result<SemanticGraphIR>(
             invalid("call belongs to multiple blocks"));
   }
@@ -391,6 +427,8 @@ Result<SemanticGraphIR> Compiler::bind_ir(IRProgram program,
     }
   }
   auto dominates = [&](std::size_t a, std::size_t b) {
+    if (paths)
+      return a <= b;  // Raw paths have a validated linear block order.
     while (b != a && b != entry)
       b = idom[b];
     return b == a;
@@ -537,6 +575,7 @@ Result<SemanticGraphIR> Compiler::bind_ir(IRProgram program,
   semantic.input_declarations_ = std::move(program.input_declarations);
   semantic.input_bindings_ = std::move(program.input_bindings);
   semantic.blocks_ = std::move(program.blocks);
+  semantic.form_ = program.form;
   semantic.entry_ = program.entry;
   semantic.outputs_ = std::move(program.returns);
   semantic.operation_registry_ = operations_;
@@ -558,8 +597,27 @@ Result<OptimizedGraphIR> Compiler::optimize(
   optimized.revision_ = semantic.revision_;
   optimized.nodes_ = semantic.nodes_;
   optimized.outputs_ = semantic.outputs_;
-  optimized.blocks_ = semantic.blocks_;
   optimized.entry_ = semantic.entry_;
+  if (semantic.form_ == IRForm::DependencyPaths) {
+    std::set<IRCallId> emitted;
+    for (const auto& path : semantic.blocks_) {
+      IRBlock block;
+      block.id = path.id;
+      for (auto call : path.calls)
+        if (emitted.insert(call).second)
+          block.calls.push_back(call);
+      if (block.calls.empty())
+        continue;
+      if (optimized.blocks_.empty())
+        optimized.entry_ = block.id;
+      else
+        optimized.blocks_.back().terminator = IRJump{{block.id, {}}};
+      optimized.blocks_.push_back(std::move(block));
+    }
+    optimized.blocks_.back().terminator = semantic.blocks_.back().terminator;
+  } else {
+    optimized.blocks_ = semantic.blocks_;
+  }
   optimized.input_bindings_ = semantic.input_bindings_;
   optimized.input_declarations_ = semantic.input_declarations_;
   optimized.resources_ = semantic.resources_;

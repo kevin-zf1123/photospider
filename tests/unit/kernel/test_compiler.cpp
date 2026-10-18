@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <map>
@@ -6,9 +7,234 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/compiler/compiler.hpp"
+#include "photospider/compiler/artifact.hpp"
 #include "support/kernel_registry_fixture.hpp"
 #include "support/test_support.hpp"
+
+namespace {
+template <class IR>
+int check_chains(const IR& semantic,
+                 const std::vector<std::vector<ps::IRCallId>>& expected) {
+  const auto& blocks = semantic.blocks();
+  PS_CHECK(blocks.size() == expected.size());
+  PS_CHECK(semantic.entry() == blocks.front().id);
+  for (std::size_t i = 0; i < blocks.size(); ++i) {
+    PS_CHECK(blocks[i].calls == expected[i]);
+    PS_CHECK(blocks[i].parameters.empty());
+    if (i + 1 < blocks.size()) {
+      const auto* jump = std::get_if<ps::IRJump>(&blocks[i].terminator);
+      PS_CHECK(jump && jump->edge.target == blocks[i + 1].id);
+      PS_CHECK(jump->edge.arguments.empty());
+    } else {
+      PS_CHECK(std::holds_alternative<ps::IRReturn>(blocks[i].terminator));
+    }
+  }
+  return 0;
+}
+
+int dependency_chains() {
+  using ps::WorkflowNodeOutput;
+  auto operations = ps::test::kernel_registry();
+  ps::Compiler compiler(operations);
+  // IDs deliberately disagree with dependency order: A=70, B=60, ... G=10.
+  ps::WorkflowDocument document;
+  document.nodes = {
+      {70, "core.constant", {}, {{"value", 2.0}}},
+      {60, "core.identity", {WorkflowNodeOutput{70, "value"}}, {}},
+      {50, "core.identity", {WorkflowNodeOutput{70, "value"}}, {}},
+      {40,
+       "math.add",
+       {WorkflowNodeOutput{60, "value"}, WorkflowNodeOutput{50, "value"}},
+       {}},
+      {30, "core.identity", {WorkflowNodeOutput{40, "value"}}, {}},
+      {20,
+       "math.add",
+       {WorkflowNodeOutput{10, "value"}, WorkflowNodeOutput{30, "value"}},
+       {}},
+      {10, "core.identity", {WorkflowNodeOutput{60, "value"}}, {}}};
+  document.outputs = {{"result", 20, "value"}};
+  ps::GraphContext graph(document);
+  auto compiled = compiler.compile(graph);
+  PS_REQUIRE_OK(compiled);
+  PS_CHECK(check_chains(compiled.value().semantic,
+                        {{70, 60, 10}, {70, 60}, {70, 50}, {40, 30}, {20}}) ==
+           0);
+  PS_CHECK(compiled.value().semantic.program().form ==
+           ps::IRForm::DependencyPaths);
+  PS_CHECK(compiled.value().optimized.program().form ==
+           ps::IRForm::ControlFlow);
+  PS_CHECK(check_chains(compiled.value().optimized,
+                        {{70, 60, 10}, {50}, {40, 30}, {20}}) == 0);
+  PS_CHECK(compiled.value().semantic.nodes().size() == 7);
+  std::vector<ps::IRCallId> executed;
+  for (const auto& block : compiled.value().plan.blocks())
+    for (const auto& instruction : block.instructions)
+      executed.push_back(
+          compiled.value().plan.steps()[instruction.step_index].node_id);
+  PS_CHECK(executed == std::vector<ps::IRCallId>({70, 60, 10, 50, 40, 30, 20}));
+  ps::ExecutionContext execution(operations);
+  auto result = execution.execute(compiled.value().plan);
+  PS_REQUIRE_OK(result);
+  PS_CHECK(ps::test::named_scalar(result.value(), "result") == 6.0);
+  auto encoded = ps::CompilerArtifact::export_ir(compiled.value().semantic);
+  PS_REQUIRE_OK(encoded);
+  auto loaded = ps::CompilerArtifact::import_ir(compiler, encoded.value());
+  PS_REQUIRE_OK(loaded);
+  const auto& raw = std::get<ps::SemanticGraphIR>(loaded.value());
+  PS_CHECK(raw.digest().value == compiled.value().semantic.digest().value);
+  auto loaded_optimized = compiler.optimize(raw);
+  PS_REQUIRE_OK(loaded_optimized);
+  PS_CHECK(loaded_optimized.value().digest().value ==
+           compiled.value().optimized.digest().value);
+  auto encoded_again = ps::CompilerArtifact::export_ir(raw);
+  PS_REQUIRE_OK(encoded_again);
+  PS_CHECK(encoded_again.value() == encoded.value());
+  auto invalid_form = raw.program();
+  invalid_form.form = ps::IRForm::ControlFlow;
+  PS_CHECK(!compiler.bind_ir(invalid_form).ok());
+  invalid_form = raw.program();
+  invalid_form.blocks.front().terminator = ps::IRJump{{invalid_form.entry, {}}};
+  PS_CHECK(!compiler.bind_ir(invalid_form).ok());
+  auto wrong_stage = encoded.value();
+  wrong_stage.replace(wrong_stage.find("stage semantic"), 14,
+                      "stage optimized");
+  PS_CHECK(!ps::CompilerArtifact::import_ir(compiler, wrong_stage).ok());
+  invalid_form = raw.program();
+  invalid_form.blocks.front().calls.assign(1048577, 70);
+  PS_CHECK(compiler.bind_ir(invalid_form).status().code ==
+           ps::ErrorCode::ResourceExhausted);
+
+  // Document storage order cannot change traversal or compiled identities.
+  std::reverse(document.nodes.begin(), document.nodes.end());
+  ps::GraphContext reordered(document);
+  auto same = compiler.compile(reordered);
+  PS_REQUIRE_OK(same);
+  PS_CHECK(same.value().semantic.digest().value ==
+           compiled.value().semantic.digest().value);
+  PS_CHECK(same.value().plan.digest().value ==
+           compiled.value().plan.digest().value);
+
+  // Changing input order selects E before G, retaining repeated raw prefixes.
+  std::swap(document.nodes[1].inputs[0], document.nodes[1].inputs[1]);
+  ps::GraphContext e_first(document);
+  auto alternative = compiler.compile(e_first);
+  PS_REQUIRE_OK(alternative);
+  PS_CHECK(check_chains(alternative.value().semantic,
+                        {{70, 60}, {70, 50}, {40, 30}, {70, 60, 10}, {20}}) ==
+           0);
+  PS_CHECK(check_chains(alternative.value().optimized,
+                        {{70, 60}, {50}, {40, 30}, {10}, {20}}) == 0);
+  auto other_result = execution.execute(alternative.value().plan);
+  PS_REQUIRE_OK(other_result);
+  PS_CHECK(ps::test::named_scalar(other_result.value(), "result") == 6.0);
+
+  // Named roots are visited by name, retaining their shared ancestor paths.
+  // The disconnected call stays in raw IR and is not demanded by execution.
+  document.outputs = {{"z", 20, "value"}, {"a", 10, "value"}};
+  document.nodes.push_back({80, "core.constant", {}, {{"value", 9.0}}});
+  ps::GraphContext multiple(document);
+  auto roots = compiler.compile(multiple);
+  PS_REQUIRE_OK(roots);
+  PS_CHECK(check_chains(roots.value().semantic, {{70, 60, 10},
+                                                 {70, 60},
+                                                 {70, 50},
+                                                 {40, 30},
+                                                 {70, 60, 10},
+                                                 {20},
+                                                 {80}}) == 0);
+  PS_CHECK(check_chains(roots.value().optimized,
+                        {{70, 60, 10}, {50}, {40, 30}, {20}, {80}}) == 0);
+  auto named = execution.execute(roots.value().plan);
+  PS_REQUIRE_OK(named);
+  PS_CHECK(ps::test::named_scalar(named.value(), "a") == 2.0);
+  PS_CHECK(ps::test::named_scalar(named.value(), "z") == 6.0);
+  std::reverse(document.outputs.begin(), document.outputs.end());
+  ps::GraphContext reordered_roots(document);
+  auto same_roots = compiler.analyze(reordered_roots.snapshot());
+  PS_REQUIRE_OK(same_roots);
+  PS_CHECK(same_roots.value().digest().value ==
+           roots.value().semantic.digest().value);
+
+  // An input used twice is still one producer and a separate join continuation.
+  ps::WorkflowDocument repeated;
+  repeated.nodes = {
+      {1, "core.constant", {}, {{"value", 3.0}}},
+      {2,
+       "math.add",
+       {WorkflowNodeOutput{1, "value"}, WorkflowNodeOutput{1, "value"}},
+       {}},
+      {3, "core.identity", {WorkflowNodeOutput{2, "value"}}, {}}};
+  repeated.outputs = {{"result", 3, "value"}};
+  ps::GraphContext repeated_graph(repeated);
+  auto shared = compiler.compile(repeated_graph);
+  PS_REQUIRE_OK(shared);
+  PS_CHECK(check_chains(shared.value().semantic, {{1}, {1}, {2, 3}}) == 0);
+  PS_CHECK(check_chains(shared.value().optimized, {{1}, {2, 3}}) == 0);
+  auto doubled = execution.execute(shared.value().plan);
+  PS_REQUIRE_OK(doubled);
+  PS_CHECK(ps::test::named_scalar(doubled.value(), "result") == 6.0);
+
+  repeated.nodes.resize(1);
+  repeated.outputs = {{"a", 1, "value"}, {"b", 1, "value"}};
+  ps::GraphContext duplicate_roots(repeated);
+  auto aliases = compiler.compile(duplicate_roots);
+  PS_REQUIRE_OK(aliases);
+  PS_CHECK(check_chains(aliases.value().semantic, {{1}, {1}}) == 0);
+  PS_CHECK(check_chains(aliases.value().optimized, {{1}}) == 0);
+  auto alias_results = execution.execute(aliases.value().plan);
+  PS_REQUIRE_OK(alias_results);
+  PS_CHECK(ps::test::named_scalar(alias_results.value(), "a") == 3.0);
+  PS_CHECK(ps::test::named_scalar(alias_results.value(), "b") == 3.0);
+
+  repeated.inputs = {multi_result::declaration(1, "input")};
+  repeated.nodes = {
+      {1, "core.identity", {ps::WorkflowInputReference{1}}, {}},
+      {2,
+       "math.add",
+       {WorkflowNodeOutput{1, "value"}, ps::WorkflowInputReference{1}},
+       {}}};
+  repeated.outputs = {{"result", 2, "value"}};
+  ps::GraphContext external(repeated);
+  auto bound_input = compiler.compile(external);
+  PS_REQUIRE_OK(bound_input);
+  PS_CHECK(check_chains(bound_input.value().semantic, {{1}, {2}}) == 0);
+  auto external_result = execution.execute(
+      bound_input.value().plan,
+      {{multi_result::binding(multi_result::take(execution.resource_budget()),
+                              "input", 4.0)}});
+  PS_REQUIRE_OK(external_result);
+  PS_CHECK(ps::test::named_scalar(external_result.value(), "result") == 8.0);
+
+  // A long unary path forms one block and uses the iterative traversal stack.
+  ps::WorkflowDocument linear;
+  linear.nodes = {{1, "core.constant", {}, {{"value", 1.0}}}};
+  std::vector<ps::IRCallId> path{1};
+  for (ps::IRCallId id = 2; id <= 512; ++id) {
+    linear.nodes.push_back(
+        {id, "core.identity", {WorkflowNodeOutput{id - 1, "value"}}, {}});
+    path.push_back(id);
+  }
+  linear.outputs = {{"result", 512, "value"}};
+  ps::GraphContext linear_graph(linear);
+  auto line = compiler.analyze(linear_graph.snapshot());
+  PS_REQUIRE_OK(line);
+  PS_CHECK(check_chains(line.value(), {path}) == 0);
+  // Full tree expansion is bounded even when a small DAG has exponential paths.
+  linear.nodes.resize(1);
+  for (ps::IRCallId id = 2; id <= 18; ++id)
+    linear.nodes.push_back({id,
+                            "math.add",
+                            {WorkflowNodeOutput{id - 1, "value"},
+                             WorkflowNodeOutput{id - 1, "value"}},
+                            {}});
+  linear.outputs = {{"result", 18, "value"}};
+  ps::GraphContext expansive(linear);
+  auto limited = compiler.analyze(expansive.snapshot());
+  PS_CHECK(!limited.ok() &&
+           limited.status().code == ps::ErrorCode::ResourceExhausted);
+  return 0;
+}
+}  // namespace
 
 /**
  * @brief Exercises typed stage identity, exact parameter bits, validation,
@@ -18,6 +244,7 @@
  * @note Behavioral failures otherwise return nonzero through `PS_CHECK`.
  */
 int main() {
+  PS_CHECK(dependency_chains() == 0);
   ps::GraphSnapshot retained_revision;
   {
     ps::GraphContext revision_owner(ps::test::addition_document(1.0, 2.0));

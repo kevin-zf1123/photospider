@@ -29,6 +29,7 @@ struct ArtifactData final {
   std::vector<IRInputBinding> input_bindings;
   std::vector<IRBlock> blocks;
   IRBlockId entry = 0;
+  IRForm form = IRForm::ControlFlow;
   std::map<IRBlockId, std::vector<PlanTileInstruction>> code;
   std::vector<PlanRecord> steps;
   std::map<std::string, std::size_t> plan_outputs;

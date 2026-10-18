@@ -32,6 +32,92 @@ struct Producer {
         ResultPublication{take(builder.seal()), true});
   }
 };
+int chain_validation_order(bool reject, bool shared = false) {
+  auto registry = std::make_shared<OperationRegistry>();
+  unsigned validations = 0, consumer_starts = 0, effect_starts = 0;
+  ValidationDefinition validator;
+  validator.identity = {"test.chain", 1, "chain/1"};
+  validator.requires_complete = true;
+  validator.prepare = [](const ValidationPreparation&) {
+    return Result<std::shared_ptr<const void>>(std::shared_ptr<const void>{});
+  };
+  validator.validate = [&](const void*, const ValidationContext&) {
+    ++validations;
+    return reject ? Status{ErrorCode::OperationFailed, "rejected upstream"}
+                  : Status::success();
+  };
+  check(registry->register_validator(std::move(validator)));
+  OperationDefinition producer;
+  producer.key = "test.chain_source";
+  producer.traits.workspace_bytes = 8192;
+  producer.traits.deterministic = false;
+  producer.traits.side_effect_free = false;
+  producer.traits.cacheable = false;
+  producer.traits.outputs = {multi_result::output("value")};
+  producer.traits.outputs[0].output_schema.validators = {
+      {"test.chain", 1, "chain/1"}};
+  // Keep the producer executable even though its consumer only reads schema.
+  OperationSharedStage stage;
+  stage.key = "effect";
+  stage.result_schema = multi_result::schema();
+  stage.mandatory = true;
+  stage.continuation_bytes = sizeof(multi_result::Program);
+  stage.workspace_bytes = 8192;
+  stage.maximum_dependency_stages = 1;
+  stage.maximum_work = 100000;
+  stage.maximum_output_payload_bytes = sizeof(double);
+  producer.traits.shared_stages = {stage};
+  producer.start_result = [&](const auto& query, const auto& allocator) {
+    if (query.shared_stage != UINT32_MAX)
+      ++effect_starts;
+    return ResultContinuation::make<multi_result::Program>(allocator, -1, 1.0);
+  };
+  check(registry->register_operation(std::move(producer)));
+  OperationDefinition consumer;
+  consumer.key = "test.chain_consumer";
+  consumer.traits.workspace_bytes = 8192;
+  consumer.traits.input_count = shared ? 2 : 1;
+  consumer.traits.input_schema.resize(consumer.traits.input_count);
+  for (auto& port : consumer.traits.input_schema)
+    port.tensor_key = "number";
+  consumer.traits.outputs = {multi_result::output("value")};
+  consumer.map_dependencies = [](const auto&) {
+    ResultStaticMapping mapping;
+    mapping.inputs.push_back({0, 0, true, {}});
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
+  consumer.start_result = [&](const auto&, const auto& allocator) {
+    ++consumer_starts;
+    return ResultContinuation::make<multi_result::Program>(allocator, -1, 2.0);
+  };
+  check(registry->register_operation(std::move(consumer)));
+  check(registry->freeze());
+  WorkflowDocument document;
+  document.nodes = {
+      {1, "test.chain_source", {}, {}},
+      {2, "test.chain_consumer", {WorkflowNodeOutput{1, "value"}}, {}}};
+  document.outputs = {{"value", 2, "value"}};
+  if (shared)
+    document.nodes.back().inputs.push_back(WorkflowNodeOutput{1, "value"});
+  GraphContext graph(document);
+  auto compiled = take(Compiler(registry).compile(graph));
+  PS_CHECK(compiled.semantic.blocks().size() == (shared ? 3 : 1));
+  ExecutionContext execution(registry);
+  auto result = execution.execute(compiled.plan);
+  if (reject) {
+    PS_CHECK(!result.ok() && result.status().message == "rejected upstream");
+    PS_CHECK(result.status().detail.node_id == 1);
+    PS_CHECK(consumer_starts == 0);
+  } else {
+    PS_REQUIRE_OK(result);
+    PS_CHECK(consumer_starts == 1);
+    PS_CHECK(multi_result::number(result.value().results.at("value")) == 2.0);
+  }
+  PS_CHECK(validations == 1);
+  PS_CHECK(effect_starts == 1);
+  return 0;
+}
+
 int complete_tiles(unsigned aliases = 0, bool runtime_request = false) {
   auto registry = std::make_shared<OperationRegistry>();
   std::atomic<unsigned> calls{0}, starts{0};
@@ -302,7 +388,9 @@ int duplicate_input_scope(bool combined, bool incomplete, bool distinct) {
 
 }  // namespace
 int main() {
-  return duplicate_input_scope(false, false, false) ||
+  return chain_validation_order(false) || chain_validation_order(true) ||
+         chain_validation_order(false, true) ||
+         duplicate_input_scope(false, false, false) ||
          duplicate_input_scope(true, false, false) ||
          duplicate_input_scope(false, true, false) ||
          duplicate_input_scope(false, false, true) || complete_tiles() ||

@@ -8,8 +8,8 @@ The kernel keeps separate identities for compiler stages, plan cache keys, immut
 
 | Identity | Domain tag | Contents | Changes when |
 | --- | --- | --- | --- |
-| Semantic IR digest | `semantic-ssa-ir-v24` | Canonical SSA program: declarations, calls, values, blocks, terminators, parameters, traits, resource identities, schemas | Any program change, including renumbered calls or values |
-| Optimized IR digest | `optimizer-v6-ssa-noop` | Parent semantic digest and the optimized program | Same as above |
+| Semantic IR digest | `semantic-ssa-ir-v25` | Program form and canonical SSA program: declarations, calls, values, blocks, terminators, parameters, traits, resource identities, schemas | Any program change, including renumbered calls or values |
+| Optimized IR digest | `optimizer-v7-dependency-paths` | Parent semantic digest and the optimized program | Same as above |
 | Physical plan digest | `static-tile-program-v26` | Parent optimized digest, execution mode, tile extent, steps and placements, output requests, and every block's instructions, grants, dependencies and terminator | Any instruction, grant or request change, or renumbering |
 | Plan cache key | `plan-cache-key-v19` | Domain-separated wrapper of the plan digest | Same as the plan digest |
 | Step structured template | `photospider.dependency-static.v4` | Tile extent, execution mode, backend, operation key, output index, traits, resource identities, parameters, input schemas | Contract, parameter, resource or input-schema change; not renumbering |

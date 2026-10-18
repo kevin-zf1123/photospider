@@ -26,6 +26,7 @@ IRProgram program(const ArtifactData& data) {
   result.input_bindings = data.input_bindings;
   result.blocks = data.blocks;
   result.entry = data.entry;
+  result.form = data.form;
   result.returns = data.ir_outputs;
   for (const auto& record : data.nodes)
     result.calls.push_back(record.node);
@@ -36,6 +37,7 @@ void store_program(ArtifactData* data, const IRProgram& source) {
   data->input_bindings = source.input_bindings;
   data->blocks = source.blocks;
   data->entry = source.entry;
+  data->form = source.form;
   data->ir_outputs = source.returns;
   for (const auto& node : source.calls)
     data->nodes.push_back({node, node.prepared->resource_ids()});

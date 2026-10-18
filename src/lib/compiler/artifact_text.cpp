@@ -81,7 +81,7 @@ class Reader final {
     const bool physical = take("psxp");
     if (!physical)
       expect("psir");
-    if (number() != 2)
+    if (number() != 3)
       fail("unsupported compiler artifact version");
     if (physical) {
       data.manifest.kind = ArtifactKind::ExecutionPlan;
@@ -468,11 +468,11 @@ class Reader final {
     }
     return result;
   }
-  std::vector<std::uint64_t> ids() {
+  std::vector<std::uint64_t> ids(std::size_t maximum = kMaximumPlanSteps) {
     expect("[");
     std::vector<std::uint64_t> result;
     while (!take("]")) {
-      bound(result.size(), kMaximumPlanSteps, "identifier list");
+      bound(result.size(), maximum, "identifier list");
       result.push_back(number());
     }
     return result;
@@ -594,8 +594,17 @@ class Reader final {
     }
     expect("entry");
     data->entry = number();
+    expect("form");
+    if (take("dependency_paths")) {
+      if (data->manifest.kind != ArtifactKind::SemanticIR)
+        fail("dependency paths are only valid in semantic IR");
+      data->form = IRForm::DependencyPaths;
+    } else {
+      expect("control_flow");
+    }
     expect("blocks");
     expect("{");
+    std::size_t occurrences = 0;
     while (!take("}")) {
       bound(data->blocks.size(), 65536, "IR blocks");
       expect("block");
@@ -611,7 +620,10 @@ class Reader final {
         block.parameters.push_back({value, schema()});
       }
       expect("calls");
-      block.calls = ids();
+      block.calls = ids(1048576 - occurrences);
+      if (block.calls.size() > 1048576 - occurrences)
+        fail("IR call occurrence limit");
+      occurrences += block.calls.size();
       if (take("jump")) {
         block.terminator = IRJump{edge()};
       } else if (take("branch")) {
@@ -966,9 +978,9 @@ std::string write_data(const ArtifactData& data) {
   Writer w;
   const bool physical = data.manifest.kind == ArtifactKind::ExecutionPlan;
   if (physical) {
-    w.text("psxp 2\n");
+    w.text("psxp 3\n");
   } else {
-    w.text("psir 2\nstage ")
+    w.text("psir 3\nstage ")
         .text(data.manifest.kind == ArtifactKind::SemanticIR ? "semantic\n"
                                                              : "optimized\n");
   }
@@ -1051,7 +1063,10 @@ std::string write_data(const ArtifactData& data) {
     write_schema(&w, *output.result_schema, "  ");
     w.text("\n");
   }
-  w.text("}\nentry ").number(data.entry).text("\nblocks {\n");
+  w.text("}\nentry ").number(data.entry).text("\nform ");
+  w.text(data.form == IRForm::DependencyPaths ? "dependency_paths"
+                                              : "control_flow");
+  w.text("\nblocks {\n");
   for (const auto& block : data.blocks) {
     w.text("  block ").number(block.id).text(" {\n    parameters {\n");
     for (const auto& parameter : block.parameters) {

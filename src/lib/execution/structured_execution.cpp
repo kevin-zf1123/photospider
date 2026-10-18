@@ -141,21 +141,33 @@ class StructuredExecution final {
       }
       incoming.clear();
       incoming_records.clear();
-      for (const auto& instruction : block.instructions) {
-        status = execute(instruction);
-        if (!status.ok())
-          return Result<ExecutionResult>(
-              call_failure(std::move(status), instruction.step_index));
-      }
-      // Certification belongs to the executed call even when no later call
-      // reads its output (in particular, effectful calls).
-      for (auto step : block.calls)
-        if (!values_[step].tiles.empty()) {
-          auto certified = value(PlanStepInput{step});
-          if (!certified.ok())
+      std::size_t instruction_index = 0, call_index = 0;
+      while (call_index < block.calls.size()) {
+        const auto call = plan_.steps()[block.calls[call_index]].node_id;
+        // Plan validation groups all outputs and shared stages by call. Run
+        // the entire group before certifying any of its assembled outputs.
+        while (instruction_index < block.instructions.size() &&
+               plan_.steps()[block.instructions[instruction_index].step_index]
+                       .node_id == call) {
+          const auto& instruction = block.instructions[instruction_index++];
+          status = execute(instruction);
+          if (!status.ok())
             return Result<ExecutionResult>(
-                call_failure(certified.status(), step));
+                call_failure(std::move(status), instruction.step_index));
         }
+        // Reject an invalid upstream result before starting the next call,
+        // including consumers that only read descriptors and effectful calls.
+        do {
+          const auto step = block.calls[call_index++];
+          if (!values_[step].tiles.empty()) {
+            auto certified = value(PlanStepInput{step});
+            if (!certified.ok())
+              return Result<ExecutionResult>(
+                  call_failure(certified.status(), step));
+          }
+        } while (call_index < block.calls.size() &&
+                 plan_.steps()[block.calls[call_index]].node_id == call);
+      }
       const PlanEdge* next = nullptr;
       if (const auto* jump = std::get_if<PlanJump>(&block.terminator)) {
         next = &jump->edge;

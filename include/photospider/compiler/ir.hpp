@@ -15,6 +15,14 @@ using IRValueId = std::uint64_t;
 using IRBlockId = std::uint64_t;
 using IRCallId = std::uint64_t;
 
+/** @brief Interpretation of the program's block call lists.
+ * DependencyPaths is a raw, linear sequence of dependency paths. Repeated
+ * call IDs request the same DAG invocation and SSA results, including effects.
+ * Optimization resolves these requests to one call site per ID in ControlFlow.
+ * ControlFlow supports branches and loops; each call has exactly one site.
+ */
+enum class IRForm { ControlFlow, DependencyPaths };
+
 /** @brief One SSA Result definition. Zero is never a valid value identifier.
  * Call results may omit the expected schema before binding. Block parameters
  * require a validated fixed schema, including on loop backedges.
@@ -26,7 +34,8 @@ struct PHOTOSPIDER_API SemanticOutput final {
 };
 
 /** @brief A static operation call, independent of any frontend graph.
- * The block's call sequence defines execution order. This table's order only
+ * ControlFlow block calls define execution order; DependencyPaths block calls
+ * are repeated requests resolved by optimization. This table's order only
  * defines metadata preparation order. Binding replaces caller-supplied traits
  * and preparation with registry-owned contracts; each call is prepared once.
  */
@@ -76,7 +85,9 @@ using IRTerminator = std::variant<IRJump, IRConditionalJump, IRReturn>;
 
 /** @brief A straight-line sequence ending in exactly one terminator.
  * All blocks must be reachable from entry. Loops are permitted; carried values
- * use typed block parameters. A call belongs to exactly one block.
+ * use typed block parameters. In ControlFlow a call belongs to exactly one
+ * block. DependencyPaths permits repeated call IDs in linear, parameterless
+ * blocks; these are dependency requests, not repeated operation invocations.
  */
 struct PHOTOSPIDER_API IRBlock final {
   IRBlockId id = 0;
@@ -104,5 +115,6 @@ struct PHOTOSPIDER_API IRProgram final {
   std::vector<IRBlock> blocks;
   IRBlockId entry = 0;
   std::vector<IRReturnDeclaration> returns;
+  IRForm form = IRForm::ControlFlow;
 };
 }  // namespace ps

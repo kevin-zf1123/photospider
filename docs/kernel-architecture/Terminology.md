@@ -5,20 +5,23 @@
 | `WorkflowDocument` | Caller-owned source graph used as compiler input. |
 | `GraphContext` | Owner of a copied workflow document and its current revision. |
 | `GraphSnapshot` | Coherent source and revision capture used by compilation. |
-| `IRProgram` | Editable frontend-neutral SSA program: input declarations and bindings, calls, blocks, an entry block and an ordered return signature. Accepted by `Compiler::bind_ir`. |
-| `SemanticGraphIR` | Immutable, validated and prepared SSA IR produced by `analyze`, `bind_ir` or `.psir` import. |
-| `OptimizedGraphIR` | Separately identified stage after the optimizer; the current optimizer is a no-op and copies every call, value and block. |
+| `IRProgram` | Editable frontend-neutral SSA program: input declarations and bindings, unique call declarations, blocks, an entry block, an ordered return signature and an `IRForm`. Accepted by `Compiler::bind_ir`. |
+| `SemanticGraphIR` | Immutable, validated and prepared IR produced by `analyze`, `bind_ir` or `.psir` import. `form()` distinguishes raw dependency paths from executable control flow. |
+| `OptimizedGraphIR` | Separately identified ControlFlow stage. Optimization resolves repeated dependency-path requests, removes empty chains and reconnects blocks; existing ControlFlow input is preserved. |
+| `IRForm::DependencyPaths` | Raw IR form retaining repeated Call ID requests in ordered paths. The same ID denotes one invocation and its SSA results, including effects. `analyze` emits complete DAG path expansion; optimization removes duplicate requests. |
+| `IRForm::ControlFlow` | Executable SSA control flow with one static site per call. Branches and loops use explicit terminators and block parameters. |
+| dependency chain | A raw path segment split at upstream branch switches, multi-input joins and new roots. Shared ancestors may occur in several chains; chain boundaries do not require graph nodes to have no fan-out. |
 | SSA value | `IRValueId`-named Result defined exactly once by a call output, a block parameter or an external input binding. Every use must be dominated by its definition. |
-| basic block / CFG | `IRBlock`: an ordered call list ending in one terminator (`IRJump`, `IRConditionalJump` or `IRReturn`). The blocks and edges form the control-flow graph; the DAG frontend emits one call per block linked by jumps. |
+| basic block / CFG | `IRBlock`: an ordered call list ending in one terminator. In ControlFlow, blocks and edges form the executable CFG and each call has one site. In DependencyPaths, blocks form a linear, parameterless sequence of request chains with a final return. |
 | block parameter | Typed value assigned when an edge enters a block; all arguments of one edge are captured before any parameter changes. Loops carry values through block parameters. |
 | conditional jump | Branch on a Result with exactly one `UInt8` sample: zero selects `if_false`, any other value `if_true`; only the chosen successor runs. |
 | `ExecutionPlan` | Validated local program: `steps()` declares every call output with its backend and fixed grids, and `blocks()` holds the tile instructions and terminators that execution follows. |
 | plan step | `PlanStep`: declaration of one call output. A step can have no instructions; the number of steps is not an execution count. |
 | tile instruction | `PlanTileInstruction`: one output tile or shared-stage target with its publication target, fixed input and shared grants, block-local dependencies and compiled CPU fallback flag. |
-| static mapping | `OperationDefinition::map_dependencies` (C: `map_dependencies` hook): pure compile-time callback that returns the tiles one target may read. The default `complete_input_dependencies` grants every projected input tile. |
+| static mapping | `OperationDefinition::map_dependencies` (C: `map_dependencies` hook): pure compile-time callback that returns the tiles one target may read. `complete_input_dependencies` covers projected ordinary inputs; shared-stage reads require explicit mapping entries. |
 | fixed grant | `PlanTensorRead` or `PlanSharedRead` stored in an instruction; the only data that instruction may read at run time. A descriptor-only grant exposes schema facts and no payload. |
 | synthetic return record | Dependency record of a named return at index `steps().size()` plus the return ordinal, returned by `ExecutionPlan::output(name).record_index`. |
-| compiler artifact | Editable versioned text file written and read by `CompilerArtifact`: `.psir` for semantic or optimized IR, `.psxp` for an execution plan. Format version 2. |
+| compiler artifact | Editable versioned text written and read by `CompilerArtifact`: `.psir` for semantic or optimized IR, `.psxp` for an execution plan. Format v3 requires a program form; only semantic IR permits dependency paths. |
 | artifact manifest | Operation keys with contract digests and resource identities listed in an artifact, readable through `CompilerArtifact::inspect` without a registry. |
 | `ExecutionContext` | Owner of bounded workers, frozen operation definitions, caches, and resource accounting. |
 | `ExecutionRun` | Private state for one synchronous execution call: program counter, block values, bound grants, evidence and diagnostics. |

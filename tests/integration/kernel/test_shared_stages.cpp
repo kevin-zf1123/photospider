@@ -90,6 +90,12 @@ int regression(bool prefix) {
   if (!prefix)
     stage.validators = {{"test.stage", 1, "work-limit/1"}};
   operation.traits.shared_stages = {stage};
+  operation.map_dependencies = [](const ResultStaticQuery& query) {
+    ResultStaticMapping mapping;
+    if (query.shared_stage == UINT32_MAX)
+      mapping.shared_stages.emplace_back(0);
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
   operation.start_result = [probe, prefix](const auto&, const auto& allocator) {
     return ResultContinuation::make<Program>(allocator, probe, prefix);
   };
@@ -331,17 +337,18 @@ struct GrantProgram {
   unsigned turn = 0;
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     using Poll = Result<ResultProgramPoll>;
-    if (phase.query.shared_stage == UINT32_MAX && turn < 2) {
+    if (phase.query.shared_stage == UINT32_MAX && turn++ == 0) {
       ResultProgramNeed need;
-      need.shared_stages.emplace_back(0,
-                                      grant_selection(phase.resources, turn++));
+      need.shared_stages.emplace_back(
+          0, grant_selection(phase.resources, phase.query.tile_unit != 0));
       return Poll(std::move(need));
     }
     if (phase.query.shared_stage == UINT32_MAX) {
       const auto& grant = phase.shared_stages->at(0);
       auto facts = take(grant.descriptor());
       auto grids = take(TileGrid::members(grant.schema(), 1));
-      auto selected = grant_selection(phase.resources, true);
+      auto selected =
+          grant_selection(phase.resources, phase.query.tile_unit != 0);
       for (std::uint32_t slot = 0; slot < grids.size(); ++slot) {
         auto found = selected.members.find(slot);
         auto expected = take(grids[slot].coverage(
@@ -350,6 +357,15 @@ struct GrantProgram {
           return Poll(
               Status{ErrorCode::OperationFailed, "wrong grant coverage"});
       }
+      auto builder = take(ResultBuilder::start(
+          phase.resources, *phase.query.output.result_schema,
+          phase.query.semantic_key, {}, phase.query.tile_extent));
+      const double value = 1;
+      check(builder.publish_tensor(
+          0, phase.query.tensor_outputs->boxes().front(),
+          ByteView(reinterpret_cast<const std::uint8_t*>(&value),
+                   sizeof(value))));
+      return Poll(ResultPublication{take(builder.seal()), true});
     }
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
@@ -376,7 +392,8 @@ int grant_key_boundaries() {
   }
   OperationDefinition operation;
   operation.key = "test.grant";
-  operation.traits.outputs = {multi_result::output("value")};
+  operation.traits.outputs = {multi_result::output(
+      "value", multi_result::schema(ElementType::Float64, {2}))};
   operation.traits.outputs[0].maximum_dependency_stages = 4;
   OperationSharedStage stage;
   stage.key = "stage";
@@ -386,6 +403,13 @@ int grant_key_boundaries() {
   stage.maximum_work = kWork;
   stage.maximum_output_payload_bytes = 336;
   operation.traits.shared_stages = {stage};
+  operation.map_dependencies = [](const ResultStaticQuery& query) {
+    ResultStaticMapping mapping;
+    if (query.shared_stage == UINT32_MAX)
+      mapping.shared_stages.emplace_back(
+          0, grant_selection(ResourceBudget{}, query.tile_unit != 0));
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
   operation.start_result = [](const auto&, const auto& allocator) {
     return ResultContinuation::make<GrantProgram>(allocator);
   };
@@ -401,9 +425,11 @@ int grant_key_boundaries() {
   ExecutionContext execution(registry);
   auto result = execution.execute(plan);
   PS_REQUIRE_OK(result);
+  PS_CHECK(multi_result::number(result.value().results.at("value"), {0}) == 1);
+  PS_CHECK(multi_result::number(result.value().results.at("value"), {1}) == 1);
   return 0;
 }
-// A[0] -> B[0] -> A[1] is acyclic even while A waits for B.
+// The static schedule can interleave A[0] -> B[0] -> A[1].
 struct InterleavedStages {
   bool committed_seed;
   unsigned turn = 0;
@@ -469,6 +495,21 @@ int interleaved_commits(bool committed_seed) {
     definition.maximum_output_payload_bytes = 16;
     operation.traits.shared_stages.push_back(std::move(definition));
   }
+  operation.map_dependencies = [committed_seed](
+                                   const ResultStaticQuery& query) {
+    ResultStaticMapping mapping;
+    if (query.shared_stage == UINT32_MAX) {
+      mapping.shared_stages.emplace_back(0);
+    } else if (query.shared_stage == 1 || query.tile_unit == 1) {
+      const auto tile = query.shared_stage == 1 && !committed_seed ? 1U : 0U;
+      TileRequest request;
+      request.members.emplace(
+          0, take(TileSet::range(ResourceBudget{}, tile, tile + 1)));
+      mapping.shared_stages.emplace_back(query.shared_stage == 0 ? 1U : 0U,
+                                         std::move(request));
+    }
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
   operation.start_result = [committed_seed](const auto&,
                                             const auto& allocator) {
     return ResultContinuation::make<InterleavedStages>(allocator,
@@ -482,18 +523,19 @@ int interleaved_commits(bool committed_seed) {
   GraphContext graph(document);
   PlanningOptions options;
   options.tile_extent = 1;
-  auto plan = take(Compiler(registry).compile(graph, options)).plan;
+  auto compiled = Compiler(registry).compile(graph, options);
+  if (!committed_seed) {
+    PS_CHECK(!compiled.ok() && compiled.status().code == ErrorCode::Cycle);
+    return 0;
+  }
+  PS_REQUIRE_OK(compiled);
+  auto plan = compiled.take_value().plan;
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   ExecutionContext execution(registry, config);
   auto result = execution.execute(plan);
-  if (!committed_seed) {
-    PS_CHECK(!result.ok() && result.status().code == ErrorCode::Cycle);
-  } else {
-    PS_REQUIRE_OK(result);
-    PS_CHECK(multi_result::number(result.value().results.at("value"), {1}) ==
-             12);
-  }
+  PS_REQUIRE_OK(result);
+  PS_CHECK(multi_result::number(result.value().results.at("value"), {1}) == 12);
   return 0;
 }
 struct CacheIdentity {
@@ -634,6 +676,33 @@ int fallback_cache_boundary(FallbackBoundary mode) {
                          query.tensor_slot == 0),
           mode == FallbackBoundary::Partial && node == 2 ? query.tile_unit : 0);
     };
+    operation.map_dependencies = [node, mode](const ResultStaticQuery& query) {
+      ResultStaticMapping mapping;
+      if (node == 1 && mode == FallbackBoundary::SharedRelay &&
+          query.shared_stage != 0) {
+        mapping.shared_stages.emplace_back(
+            query.shared_stage == UINT32_MAX ? 1U : 0U);
+      } else if (node == 1 && mode == FallbackBoundary::Partial) {
+        if (query.shared_stage == UINT32_MAX) {
+          TileRequest request;
+          request.members.emplace(
+              0, take(TileSet::range(ResourceBudget{}, query.tile_unit,
+                                     query.tile_unit + 1)));
+          mapping.shared_stages.emplace_back(0, std::move(request));
+        } else if (query.tile_unit == 1) {
+          mapping.inputs.push_back(
+              {0, 0, false, take(TileSet::range(ResourceBudget{}, 0, 1))});
+        }
+      } else if (node != 0) {
+        const auto tile = mode == FallbackBoundary::Partial && node == 2
+                              ? query.tile_unit
+                              : 0;
+        mapping.inputs.push_back(
+            {0, 0, false,
+             take(TileSet::range(ResourceBudget{}, tile, tile + 1))});
+      }
+      return Result<ResultStaticMapping>(std::move(mapping));
+    };
     if (node == 1 && mode == FallbackBoundary::WholeStage)
       operation = sdk::with_whole_stage(std::move(operation), kWork);
     if (node == 1 && mode == FallbackBoundary::SharedRelay) {
@@ -698,8 +767,10 @@ int fallback_cache_boundary(FallbackBoundary mode) {
     PS_CHECK(starts[0] == run);
     PS_CHECK(result.value().diagnostics.fallback_reasons.size() == 1);
     if (mode == FallbackBoundary::Partial) {
-      PS_CHECK(sink_tiles[0] == 1 && sink_tiles[1] == run);
-      PS_CHECK(result.value().diagnostics.cache_hits == run - 1);
+      // Shared-stage reads make the producer non-reusable, including the
+      // prefix published before its fallback-tainted input is read.
+      PS_CHECK(sink_tiles[0] == run && sink_tiles[1] == run);
+      PS_CHECK(result.value().diagnostics.cache_hits == 0);
     } else {
       PS_CHECK(starts[2] == run);
       PS_CHECK(result.value().diagnostics.cache_hits == 0);
