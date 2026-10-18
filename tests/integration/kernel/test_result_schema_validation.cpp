@@ -101,9 +101,10 @@ int chain_validation_order(bool reject, bool shared = false) {
     document.nodes.back().inputs.push_back(WorkflowNodeOutput{1, "value"});
   GraphContext graph(document);
   auto compiled = take(Compiler(registry).compile(graph));
-  PS_CHECK(compiled.semantic.blocks().size() == (shared ? 3 : 1));
+  PS_CHECK(compiled.ir_versions.front().ir.value().blocks().size() ==
+           (shared ? 3 : 1));
   ExecutionContext execution(registry);
-  auto result = execution.execute(compiled.plan);
+  auto result = execution.execute(compiled.plan.value());
   if (reject) {
     PS_CHECK(!result.ok() && result.status().message == "rejected upstream");
     PS_CHECK(result.status().detail.node_id == 1);
@@ -172,7 +173,7 @@ int complete_tiles(unsigned aliases = 0, bool runtime_request = false) {
   const auto requests = planning.output_requests;
   if (runtime_request)
     planning.output_requests.clear();
-  auto plan = take(Compiler(registry).compile(graph, planning)).plan;
+  auto plan = take(Compiler(registry).compile(graph, planning)).plan.value();
   ExecutionContext execution(registry);
   const auto verify = [&](const auto& result) {
     PS_REQUIRE_OK(result);
@@ -249,7 +250,7 @@ int complete_bundle(bool declared) {
   options.tile_extent = 1;
   options.output_requests["value"].members.emplace(
       0, take(TileSet::range(root, 0, 1)));
-  auto plan = take(Compiler(registry).compile(graph, options)).plan;
+  auto plan = take(Compiler(registry).compile(graph, options)).plan.value();
   ExecutionContext execution(registry);
   auto result = execution.execute(plan);
   PS_REQUIRE_OK(result);
@@ -369,7 +370,7 @@ int duplicate_input_scope(bool combined, bool incomplete, bool distinct) {
   GraphContext graph(document);
   PlanningOptions planning;
   planning.tile_extent = 1;
-  auto plan = take(Compiler(registry).compile(graph, planning)).plan;
+  auto plan = take(Compiler(registry).compile(graph, planning)).plan.value();
   ExecutionContext context(registry);
   auto result = context.execute(plan);
   if (incomplete) {

@@ -120,12 +120,14 @@ tests/results/
 *.pyc
 __pycache__/
 
-# Private numeric math adapter; builders supply the ignored upstream source.
+# Private dependency metadata and adapter; builders supply ignored upstream sources.
 !third_party/
 !third_party/SLEEF.md
+!third_party/YYJSON.md
 !third_party/photospider_sleef.c
 !third_party/IK_LLAMA_LICENSE.txt
 /third_party/sleef/
+/third_party/yyjson/
 
 !tools/
 !tools/compile_native_vulkan_fixtures.py
@@ -139,3 +141,6 @@ __pycache__/
 
 
 /plugins/ops/PixelOE/
+
+# CLI behavior tests.
+!tests/tools/*.py

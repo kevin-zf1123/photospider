@@ -200,7 +200,7 @@ void impure_c_whole() {
   GraphContext graph(doc);
   auto compiled = Compiler(registry).compile(graph);
   require(compiled.ok(), compiled.status().message);
-  auto frozen = context.freeze(compiled.value().plan, {}).take_value();
+  auto frozen = context.freeze(compiled.value().plan.value(), {}).take_value();
   ExecutionOptions options;
   options.maximum_parallelism = 1;
   auto first = context.execute(frozen, {}, options);
@@ -219,7 +219,7 @@ void impure_c_whole() {
   doc.outputs = {{"a", 1, "number"}};
   GraphContext single(doc);
   auto mandatory = Compiler(registry).compile(single).take_value();
-  auto captured = context.freeze(mandatory.plan, {}).take_value();
+  auto captured = context.freeze(mandatory.plan.value(), {}).take_value();
   const auto mandatory_before = calls();
   auto third = context.execute(captured, {}, options);
   auto fourth = context.execute(captured, {}, options);
@@ -308,7 +308,7 @@ void backend_contracts() {
   GraphContext graph(doc);
   auto compiled = Compiler(registry).compile(graph);
   require(compiled.ok(), compiled.status().message);
-  auto output = context.execute(compiled.value().plan);
+  auto output = context.execute(compiled.value().plan.value());
   require(output.ok(), output.status().message);
   require(read_number(output.value().results.at("out")) == 7,
           "null publication context is rejected without poisoning valid "
@@ -352,7 +352,7 @@ void fallback_contracts(const std::shared_ptr<OperationRegistry>& registry) {
         const auto gpu_destroy = attempts(enabled, 2, mode, 1);
         const auto dispatched = dispatches();
         {
-          auto output = context.execute(compiled.value().plan);
+          auto output = context.execute(compiled.value().plan.value());
           if (succeeds) {
             require(output.ok(), output.status().message);
             const auto& diagnostics = output.value().diagnostics;
@@ -452,7 +452,8 @@ void member_contracts() {
     ExecutionBinding control;
     control.name = "control";
     control.result = control_source(context.resource_budget().value(), 1);
-    auto result = context.execute(compiled.value().plan, {{image, control}});
+    auto result =
+        context.execute(compiled.value().plan.value(), {{image, control}});
     require(result.ok(), result.status().message);
     float pixel = 0;
     const auto& output = result.value().results.at("out");
@@ -487,7 +488,8 @@ void sole_member_contracts() {
   ExecutionBinding control;
   control.name = "control";
   control.result = control_source(context.resource_budget().value(), 1);
-  auto result = context.execute(compiled.value().plan, {{image, control}});
+  auto result =
+      context.execute(compiled.value().plan.value(), {{image, control}});
   require(result.ok(), result.status().message);
   float pixel = 0;
   const auto& output = result.value().results.at("out");
@@ -578,7 +580,8 @@ void run() {
     GraphContext graph(document(key));
     auto compiled = Compiler(registry).compile(graph, tile_planning);
     require(compiled.ok(), compiled.status().message);
-    auto frozen = context.freeze(compiled.value().plan, {{a, c}}).take_value();
+    auto frozen =
+        context.freeze(compiled.value().plan.value(), {{a, c}}).take_value();
     const bool whole = std::string(key) != "fixture.result.copy";
     const auto q =
         whole ? TileRequest{{{0, TileSet::range(root, 0, 8).take_value()}}}
@@ -631,7 +634,7 @@ void run() {
     GraphContext graph(document(key));
     auto compiled =
         Compiler(registry).compile(graph, tile_planning).take_value();
-    auto frozen = context.freeze(compiled.plan, {{a, c}}).take_value();
+    auto frozen = context.freeze(compiled.plan.value(), {{a, c}}).take_value();
     const bool whole = std::string(key).find("whole") != std::string::npos;
     const auto q =
         whole ? TileRequest{{{0, TileSet::range(root, 0, 8).take_value()}}}
@@ -700,7 +703,7 @@ void run() {
   }
   for (std::int64_t mode : {1, 2, 3, 8, 10, 11, 12, 14, 16}) {
     GraphContext graph(document("fixture.result.view", mode));
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
+    auto plan = Compiler(registry).compile(graph).take_value().plan.value();
     auto output = context.execute(plan, {{a, c}});
     require(!output.ok() && output.status().code ==
                                 (mode == 3 ? ErrorCode::Cancelled
@@ -710,7 +713,7 @@ void run() {
   }
   for (std::int64_t mode : {1, 2, 3, 5}) {
     GraphContext graph(document("fixture.result.copy", mode));
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
+    auto plan = Compiler(registry).compile(graph).take_value().plan.value();
     auto output = context.execute(plan, {{a, c}});
     require(!output.ok() && output.status().code ==
                                 (mode == 3 ? ErrorCode::Cancelled
@@ -727,7 +730,7 @@ void run() {
   for (auto mode : {6, 10, 11}) {
     GraphContext stale(document("fixture.result.whole", mode));
     auto compiled = Compiler(registry).compile(stale).take_value();
-    auto output = context.execute(compiled.plan, {{a, c}});
+    auto output = context.execute(compiled.plan.value(), {{a, c}});
     require(!output.ok() && output.status().code == ErrorCode::InvalidArgument,
             "stale start CPU service lease");
   }
@@ -735,7 +738,7 @@ void run() {
     auto projected = document("fixture.result.mixed", 12);
     projected.outputs = {{"out", 1, "number"}};
     GraphContext graph(projected);
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
+    auto plan = Compiler(registry).compile(graph).take_value().plan.value();
     auto escaped = context.execute(plan, {{a, c}});
     require(
         !escaped.ok() && escaped.status().code == ErrorCode::InvalidArgument,
@@ -749,7 +752,7 @@ void run() {
   GraphContext mixed_graph(mixed_doc);
   auto mixed_plan = Compiler(registry).compile(mixed_graph);
   require(mixed_plan.ok(), mixed_plan.status().message);
-  auto mixed = context.execute(mixed_plan.value().plan, {{a, c}});
+  auto mixed = context.execute(mixed_plan.value().plan.value(), {{a, c}});
   require(mixed.ok(), "C mixed: " + std::string(mixed.status().message));
   require(mixed.value().results.size() == 3,
           "C same-node image and numeric Tensor outputs");
@@ -801,7 +804,7 @@ void run() {
   auto dynamic_plan = Compiler(registry).compile(dynamic_graph);
   require(dynamic_plan.ok(), dynamic_plan.status().message);
   auto dynamic_result =
-      context.execute(dynamic_plan.value().plan, {{dynamic, c}});
+      context.execute(dynamic_plan.value().plan.value(), {{dynamic, c}});
   require(dynamic_result.ok(), dynamic_result.status().message);
   float pixel = 0;
   auto object = dynamic_result.value().results.at("out");
@@ -814,7 +817,7 @@ void run() {
   scalar.nodes = {{1, "fixture.result.scalar", {}, {}}};
   scalar.outputs = {{"out", 1, "number"}};
   GraphContext graph(scalar);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan = Compiler(registry).compile(graph).take_value().plan.value();
   auto frozen = context.freeze(plan).take_value();
   auto result = context.execute_fragments(
       frozen,
@@ -839,7 +842,7 @@ void run() {
   GraphContext parameter_graph(scalar);
   auto parameter_plan = Compiler(registry).compile(parameter_graph);
   require(parameter_plan.ok(), parameter_plan.status().message);
-  auto parameter_result = context.execute(parameter_plan.value().plan);
+  auto parameter_result = context.execute(parameter_plan.value().plan.value());
   require(parameter_result.ok(), parameter_result.status().message);
   require(read_number(parameter_result.value().results.at("out"), 30) == 62,
           "C unsorted parameter declarations execute with typed values");
@@ -899,7 +902,7 @@ void c_affine_tensor_view() {
   GraphContext graph(document("fixture.result.view", 13));
   auto compiled = Compiler(registry).compile(graph);
   require(compiled.ok(), compiled.status().message);
-  auto plan = compiled.take_value().plan;
+  auto plan = compiled.take_value().plan.value();
   auto output = context.execute(plan, {{source, control}});
   require(output.ok(), output.status().message);
   auto result = output.value().results.at("out");
@@ -951,7 +954,7 @@ void c_sparse_wide_output() {
     planning.tile_extent = 1;
     planning.output_requests["out"].members.emplace(
         0, take(TileSet::from_indices(ResourceBudget{}, {0, extent - 1})));
-    auto plan = take(Compiler(registry).compile(graph, planning)).plan;
+    auto plan = take(Compiler(registry).compile(graph, planning)).plan.value();
     ExecutionContextConfig config;
     config.cpu_workers = 1;
     config.result_cache_bytes = 0;
@@ -1098,7 +1101,7 @@ void c_reshape_views() {
         {41, "fixture.result.reshape", {WorkflowInputReference{1}}, {}}};
     document.outputs = {{"out", 41, "value"}};
     GraphContext graph(document);
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
+    auto plan = Compiler(registry).compile(graph).take_value().plan.value();
     auto executed = context.execute(plan, {{binding}});
     require(executed.ok(), executed.status().message);
     auto result = executed.value().results.at("out");
@@ -1164,7 +1167,7 @@ void c_whole_tensor_programs() {
       {42, "fixture.result.prefix", {WorkflowInputReference{1}}, {}}};
   document.outputs = {{"out", 42, "value"}};
   GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan = Compiler(registry).compile(graph).take_value().plan.value();
   auto executed = context->execute(plan, {{binding}});
   require(executed.ok(), executed.status().message);
   auto result = executed.value().results.at("out");
@@ -1185,8 +1188,10 @@ void c_whole_tensor_programs() {
   for (bool periodic : {false, true}) {
     document.nodes[0].parameters = {{"mode", std::int64_t{periodic ? 8 : 0}}};
     GraphContext neighborhood_graph(document);
-    auto neighborhood_plan =
-        Compiler(registry).compile(neighborhood_graph).take_value().plan;
+    auto neighborhood_plan = Compiler(registry)
+                                 .compile(neighborhood_graph)
+                                 .take_value()
+                                 .plan.value();
     auto executed = context->execute(neighborhood_plan, {{binding}});
     require(executed.ok(), executed.status().message);
     const auto output = executed.value().results.at("out");
@@ -1216,7 +1221,7 @@ void c_whole_tensor_programs() {
     document.nodes[0].parameters = {{"mode", mode}};
     GraphContext cartesian_graph(document);
     auto compiled = Compiler(registry).compile(cartesian_graph).take_value();
-    auto output = context->execute(compiled.plan, {{binding}});
+    auto output = context->execute(compiled.plan.value(), {{binding}});
     require(output.ok(), output.status().message);
     auto tensor = output.value().results.at("out");
     for (uint64_t i = 0; i < 6; ++i) {
@@ -1227,7 +1232,7 @@ void c_whole_tensor_programs() {
                   value == 9,
               "C Cartesian bounded source sum survives handle release");
     }
-    const TileUnit unit{compiled.plan.output("out").record_index, 0, 0};
+    const TileUnit unit{compiled.plan.value().output("out").record_index, 0, 0};
     require_whole_input(output.value().dependencies, unit);
     require_dirty_unit(output.value().dependencies, root, unit, 0);
   }
@@ -1285,7 +1290,8 @@ void fragmented_window_work() {
       const auto before = root.statistics().issued.work;
       require(before < 10000,
               "fragmented setup leaves the read budget available");
-      auto executed = context.execute(compiled.plan, {{{"source", input}}});
+      auto executed =
+          context.execute(compiled.plan.value(), {{{"source", input}}});
       if (limited) {
         require(!executed.ok() &&
                     executed.status().code == ErrorCode::ResourceExhausted &&
@@ -1320,7 +1326,7 @@ void window_work_failure() {
   control.name = "control";
   control.result = control_source(root, 0);
   GraphContext graph(document("fixture.result.view", 7));
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan = Compiler(registry).compile(graph).take_value().plan.value();
   auto result = context.execute(plan, {{source, control}});
   require(!result.ok() &&
               result.status().code == ErrorCode::ResourceExhausted &&
@@ -1364,7 +1370,8 @@ void many_view_windows() {
   GraphContext graph(doc);
   auto compiled = Compiler(registry).compile(graph);
   require(compiled.ok(), compiled.status().message);
-  auto result = context.execute(compiled.value().plan, {{source, control}});
+  auto result =
+      context.execute(compiled.value().plan.value(), {{source, control}});
   require(result.ok(), result.status().message);
   auto output = result.value().results.at("out");
   float value = 0;
@@ -1638,7 +1645,7 @@ void impure_start_fallback() {
     options.execution_mode = ExecutionMode::NativeGpu;
     auto compiled = Compiler(registry).compile(graph, options);
     require(compiled.ok(), compiled.status().message);
-    auto rejected = context.execute(compiled.value().plan);
+    auto rejected = context.execute(compiled.value().plan.value());
     require(!rejected.ok() &&
                 rejected.status().code == ErrorCode::BackendUnavailable &&
                 (*attempts)[0] == 0 && (*attempts)[1] == 1,
@@ -1670,7 +1677,7 @@ int native_gpu() {
   options.execution_mode = ExecutionMode::NativeGpu;
   auto compiled = Compiler(registry).compile(graph, options);
   require(compiled.ok(), compiled.status().message);
-  auto output = context.execute(compiled.value().plan);
+  auto output = context.execute(compiled.value().plan.value());
   require(output.ok(), output.status().message);
   const auto& result = output.value().results.at("out");
   float number = 0;
@@ -1682,7 +1689,7 @@ int native_gpu() {
   require(output.value().diagnostics.native_dispatch_count > 0 &&
               output.value().diagnostics.native_submission_count > 0,
           "actual native Result GPU dispatch");
-  auto warm = context.execute(compiled.value().plan);
+  auto warm = context.execute(compiled.value().plan.value());
   require(warm.ok(), warm.status().message);
   const auto& cached = warm.value().results.at("out");
   number = 0;
@@ -1703,7 +1710,8 @@ int native_gpu() {
   for (int64_t mode : {1, 2}) {
     doc.nodes[0].parameters = {{"mode", mode}};
     GraphContext invalid(doc);
-    auto plan = Compiler(registry).compile(invalid, options).take_value().plan;
+    auto plan =
+        Compiler(registry).compile(invalid, options).take_value().plan.value();
     auto failed = context.execute(plan);
     require(!failed.ok() && failed.status().code == ErrorCode::InvalidArgument,
             "native service preserves sticky host InvalidArgument");
@@ -1718,7 +1726,8 @@ int native_gpu() {
     GraphContext mapped(document("fixture.result.view_gpu"));
     auto plan = Compiler(registry).compile(mapped, options);
     require(plan.ok(), plan.status().message);
-    auto result = context.execute(plan.value().plan, {{source, control}});
+    auto result =
+        context.execute(plan.value().plan.value(), {{source, control}});
     require(result.ok(), result.status().message);
     const auto box = Region({{0, 1}, {0, 1}, {0, 2}, {0, 4}});
     auto input =
@@ -1750,8 +1759,10 @@ int native_gpu() {
       {2, "fixture.scalar.image", {WorkflowNodeOutput{1, "value"}}, {}}};
   chain.outputs = {{"out", 2, "value"}};
   GraphContext chain_graph(chain);
-  auto chain_plan =
-      Compiler(registry).compile(chain_graph, options).take_value().plan;
+  auto chain_plan = Compiler(registry)
+                        .compile(chain_graph, options)
+                        .take_value()
+                        .plan.value();
   float eight = 8;
   ExecutionBinding binding;
   binding.name = "number";
@@ -1787,16 +1798,16 @@ int native_gpu() {
     upload_binding.result = numeric_source(
         upload_context.resource_budget().value(), *input.result_schema,
         ByteView(reinterpret_cast<const uint8_t*>(&eight), 4));
-    auto uploaded =
-        upload_context.execute(compiled.value().plan, {{upload_binding}});
+    auto uploaded = upload_context.execute(compiled.value().plan.value(),
+                                           {{upload_binding}});
     require(uploaded.ok(), uploaded.status().message);
     require(read_number(uploaded.value().results.at("out")) == 4 &&
                 uploaded.value().diagnostics.native_dispatch_count > 0 &&
                 uploaded.value().diagnostics.transfer_count == 1,
             "C11 native window performs one accounted upload and GPU dispatch");
     uploaded = Result<ExecutionResult>(ExecutionResult{});
-    auto warm_upload =
-        upload_context.execute(compiled.value().plan, {{upload_binding}});
+    auto warm_upload = upload_context.execute(compiled.value().plan.value(),
+                                              {{upload_binding}});
     require(warm_upload.ok(), warm_upload.status().message);
     require(read_number(warm_upload.value().results.at("out")) == 4,
             "warm native input numerical result");
@@ -1809,7 +1820,7 @@ int native_gpu() {
       GraphContext invalid_graph(c_input);
       auto invalid =
           Compiler(registry).compile(invalid_graph, options).take_value();
-      auto rejected = context.execute(invalid.plan, {{binding}});
+      auto rejected = context.execute(invalid.plan.value(), {{binding}});
       require(
           !rejected.ok() &&
               rejected.status().code == ErrorCode::InvalidArgument,
@@ -1825,7 +1836,7 @@ int native_gpu() {
     auto resident =
         Compiler(registry).compile(resident_graph, options).take_value();
     context.clear_result_cache();
-    auto continued = context.execute(resident.plan, {{binding}});
+    auto continued = context.execute(resident.plan.value(), {{binding}});
     require(continued.ok(), continued.status().message);
     require(
         read_number(continued.value().results.at("out")) == 2 &&
@@ -1839,8 +1850,10 @@ int native_gpu() {
     scalar_document.nodes.resize(1);
     scalar_document.outputs = {{"out", 1, "value"}};
     GraphContext scalar_graph(scalar_document);
-    auto scalar_plan =
-        Compiler(registry).compile(scalar_graph, options).take_value().plan;
+    auto scalar_plan = Compiler(registry)
+                           .compile(scalar_graph, options)
+                           .take_value()
+                           .plan.value();
     auto limited_config = config;
     limited_config.result_cache_bytes = 256;
     limited_config.managed_resources->capacity[ResourceKind::Shared] = 8;
@@ -1877,8 +1890,10 @@ int native_gpu() {
         {3, "fixture.scalar.image", {WorkflowNodeOutput{2, "value"}}, {}}};
     view_document.outputs = {{"out", 3, "value"}};
     GraphContext view_graph(view_document);
-    auto view_plan =
-        Compiler(registry).compile(view_graph, options).take_value().plan;
+    auto view_plan = Compiler(registry)
+                         .compile(view_graph, options)
+                         .take_value()
+                         .plan.value();
     ExecutionContext layout_context(registry, config);
     auto copied = layout_context.execute(view_plan);
     require(copied.ok(), copied.status().message);
@@ -1922,7 +1937,8 @@ int native_gpu() {
           {1, "fixture.native.scalar", {WorkflowInputReference{1}}, {}}};
       one.outputs = {{"out", 1, "value"}};
       GraphContext graph(one);
-      auto plan = Compiler(registry).compile(graph, options).take_value().plan;
+      auto plan =
+          Compiler(registry).compile(graph, options).take_value().plan.value();
       ExecutionBinding current;
       current.name = "number";
       current.result =

@@ -181,9 +181,9 @@ void append_edge(DigestBuilder* d, const PlanEdge& edge) {
 }
 }  // namespace
 
-std::string semantic_digest(const IRProgram& program) {
+std::string ir_digest(const IRProgram& program) {
   DigestBuilder digest;
-  digest.text("semantic-ssa-ir-v25");
+  digest.text("validated-ssa-ir-v26");
   digest.integer(static_cast<std::uint64_t>(program.form));
   append_declarations(&digest, program.input_declarations);
   digest.integer(program.input_bindings.size());
@@ -243,18 +243,10 @@ std::string semantic_digest(const IRProgram& program) {
   }
   return digest.finish();
 }
-std::string optimized_digest(const std::string& semantic,
-                             const IRProgram& program) {
-  DigestBuilder digest;
-  digest.text("optimizer-v7-dependency-paths");
-  digest.text(semantic);
-  digest.text(semantic_digest(program));
-  return digest.finish();
-}
 std::string physical_digest(const ExecutionPlan& plan) {
   DigestBuilder digest;
-  digest.text("static-tile-program-v26");
-  digest.text(plan.optimized_digest().value);
+  digest.text("static-tile-program-v27");
+  digest.text(plan.input_ir_digest().value);
   digest.integer(plan.tile_extent());
   digest.integer(static_cast<std::uint32_t>(plan.execution_mode()));
   append_declarations(&digest, plan.input_declarations());
@@ -354,7 +346,7 @@ std::string physical_digest(const ExecutionPlan& plan) {
 }
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v19");
+  digest.text("plan-cache-key-v20");
   digest.text(plan);
   return digest.finish();
 }

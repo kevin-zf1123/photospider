@@ -10,10 +10,10 @@ Photospider is an embeddable C++17 kernel that validates local workflows, compil
 WorkflowDocument -> GraphContext -> GraphSnapshot      IRProgram (other frontend)
                                     |                         |
                                     v                         v
-                         analyze -----------------> SemanticGraphIR <---- .psir
+                         analyze -----------------> ValidatedIR <---- .psir
                                                           |
                                                           v
-                                     optimize: resolve paths -> OptimizedGraphIR <---- .psir
+                                     optional optimize + validate -> ValidatedIR <---- .psir
                                                           |
                                                           v
                                    plan: static mapping, tile expansion,
@@ -37,23 +37,26 @@ ExecutionBindings --------------------------------------> Run
 
 The compiler owns static validation, dependency mapping and planning. Each Run owns its program counter, block values, bound grants, Result producers, cancellation state, dependency recorder, and diagnostics; it executes one plan instruction at a time. Parallelism comes from separate Runs sharing the context's pools and from CPU range, CPU tile and GPU work inside one operation callback. Returned Results keep their backing and leases alive independently.
 
+Planner accepts the initial ValidatedIR directly; the optimizer edge is optional.
+
 ## 3. Contracts and interfaces
 
 ```cpp
 class Compiler {
  public:
-  Result<SemanticGraphIR> analyze(const GraphSnapshot&,
+  Result<ValidatedIR> analyze(const GraphSnapshot&,
                                   ResourceSet = {}) const;
-  Result<SemanticGraphIR> bind_ir(IRProgram, ResourceSet = {}) const;
-  Result<OptimizedGraphIR> optimize(const SemanticGraphIR&) const;
-  Result<ExecutionPlan> plan(const OptimizedGraphIR&,
+  Result<ValidatedIR> bind_ir(IRProgram, ResourceSet = {}) const;
+  Result<ValidatedIR> optimize(const ValidatedIR&,
+                               const OptimizerInvocation& = {"optimize", {}}) const;
+  Result<ExecutionPlan> plan(const ValidatedIR&,
                              const PlanningOptions& = {}) const;
 };
 
 class CompilerArtifact {
  public:
   static Status save_plan(const ExecutionPlan&, const std::string& path);
-  static Result<ExecutionPlan> load_plan(const Compiler&,
+  static Result<ExecutionPlan> load_plan(std::shared_ptr<OperationRegistry>,
                                          const std::string& path,
                                          ResourceSet = {});
 };
@@ -71,7 +74,7 @@ These are abbreviated public signatures; unrelated members are omitted. Each sta
 
 `plan` calls each operation's static mapper, expands the reachable output tiles into deduplicated instructions with fixed read grants, and validates the result. Its tile deduplication tracks work already scheduled in the plan independently of runtime caches. Execution checks plan currentness and the frozen operation-registry identity before callbacks, then follows the instructions and CFG. Each call's produced outputs are certified before the next call starts. `analyze` accepts an immutable `ResourceSet` of content-addressed resources; each operation's preparation selects the identities it needs, such as an ICC profile named by an explicit color parameter. Result and Tensor carry structure and data only; domain interpretation is an explicit operation parameter, and the kernel performs no label matching on connections.
 
-`CompilerArtifact` saves and loads every stage as editable format-v3 text (`.psir` for IR, `.psxp` for plans). Semantic IR may preserve dependency paths; optimized IR and plans require control flow. Earlier artifact versions are rejected. A loaded stage is independent of any `GraphContext`, requires the same frozen registry for execution, and is fully revalidated on import. See [Compiler and local execution](Compiler-and-Execution.md#compiler-artifacts).
+`CompilerArtifact` saves and loads v4 text (`.psir` for unified IR, `.psxp` for complete Plans). Raw and transformed IR may use dependency paths or CFG; Plans save their privately lowered CFG. v1–v3 require re-export. Loaded values are independent of the original GraphContext but still require matching frozen registry/resources. Plan import invokes no optimizer, mapper or planner. See [Compiler and execution](Compiler-and-Execution.md#compiler-artifacts).
 
 `CpuExact` is the default execution mode. `NativeGpu` permits placement only for operations that declare a native implementation and match the configured backend. CPU work uses the fixed context pool; native callbacks use the configured backend lane. Cancellation is cooperative, and callbacks already entered may finish before the Run returns.
 

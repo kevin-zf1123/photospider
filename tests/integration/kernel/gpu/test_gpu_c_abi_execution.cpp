@@ -229,7 +229,8 @@ int main(int argc, char** argv) try {
     auto compiled = Compiler(registry).compile(graph, options);
     if (check(compiled.ok(), "C workflow compile failed"))
       return 1;
-    auto frozen = context.freeze(compiled.value().plan, bindings).take_value();
+    auto frozen =
+        context.freeze(compiled.value().plan.value(), bindings).take_value();
     auto result = context.execute_fragments(
         frozen, {{"sum", TileRequest{{{0, take(TileSet::from_indices(
                                               ResourceBudget{}, {0, 1}))}}}}});
@@ -284,7 +285,7 @@ int main(int argc, char** argv) try {
         take(Compiler(registry).compile(minimum_graph, options));
     auto minimum_binding = inputs(take(context.resource_budget()), 4225);
     auto minimum_frozen =
-        take(context.freeze(minimum_plan.plan, minimum_binding));
+        take(context.freeze(minimum_plan.plan.value(), minimum_binding));
     auto minimum_output =
         take(context.execute_fragments(minimum_frozen, {{"sum", point(0)}}));
     if (check(number(minimum_output.results.at("sum"), 0) == 2145,
@@ -298,7 +299,8 @@ int main(int argc, char** argv) try {
       GraphContext renewed_graph(document(17));
       auto renewed_plan =
           take(Compiler(registry).compile(renewed_graph, options));
-      auto renewed_frozen = take(context.freeze(renewed_plan.plan, bindings));
+      auto renewed_frozen =
+          take(context.freeze(renewed_plan.plan.value(), bindings));
       auto renewed =
           take(context.execute_fragments(renewed_frozen, {{"sum", point(0)}}));
       if (check(number(renewed.results.at("sum"), 0) == 2145 &&
@@ -317,14 +319,16 @@ int main(int argc, char** argv) try {
       tight.gpu_enabled = gpu;
       // Native allocations above 16 KiB round up independently: the compact
       // 16644-byte atlas payload and 20480-byte directory each occupy 32 KiB.
-      tight.maximum_live_bytes =
-          length * sizeof(float) +
-          bad_plan.plan.steps()[0].traits.outputs[0].continuation_bytes + 4 +
-          24 + 2 * 32768;
+      tight.maximum_live_bytes = length * sizeof(float) +
+                                 bad_plan.plan.value()
+                                     .steps()[0]
+                                     .traits.outputs[0]
+                                     .continuation_bytes +
+                                 4 + 24 + 2 * 32768;
       ExecutionContext fresh(registry, tight);
       const auto fresh_bindings = inputs(take(fresh.resource_budget()));
       auto bad_frozen =
-          fresh.freeze(bad_plan.plan, fresh_bindings).take_value();
+          fresh.freeze(bad_plan.plan.value(), fresh_bindings).take_value();
       auto failed = fresh.execute_fragments(bad_frozen, {{"sum", point(0)}});
       const auto expected =
           mode == 7 ? ErrorCode::OperationFailed : ErrorCode::InvalidArgument;
@@ -347,7 +351,8 @@ int main(int argc, char** argv) try {
                 "C failed Result retained payload or cached output"))
         return 1;
       auto retry_frozen =
-          fresh.freeze(compiled.value().plan, fresh_bindings).take_value();
+          fresh.freeze(compiled.value().plan.value(), fresh_bindings)
+              .take_value();
       auto retry = fresh.execute_fragments(retry_frozen, {{"sum", point(0)}});
       if (check(
               retry.ok() &&

@@ -7,7 +7,7 @@
 #include <new>
 #include <tuple>
 
-#include "photospider/compiler/compiler.hpp"
+#include "photospider/compiler/plan.hpp"
 #include "photospider/data/tiles.hpp"
 
 namespace ps {

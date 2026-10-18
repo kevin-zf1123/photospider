@@ -23,6 +23,7 @@ struct PlanRecord final {
 struct ArtifactData final {
   ArtifactManifest manifest;
   std::string parent_digest;
+  IRProvenance provenance;
   std::vector<WorkflowInputDeclaration> declarations;
   std::vector<IRRecord> nodes;
   std::vector<IRReturnDeclaration> ir_outputs;

@@ -942,7 +942,7 @@ class StructuredExecution final {
       UnitState& unit, const PlanTileInstruction& instruction,
       std::uint32_t phase, std::uint64_t before) {
     using Answer = Result<std::optional<ResultCheckpoint>>;
-    std::lock_guard<std::recursive_mutex> lock(cache_mutex_);
+    std::unique_lock<std::recursive_mutex> lock(cache_mutex_);
     auto status = cache_allowed(unit);
     if (!status.ok())
       return Answer(status);
@@ -973,6 +973,10 @@ class StructuredExecution final {
       if (!cache_work(witness->weight).ok())
         return cache_failure_.ok() ? Answer(std::optional<ResultCheckpoint>{})
                                    : Answer(cache_failure_);
+      lock.unlock();
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+      execution_testing::notify_checkpoint_borrowed();
+#endif
       return Answer(std::optional<ResultCheckpoint>{std::move(found)});
     } catch (const std::bad_alloc&) {
       return Answer(std::optional<ResultCheckpoint>{});
@@ -982,7 +986,7 @@ class StructuredExecution final {
                             const PlanTileInstruction& instruction,
                             std::uint32_t phase, std::uint64_t sequence,
                             const ResultRef& state) {
-    std::lock_guard<std::recursive_mutex> lock(cache_mutex_);
+    std::unique_lock<std::recursive_mutex> lock(cache_mutex_);
     auto status = cache_allowed(unit);
     if (!status.ok())
       return status;
@@ -1023,7 +1027,12 @@ class StructuredExecution final {
       checkpoint.sequence_ = sequence;
       checkpoint.state_ = state;
       checkpoint.witness_ = std::move(witness);
-      scope->put(checkpoint, weight);
+      if (scope->put(checkpoint, weight)) {
+        lock.unlock();
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+        execution_testing::notify_checkpoint_published();
+#endif
+      }
       return Status::success();
     } catch (const std::bad_alloc&) {
       return Status::success();

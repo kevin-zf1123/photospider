@@ -53,8 +53,7 @@ struct Follow {
     check(phase.read_tensor(1, 0, {0, position}, &sample, 8));
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        phase.query.tile_extent));
+        phase.query.semantic_key, {}, phase.query.tile_extent));
     auto storage = take(phase.resources.allocator().allocate(sizeof(sample)));
     std::memcpy(storage.data(), &sample, sizeof(sample));
     check(builder.publish_tensor(0, Region({{0, 1}, {atom, 1}}),
@@ -82,6 +81,7 @@ void progressive_workflow() {
   }
   auto registry = std::make_shared<OperationRegistry>();
   std::vector<std::uint64_t> controls, payloads;
+  bool outside_grant = false;
   check(registry->register_operation(dependency_fixture::source(
       "example.controls", control_schema,
       [&](const ResultProgramQuery&, const Region& region, std::uint8_t* bytes,
@@ -92,7 +92,9 @@ void progressive_workflow() {
           return Status{ErrorCode::OperationFailed,
                         "unexpected control generation"};
         controls.push_back(i);
-        const std::int64_t value = i == 0 ? 1 : i == 1 ? 3 : -1000000000;
+        const std::int64_t value = i == 0   ? (outside_grant ? 2 : 1)
+                                   : i == 1 ? 3
+                                            : -1000000000;
         std::memcpy(bytes, &value, 8);
         return Status::success();
       })));
@@ -122,6 +124,16 @@ void progressive_workflow() {
   }
   follow.traits.outputs = {
       dependency_fixture::output(payload_schema, sizeof(Follow), 8)};
+  unsigned mappings = 0;
+  follow.map_dependencies = [&](const ResultStaticQuery&) {
+    ++mappings;
+    ResultStaticMapping mapping;
+    mapping.inputs = {
+        {0, 0, false, take(TileSet::from_indices(ResourceBudget{}, {0, 1, 3}))},
+        {1, 0, false,
+         take(TileSet::from_indices(ResourceBudget{}, {extent - 1}))}};
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
   follow.start_result = [](const ResultProgramQuery&,
                            const BufferAllocator& allocator) {
     return ResultContinuation::make<Follow>(allocator);
@@ -144,8 +156,9 @@ void progressive_workflow() {
   options.output_requests = {
       {"sample", {{{0, take(TileSet::from_indices(requests, {0}))}}}}};
   auto compiled = take(Compiler(registry).compile(graph, options));
+  const auto static_mappings = mappings;
   ExecutionContext execution(registry, {1, false, 4, 128});
-  auto result = take(execution.execute(compiled.plan));
+  auto result = take(execution.execute(compiled.plan.value()));
   const auto peak = take(execution.resource_budget())
                         .statistics()
                         .peak[ResourceKind::Payload];
@@ -155,13 +168,46 @@ void progressive_workflow() {
   if (value != 17.25 || controls != std::vector<std::uint64_t>({0, 1, 3}) ||
       payloads != std::vector<std::uint64_t>({extent - 1}) || peak > 128)
     throw std::runtime_error("progressive independent oracle failed");
+  std::size_t source_instructions = 0, follow_instructions = 0;
+  const auto& plan = compiled.plan.value();
+  for (const auto& block : plan.blocks())
+    for (const auto& instruction : block.instructions) {
+      if (plan.steps()[instruction.step_index].node_id != 3) {
+        ++source_instructions;
+        continue;
+      }
+      ++follow_instructions;
+      if (instruction.shared_stage != UINT32_MAX ||
+          instruction.tensor_slot != 0 || instruction.tile_unit != 0 ||
+          instruction.inputs.size() != 2 || !instruction.shared_inputs.empty())
+        throw std::runtime_error("unexpected follow instruction");
+      bool seen[2] = {};
+      for (const auto& read : instruction.inputs) {
+        const auto& expected = read.input == 0 ? controls : payloads;
+        if (read.input > 1 || seen[read.input] || read.tensor_slot != 0 ||
+            read.descriptor_only ||
+            read.tiles != take(TileSet::from_indices(requests, expected)))
+          throw std::runtime_error("follow lost fixed static grants");
+        seen[read.input] = true;
+      }
+    }
+  if (source_instructions != 4 || follow_instructions != 1)
+    throw std::runtime_error("progressive plan expanded unexpected work");
+  // Runtime records project external input dependencies. These generators
+  // have no external inputs; internal read capabilities belong to the Plan.
   auto record = take(result.dependencies.tile_record({2, 0, 0}));
-  if (!record || record->inputs.size() != 2 ||
-      record->inputs[0].tiles !=
-          take(TileSet::from_indices(requests, controls)) ||
-      record->inputs[1].tiles !=
-          take(TileSet::from_indices(requests, payloads)))
-    throw std::runtime_error("follow lost historical tile Needs");
+  if (!record || !record->inputs.empty())
+    throw std::runtime_error("unexpected external dependency record");
+  if (mappings != static_mappings)
+    throw std::runtime_error("execution invoked the static mapper");
+  result = {};
+  outside_grant = true;
+  execution.clear_result_cache();
+  auto refused = execution.execute(compiled.plan.value());
+  if (refused.ok() ||
+      refused.status().detail.origin != FailureOrigin::Protocol ||
+      mappings != static_mappings)
+    throw std::runtime_error("progressive Need escaped the compiled grants");
   std::cout
       << "progressive: value=17.25, controls=[0,1,3], payload=[999999999], "
          "generated_bytes=32, peak_payload="

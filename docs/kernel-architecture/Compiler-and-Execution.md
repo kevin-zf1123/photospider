@@ -2,7 +2,9 @@
 
 ## Scope and ownership
 
-The callable pipeline has five stages: DAG frontend, `SemanticGraphIR`, `OptimizedGraphIR`, `ExecutionPlan`, and execution through `ExecutionContext`. The semantic IR, optimized IR and plan are immutable compiled values; each Run owns mutable execution state. The current package is 0.37.0 with OperationTraits version 29. `Compiler` borrows a frozen `OperationRegistry` for its whole lifetime; its constructor throws `std::invalid_argument` for a null or mutable registry. `ExecutionContext` owns the bounded CPU pool, the optional native backend lane, caches, and a resource root shared by Runs and surviving owners. The context uses default `ResourceLimits` unless `managed_resources` supplies explicit limits; `maximum_live_bytes` also limits Payload.
+Frontend, optimizer and planner registries have stable object identity: copying, moving and assignment are disabled. Share a frozen registry through `shared_ptr`; create a separate registry and register definitions explicitly to build another catalog.
+
+The pipeline consists of a DAG frontend, validation, optional IR transformations, physical planning and local execution. All validated IR versions use `ValidatedIR`; immutable plans use `ExecutionPlan`, and each Run owns mutable state. Package 0.38.0 keeps OperationTraits 29 and Result ABI 7. `Compiler` retains frozen operation, frontend, optimizer and planner registries. `ExecutionContext` owns worker pools, native backend, caches and the Root shared by Runs and surviving results. `maximum_live_bytes` limits Payload in addition to managed resource limits.
 
 `WorkflowInputDeclaration` stores an id, exact name, and required Result schema. `ExecutionBinding` stores a name and owning `ResultRef`. Tensor remains typed backing used by Result storage and codecs. `OperationMetadata` carries only the complete Result schema; metadata specialization is structural inference of output schemas from input schemas and static parameters. Tensor shape and layout belong to `ResultTensorSpec`. Ports connect when their structural predicates match; the compiler does not compare domain labels, so Results with the same structure but different intended meanings connect to the same port.
 
@@ -12,53 +14,49 @@ Each operation's static preparation lists the `ResourceIdentity` values it needs
 
 ```mermaid
 flowchart LR
-    DAG[WorkflowDocument snapshot] -->|Compiler::analyze| S[SemanticGraphIR]
-    FE[Other frontend IRProgram] -->|Compiler::bind_ir| S
-    PSIR[.psir file] -->|CompilerArtifact::import_ir| S
-    PSIR -->|import_ir, stage optimized| O
-    S -->|Compiler::optimize| O[OptimizedGraphIR: ControlFlow]
-    O -->|Compiler::plan| P[ExecutionPlan]
-    PSXP[.psxp file] -->|CompilerArtifact::import_plan| P
-    P -->|select_outputs / tile_plan| P2[Filtered ExecutionPlan]
-    P --> X[ExecutionContext::execute]
-    P2 --> X
-    B[ExecutionBindings] --> X
-    X --> R[Named Results]
-    X --> E[Cancelled, Stale, or typed failure]
+    DAG[WorkflowDocument] -->|analyze + validate| IR[ValidatedIR]
+    FE[IRProgram] -->|bind_ir| IR
+    PSIR[.psir v4] -->|import_ir| IR
+    IR -->|optional ordered optimize + validate| NEXT[ValidatedIR next revision]
+    IR -->|plan| P[ExecutionPlan]
+    NEXT -->|plan| P
+    PSXP[.psxp v4] -->|link + validate saved code| P
+    P -->|ExecutionContext::execute + bindings| R[Named Results]
 ```
 
-`Compiler::compile(context, options, resources)` runs `analyze`, `optimize` and `plan` as one fail-before-publication flow and returns all three stages plus raw stage timings. Each stage is also callable on its own, so a caller can save, inspect or replace any intermediate object.
+`Compiler::compile(context, options, resources, optimizers = {}, frontend = "dag")` analyzes the graph, runs only the requested ordered invocations, and plans the last IR. The default invokes no optimizer. `CompiledWorkflow` retains ordered `IRRevision` records and an optional Plan. Standalone `analyze`, `bind_ir`, `optimize` and `plan` remain public library entry points. The CLI additionally supports IR-only endpoints, snapshots and release; see [psc/psx](../development/Compiler-Tools.md).
 
-- **DAG frontend.** `analyze(snapshot, resources)` accepts only a current schema-7 `WorkflowDocument` with at most 65,536 nodes, 4,096 inputs and 1 to 4,096 named outputs; other versions fail. It produces `IRForm::DependencyPaths`. Named outputs are visited in name order, with an iterative, input-port-ordered DFS from each returned node. A node is appended after all its upstream paths. Shared ancestors are expanded again on every referencing path, using the same Call and SSA IDs. After the named outputs, nodes not yet covered are used as roots in ID order, retaining unused calls and effects. Switching to another upstream path after emitting calls, reaching a multi-input join, or starting a new root ends the current nonempty chain. Jumps connect chains and the last chain returns the named outputs. Cycles fail `Cycle`; expansion beyond 1,048,576 call occurrences or 65,536 chains fails `ResourceExhausted`.
-- **IR binding.** `bind_ir(program, resources)` accepts an `IRProgram` from any frontend and returns a `SemanticGraphIR`. It is the same validator and preparer that `analyze` uses. Binding ignores caller-supplied traits and preparation and rebinds both from the registry; each call is prepared once.
-- **Optimizer.** For `DependencyPaths`, `optimize(semantic)` visits raw blocks in order, retains the first request for each Call ID, removes subsequent requests and empty chains, and reconnects the remaining blocks. The final return is preserved even if its original chain becomes empty. The result has `IRForm::ControlFlow`, one site per call, and a separate optimized digest. Call declarations, SSA IDs and all unique calls are retained. An input already in `ControlFlow` keeps its calls, values, blocks and terminators unchanged.
-- **Planner.** `plan(optimized, options)` expands every reachable result into fixed tile instructions, places each instruction in the block of its call, and validates the program before returning it.
-- **Execution.** `ExecutionContext::execute(plan, bindings, cancellation, options)` interprets the plan's blocks in order. It never maps dependencies, expands tiles, or reorders instructions.
+- **Frontend:** `analyze` resolves a registered frontend by name. The default `dag@1` traverses named outputs in name order using input-port-ordered DFS, then retains remaining roots by ID. It emits `DependencyPaths`, retaining repeated references to shared Call IDs. Bounds are 65536 calls/blocks, 1048576 references, and schema-7 DAG input with at most 4096 inputs/outputs. Cycles fail before publication.
+- **Validation:** `bind_ir` validates SSA, dominance, schemas, resources and control flow, and binds static operation contracts. It publishes immutable `ValidatedIR` from an editable `IRProgram`. Registry and source currentness remain required.
+- **Optional transformation:** `OptimizerRegistry` resolves names; an ordered invocation vector preserves order and repetitions. A transform reads immutable IR and returns a new program. Validation precedes publication; invalid output is `Internal`. Producer name/version/options and parent content identity are provenance, excluded from the new content digest. No-op stages can share the same identity. The default `optimize@1` retains existing dependency-path deduplication as an optional example.
+- **Planner:** `plan` accepts either legal IR form. It privately retains the first request per Call ID, removes empty chains and reconnects DependencyPaths as CFG, then performs static tile expansion. It does not dispatch an optimizer. CFG input keeps its branches and loops; distinct loop activations are never globally merged. Input IR is unchanged.
+- **Execution:** the VM executes saved physical instructions with bindings; no optimizer or mapper runs.
 
-### Dependency-path example
+For `B(A), C(A), D(B,C), E(D), G(B), F(G,E)`, raw chains are `ABG / AB / AC / DE / F`. The example optimizer and planner's private lowering both obtain `ABG / C / DE / F`. Repeated A/B references represent the same calls, including effects. Different Call IDs remain different invocations. Raw paths remain visible when planning directly. The plan parent is always the actual supplied IR identity.
 
-For `B(A)`, `C(A)`, `D(B,C)`, `E(D)`, `G(B)` and final output `F(G,E)`, input-port order makes the frontend visit G before E:
+## Frontend registration
 
-```mermaid
-flowchart LR
-    A --> B
-    A --> C
-    B --> D
-    C --> D
-    D --> E
-    B --> G
-    G --> F
-    E --> F
+```cpp
+// The caller implements lowering with public IRProgram types.
+ps::Result<ps::IRProgram> lower_source(const ps::WorkflowDocument&,
+                                      const ps::OperationRegistry&);
+auto frontends = std::make_shared<ps::FrontendRegistry>();
+auto registration = frontends->add({"custom", "1", "Custom document lowering", lower_source});
+if (!registration.ok()) return registration;
+frontends->freeze();
+ps::Compiler compiler(operations, {}, {}, frontends);
+auto ir = compiler.analyze(graph.snapshot(), resources, "custom");
+// The complete pipeline accepts the same frontend name as its final argument.
+auto compiled = compiler.compile(graph, {}, resources, {}, "custom");
 ```
 
-| Stage | Ordered chains |
-| --- | --- |
-| Raw semantic IR, `DependencyPaths` | `ABG / AB / AC / DE / F` |
-| Optimized IR, `ControlFlow` | `ABG / C / DE / F` |
+`FrontendDefinition` contains a name, version, description and lowering callback. The current typed source contract is `WorkflowDocument`, read from a coherent `GraphSnapshot`; callbacks also receive the compiler's frozen operation registry. They return an independent editable `IRProgram`. The compiler then binds operation contracts and caller-supplied resources through `bind_ir`, validates the result, and attaches the snapshot revision/currentness and registered name/version provenance. Provenance remains separate from IR content identity. Lowering implementations preserve source semantics; structural binding alone does not prove that translation.
 
-Each letter denotes a Call ID. The raw call table contains seven declarations, while the path lists contain ten references. The second `AB` and the `A` prefix of `AC` remain visible until optimization. A repeated reference requests the same invocation and its SSA results, including when that invocation has effects. Distinct Call IDs remain distinct invocations even if their operation and parameters match. A chain is a dependency-path segment, so a fan-out such as A feeding both B and C does not force A into a separate block.
+`FrontendRegistry` preserves registration order, rejects empty or duplicate names, names over 1024 bytes, empty versions or versions over 128 bytes, missing callbacks and registration after freeze. Register and freeze before sharing; callbacks must support independent concurrent calls, retain no borrowed arguments and invoke no runtime operation callbacks. A compiler retains an injected frozen registry. `Compiler::frontends()` exposes that catalog or lazily creates the default catalog with the single `dag@1` definition. Its implementation is `src/lib/compiler/frontend/DAG/dag.cpp`; orchestration and catalog ownership are in `frontend.cpp` and `frontend_registry.cpp`.
 
-The optimized example has four blocks and three unconditional jumps. Every upstream definition precedes its consumer. Changing F's input order to `F(E,G)` changes the raw paths to `AB / AC / DE / ABG / F` and the optimized chains to `AB / C / DE / G / F`. No runtime execution-state query is needed to select an upstream branch; the frontend traversal determines the path order and optimization resolves repeated requests before planning.
+Unknown frontend names return `NotFound`. Default, replaced or expired snapshots return `Stale`, and currentness is checked again after lowering and before successful publication. Callback failures and binding validation failures retain their error code and receive a frontend name/version diagnostic; source is not assumed valid. Thrown callback exceptions return `Internal`, and allocation failure returns `ResourceExhausted`. No partial validated IR is published. Direct `bind_ir` and artifact import do not invoke a registered frontend; IR import retains saved provenance.
+
+`psc` uses `dag@1` for DAG JSON input and imports PSIR directly. Its input identification remains unchanged; frontend selection and discovery are library APIs only. Other source representations need a separate typed input contract. The only shipped frontend is DAG.
 
 ## IR data model
 
@@ -102,7 +100,7 @@ struct IRProgram {
 }  // namespace ps
 ```
 
-`IRProgram::calls` contains unique call declarations in metadata preparation order. In `DependencyPaths`, block `calls` lists contain ordered requests and may repeat the same Call ID. In `ControlFlow`, they define executable call order and each call has one site. `SemanticGraphIR::form()` reports the interpretation; `SemanticGraphIR::program()` preserves it in an owning editable copy. `OptimizedGraphIR::program()` always returns `ControlFlow`. Another pass or frontend may edit either copy and bind it again.
+`IRProgram::calls` stores unique call declarations. DependencyPaths block lists may repeat a Call ID; ControlFlow has one static site per call. `ValidatedIR::form()` identifies the interpretation, and `program()` returns an independent editable copy. Passes can modify that builder and validate it again. Neither form implies that an optimizer ran.
 
 `bind_ir` accepts the program only when all of these hold:
 
@@ -126,6 +124,7 @@ struct PlanningOptions {
   std::uint64_t tile_extent = 128;            // positive power of two
   std::uint64_t maximum_instructions = 4194304;
   std::uint64_t maximum_dependency_edges = 16777216;
+  std::string planner = "static-tiles";
 };
 struct PlanTensorRead {      // fixed read capability
   std::uint32_t input, tensor_slot;
@@ -163,11 +162,33 @@ struct PlanOutput {
 }  // namespace ps
 ```
 
+`PlanningOptions::planner` names a definition in the compiler's frozen `PlannerRegistry`. The default catalog registers `static-tiles@1`. A caller can inject its own frozen catalog as the third `Compiler` constructor argument; `Compiler::planners()` exposes it for read-only discovery. Registration preserves order and rejects empty or duplicate names, names over 1024 bytes, empty versions or versions over 128 bytes, missing callbacks and empty, invalid or repeated supported IR forms. Registration and freeze happen before sharing; callbacks must support concurrent independent invocations.
+
+```cpp
+// The caller supplies emit_tiles with this callback signature.
+ps::Status emit_tiles(const ps::ValidatedIR&, ps::PlanBuilder&,
+                      const ps::PlanningOptions&);
+auto planners = std::make_shared<ps::PlannerRegistry>();
+auto registration = planners->add({"custom", "1", "Custom tile schedule", emit_tiles});
+if (!registration.ok()) return registration;
+planners->freeze();
+ps::Compiler compiler(operations, {}, planners);  // frozen operation registry
+ps::PlanningOptions options;
+options.planner = "custom";
+auto result = compiler.plan(ir, options);        // existing validated IR
+```
+
+The compiler checks source currentness and operation-registry ownership, resolves the name, checks the supported input IR form, and links a private plan skeleton. Linking fixes lowered CFG, block parameters, call/output declarations, schemas, prepared operations, CPU/GPU placement and normalized output requests. The callback receives the original immutable IR and a `PlanBuilder` with read-only access to that skeleton. `instructions(block_index)` is its only mutable program surface, initially empty. The builder cannot be copied or constructed by callers; borrowed references are limited to the callback lifetime. The built-in static planner uses this same public interface.
+
+After a successful callback, the compiler checks currentness, total emitted instructions and stored dependency edges against the caller's limits, then validates instruction addresses, publication coverage, input grants, dependencies, call order, requested roots and mandatory effects. Only then does it compute physical identity and cache templates and publish `ExecutionPlan`. Invalid generated code or callback exceptions return `Internal`; callback allocation failures and exceeded output budgets return `ResourceExhausted`. Callback-returned failures retain their code with a planner name/version diagnostic. Unknown names return `NotFound`; unsupported forms return `InvalidArgument`; foreign or expired IR returns `Stale`. No partial Plan is published.
+
+Structural validation does not prove mapper semantics or CPU fallback equivalence. Trusted planner implementations must preserve those properties, use only pure static hooks and bound their own intermediate work and allocations. The compiler's final instruction/edge checks do not cap callback memory use. The static planner also bounds expanded dependencies while generating code. Planning receives no runtime bindings and runs no execution callbacks. Plan artifacts contain generated instructions; loading, narrowing and execution require no planner registry or callback. Planner name/version are diagnostic metadata and do not enter the serialized Plan or physical digest. The independent `execution_mode` selects placement.
+
 `ExecutionPlan::steps()` is the complete table of physical call outputs: one `PlanStep` per call result, with its operation, inputs, backend, fixed schema, member grids and prepared shared stages. Steps are declarations. The executable content is `blocks()[i].instructions`, and a step can exist without any instruction, for example an unselected sibling output or an unused pure call. The number of steps is therefore not an execution count.
 
 The planner expands roots in this order for every block: the branch condition (all tiles), every edge argument (all tiles), and each named return restricted to its normalized `output_requests` entry. It then adds every call that is not side-effect-free and every mandatory shared stage. For each root tile, it builds an instruction by calling the operation's static mapper once with a `ResultStaticQuery`, resolves the returned reads against the producers' grids, and recursively builds producer tiles before the consumer. The key `(step, shared stage, member, tile)` deduplicates units, so a tile shared by several consumers is emitted once. Inside each block, a stable sort restores IR call order while keeping each call's tiles in dependency order.
 
-Shared-stage units are canonicalized to the call's primary output step so sibling outputs can share the same stage instructions. This deduplication records units already scheduled during compilation; runtime cache state is separate. The planner builds requested dependencies before consumers and suppresses duplicate units as it expands them. It does not first materialize every tile of every call and then delete duplicates, and it does not pipeline one source tile through all downstream calls to the final output. Raw path-request elimination belongs to IR optimization; tile demand selection and unit deduplication belong to planning.
+Shared-stage units are canonicalized to the call's primary output step so sibling outputs can share the same stage instructions. This deduplication records units already scheduled during compilation; runtime cache state is separate. The planner builds requested dependencies before consumers and suppresses duplicate units as it expands them. It does not first materialize every tile of every call and then delete duplicates, and it does not pipeline one source tile through all downstream calls to the final output. The optional optimizer can eliminate raw path requests; the planner performs the same required lowering privately when they remain. Tile demand selection and unit deduplication belong to planning.
 
 `complete_input_dependencies` covers the selected ordinary inputs only. Each shared-stage read needs an explicit `ResultStaticMapping::shared_stages` entry; declaring an `OperationSharedStage` alone adds no read edge. Stage-to-stage dependencies and cyclic tile dependencies are resolved during planning. Runtime `ResultProgramNeed` checks cannot add an edge or change the fixed grants.
 
@@ -216,99 +237,27 @@ The coordinator checks cancellation, plan currentness, observer failure and the 
 
 ## Compiler artifacts
 
-`CompilerArtifact` stores stages as editable UTF-8 text. `.psir` holds a semantic or optimized IR program; `.psxp` holds a complete execution plan. Both use text format version 3. Earlier versions, including v2, are rejected and must be regenerated from the source workflow or IR using the current compiler.
+`CompilerArtifact::export_ir/import_ir` serialize the unified `ValidatedIR`; `export_plan/import_plan` handle `ExecutionPlan`. Both text formats are v4. v1–v3 are rejected with a re-export diagnostic. IR begins with `psir 4`, `stage ir`, parent, producer/version and typed options, then manifests and program declarations including its explicit form. Both DependencyPaths and ControlFlow round-trip unchanged. Import becomes IR0 in a new driver session and retains source provenance. Provenance does not contribute to content identity.
+
+Plan text begins with `psxp 4` and the actual input IR identity as parent. It contains the privately lowered CFG and complete physical instructions, grants, dependencies, output selections, backend placements and fallback choices. Plan import accepts a frozen operation registry directly, links saved contracts and resources, restores instructions and validates them. It rejects a saved program whose form is not ControlFlow. It does not run the frontend, optimizer, mapper, tile expansion or backend selection. Derived grids and pure static preparation are rebuilt. The saved CFG need not have the parent's raw form.
+
+Operation manifest digests describe contracts, not authentication of callback code. Resources use SHA-256 and byte length; import requires caller-supplied matching bytes. No DSO paths, native pointers, cache or Run state is serialized. Missing contracts/resources fail `NotFound`, changed contracts fail `TypeMismatch`. IR and plan identities are recomputed. Text is bounded to 64 MiB, with parser line/column errors. Typed parameters preserve binary64 bits, including signed zero and nonfinite payloads where operation schemas allow them.
+
+Imported stages have local revision one and depend on the retained frozen registry, not the old GraphContext. Source-bound stages remain subject to graph currentness. Exporting stale/default stages fails `Stale`. Library `save_*` helpers encode before opening the destination but are not atomic; I/O errors may leave partial text. The CLI uses byte codecs and its own atomic publication policy. See [CLI formats](../development/Compiler-Tool-Formats.md) and [CLI publication](../development/Compiler-Tools.md).
 
 ```cpp
-namespace ps {
-enum class ArtifactKind { SemanticIR, OptimizedIR, ExecutionPlan };
-struct ArtifactOperation { std::string key; std::string contract_digest; };
-struct ArtifactManifest {
-  ArtifactKind kind;
-  std::uint32_t format_version = 3;
-  std::vector<ArtifactOperation> operations;
-  std::vector<ResourceIdentity> resources;
-};
-using ImportedIR = std::variant<SemanticGraphIR, OptimizedGraphIR>;
-
-class CompilerArtifact {
- public:
-  static Result<std::string> export_ir(const SemanticGraphIR&);
-  static Result<std::string> export_ir(const OptimizedGraphIR&);
-  static Result<std::string> export_plan(const ExecutionPlan&);
-  static Result<ArtifactManifest> inspect(std::string_view text);
-  static Result<ImportedIR> import_ir(const Compiler&, std::string_view, ResourceSet = {});
-  static Result<ExecutionPlan> import_plan(const Compiler&, std::string_view, ResourceSet = {});
-  static Status save_ir(const SemanticGraphIR&, const std::string& path);
-  static Status save_ir(const OptimizedGraphIR&, const std::string& path);
-  static Status save_plan(const ExecutionPlan&, const std::string& path);
-  static Result<ImportedIR> load_ir(const Compiler&, const std::string& path, ResourceSet = {});
-  static Result<ExecutionPlan> load_plan(const Compiler&, const std::string& path, ResourceSet = {});
-};
-}  // namespace ps
+ps::Compiler compiler(registry);  // frozen registry
+// Each Result must be checked before accessing its value.
+auto ir = compiler.analyze(graph.snapshot(), resources);
+if (!ir.ok()) return ir.status();
+auto plan = compiler.plan(ir.value());  // zero optimizer calls
+if (!plan.ok()) return plan.status();
+auto text = ps::CompilerArtifact::export_plan(plan.value());
+if (!text.ok()) return text.status();
+auto restored = ps::CompilerArtifact::import_plan(registry, text.value(), resources);
+if (!restored.ok()) return restored.status();
+auto result = execution.execute(restored.value(), bindings);
 ```
-
-Both formats begin with a magic and version line (`psir 3` or `psxp 3`). A `.psir` file records `stage semantic` or `stage optimized`, then a parent digest, the operation manifest, resources, input declarations and bindings, calls with their per-call resource uses, the return signature, the entry block, the mandatory `form` field and the blocks. `form dependency_paths` is accepted only for semantic IR; `form control_flow` is accepted for semantic IR, optimized IR and plans. Exporting and importing semantic dependency paths preserves their repeated references without running optimization. An optimized artifact or plan that declares dependency paths is rejected.
-
-A `.psxp` file records its parent digest, execution mode and `tile_extent`, the same control-flow declarations, each step's backend placement, the named output requests, and a `code` section with every block's instructions: publication target, published samples, fixed input and shared grants, block-local dependency ordinals and the `cpu_fallback` flag. Tile grids are not stored; import rebuilds them from the fixed schemas and `tile_extent`.
-
-The text accepts `;` line comments, escaped strings and explicitly typed parameters (`i64`, `f64`, `f64_bits`, `bool`, `string`). The writer emits finite normal doubles as round-trip decimal and NaN, infinity and subnormal values as `f64_bits` with sixteen hexadecimal digits. Parsing and writing use the classic locale with a default floating environment and round-to-nearest, so the result does not depend on the caller's locale or rounding mode.
-
-The manifest lists each operation key with a contract digest and each resource with its SHA-256 identity and byte length. The contract digest identifies registered traits and validator and report references; it does not identify or authenticate native callback code. A file contains no library path, executable code, native pointer, device handle, Run state, cache content or resource bytes.
-
-- `inspect(text)` parses the whole file without a registry and returns the manifest. A host uses it to decide which operation libraries to load and which resources to supply before importing.
-- `import_ir` links the manifest against the compiler's frozen registry, fails `TypeMismatch` when a contract digest differs and `NotFound` for a missing operation or resource, then runs `bind_ir`. An optimized artifact stays optimized; no optimization runs.
-- `import_plan` performs the same linking, restores the declarations, placements and instruction blocks, rebuilds grids and static preparation, and runs full plan validation: fixed grants, input projections, members and ranges, publication closures, block-local dependency readiness, IR call order, CFG and backend legality. It calls no mapper, performs no tile expansion and chooses no backend. A stored choice the current host cannot execute, for example a GPU placement in a `CpuExact` plan, fails `BackendUnavailable` or `InvalidArgument`.
-- Digests are recomputed on import. The stored parent digest is provenance and does not sign the text, so an edited file is valid exactly when it passes binding and validation.
-
-An imported stage is independent of any `GraphContext`. Its `revision()` is 1 and `current()` stays true while the registry is alive. Execution must use an `ExecutionContext` built over the same frozen registry instance; `execute`, `freeze` and `open_demand` fail `Stale` for a plan linked to another registry. A stage compiled directly from a DAG keeps its snapshot semantics and becomes stale when the source `GraphContext` is replaced or destroyed; a saved file carries no source liveness. Export of a stale or default stage fails `Stale`.
-
-Texts and files are capped at 64 MiB. Syntax errors return `InvalidArgument` with line and column. `save_*` encodes completely before opening the destination, so an encoding failure leaves the file untouched; the write itself is not an atomic rename, and an I/O failure can leave partial text and returns `OperationFailed` with Io/ShortIo detail. `load_*` returns `NotFound` for an unreadable path and selects the format from the magic line, not the extension.
-
-The following excerpt shows one complete round trip. `registry` is a frozen `std::shared_ptr<OperationRegistry>`, `graph` a `GraphContext`, `resources` the `ResourceSet` that static preparation selects from, and `bindings` the per-Run `ExecutionBindings`.
-
-```cpp
-ps::Status compile_save_and_run(std::shared_ptr<ps::OperationRegistry> registry,
-                                const ps::GraphContext& graph,
-                                const ps::ResourceSet& resources,
-                                const ps::ExecutionBindings& bindings) {
-  ps::Compiler compiler(registry);
-  auto semantic = compiler.analyze(graph.snapshot(), resources);
-  if (!semantic.ok())
-    return semantic.status();
-  auto optimized = compiler.optimize(semantic.value());
-  if (!optimized.ok())
-    return optimized.status();
-  auto plan = compiler.plan(optimized.value(), ps::PlanningOptions{});
-  if (!plan.ok())
-    return plan.status();
-
-  auto saved = ps::CompilerArtifact::save_ir(semantic.value(), "pipeline.psir");
-  if (saved.ok())
-    saved = ps::CompilerArtifact::save_ir(optimized.value(), "pipeline.opt.psir");
-  if (saved.ok())
-    saved = ps::CompilerArtifact::save_plan(plan.value(), "pipeline.psxp");
-  if (!saved.ok())
-    return saved;
-
-  auto ir = ps::CompilerArtifact::load_ir(compiler, "pipeline.opt.psir", resources);
-  if (!ir.ok())
-    return ir.status();
-  if (!std::holds_alternative<ps::OptimizedGraphIR>(ir.value()))
-    return {ps::ErrorCode::TypeMismatch, "expected an optimized IR artifact"};
-
-  auto loaded = ps::CompilerArtifact::load_plan(compiler, "pipeline.psxp", resources);
-  if (!loaded.ok())
-    return loaded.status();
-  ps::ExecutionContext execution(registry);
-  auto result = execution.execute(loaded.value(), bindings);
-  if (!result.ok())
-    return result.status();
-  // result.value().results maps each named output to its ResultRef.
-  return ps::Status::success();
-}
-```
-
-`load_ir` returns `ImportedIR`; a caller continues a semantic stage with `optimize` and an optimized stage with `plan`. The artifact API has no command-line front end.
 
 ## Operation callbacks and errors
 
@@ -318,7 +267,7 @@ Ordinary CPU callbacks run on the context CPU pool with the range service; GPU c
 
 An operation that declares `OperationTraits::cpu_staged_tiles` runs its poll on the coordinator with the planar staged tile service. `image.stmap` does so for requests of at least 65,536 pixels: the coordinator prepares bounded spans of output pixels, submits one tile stage whose geometry depends only on the span count, and joins every tile before publication commits. `ExecutionOptions::maximum_parallelism` caps the workers of that tile service; zero uses the CPU pool's worker count. Tile callbacks receive only immutable inputs and disjoint raw output runs. See [Dependency sampling](Dependency-Sampling.md#publication-and-parallel-arithmetic) and [Parallel execution model](Parallel-Execution-Model.md#planar-staged-tile-service).
 
-GPU-to-CPU fallback is compiled. When a step is placed on GPU and its traits declare `allows_cpu_fallback`, CPU support, determinism and freedom from side effects, the planner calls the mapper a second time with the CPU backend and sets `PlanTileInstruction::cpu_fallback` only when the CPU reads fit inside the GPU grants, including complete-validation coverage. An instruction with shared-stage reads gets no compiled fallback; that path needs explicit IR control flow. At run time, a GPU start or poll that fails with an unqualified `BackendUnavailable` (`reason=None`, origin unspecified or backend, scope unspecified or group) retries on CPU with the same grants only if the attempt published nothing and performed no input read, native dispatch, checkpoint, block or GPU selection, and no protocol, observer, resource, cancellation or stop failure vetoed it. The rejected GPU attempt keeps its timing record, the CPU attempt starts with fresh failure owners, and the retried result is excluded from completed-result, checkpoint and block reuse.
+GPU-to-CPU fallback is compiled. When a step is placed on GPU and its traits declare `allows_cpu_fallback`, CPU support, determinism and freedom from side effects, the planner calls the mapper a second time with the CPU backend and sets `PlanTileInstruction::cpu_fallback` only when the CPU reads fit inside the GPU grants, including complete-validation coverage. A valid CPU mapping that exceeds the saved grants leaves fallback disabled and preserves the otherwise valid GPU plan. Invalid mapper results remain planning errors. An instruction with shared-stage reads gets no compiled fallback; that path needs explicit IR control flow. At run time, a GPU start or poll that fails with an unqualified `BackendUnavailable` (`reason=None`, origin unspecified or backend, scope unspecified or group) retries on CPU with the same grants only if the attempt published nothing and performed no input read, native dispatch, checkpoint, block or GPU selection, and no protocol, observer, resource, cancellation or stop failure vetoed it. The rejected GPU attempt keeps its timing record, the CPU attempt starts with fresh failure owners, and the retried result is excluded from completed-result, checkpoint and block reuse.
 
 ## Storage, resources and diagnostics
 
@@ -330,21 +279,21 @@ A Result owns its static schema, descriptor coverage, numerical backing, and Obj
 
 | Axis | Current value |
 | --- | --- |
-| Package / SOVERSION | 0.37.0 / 0.37 |
+| Package / SOVERSION | 0.38.0 / 0.38 |
 | `OperationTraits::version` | 29 |
 | C Result operation ABI | 7 (`ps_result_operation_plugin_get_api_v7`) |
 | WorkflowDocument schema | 7 |
-| `.psir` / `.psxp` text format | 3 |
-| Semantic identity domain | `semantic-ssa-ir-v25` |
-| Optimizer identity domain | `optimizer-v7-dependency-paths` |
-| Physical plan identity domain | `static-tile-program-v26` |
-| Plan cache key domain | `plan-cache-key-v19` |
+| `.psir` / `.psxp` text format | 4 |
+| IR identity domain | `validated-ssa-ir-v26` |
+| Example optimizer | `optimize@1` (provenance only) |
+| Physical plan identity domain | `static-tile-program-v27` |
+| Plan cache key domain | `plan-cache-key-v20` |
 | Saved operation contract domain | `artifact-static-operation-contract-v2` |
 | Result schema canonical tag | `photospider.result-schema.v6` |
 
-These version axes are independent. CPU parallel and tile services are version 2; native GPU services are version 1. `TileGrid::from_schema` returns `Result<TileGrid>`, and `OperationRegistry::prepare_operation` resolves the static operation contract. Semantic, optimized and plan digests include program identifiers, so renumbering calls or values changes them even when the computation is the same.
+These version axes are independent. CPU parallel and tile services are version 2; native GPU services are version 1. `TileGrid::from_schema` returns `Result<TileGrid>`, and `OperationRegistry::prepare_operation` resolves the static operation contract. IR and Plan digests include program identifiers, so renumbering calls or values changes them even when the computation is the same.
 
-The added program-form state changes public C++ IR object layouts; consumers must be rebuilt with matching headers and libraries. This change does not alter WorkflowDocument schema 7 or C Result operation ABI 7.
+Public C++ IR and `PlanningOptions` object layouts require matching headers and libraries; rebuild consumers when either layout changes. WorkflowDocument schema 7 and C Result operation ABI 7 remain independent version axes.
 
 ## Limitations and non-goals
 

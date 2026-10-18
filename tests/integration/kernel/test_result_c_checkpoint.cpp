@@ -139,7 +139,7 @@ int workflow(unsigned mode, bool cache = true,
     std::cerr << loaded.message << '\n';
   PS_CHECK(loaded.ok() && registry->freeze().ok());
   GraphContext graph(document(mode, key));
-  auto plan = take(Compiler(registry).compile(graph, planning())).plan;
+  auto plan = take(Compiler(registry).compile(graph, planning())).plan.value();
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   config.result_cache_bytes = cache ? 1048576 : 0;
@@ -213,7 +213,7 @@ int finite_prefix(double first, double second) {
   PS_CHECK(registry->load_plugin(PS_RESULT_CHECKPOINT_FIXTURE).ok() &&
            registry->freeze().ok());
   GraphContext graph(document(0, "fixture.result_checkpoint"));
-  auto plan = take(Compiler(registry).compile(graph, planning())).plan;
+  auto plan = take(Compiler(registry).compile(graph, planning())).plan.value();
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   config.result_cache_bytes = 1048576;
@@ -243,7 +243,7 @@ int shared_prefix(unsigned mode, bool restore_prefix = true) {
   PS_CHECK(registry->load_plugin(PS_RESULT_CHECKPOINT_FIXTURE).ok() &&
            registry->freeze().ok());
   GraphContext graph(document(mode, "fixture.result_checkpoint"));
-  auto plan = take(Compiler(registry).compile(graph, planning())).plan;
+  auto plan = take(Compiler(registry).compile(graph, planning())).plan.value();
   ExecutionContextConfig config;
   config.cpu_workers = 2;
   config.result_cache_bytes = 1048576;
@@ -307,7 +307,7 @@ int cancelled_read() {
   PS_CHECK(registry->load_plugin(PS_RESULT_CHECKPOINT_FIXTURE).ok() &&
            registry->freeze().ok());
   GraphContext graph(document(18, "fixture.result_checkpoint"));
-  auto plan = take(Compiler(registry).compile(graph, planning())).plan;
+  auto plan = take(Compiler(registry).compile(graph, planning())).plan.value();
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   config.managed_resources = ResourceLimits{};

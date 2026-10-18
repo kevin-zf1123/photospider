@@ -10,10 +10,10 @@ Photospider 是可嵌入的 C++17 内核，用于校验本地图工作流，经�
 WorkflowDocument -> GraphContext -> GraphSnapshot      IRProgram (other frontend)
                                     |                         |
                                     v                         v
-                         analyze -----------------> SemanticGraphIR <---- .psir
+                         analyze -----------------> ValidatedIR <---- .psir
                                                           |
                                                           v
-                                     optimize: resolve paths -> OptimizedGraphIR <---- .psir
+                                     optional optimize + validate -> ValidatedIR <---- .psir
                                                           |
                                                           v
                                    plan: static mapping, tile expansion,
@@ -37,23 +37,26 @@ ExecutionBindings --------------------------------------> Run
 
 Compiler 负责静态校验、依赖映射与规划。每个 Run 持有其 program counter、block 值、已绑定授权、Result producers、取消状态、dependency recorder 和诊断；它同一时刻只执行一条 plan 指令。并行来自共享 context pool 的不同 Run，以及单个算子回调内部的 CPU range、CPU tile 和 GPU 工作。返回的 Result 独立持有 backing 与 leases。
 
+Planner 直接接受初始 ValidatedIR，optimizer 路径可跳过。
+
 ## 3. 契约与接口
 
 ```cpp
 class Compiler {
  public:
-  Result<SemanticGraphIR> analyze(const GraphSnapshot&,
+  Result<ValidatedIR> analyze(const GraphSnapshot&,
                                   ResourceSet = {}) const;
-  Result<SemanticGraphIR> bind_ir(IRProgram, ResourceSet = {}) const;
-  Result<OptimizedGraphIR> optimize(const SemanticGraphIR&) const;
-  Result<ExecutionPlan> plan(const OptimizedGraphIR&,
+  Result<ValidatedIR> bind_ir(IRProgram, ResourceSet = {}) const;
+  Result<ValidatedIR> optimize(const ValidatedIR&,
+                               const OptimizerInvocation& = {"optimize", {}}) const;
+  Result<ExecutionPlan> plan(const ValidatedIR&,
                              const PlanningOptions& = {}) const;
 };
 
 class CompilerArtifact {
  public:
   static Status save_plan(const ExecutionPlan&, const std::string& path);
-  static Result<ExecutionPlan> load_plan(const Compiler&,
+  static Result<ExecutionPlan> load_plan(std::shared_ptr<OperationRegistry>,
                                          const std::string& path,
                                          ResourceSet = {});
 };
@@ -71,7 +74,7 @@ class ExecutionContext {
 
 `plan` 调用每个算子的静态 mapper，把可达的输出 tile 展开为带固定读取授权的去重指令，并验证结果。Tile 去重记录已安排到 plan 中的工作，与运行时缓存独立。Execution 在 callback 前检查 plan currentness 与冻结的 operation registry identity，然后遵循指令和 CFG 执行。每个 call 产出的输出都在下一个 call 开始前完成认证。`analyze` 接收不可变的内容寻址 `ResourceSet`；每个算子的 preparation 选择它需要的 identity，例如由显式颜色参数命名的 ICC profile。Result 与 Tensor 只携带结构和数据；领域解释是显式算子参数，内核不在连线上做标签匹配。
 
-`CompilerArtifact` 把每个阶段保存和加载为可编辑的格式 v3 文本（IR 为 `.psir`，plan 为 `.psxp`）。语义 IR 可以保留依赖路径；优化 IR 和 plan 要求控制流形式。更早的产物版本会被拒绝。加载的阶段独立于任何 `GraphContext`，执行时要求同一冻结 registry，并在导入时完整重新验证。见[Compiler 与本地执行](Compiler-and-Execution.zh.md#compiler-产物)。
+`CompilerArtifact` 保存和加载 v4 文本（`.psir` 是统一 IR，`.psxp` 是完整 Plan）。原始和优化 IR 都允许依赖路径或 CFG；Plan 保存私有 lowering 的 CFG。v1–v3 拒绝并要求重新导出。加载对象独立于原 GraphContext，仍需匹配的冻结 registry 和资源。Plan 导入不调用 optimizer、mapper 或 planner。见[Compiler 与本地执行](Compiler-and-Execution.zh.md#compiler-产物)。
 
 `CpuExact` 是默认执行模式。`NativeGpu` 仅允许把声明了原生实现且匹配当前配置后端的算子放到 GPU。CPU 工作使用固定 context pool；原生回调使用配置的 backend lane。Cancellation 是协作式的，已经进入回调的任务可能需要完成后 Run 才能返回。
 

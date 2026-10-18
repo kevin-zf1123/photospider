@@ -20,12 +20,10 @@ ErrorCode fail_first_query() noexcept {
 }
 struct Counts {
   unsigned gpu_starts = 0, cpu_starts = 0, destroyed = 0;
-  bool ordered_retirement = true;
+  bool read_before_native = false;
 };
 struct State {
   State(Counts* counts, Backend backend) : counts(counts), backend(backend) {
-    if (backend == Backend::Cpu && counts->destroyed != counts->gpu_starts)
-      counts->ordered_retirement = false;
     ++(backend == Backend::Gpu ? counts->gpu_starts : counts->cpu_starts);
   }
   ~State() noexcept { ++counts->destroyed; }
@@ -44,9 +42,11 @@ struct State {
       return Result<ResultProgramPoll>(std::move(need));
     }
     float sample = 0;
-    auto read = phase.read_tensor(0, 0, {0}, &sample, sizeof(sample));
-    if (!read.ok())
-      return Result<ResultProgramPoll>(read);
+    if (backend == Backend::Cpu || counts->read_before_native) {
+      auto read = phase.read_tensor(0, 0, {0}, &sample, sizeof(sample));
+      if (!read.ok())
+        return Result<ResultProgramPoll>(read);
+    }
     auto output = multi_result::take(phase.allocator.allocate(4));
     if (backend == Backend::Gpu) {
       auto first = phase.acquire_native_tensor(0, 0, Region::whole({1}));
@@ -104,10 +104,11 @@ float read(const ResultRef& result) {
       multi_result::take(result.descriptor()), 0, {0}, &number, 4));
   return number;
 }
-int capacity_failure(ErrorCode error) {
+int capacity_failure(ErrorCode error, bool read_before_native) {
   queries = 0;
   injected = error;
   Counts counts;
+  counts.read_before_native = read_before_native;
   auto registry = std::make_shared<OperationRegistry>();
   OperationDefinition operation;
   operation.key = "native.capacity";
@@ -147,28 +148,20 @@ int capacity_failure(ErrorCode error) {
     return 77;
   auto input = multi_result::binding(context.resource_budget().take_value(),
                                      "input", 14, schema);
-  auto result = context.execute(compiled.value().plan, {{input}});
+  auto result = context.execute(compiled.value().plan.value(), {{input}});
   PS_CHECK(queries == 1 && counts.gpu_starts == 1);
-  if (error == ErrorCode::BackendUnavailable) {
-    PS_CHECK(result.ok());
-    PS_CHECK(counts.cpu_starts == 1 && counts.destroyed == 2 &&
-             counts.ordered_retirement);
-    PS_CHECK(result.value().diagnostics.fallback_reasons.size() == 1);
-    PS_CHECK(result.value().diagnostics.selected_backends.at({1, 0}) ==
-             Backend::Cpu);
-    PS_CHECK(read(result.value().results.at("output")) == 7);
-  } else {
-    PS_CHECK(!result.ok() && result.status().code == error);
-    PS_CHECK(result.status().message == "injected native capacity query");
-    PS_CHECK(counts.cpu_starts == 0 && counts.destroyed == 1);
-  }
+  // Native acquisition has already opened an input window before its device
+  // capacity query. Even BackendUnavailable cannot restart this attempt.
+  PS_CHECK(!result.ok() && result.status().code == error);
+  PS_CHECK(result.status().message == "injected native capacity query");
+  PS_CHECK(counts.cpu_starts == 0 && counts.destroyed == 1);
   const auto retired = context.resource_budget().take_value().statistics();
   PS_CHECK(retired.live[ResourceKind::Device] == 0 &&
            retired.live[ResourceKind::Shared] == 0);
   // A failed speculative session releases its owners before a later Run.
   injected = ErrorCode::Ok;
   queries = 0;
-  auto retry = context.execute(compiled.value().plan, {{input}});
+  auto retry = context.execute(compiled.value().plan.value(), {{input}});
   PS_CHECK(retry.ok() && retry.value().diagnostics.fallback_reasons.empty());
   PS_CHECK(read(retry.value().results.at("output")) == 7);
   PS_CHECK(counts.destroyed == counts.cpu_starts + counts.gpu_starts);
@@ -183,12 +176,14 @@ int main() {
   for (auto error :
        {ps::ErrorCode::BackendUnavailable, ps::ErrorCode::ResourceExhausted,
         ps::ErrorCode::OperationFailed}) {
-    const int result = capacity_failure(error);
-    if (result != 0)
-      return result;
+    for (bool read_before_native : {false, true}) {
+      const int result = capacity_failure(error, read_before_native);
+      if (result != 0)
+        return result;
+    }
   }
   ps::execution_testing::install_execution_test_hooks(nullptr);
-  std::cout
-      << "native dependency capacity: typed errors, restart and retry passed\n";
+  std::cout << "native dependency capacity: typed errors, retirement and "
+               "recovery passed\n";
   return 0;
 }

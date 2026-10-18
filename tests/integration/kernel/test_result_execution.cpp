@@ -106,7 +106,7 @@ int foreign_objects() {
   document.nodes = {{1, "foreign", {}, {}}};
   document.outputs = {{"result", 1, "value"}};
   GraphContext graph(document);
-  auto plan = take(Compiler(registry).compile(graph)).plan;
+  auto plan = take(Compiler(registry).compile(graph)).plan.value();
   ExecutionContext execution(registry);
   PS_CHECK(execution.execute(plan).status().code == ErrorCode::InvalidArgument);
   return 0;
@@ -153,7 +153,7 @@ int foreign_backing() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   for (std::uint64_t limit : {0U, 8U}) {
     ExecutionContextConfig config;
     config.managed_resources = ResourceLimits{};
@@ -215,31 +215,33 @@ int binding_contract() {
   ExecutionContext context(registry);
   auto root = context.resource_budget().take_value();
   auto input = source_result(root, schema, backing).take_value();
-  PS_CHECK(context.execute(compiled.value().plan).status().code ==
+  PS_CHECK(context.execute(compiled.value().plan.value()).status().code ==
            ErrorCode::InvalidArgument);
   PS_CHECK(context
-               .execute(compiled.value().plan,
+               .execute(compiled.value().plan.value(),
                         {{{"unused", input}, {"unused", input}}})
                .status()
                .code == ErrorCode::InvalidArgument);
-  PS_CHECK(context.execute(compiled.value().plan, {{{"extra", input}}})
+  PS_CHECK(context.execute(compiled.value().plan.value(), {{{"extra", input}}})
                .status()
                .code == ErrorCode::InvalidArgument);
-  PS_CHECK(context.execute(compiled.value().plan, {{{"unused", {}}}})
+  PS_CHECK(context.execute(compiled.value().plan.value(), {{{"unused", {}}}})
                .status()
                .code == ErrorCode::InvalidArgument);
   ResourceBudget foreign;
   auto other_root = source_result(foreign, schema, backing).take_value();
-  PS_CHECK(context.execute(compiled.value().plan, {{{"unused", other_root}}})
-               .status()
-               .code == ErrorCode::InvalidArgument);
+  PS_CHECK(
+      context.execute(compiled.value().plan.value(), {{{"unused", other_root}}})
+          .status()
+          .code == ErrorCode::InvalidArgument);
   auto wrong_schema = schema;
   wrong_schema.id = "test.wrong_binding";
   auto wrong = source_result(root, wrong_schema, backing).take_value();
-  PS_CHECK(context.execute(compiled.value().plan, {{{"unused", wrong}}})
+  PS_CHECK(context.execute(compiled.value().plan.value(), {{{"unused", wrong}}})
                .status()
                .code == ErrorCode::TypeMismatch);
-  auto result = context.execute(compiled.value().plan, {{{"unused", input}}});
+  auto result =
+      context.execute(compiled.value().plan.value(), {{{"unused", input}}});
   PS_CHECK(result.ok() &&
            scalar_result(result.value().results.at("value")) == 42);
   auto changed = document;
@@ -247,8 +249,9 @@ int binding_contract() {
       std::make_shared<const SchemaTemplate>(wrong_schema);
   GraphContext changed_graph(changed);
   auto changed_plan = compiler.compile(changed_graph);
-  PS_CHECK(changed_plan.ok() && compiled.value().plan.digest().value !=
-                                    changed_plan.value().plan.digest().value);
+  PS_CHECK(changed_plan.ok() &&
+           compiled.value().plan.value().digest().value !=
+               changed_plan.value().plan.value().digest().value);
   return 0;
 }
 struct EffectState {
@@ -369,7 +372,7 @@ int mandatory_effects() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   auto frozen = context.freeze(plan, {}).take_value();
   for (unsigned run = 1; run <= 2; ++run) {
     auto result = context.execute(frozen);
@@ -398,7 +401,8 @@ int mandatory_effects() {
   mode = 0;
   document.nodes[1] = {2, "effect_constant", {}, {}};
   GraphContext unrelated(document);
-  auto independent = Compiler(registry).compile(unrelated).take_value().plan;
+  auto independent =
+      Compiler(registry).compile(unrelated).take_value().plan.value();
   auto captured = context.freeze(independent, {}).take_value();
   DemandQuery empty{{"value", TileRequest{}}};
   const auto before = calls;
@@ -447,7 +451,7 @@ int foreign_binding_admission() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionContext context(registry);
   ResourceLimits limits;
   limits.maximum_work = 100000;
@@ -551,7 +555,7 @@ int sparse_source_need_budget() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   auto input = TensorSpan::create({ElementType::UInt8, {1, 256}},
                                   Region::whole({1, 256}), {0, {256, 1}},
                                   std::vector<std::uint8_t>(256))

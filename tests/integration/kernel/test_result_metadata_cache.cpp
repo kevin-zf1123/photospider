@@ -161,7 +161,7 @@ int compact_identity() {
                                        "fixture.metadata",
                                        {WorkflowInputReference{1}},
                                        {{"offset", offset}}}}));
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
+    auto plan = Compiler(registry).compile(graph).take_value().plan.value();
     const auto before = calls.load();
     std::vector<std::uint8_t> observed;
     unsigned publications = 0;
@@ -239,7 +239,8 @@ int compact_identity() {
       {input}, {{1, "fixture.partial", {WorkflowInputReference{1}}, {}}}));
   PlanningOptions options;
   options.output_requests["result"] = {{{0, take(TileSet::range(root, 0, 1))}}};
-  auto partial = Compiler(registry).compile(graph, options).take_value().plan;
+  auto partial =
+      Compiler(registry).compile(graph, options).take_value().plan.value();
   const auto before = calls.load();
   auto first =
       execution.execute(partial, cache_fixture::bind_sources(root, {input}));

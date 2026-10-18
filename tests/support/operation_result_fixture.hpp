@@ -40,7 +40,7 @@ inline ps::Result<ps::ExecutionResult> execute(
   ps::ExecutionContext context(borrowed, config);
   auto input = multi_result::binding(context.resource_budget().take_value(),
                                      "input", 3, schema(atomic));
-  return context.execute(compiled.value().plan, {{input}});
+  return context.execute(compiled.value().plan.value(), {{input}});
 }
 inline ps::Result<ps::ResultContinuation> start(
     ps::OperationRegistry& registry, const std::string& key,

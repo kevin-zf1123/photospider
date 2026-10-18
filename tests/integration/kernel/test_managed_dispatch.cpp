@@ -104,7 +104,9 @@ int stages(unsigned mode, std::uint64_t maximum, std::uint64_t queue) {
   }
   GraphContext graph(doc);
   auto plan = take(Compiler(registry).compile(graph));
-  const auto execute = [&] { return context.execute(plan.plan, bindings); };
+  const auto execute = [&] {
+    return context.execute(plan.plan.value(), bindings);
+  };
   const auto failed = [&](const Result<ExecutionResult>& result) {
     return !result.ok() && result.status().code == ErrorCode::ResourceExhausted;
   };
@@ -186,7 +188,7 @@ int source_failure() {
     GraphContext graph(doc);
     auto plan = take(Compiler(registry).compile(graph));
     ExecutionContext context(registry);
-    auto result = context.execute(plan.plan);
+    auto result = context.execute(plan.plan.value());
     PS_CHECK(!result.ok() && callbacks == 0);
     PS_CHECK(result.status().code == ErrorCode::OperationFailed);
     PS_CHECK(result.status().detail.node_id == 7);

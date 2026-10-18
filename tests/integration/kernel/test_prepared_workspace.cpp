@@ -99,7 +99,7 @@ int main() {
       PS_CHECK(compiled.ok());
       const auto preparations_before_execution = preparations;
       for (unsigned repeat = 0; repeat < 2; ++repeat) {
-        auto result = context.execute(compiled.value().plan);
+        auto result = context.execute(compiled.value().plan.value());
         if (!result.ok())
           std::cerr << result.status().message << '\n';
         PS_CHECK(result.ok());
@@ -118,7 +118,7 @@ int main() {
         limited_config.managed_resources->capacity[ResourceKind::Payload] =
             2048;
         ExecutionContext limited(registry, limited_config);
-        auto failure = limited.execute(compiled.value().plan);
+        auto failure = limited.execute(compiled.value().plan.value());
         PS_CHECK(!failure.ok() &&
                  failure.status().code == ErrorCode::ResourceExhausted);
         PS_CHECK(preparations == preparations_before_execution);

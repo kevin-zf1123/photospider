@@ -234,7 +234,7 @@ int execution_owner() {
   auto root = context->resource_budget().take_value();
   ResultRef held;
   {
-    auto result = context->execute(compiled.value().plan);
+    auto result = context->execute(compiled.value().plan.value());
     if (!result.ok())
       std::cerr << result.status().message
                 << " code=" << static_cast<unsigned>(result.status().code)

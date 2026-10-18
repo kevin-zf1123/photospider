@@ -87,7 +87,7 @@ int staged_outputs() {
   const auto root = multi_result::take(execution.resource_budget());
   ExecutionBindings bindings{{multi_result::binding(root, "a", 7),
                               multi_result::binding(root, "b", 11)}};
-  auto frozen = execution.freeze(compiled.value().plan, bindings);
+  auto frozen = execution.freeze(compiled.value().plan.value(), bindings);
   PS_CHECK(frozen.ok());
   const DemandQuery query{
       {"left",
@@ -103,13 +103,14 @@ int staged_outputs() {
       TileRequest{{{0, multi_result::take(TileSet::range(root, 0, 1))}}};
   PS_CHECK(verify_source(first.value().dependencies, {0, 0, 0}, 0) == 0);
   PS_CHECK(verify_source(first.value().dependencies, {1, 1, 0}, 1) == 0);
-  const auto left_return = compiled.value().plan.output("left").record_index;
+  const auto left_return =
+      compiled.value().plan.value().output("left").record_index;
   PS_CHECK(verify_source(first.value().dependencies, {left_return, 0, 0}, 0) ==
            0);
   PS_CHECK(verify_dirty(first.value().dependencies, root, 0,
                         {{0, 0, 0}, {left_return, 0, 0}}) == 0);
   bindings.inputs[0] = multi_result::binding(root, "a", 13);
-  auto replacement = execution.freeze(compiled.value().plan, bindings);
+  auto replacement = execution.freeze(compiled.value().plan.value(), bindings);
   PS_CHECK(replacement.ok());
   auto changed = execution.execute_fragments(replacement.value(), query);
   PS_CHECK(changed.ok());
@@ -129,7 +130,7 @@ int staged_outputs() {
                              WorkflowInputReference{10}};
   renamed.outputs = {{"right", 99, "right"}};
   GraphContext renamed_graph(renamed);
-  auto renamed_plan = compiler.compile(renamed_graph).take_value().plan;
+  auto renamed_plan = compiler.compile(renamed_graph).take_value().plan.value();
   const auto before_rename = (*counts)[1].load();
   auto renamed_frozen = execution.freeze(renamed_plan, bindings).take_value();
   auto renamed_result =
@@ -156,7 +157,7 @@ int staged_outputs() {
        {}});
   chain.outputs = {{"left", 2, "left"}, {"right", 2, "right"}};
   GraphContext chain_graph(chain);
-  auto chain_plan = compiler.compile(chain_graph).take_value().plan;
+  auto chain_plan = compiler.compile(chain_graph).take_value().plan.value();
   auto chain_frozen = execution.freeze(chain_plan, bindings).take_value();
   auto seeded_chain = execution.execute_fragments(chain_frozen, query);
   PS_CHECK(seeded_chain.ok());
@@ -166,7 +167,7 @@ int staged_outputs() {
                            WorkflowNodeOutput{77, "right"}};
   chain.outputs = {{"right", 88, "right"}};
   GraphContext moved_chain(chain);
-  auto moved_plan = compiler.compile(moved_chain).take_value().plan;
+  auto moved_plan = compiler.compile(moved_chain).take_value().plan.value();
   auto moved_frozen = execution.freeze(moved_plan, bindings).take_value();
   const auto before_chain = (*counts)[1].load();
   const auto left_before_chain = (*counts)[0].load();
@@ -194,16 +195,16 @@ int staged_outputs() {
   document.outputs = {{"right", 1, "right"}};
   GraphContext single(document);
   auto selected = compiler.compile(single);
-  PS_CHECK(selected.ok() && selected.value().plan.steps().size() == 2);
+  PS_CHECK(selected.ok() && selected.value().plan.value().steps().size() == 2);
   std::size_t instructions = 0;
-  for (const auto& block : selected.value().plan.blocks())
+  for (const auto& block : selected.value().plan.value().blocks())
     for (const auto& instruction : block.instructions) {
       PS_CHECK(instruction.step_index == 1);
       ++instructions;
     }
   PS_CHECK(instructions == 1);
   const auto left_before = (*counts)[0].load();
-  PS_CHECK(execution.execute(selected.value().plan, bindings).ok());
+  PS_CHECK(execution.execute(selected.value().plan.value(), bindings).ok());
   PS_CHECK((*counts)[0] == left_before);
   return 0;
 }
@@ -262,7 +263,7 @@ int projected_sync_inputs() {
   ExecutionContext execution(registry, {1, false, 8, 4096, 2048});
   const auto root = multi_result::take(execution.resource_budget());
   const ExecutionBindings bindings{{multi_result::binding(root, "a", 7)}};
-  auto result = execution.execute(compiled.value().plan, bindings);
+  auto result = execution.execute(compiled.value().plan.value(), bindings);
   if (!result.ok())
     std::cerr << result.status().message << "\n";
   PS_CHECK(result.ok());
@@ -271,11 +272,11 @@ int projected_sync_inputs() {
   PS_CHECK(unwanted_calls->load() == 0);
   execution.clear_result_cache();
   auto frozen = execution
-                    .freeze(compiled.value().plan,
+                    .freeze(compiled.value().plan.value(),
                             {{multi_result::binding(root, "a", 17)}})
                     .take_value();
   auto independent = execution
-                         .freeze(compiled.value().plan,
+                         .freeze(compiled.value().plan.value(),
                                  {{multi_result::binding(root, "a", 23)}})
                          .take_value();
   const DemandQuery only_constant{
@@ -390,7 +391,7 @@ int projected_shapes_and_permutation() {
   const auto root = multi_result::take(execution.resource_budget());
   const auto a = multi_result::binding(root, "a", 7, left_schema);
   const auto b = multi_result::binding(root, "b", 11, right_schema);
-  auto result = execution.execute(compiled.value().plan, {{b, a}});
+  auto result = execution.execute(compiled.value().plan.value(), {{b, a}});
   PS_CHECK(result.ok());
   const auto& left = result.value().results.at("left");
   const auto& right = result.value().results.at("right");
@@ -414,7 +415,7 @@ int projected_shapes_and_permutation() {
   document.outputs = {{"left", 1, "left"}};
   GraphContext single(document);
   const auto right_before = (*counts)[1].load();
-  auto selected = Compiler(registry).compile(single).take_value().plan;
+  auto selected = Compiler(registry).compile(single).take_value().plan.value();
   PS_CHECK(execution.execute(selected, {{b, a}}).ok());
   PS_CHECK((*counts)[1] == right_before);
   return 0;
@@ -487,8 +488,9 @@ int projected_result_programs() {
         config.managed_resources = ResourceLimits{};
       ExecutionContext context(registry, config);
       const auto root = multi_result::take(context.resource_budget());
-      auto result = context.execute(
-          compiled.value().plan, {{multi_result::binding(root, "source", 7)}});
+      auto result =
+          context.execute(compiled.value().plan.value(),
+                          {{multi_result::binding(root, "source", 7)}});
       if (!result.ok())
         std::cerr << result.status().message
                   << " code=" << static_cast<unsigned>(result.status().code)
@@ -518,7 +520,7 @@ int synchronous_outputs() {
   PS_CHECK(compiled.ok());
   ExecutionContext execution(registry, {1, false, 16, 4096, 2048});
   for (unsigned i = 0; i < 2; ++i) {
-    auto result = execution.execute(compiled.value().plan);
+    auto result = execution.execute(compiled.value().plan.value());
     PS_CHECK(result.ok());
     PS_CHECK(multi_result::number(result.value().results.at("first")) == 10);
     PS_CHECK(multi_result::number(result.value().results.at("second")) == 11);

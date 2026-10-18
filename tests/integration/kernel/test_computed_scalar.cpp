@@ -274,7 +274,8 @@ int valid_views(const std::shared_ptr<OperationRegistry>& base) {
           options.execution_mode = mode;
           auto compiled = compiler.compile(graph, options);
           PS_CHECK(compiled.ok());
-          auto result = execution.execute(compiled.value().plan, s.bindings);
+          auto result =
+              execution.execute(compiled.value().plan.value(), s.bindings);
           PS_CHECK(result.ok());
           scalar_scene::check(s, result.value().results.at("result"));
         }
@@ -289,7 +290,7 @@ int reuse_and_errors(const std::shared_ptr<OperationRegistry>& base) {
   const auto root = take(execution.resource_budget());
   auto s = scene(root);
   GraphContext graph(s.document);
-  auto plan = compiler.compile(graph).take_value().plan;
+  auto plan = compiler.compile(graph).take_value().plan.value();
   const auto check = [&](float coefficient) {
     auto bindings = s.bindings;
     bindings.inputs.back().result = s1_fixture::scalar(root, coefficient);
@@ -312,7 +313,7 @@ int reuse_and_errors(const std::shared_ptr<OperationRegistry>& base) {
     execution.clear_result_cache();
     auto bad = scene(root, 0, 1, mode);
     GraphContext full(bad.document);
-    auto full_plan = compiler.compile(full).take_value().plan;
+    auto full_plan = compiler.compile(full).take_value().plan.value();
     const auto expected =
         mode == 3 ? ErrorCode::InvalidArgument : ErrorCode::OperationFailed;
     auto before = f.consumers.load();
@@ -322,14 +323,14 @@ int reuse_and_errors(const std::shared_ptr<OperationRegistry>& base) {
                 << " code=" << static_cast<unsigned>(failed.status().code)
                 << " message=" << failed.status().message << '\n';
     PS_CHECK(failed.status().code == expected);
-    PS_CHECK(f.consumers == before + 1);
+    PS_CHECK(f.consumers == before);
     // Generic tensors may contain NaN or out-of-range controls. A Result cannot
     // publish a different schema from the one compiled for its producer.
     auto document = bad.document;
     document.nodes.resize(1);
     document.outputs = {{"source", 5, "value"}};
     GraphContext producer(document);
-    auto producer_plan = compiler.compile(producer).take_value().plan;
+    auto producer_plan = compiler.compile(producer).take_value().plan.value();
     auto alone = execution.execute(producer_plan, bad.bindings);
     if (mode == 3) {
       PS_CHECK(alone.status().code == ErrorCode::InvalidArgument &&
@@ -340,16 +341,16 @@ int reuse_and_errors(const std::shared_ptr<OperationRegistry>& base) {
     auto produced = f.producers.load();
     PS_CHECK(execution.execute(full_plan, bad.bindings).status().code ==
              expected);
-    PS_CHECK(f.consumers == before + 2 && f.producers == produced);
+    PS_CHECK(f.consumers == before && f.producers == produced);
   }
   auto opacity = scene(root, 1);
   opacity.bindings.inputs.back().result = s1_fixture::scalar(root, .75F);
   GraphContext opacity_graph(opacity.document);
-  auto opacity_plan = compiler.compile(opacity_graph).take_value().plan;
+  auto opacity_plan = compiler.compile(opacity_graph).take_value().plan.value();
   const auto before_opacity = f.consumers.load();
   PS_CHECK(execution.execute(opacity_plan, opacity.bindings).status().code ==
            ErrorCode::OperationFailed);
-  PS_CHECK(f.consumers == before_opacity + 1);
+  PS_CHECK(f.consumers == before_opacity);
   const auto before_gain = f.producers.load();
   PS_CHECK(check(.75F));  // The same cached 1.5 value is valid as gain.
   PS_CHECK(f.producers == before_gain);
@@ -381,24 +382,27 @@ int payload_admission(const std::shared_ptr<OperationRegistry>& base) {
   const auto root = take(execution.resource_budget());
   auto input = scene(root, 0, 1);
   GraphContext graph(input.document);
-  const auto plan = take(Compiler(fixture.registry).compile(graph)).plan;
+  const auto plan =
+      take(Compiler(fixture.registry).compile(graph)).plan.value();
   const auto baseline = root.statistics().live[ResourceKind::Payload];
   {
     ResourceCapacity held;
+    // Only one continuation is active. Leave eight bytes for the producer's
+    // nine-byte strided backing so publication fails before its consumer
+    // starts.
     held[ResourceKind::Payload] =
-        root.available_capacity()[ResourceKind::Payload] - sizeof(Scale) -
-        sizeof(ScalarConsumer) - 8;
+        root.available_capacity()[ResourceKind::Payload] - sizeof(Scale) - 8;
     auto reservation = take(root.reserve(held));
     const auto before = root.statistics().live[ResourceKind::Payload];
     auto failed = execution.execute(plan, input.bindings);
     PS_CHECK(!failed.ok() &&
              failed.status().code == ErrorCode::ResourceExhausted);
-    PS_CHECK(fixture.producers == 1 && fixture.consumers == 1);
+    PS_CHECK(fixture.producers == 1 && fixture.consumers == 0);
     PS_CHECK(root.statistics().live[ResourceKind::Payload] == before);
   }
   PS_CHECK(root.statistics().live[ResourceKind::Payload] == baseline);
   auto retried = execution.execute(plan, input.bindings);
-  PS_CHECK(retried.ok() && fixture.producers == 2 && fixture.consumers == 2);
+  PS_CHECK(retried.ok() && fixture.producers == 2 && fixture.consumers == 1);
   scalar_scene::check(input, retried.value().results.at("result"));
   return 0;
 }
@@ -422,7 +426,7 @@ int parameter_binding_identity(const std::shared_ptr<OperationRegistry>& base) {
         std::make_shared<SchemaTemplate>(schema);
     s.bindings.inputs.back().result = result;
     GraphContext graph(s.document);
-    auto plan = compiler.compile(graph).take_value().plan;
+    auto plan = compiler.compile(graph).take_value().plan.value();
     auto before = f.producers.load();
     auto output = execution.execute(plan, s.bindings);
     PS_CHECK(output.ok() && f.producers == before + 1);

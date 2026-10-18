@@ -112,7 +112,7 @@ int registration_and_invocation() {
   auto c_plan = Compiler(c_registry).compile(c_graph);
   PS_CHECK(c_plan.ok());
   ExecutionContext c_execution(c_registry);
-  auto c_value = c_execution.execute(c_plan.value().plan);
+  auto c_value = c_execution.execute(c_plan.value().plan.value());
   PS_CHECK(c_value.ok() &&
            multi_result::number(c_value.value().results.at("selected")) == 11);
   return 0;
@@ -175,13 +175,19 @@ int compilation() {
   Compiler compiler(registry);
   auto compiled = compiler.compile(graph);
   PS_CHECK(compiled.ok());
-  PS_CHECK(compiled.value().semantic.nodes()[0].outputs.size() == 2);
   PS_CHECK(compiled.value()
-               .semantic.nodes()[0]
+               .ir_versions.front()
+               .ir.value()
+               .nodes()[0]
+               .outputs.size() == 2);
+  PS_CHECK(compiled.value()
+               .ir_versions.front()
+               .ir.value()
+               .nodes()[0]
                .outputs[1]
                .result_schema->tensors[0]
                .descriptor.element_type == ElementType::Int64);
-  const auto& steps = compiled.value().plan.steps();
+  const auto& steps = compiled.value().plan.value().steps();
   PS_CHECK(steps.size() == 3);
   PS_CHECK((steps[0].result_ref() == ValueRef{1, 0}));
   PS_CHECK((steps[1].result_ref() == ValueRef{1, 1}));
@@ -190,14 +196,14 @@ int compilation() {
            std::vector<std::uint64_t>{2});
   PS_CHECK(std::get<PlanStepInput>(steps[2].inputs[0]).step_index == 1);
   std::vector<bool> scheduled(3, false);
-  for (const auto& block : compiled.value().plan.blocks())
+  for (const auto& block : compiled.value().plan.value().blocks())
     for (const auto& instruction : block.instructions) {
       PS_CHECK(instruction.step_index == 1 || instruction.step_index == 2);
       scheduled[instruction.step_index] = true;
     }
   PS_CHECK(!scheduled[0] && scheduled[1] && scheduled[2]);
   ExecutionContext context(registry);
-  auto executed = context.execute(compiled.value().plan);
+  auto executed = context.execute(compiled.value().plan.value());
   PS_CHECK(executed.ok());
   const auto& integer_result = executed.value().results.at("selected");
   std::int64_t integer = 0;
@@ -209,13 +215,13 @@ int compilation() {
   document.outputs.push_back({"first", 1, "first"});
   GraphContext both(document);
   auto all = compiler.compile(both);
-  PS_CHECK(all.ok() && all.value().plan.steps().size() == 3);
+  PS_CHECK(all.ok() && all.value().plan.value().steps().size() == 3);
   scheduled.assign(3, false);
-  for (const auto& block : all.value().plan.blocks())
+  for (const auto& block : all.value().plan.value().blocks())
     for (const auto& instruction : block.instructions)
       scheduled.at(instruction.step_index) = true;
   PS_CHECK(scheduled[0] && scheduled[1] && scheduled[2]);
-  auto all_executed = context.execute(all.value().plan);
+  auto all_executed = context.execute(all.value().plan.value());
   PS_CHECK(all_executed.ok());
   PS_CHECK(multi_result::number(all_executed.value().results.at("first"),
                                 {2, 4}) == 10);

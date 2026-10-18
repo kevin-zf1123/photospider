@@ -105,8 +105,7 @@ struct Gather final {
     const auto make_builder = [&] {
       return ps::ResultBuilder::start(
           phase.resources, *phase.query.output.result_schema,
-          phase.query.semantic_key, {},
-          phase.query.tile_extent);
+          phase.query.semantic_key, {}, phase.query.tile_extent);
     };
     if (phase.query.output_index == 1 ||
         (phase.query.tensor_outputs && phase.query.tensor_outputs->empty())) {
@@ -250,6 +249,31 @@ inline ps::Status register_gather(ps::OperationRegistry* registry) {
     outputs[1].metadata.result_schema =
         std::make_shared<const ps::SchemaTemplate>(numeric_schema(true));
     return Answer(std::move(outputs));
+  };
+  definition.map_dependencies = [](const ps::ResultStaticQuery& query) {
+    auto mapping = ps::complete_input_dependencies(query);
+    if (!mapping.ok() || query.output_index == 1 || !query.tensor_outputs)
+      return mapping;
+    std::vector<ps::Region> rows;
+    for (const auto& box : query.tensor_outputs->boxes()) {
+      auto dimensions = box.dimensions();
+      dimensions.back() = {0, 4};
+      rows.emplace_back(std::move(dimensions));
+    }
+    auto samples = ps::Footprint::from_regions(
+        image_schema().tensors[0].sample_shape(), rows);
+    if (!samples.ok())
+      return ps::Result<ps::ResultStaticMapping>(samples.status());
+    auto selected_mapping = mapping.take_value();
+    for (auto& read : selected_mapping.inputs)
+      if (read.input < 2) {
+        auto selected = ps::sdk::tile_need_for_samples(query, read.input, 0,
+                                                       samples.value());
+        if (!selected.ok())
+          return ps::Result<ps::ResultStaticMapping>(selected.status());
+        read = selected.take_value();
+      }
+    return ps::Result<ps::ResultStaticMapping>(std::move(selected_mapping));
   };
   definition.start_result = [](const ps::ResultProgramQuery&,
                                const ps::BufferAllocator& allocator) {

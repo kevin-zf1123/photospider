@@ -114,7 +114,7 @@ int main() {
   GraphContext capture_graph(document);
   auto capture_plan = take(Compiler(registry).compile(capture_graph));
   auto bad_binding = multi_result::binding(root, "input", -1, schema);
-  PS_CHECK(context.execute(capture_plan.plan, {{bad_binding}}).ok());
+  PS_CHECK(context.execute(capture_plan.plan.value(), {{bad_binding}}).ok());
   PS_CHECK(captured->size() == 1);
   auto good_binding = multi_result::binding(root, "input", 2, schema);
   OperationMetadata input;
@@ -154,7 +154,7 @@ int main() {
   auto bad = invalid_direct.poll(phase);
   PS_CHECK(!bad.ok() && bad.status().code == ErrorCode::InvalidArgument);
   PS_CHECK(executed->load() == before_direct);
-  PS_CHECK(context.execute(capture_plan.plan, {{good_binding}}).ok());
+  PS_CHECK(context.execute(capture_plan.plan.value(), {{good_binding}}).ok());
   objects[0] = good_binding.result;
   auto valid_direct =
       take(registry->start_result("fixture.copy_validated", query, allocator));

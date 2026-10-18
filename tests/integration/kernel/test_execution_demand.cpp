@@ -100,7 +100,7 @@ int generations() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionContext context(registry, {1, false, 8, 4096});
   const auto root = context.resource_budget().take_value();
   ExecutionBindings bindings{
@@ -449,7 +449,7 @@ int edit_and_cancel() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   auto context = std::make_unique<ExecutionContext>(
       registry, ExecutionContextConfig{2, false, 8, 4096});
   ExecutionBindings bindings{
@@ -528,7 +528,7 @@ int replacement_during_shutdown() {
   auto compiled = Compiler(registry).compile(
       graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1});
   PS_REQUIRE_OK(compiled);
-  auto plan = compiled.take_value().plan;
+  auto plan = compiled.take_value().plan.value();
   for (unsigned attempt = 0; attempt < 16; ++attempt) {
     auto context = std::make_unique<ExecutionContext>(
         registry, ExecutionContextConfig{1, false, 4, 4096});
@@ -564,7 +564,7 @@ int isolation_and_limits() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionContextConfig config{1, false, 4, 4096};
   config.maximum_demands = 1;
   ExecutionContext context(registry, config);
@@ -656,7 +656,7 @@ int snapshot_replacement() {
         Compiler(registry)
             .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
             .take_value()
-            .plan;
+            .plan.value();
     ExecutionBindings bindings{
         {snapshot_binding(context, "image", snapshot, initial)}};
     auto demand = context.open_demand(plan, bindings).take_value();
@@ -725,7 +725,7 @@ int concurrent_ancestors() {
         Compiler(registry)
             .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
             .take_value()
-            .plan;
+            .plan.value();
     ExecutionContext context(registry, {2, false, 8, 4096});
     auto demand =
         context
@@ -808,7 +808,7 @@ int auxiliary_cancellation() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionContext context(registry, {2, false, 8, 4096});
   auto demand =
       context
@@ -849,7 +849,7 @@ int impure_ancestor() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionContext context(registry, {2, false, 8, 4096});
   auto demand = context.open_demand(plan, {}).take_value();
   auto a = std::async(std::launch::async, [&] {
@@ -894,7 +894,8 @@ int concurrent_fallback() {
   PlanningOptions planning;
   planning.tile_extent = 1;
   planning.execution_mode = ExecutionMode::NativeGpu;
-  auto plan = Compiler(registry).compile(graph, planning).take_value().plan;
+  auto plan =
+      Compiler(registry).compile(graph, planning).take_value().plan.value();
   ExecutionContext context(registry, {2, false, 8, 4096, 128});
   auto demand =
       context
@@ -974,7 +975,7 @@ int protocol_first_cause() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionContext context(registry, {1, false, 8, 4096});
   auto demand =
       context
@@ -1004,7 +1005,7 @@ int cancelled_run_and_frozen() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionContext context(registry, {2, false, 8, 4096});
   ExecutionBindings bindings{
       {binding(context, "x", values<double>(ElementType::Float64, {7, 9}))}};
@@ -1085,7 +1086,7 @@ int cache_work_and_epoch() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionContextConfig config{1, false, 8, 65536, 32768};
   ResourceLimits resources;
   // This deep graph retains each Result's mandatory structural ancestry.
@@ -1117,7 +1118,7 @@ int cache_work_and_epoch() {
       Compiler(registry)
           .compile(short_graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionBindings short_bindings{
       {binding(context, "x", values<double>(ElementType::Float64, {7, 9}))}};
   auto short_demand =
@@ -1154,7 +1155,7 @@ int cached_atomic_ancestor() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionContext context(registry, {1, false, 8, 4096, 512});
   ExecutionBindings bindings{
       {binding(context, "x", values<double>(ElementType::Float64, {7, 9}))}};
@@ -1184,7 +1185,7 @@ int cached_atomic_ancestor() {
       Compiler(registry)
           .compile(named_graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionContext tight(registry, {1, false, 8, 4096, 16});
   ExecutionBindings tight_bindings{
       {binding(tight, "x", values<double>(ElementType::Float64, {7, 9}))}};
@@ -1299,7 +1300,7 @@ int cache_snapshot_bits() {
         Compiler(registry)
             .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
             .take_value()
-            .plan;
+            .plan.value();
     ExecutionContext context(registry, {1, false, 8, 4096, 512});
     auto demand =
         context.open_demand(plan, {{binding(context, "image", packed)}})
@@ -1350,7 +1351,7 @@ int content_cache() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionContextConfig config{1, false, 8, 4096};
   config.result_cache_bytes = 2048;
   ExecutionContext context(registry, config);
@@ -1456,7 +1457,7 @@ int structured_content_cache() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionContextConfig config{1, false, 8, 4096};
   config.result_cache_bytes = 2048;
   ExecutionContext context(registry, config);
@@ -1612,7 +1613,7 @@ int concurrent_failure_isolation() {
       Compiler(registry)
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
-          .plan;
+          .plan.value();
   ExecutionContext context(registry, {3, false, 8, 4096});
   ExecutionBindings bindings{
       {binding(context, "x",

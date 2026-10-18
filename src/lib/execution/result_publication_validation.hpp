@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "photospider/compiler/compiler.hpp"
+#include "photospider/compiler/plan.hpp"
 #include "photospider/plugin/result_program.hpp"
 
 namespace ps::execution_internal {

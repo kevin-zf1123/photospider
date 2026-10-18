@@ -151,12 +151,12 @@ int main() {
   GraphContext metadata_graph(metadata_document);
   auto metadata_cpu = Compiler(registry).compile(metadata_graph);
   PS_REQUIRE_OK(metadata_cpu);
-  auto metadata_result = context.execute(metadata_cpu.value().plan);
+  auto metadata_result = context.execute(metadata_cpu.value().plan.value());
   PS_REQUIRE_OK(metadata_result);
   PS_CHECK(calls == 0);
   auto metadata_native = Compiler(registry).compile(metadata_graph, planning);
   PS_REQUIRE_OK(metadata_native);
-  PS_REQUIRE_OK(context.execute(metadata_native.value().plan));
+  PS_REQUIRE_OK(context.execute(metadata_native.value().plan.value()));
   PS_CHECK(calls == 0);
   // A mandatory effect root still excludes its metadata-only GPU input.
   auto effect_document = metadata_document;
@@ -165,9 +165,9 @@ int main() {
   GraphContext effect_graph(effect_document);
   auto effect_cpu = Compiler(registry).compile(effect_graph);
   PS_REQUIRE_OK(effect_cpu);
-  PS_REQUIRE_OK(context.execute(effect_cpu.value().plan));
+  PS_REQUIRE_OK(context.execute(effect_cpu.value().plan.value()));
   PS_CHECK(calls == 0 && effect_calls == 1);
-  auto tile = effect_cpu.value().plan.tile_plan(
+  auto tile = effect_cpu.value().plan.value().tile_plan(
       "value", TileRequest{{{0, TileSet::range(root, 0, 1).take_value()}}});
   PS_REQUIRE_OK(tile);
   PS_REQUIRE_OK(context.execute(tile.value()));
@@ -187,7 +187,7 @@ int main() {
   GraphContext malformed_metadata(metadata_document);
   PS_CHECK(Compiler(registry).compile(malformed_metadata).status().code ==
            ErrorCode::TypeMismatch);
-  auto disabled = context.execute(gpu.value().plan);
+  auto disabled = context.execute(gpu.value().plan.value());
   PS_CHECK(!disabled.ok() &&
            disabled.status().code == ErrorCode::BackendUnavailable);
   PS_CHECK(calls == 0);
@@ -195,8 +195,9 @@ int main() {
   GraphContext fallback_graph(document);
   auto fallback_gpu = Compiler(registry).compile(fallback_graph, planning);
   PS_CHECK(fallback_gpu.ok() &&
-           fallback_gpu.value().plan.steps()[0].backend == Backend::Gpu);
-  auto recovered = context.execute(fallback_gpu.value().plan);
+           fallback_gpu.value().plan.value().steps()[0].backend ==
+               Backend::Gpu);
+  auto recovered = context.execute(fallback_gpu.value().plan.value());
   PS_CHECK(recovered.ok() && cpu_calls == 1 && gpu_calls == 0);
   PS_CHECK(recovered.value().diagnostics.fallback_reasons.size() == 1);
   const auto& output = recovered.value().results.at("value");

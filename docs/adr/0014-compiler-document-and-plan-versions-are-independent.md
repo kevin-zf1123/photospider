@@ -2,26 +2,14 @@
 
 - Status: Accepted
 
-## Current implementation: SSA IR and artifacts
+## Current implementation: unified IR and v4 artifacts
 
-The DAG frontend lowers to CFG/SSA through `analyze`; another frontend can bind
-an `IRProgram` directly with `bind_ir`. The separately callable optimizer is a
-no-op. Planning expands fixed tile instructions and grants; a Run interprets
-that program without dependency mapping or instruction reordering.
+Package 0.38.0 uses `ValidatedIR` for every validated IR version. Optimization is optional; the planner accepts legal dependency paths and privately deduplicates repeated Call IDs. Explicit CFG loops retain activation semantics. Ordered named optimizer invocations produce validated immutable versions. Content identity excludes provenance. `.psir` and `.psxp` are format v4; versions 1–3 require re-export. Plans identify their actual input IR and import without optimizer/mapper/planner execution. See [current contracts](../development/Compiler-Version-Contract.md).
 
-`CompilerArtifact` adds a separate text-format axis: `.psir` and `.psxp` use
-version 2, and version 1 is rejected. These files persist IR or a complete static
-Plan independently of the source `GraphContext`. Import links against a frozen
-registry and explicit resource identities, validates saved contracts and
-instructions, and produces a standalone stage at revision 1. Plan import does
-not rerun the mapper or planner. Execution still requires the same registry
-instance. Artifacts contain no DSO paths, callback code or resource bytes, and
-contract digests do not authenticate native code. The original distinction
-between compiler objects and daemon wire protocols remains in force. Current
-identity domains and file error/lifetime rules are in
-[Compiler and execution](../kernel-architecture/Compiler-and-Execution.md#compiler-artifacts).
+The sections below record the original decision's separate version axes. Their historical stage-type examples have been superseded by the unified IR API; document, package, ABI and artifact versions remain independent.
 
 ## 1. Core Summary (TL;DR)
+
 The compiler builds distinct immutable semantic, optimized, and physical-plan values from a versioned workflow document. Document schema, plugin ABI, package API, planner behavior, and daemon IPC versions describe different contracts. Keeping them separate avoids implying compatibility where none is promised.
 
 ## 2. Mental Model & Intuition
@@ -61,5 +49,6 @@ The independent axes include WorkflowDocument schema, OperationTraits, operation
 
 Internal IR and plan objects are in-memory contracts, not daemon wire formats. Their registry identity prevents use with an incompatible frozen operation set. A matching cache key never replaces plan validation and stale checks. Embedding-provided cache hits are revalidated; malformed or stale entries become misses. See [Compiler and execution](../kernel-architecture/Compiler-and-Execution.md) for current identity fields and stage validation.
 
-## 5. Consequences
+## 4. Consequences
+
 Consumers must version each public boundary they actually expose and rebuild disposable plans when source, traits, rules, or target capabilities change. A stale or invalid cache entry is rejected or treated as a miss. Package API changes can be breaking even when workflow schema is unchanged.

@@ -6,8 +6,7 @@
 | `GraphContext` | Owner of a copied workflow document and its current revision. |
 | `GraphSnapshot` | Coherent source and revision capture used by compilation. |
 | `IRProgram` | Editable frontend-neutral SSA program: input declarations and bindings, unique call declarations, blocks, an entry block, an ordered return signature and an `IRForm`. Accepted by `Compiler::bind_ir`. |
-| `SemanticGraphIR` | Immutable, validated and prepared IR produced by `analyze`, `bind_ir` or `.psir` import. `form()` distinguishes raw dependency paths from executable control flow. |
-| `OptimizedGraphIR` | Separately identified ControlFlow stage. Optimization resolves repeated dependency-path requests, removes empty chains and reconnects blocks; existing ControlFlow input is preserved. |
+| `ValidatedIR` | Immutable validated, prepared IR; frontend, import and optional optimizers publish this type. Both forms can be planned directly. |
 | `IRForm::DependencyPaths` | Raw IR form retaining repeated Call ID requests in ordered paths. The same ID denotes one invocation and its SSA results, including effects. `analyze` emits complete DAG path expansion; optimization removes duplicate requests. |
 | `IRForm::ControlFlow` | Executable SSA control flow with one static site per call. Branches and loops use explicit terminators and block parameters. |
 | dependency chain | A raw path segment split at upstream branch switches, multi-input joins and new roots. Shared ancestors may occur in several chains; chain boundaries do not require graph nodes to have no fan-out. |
@@ -21,7 +20,7 @@
 | static mapping | `OperationDefinition::map_dependencies` (C: `map_dependencies` hook): pure compile-time callback that returns the tiles one target may read. `complete_input_dependencies` covers projected ordinary inputs; shared-stage reads require explicit mapping entries. |
 | fixed grant | `PlanTensorRead` or `PlanSharedRead` stored in an instruction; the only data that instruction may read at run time. A descriptor-only grant exposes schema facts and no payload. |
 | synthetic return record | Dependency record of a named return at index `steps().size()` plus the return ordinal, returned by `ExecutionPlan::output(name).record_index`. |
-| compiler artifact | Editable versioned text written and read by `CompilerArtifact`: `.psir` for semantic or optimized IR, `.psxp` for an execution plan. Format v3 requires a program form; only semantic IR permits dependency paths. |
+| compiler artifact | Version-4 text: `.psir` stores either validated IR form and provenance; `.psxp` stores the complete physical plan. Earlier versions require re-export. |
 | artifact manifest | Operation keys with contract digests and resource identities listed in an artifact, readable through `CompilerArtifact::inspect` without a registry. |
 | `ExecutionContext` | Owner of bounded workers, frozen operation definitions, caches, and resource accounting. |
 | `ExecutionRun` | Private state for one synchronous execution call: program counter, block values, bound grants, evidence and diagnostics. |

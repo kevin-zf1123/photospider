@@ -209,7 +209,7 @@ void thread_probes(const std::shared_ptr<OperationRegistry>& registry,
       bounds.dependencies.maximum_work = budget;
       entered->store(false);
       auto run =
-          context.execute_fragments(take(context.freeze(compiled.plan)),
+          context.execute_fragments(take(context.freeze(compiled.plan.value())),
                                     {{"empty", point(root, 0)}}, {}, bounds);
       const auto expected = wrong            ? ErrorCode::InvalidArgument
                             : budget == 8288 ? ErrorCode::ResourceExhausted
@@ -258,7 +258,7 @@ int main(int argc, char** argv) try {
         gpu ? ExecutionMode::NativeGpu : ExecutionMode::CpuExact;
     GraphContext graph(document());
     auto compiled = Compiler(registry).compile(graph, options).take_value();
-    auto frozen = context.freeze(compiled.plan, bindings).take_value();
+    auto frozen = context.freeze(compiled.plan.value(), bindings).take_value();
     auto result = context.execute_fragments(frozen, {{"sum", pair(root)}});
     if (!result.ok())
       std::cerr << result.status().message << '\n';
@@ -269,8 +269,9 @@ int main(int argc, char** argv) try {
                 "discovery arithmetic oracle failed"))
         return 1;
     }
-    const auto step = compiled.plan.return_signature()
-                          .at(compiled.plan.outputs().at("sum"))
+    const auto step = compiled.plan.value()
+                          .return_signature()
+                          .at(compiled.plan.value().outputs().at("sum"))
                           .record_index;
     const TileInterval all{0, length};
     const auto fixed = take(TileSet::from_intervals(root, &all, 1));
@@ -285,7 +286,8 @@ int main(int argc, char** argv) try {
                    : result.value().diagnostics.native_dispatch_count == 0),
               "discovery/resume dispatch count failed"))
       return 1;
-    auto demand = context.open_demand(compiled.plan, bindings).take_value();
+    auto demand =
+        context.open_demand(compiled.plan.value(), bindings).take_value();
     if (check(demand.request({{"sum", point(root, 0)}}).ok() &&
                   demand
                       .replace_bindings(
@@ -331,7 +333,7 @@ int main(int argc, char** argv) try {
       return 1;
     auto bad_control =
         context
-            .freeze(compiled.plan,
+            .freeze(compiled.plan.value(),
                     bind(data, source(root, ElementType::Int64, -1)))
             .take_value();
     if (check(context.execute_fragments(bad_control, {{"sum", point(root, 0)}})
@@ -356,7 +358,7 @@ int main(int argc, char** argv) try {
       if (mode == 2)
         bounds.dependencies.maximum_gpu_requests = 0;
       auto denied = context.execute_fragments(
-          context.freeze(bad.plan, bindings).take_value(),
+          context.freeze(bad.plan.value(), bindings).take_value(),
           {{"sum", point(root, 0)}}, {}, bounds);
       if (check(denied.status().code == (mode == 1
                                              ? ErrorCode::InvalidArgument
@@ -371,8 +373,9 @@ int main(int argc, char** argv) try {
                                source(fresh_root, ElementType::Int64));
       GraphContext invalid(document(2, mode));
       auto plan = take(Compiler(registry).compile(invalid, options));
-      auto failed = fresh.execute_fragments(
-          take(fresh.freeze(plan.plan, inputs)), {{"sum", point(root, 0)}});
+      auto failed =
+          fresh.execute_fragments(take(fresh.freeze(plan.plan.value(), inputs)),
+                                  {{"sum", point(root, 0)}});
       if (mode == 19 &&
           check(failed.status().reason == FailureReason::UnauthorizedRead &&
                     failed.status().detail.origin == FailureOrigin::Protocol,
@@ -393,7 +396,8 @@ int main(int argc, char** argv) try {
                 "failed discovery retained payload or cached a result"))
         return 1;
       auto retry = fresh.execute_fragments(
-          take(fresh.freeze(compiled.plan, inputs)), {{"sum", point(root, 0)}});
+          take(fresh.freeze(compiled.plan.value(), inputs)),
+          {{"sum", point(root, 0)}});
       if (check(retry.ok() &&
                     retry.value().diagnostics.native_dispatch_count > 0 &&
                     number(retry.value().results.at("sum"), 0) == 8,
@@ -403,17 +407,19 @@ int main(int argc, char** argv) try {
     {
       GraphContext mixed(document(2, 13));
       auto plan = take(Compiler(registry).compile(mixed, options));
-      auto run = take(
-          context.execute_fragments(take(context.freeze(plan.plan, bindings)),
-                                    {{"sum", point(root, 0)}}));
-      if (check(number(run.results.at("sum"), 0) == 8 &&
-                    run.diagnostics.native_dispatch_count > 0 &&
-                    input_tiles(run, plan.plan.output("sum").record_index, 0, 0,
-                                fixed),
-                "unordered discovery tile normalization failed"))
+      auto run = take(context.execute_fragments(
+          take(context.freeze(plan.plan.value(), bindings)),
+          {{"sum", point(root, 0)}}));
+      if (check(
+              number(run.results.at("sum"), 0) == 8 &&
+                  run.diagnostics.native_dispatch_count > 0 &&
+                  input_tiles(run, plan.plan.value().output("sum").record_index,
+                              0, 0, fixed),
+              "unordered discovery tile normalization failed"))
         return 1;
       auto empty = take(context.execute_fragments(
-          take(context.freeze(plan.plan, bindings)), {{"sum", TileRequest{}}}));
+          take(context.freeze(plan.plan.value(), bindings)),
+          {{"sum", TileRequest{}}}));
       if (check(empty.diagnostics.native_dispatch_count == 0,
                 "empty discovery dispatched native work"))
         return 1;
@@ -421,9 +427,9 @@ int main(int argc, char** argv) try {
     for (unsigned mode : {17, 18}) {
       GraphContext valid(document(2, mode));
       auto plan = take(Compiler(registry).compile(valid, options));
-      auto run = take(
-          context.execute_fragments(take(context.freeze(plan.plan, bindings)),
-                                    {{"sum", point(root, 0)}}));
+      auto run = take(context.execute_fragments(
+          take(context.freeze(plan.plan.value(), bindings)),
+          {{"sum", point(root, 0)}}));
       if (check(
               number(run.results.at("sum"), 0) == 8 &&
                   run.diagnostics.native_dispatch_count == (mode == 17 ? 3 : 2),
@@ -431,7 +437,7 @@ int main(int argc, char** argv) try {
         return 1;
       if (mode == 18) {
         auto record = take(run.dependencies.tile_record(
-            {plan.plan.output("sum").record_index, 0, 0, 0}));
+            {plan.plan.value().output("sum").record_index, 0, 0, 0}));
         bool whole = false;
         for (const auto& need : record->inputs) {
           const auto* source = std::get_if<PlanWorkflowInput>(&need.producer);
@@ -456,9 +462,9 @@ int main(int argc, char** argv) try {
       else
         bounds.dependencies.maximum_work = 8192;
       {
-        auto single =
-            fresh.execute_fragments(take(fresh.freeze(plan.plan, inputs)),
-                                    {{"sum", point(root, 0)}}, {}, bounds);
+        auto single = fresh.execute_fragments(
+            take(fresh.freeze(plan.plan.value(), inputs)),
+            {{"sum", point(root, 0)}}, {}, bounds);
         if (!single.ok())
           std::cerr << "single run_limit=" << run_limit << " "
                     << single.status().message << '\n';
@@ -470,7 +476,7 @@ int main(int argc, char** argv) try {
       GraphContext repeated(document(2, 17));
       auto repeated_plan = take(Compiler(registry).compile(repeated, options));
       auto failed = fresh.execute_fragments(
-          take(fresh.freeze(repeated_plan.plan, inputs)),
+          take(fresh.freeze(repeated_plan.plan.value(), inputs)),
           {{"sum", point(fresh_root, 0)}}, {}, bounds);
       if (check(failed.status().code == ErrorCode::ResourceExhausted &&
                     fresh_root.statistics().live[ResourceKind::Payload] ==
@@ -493,10 +499,13 @@ int main(int argc, char** argv) try {
     const auto directory_bytes = (length / 64) * 2 * kFragmentAtlasSlotBytes;
     const auto directory_capacity = ((directory_bytes + 16383) / 16384) * 16384;
     const auto data_atlas_bytes = length * 4 + directory_capacity;
-    const auto minimum =
-        source_bytes +
-        large_plan.plan.steps()[0].traits.outputs[0].continuation_bytes + 168 +
-        std::max<std::uint64_t>(4112, 8 + data_atlas_bytes);
+    const auto minimum = source_bytes +
+                         large_plan.plan.value()
+                             .steps()[0]
+                             .traits.outputs[0]
+                             .continuation_bytes +
+                         168 +
+                         std::max<std::uint64_t>(4112, 8 + data_atlas_bytes);
     for (auto bytes : {minimum - 1, minimum}) {
       ExecutionContextConfig tight;
       tight.gpu_enabled = true;
@@ -505,7 +514,8 @@ int main(int argc, char** argv) try {
       const auto small_root = take(small.resource_budget());
       const auto small_bindings = bind(source(small_root, ElementType::Float32),
                                        source(small_root, ElementType::Int64));
-      auto query = small.freeze(large_plan.plan, small_bindings).take_value();
+      auto query =
+          small.freeze(large_plan.plan.value(), small_bindings).take_value();
       auto run = small.execute_fragments(query, {{"sum", point(root, 0)}});
       if (!run.ok() && bytes == minimum)
         std::cerr << "frontier bytes=" << bytes << " peak="

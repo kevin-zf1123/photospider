@@ -127,7 +127,7 @@ int dependency_workflow(const std::shared_ptr<Device>& device) {
         config.managed_resources = ResourceLimits{};
         config.managed_resources->capacity[kind] = payload + constants - reject;
         ExecutionContext context(registry, config);
-        auto result = context.execute(compiled.value().plan);
+        auto result = context.execute(compiled.value().plan.value());
         if (result.ok() == reject)
           std::cerr << result.status().message << '\n';
         PS_CHECK(result.ok() == !reject);

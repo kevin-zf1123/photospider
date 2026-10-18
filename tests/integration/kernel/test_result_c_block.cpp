@@ -76,7 +76,7 @@ int workflow(unsigned mode, bool cache) {
     GraphContext graph(doc);
     PlanningOptions planning;
     planning.tile_extent = 1;
-    auto plan = take(Compiler(registry).compile(graph, planning)).plan;
+    auto plan = take(Compiler(registry).compile(graph, planning)).plan.value();
     ExecutionContextConfig config;
     config.cpu_workers = 1;
     config.result_cache_bytes = cache ? 1048576 : 0;

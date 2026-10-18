@@ -20,14 +20,7 @@ using namespace ps;  // NOLINT(build/namespaces)
 using multi_result::check;
 using multi_result::take;
 struct Control {
-  std::mutex mutex;
-  std::condition_variable changed;
-  bool overlap = true, left_entered = false, right_done = false;
-  bool check_release = true, cancel = false;
-  unsigned backed = 0;
-  bool allocation_failed = false;
   std::weak_ptr<const CpuStorage> source;
-  CancellationSource cancellation;
   std::atomic<unsigned> sources{0}, active{0}, peak{0};
 };
 struct Program {
@@ -60,33 +53,13 @@ struct Program {
         double right = 0;
         check(phase.read_tensor(1, 0, {0}, &right, sizeof(right)));
         number += right;
-        // Completed tiles remain available while downstream adaptive Needs
-        // can still revisit their producers. Run retirement releases them.
-        if (control->check_release && control->source.expired())
+        // The static VM retains executed tiles for the current activation.
+        // Run retirement releases them after downstream consumers finish.
+        if (control->source.expired())
           return Result<ResultProgramPoll>(
               Status{ErrorCode::OperationFailed,
                      "source released before downstream completion"});
       } else {
-        std::unique_lock<std::mutex> lock(control->mutex);
-        if (mode == 1) {
-          control->left_entered = true;
-          control->changed.notify_all();
-          if (control->overlap &&
-              !control->changed.wait_for(lock, std::chrono::seconds(2),
-                                         [&] { return control->right_done; }))
-            return Result<ResultProgramPoll>(Status{
-                ErrorCode::OperationFailed, "independent right did not run"});
-        } else {
-          if (control->overlap &&
-              !control->changed.wait_for(lock, std::chrono::seconds(2),
-                                         [&] { return control->left_entered; }))
-            return Result<ResultProgramPoll>(Status{
-                ErrorCode::OperationFailed, "independent left did not run"});
-          control->right_done = true;
-          if (control->cancel)
-            control->cancellation.cancel();
-          control->changed.notify_all();
-        }
         if (control->source.expired())
           return Result<ResultProgramPoll>(
               Status{ErrorCode::OperationFailed, "source released during use"});
@@ -101,29 +74,9 @@ struct Program {
                                              phase.query.semantic_key, {}));
 
     auto made = phase.resources.allocator().allocate(sizeof(number));
-    if (!made.ok()) {
-      std::lock_guard<std::mutex> lock(control->mutex);
-      control->allocation_failed = true;
-      control->changed.notify_all();
+    if (!made.ok())
       return Result<ResultProgramPoll>(made.status());
-    }
     auto buffer = made.take_value();
-    if ((mode == 1 || mode == 2) && control->overlap) {
-      std::unique_lock<std::mutex> lock(control->mutex);
-      ++control->backed;
-      control->changed.notify_all();
-      if (!control->changed.wait_for(lock, std::chrono::seconds(2), [&] {
-            return control->backed == 2 || control->allocation_failed ||
-                   control->cancellation.token().cancelled();
-          }))
-        return Result<ResultProgramPoll>(
-            Status{ErrorCode::OperationFailed, "parallel backing barrier"});
-      if (control->cancellation.token().cancelled())
-        return Result<ResultProgramPoll>(Status{ErrorCode::Cancelled, {}});
-      if (control->allocation_failed)
-        return Result<ResultProgramPoll>(
-            Status{ErrorCode::ResourceExhausted, {}});
-    }
     std::memcpy(buffer.data(), &number, sizeof(number));
     auto storage = std::move(buffer).freeze();
     if (!mode)
@@ -170,7 +123,6 @@ void hold_callback_owner() noexcept {
 }
 int callback_retirement() {
   Control control;
-  control.overlap = false;
   auto operations = registry(&control);
   WorkflowDocument document;
   document.nodes = {{1, "source", {}, {}}};
@@ -189,7 +141,7 @@ int callback_retirement() {
     execution_testing::install_execution_test_hooks(&hooks);
     CancellationSource cancellation;
     auto pending = std::async(std::launch::async, [&] {
-      return execution.execute(compiled.plan, {}, cancellation.token());
+      return execution.execute(compiled.plan.value(), {}, cancellation.token());
     });
     bool entered = false;
     {
@@ -217,7 +169,7 @@ int callback_retirement() {
                  : result.ok());
     result = Result<ExecutionResult>(ExecutionResult{});
     PS_CHECK(control.source.expired());
-    auto recovered = execution.execute(compiled.plan);
+    auto recovered = execution.execute(compiled.plan.value());
     PS_CHECK(recovered.ok() &&
              multi_result::number(recovered.value().results.at("result")) == 2);
   }
@@ -275,7 +227,7 @@ int scratch_liveness() {
     config.result_cache_bytes = 0;
     config.maximum_live_bytes = 48;
     ExecutionContext exact(operations, config);
-    auto result = exact.execute(plan.plan);
+    auto result = exact.execute(plan.plan.value());
     const auto stats = take(exact.resource_budget()).statistics();
     if (std::string(key) == "scratch") {
       PS_CHECK(result.ok() &&
@@ -288,13 +240,15 @@ int scratch_liveness() {
     PS_CHECK(stats.live[ResourceKind::Queue] == 0);
     config.maximum_live_bytes = 47;
     ExecutionContext insufficient(operations, config);
-    auto failed = insufficient.execute(plan.plan);
+    auto failed = insufficient.execute(plan.plan.value());
     PS_CHECK(!failed.ok() &&
              failed.status().code == ErrorCode::ResourceExhausted);
   }
   return 0;
 }
 int graph_liveness() {
+  // Four live Result backings plus the one executing continuation.
+  constexpr auto peak_payload = sizeof(Program) + 4 * sizeof(double);
   Control control;
   auto operations = registry(&control);
   WorkflowDocument document;
@@ -315,30 +269,24 @@ int graph_liveness() {
     ExecutionContextConfig config;
     config.cpu_workers = 2;
     config.result_cache_bytes = 0;
-    config.maximum_live_bytes = 72;
+    config.maximum_live_bytes = peak_payload;
     ExecutionContext execution(operations, config);
     root = take(execution.resource_budget());
     ExecutionOptions options;
     options.maximum_parallelism = 2;
-    auto result = execution.execute(plan.plan, {}, {}, options);
+    auto result = execution.execute(plan.plan.value(), {}, {}, options);
     if (!result.ok())
       std::cerr << result.status().message << '\n';
-    PS_CHECK(result.ok() && control.source.expired() && control.peak == 2);
-    PS_CHECK(result.value().diagnostics.peak_active_tasks <= 2);
-    PS_CHECK(root.statistics().peak[ResourceKind::Payload] == 72);
+    PS_CHECK(result.ok() && control.source.expired() && control.peak == 1);
+    PS_CHECK(result.value().diagnostics.peak_active_tasks == 1);
+    PS_CHECK(root.statistics().peak[ResourceKind::Payload] == peak_payload);
     retained = result.value().results.at("result");
     PS_CHECK(multi_result::number(retained) == 7 && retained.owned_by(root));
-    control.left_entered = control.right_done = false;
-    control.backed = 0;
-    control.allocation_failed = false;
-    auto held = execution.execute(plan.plan, {}, {}, options);
+    auto held = execution.execute(plan.plan.value(), {}, {}, options);
     PS_CHECK(!held.ok() && held.status().code == ErrorCode::ResourceExhausted);
     retained = {};
     result = Result<ExecutionResult>(ExecutionResult{});
-    control.left_entered = control.right_done = false;
-    control.backed = 0;
-    control.allocation_failed = false;
-    auto recovered = execution.execute(plan.plan, {}, {}, options);
+    auto recovered = execution.execute(plan.plan.value(), {}, {}, options);
     PS_CHECK(recovered.ok());
     retained = recovered.value().results.at("result");
     PS_CHECK(root.statistics().live[ResourceKind::Queue] == 0);
@@ -347,15 +295,12 @@ int graph_liveness() {
   PS_CHECK(root.statistics().live[ResourceKind::Payload] == 8);
   retained = {};
   PS_CHECK(root.statistics().live[ResourceKind::Payload] == 0);
-  control.left_entered = control.right_done = false;
-  control.backed = 0;
-  control.allocation_failed = false;
   ExecutionContextConfig config;
   config.cpu_workers = 2;
   config.result_cache_bytes = 0;
-  config.maximum_live_bytes = 71;
+  config.maximum_live_bytes = peak_payload - 1;
   ExecutionContext insufficient(operations, config);
-  auto failed = insufficient.execute(plan.plan);
+  auto failed = insufficient.execute(plan.plan.value());
   PS_CHECK(!failed.ok() &&
            failed.status().code == ErrorCode::ResourceExhausted);
   PS_CHECK(control.active == 0 && control.source.expired());

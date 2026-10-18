@@ -8,10 +8,9 @@ The kernel keeps separate identities for compiler stages, plan cache keys, immut
 
 | Identity | Domain tag | Contents | Changes when |
 | --- | --- | --- | --- |
-| Semantic IR digest | `semantic-ssa-ir-v25` | Program form and canonical SSA program: declarations, calls, values, blocks, terminators, parameters, traits, resource identities, schemas | Any program change, including renumbered calls or values |
-| Optimized IR digest | `optimizer-v7-dependency-paths` | Parent semantic digest and the optimized program | Same as above |
-| Physical plan digest | `static-tile-program-v26` | Parent optimized digest, execution mode, tile extent, steps and placements, output requests, and every block's instructions, grants, dependencies and terminator | Any instruction, grant or request change, or renumbering |
-| Plan cache key | `plan-cache-key-v19` | Domain-separated wrapper of the plan digest | Same as the plan digest |
+| IR content digest | `validated-ssa-ir-v26` | Program form and canonical SSA program: declarations, calls, values, blocks, terminators, parameters, traits, resource identities, schemas | Any program change, including renumbered calls or values |
+| Physical plan digest | `static-tile-program-v27` | Actual input IR digest, execution mode, tile extent, steps and placements, output requests, and every block's instructions, grants, dependencies and terminator | Any instruction, grant or request change, or renumbering |
+| Plan cache key | `plan-cache-key-v20` | Domain-separated wrapper of the plan digest | Same as the plan digest |
 | Step structured template | `photospider.dependency-static.v4` | Tile extent, execution mode, backend, operation key, output index, traits, resource identities, parameters, input schemas | Contract, parameter, resource or input-schema change; not renumbering |
 | Fixed-grant content key | `photospider.fixed-grant-cache.v2` | Step template, backend, member, tile, publication samples, descriptor-grant ports, granted input schemas and sample bytes | Any input byte or grant change; not renumbering |
 | Fixed block-input proof | `photospider.fixed-block-inputs.v2` | Block contract plus the same grant content (without member and tile) | Same as the content key |

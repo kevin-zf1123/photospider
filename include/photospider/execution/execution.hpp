@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "photospider/compiler/compiler.hpp"
+#include "photospider/compiler/plan.hpp"
 #include "photospider/core/cancellation.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/core/resources.hpp"

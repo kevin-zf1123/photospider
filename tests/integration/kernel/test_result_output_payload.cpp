@@ -200,7 +200,8 @@ void cumulative_tile_payload() {
     ps::GraphContext graph(document);
     ps::PlanningOptions planning;
     planning.tile_extent = 1;
-    auto plan = take(ps::Compiler(registry).compile(graph, planning)).plan;
+    auto plan =
+        take(ps::Compiler(registry).compile(graph, planning)).plan.value();
     ps::ExecutionContextConfig config;
     config.result_cache_bytes = 1048576;
     config.cpu_workers = 1;
@@ -290,7 +291,7 @@ void worker_metadata_limits(ps::ResourceKind kind,
     config.managed_resources->capacity[kind] = control->limit;
     ps::ExecutionContext execution(registry, config);
     control->root = take(execution.resource_budget());
-    auto result = execution.execute(compiled.plan);
+    auto result = execution.execute(compiled.plan.value());
     if (prior_protocol) {
       require(
           !result.ok() &&
@@ -437,7 +438,7 @@ void output_payload_bounds() {
   ps::GraphContext graph(document);
   auto compiled = take(ps::Compiler(registry).compile(graph));
   ps::ExecutionContext context(registry);
-  auto denied = context.execute(compiled.plan);
+  auto denied = context.execute(compiled.plan.value());
   require(!denied.ok() &&
               denied.status().reason == ps::FailureReason::CapacityLimit,
           "workflow rejects excessive new output backing");
@@ -503,7 +504,7 @@ void output_payload_bounds() {
           "mixed output bounds");
   require(mixed->freeze().ok(), "freeze mixed output bounds");
   ps::GraphContext mixed_graph(document);
-  auto mixed_plan = take(ps::Compiler(mixed).compile(mixed_graph)).plan;
+  auto mixed_plan = take(ps::Compiler(mixed).compile(mixed_graph)).plan.value();
   ps::ExecutionContext mixed_context(mixed);
   auto frozen = take(mixed_context.freeze(mixed_plan));
   auto bad = mixed_context.execute_fragments(
@@ -607,7 +608,8 @@ void output_payload_bounds() {
   document.nodes[0].inputs = {ps::WorkflowInputReference{1}};
   document.outputs.resize(1);
   ps::GraphContext borrowed_graph(document);
-  auto plan = take(ps::Compiler(borrowing).compile(borrowed_graph)).plan;
+  auto plan =
+      take(ps::Compiler(borrowing).compile(borrowed_graph)).plan.value();
   auto result = take(borrowed_context.execute(plan, {{{"input", input}}}));
   auto output = result.results.at("a");
   auto window = take(output.acquire_tensor(take(output.descriptor()), 0,

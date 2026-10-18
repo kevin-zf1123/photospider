@@ -94,7 +94,7 @@ Result<WorkflowNodeOutput> expand(WorkflowDocument* document,
         "LUT3D source builder must only append nodes"));
   return result;
 }
-Result<ElementType> source_type(const SemanticGraphIR& graph,
+Result<ElementType> source_type(const ValidatedIR& graph,
                                 const WorkflowNodeOutput& output,
                                 const TensorDescriptor& descriptor,
                                 const ColorArrayDescriptor& color) {

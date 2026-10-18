@@ -8,7 +8,7 @@
 
 Result 只携带结构、数据以及存储所需的 owner。它没有附着的领域描述、semantic kind 或 facet 列表。内核不会把颜色、alpha、transfer 或采样描述从输入传播到输出，也不会在连线上匹配这类标签。结构相同的两个 Result 可以连接到同一个端口，即使调用方赋予它们不同含义。需要领域解释的算子以显式静态参数或显式的算子领域配置接收该解释，并可通过绑定的校验器检查样本合法性（见[端口校验器与诊断报告](#端口校验器与诊断报告)）。
 
-当前 package 为 0.37.0。WorkflowDocument schema 为 7，OperationTraits version 为 29，Result C operation ABI 为 7，CPU parallel 与 CPU tiles 服务为 version 2，native GPU 服务为 version 1。这些版本号描述彼此独立的契约。C++ operation interface 使用 `start_result`、`ResultContinuation` 和静态 `map_dependencies` mapper。Result C operation table 是唯一的 C operation-plugin 接口；consumer 必须针对已安装 package 重建，因为 C++ API 与精确大小的 C 声明是契约。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md)（Proposed）记录所有 operation 共用的按前缀协商 C ABI；package 0.37.0 尚未实现。
+当前 package 为 0.38.0。WorkflowDocument schema 为 7，OperationTraits version 为 29，Result C operation ABI 为 7，CPU parallel 与 CPU tiles 服务为 version 2，native GPU 服务为 version 1。这些版本号描述彼此独立的契约。C++ operation interface 使用 `start_result`、`ResultContinuation` 和静态 `map_dependencies` mapper。Result C operation table 是唯一的 C operation-plugin 接口；consumer 必须针对已安装 package 重建，因为 C++ API 与精确大小的 C 声明是契约。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md)（Proposed）记录所有 operation 共用的按前缀协商 C ABI；package 0.38.0 尚未实现。
 
 编译器把不可变 schema 复制到 plan，并编译每条 tile 指令及其固定读取授权。执行协调器按 plan 顺序执行这些指令，拥有 Run 的值与状态，并执行回调与 I/O。`ResultRef` 拥有其 schema、单调 descriptor 事实、已认证 backing。引用的副本共享这份所有权。外部引用或读窗口在执行上下文结束后仍让所需 backing 保持存活。依赖事实不属于 Result：执行把每个已执行 tile 的已编译读取记录在 `TileRecord` 中（见[Tile 记录与冻结证据](#tile-记录与冻结证据)）。
 

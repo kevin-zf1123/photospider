@@ -2,22 +2,14 @@
 
 - 状态：已接受
 
-## 当前实现：SSA IR 与编译产物
+## 当前实现：统一 IR 与 v4 产物
 
-DAG 前端通过 `analyze` 生成 CFG/SSA；其他前端可使用 `bind_ir` 直接绑定
-`IRProgram`。独立可调用的 optimizer 当前为 no-op。Planner 展开固定 tile
-指令和授权；Run 解释执行该程序，不进行依赖映射或指令重排。
+Package 0.38.0 的所有合法 IR 版本统一使用 `ValidatedIR`。优化可选；planner 接受合法依赖路径，并私有地对重复 Call ID 去重。显式 CFG 循环保留激活语义。有序命名 optimizer 调用产生经过校验的不可变版本，内容 identity 不含来源。`.psir` 与 `.psxp` 为 v4，版本 1–3 需要重新导出。Plan 标识实际输入 IR，导入不执行 optimizer/mapper/planner。参见[当前契约](../../development/zh/Compiler-Version-Contract.zh.md)。
 
-`CompilerArtifact` 增加独立的文本格式版本轴：`.psir` 和 `.psxp` 使用版本 2，
-拒绝版本 1。文件独立于来源 `GraphContext` 保存 IR 或完整静态 Plan。Import
-链接冻结 registry 和显式资源身份，校验保存的契约与指令，生成 revision 为 1
-的独立阶段。Plan import 不重新调用 mapper 或 planner；执行仍要求相同
-registry 实例。产物不包含 DSO 路径、callback 代码或资源字节，contract digest
-不认证原生代码。编译对象与 daemon wire protocol 的原有边界继续适用。当前
-identity domains 及文件错误、生命周期规则见
-[Compiler 与执行](../../kernel-architecture/zh/Compiler-and-Execution.zh.md#compiler-产物)。
+下面保留原始决策中独立版本轴的历史说明。历史阶段类型示例已被统一 IR API 取代，document、package、ABI 和 artifact 版本仍相互独立。
 
 ## 1. 核心摘要 (TL;DR)
+
 Compiler 从版本化 workflow 文档逐步构造不同的不可变语义、优化和物理 plan。文档 schema、plugin ABI、package API、planner 行为和 daemon IPC 是不同契约。分别管理这些版本，避免暗示并不存在的兼容性。
 
 ## 2. 架构心智模型
@@ -53,5 +45,6 @@ struct PlanCacheKey { std::string value; };
 
 缓存命中仍须校验 plan 和 currentness。嵌入方提供的 cache hit 也要重新验证；格式错误或过期的条目作为 miss 处理。阶段身份和校验细节见 [Compiler 和执行](../../kernel-architecture/Compiler-and-Execution.md)。
 
-## 5. 后果与代价
+## 4. 后果与代价
+
 Consumer 应分别维护自己公开的每种契约版本，并在源文档、trait、规则或目标能力变化时重建可丢弃的 plan。过期或无效 cache entry 会被拒绝或视为 miss。即使 workflow schema 不变，package API 仍可能发生不兼容变化。

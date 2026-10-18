@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "photospider/compiler/artifact.hpp"
+#include "photospider/compiler/compiler.hpp"
 #include "photospider/execution/execution.hpp"
 
 namespace {
@@ -148,8 +149,7 @@ void branch(bool condition) {
       {40, {{104, f.type}}, {}, ps::IRReturn{{104}}}};
   ps::Compiler compiler(f.registry);
   auto semantic = take(compiler.bind_ir(program));
-  auto optimized = take(compiler.optimize(semantic));
-  auto plan = take(compiler.plan(optimized));
+  auto plan = take(compiler.plan(semantic));
   const auto mappings = f.mappings->load();
   ps::ExecutionContext execution(f.registry);
   check(read(take(execution.execute(plan))) == (condition ? 11 : 22),
@@ -183,7 +183,7 @@ void loop() {
   require(f.registry->freeze());
   ps::Compiler compiler(f.registry);
   auto semantic = take(compiler.bind_ir(loop_program(f)));
-  auto plan = take(compiler.plan(take(compiler.optimize(semantic))));
+  auto plan = take(compiler.plan(semantic));
   const auto mappings = f.mappings->load();
   ps::ExecutionContext execution(f.registry);
   check(read(take(execution.execute(plan))) == 0,
@@ -315,7 +315,8 @@ void static_tiles() {
                           take(ps::TileSet::range(ps::ResourceBudget{}, 0, 1)));
   auto selected = take(plan.tile_plan("result", request));
   auto encoded = take(ps::CompilerArtifact::export_plan(selected));
-  auto loaded = take(ps::CompilerArtifact::import_plan(compiler, encoded));
+  auto loaded =
+      take(ps::CompilerArtifact::import_plan(compiler.operations(), encoded));
   check(take(ps::CompilerArtifact::export_plan(loaded)) == encoded,
         "filtered plan text changed");
   auto result = take(execution.execute(loaded));
@@ -407,7 +408,8 @@ void descriptor_cache() {
   const auto where = text.find(original);
   check(where != std::string::npos, "missing editable descriptor instruction");
   text.replace(where, original.size(), "input 1 member 0 descriptor true");
-  auto second = take(ps::CompilerArtifact::import_plan(compiler, text));
+  auto second =
+      take(ps::CompilerArtifact::import_plan(compiler.operations(), text));
   check(f.mappings->load() == 1, "descriptor plan import reran mapper");
   ps::ExecutionContextConfig config;
   config.result_cache_bytes = 1024 * 1024;
@@ -458,6 +460,76 @@ struct CheckpointProgram {
         ps::ResultPublication{std::move(state), true});
   }
 };
+void optional_fallback() {
+  // No GPU device or Run is needed to decide whether a fixed retry is safe.
+  for (unsigned mode : {0U, 1U}) {
+    Fixture f;
+    auto type = std::make_shared<ps::SchemaTemplate>(*f.type);
+    type->tensors[0].descriptor.shape = {3};
+    require(type->validate());
+    f.type = type;
+    ps::OperationDefinition definition;
+    definition.key = "fx.optional_fallback";
+    definition.traits.input_count = 1;
+    definition.traits.supports_gpu = true;
+    definition.traits.allows_cpu_fallback = true;
+    ps::OperationPortConstraint port;
+    port.result_schema_id = type->id;
+    port.result_schema_version = type->version;
+    definition.traits.input_schema = {port};
+    auto& output = definition.traits.outputs[0];
+    output.result_schema = *type;
+    output.output_schema.result_schema_id = type->id;
+    output.output_schema.result_schema_version = type->version;
+    output.continuation_bytes = sizeof(Program);
+    output.maximum_dependency_stages = 1;
+    definition.map_dependencies = [mode](const ps::ResultStaticQuery& query) {
+      const bool cpu = query.backend == ps::Backend::Cpu;
+      const auto tile = cpu && mode == 1 ? 1U : 0U;
+      ps::ResultStaticMapping mapping;
+      mapping.inputs.push_back(
+          {0, 0, false,
+           take(ps::TileSet::range(ps::ResourceBudget{}, tile, tile + 1))});
+      return ps::Result<ps::ResultStaticMapping>(std::move(mapping));
+    };
+    auto polls = std::make_shared<std::atomic<std::uint64_t>>(0);
+    definition.start_result = [polls](const auto&, const auto& allocator) {
+      return ps::ResultContinuation::make<Program>(allocator, false, 0, polls);
+    };
+    require(f.registry->register_operation(std::move(definition)));
+    require(f.registry->freeze());
+    ps::IRProgram program;
+    program.input_declarations = {{1, "input", type}};
+    program.input_bindings = {{1, 101}};
+    program.calls = {f.call(1, "fx.optional_fallback", {101}, 102)};
+    program.entry = 1;
+    program.blocks = {{1, {}, {1}, ps::IRReturn{{102}}}};
+    program.returns = {{"result", type}};
+    ps::Compiler compiler(f.registry);
+    auto ir = take(compiler.bind_ir(program));
+    ps::PlanningOptions options;
+    options.execution_mode = ps::ExecutionMode::NativeGpu;
+    options.tile_extent = 1;
+    auto planned = compiler.plan(ir, options);
+    auto plan = take(std::move(planned));
+    check(plan.steps()[0].backend == ps::Backend::Gpu,
+          "incompatible retry changed primary backend");
+    for (const auto& block : plan.blocks())
+      for (const auto& instruction : block.instructions) {
+        check(instruction.cpu_fallback == (mode == 0),
+              "CPU fallback coverage proof mismatch");
+        check(instruction.inputs.size() == 1 &&
+                  instruction.inputs[0].tiles.size() == 1 &&
+                  instruction.inputs[0].tiles.contains(0),
+              "optional retry enlarged the primary GPU grants");
+      }
+    auto restored = take(ps::CompilerArtifact::import_plan(
+        f.registry, take(ps::CompilerArtifact::export_plan(plan))));
+    check(restored.blocks()[0].instructions[0].cpu_fallback == (mode == 0),
+          "Plan import changed saved fallback");
+    check(polls->load() == 0, "planning invoked an execution callback");
+  }
+}
 void checkpoint_identity() {
   Fixture f;
   auto polls = std::make_shared<std::atomic<std::uint64_t>>(0);
@@ -488,7 +560,7 @@ void checkpoint_identity() {
   auto plan = take(
       compiler.plan(take(compiler.optimize(take(compiler.bind_ir(program))))));
   plan = take(ps::CompilerArtifact::import_plan(
-      compiler, take(ps::CompilerArtifact::export_plan(plan))));
+      compiler.operations(), take(ps::CompilerArtifact::export_plan(plan))));
   ps::ExecutionContext execution(f.registry);
   const auto result = take(execution.execute(plan));
   check(read(result) == 7, "first checkpoint result changed");
@@ -508,6 +580,7 @@ int main() try {
   static_tiles();
   descriptor_cache();
   checkpoint_identity();
+  optional_fallback();
   return 0;
 } catch (const std::exception& error) {
   std::cerr << error.what() << '\n';

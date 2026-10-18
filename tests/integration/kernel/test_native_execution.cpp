@@ -296,7 +296,7 @@ int sticky_resource_before_fallback() {
     PlanningOptions options;
     options.execution_mode = ExecutionMode::NativeGpu;
     auto plan = multi_result::take(Compiler(registry).compile(graph, options));
-    auto result = context.execute(plan.plan, {{input}});
+    auto result = context.execute(plan.plan.value(), {{input}});
     if (mode >= 7) {
       const auto expected = typed_native_failure(mode);
       PS_CHECK(!result.ok() && calls == 0 &&
@@ -353,7 +353,8 @@ int main() try {
   ExecutionContext cpu(registry);
   ExecutionBindings bindings{
       {{"input", source(cpu.resource_budget().take_value(), backing)}}};
-  auto fallback = multi_result::take(cpu.execute(compiled.plan, bindings));
+  auto fallback =
+      multi_result::take(cpu.execute(compiled.plan.value(), bindings));
   PS_CHECK(fallback.diagnostics.fallback_reasons.size() == 2 &&
            fallback.diagnostics.native_dispatch_count == 0);
   ExecutionContextConfig config;
@@ -370,7 +371,7 @@ int main() try {
     bindings = {
         {{"input", source(execution.resource_budget().take_value(), backing)}}};
     auto result =
-        multi_result::take(execution.execute(compiled.plan, bindings));
+        multi_result::take(execution.execute(compiled.plan.value(), bindings));
     const auto queue = execution.scheduler_statistics();
     PS_CHECK(queue.enabled && !queue.cpu.saturated && !queue.gpu.saturated);
     PS_CHECK(queue.gpu.accepted_callbacks > 0 &&
@@ -387,15 +388,16 @@ int main() try {
     retained = result.results.at("result");
     CancellationSource cancellation;
     after = [&] { cancellation.cancel(); };
-    PS_CHECK(execution.execute(compiled.plan, bindings, cancellation.token())
-                 .status()
-                 .code == ErrorCode::Cancelled);
+    PS_CHECK(
+        execution.execute(compiled.plan.value(), bindings, cancellation.token())
+            .status()
+            .code == ErrorCode::Cancelled);
     after = [&] { graph.replace(doc); };
-    PS_CHECK(execution.execute(compiled.plan, bindings).status().code ==
+    PS_CHECK(execution.execute(compiled.plan.value(), bindings).status().code ==
              ErrorCode::Stale);
     after = {};
     compiled = multi_result::take(Compiler(registry).compile(graph, planning));
-    PS_CHECK(execution.execute(compiled.plan, bindings).ok());
+    PS_CHECK(execution.execute(compiled.plan.value(), bindings).ok());
   }
   PS_CHECK(numbers(retained) == numbers(fallback.results.at("result")));
   PS_CHECK(sticky_resource_before_fallback() == 0);
@@ -411,7 +413,8 @@ int main() try {
   bindings = {
       {{"input", source(bounded.resource_budget().take_value(), backing)}}};
   for (int repeat = 0; repeat < 3; ++repeat) {
-    auto run = multi_result::take(bounded.execute(bounded_plan.plan, bindings));
+    auto run = multi_result::take(
+        bounded.execute(bounded_plan.plan.value(), bindings));
     PS_CHECK(run.diagnostics.native_dispatch_count == 1);
     PS_CHECK(run.diagnostics.fallback_reasons.empty());
     PS_CHECK(run.diagnostics.transfer_count == (repeat == 0 ? 1u : 0u));
@@ -439,7 +442,7 @@ int main() try {
       auto changed =
           source(context.resource_budget().take_value(), changed_backing);
       auto run = multi_result::take(
-          context.execute(bounded_plan.plan, {{{"input", changed}}}));
+          context.execute(bounded_plan.plan.value(), {{{"input", changed}}}));
       PS_CHECK(run.diagnostics.native_dispatch_count == 1);
       PS_CHECK(numbers(run.results.at("result"))[0] == first * .5F);
       PS_CHECK(context.resource_budget().take_value().statistics().peak[kind] <=
@@ -469,7 +472,7 @@ int main() try {
   second =
       source(shared_context.resource_budget().take_value(), second_backing);
   auto shared_result = multi_result::take(shared_context.execute(
-      shared_plan.plan, {{{"first", first}, {"second", second}}}));
+      shared_plan.plan.value(), {{{"first", first}, {"second", second}}}));
   PS_CHECK(numbers(shared_result.results.at("first")) ==
            numbers(shared_result.results.at("second")));
   // Distinct rank/origin/stride layouts sharing backing must not collide.
@@ -487,7 +490,7 @@ int main() try {
   auto ranks_plan =
       multi_result::take(Compiler(registry).compile(ranks_graph, planning));
   auto ranks = multi_result::take(shared_context.execute(
-      ranks_plan.plan, {{{"first", first}, {"second", second}}}));
+      ranks_plan.plan.value(), {{{"first", first}, {"second", second}}}));
   PS_CHECK(
       ranks.results.at("first").schema().tensors[0].descriptor.shape.size() ==
       5);

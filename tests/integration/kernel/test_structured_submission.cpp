@@ -205,7 +205,7 @@ struct Fixture {
       document.outputs = {{"result", 2, "value"}};
     }
     graph = std::make_unique<GraphContext>(document);
-    plan = take(Compiler(registry).compile(*graph)).plan;
+    plan = take(Compiler(registry).compile(*graph)).plan.value();
   }
 };
 std::atomic<unsigned> submissions{0};

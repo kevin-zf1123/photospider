@@ -81,26 +81,25 @@ class Reader final {
     const bool physical = take("psxp");
     if (!physical)
       expect("psir");
-    if (number() != 3)
-      fail("unsupported compiler artifact version");
+    if (number() != 4)
+      fail("unsupported compiler artifact version; re-export using format v4");
     if (physical) {
       data.manifest.kind = ArtifactKind::ExecutionPlan;
     } else {
       expect("stage");
-      if (take("semantic"))
-        data.manifest.kind = ArtifactKind::SemanticIR;
-      else if (take("optimized"))
-        data.manifest.kind = ArtifactKind::OptimizedIR;
-      else
-        fail("expected semantic or optimized IR stage");
+      expect("ir");
+      data.manifest.kind = ArtifactKind::IR;
     }
     expect("parent");
     data.parent_digest = quoted(16);
     if (!data.parent_digest.empty() && !hexadecimal(data.parent_digest, 16))
       fail("parent must be an empty or sixteen-digit identity");
-    if (data.manifest.kind == ArtifactKind::SemanticIR &&
-        !data.parent_digest.empty())
-      fail("semantic IR has no parent stage");
+    if (!physical) {
+      expect("producer");
+      data.provenance.producer = quoted(1024);
+      data.provenance.version = quoted(128);
+      data.provenance.options = parameters();
+    }
     if (physical) {
       expect("mode");
       if (take("cpu_exact"))
@@ -596,8 +595,8 @@ class Reader final {
     data->entry = number();
     expect("form");
     if (take("dependency_paths")) {
-      if (data->manifest.kind != ArtifactKind::SemanticIR)
-        fail("dependency paths are only valid in semantic IR");
+      if (data->manifest.kind == ArtifactKind::ExecutionPlan)
+        fail("physical artifacts require control flow");
       data->form = IRForm::DependencyPaths;
     } else {
       expect("control_flow");
@@ -978,13 +977,19 @@ std::string write_data(const ArtifactData& data) {
   Writer w;
   const bool physical = data.manifest.kind == ArtifactKind::ExecutionPlan;
   if (physical) {
-    w.text("psxp 3\n");
+    w.text("psxp 4\n");
   } else {
-    w.text("psir 3\nstage ")
-        .text(data.manifest.kind == ArtifactKind::SemanticIR ? "semantic\n"
-                                                             : "optimized\n");
+    w.text("psir 4\nstage ir\n");
   }
   w.text("parent ").quoted(data.parent_digest).text("\n");
+  if (!physical) {
+    w.text("producer ")
+        .quoted(data.provenance.producer)
+        .text(" ")
+        .quoted(data.provenance.version)
+        .text("\n");
+    write_parameters(&w, data.provenance.options);
+  }
   if (physical) {
     w.text("mode ").text(data.options.execution_mode == ExecutionMode::CpuExact
                              ? "cpu_exact\n"

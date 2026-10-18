@@ -243,8 +243,8 @@ int run(unsigned grant, unsigned mode, unsigned layers = 1,
     ++delivered;
     return Status::success();
   };
-  auto result =
-      context.execute(plan.plan, {{input}}, probe.cancel.token(), options);
+  auto result = context.execute(plan.plan.value(), {{input}},
+                                probe.cancel.token(), options);
   PS_CHECK(probe.active == 0 && probe.alive == 0 && probe.peak <= grant);
   if (mode) {
     PS_CHECK(!result.ok() && delivered == 0);
@@ -280,7 +280,7 @@ int run(unsigned grant, unsigned mode, unsigned layers = 1,
     document.outputs = {{"values", layers + 1, "value"}};
     GraphContext downstream(document);
     auto next = take(Compiler(registry).compile(downstream, planning));
-    auto copied = context.execute(next.plan, {{input}});
+    auto copied = context.execute(next.plan.value(), {{input}});
     PS_CHECK(copied.ok());
     for (unsigned i = 0; i < 36; ++i) {
       std::int64_t number = 0;
@@ -297,7 +297,7 @@ int run(unsigned grant, unsigned mode, unsigned layers = 1,
     std::vector<std::future<Result<ExecutionResult>>> runs;
     for (unsigned i = 0; i < 4; ++i)
       runs.push_back(std::async(std::launch::async, [&] {
-        return context.execute(plan.plan, {{input}}, {}, options);
+        return context.execute(plan.plan.value(), {{input}}, {}, options);
       }));
     for (auto& future : runs) {
       PS_CHECK(future.wait_for(std::chrono::seconds(10)) ==

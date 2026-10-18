@@ -89,7 +89,7 @@ int main() {
     auto plan = Compiler(registry).compile(graph);
     PS_REQUIRE_OK(plan);
     auto demand =
-        context.open_demand(plan.value().plan, {{input}}).take_value();
+        context.open_demand(plan.value().plan.value(), {{input}}).take_value();
     const TileRequest query{{{0, TileSet::range(root, 0, 1).take_value()}}};
     auto result = demand.request({{"y", query}});
     if (mode == 0) {

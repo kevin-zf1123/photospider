@@ -150,8 +150,8 @@ Result<RawBenchmarkReport> RawBenchmarkRunner::run(
 #endif
     sample.compilation = workflow.diagnostics;
 
-    auto executed = execution_->execute(workflow.plan, bindings, cancellation,
-                                        options.execution);
+    auto executed = execution_->execute(workflow.plan.value(), bindings,
+                                        cancellation, options.execution);
     if (!executed.ok()) {
       if (executed.status().code == ErrorCode::Cancelled) {
         return Result<RawBenchmarkReport>(executed.status());

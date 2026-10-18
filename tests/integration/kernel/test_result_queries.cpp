@@ -46,7 +46,7 @@ ExecutionPlan compile(const std::shared_ptr<OperationRegistry>& registry,
                       GraphContext& graph) {
   PlanningOptions planning;
   planning.tile_extent = 1;
-  return take(Compiler(registry).compile(graph, planning)).plan;
+  return take(Compiler(registry).compile(graph, planning)).plan.value();
 }
 ResultProgramPoll publication(const ResultProgramPhase& phase, double value) {
   auto builder = take(ResultBuilder::start(

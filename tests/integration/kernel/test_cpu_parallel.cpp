@@ -192,7 +192,7 @@ int run(unsigned workers, unsigned mode, unsigned grant, unsigned simultaneous,
   std::vector<std::future<Result<ExecutionResult>>> runs;
   for (unsigned i = 0; i < simultaneous; ++i)
     runs.push_back(std::async(std::launch::async, [&] {
-      return context.execute(compiled.value().plan, {},
+      return context.execute(compiled.value().plan.value(), {},
                              shared.cancellation.token());
     }));
   for (auto& future : runs) {
@@ -317,7 +317,8 @@ int cancel_during_cpu_loop() {
   ExecutionContext context(operations, config);
   CancellationSource cancellation;
   auto future = std::async(std::launch::async, [&] {
-    return context.execute(compiled.value().plan, {}, cancellation.token());
+    return context.execute(compiled.value().plan.value(), {},
+                           cancellation.token());
   });
   struct Release {
     MidloopProbe& probe;

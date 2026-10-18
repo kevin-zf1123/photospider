@@ -2,34 +2,36 @@
 
 ## Current contract
 
-Package 0.37.0 uses SameMinorVersion compatibility. C++ consumers and external C operation modules must rebuild against the matching headers. Result ABI 7 requires exact table/record sizes and provides no compatibility shim; modules built for ABI 1 through 6 are rejected. The prefix-negotiated frozen ABI in ADR 0022 remains Proposed.
+Package 0.38.0 uses SameMinorVersion compatibility. C++ consumers and external C operation modules must rebuild against the matching headers. Result ABI 7 requires exact table/record sizes and provides no compatibility shim; modules built for ABI 1 through 6 are rejected. The prefix-negotiated frozen ABI in ADR 0022 remains Proposed.
 
 | Contract | Version |
 | --- | --- |
-| Package | 0.37.0 |
+| Package | 0.38.0 |
 | WorkflowDocument | 7 |
 | OperationTraits | 29 |
 | Result operation C ABI | 7, exact-size |
 | CPU parallel / tiles service ABI | 2 / 2 |
 | Native GPU service ABI | 1 |
-| `.psir` / `.psxp` text format | 3 |
+| `.psir` / `.psxp` text format | 4 |
 | Result schema encoding | `photospider.result-schema.v6` |
-| Semantic IR | `semantic-ssa-ir-v25` |
-| Optimizer | `optimizer-v7-dependency-paths` |
-| Physical plan | `static-tile-program-v26` |
-| Plan cache key | `plan-cache-key-v19` |
+| Validated IR | `validated-ssa-ir-v26` |
+| Example optimizer | `optimize@1` (provenance only) |
+| Physical plan | `static-tile-program-v27` |
+| Plan cache key | `plan-cache-key-v20` |
 | Saved operation contract | `artifact-static-operation-contract-v2` |
 | Step dependency template | `photospider.dependency-static.v4` |
 | Fixed grant / block input proof | `photospider.fixed-grant-cache.v2` / `photospider.fixed-block-inputs.v2` |
 | Ops TensorDescription codecs | TDM4/TDM5 |
 
-These axes are independent. Package `0.37.0` uses SOVERSION `0.37`. `SchemaTemplate` defines structural members and scopes; `ResultTensorSpec` defines shape, dtype, batch/atomic axes and optional spatial layout. `ResultViewAxis` uses anchored affine coordinates and signed steps. `TileGrid::from_schema` returns `Result<TileGrid>`; `OperationRegistry::prepare_operation` prepares the static contract. `ExecutionContext` uses `ResourceBudget` for Root admission, while snapshot reservations have an independent bounded budget. External C DSOs export `ps_result_operation_plugin_get_api_v7` with ABI 7's exact sizes, an optional static `map_dependencies` hook as the last member of each operation record, explicit non-NULL tensor-view transforms, and a 1..16-piece C transaction service. A module that also exports any `_v1` through `_v6` getter fails with `TypeMismatch`; a version or record-size mismatch is rejected during import. Renaming the getter or changing `abi_version` alone does not make an ABI 6 module valid, because the operation record layout and the meaning of run-time Needs changed. ADR 0022 remains a Proposed, unimplemented separate contract. Current authoritative definitions are the public headers, CMake package declaration and compiler canonical encoders.
+These axes are independent. Package `0.38.0` uses SOVERSION `0.38`. `SchemaTemplate` defines structural members and scopes; `ResultTensorSpec` defines shape, dtype, batch/atomic axes and optional spatial layout. `ResultViewAxis` uses anchored affine coordinates and signed steps. `TileGrid::from_schema` returns `Result<TileGrid>`; `OperationRegistry::prepare_operation` prepares the static contract. `ExecutionContext` uses `ResourceBudget` for Root admission, while snapshot reservations have an independent bounded budget. External C DSOs export `ps_result_operation_plugin_get_api_v7` with ABI 7's exact sizes, an optional static `map_dependencies` hook as the last member of each operation record, explicit non-NULL tensor-view transforms, and a 1..16-piece C transaction service. A module that also exports any `_v1` through `_v6` getter fails with `TypeMismatch`; a version or record-size mismatch is rejected during import. Renaming the getter or changing `abi_version` alone does not make an ABI 6 module valid, because the operation record layout and the meaning of run-time Needs changed. ADR 0022 remains a Proposed, unimplemented separate contract. Current authoritative definitions are the public headers, CMake package declaration and compiler canonical encoders.
 
 ## Compiler stages and artifacts
 
-The compiler exposes four independently callable stages: DAG analysis or `bind_ir` to `SemanticGraphIR`, optimization to `OptimizedGraphIR`, `plan` to `ExecutionPlan`, and execution. DAG analysis emits `IRForm::DependencyPaths`, preserving repeated requests for shared Call IDs in the raw paths. Optimization retains the first request for each call, removes empty chains and reconnects the blocks as `ControlFlow`. Explicit ControlFlow input retains its CFG. The program-form field changes public C++ IR layouts, so consumers must rebuild with matching headers and libraries; WorkflowDocument schema 7 and C Result operation ABI 7 are unchanged.
+Frontend/`bind_ir`, optional named optimizers, and artifact import publish the same immutable `ValidatedIR`. Planner accepts legal DependencyPaths or ControlFlow directly. For dependency paths it deduplicates Call IDs in a private lowering copy without invoking an optimizer. Existing CFG loops retain their activation semantics. The default compile pipeline has zero optimizer invocations. Ordered invocations, including duplicate names, create numbered versions; content identity excludes producer history, so a no-op can preserve its digest.
 
-`CompilerArtifact` stores IR stages as `.psir` (`stage semantic` or `stage optimized`) and plans as `.psxp`, both at text format version 3. Each file must declare `form dependency_paths` or `form control_flow`. Only semantic IR permits dependency paths; optimized IR and plans require control flow. Earlier versions, including v2, are rejected without a converter; regenerate them from source workflow or IR. An artifact manifest names each operation key with its `artifact-static-operation-contract-v2` digest and each resource by SHA-256 and byte length. Import fails with `TypeMismatch` when a registered contract digest differs and `NotFound` when an operation or resource is missing. Digests are recomputed on import, and the stored parent digest is provenance rather than a signature. See [Compiler and local execution](../kernel-architecture/Compiler-and-Execution.md#compiler-artifacts).
+Artifact v4 uses `stage ir` and explicit program form for `.psir`; `.psxp` saves lowered CFG and complete physical instructions, with its actual input IR identity as parent. Both raw and transformed IR can be imported and planned directly. Versions 1–3 are rejected with a re-export message. Plan import links and validates saved code without optimization, mapper calls or replanning. Registry/resource matching and currentness checks remain. Operation manifest digests describe contracts, not code authentication. See [tools](Compiler-Tools.md), [formats](Compiler-Tool-Formats.md) and [compiler architecture](../kernel-architecture/Compiler-and-Execution.md).
+
+This is a breaking C++ API/artifact change: `SemanticGraphIR`, `OptimizedGraphIR`, their split digests and the `ImportedIR` variant are removed without aliases. `CompiledWorkflow` has ordered IR revisions and optional Plan; `ExecutionPlan::input_ir_digest()` names its actual parent. Rebuild consumers and re-export artifacts. Document schema 7, OperationTraits 29 and C operation ABI 7 are unchanged.
 
 ## Workflow inputs and operation execution
 
@@ -47,4 +49,4 @@ C metadata resolution supplies schemas, selected resources and static shared-sta
 
 ## Identity and runtime matching
 
-Canonical compiler identities include the program form, program identifiers, prepared operation contracts, static schemas, parameters, selected resources, input projections, shared-stage definitions, relevant backend choices and, for plans, every instruction and grant. Renumbering calls or values therefore changes semantic, optimized and plan digests. Content cache identities exclude physical node, step and plan identifiers. Raw pointers, padding and allocation addresses do not define identity. C import rejects wrong ABI or size; native service availability also depends on build and device. Compiler artifacts are editable versioned text and carry no native pointers, library paths, device handles, Run state or cache content.
+Canonical compiler identities include the program form, program identifiers, prepared operation contracts, static schemas, parameters, selected resources, input projections, shared-stage definitions, relevant backend choices and, for plans, every instruction and grant. Renumbering calls or values therefore changes IR and plan digests. Content cache identities exclude physical node, step and plan identifiers. Raw pointers, padding and allocation addresses do not define identity. C import rejects wrong ABI or size; native service availability also depends on build and device. Compiler artifacts are editable versioned text and carry no native pointers, library paths, device handles, Run state or cache content.

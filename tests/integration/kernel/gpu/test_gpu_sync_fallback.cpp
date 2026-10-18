@@ -288,7 +288,8 @@ int fallback_records() {
     PlanningOptions planning;
     planning.execution_mode = ExecutionMode::NativeGpu;
     planning.tile_extent = 1;
-    auto plan = Compiler(registry).compile(graph, planning).take_value().plan;
+    auto plan =
+        Compiler(registry).compile(graph, planning).take_value().plan.value();
     ExecutionContext context(registry, {1, true, 8, 1 << 20, 0});
     const auto root = context.resource_budget().take_value();
     const auto bindings = make_bindings(root);
@@ -443,7 +444,8 @@ int main() {
       return 77;
     }
     GraphContext graph(document("example.increment", false));
-    auto plan = Compiler(registry).compile(graph, planning).take_value().plan;
+    auto plan =
+        Compiler(registry).compile(graph, planning).take_value().plan.value();
     const auto root = context.resource_budget().take_value();
     const auto bindings = make_bindings(root);
     auto frozen = context.freeze(plan, bindings).take_value();
@@ -495,7 +497,7 @@ int main() {
       context.clear_result_cache();
       GraphContext chain(document(key, true));
       auto chain_plan =
-          Compiler(registry).compile(chain, planning).take_value().plan;
+          Compiler(registry).compile(chain, planning).take_value().plan.value();
       auto captured = context.freeze(chain_plan, bindings).take_value();
       unavailable = true;
       const auto before = starts.load();
@@ -553,7 +555,8 @@ int main() {
   // One large tile has independent native input/output allocation rounding.
   planning.tile_extent = 8192;
   GraphContext whole(document("example.fail_in_poll", false));
-  auto plan = Compiler(registry).compile(whole, planning).take_value().plan;
+  auto plan =
+      Compiler(registry).compile(whole, planning).take_value().plan.value();
   for (std::uint64_t native_limit : {65535, 65536}) {
     const auto limit = length * 4 + native_limit;
     ExecutionContext context(registry, {1, true, 8, limit, 0});
@@ -602,8 +605,10 @@ int main() {
         return 1;
       retry = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
       GraphContext late_graph(document("example.fail_after_read", false));
-      auto late_plan =
-          Compiler(registry).compile(late_graph, planning).take_value().plan;
+      auto late_plan = Compiler(registry)
+                           .compile(late_graph, planning)
+                           .take_value()
+                           .plan.value();
       auto late_frozen = context.freeze(late_plan, bindings).take_value();
       unavailable = true;
       const auto cpu_before = cpu_calls.load();

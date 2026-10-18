@@ -25,6 +25,13 @@ jobs:
           "$CXX" --version
       - name: Verify Ninja
         run: ninja --version
+      - name: Prepare CLI JSON dependency
+        run: |
+          mkdir -p third_party/yyjson
+          upstream=https://raw.githubusercontent.com/ibireme/yyjson/6447536015f3d600f3d65323b10976103b337ca7
+          curl --fail --location --retry 3 "$upstream/src/yyjson.c" --output third_party/yyjson/yyjson.c
+          curl --fail --location --retry 3 "$upstream/src/yyjson.h" --output third_party/yyjson/yyjson.h
+          curl --fail --location --retry 3 "$upstream/LICENSE" --output third_party/yyjson/LICENSE
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja
@@ -53,6 +60,13 @@ jobs:
           "$CXX" --version
       - name: Verify Ninja
         run: ninja --version
+      - name: Prepare CLI JSON dependency
+        run: |
+          mkdir -p third_party/yyjson
+          upstream=https://raw.githubusercontent.com/ibireme/yyjson/6447536015f3d600f3d65323b10976103b337ca7
+          curl --fail --location --retry 3 "$upstream/src/yyjson.c" --output third_party/yyjson/yyjson.c
+          curl --fail --location --retry 3 "$upstream/src/yyjson.h" --output third_party/yyjson/yyjson.h
+          curl --fail --location --retry 3 "$upstream/LICENSE" --output third_party/yyjson/LICENSE
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja

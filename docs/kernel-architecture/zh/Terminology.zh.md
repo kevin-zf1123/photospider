@@ -6,8 +6,7 @@
 | `GraphContext` | 持有复制的 workflow document 和当前 revision。 |
 | `GraphSnapshot` | 编译使用的一致 source/revision 快照。 |
 | `IRProgram` | 可编辑、与前端无关的 SSA 程序：输入声明与绑定、唯一 call 声明、blocks、entry block、有序 return 签名及 `IRForm`。由 `Compiler::bind_ir` 接受。 |
-| `SemanticGraphIR` | 由 `analyze`、`bind_ir` 或 `.psir` 导入产生的不可变、已验证并已准备的 IR。`form()` 区分原始依赖路径与可执行控制流。 |
-| `OptimizedGraphIR` | 具有独立 identity 的 ControlFlow 阶段。优化消除重复的依赖路径请求、移除空 chain 并重新连接 blocks；已有 ControlFlow 输入保持不变。 |
+| `ValidatedIR` | 不可变、已校验和准备的 IR；前端、导入和可选 optimizer 发布同一类型，两种形式都可直接规划。 |
 | `IRForm::DependencyPaths` | 原始 IR 形式，在有序路径中保留重复 Call ID 请求。相同 ID 指向同一次调用及其 SSA 结果，包括副作用。完整 DAG 路径展开由 `analyze` 生成，去重由优化执行。 |
 | `IRForm::ControlFlow` | 每个 call 有一个静态调用位置的可执行 SSA 控制流。分支与循环通过显式 terminators 和 block 参数表示。 |
 | dependency chain（依赖链） | 原始路径中的一段，在切换上游分支、多输入汇合点和新根处划分。共享祖先可以出现在多条 chain 中；chain 划分不要求图中节点没有分叉。 |
@@ -21,7 +20,7 @@
 | 静态 mapping | `OperationDefinition::map_dependencies`（C：`map_dependencies` hook）：纯编译期回调，返回一个目标可以读取的 tile。`complete_input_dependencies` 覆盖 projection 中的普通输入；共享 stage 读取需要显式 mapping 条目。 |
 | 固定授权 | 保存在指令中的 `PlanTensorRead` 或 `PlanSharedRead`；该指令在运行时唯一可以读取的数据。Descriptor-only 授权暴露 schema 事实，不暴露 payload。 |
 | synthetic return 记录 | 具名 return 的依赖记录，索引为 `steps().size()` 加 return 序号，由 `ExecutionPlan::output(name).record_index` 返回。 |
-| compiler 产物 | 由 `CompilerArtifact` 写入和读取的可编辑、带版本文本：`.psir` 保存语义或优化 IR，`.psxp` 保存执行 plan。格式 v3 必须声明程序形式，只有语义 IR 允许依赖路径。 |
+| compiler 产物 | v4 文本：`.psir` 保存任一合法 IR 形式及来源，`.psxp` 保存完整物理 Plan；旧版本需要重新导出。 |
 | 产物 manifest | 产物中列出的 operation key 及其 contract digest 和资源 identity，可通过 `CompilerArtifact::inspect` 在没有 registry 的情况下读取。 |
 | `ExecutionContext` | 持有有界 worker、冻结的 operation definition、缓存和资源计费。 |
 | `ExecutionRun` | 单次同步执行调用的私有状态：program counter、block 值、已绑定授权、证据和诊断。 |

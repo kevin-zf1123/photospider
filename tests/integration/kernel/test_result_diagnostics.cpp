@@ -144,8 +144,9 @@ int poll_reports() {
   ExecutionContext context(registry, config);
   const auto root = take(context.resource_budget());
   {
-    auto result = take(context.execute(
-        compiled.plan, {{multi_result::binding(root, "input", 7, schema)}}));
+    auto result = take(
+        context.execute(compiled.plan.value(),
+                        {{multi_result::binding(root, "input", 7, schema)}}));
     double sum = 0;
     for (unsigned i = 0; i < 5; ++i)
       sum += multi_result::number(result.results.at("value"), {i});
@@ -172,7 +173,7 @@ int poll_reports() {
       {1, "test.numeric_report", {WorkflowNodeOutput{2, "value"}}, {}}};
   GraphContext failure_graph(document);
   auto failure_plan = take(Compiler(registry).compile(failure_graph));
-  auto failure = context.execute(failure_plan.plan);
+  auto failure = context.execute(failure_plan.plan.value());
   if (failure.ok() || failure.status().code != ErrorCode::OperationFailed)
     std::cerr << "report failure: "
               << static_cast<unsigned>(failure.status().code) << " "

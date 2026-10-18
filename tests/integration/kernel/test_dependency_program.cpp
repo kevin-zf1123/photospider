@@ -145,7 +145,7 @@ Result<ExecutionResult> execute_probe(OperationDefinition operation,
   auto plan = multi_result::take(
                   Compiler(registry).compile(
                       graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
-                  .plan;
+                  .plan.value();
   plan = multi_result::take(plan.tile_plan(
       "result", TileRequest{{{0, multi_result::take(TileSet::from_indices(
                                      ResourceBudget{}, {0}))}}}));
@@ -235,7 +235,7 @@ int progressive() {
   auto plan = multi_result::take(
                   Compiler(registry).compile(
                       graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
-                  .plan;
+                  .plan.value();
   plan = multi_result::take(plan.tile_plan(
       "result", TileRequest{{{0, multi_result::take(TileSet::from_indices(
                                      ResourceBudget{}, {0}))}}}));
@@ -336,7 +336,7 @@ int block_services() {
   auto plan = multi_result::take(
                   Compiler(registry).compile(
                       graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
-                  .plan;
+                  .plan.value();
   ExecutionContext context(registry, {1, false, 8, 65536, 64});
   auto input =
       source(multi_result::take(context.resource_budget()), "x",
@@ -670,7 +670,7 @@ int root_work_resume() {
     auto plan = multi_result::take(
                     Compiler(registry).compile(
                         graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
-                    .plan;
+                    .plan.value();
     plan = multi_result::take(plan.tile_plan(
         "result", TileRequest{{{0, multi_result::take(TileSet::from_indices(
                                        ResourceBudget{}, {0}))}}}));
@@ -790,7 +790,7 @@ int sibling_admission() {
   auto plan = multi_result::take(
                   Compiler(registry).compile(
                       graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
-                  .plan;
+                  .plan.value();
   ExecutionContext limited(registry, {1, false, 8, 4 * mib + 65536});
   auto failed = limited.execute(plan);
   PS_CHECK(failed.status().code == ErrorCode::ResourceExhausted);
@@ -804,7 +804,7 @@ int sibling_admission() {
   document.outputs = {{"a", 1, "value"}};
   GraphContext single_graph(document);
   auto single =
-      multi_result::take(Compiler(registry).compile(single_graph)).plan;
+      multi_result::take(Compiler(registry).compile(single_graph)).plan.value();
   auto recovered = limited.execute(single);
   PS_CHECK(recovered.ok() && calls[0] == 2 && calls[1] == 1);
   PS_CHECK(recovered.value().diagnostics.peak_live_bytes >= 4 * mib);
@@ -876,7 +876,7 @@ int execution_network() {
   auto plan = multi_result::take(
                   Compiler(registry).compile(
                       graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
-                  .plan;
+                  .plan.value();
   plan = multi_result::take(plan.tile_plan(
       "result", TileRequest{{{0, multi_result::take(TileSet::from_indices(
                                      ResourceBudget{}, {0}))}}}));

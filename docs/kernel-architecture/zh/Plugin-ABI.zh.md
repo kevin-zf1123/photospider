@@ -2,7 +2,7 @@
 
 ## 1. 核心摘要 (TL;DR)
 
-Photospider 通过精确大小的版本化 C 表在宿主进程中加载受信任的 operation module，并在发布前复制声明；内置 operations 则通过 C++ `OperationRegistry` 注册。Structured Result C ABI 的每个 port 对应一个 Result object，每个 Result 都是由 1..16 个 typed Tensor 成员组成的静态目录，成员保存数值或图像 samples。Result 只存储结构与数据。Planner 调用每个算子的纯静态 mapping hook，为每个输出 tile 固定其可读取的成员 tile；运行时 callback 只读取这些已编译授权，宿主在 Result 之外记录每个已执行 tile 的依赖。Package 0.37.0 使用 Result operation C ABI 7 与 OperationTraits 29。ABI 7 提供成员局部的 tile 区间、同步的静态 mapping sink、静态 publication scope、Run 共享 stage、校验器与诊断注册、metadata resolution 期间的显式资源选择、授权的校验读取以及 `fail_domain`；Result 记录不携带 facet 或领域 metadata。
+Photospider 通过精确大小的版本化 C 表在宿主进程中加载受信任的 operation module，并在发布前复制声明；内置 operations 则通过 C++ `OperationRegistry` 注册。Structured Result C ABI 的每个 port 对应一个 Result object，每个 Result 都是由 1..16 个 typed Tensor 成员组成的静态目录，成员保存数值或图像 samples。Result 只存储结构与数据。Planner 调用每个算子的纯静态 mapping hook，为每个输出 tile 固定其可读取的成员 tile；运行时 callback 只读取这些已编译授权，宿主在 Result 之外记录每个已执行 tile 的依赖。Package 0.38.0 使用 Result operation C ABI 7 与 OperationTraits 29。ABI 7 提供成员局部的 tile 区间、同步的静态 mapping sink、静态 publication scope、Run 共享 stage、校验器与诊断注册、metadata resolution 期间的显式资源选择、授权的校验读取以及 `fail_domain`；Result 记录不携带 facet 或领域 metadata。
 
 ## 2. 架构心智模型 (Mental Model & Intuition)
 
@@ -232,7 +232,7 @@ Run 服务与校验 context 上的 `fail_domain(status_code, domain_code)` 记�
 ## 4. 负面清单与边界 (Non-Goals & Explicit Boundaries)
 
 - Operation module 是受信任的进程内代码。ABI 校验不对其做沙箱隔离或认证。
-- C++ consumer 针对已安装的 package 0.37.0 头文件构建。资源设施在 `photospider/core/` 中声明：`core/cancellation.hpp`、`core/resources.hpp` 与 `core/resource_allocator.hpp`。WorkflowDocument schema 7 与 OperationTraits 29 定义当前编译器契约。Result operation C 表为 ABI 7。C 导入边界拒绝无效的外部记录，内部执行状态只在校验之后表示。
+- C++ consumer 针对已安装的 package 0.38.0 头文件构建。资源设施在 `photospider/core/` 中声明：`core/cancellation.hpp`、`core/resources.hpp` 与 `core/resource_allocator.hpp`。WorkflowDocument schema 7 与 OperationTraits 29 定义当前编译器契约。Result operation C 表为 ABI 7。C 导入边界拒绝无效的外部记录，内部执行状态只在校验之后表示。
 - 内置 operations 通过已安装头文件中未冻结的 C++ `OperationDefinition` 注册路径注册，C importer 只接受精确的 ABI 7 结构大小。C operation 没有由算子持有的持久准备状态。其 metadata resolver 可以通过 `set_shared_stages` 替换静态共享 stage 声明，包括输入投影和 workspace 上限。C 校验器保留各自的准备状态。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md)（Proposed）记录目标：内置与外部 module 共用一个按前缀协商的 C ABI、单独版本化的服务表，以及 module 侧的 header-only C++ SDK。
 - ABI 不携带 semantic kind、facet 或附着描述。领域解释是 operation 参数或算子领域配置，领域合法性由绑定的校验器检查。
 - ABI 没有整体 Result 执行模式、运行期成员计数、动态 tile End 或运行期依赖展开。需要完整输入的算法映射每个成员 tile 或读取共享 stage；数据相关的读取声明有限的静态超集。

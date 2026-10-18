@@ -15,7 +15,7 @@ int main() {
   {
     GraphContext graph(test::addition_document(2, 3));
     auto compiled = compiler.compile(graph).take_value();
-    auto owner = execution.freeze(compiled.plan).take_value();
+    auto owner = execution.freeze(compiled.plan.value()).take_value();
     const auto captured = root.statistics().live.values;
     PS_CHECK(root.statistics().live[ResourceKind::Metadata] >
              baseline[ResourceKind::Metadata]);
@@ -32,15 +32,15 @@ int main() {
     GraphContext graph(document);
     auto compiled = compiler.compile(graph);
     PS_CHECK(compiled.ok());
-    auto captured = execution.freeze(compiled.value().plan);
+    auto captured = execution.freeze(compiled.value().plan.value());
     PS_CHECK(captured.ok());
     frozen = captured.take_value();
     graph.replace(test::addition_document(7, 11));
-    PS_CHECK(execution.execute(compiled.value().plan).status().code ==
+    PS_CHECK(execution.execute(compiled.value().plan.value()).status().code ==
              ErrorCode::Stale);
     auto result = execution.execute(frozen);
     PS_CHECK(result.ok() && test::named_scalar(result.value(), "sum") == 5);
-    PS_CHECK(execution.freeze(compiled.value().plan).status().code ==
+    PS_CHECK(execution.freeze(compiled.value().plan.value()).status().code ==
              ErrorCode::Stale);
   }
   auto result = execution.execute(frozen);

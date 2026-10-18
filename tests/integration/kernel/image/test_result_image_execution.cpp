@@ -183,7 +183,7 @@ void scalar_prelude_workflows() {
                    {}}};
   direct.outputs = {{"out", 91, "value"}};
   GraphContext graph(direct);
-  auto plan = take(Compiler(registry).compile(graph)).plan;
+  auto plan = take(Compiler(registry).compile(graph)).plan.value();
   auto success = context.execute(plan, {{external, ignored}});
   require(
       success.ok() && *starts == 1,
@@ -278,7 +278,8 @@ void scalar_prelude_workflows() {
          {WorkflowNodeOutput{70, "value"}, WorkflowInputReference{2}},
          {}}};
     GraphContext computed_graph(computed);
-    auto computed_plan = take(Compiler(registry).compile(computed_graph)).plan;
+    auto computed_plan =
+        take(Compiler(registry).compile(computed_graph)).plan.value();
     auto invalid = context.execute(computed_plan, {{ignored}});
     require(!invalid.ok() &&
                 invalid.status().code == ErrorCode::OperationFailed &&
@@ -301,7 +302,8 @@ void scalar_prelude_workflows() {
                    {}}};
   shared.outputs.push_back({"loose", 80, "value"});
   auto shared_graph = std::make_shared<GraphContext>(shared);
-  auto shared_plan = take(Compiler(registry).compile(*shared_graph)).plan;
+  auto shared_plan =
+      take(Compiler(registry).compile(*shared_graph)).plan.value();
   auto frozen = take(context.freeze(shared_plan, {{ignored}}));
   auto warm_source = context.execute_fragments(
       frozen,
@@ -334,7 +336,7 @@ void foundation_tensor_workflows() {
   document.outputs = {{"number", 1, "value"}, {"alias", 2, "value"}};
   auto graph = std::make_shared<GraphContext>(document);
   auto compiled = take(Compiler(driver.registry).compile(*graph));
-  auto output = take(driver.context->execute(compiled.plan));
+  auto output = take(driver.context->execute(compiled.plan.value()));
   auto number = output.results.at("number");
   auto alias = output.results.at("alias");
   auto source_window = take(

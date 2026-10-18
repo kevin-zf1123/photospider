@@ -303,6 +303,9 @@ photospider_add_kernel_test(test_checked_math Photospider::kernel tests/unit/ker
 target_include_directories(test_checked_math PRIVATE src/lib)
 photospider_add_kernel_test(
     test_compiler Photospider::kernel tests/unit/kernel/test_compiler.cpp)
+photospider_add_kernel_test(test_frontend_registry Photospider::kernel tests/unit/kernel/test_frontend_registry.cpp)
+photospider_add_kernel_test(test_planner_registry Photospider::kernel tests/unit/kernel/test_planner_registry.cpp)
+photospider_add_kernel_test(test_compiler_pipeline Photospider::kernel tests/unit/kernel/test_compiler_pipeline.cpp)
 photospider_add_kernel_test(
     test_compiler_artifact Photospider::kernel tests/unit/kernel/test_compiler_artifact.cpp)
 photospider_add_kernel_test(

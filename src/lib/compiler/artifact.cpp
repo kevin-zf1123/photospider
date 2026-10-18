@@ -1,6 +1,7 @@
 #include "photospider/compiler/artifact.hpp"
 
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
@@ -8,6 +9,7 @@
 
 #include "compiler/artifact_text.hpp"
 #include "compiler/identity.hpp"
+#include "photospider/compiler/compiler.hpp"
 #include "plugin/dependency_identity.hpp"
 
 namespace ps {
@@ -63,11 +65,12 @@ Result<ArtifactManifest> manifest(ArtifactKind kind,
   }
   return Result<ArtifactManifest>(std::move(result));
 }
-Result<ResourceSet> link(const Compiler& compiler, const ArtifactData& data,
+Result<ResourceSet> link(const OperationRegistry& operations,
+                         const ArtifactData& data,
                          const ResourceSet& available) {
   std::set<std::string> declared, used;
   for (const auto& required : data.manifest.operations) {
-    auto traits = compiler.operations()->find_traits(required.key);
+    auto traits = operations.find_traits(required.key);
     if (!traits.ok())
       return Result<ResourceSet>(traits.status());
     if (compiler_internal::operation_digest(traits.value()) !=
@@ -85,7 +88,7 @@ Result<ResourceSet> link(const Compiler& compiler, const ArtifactData& data,
         invalid("operation dependency table is not exact"));
   return available.select(data.manifest.resources);
 }
-Status validate_resources(const SemanticGraphIR& ir, const ArtifactData& data) {
+Status validate_resources(const ValidatedIR& ir, const ArtifactData& data) {
   std::map<IRCallId, const compiler_internal::IRRecord*> records;
   std::set<ResourceIdentity> used;
   for (const auto& record : data.nodes)
@@ -109,6 +112,7 @@ Result<std::string> export_graph(const IR& ir, ArtifactKind kind,
                                  const std::string& parent) {
   ArtifactData data;
   data.parent_digest = parent;
+  data.provenance = ir.provenance();
   store_program(&data, ir.program());
   auto dependencies = manifest(kind, registry, data);
   if (!dependencies.ok())
@@ -118,23 +122,13 @@ Result<std::string> export_graph(const IR& ir, ArtifactKind kind,
 }
 }  // namespace
 
-Result<std::string> CompilerArtifact::export_ir(const SemanticGraphIR& ir) {
+Result<std::string> CompilerArtifact::export_ir(const ValidatedIR& ir) {
   try {
     auto registry = ir.operation_registry_.lock();
     if (!registry || !ir.current() || !ir.revision())
       return Result<std::string>({ErrorCode::Stale, "IR is stale"});
-    return export_graph(ir, ArtifactKind::SemanticIR, *registry, {});
-  } catch (const std::bad_alloc&) {
-    return Result<std::string>(exhausted());
-  }
-}
-Result<std::string> CompilerArtifact::export_ir(const OptimizedGraphIR& ir) {
-  try {
-    auto registry = ir.operation_registry_.lock();
-    if (!registry || !ir.current() || !ir.revision())
-      return Result<std::string>({ErrorCode::Stale, "optimized IR is stale"});
-    return export_graph(ir, ArtifactKind::OptimizedIR, *registry,
-                        ir.semantic_digest().value);
+    return export_graph(ir, ArtifactKind::IR, *registry,
+                        ir.provenance().parent_digest);
   } catch (const std::bad_alloc&) {
     return Result<std::string>(exhausted());
   }
@@ -145,7 +139,7 @@ Result<std::string> CompilerArtifact::export_plan(const ExecutionPlan& plan) {
     if (!registry || !plan.current() || !plan.revision())
       return Result<std::string>({ErrorCode::Stale, "plan is stale"});
     ArtifactData data;
-    data.parent_digest = plan.optimized_digest_.value;
+    data.parent_digest = plan.input_ir_digest_.value;
     store_program(&data, plan.linked_program_);
     auto dependencies = manifest(ArtifactKind::ExecutionPlan, *registry, data);
     if (!dependencies.ok())
@@ -170,58 +164,52 @@ Result<ArtifactManifest> CompilerArtifact::inspect(std::string_view text) {
     return Result<ArtifactManifest>(data.status());
   return Result<ArtifactManifest>(std::move(data.take_value().manifest));
 }
-Result<ImportedIR> CompilerArtifact::import_ir(const Compiler& compiler,
-                                               std::string_view text,
-                                               ResourceSet resources) {
+Result<ValidatedIR> CompilerArtifact::import_ir(const Compiler& compiler,
+                                                std::string_view text,
+                                                ResourceSet resources) {
   try {
     auto decoded = compiler_internal::decode_artifact(text);
     if (!decoded.ok())
-      return Result<ImportedIR>(decoded.status());
+      return Result<ValidatedIR>(decoded.status());
     auto data = decoded.take_value();
     if (data.manifest.kind == ArtifactKind::ExecutionPlan)
-      return Result<ImportedIR>(invalid("expected psir"));
-    auto bound_resources = link(compiler, data, resources);
+      return Result<ValidatedIR>(invalid("expected psir"));
+    auto bound_resources = link(*compiler.operations(), data, resources);
     if (!bound_resources.ok())
-      return Result<ImportedIR>(bound_resources.status());
+      return Result<ValidatedIR>(bound_resources.status());
     auto bound = compiler.bind_ir(program(data), bound_resources.take_value());
     if (!bound.ok())
-      return Result<ImportedIR>(bound.status());
+      return Result<ValidatedIR>(bound.status());
     auto checked = validate_resources(bound.value(), data);
     if (!checked.ok())
-      return Result<ImportedIR>(checked);
-    if (data.manifest.kind == ArtifactKind::SemanticIR)
-      return Result<ImportedIR>(ImportedIR{bound.take_value()});
-    const auto& linked = bound.value();
-    OptimizedGraphIR result;
-    result.revision_ = linked.revision_;
-    result.nodes_ = linked.nodes_;
-    result.outputs_ = linked.outputs_;
-    result.blocks_ = linked.blocks_;
-    result.entry_ = linked.entry_;
-    result.input_bindings_ = linked.input_bindings_;
-    result.input_declarations_ = linked.input_declarations_;
-    result.resources_ = linked.resources_;
-    result.current_check_ = linked.current_check_;
-    result.operation_registry_ = linked.operation_registry_;
-    result.semantic_digest_.value = data.parent_digest;
-    result.digest_.value = compiler_internal::optimized_digest(
-        result.semantic_digest_.value, result.program());
-    return Result<ImportedIR>(ImportedIR{std::move(result)});
+      return Result<ValidatedIR>(checked);
+    auto result = bound.take_value();
+    result.provenance_ = data.provenance;
+    result.provenance_.parent_digest = data.parent_digest;
+    return Result<ValidatedIR>(std::move(result));
   } catch (const std::bad_alloc&) {
-    return Result<ImportedIR>(exhausted());
+    return Result<ValidatedIR>(exhausted());
   }
 }
-Result<ExecutionPlan> CompilerArtifact::import_plan(const Compiler& compiler,
-                                                    std::string_view text,
-                                                    ResourceSet resources) {
+Result<ExecutionPlan> CompilerArtifact::import_plan(
+    std::shared_ptr<OperationRegistry> operations, std::string_view text,
+    ResourceSet resources) {
   try {
+    if (!operations || !operations->frozen())
+      return Result<ExecutionPlan>(
+          invalid("Plan loading requires a frozen operation registry"));
+    // Binding/linking services use only the supplied contract environment.
+    Compiler compiler(std::move(operations));
     auto decoded = compiler_internal::decode_artifact(text);
     if (!decoded.ok())
       return Result<ExecutionPlan>(decoded.status());
     auto data = decoded.take_value();
     if (data.manifest.kind != ArtifactKind::ExecutionPlan)
       return Result<ExecutionPlan>(invalid("expected psxp"));
-    auto bound_resources = link(compiler, data, resources);
+    if (data.form != IRForm::ControlFlow)
+      return Result<ExecutionPlan>(
+          invalid("psxp requires lowered control flow"));
+    auto bound_resources = link(*compiler.operations(), data, resources);
     if (!bound_resources.ok())
       return Result<ExecutionPlan>(bound_resources.status());
     auto bound = compiler.bind_ir(program(data), bound_resources.take_value());
@@ -230,25 +218,13 @@ Result<ExecutionPlan> CompilerArtifact::import_plan(const Compiler& compiler,
     auto checked = validate_resources(bound.value(), data);
     if (!checked.ok())
       return Result<ExecutionPlan>(checked);
-    const auto& declarations = bound.value();
-    OptimizedGraphIR optimized;
-    optimized.revision_ = declarations.revision_;
-    optimized.nodes_ = declarations.nodes_;
-    optimized.outputs_ = declarations.outputs_;
-    optimized.blocks_ = declarations.blocks_;
-    optimized.entry_ = declarations.entry_;
-    optimized.input_bindings_ = declarations.input_bindings_;
-    optimized.input_declarations_ = declarations.input_declarations_;
-    optimized.resources_ = declarations.resources_;
-    optimized.current_check_ = declarations.current_check_;
-    optimized.operation_registry_ = declarations.operation_registry_;
-    optimized.digest_.value = data.parent_digest;
+    auto validated = bound.take_value();
     std::vector<Backend> placements;
     for (const auto& record : data.steps)
       placements.push_back(record.step.backend);
     // Bind declarations and stored placements without optimization, backend
     // selection, tile expansion or an operation dependency-mapping callback.
-    auto linked = compiler.link_plan(optimized, data.options, &placements);
+    auto linked = compiler.link_plan(validated, data.options, &placements);
     if (!linked.ok())
       return linked;
     auto result = linked.take_value();
@@ -282,7 +258,7 @@ Result<ExecutionPlan> CompilerArtifact::import_plan(const Compiler& compiler,
             invalid("invalid physical return mapping"));
     result.outputs_ = data.plan_outputs;
     result.output_requests_ = data.options.output_requests;
-    result.optimized_digest_.value = data.parent_digest;
+    result.input_ir_digest_.value = data.parent_digest;
     checked = compiler.finalize_plan(&result);
     if (checked.ok())
       checked = compiler.validate_plan(result);
@@ -300,11 +276,7 @@ Result<ExecutionPlan> CompilerArtifact::import_plan(const Compiler& compiler,
   }
 }
 
-Status CompilerArtifact::save_ir(const SemanticGraphIR& ir,
-                                 const std::string& path) {
-  return compiler_internal::write_artifact_file(path, export_ir(ir));
-}
-Status CompilerArtifact::save_ir(const OptimizedGraphIR& ir,
+Status CompilerArtifact::save_ir(const ValidatedIR& ir,
                                  const std::string& path) {
   return compiler_internal::write_artifact_file(path, export_ir(ir));
 }
@@ -312,20 +284,20 @@ Status CompilerArtifact::save_plan(const ExecutionPlan& plan,
                                    const std::string& path) {
   return compiler_internal::write_artifact_file(path, export_plan(plan));
 }
-Result<ImportedIR> CompilerArtifact::load_ir(const Compiler& compiler,
-                                             const std::string& path,
-                                             ResourceSet resources) {
+Result<ValidatedIR> CompilerArtifact::load_ir(const Compiler& compiler,
+                                              const std::string& path,
+                                              ResourceSet resources) {
   auto text = compiler_internal::read_artifact_file(path);
   if (!text.ok())
-    return Result<ImportedIR>(text.status());
+    return Result<ValidatedIR>(text.status());
   return import_ir(compiler, text.value(), std::move(resources));
 }
-Result<ExecutionPlan> CompilerArtifact::load_plan(const Compiler& compiler,
-                                                  const std::string& path,
-                                                  ResourceSet resources) {
+Result<ExecutionPlan> CompilerArtifact::load_plan(
+    std::shared_ptr<OperationRegistry> operations, const std::string& path,
+    ResourceSet resources) {
   auto text = compiler_internal::read_artifact_file(path);
   if (!text.ok())
     return Result<ExecutionPlan>(text.status());
-  return import_plan(compiler, text.value(), std::move(resources));
+  return import_plan(std::move(operations), text.value(), std::move(resources));
 }
 }  // namespace ps

@@ -1140,7 +1140,7 @@ int result_dso_contracts(bool require_gpu) {
     const auto cpu_before =
         observer.counter("ps_operation_fixture_cpu_invocation_count",
                          kFixtureGpuBackendUnavailable);
-    auto result = context.execute(fallback.value().plan, {{binding}});
+    auto result = context.execute(fallback.value().plan.value(), {{binding}});
     PS_REQUIRE_OK(result);
     PS_CHECK(multi_result::number(result.value().results.at("value")) == 12);
     const auto& diagnostics = result.value().diagnostics;
@@ -1183,7 +1183,7 @@ int result_dso_contracts(bool require_gpu) {
           "ps_operation_fixture_cpu_invocation_count", item.second);
       auto compiled = compile(item.first, true);
       PS_CHECK(compiled.ok());
-      auto failed = context.execute(compiled.value().plan, {{binding}});
+      auto failed = context.execute(compiled.value().plan.value(), {{binding}});
       PS_CHECK(!failed.ok());
       PS_CHECK(failed.status().code == (item.second == 5
                                             ? ErrorCode::InvalidArgument
@@ -1199,7 +1199,8 @@ int result_dso_contracts(bool require_gpu) {
       PS_CHECK(observer.counter("ps_operation_fixture_cpu_invocation_count",
                                 item.second) == cpu_before);
     }
-    auto recovered = context.execute(fallback.value().plan, {{binding}});
+    auto recovered =
+        context.execute(fallback.value().plan.value(), {{binding}});
     PS_CHECK(recovered.ok());
     PS_CHECK(multi_result::number(recovered.value().results.at("value")) == 12);
     PS_CHECK(recovered.value().diagnostics.cache_hits == 0);
@@ -1226,7 +1227,7 @@ int result_dso_contracts(bool require_gpu) {
         future.wait();
     });
     future = std::async(std::launch::async, [&] {
-      return context.execute(compiled.value().plan, {{binding}},
+      return context.execute(compiled.value().plan.value(), {{binding}},
                              cancellation.token());
     });
     const bool waiting = controls.wait(5000) != 0;
@@ -1338,18 +1339,18 @@ int main(int argc, char** argv) {
 
   GraphContext graph(ps::test::addition_document(2.5, 4.0));
   CompiledWorkflow workflow = compile_or_throw(&compiler, graph);
-  auto result = execution.execute(workflow.plan);
+  auto result = execution.execute(workflow.plan.value());
   PS_REQUIRE_OK(result);
   PS_CHECK(ps::test::named_scalar(result.value(), "sum") == 6.5);
   PS_CHECK(std::string_view(result.value().diagnostics.plan_digest) ==
-           workflow.plan.digest().value);
+           workflow.plan.value().digest().value);
   PS_CHECK(!result.value().diagnostics.result_digest.empty());
   PS_CHECK(result.value().diagnostics.selected_backends.size() == 3U);
 
   auto other_operations = kernel_registry();
   ExecutionContext mismatched_execution(
       other_operations, ExecutionContextConfig{1U, false, 8U, 65536U});
-  auto mismatched_result = mismatched_execution.execute(workflow.plan);
+  auto mismatched_result = mismatched_execution.execute(workflow.plan.value());
   PS_CHECK(!mismatched_result.ok());
   PS_CHECK(mismatched_result.status().code == ErrorCode::Stale);
 
@@ -1427,32 +1428,32 @@ int main(int argc, char** argv) {
     });
   };
   for (const auto* operation : {"test.effect_source", "test.effect_sink"}) {
-    PS_CHECK(contains_effect(effect_workflow.semantic.nodes(), operation));
-    PS_CHECK(contains_effect(effect_workflow.optimized.nodes(), operation));
-    PS_CHECK(contains_effect(effect_workflow.plan.steps(), operation));
+    PS_CHECK(contains_effect(
+        effect_workflow.ir_versions.front().ir.value().nodes(), operation));
+    PS_CHECK(contains_effect(effect_workflow.plan.value().steps(), operation));
   }
-  PS_CHECK(effect_workflow.optimized.semantic_digest().value ==
-           effect_workflow.semantic.digest().value);
-  PS_CHECK(effect_workflow.plan.optimized_digest().value ==
-           effect_workflow.optimized.digest().value);
-  PS_CHECK(!effect_workflow.plan.digest().value.empty());
-  PS_CHECK(!effect_workflow.plan.cache_key().value.empty());
-  PS_CHECK(effect_workflow.plan.digest().value !=
-           effect_workflow.plan.cache_key().value);
-  PS_CHECK(repeated_effect_workflow.semantic.digest().value ==
-           effect_workflow.semantic.digest().value);
-  PS_CHECK(repeated_effect_workflow.optimized.digest().value ==
-           effect_workflow.optimized.digest().value);
-  PS_CHECK(repeated_effect_workflow.plan.digest().value ==
-           effect_workflow.plan.digest().value);
-  PS_CHECK(repeated_effect_workflow.plan.cache_key().value ==
-           effect_workflow.plan.cache_key().value);
+  PS_CHECK(effect_workflow.plan.value().input_ir_digest().value ==
+           effect_workflow.ir_versions.back().ir.value().digest().value);
+  PS_CHECK(!effect_workflow.plan.value().digest().value.empty());
+  PS_CHECK(!effect_workflow.plan.value().cache_key().value.empty());
+  PS_CHECK(effect_workflow.plan.value().digest().value !=
+           effect_workflow.plan.value().cache_key().value);
+  PS_CHECK(
+      repeated_effect_workflow.ir_versions.front().ir.value().digest().value ==
+      effect_workflow.ir_versions.front().ir.value().digest().value);
+  PS_CHECK(repeated_effect_workflow.plan.value().digest().value ==
+           effect_workflow.plan.value().digest().value);
+  PS_CHECK(repeated_effect_workflow.plan.value().cache_key().value ==
+           effect_workflow.plan.value().cache_key().value);
   ExecutionOptions serial_execution;
   serial_execution.maximum_parallelism = 1U;
-  auto first_effect_result =
-      effect_execution.execute(effect_workflow.plan, {}, {}, serial_execution);
-  auto second_effect_result =
-      effect_execution.execute(effect_workflow.plan, {}, {}, serial_execution);
+  auto first_effect_result = effect_execution.execute(
+      effect_workflow.plan.value(), {}, {}, serial_execution);
+  auto optimized_effect =
+      effect_compiler.compile(effect_graph, {}, {}, {{"optimize", {}}});
+  PS_REQUIRE_OK(optimized_effect);
+  auto second_effect_result = effect_execution.execute(
+      optimized_effect.value().plan.value(), {}, {}, serial_execution);
   PS_REQUIRE_OK(first_effect_result);
   PS_REQUIRE_OK(second_effect_result);
   PS_CHECK(ps::test::named_scalar(first_effect_result.value(), "effect") ==
@@ -1475,10 +1476,10 @@ int main(int argc, char** argv) {
   }
   PS_CHECK(
       std::string_view(first_effect_result.value().diagnostics.plan_digest) ==
-      effect_workflow.plan.digest().value);
+      effect_workflow.plan.value().digest().value);
   PS_CHECK(
       std::string_view(second_effect_result.value().diagnostics.plan_digest) ==
-      effect_workflow.plan.digest().value);
+      optimized_effect.value().plan.value().digest().value);
   {
     std::lock_guard<std::mutex> lock(effect_mutex);
     PS_CHECK(source_calls == 2U);
@@ -1490,7 +1491,7 @@ int main(int argc, char** argv) {
   CompiledWorkflow unavailable_gpu_workflow =
       compile_or_throw(&compiler, unavailable_gpu_graph, true);
   auto unavailable_gpu_result =
-      execution.execute(unavailable_gpu_workflow.plan);
+      execution.execute(unavailable_gpu_workflow.plan.value());
   PS_REQUIRE_OK(unavailable_gpu_result);
   PS_CHECK(ps::test::named_scalar(unavailable_gpu_result.value(), "sum") ==
            6.5);
@@ -1504,10 +1505,10 @@ int main(int argc, char** argv) {
   CompiledWorkflow left_workflow = compile_or_throw(&compiler, left);
   CompiledWorkflow right_workflow = compile_or_throw(&compiler, right);
   auto left_future = std::async(std::launch::async, [&] {
-    return execution.execute(left_workflow.plan);
+    return execution.execute(left_workflow.plan.value());
   });
   auto right_future = std::async(std::launch::async, [&] {
-    return execution.execute(right_workflow.plan);
+    return execution.execute(right_workflow.plan.value());
   });
   auto left_result = left_future.get();
   auto right_result = right_future.get();
@@ -1532,20 +1533,21 @@ int main(int argc, char** argv) {
       &hold_final_result_ready,       &hold_post_submit_observation};
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto waiting_cpu_future = std::async(std::launch::async, [&] {
-    return queue_bound_execution.execute(waiting_cpu_workflow.plan);
+    return queue_bound_execution.execute(waiting_cpu_workflow.plan.value());
   });
   const bool cpu_callback_is_waiting =
       queue_gate.wait_until_entered(std::chrono::seconds(2));
   auto competing_gpu_result =
-      queue_bound_execution.execute(competing_gpu_workflow.plan);
+      queue_bound_execution.execute(competing_gpu_workflow.plan.value());
   CancellationSource waiting_rejection_cancellation;
   SchedulerFailureController waiting_rejection_control(
       ps::execution_testing::SchedulerFailurePoint::WaitingAdmissionRejected,
       ps::execution_testing::CallbackSubmitAction::Proceed, Backend::Cpu,
       &waiting_rejection_cancellation, nullptr, nullptr, false);
   g_scheduler_failure_controller = &waiting_rejection_control;
-  auto cancelled_waiting_rejection = queue_bound_execution.execute(
-      competing_gpu_workflow.plan, {}, waiting_rejection_cancellation.token());
+  auto cancelled_waiting_rejection =
+      queue_bound_execution.execute(competing_gpu_workflow.plan.value(), {},
+                                    waiting_rejection_cancellation.token());
   g_scheduler_failure_controller = nullptr;
   queue_gate.release();
   auto waiting_cpu_result = waiting_cpu_future.get();
@@ -1560,7 +1562,7 @@ int main(int argc, char** argv) {
   PS_CHECK(waiting_cpu_result.ok());
   PS_CHECK(ps::test::named_scalar(waiting_cpu_result.value(), "sum") == 7.0);
   auto recovered_gpu_result =
-      queue_bound_execution.execute(competing_gpu_workflow.plan);
+      queue_bound_execution.execute(competing_gpu_workflow.plan.value());
   PS_CHECK(recovered_gpu_result.ok());
   PS_CHECK(ps::test::named_scalar(recovered_gpu_result.value(), "sum") == 11.0);
 
@@ -1603,19 +1605,29 @@ int main(int argc, char** argv) {
         single_operation_document("test.queued_attempt_target"));
     CompiledWorkflow queued_target_workflow =
         compile_or_throw(&queued_attempt_compiler, queued_target_graph);
-    PS_CHECK(queued_target_workflow.semantic.nodes().size() == 1U);
-    PS_CHECK(!queued_target_workflow.semantic.nodes()
+    PS_CHECK(
+        queued_target_workflow.ir_versions.front().ir.value().nodes().size() ==
+        1U);
+    PS_CHECK(!queued_target_workflow.ir_versions.front()
+                  .ir.value()
+                  .nodes()
                   .front()
                   .traits.side_effect_free);
-    PS_CHECK(!queued_target_workflow.optimized.nodes()
+    PS_CHECK(!queued_target_workflow.ir_versions.back()
+                  .ir.value()
+                  .nodes()
+                  .front()
+                  .traits.side_effect_free);
+    PS_CHECK(!queued_target_workflow.plan.value()
+                  .steps()
                   .front()
                   .traits.side_effect_free);
     PS_CHECK(
-        !queued_target_workflow.plan.steps().front().traits.side_effect_free);
-    PS_CHECK(!queued_target_workflow.plan.steps().front().traits.cacheable);
+        !queued_target_workflow.plan.value().steps().front().traits.cacheable);
 
     auto queued_occupant_future = std::async(std::launch::async, [&] {
-      return queued_attempt_execution.execute(queued_occupant_workflow.plan);
+      return queued_attempt_execution.execute(
+          queued_occupant_workflow.plan.value());
     });
     const bool queued_occupant_active =
         queued_attempt_gate.wait_until_cpu_active(std::chrono::seconds(2));
@@ -1626,7 +1638,8 @@ int main(int argc, char** argv) {
     ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
     auto queued_target_future = std::async(std::launch::async, [&] {
       return queued_attempt_execution.execute(
-          queued_target_workflow.plan, {}, queued_target_cancellation.token());
+          queued_target_workflow.plan.value(), {},
+          queued_target_cancellation.token());
     });
     const bool post_submit_observed =
         queued_attempt_gate.wait_until_post_submit_observed(
@@ -1664,8 +1677,8 @@ int main(int argc, char** argv) {
 
     CompiledWorkflow queued_target_recovery_workflow =
         compile_or_throw(&queued_attempt_compiler, queued_target_graph);
-    auto queued_target_recovery =
-        queued_attempt_execution.execute(queued_target_recovery_workflow.plan);
+    auto queued_target_recovery = queued_attempt_execution.execute(
+        queued_target_recovery_workflow.plan.value());
     PS_CHECK(queued_target_recovery.ok());
     PS_CHECK(ps::test::named_scalar(queued_target_recovery.value(), "value") ==
              5.0);
@@ -1686,8 +1699,8 @@ int main(int argc, char** argv) {
   g_final_result_ready_gate = &final_cancel_gate;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto final_cancel_future = std::async(std::launch::async, [&] {
-    return final_result_execution.execute(final_cancel_workflow.plan, {},
-                                          final_cancel_source.token());
+    return final_result_execution.execute(final_cancel_workflow.plan.value(),
+                                          {}, final_cancel_source.token());
   });
   const bool final_cancel_ready =
       final_cancel_gate.wait_until_entered(std::chrono::seconds(2));
@@ -1701,7 +1714,7 @@ int main(int argc, char** argv) {
   PS_CHECK(!final_cancel_result.ok());
   PS_CHECK(final_cancel_result.status().code == ErrorCode::Cancelled);
   auto final_cancel_recovered =
-      final_result_execution.execute(final_cancel_workflow.plan);
+      final_result_execution.execute(final_cancel_workflow.plan.value());
   PS_CHECK(final_cancel_recovered.ok());
   PS_CHECK(final_cancel_recovered.value()
                    .results.at("value")
@@ -1721,7 +1734,7 @@ int main(int argc, char** argv) {
   g_final_result_ready_gate = &final_stale_gate;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto final_stale_future = std::async(std::launch::async, [&] {
-    return final_result_execution.execute(final_stale_workflow.plan);
+    return final_result_execution.execute(final_stale_workflow.plan.value());
   });
   const bool final_stale_ready =
       final_stale_gate.wait_until_entered(std::chrono::seconds(2));
@@ -1737,8 +1750,8 @@ int main(int argc, char** argv) {
   PS_CHECK(final_stale_result.status().code == ErrorCode::Stale);
   CompiledWorkflow final_stale_recovery_workflow =
       compile_or_throw(&final_result_compiler, final_stale_graph);
-  auto final_stale_recovered =
-      final_result_execution.execute(final_stale_recovery_workflow.plan);
+  auto final_stale_recovered = final_result_execution.execute(
+      final_stale_recovery_workflow.plan.value());
   PS_CHECK(final_stale_recovered.ok());
   PS_CHECK(final_stale_recovered.value()
                    .results.at("value")
@@ -1758,7 +1771,7 @@ int main(int argc, char** argv) {
   g_final_result_ready_gate = &final_both_gate;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto final_both_future = std::async(std::launch::async, [&] {
-    return final_result_execution.execute(final_both_workflow.plan, {},
+    return final_result_execution.execute(final_both_workflow.plan.value(), {},
                                           final_both_source.token());
   });
   const bool final_both_ready =
@@ -1778,7 +1791,7 @@ int main(int argc, char** argv) {
   CompiledWorkflow final_both_recovery_workflow =
       compile_or_throw(&final_result_compiler, final_both_graph);
   auto final_both_recovered =
-      final_result_execution.execute(final_both_recovery_workflow.plan);
+      final_result_execution.execute(final_both_recovery_workflow.plan.value());
   PS_CHECK(final_both_recovered.ok());
   PS_CHECK(final_both_recovered.value()
                    .results.at("value")
@@ -1793,10 +1806,11 @@ int main(int argc, char** argv) {
   ExecutionContext concurrent_lane_execution(
       operations, ExecutionContextConfig{2U, true, 8U, 65536U});
   auto cpu_lane_future = std::async(std::launch::async, [&] {
-    return concurrent_lane_execution.execute(waiting_cpu_workflow.plan);
+    return concurrent_lane_execution.execute(waiting_cpu_workflow.plan.value());
   });
   auto gpu_lane_future = std::async(std::launch::async, [&] {
-    return concurrent_lane_execution.execute(competing_gpu_workflow.plan);
+    return concurrent_lane_execution.execute(
+        competing_gpu_workflow.plan.value());
   });
   auto cpu_lane_result = cpu_lane_future.get();
   auto gpu_lane_result = gpu_lane_future.get();
@@ -1833,7 +1847,7 @@ int main(int argc, char** argv) {
   CompiledWorkflow unavailable_workflow =
       compile_or_throw(&gpu_only_compiler, unavailable_graph, true);
   auto denied_without_stop =
-      no_gpu_execution.execute(unavailable_workflow.plan);
+      no_gpu_execution.execute(unavailable_workflow.plan.value());
   PS_CHECK(!denied_without_stop.ok());
   PS_CHECK(denied_without_stop.status().code == ErrorCode::BackendUnavailable);
 
@@ -1845,7 +1859,7 @@ int main(int argc, char** argv) {
   g_scheduler_failure_controller = &unavailable_cancel_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto cancelled_unavailable = no_gpu_execution.execute(
-      unavailable_workflow.plan, {}, unavailable_cancellation.token());
+      unavailable_workflow.plan.value(), {}, unavailable_cancellation.token());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(unavailable_cancel_control.failure_observed());
@@ -1865,7 +1879,7 @@ int main(int argc, char** argv) {
   g_scheduler_failure_controller = &unavailable_stale_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto stale_unavailable =
-      no_gpu_execution.execute(unavailable_stale_workflow.plan);
+      no_gpu_execution.execute(unavailable_stale_workflow.plan.value());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(unavailable_stale_control.failure_observed());
@@ -1885,7 +1899,7 @@ int main(int argc, char** argv) {
   g_scheduler_failure_controller = &cpu_submission_rejection_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto cpu_submission_rejection =
-      cpu_submission_execution.execute(submission_workflow.plan);
+      cpu_submission_execution.execute(submission_workflow.plan.value());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(cpu_submission_rejection_control.failure_observed());
@@ -1894,15 +1908,16 @@ int main(int argc, char** argv) {
   PS_CHECK(cpu_submission_rejection.status().code ==
            ErrorCode::ResourceExhausted);
   auto cpu_submission_recovered =
-      cpu_submission_execution.execute(submission_workflow.plan);
+      cpu_submission_execution.execute(submission_workflow.plan.value());
   PS_CHECK(cpu_submission_recovered.ok());
   PS_CHECK(ps::test::named_scalar(cpu_submission_recovered.value(), "sum") ==
            6.5);
 
   ExecutionContext gpu_submission_execution(
       gpu_only_operations, ExecutionContextConfig{1U, true, 4U, 65536U});
-  PS_CHECK(unavailable_workflow.plan.steps().size() == 1U);
-  PS_CHECK(unavailable_workflow.plan.steps().front().backend == Backend::Gpu);
+  PS_CHECK(unavailable_workflow.plan.value().steps().size() == 1U);
+  PS_CHECK(unavailable_workflow.plan.value().steps().front().backend ==
+           Backend::Gpu);
   SchedulerFailureController gpu_submission_rejection_control(
       ps::execution_testing::SchedulerFailurePoint::CallbackSubmitRejected,
       ps::execution_testing::CallbackSubmitAction::Reject, Backend::Gpu,
@@ -1910,7 +1925,7 @@ int main(int argc, char** argv) {
   g_scheduler_failure_controller = &gpu_submission_rejection_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto gpu_submission_rejection =
-      gpu_submission_execution.execute(unavailable_workflow.plan);
+      gpu_submission_execution.execute(unavailable_workflow.plan.value());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(gpu_submission_rejection_control.failure_observed());
@@ -1927,7 +1942,7 @@ int main(int argc, char** argv) {
   g_scheduler_failure_controller = &submission_cancel_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto cancelled_submission = gpu_submission_execution.execute(
-      unavailable_workflow.plan, {}, submission_cancellation.token());
+      unavailable_workflow.plan.value(), {}, submission_cancellation.token());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(submission_cancel_control.failure_observed());
@@ -1940,8 +1955,8 @@ int main(int argc, char** argv) {
       compile_or_throw(&gpu_only_compiler, rejected_stale_graph, true);
   WorkflowDocument rejected_replacement =
       single_operation_document("test.gpu_only");
-  PS_CHECK(rejected_stale_workflow.plan.steps().size() == 1U);
-  PS_CHECK(rejected_stale_workflow.plan.steps().front().backend ==
+  PS_CHECK(rejected_stale_workflow.plan.value().steps().size() == 1U);
+  PS_CHECK(rejected_stale_workflow.plan.value().steps().front().backend ==
            Backend::Gpu);
   SchedulerFailureController submission_stale_control(
       ps::execution_testing::SchedulerFailurePoint::CallbackSubmitRejected,
@@ -1950,7 +1965,7 @@ int main(int argc, char** argv) {
   g_scheduler_failure_controller = &submission_stale_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto stale_submission =
-      gpu_submission_execution.execute(rejected_stale_workflow.plan);
+      gpu_submission_execution.execute(rejected_stale_workflow.plan.value());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(submission_stale_control.failure_observed());
@@ -1965,7 +1980,7 @@ int main(int argc, char** argv) {
   g_scheduler_failure_controller = &safe_original_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto safe_original_submission =
-      gpu_submission_execution.execute(unavailable_workflow.plan);
+      gpu_submission_execution.execute(unavailable_workflow.plan.value());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(safe_original_control.failure_observed());
@@ -1983,7 +1998,7 @@ int main(int argc, char** argv) {
   g_scheduler_failure_controller = &null_diagnostic_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto null_diagnostic_submission =
-      gpu_submission_execution.execute(unavailable_workflow.plan);
+      gpu_submission_execution.execute(unavailable_workflow.plan.value());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(null_diagnostic_control.submit_action_observed());
@@ -1998,8 +2013,9 @@ int main(int argc, char** argv) {
       &safe_fallback_cancellation, nullptr, nullptr, true);
   g_scheduler_failure_controller = &safe_cancel_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
-  auto safe_cancelled_submission = gpu_submission_execution.execute(
-      unavailable_workflow.plan, {}, safe_fallback_cancellation.token());
+  auto safe_cancelled_submission =
+      gpu_submission_execution.execute(unavailable_workflow.plan.value(), {},
+                                       safe_fallback_cancellation.token());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(safe_cancel_control.failure_observed());
@@ -2014,8 +2030,9 @@ int main(int argc, char** argv) {
       compile_or_throw(&gpu_only_compiler, safe_stale_graph, true);
   WorkflowDocument safe_replacement =
       single_operation_document("test.gpu_only");
-  PS_CHECK(safe_stale_workflow.plan.steps().size() == 1U);
-  PS_CHECK(safe_stale_workflow.plan.steps().front().backend == Backend::Gpu);
+  PS_CHECK(safe_stale_workflow.plan.value().steps().size() == 1U);
+  PS_CHECK(safe_stale_workflow.plan.value().steps().front().backend ==
+           Backend::Gpu);
   SchedulerFailureController safe_stale_control(
       ps::execution_testing::SchedulerFailurePoint::CallbackSubmitException,
       ps::execution_testing::CallbackSubmitAction::ThrowBadAlloc, Backend::Gpu,
@@ -2023,7 +2040,7 @@ int main(int argc, char** argv) {
   g_scheduler_failure_controller = &safe_stale_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto safe_stale_submission =
-      gpu_submission_execution.execute(safe_stale_workflow.plan);
+      gpu_submission_execution.execute(safe_stale_workflow.plan.value());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(safe_stale_control.failure_observed());
@@ -2035,7 +2052,7 @@ int main(int argc, char** argv) {
   PS_CHECK(gpu_only_gpu_calls == 0U);
   PS_CHECK(gpu_only_cpu_calls == 0U);
   auto gpu_submission_recovered =
-      gpu_submission_execution.execute(unavailable_workflow.plan);
+      gpu_submission_execution.execute(unavailable_workflow.plan.value());
   PS_CHECK(gpu_submission_recovered.ok());
   PS_CHECK(ps::test::named_scalar(gpu_submission_recovered.value(), "value") ==
            1.0);
@@ -2087,15 +2104,17 @@ int main(int argc, char** argv) {
     GraphContext external_stop_graph(external_stop_document());
     CompiledWorkflow external_stop_workflow =
         compile_or_throw(&external_stop_compiler, external_stop_graph, true);
-    PS_CHECK(external_stop_workflow.plan.steps().size() == 2U);
-    PS_CHECK(external_stop_workflow.plan.steps()[0U].backend == Backend::Gpu);
-    PS_CHECK(external_stop_workflow.plan.steps()[1U].backend == Backend::Cpu);
+    PS_CHECK(external_stop_workflow.plan.value().steps().size() == 2U);
+    PS_CHECK(external_stop_workflow.plan.value().steps()[0U].backend ==
+             Backend::Gpu);
+    PS_CHECK(external_stop_workflow.plan.value().steps()[1U].backend ==
+             Backend::Cpu);
 
     CancellationSource external_stop_cancellation;
     auto external_stop_future = std::async(std::launch::async, [&] {
-      return external_stop_execution.execute(external_stop_workflow.plan, {},
-                                             external_stop_cancellation.token(),
-                                             ExecutionOptions{2U});
+      return external_stop_execution.execute(
+          external_stop_workflow.plan.value(), {},
+          external_stop_cancellation.token(), ExecutionOptions{2U});
     });
     const bool gpu_entered =
         external_stop_control.wait_until_gpu_active(std::chrono::seconds(2));
@@ -2105,7 +2124,8 @@ int main(int argc, char** argv) {
             ? external_stop_cancellation.cancel()
             : external_stop_graph.replace(external_stop_document()) != 0U;
     auto cpu_sentinel_future = std::async(std::launch::async, [&] {
-      return external_stop_execution.execute(cpu_sentinel_workflow.plan);
+      return external_stop_execution.execute(
+          cpu_sentinel_workflow.plan.value());
     });
     const bool cpu_completed_before_gpu_release =
         cpu_sentinel_future.wait_for(std::chrono::seconds(2)) ==
@@ -2156,8 +2176,8 @@ int main(int argc, char** argv) {
             ? compile_or_throw(&external_stop_compiler, external_stop_graph,
                                true)
             : external_stop_workflow;
-    auto healthy_external_stop_result =
-        external_stop_execution.execute(healthy_external_stop_workflow.plan);
+    auto healthy_external_stop_result = external_stop_execution.execute(
+        healthy_external_stop_workflow.plan.value());
     PS_CHECK(healthy_external_stop_result.ok());
     PS_CHECK(ps::test::named_scalar(healthy_external_stop_result.value(),
                                     "gpu") == 7.0);
@@ -2175,7 +2195,7 @@ int main(int argc, char** argv) {
       compile_or_throw(&compiler, cancellable);
   CancellationSource cancellation;
   auto cancelled_future = std::async(std::launch::async, [&] {
-    return execution.execute(cancellable_workflow.plan, {},
+    return execution.execute(cancellable_workflow.plan.value(), {},
                              cancellation.token());
   });
   const bool cancellation_started = cancellation_event->wait();
@@ -2189,7 +2209,7 @@ int main(int argc, char** argv) {
   GraphContext replaceable(ps::test::delayed_document(120));
   CompiledWorkflow stale_workflow = compile_or_throw(&compiler, replaceable);
   auto stale_future = std::async(std::launch::async, [&] {
-    return execution.execute(stale_workflow.plan);
+    return execution.execute(stale_workflow.plan.value());
   });
   const bool stale_started = stale_event->wait();
   replaceable.replace(ps::test::delayed_document(0));
@@ -2213,7 +2233,7 @@ int main(int argc, char** argv) {
       compile_or_throw(&compiler, fallback_graph, true);
   ExecutionContext gpu_execution(operations,
                                  ExecutionContextConfig{2U, true, 16U, 65536U});
-  auto fallback_result = gpu_execution.execute(fallback_workflow.plan);
+  auto fallback_result = gpu_execution.execute(fallback_workflow.plan.value());
   PS_CHECK(fallback_result.ok());
   PS_CHECK(ps::test::named_scalar(fallback_result.value(), "value") == 9.0);
   PS_CHECK(fallback_result.value().diagnostics.fallback_reasons.size() == 1U);
@@ -2286,7 +2306,7 @@ int main(int argc, char** argv) {
   GraphContext atomic_graph(std::move(atomic_document));
   CompiledWorkflow atomic_workflow =
       compile_or_throw(&atomic_compiler, atomic_graph, true);
-  auto atomic_result = atomic_execution.execute(atomic_workflow.plan);
+  auto atomic_result = atomic_execution.execute(atomic_workflow.plan.value());
   PS_CHECK(atomic_result.ok());
   PS_CHECK(atomic_result.value().diagnostics.transfer_count == 0U &&
            atomic_result.value().diagnostics.native_dispatch_count == 0U &&
@@ -2314,7 +2334,7 @@ int main(int argc, char** argv) {
   auto whole_workflow = whole_compiler.compile(whole_graph, region_options);
   PS_CHECK(whole_workflow.ok());
   ExecutionContext whole_execution(whole_operations);
-  PS_CHECK(whole_execution.execute(whole_workflow.value().plan).ok());
+  PS_CHECK(whole_execution.execute(whole_workflow.value().plan.value()).ok());
   PS_CHECK(region_equals(*whole_observed, 0U, 10U));
 
   PlanningOptions unknown_region_options;
@@ -2357,18 +2377,18 @@ int main(int argc, char** argv) {
                                ExecutionContextConfig{1U, false, 4U, 8U});
   GraphContext large(single_operation_document("test.large"));
   CompiledWorkflow large_workflow = compile_or_throw(&resource_compiler, large);
-  auto large_result = constrained.execute(large_workflow.plan);
+  auto large_result = constrained.execute(large_workflow.plan.value());
   PS_CHECK(!large_result.ok());
   PS_CHECK(large_result.status().code == ErrorCode::ResourceExhausted);
   GraphContext small(single_operation_document("test.small"));
   CompiledWorkflow small_workflow = compile_or_throw(&resource_compiler, small);
-  auto small_result = constrained.execute(small_workflow.plan);
+  auto small_result = constrained.execute(small_workflow.plan.value());
   PS_CHECK(small_result.ok());
   PS_CHECK(ps::test::named_scalar(small_result.value(), "value") == 2.0);
   PS_CHECK(small_result.value().diagnostics.peak_live_bytes == 8U);
   ExecutionContext enough_resource(resource_operations,
                                    ExecutionContextConfig{1U, false, 4U, 16U});
-  auto large_success = enough_resource.execute(large_workflow.plan);
+  auto large_success = enough_resource.execute(large_workflow.plan.value());
   PS_CHECK(large_success.ok() &&
            ps::test::named_scalar(large_success.value(), "value") == 1.0);
   PS_CHECK(large_success.value().diagnostics.peak_live_bytes == 16U);

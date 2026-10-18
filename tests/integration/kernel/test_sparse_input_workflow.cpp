@@ -33,6 +33,10 @@ void data_workflow() {
   GraphContext graph(document);
   PlanningOptions options;
   options.tile_extent = 1;
+  ResourceBudget planning_root;
+  options.output_requests = {
+      {"result",
+       {{{0, checked(TileSet::from_indices(planning_root, {1, width - 2}))}}}}};
   const auto compiled = checked(Compiler(operations).compile(graph, options));
   ExecutionContext execution(operations, {1, false, 8, 65536});
   const auto root = checked(execution.resource_budget());
@@ -54,7 +58,8 @@ void data_workflow() {
   const auto coverage = checked(Footprint::from_regions(
       {1, width},
       {Region({{0, 1}, {1, 1}}), Region({{0, 1}, {width - 2, 1}})}));
-  const auto frozen = checked(execution.freeze(compiled.plan, {{source}}));
+  const auto frozen =
+      checked(execution.freeze(compiled.plan.value(), {{source}}));
   auto result =
       checked(execution.execute_fragments(frozen, {{"result", request}}));
   const auto& fragments = result.results.at("result");
@@ -72,8 +77,10 @@ void data_workflow() {
   changes.push_back({PlanWorkflowInput{0}, 0, 0,
                      checked(TileSet::from_indices(root, {1})), false});
   const auto dirty = checked(result.dependencies.dirty_units(changes));
-  require(dirty.size() == 1 && dirty[0] == TileUnit{0, 0, 0, 1},
-          "identity tile invalidation");
+  require(dirty.size() == 2 && dirty[0] == TileUnit{0, 0, 0, 1} &&
+              dirty[1] == TileUnit{compiled.plan->output("result").record_index,
+                                   0, 0, 1},
+          "identity invalidates exactly its call tile and named return");
   for (auto tile : {UINT64_C(1), width - 2}) {
     auto record = checked(result.dependencies.tile_record({0, 0, 0, tile}));
     require(record && record->inputs.size() == 1 &&

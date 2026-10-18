@@ -107,7 +107,7 @@ int regression(bool prefix) {
   GraphContext graph(document);
   PlanningOptions planning;
   planning.tile_extent = 1;
-  auto plan = take(Compiler(registry).compile(graph, planning)).plan;
+  auto plan = take(Compiler(registry).compile(graph, planning)).plan.value();
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   ExecutionContext execution(registry, config);
@@ -222,7 +222,7 @@ int prefix_revisit() {
   GraphContext graph(document);
   PlanningOptions planning;
   planning.tile_extent = 1;
-  auto plan = take(Compiler(registry).compile(graph, planning)).plan;
+  auto plan = take(Compiler(registry).compile(graph, planning)).plan.value();
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   ExecutionContext execution(registry, config);
@@ -421,7 +421,7 @@ int grant_key_boundaries() {
   GraphContext graph(document);
   PlanningOptions options;
   options.tile_extent = 1;
-  auto plan = take(Compiler(registry).compile(graph, options)).plan;
+  auto plan = take(Compiler(registry).compile(graph, options)).plan.value();
   ExecutionContext execution(registry);
   auto result = execution.execute(plan);
   PS_REQUIRE_OK(result);
@@ -529,7 +529,7 @@ int interleaved_commits(bool committed_seed) {
     return 0;
   }
   PS_REQUIRE_OK(compiled);
-  auto plan = compiled.take_value().plan;
+  auto plan = compiled.take_value().plan.value();
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   ExecutionContext execution(registry, config);
@@ -754,7 +754,7 @@ int fallback_cache_boundary(FallbackBoundary mode) {
   PlanningOptions options;
   options.execution_mode = ExecutionMode::NativeGpu;
   options.tile_extent = 1;
-  auto plan = take(Compiler(registry).compile(graph, options)).plan;
+  auto plan = take(Compiler(registry).compile(graph, options)).plan.value();
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   config.gpu_enabled = false;

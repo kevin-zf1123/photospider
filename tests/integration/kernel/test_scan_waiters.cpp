@@ -114,7 +114,7 @@ int concurrent_scans(bool cancel_owner, bool finite, bool cache) {
       {1, "test.checkpoint_scan", {WorkflowInputReference{1}}, {}}};
   document.outputs = {{"y", 1, "value"}};
   GraphContext graph(document);
-  auto plan = take(Compiler(registry).compile(graph)).plan;
+  auto plan = take(Compiler(registry).compile(graph)).plan.value();
   ExecutionContextConfig config;
   config.cpu_workers = 2;
   config.result_cache_bytes = cache ? 1048576 : 0;
@@ -186,12 +186,12 @@ int concurrent_scans(bool cancel_owner, bool finite, bool cache) {
   PS_CHECK(root.statistics().live[ResourceKind::Queue] == 0);
   return 0;
 }
-// A checkpoint hit must become a miss when restoring its metadata cannot fit.
-// No restored dependency may escape that refused transaction.
+// Optional checkpoint lookup must not poison the Run when metadata is scarce.
+// A hit or miss keeps the instruction's already-bound static grants.
 struct CapacityProbe {
   Gate gate;
   std::uint64_t remaining = 0;
-  bool hit = false, grants_empty = false;
+  bool hit = false, grants_complete = false;
   ErrorCode failure = ErrorCode::Internal;
 };
 struct CapacityScan {
@@ -213,7 +213,7 @@ struct CapacityScan {
         return Answer(saved.status());
       probe->hit = saved.value().has_value();
       probe->failure = phase.failure->load();
-      probe->grants_empty = phase.tensors->empty();
+      probe->grants_complete = phase.tensors->size() == 100;
     } else if (!turn++) {
       ResultProgramNeed need;
       for (unsigned port = 0; port < 100; ++port)
@@ -263,7 +263,7 @@ int checkpoint_restore_capacity(bool enough) {
   document.nodes.push_back(std::move(node));
   document.outputs = {{"value", 1, "value"}};
   GraphContext graph(document);
-  auto plan = take(Compiler(registry).compile(graph)).plan;
+  auto plan = take(Compiler(registry).compile(graph)).plan.value();
   ExecutionContextConfig config;
   config.cpu_workers = 2;
   ExecutionContext context(registry, config);
@@ -298,10 +298,10 @@ int checkpoint_restore_capacity(bool enough) {
   PS_REQUIRE_OK(first);
   PS_REQUIRE_OK(second);
   PS_CHECK(probe.hit == enough && probe.failure == ErrorCode::Ok);
-  PS_CHECK(probe.grants_empty);
+  PS_CHECK(probe.grants_complete);
   PS_CHECK(probe.gate.borrowed == (enough ? 1U : 0U));
   auto record = take(second.value().dependencies.tile_record({0, 0, 0}));
-  PS_CHECK(record && record->inputs.size() == (enough ? 100U : 0U));
+  PS_CHECK(record && record->inputs.size() == 100);
   PS_CHECK(multi_result::number(second.value().results.at("value")) == 7);
   return 0;
 }
@@ -360,7 +360,7 @@ int block_restore_capacity(bool cache, bool enough) {
   document.nodes = {{1, "test.block_capacity", {}, {}}};
   document.outputs = {{"value", 1, "value"}};
   GraphContext graph(document);
-  auto plan = take(Compiler(registry).compile(graph)).plan;
+  auto plan = take(Compiler(registry).compile(graph)).plan.value();
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   config.result_cache_bytes = cache ? 1048576 : 0;

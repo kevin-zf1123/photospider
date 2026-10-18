@@ -91,7 +91,7 @@ int run(bool producer, bool spatial = true) {
     GraphContext graph(document);
     PlanningOptions options;
     options.tile_extent = 2;
-    auto plan = take(Compiler(registry).compile(graph, options)).plan;
+    auto plan = take(Compiler(registry).compile(graph, options)).plan.value();
     auto bound = producer ? ExecutionBindings{} : bindings(root, spatial);
     auto demand = take(context.open_demand(plan, bound));
     const auto before = starts.load();
@@ -219,7 +219,7 @@ int output_queries() {
   GraphContext graph(doc);
   PlanningOptions planning;
   planning.tile_extent = 2;
-  auto plan = take(Compiler(registry).compile(graph, planning)).plan;
+  auto plan = take(Compiler(registry).compile(graph, planning)).plan.value();
   auto demand = take(execution.open_demand(plan, {}));
   const auto step = plan.output("result").record_index;
   for (bool all : {false, true}) {

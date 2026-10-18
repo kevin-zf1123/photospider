@@ -138,8 +138,8 @@ int fork(unsigned parallelism, bool cancel = false,
   ExecutionContext context(operations, config);
   ExecutionOptions options;
   options.maximum_parallelism = parallelism;
-  auto result =
-      context.execute(plan.plan, {}, control.cancellation.token(), options);
+  auto result = context.execute(plan.plan.value(), {},
+                                control.cancellation.token(), options);
   const bool exhausted = maximum_payload == kJoinedPayload - 1;
   if (exhausted) {
     PS_CHECK(!result.ok() &&
@@ -177,7 +177,7 @@ int fork(unsigned parallelism, bool cancel = false,
   if (maximum_payload == kJoinedPayload) {
     control.order.clear();
     control.sources = 0;
-    auto held = context.execute(plan.plan, {}, {}, options);
+    auto held = context.execute(plan.plan.value(), {}, {}, options);
     PS_CHECK(!held.ok() && held.status().code == ErrorCode::ResourceExhausted);
     PS_CHECK(control.order == expected && control.sources == 1 &&
              control.active == 0 && control.source.expired());
@@ -187,7 +187,7 @@ int fork(unsigned parallelism, bool cancel = false,
     PS_CHECK(root.statistics().live[ResourceKind::Payload] == 0);
     control.order.clear();
     control.sources = 0;
-    auto recovered = context.execute(plan.plan, {}, {}, options);
+    auto recovered = context.execute(plan.plan.value(), {}, {}, options);
     if (!recovered.ok())
       std::cerr << recovered.status().message << '\n';
     PS_CHECK(recovered.ok());

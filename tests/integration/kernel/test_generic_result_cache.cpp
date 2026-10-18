@@ -175,7 +175,7 @@ int opaque_result_cache_preservation() {
                     {2, "identity", {WorkflowNodeOutput{1, "value"}}, {}}};
   document.outputs = {{"result", 1, "value"}};
   GraphContext graph(document);
-  auto plan = Compiler(operations).compile(graph).take_value().plan;
+  auto plan = Compiler(operations).compile(graph).take_value().plan.value();
   ExecutionContext execution(operations, configuration());
   auto root = execution.resource_budget().take_value();
   ExecutionBindings bindings{
@@ -184,7 +184,7 @@ int opaque_result_cache_preservation() {
   copied_document.outputs = {{"result", 2, "value"}};
   GraphContext copied_graph(copied_document);
   auto copied_plan =
-      Compiler(operations).compile(copied_graph).take_value().plan;
+      Compiler(operations).compile(copied_graph).take_value().plan.value();
   for (unsigned run = 0; run < 2; ++run) {
     auto result = execution.execute(plan, bindings);
     PS_CHECK(result.ok());
@@ -221,7 +221,7 @@ int result_content_bits() {
     doc.nodes = {{1, "bits.identity", {WorkflowInputReference{1}}, {}}};
     doc.outputs = {{"y", 1, "value"}};
     GraphContext graph(doc);
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
+    auto plan = Compiler(registry).compile(graph).take_value().plan.value();
     ExecutionContext context(registry, configuration());
     auto root = context.resource_budget().take_value();
     std::vector<std::uint8_t> backing(width * 3), logical(width * 3);
@@ -348,7 +348,7 @@ int cache_shared_route_budget() {
        {}}};
   document.outputs = {{"y", 4, "value"}};
   GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan = Compiler(registry).compile(graph).take_value().plan.value();
   ExecutionContext execution(registry, configuration());
   auto resource_root = execution.resource_budget().take_value();
   auto frozen =
@@ -374,7 +374,8 @@ int cache_shared_route_budget() {
        {}}};
   document.outputs = {{"y", 30, "value"}};
   GraphContext changed(document);
-  auto changed_plan = Compiler(registry).compile(changed).take_value().plan;
+  auto changed_plan =
+      Compiler(registry).compile(changed).take_value().plan.value();
   auto changed_frozen =
       execution
           .freeze(changed_plan,
@@ -425,7 +426,7 @@ int diamond_cache_support() {
   document.nodes.push_back({6, "merge", siblings, {}});
   document.outputs = {{"y", 6, "value"}};
   GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan = Compiler(registry).compile(graph).take_value().plan.value();
   const TileRequest q{
       {{0, TileSet::range(ResourceBudget{}, 0, 1).take_value()}}};
   // Public execution and retained-result replay must preserve diamond ancestry.

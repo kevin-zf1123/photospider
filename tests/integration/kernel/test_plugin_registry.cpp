@@ -830,7 +830,7 @@ int verify_cpp_invocation_prevalidation() {
   ExecutionContextConfig config;
   config.managed_resources = ResourceLimits{};
   ExecutionContext context(registry, config);
-  auto invalid_result = context.execute(compiled.value().plan);
+  auto invalid_result = context.execute(compiled.value().plan.value());
   PS_CHECK(!invalid_result.ok() &&
            invalid_result.status().code == ErrorCode::InvalidArgument);
   PS_CHECK(default_starts == 1);
@@ -1233,7 +1233,7 @@ int main() {
     GraphContext graph(document);
     auto compiled = Compiler(borrowed).compile(graph);
     PS_CHECK(compiled.ok());
-    auto failed = context.execute(compiled.value().plan);
+    auto failed = context.execute(compiled.value().plan.value());
     PS_CHECK(!failed.ok() &&
              failed.status().code == ErrorCode::InvalidArgument);
     PS_CHECK(failed.status().detail.origin == ps::FailureOrigin::Protocol);

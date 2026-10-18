@@ -367,7 +367,7 @@ int planning() {
   GraphContext graph(std::move(document));
   auto compiled = compiler.compile(graph);
   PS_REQUIRE_OK(compiled);
-  const auto& plan = compiled.value().plan;
+  const auto& plan = compiled.value().plan.value();
   PS_CHECK(plan.tile_extent() == 128 && plan.input_tile_grids().size() == 1 &&
            plan.input_tile_grids()[0][0].tile_count() == 12);
   PS_CHECK(plan.steps()[0].tile_grids[0].tile_count() == 12);
@@ -380,7 +380,8 @@ int planning() {
            query.output_tile_grids[0].tile_count() == 12);
   PlanningOptions options;
   options.tile_extent = 64;
-  auto smaller = compiler.plan(compiled.value().optimized, options);
+  auto smaller =
+      compiler.plan(compiled.value().ir_versions.back().ir.value(), options);
   PS_REQUIRE_OK(smaller);
   PS_CHECK(smaller.value().input_tile_grids()[0][0].tile_count() == 30 &&
            smaller.value().digest().value != plan.digest().value);
@@ -391,7 +392,8 @@ int planning() {
       {{0, TileSet::from_indices(root, {0, 11}).take_value()}}};
   options.tile_extent = 128;
   options.output_requests = {{"spatial", selected}, {"second", selected}};
-  auto narrowed = compiler.plan(compiled.value().optimized, options);
+  auto narrowed =
+      compiler.plan(compiled.value().ir_versions.back().ir.value(), options);
   PS_REQUIRE_OK(narrowed);
   PS_CHECK(narrowed.value().output_requests().at("spatial") == selected &&
            narrowed.value().output_requests().at("second") == selected &&
@@ -425,16 +427,21 @@ int planning() {
            {{"spatial", {{{1, selected.members.at(0)}}}}},
            {{"missing", {}}}}) {
     options.output_requests = invalid;
-    PS_CHECK(compiler.plan(compiled.value().optimized, options).status().code ==
-             ErrorCode::InvalidArgument);
+    PS_CHECK(
+        compiler.plan(compiled.value().ir_versions.back().ir.value(), options)
+            .status()
+            .code == ErrorCode::InvalidArgument);
   }
   options.output_requests = {{"spatial", {}}};
-  auto empty = compiler.plan(compiled.value().optimized, options);
+  auto empty =
+      compiler.plan(compiled.value().ir_versions.back().ir.value(), options);
   PS_REQUIRE_OK(empty);
   PS_CHECK(empty.value().output_requests().at("spatial").empty());
   options.tile_extent = 3;
-  PS_CHECK(compiler.plan(compiled.value().optimized, options).status().code ==
-           ErrorCode::InvalidArgument);
+  PS_CHECK(
+      compiler.plan(compiled.value().ir_versions.back().ir.value(), options)
+          .status()
+          .code == ErrorCode::InvalidArgument);
   return 0;
 }
 }  // namespace

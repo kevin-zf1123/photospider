@@ -61,7 +61,7 @@ std::pair<ResultRef, ResultRef> run() {
   ExecutionBinding c;
   c.name = "control";
   c.result = unified_result_fixture::input_control(budget, selectors);
-  auto executed = context.execute(planned.value().plan, {{a, b, c}});
+  auto executed = context.execute(planned.value().plan.value(), {{a, b, c}});
   require(executed.ok(), executed.status().message);
   auto& result = executed.value().results.at("out");
   auto facts = result.descriptor().take_value();
@@ -77,7 +77,7 @@ std::pair<ResultRef, ResultRef> run() {
                   .ok() &&
               count == 32,
           "numeric Result sibling");
-  auto frozen = context.freeze(planned.value().plan, {{a, b, c}});
+  auto frozen = context.freeze(planned.value().plan.value(), {{a, b, c}});
   require(frozen.ok(), "freeze typed Result bindings");
   const auto wanted_tiles = TileSet::from_indices(budget, {22}).take_value();
   const TileRequest wanted{{{0, wanted_tiles}}};
@@ -95,11 +95,24 @@ std::pair<ResultRef, ResultRef> run() {
       ResourceAllocator<TileChange>(budget)};
   control_change.push_back({PlanWorkflowInput{2}, 0, 0, {}, true});
   auto dirty = sparse.value().dependencies.dirty_units(control_change);
-  require(dirty.ok() && dirty.value().size() == 1 &&
-              dirty.value()[0] == TileUnit{0, 0, 0, 22},
-          "Full control changes invalidate the subscribed output tile");
-  auto handle =
-      context.open_demand(planned.value().plan, {{a, b, c}}).take_value();
+  const auto return_record = planned.value().plan->output("out").record_index;
+  const auto expected_dirty = [&](const auto& units) {
+    return units.size() == 2 && units[0] == TileUnit{0, 0, 0, 22} &&
+           units[1] == TileUnit{return_record, 0, 0, 22};
+  };
+  require(dirty.ok() && expected_dirty(dirty.value()),
+          "control descriptor change reaches the call tile and return root");
+  const auto control_grid =
+      TileGrid::from_schema(unified_result_fixture::numeric_schema(), 1, 0)
+          .take_value();
+  control_change[0].descriptor_changed = false;
+  control_change[0].tiles =
+      TileSet::range(budget, 0, control_grid.tile_count()).take_value();
+  auto payload_dirty = sparse.value().dependencies.dirty_units(control_change);
+  require(payload_dirty.ok() && expected_dirty(payload_dirty.value()),
+          "full control payload change reaches the call tile and return root");
+  auto handle = context.open_demand(planned.value().plan.value(), {{a, b, c}})
+                    .take_value();
   auto initial = handle.request({{"out", wanted}});
   require(initial.ok(), initial.status().message);
   selectors[22] = 3;
@@ -124,22 +137,31 @@ std::pair<ResultRef, ResultRef> run() {
                            TileSet::from_indices(budget, {23}).take_value(),
                            false});
   auto new_dirty = updated.value().dependencies.dirty_units(source_change);
-  require(new_dirty.ok() && new_dirty.value().size() == 1 &&
-              new_dirty.value()[0] == TileUnit{0, 0, 0, 22},
-          "new branch replaces old tile dependency");
+  require(new_dirty.ok() && expected_dirty(new_dirty.value()),
+          "selected branch lies in the fixed static support");
   auto old_dirty = initial.value().dependencies.dirty_units(source_change);
-  require(old_dirty.ok() && old_dirty.value().empty(),
-          "prior dependency snapshot remains immutable");
+  require(old_dirty.ok() && expected_dirty(old_dirty.value()),
+          "prior snapshot retains the same immutable static support");
+  const auto& original = initial.value().results.at("out");
+  require(original.read_tensor(original.descriptor().value(), 0, {1, 0, 1, 2},
+                               &pixel, 4)
+                  .ok() &&
+              pixel == 1012,
+          "later execution changed the earlier Result");
+  source_change[0].tiles = TileSet::from_indices(budget, {19}).take_value();
+  auto other_row = updated.value().dependencies.dirty_units(source_change);
+  require(other_row.ok() && other_row.value().empty(),
+          "source changes in another row do not dirty this output");
   selectors[0] = 7;
   c.result = unified_result_fixture::input_control(budget, selectors);
-  auto unrelated =
-      handle.replace_bindings({{a, b, c}}, SnapshotAccessOptions{33, {}});
+  auto unrelated = handle.replace_bindings(
+      {{a, b, c}}, SnapshotAccessOptions{32 + 2 * 4, {}});
   require(unrelated.ok(), unrelated.status().message);
   require(
       unrelated.value().potential_dirty.at("out").members.at(0) == wanted_tiles,
       "Full control payload edits conservatively invalidate subscribed tiles");
   const auto evaluate = [&](const DemandQuery& query) {
-    auto current = context.freeze(planned.value().plan, {{a, b, c}});
+    auto current = context.freeze(planned.value().plan.value(), {{a, b, c}});
     require(current.ok(), current.status().message);
     return context.execute_fragments(current.value(), query);
   };

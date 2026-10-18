@@ -55,7 +55,9 @@ struct Driver {
     planning.execution_mode =
         native ? ExecutionMode::NativeGpu : ExecutionMode::CpuExact;
     auto compiled = take(Compiler(registry).compile(*graph, planning));
-    return {std::move(graph), std::move(compiled.plan), {std::move(inputs)}};
+    return {std::move(graph),
+            std::move(compiled.plan.value()),
+            {std::move(inputs)}};
   }
   ResultRef run(const std::string& operation,
                 std::vector<ExecutionBinding> inputs,

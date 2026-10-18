@@ -54,38 +54,42 @@ int dependency_chains() {
       {10, "core.identity", {WorkflowNodeOutput{60, "value"}}, {}}};
   document.outputs = {{"result", 20, "value"}};
   ps::GraphContext graph(document);
-  auto compiled = compiler.compile(graph);
+  auto compiled = compiler.compile(graph, {}, {}, {{"optimize", {}}});
   PS_REQUIRE_OK(compiled);
-  PS_CHECK(check_chains(compiled.value().semantic,
+  PS_CHECK(check_chains(compiled.value().ir_versions.front().ir.value(),
                         {{70, 60, 10}, {70, 60}, {70, 50}, {40, 30}, {20}}) ==
            0);
-  PS_CHECK(compiled.value().semantic.program().form ==
+  PS_CHECK(compiled.value().ir_versions.front().ir.value().program().form ==
            ps::IRForm::DependencyPaths);
-  PS_CHECK(compiled.value().optimized.program().form ==
+  PS_CHECK(compiled.value().ir_versions.back().ir.value().program().form ==
            ps::IRForm::ControlFlow);
-  PS_CHECK(check_chains(compiled.value().optimized,
+  PS_CHECK(check_chains(compiled.value().ir_versions.back().ir.value(),
                         {{70, 60, 10}, {50}, {40, 30}, {20}}) == 0);
-  PS_CHECK(compiled.value().semantic.nodes().size() == 7);
+  PS_CHECK(compiled.value().ir_versions.front().ir.value().nodes().size() == 7);
   std::vector<ps::IRCallId> executed;
-  for (const auto& block : compiled.value().plan.blocks())
+  for (const auto& block : compiled.value().plan.value().blocks())
     for (const auto& instruction : block.instructions)
-      executed.push_back(
-          compiled.value().plan.steps()[instruction.step_index].node_id);
+      executed.push_back(compiled.value()
+                             .plan.value()
+                             .steps()[instruction.step_index]
+                             .node_id);
   PS_CHECK(executed == std::vector<ps::IRCallId>({70, 60, 10, 50, 40, 30, 20}));
   ps::ExecutionContext execution(operations);
-  auto result = execution.execute(compiled.value().plan);
+  auto result = execution.execute(compiled.value().plan.value());
   PS_REQUIRE_OK(result);
   PS_CHECK(ps::test::named_scalar(result.value(), "result") == 6.0);
-  auto encoded = ps::CompilerArtifact::export_ir(compiled.value().semantic);
+  auto encoded = ps::CompilerArtifact::export_ir(
+      compiled.value().ir_versions.front().ir.value());
   PS_REQUIRE_OK(encoded);
   auto loaded = ps::CompilerArtifact::import_ir(compiler, encoded.value());
   PS_REQUIRE_OK(loaded);
-  const auto& raw = std::get<ps::SemanticGraphIR>(loaded.value());
-  PS_CHECK(raw.digest().value == compiled.value().semantic.digest().value);
+  const auto& raw = loaded.value();
+  PS_CHECK(raw.digest().value ==
+           compiled.value().ir_versions.front().ir.value().digest().value);
   auto loaded_optimized = compiler.optimize(raw);
   PS_REQUIRE_OK(loaded_optimized);
   PS_CHECK(loaded_optimized.value().digest().value ==
-           compiled.value().optimized.digest().value);
+           compiled.value().ir_versions.back().ir.value().digest().value);
   auto encoded_again = ps::CompilerArtifact::export_ir(raw);
   PS_REQUIRE_OK(encoded_again);
   PS_CHECK(encoded_again.value() == encoded.value());
@@ -96,8 +100,7 @@ int dependency_chains() {
   invalid_form.blocks.front().terminator = ps::IRJump{{invalid_form.entry, {}}};
   PS_CHECK(!compiler.bind_ir(invalid_form).ok());
   auto wrong_stage = encoded.value();
-  wrong_stage.replace(wrong_stage.find("stage semantic"), 14,
-                      "stage optimized");
+  wrong_stage.replace(wrong_stage.find("stage ir"), 8, "stage invalid");
   PS_CHECK(!ps::CompilerArtifact::import_ir(compiler, wrong_stage).ok());
   invalid_form = raw.program();
   invalid_form.blocks.front().calls.assign(1048577, 70);
@@ -107,24 +110,24 @@ int dependency_chains() {
   // Document storage order cannot change traversal or compiled identities.
   std::reverse(document.nodes.begin(), document.nodes.end());
   ps::GraphContext reordered(document);
-  auto same = compiler.compile(reordered);
+  auto same = compiler.compile(reordered, {}, {}, {{"optimize", {}}});
   PS_REQUIRE_OK(same);
-  PS_CHECK(same.value().semantic.digest().value ==
-           compiled.value().semantic.digest().value);
-  PS_CHECK(same.value().plan.digest().value ==
-           compiled.value().plan.digest().value);
+  PS_CHECK(same.value().ir_versions.front().ir.value().digest().value ==
+           compiled.value().ir_versions.front().ir.value().digest().value);
+  PS_CHECK(same.value().plan.value().digest().value ==
+           compiled.value().plan.value().digest().value);
 
   // Changing input order selects E before G, retaining repeated raw prefixes.
   std::swap(document.nodes[1].inputs[0], document.nodes[1].inputs[1]);
   ps::GraphContext e_first(document);
-  auto alternative = compiler.compile(e_first);
+  auto alternative = compiler.compile(e_first, {}, {}, {{"optimize", {}}});
   PS_REQUIRE_OK(alternative);
-  PS_CHECK(check_chains(alternative.value().semantic,
+  PS_CHECK(check_chains(alternative.value().ir_versions.front().ir.value(),
                         {{70, 60}, {70, 50}, {40, 30}, {70, 60, 10}, {20}}) ==
            0);
-  PS_CHECK(check_chains(alternative.value().optimized,
+  PS_CHECK(check_chains(alternative.value().ir_versions.back().ir.value(),
                         {{70, 60}, {50}, {40, 30}, {10}, {20}}) == 0);
-  auto other_result = execution.execute(alternative.value().plan);
+  auto other_result = execution.execute(alternative.value().plan.value());
   PS_REQUIRE_OK(other_result);
   PS_CHECK(ps::test::named_scalar(other_result.value(), "result") == 6.0);
 
@@ -133,18 +136,19 @@ int dependency_chains() {
   document.outputs = {{"z", 20, "value"}, {"a", 10, "value"}};
   document.nodes.push_back({80, "core.constant", {}, {{"value", 9.0}}});
   ps::GraphContext multiple(document);
-  auto roots = compiler.compile(multiple);
+  auto roots = compiler.compile(multiple, {}, {}, {{"optimize", {}}});
   PS_REQUIRE_OK(roots);
-  PS_CHECK(check_chains(roots.value().semantic, {{70, 60, 10},
-                                                 {70, 60},
-                                                 {70, 50},
-                                                 {40, 30},
-                                                 {70, 60, 10},
-                                                 {20},
-                                                 {80}}) == 0);
-  PS_CHECK(check_chains(roots.value().optimized,
+  PS_CHECK(
+      check_chains(roots.value().ir_versions.front().ir.value(), {{70, 60, 10},
+                                                                  {70, 60},
+                                                                  {70, 50},
+                                                                  {40, 30},
+                                                                  {70, 60, 10},
+                                                                  {20},
+                                                                  {80}}) == 0);
+  PS_CHECK(check_chains(roots.value().ir_versions.back().ir.value(),
                         {{70, 60, 10}, {50}, {40, 30}, {20}, {80}}) == 0);
-  auto named = execution.execute(roots.value().plan);
+  auto named = execution.execute(roots.value().plan.value());
   PS_REQUIRE_OK(named);
   PS_CHECK(ps::test::named_scalar(named.value(), "a") == 2.0);
   PS_CHECK(ps::test::named_scalar(named.value(), "z") == 6.0);
@@ -153,7 +157,7 @@ int dependency_chains() {
   auto same_roots = compiler.analyze(reordered_roots.snapshot());
   PS_REQUIRE_OK(same_roots);
   PS_CHECK(same_roots.value().digest().value ==
-           roots.value().semantic.digest().value);
+           roots.value().ir_versions.front().ir.value().digest().value);
 
   // An input used twice is still one producer and a separate join continuation.
   ps::WorkflowDocument repeated;
@@ -166,22 +170,26 @@ int dependency_chains() {
       {3, "core.identity", {WorkflowNodeOutput{2, "value"}}, {}}};
   repeated.outputs = {{"result", 3, "value"}};
   ps::GraphContext repeated_graph(repeated);
-  auto shared = compiler.compile(repeated_graph);
+  auto shared = compiler.compile(repeated_graph, {}, {}, {{"optimize", {}}});
   PS_REQUIRE_OK(shared);
-  PS_CHECK(check_chains(shared.value().semantic, {{1}, {1}, {2, 3}}) == 0);
-  PS_CHECK(check_chains(shared.value().optimized, {{1}, {2, 3}}) == 0);
-  auto doubled = execution.execute(shared.value().plan);
+  PS_CHECK(check_chains(shared.value().ir_versions.front().ir.value(),
+                        {{1}, {1}, {2, 3}}) == 0);
+  PS_CHECK(check_chains(shared.value().ir_versions.back().ir.value(),
+                        {{1}, {2, 3}}) == 0);
+  auto doubled = execution.execute(shared.value().plan.value());
   PS_REQUIRE_OK(doubled);
   PS_CHECK(ps::test::named_scalar(doubled.value(), "result") == 6.0);
 
   repeated.nodes.resize(1);
   repeated.outputs = {{"a", 1, "value"}, {"b", 1, "value"}};
   ps::GraphContext duplicate_roots(repeated);
-  auto aliases = compiler.compile(duplicate_roots);
+  auto aliases = compiler.compile(duplicate_roots, {}, {}, {{"optimize", {}}});
   PS_REQUIRE_OK(aliases);
-  PS_CHECK(check_chains(aliases.value().semantic, {{1}, {1}}) == 0);
-  PS_CHECK(check_chains(aliases.value().optimized, {{1}}) == 0);
-  auto alias_results = execution.execute(aliases.value().plan);
+  PS_CHECK(check_chains(aliases.value().ir_versions.front().ir.value(),
+                        {{1}, {1}}) == 0);
+  PS_CHECK(check_chains(aliases.value().ir_versions.back().ir.value(), {{1}}) ==
+           0);
+  auto alias_results = execution.execute(aliases.value().plan.value());
   PS_REQUIRE_OK(alias_results);
   PS_CHECK(ps::test::named_scalar(alias_results.value(), "a") == 3.0);
   PS_CHECK(ps::test::named_scalar(alias_results.value(), "b") == 3.0);
@@ -195,11 +203,12 @@ int dependency_chains() {
        {}}};
   repeated.outputs = {{"result", 2, "value"}};
   ps::GraphContext external(repeated);
-  auto bound_input = compiler.compile(external);
+  auto bound_input = compiler.compile(external, {}, {}, {{"optimize", {}}});
   PS_REQUIRE_OK(bound_input);
-  PS_CHECK(check_chains(bound_input.value().semantic, {{1}, {2}}) == 0);
+  PS_CHECK(check_chains(bound_input.value().ir_versions.front().ir.value(),
+                        {{1}, {2}}) == 0);
   auto external_result = execution.execute(
-      bound_input.value().plan,
+      bound_input.value().plan.value(),
       {{multi_result::binding(multi_result::take(execution.resource_budget()),
                               "input", 4.0)}});
   PS_REQUIRE_OK(external_result);
@@ -293,18 +302,20 @@ int main() {
   GraphContext first(ps::test::addition_document(2.0, 3.0));
   auto compiled = compiler.compile(first);
   PS_CHECK(compiled.ok());
-  PS_CHECK(compiled.value().semantic.nodes().size() == 3U);
-  PS_CHECK(compiled.value().semantic.digest().value.size() == 16U);
-  PS_CHECK(compiled.value().optimized.digest().value.size() == 16U);
-  PS_CHECK(compiled.value().plan.digest().value.size() == 16U);
-  PS_CHECK(compiled.value().plan.cache_key().value.size() == 16U);
-  PS_CHECK(compiled.value().semantic.digest().value !=
-           compiled.value().optimized.digest().value);
-  PS_CHECK(compiled.value().optimized.digest().value !=
-           compiled.value().plan.digest().value);
-  PS_CHECK(compiled.value().plan.digest().value !=
-           compiled.value().plan.cache_key().value);
-  PS_CHECK(compiled.value().plan.steps().back().backend == Backend::Cpu);
+  PS_CHECK(compiled.value().ir_versions.front().ir.value().nodes().size() ==
+           3U);
+  PS_CHECK(
+      compiled.value().ir_versions.front().ir.value().digest().value.size() ==
+      16U);
+  PS_CHECK(compiled.value().plan.value().digest().value.size() == 16U);
+  PS_CHECK(compiled.value().plan.value().cache_key().value.size() == 16U);
+  PS_CHECK(compiled.value().ir_versions.size() == 1);
+  PS_CHECK(compiled.value().ir_versions.back().ir.value().digest().value !=
+           compiled.value().plan.value().digest().value);
+  PS_CHECK(compiled.value().plan.value().digest().value !=
+           compiled.value().plan.value().cache_key().value);
+  PS_CHECK(compiled.value().plan.value().steps().back().backend ==
+           Backend::Cpu);
 
   WorkflowDocument unknown_parameter = ps::test::addition_document(2.0, 3.0);
   unknown_parameter.nodes.front().parameters = {{"vlaue", 2.0}};
@@ -334,8 +345,12 @@ int main() {
   GraphContext equivalent(ps::test::addition_document(2.0, 3.0));
   auto equivalent_compiled = compiler.compile(equivalent);
   PS_CHECK(equivalent_compiled.ok());
-  PS_CHECK(compiled.value().semantic.digest().value ==
-           equivalent_compiled.value().semantic.digest().value);
+  PS_CHECK(compiled.value().ir_versions.front().ir.value().digest().value ==
+           equivalent_compiled.value()
+               .ir_versions.front()
+               .ir.value()
+               .digest()
+               .value);
 
   auto signed_zero_operations = std::make_shared<ps::OperationRegistry>();
   ps::OperationDefinition signed_zero_definition;
@@ -377,19 +392,18 @@ int main() {
   auto negative_zero = signed_zero_compiler.compile(negative_zero_graph);
   PS_CHECK(positive_zero.ok());
   PS_CHECK(negative_zero.ok());
-  PS_CHECK(positive_zero.value().semantic.digest().value !=
-           negative_zero.value().semantic.digest().value);
-  PS_CHECK(positive_zero.value().optimized.digest().value !=
-           negative_zero.value().optimized.digest().value);
-  PS_CHECK(positive_zero.value().plan.digest().value !=
-           negative_zero.value().plan.digest().value);
-  PS_CHECK(positive_zero.value().plan.cache_key().value !=
-           negative_zero.value().plan.cache_key().value);
+  PS_CHECK(
+      positive_zero.value().ir_versions.front().ir.value().digest().value !=
+      negative_zero.value().ir_versions.front().ir.value().digest().value);
+  PS_CHECK(positive_zero.value().plan.value().digest().value !=
+           negative_zero.value().plan.value().digest().value);
+  PS_CHECK(positive_zero.value().plan.value().cache_key().value !=
+           negative_zero.value().plan.value().cache_key().value);
   ps::ExecutionContext signed_zero_execution(signed_zero_operations);
   auto positive_zero_result =
-      signed_zero_execution.execute(positive_zero.value().plan);
+      signed_zero_execution.execute(positive_zero.value().plan.value());
   auto negative_zero_result =
-      signed_zero_execution.execute(negative_zero.value().plan);
+      signed_zero_execution.execute(negative_zero.value().plan.value());
   if (!positive_zero_result.ok())
     std::cerr << positive_zero_result.status().message << " code="
               << static_cast<unsigned>(positive_zero_result.status().code)
@@ -440,14 +454,15 @@ int main() {
   gpu_options.execution_mode = ps::ExecutionMode::NativeGpu;
   auto gpu_compiled = compiler.compile(first, gpu_options);
   PS_CHECK(gpu_compiled.ok());
-  PS_CHECK(gpu_compiled.value().plan.steps().front().backend == Backend::Cpu);
-  PS_CHECK(gpu_compiled.value().plan.digest().value !=
-           compiled.value().plan.digest().value);
+  PS_CHECK(gpu_compiled.value().plan.value().steps().front().backend ==
+           Backend::Cpu);
+  PS_CHECK(gpu_compiled.value().plan.value().digest().value !=
+           compiled.value().plan.value().digest().value);
 
   auto other_operations = kernel_registry();
   Compiler other_compiler(other_operations);
   auto mismatched_optimization =
-      other_compiler.optimize(compiled.value().semantic);
+      other_compiler.optimize(compiled.value().ir_versions.front().ir.value());
   PS_CHECK(!mismatched_optimization.ok());
   PS_CHECK(mismatched_optimization.status().code == ErrorCode::Stale);
   return 0;

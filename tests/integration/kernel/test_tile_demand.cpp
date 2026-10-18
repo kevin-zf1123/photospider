@@ -95,6 +95,16 @@ struct Fixture {
     operation.traits.outputs = {multi_result::output("value", output)};
     operation.traits.outputs[0].maximum_dependency_stages = 3;
     operation.traits.cacheable = false;
+    operation.map_dependencies = [](const ResultStaticQuery& query) {
+      ResultStaticMapping mapping;
+      mapping.inputs = {
+          {0, 0, false,
+           multi_result::take(TileSet::from_indices(
+               ResourceBudget{}, {query.tile_unit, query.tile_unit + 2}))},
+          {1, 0, false,
+           multi_result::take(TileSet::range(ResourceBudget{}, 0, 1))}};
+      return Result<ResultStaticMapping>(std::move(mapping));
+    };
     operation.start_result = [&](const auto&, const auto& allocator) {
       return ResultContinuation::make<Program>(allocator, &gate);
     };
@@ -111,8 +121,8 @@ struct Fixture {
     graph = std::make_unique<GraphContext>(std::move(document));
     PlanningOptions planning;
     planning.tile_extent = 2;
-    plan =
-        multi_result::take(Compiler(operations).compile(*graph, planning)).plan;
+    plan = multi_result::take(Compiler(operations).compile(*graph, planning))
+               .plan.value();
     ExecutionContextConfig config;
     config.cpu_workers = 2;
     context = std::make_unique<ExecutionContext>(operations, config);
@@ -169,7 +179,7 @@ int overlapping_queries() {
   values[0] = 999;
   auto obsolete = demand.replace_bindings(fixture.bindings(values, 1));
   PS_REQUIRE_OK(obsolete);
-  PS_CHECK(obsolete.value().potential_dirty.at("result").empty());
+  PS_CHECK(equals(obsolete.value().potential_dirty.at("result"), {0}));
   fixture.gate.fail = true;
   auto failed = demand.request(first);
   fixture.gate.fail = false;
@@ -199,8 +209,10 @@ int sparse_bindings() {
   const std::vector<double> values{10, 10, 20, 20, 30, 30, 40, 40};
   Fixture sparse;
   auto demand = multi_result::take(
-      sparse.context->open_demand(sparse.plan, sparse.bindings(values, 0, 1)));
+      sparse.context->open_demand(sparse.plan, sparse.bindings(values, 0, 3)));
   PS_REQUIRE_OK(demand.request(sparse.query({0})));
+  PS_CHECK(demand.request(sparse.query({1})).status().code ==
+           ErrorCode::InvalidArgument);
   auto expanded = demand.replace_bindings(sparse.bindings(values, 0));
   PS_REQUIRE_OK(expanded);
   PS_CHECK(expanded.value().potential_dirty.at("result").empty());
@@ -260,7 +272,7 @@ int generation_race(bool cancel_run = false) {
   edit[1] = 11;
   auto update = demand.replace_bindings(fixture.bindings(edit, 1));
   PS_REQUIRE_OK(update);
-  PS_CHECK(update.value().potential_dirty.at("result").empty());
+  PS_CHECK(equals(update.value().potential_dirty.at("result"), {0}));
   return 0;
 }
 int limits_bits_and_retirement() {

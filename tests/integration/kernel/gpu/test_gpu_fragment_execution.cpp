@@ -432,7 +432,7 @@ int spatial_owner() {
     PlanningOptions planning;
     planning.tile_extent = 1;
     planning.execution_mode = ExecutionMode::NativeGpu;
-    auto plan = take(Compiler(registry).compile(graph, planning)).plan;
+    auto plan = take(Compiler(registry).compile(graph, planning)).plan.value();
     auto output = take(context.execute(plan, {{binding}}));
     if (require(gpu_result::number(output.results.at("out"), 0) == 30 &&
                     output.diagnostics.native_dispatch_count > 0,
@@ -612,7 +612,8 @@ int main() try {
     planning.tile_extent = 1;
     planning.execution_mode =
         gpu ? ExecutionMode::NativeGpu : ExecutionMode::CpuExact;
-    const auto plan = take(Compiler(registry).compile(graph, planning)).plan;
+    const auto plan =
+        take(Compiler(registry).compile(graph, planning)).plan.value();
     const auto frozen = take(context.freeze(plan, bindings));
     const auto query = request({0, 1, 2});
     auto result = take(context.execute_fragments(frozen, {{"sum", query}}));
@@ -666,12 +667,13 @@ int main() try {
   PlanningOptions planning;
   planning.tile_extent = 1;
   planning.execution_mode = ExecutionMode::NativeGpu;
-  const auto plan = take(Compiler(registry).compile(graph, planning)).plan;
+  const auto plan =
+      take(Compiler(registry).compile(graph, planning)).plan.value();
   auto fixed_document = document;
   fixed_document.nodes[0].operation = "example.sparse_fixed_sum";
   GraphContext fixed_graph(fixed_document);
   const auto fixed_plan =
-      take(Compiler(registry).compile(fixed_graph, planning)).plan;
+      take(Compiler(registry).compile(fixed_graph, planning)).plan.value();
   constexpr std::uint64_t source_bytes = length * 12;
   constexpr std::uint64_t minimum =
       source_bytes + sizeof(SparseState) + 4 + 12 + 12 + 8 + 65 * 4 + 32768;
@@ -730,7 +732,7 @@ int main() try {
     if (mode == 2)
       selected.execution_mode = ExecutionMode::CpuExact;
     const auto bad_plan =
-        take(Compiler(registry).compile(bad_graph, selected)).plan;
+        take(Compiler(registry).compile(bad_graph, selected)).plan.value();
     ExecutionContext isolated(registry, config);
     const auto root = take(isolated.resource_budget());
     const auto bound = inputs(root);
@@ -781,7 +783,7 @@ int main() try {
     auto empty_document = document;
     GraphContext empty_graph(empty_document);
     const auto empty_plan =
-        take(Compiler(registry).compile(empty_graph, planning)).plan;
+        take(Compiler(registry).compile(empty_graph, planning)).plan.value();
     ExecutionContext empty_context(registry, config);
     const auto root = take(empty_context.resource_budget());
     const auto bound = inputs(root, 4);
@@ -802,7 +804,8 @@ int main() try {
         protocol ? "example.native_protocol_cancel" : "example.native_cancel";
     GraphContext cancelled_graph(document);
     const auto cancelled_plan =
-        take(Compiler(registry).compile(cancelled_graph, planning)).plan;
+        take(Compiler(registry).compile(cancelled_graph, planning))
+            .plan.value();
     ExecutionOptions options;
     options.dependencies.sets.cancellation =
         (protocol ? protocol_cancellation : cancellation).token();

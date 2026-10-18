@@ -147,7 +147,7 @@ int late_delta() {
         {5, "result", {WorkflowNodeOutput{4, "value"}}, {}}};
     document.outputs = {{"y", 5, "value"}};
     GraphContext graph(document);
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
+    auto plan = Compiler(registry).compile(graph).take_value().plan.value();
     return_record = plan.output("y").record_index;
     ExecutionContext context(registry, {1, false, 4, 65536});
     retained_root = context.resource_budget().take_value();
@@ -211,7 +211,7 @@ int repeated_input_record() {
       Compiler(registry)
           .compile(graph)
           .take_value()
-          .plan
+          .plan.value()
           .tile_plan("y", TileRequest{{{0, multi_result::take(TileSet::range(
                                                ResourceBudget{}, 0, 1))}}})
           .take_value();
@@ -233,7 +233,7 @@ int repeated_input_record() {
   document.outputs = {{"global", 1, "value"}};
   GraphContext global_graph(document);
   const auto global_plan =
-      Compiler(registry).compile(global_graph).take_value().plan;
+      Compiler(registry).compile(global_graph).take_value().plan.value();
   auto demand =
       context
           .open_demand(
@@ -267,7 +267,7 @@ int metadata_bounds() {
   for (unsigned i = 0; i < 17; ++i)
     document.outputs.push_back({"alias" + std::to_string(i), 1, "value"});
   GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan = Compiler(registry).compile(graph).take_value().plan.value();
   ExecutionContextConfig config{1, false, 4, 65536};
   config.managed_resources = ResourceLimits{};
   config.managed_resources->capacity[ResourceKind::Metadata] = 16 * 1024 * 1024;

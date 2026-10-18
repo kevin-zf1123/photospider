@@ -356,7 +356,8 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
   ExecutionBindings bindings{{{"input", input_result}}};
   if (two_inputs)
     bindings.inputs.push_back({"input2", input_result});
-  auto frozen = multi_result::take(context.freeze(compiled.plan, bindings));
+  auto frozen =
+      multi_result::take(context.freeze(compiled.plan.value(), bindings));
   ExecutionOptions options;
   options.dependencies.maximum_work = work;
   options.dependencies.maximum_gpu_requests = capacity;
@@ -398,8 +399,9 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
         PS_CHECK(sum == (mode == 10 || mode == 18 ? 0 : 42));
         auto record =
             multi_result::take(progress.value().dependencies.tile_record(
-                {compiled.plan.return_signature()
-                     .at(compiled.plan.outputs().at("out"))
+                {compiled.plan.value()
+                     .return_signature()
+                     .at(compiled.plan.value().outputs().at("out"))
                      .record_index,
                  0, 0, tile}));
         PS_CHECK(record && record->inputs.size() == (mode == 18   ? 0
@@ -420,8 +422,8 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
         }
       }
       if (mode == 25) {
-        auto handle =
-            multi_result::take(context.open_demand(compiled.plan, bindings));
+        auto handle = multi_result::take(
+            context.open_demand(compiled.plan.value(), bindings));
         auto observed = multi_result::take(handle.request({{"out", demand}}));
         auto updated = multi_result::take(handle.replace_bindings(
             {{{"input", sparse_input(root, input_schema, 22)}}}));

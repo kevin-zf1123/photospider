@@ -118,7 +118,7 @@ int empty_input_request() {
   GraphContext graph(document);
   auto plan = take(Compiler(registry).compile(
                        graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
-                  .plan;
+                  .plan.value();
   ExecutionContext context(registry, {1, false, 16, 1048576, 0});
   auto root = take(context.resource_budget());
   auto frozen = take(context.freeze(plan, {}));
@@ -228,7 +228,7 @@ int metadata_tensor_need(unsigned mode, bool denied = false,
     auto plan =
         take(Compiler(registry).compile(
                  graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
-            .plan;
+            .plan.value();
     ExecutionContext context(registry, {1, false, 16, 1048576, 0});
     root = take(context.resource_budget());
     auto frozen = take(context.freeze(plan));
@@ -561,7 +561,7 @@ int broad_tensor_need(unsigned mode) {
   GraphContext graph(document);
   auto plan = take(Compiler(registry).compile(
                        graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
-                  .plan;
+                  .plan.value();
   ResourceBudget root;
   ExecutionResult held;
   {
@@ -766,7 +766,8 @@ int profile_owners(bool exhaust = false, bool work_exhaust = false) {
         {20, "test.resource_view", {WorkflowNodeOutput{10, "value"}}, {}}};
     document.outputs = {{"value", 20, "value"}};
     GraphContext graph(document);
-    auto plan = take(Compiler(registry).compile(graph, {}, resources)).plan;
+    auto plan =
+        take(Compiler(registry).compile(graph, {}, resources)).plan.value();
     {
       ExecutionContextConfig config{1, false, 16, 4194304, 0};
       config.managed_resources = ResourceLimits{};

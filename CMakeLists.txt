@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.37.0
+  VERSION 0.38.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -85,7 +85,19 @@ set(
   PHOTOSPIDER_KERNEL_SOURCES
 
   src/lib/compiler/compiler.cpp
-  src/lib/compiler/planning.cpp
+  src/lib/compiler/frontend.cpp
+  src/lib/compiler/frontend_registry.cpp
+  src/lib/compiler/frontend/DAG/dag.cpp
+  src/lib/compiler/ir_validation.cpp
+  src/lib/compiler/optimizer.cpp
+  src/lib/compiler/optimizer_registry.cpp
+  src/lib/compiler/optimizers/deduplicate.cpp
+  src/lib/compiler/plan_linking.cpp
+  src/lib/compiler/plan_validation.cpp
+  src/lib/compiler/plan_selection.cpp
+  src/lib/compiler/planner.cpp
+  src/lib/compiler/planner_registry.cpp
+  src/lib/compiler/planners/static_tiles.cpp
   src/lib/compiler/static_mapping.cpp
   src/lib/compiler/identity.cpp
   src/lib/compiler/artifact.cpp
@@ -162,7 +174,18 @@ endif()
 set_source_files_properties(
   src/lib/data/tensor_validation.cpp
   src/lib/plugin/port_validation.cpp src/lib/compiler/compiler.cpp
-  src/lib/compiler/planning.cpp src/lib/compiler/static_mapping.cpp
+  src/lib/compiler/frontend.cpp
+  src/lib/compiler/frontend_registry.cpp
+  src/lib/compiler/frontend/DAG/dag.cpp src/lib/compiler/ir_validation.cpp
+  src/lib/compiler/optimizer.cpp
+  src/lib/compiler/optimizer_registry.cpp
+  src/lib/compiler/optimizers/deduplicate.cpp
+  src/lib/compiler/plan_linking.cpp
+  src/lib/compiler/plan_validation.cpp
+  src/lib/compiler/plan_selection.cpp
+  src/lib/compiler/planner.cpp
+  src/lib/compiler/planner_registry.cpp
+  src/lib/compiler/planners/static_tiles.cpp src/lib/compiler/static_mapping.cpp
   src/lib/compiler/identity.cpp src/lib/compiler/artifact.cpp
   src/lib/compiler/artifact_text.cpp
   src/lib/plugin/operation_registry.cpp PROPERTIES
@@ -411,3 +434,5 @@ endif()
 
 install(FILES third_party/IK_LLAMA_LICENSE.txt
   DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/Photospider)
+
+include(cmake/CompilerTools.cmake)

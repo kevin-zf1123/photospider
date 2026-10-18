@@ -73,17 +73,17 @@ inline int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape,
   auto first_compilation = compiler.compile(graph);
   auto second_compilation = compiler.compile(graph);
   PS_CHECK(first_compilation.ok() && second_compilation.ok());
-  PS_CHECK(first_compilation.value().semantic.digest().value ==
-           second_compilation.value().semantic.digest().value);
-  PS_CHECK(first_compilation.value().optimized.digest().value ==
-           second_compilation.value().optimized.digest().value);
-  PS_CHECK(first_compilation.value().plan.digest().value ==
-           second_compilation.value().plan.digest().value);
-  PS_CHECK(first_compilation.value().plan.cache_key().value ==
-           second_compilation.value().plan.cache_key().value);
-  PS_CHECK(first_compilation.value().plan.steps().size() == 1);
+  PS_CHECK(
+      first_compilation.value().ir_versions.front().ir.value().digest().value ==
+      second_compilation.value().ir_versions.front().ir.value().digest().value);
+  PS_CHECK(first_compilation.value().plan.value().digest().value ==
+           second_compilation.value().plan.value().digest().value);
+  PS_CHECK(first_compilation.value().plan.value().cache_key().value ==
+           second_compilation.value().plan.value().cache_key().value);
+  PS_CHECK(first_compilation.value().plan.value().steps().size() == 1);
   PS_CHECK(first_compilation.value()
-               .plan.steps()[0]
+               .plan.value()
+               .steps()[0]
                .output_result_schema->tensors[0]
                .sample_shape() == shape);
   ps::ExecutionContextConfig config;
@@ -95,8 +95,9 @@ inline int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape,
   ps::ExecutionContext execution(registry, config);
   auto root = execution.resource_budget();
   PS_CHECK(root.ok());
-  auto first_result = execution.execute(first_compilation.value().plan);
-  auto second_result = execution.execute(second_compilation.value().plan);
+  auto first_result = execution.execute(first_compilation.value().plan.value());
+  auto second_result =
+      execution.execute(second_compilation.value().plan.value());
   if (!first_result.ok())
     std::cerr << "broadcast first execution: code="
               << static_cast<unsigned>(first_result.status().code) << " reason="

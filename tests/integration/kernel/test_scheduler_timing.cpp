@@ -93,7 +93,7 @@ int observe(bool enabled) {
   const auto input_root = multi_result::take(context.resource_budget());
   const auto run = [&](std::int64_t value) {
     return context.execute(
-        plan.plan,
+        plan.plan.value(),
         {{multi_result::binding(input_root, "input", value, schema)}});
   };
   std::future<Result<ExecutionResult>> first, second;

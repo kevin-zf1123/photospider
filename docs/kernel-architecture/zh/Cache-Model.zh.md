@@ -8,10 +8,9 @@ Kernel 分别管理编译阶段、plan cache key、不可变输入快照、已�
 
 | Identity | 域标签 | 内容 | 何时改变 |
 | --- | --- | --- | --- |
-| Semantic IR digest | `semantic-ssa-ir-v25` | 程序形式及规范 SSA 程序：declarations、calls、values、blocks、terminators、参数、traits、资源 identity、schemas | 任何程序变化，包括 call 或 value 重新编号 |
-| Optimized IR digest | `optimizer-v7-dependency-paths` | 父 semantic digest 与优化后程序 | 同上 |
-| Physical plan digest | `static-tile-program-v26` | 父 optimized digest、执行模式、tile extent、steps 与放置、输出请求，以及每个 block 的指令、授权、依赖和 terminator | 任何指令、授权或请求变化，或重新编号 |
-| Plan cache key | `plan-cache-key-v19` | Plan digest 的域分离包装 | 与 plan digest 相同 |
+| IR content digest | `validated-ssa-ir-v26` | 程序形式及规范 SSA 程序：declarations、calls、values、blocks、terminators、参数、traits、资源 identity、schemas | 任何程序变化，包括 call 或 value 重新编号 |
+| Physical plan digest | `static-tile-program-v27` | 实际输入 IR digest、执行模式、tile extent、steps 与放置、输出请求，以及每个 block 的指令、授权、依赖和 terminator | 任何指令、授权或请求变化，或重新编号 |
+| Plan cache key | `plan-cache-key-v20` | Plan digest 的域分离包装 | 与 plan digest 相同 |
 | Step structured template | `photospider.dependency-static.v4` | Tile extent、执行模式、后端、operation key、输出索引、traits、资源 identity、参数、输入 schema | 契约、参数、资源或输入 schema 变化；重新编号不改变 |
 | 固定授权内容 key | `photospider.fixed-grant-cache.v2` | Step template、后端、成员、tile、publication samples、descriptor 授权端口、已授权输入的 schema 与样本字节 | 任何输入字节或授权变化；重新编号不改变 |
 | 固定 block 输入证明 | `photospider.fixed-block-inputs.v2` | Block 契约加上相同的授权内容（不含成员与 tile） | 与内容 key 相同 |

@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/compiler/compiler.hpp"
+#include "photospider/compiler/plan.hpp"
 #include "photospider/core/content_digest.hpp"
 #include "plugin/operation_identity.hpp"
 

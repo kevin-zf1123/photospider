@@ -7,8 +7,8 @@ Photospider is a C++17, single-machine graph compiler and execution kernel for e
 The installed `Photospider::kernel` target provides:
 
 - schema-7 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
-- typed semantic IR and optimized IR;
-- Result operation C ABI 6 and OperationTraits 28 with closed typed parameter schemas, optimization, and member-tile-demand-aware local physical planning;
+- immutable validated IR with optional ordered optimization;
+- Result operation C ABI 7 and OperationTraits 29 with closed typed parameter schemas, optimization, and member-tile-demand-aware local physical planning;
 - CPU-required and GPU-optional local execution;
 - operation support is defined by each registered contract; see [image operations](docs/kernel-architecture/Image-Operations.md) and the [built-in operations index](docs/built-in_ops/README.md);
 - static `Result` members and unified `Tensor`, explicit operation-bound validation, rank-general `Region`, strided layout, immutable bytes, Metal shared storage and bounded local caches;
@@ -21,7 +21,7 @@ Operation DSOs are trusted in-process extensions configured at startup. Their ex
 
 ## Build
 
-Building the kernel requires CMake 3.21+, Clang C and C++ compilers with C99 and C++17 support, and Threads. Bundled operations additionally require the pinned SLEEF 3.9.0 source. For an ops build, follow the [SLEEF preparation instructions](third_party/SLEEF.md) to download it into `third_party/sleef/`. This ignored directory is not included in the repository; CMake does not download dependencies. Reuse an existing build directory for local development; configure only when its options need changing. There is no mandatory media, serialization, cryptographic, or GPU SDK dependency.
+Building the kernel requires CMake 3.21+, Clang C and C++ compilers with C99 and C++17 support, and Threads. Bundled operations additionally require the pinned SLEEF 3.9.0 source; follow the [SLEEF preparation instructions](third_party/SLEEF.md) to download it into `third_party/sleef/`. The `psc` and `psx` tools, enabled by default, require the pinned yyjson 0.13.0 source; follow the [yyjson preparation instructions](third_party/YYJSON.md) to place it in `third_party/yyjson/` before configuring, or set `PHOTOSPIDER_BUILD_TOOLS=OFF` to disable the tools. Both source directories are ignored by Git and absent from repository checkouts; CMake does not download dependencies. Reuse an existing build directory for local development; configure only when its options need changing. The kernel library itself has no mandatory media, serialization, cryptographic, or GPU SDK dependency.
 
 ```bash
 CC=clang CXX=clang++ cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
@@ -36,6 +36,12 @@ CPU exact execution is the default. `ExecutionMode::NativeGpu` grants native pla
 kernel umbrella does not export benchmark interfaces. Retained tests and temporary
 acceptance follow [Testing and Validation](docs/development/Testing-and-Validation.md).
 
+## Compiler and executor tools
+
+`PHOTOSPIDER_BUILD_TOOLS=ON` builds `psc` and `psx` by default. `psc input.json -o output.psxp` validates and plans directly without optimization. Add `-O optimize` explicitly for the optional example pass; `--emit ir` and `--save-ir N=PATH` select and preserve IR versions. `psx output.psxp --bindings inputs.json -o output.results` executes saved instructions and exports actual Tensor coverage. Built-in operations register by default when ops are enabled; otherwise use `--load-ops`.
+
+See [CLI usage](docs/development/Compiler-Tools.md), [file formats](docs/development/Compiler-Tool-Formats.md), and [中文说明](docs/development/zh/Compiler-Tools.zh.md). Artifacts use v4; earlier formats require re-export.
+
 ## Install and consume
 
 The following is package usage documentation, not a development validation step.
@@ -46,7 +52,7 @@ cmake --install build --prefix /desired/photospider-prefix
 ```
 
 ```cmake
-find_package(Photospider 0.36 CONFIG REQUIRED COMPONENTS kernel)
+find_package(Photospider 0.38 CONFIG REQUIRED COMPONENTS kernel)
 target_link_libraries(app PRIVATE Photospider::kernel)
 ```
 
@@ -68,7 +74,7 @@ SDK target `Photospider::ops_sdk`, which uses only kernel public interfaces.
 not supply compiled implementations on its own.
 
 ```cmake
-find_package(Photospider 0.36 CONFIG REQUIRED COMPONENTS kernel ops)
+find_package(Photospider 0.38 CONFIG REQUIRED COMPONENTS kernel ops)
 target_link_libraries(app PRIVATE Photospider::ops)
 ```
 

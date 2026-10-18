@@ -125,8 +125,9 @@ struct Fixture {
         multi_result::take(Compiler(operations).compile(graph, options));
     ExecutionContext context(operations);
     auto root = multi_result::take(context.resource_budget());
-    auto frozen = multi_result::take(context.freeze(
-        compiled.plan, {{multi_result::binding(root, "image", 1, image),
+    auto frozen = multi_result::take(
+        context.freeze(compiled.plan.value(),
+                       {{multi_result::binding(root, "image", 1, image),
                          multi_result::binding(root, "other", 2, image)}}));
     return frozen.plan();
   }

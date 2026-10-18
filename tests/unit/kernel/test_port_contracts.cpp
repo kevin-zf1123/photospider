@@ -186,14 +186,14 @@ int inference() {
   Compiler compiler(registry);
   auto compiled = compiler.compile(graph);
   PS_CHECK(compiled.ok());
-  const auto& node = compiled.value().semantic.nodes()[0];
+  const auto& node = compiled.value().ir_versions.front().ir.value().nodes()[0];
   const auto& tensor = node.outputs[0].result_schema->tensors[0];
   PS_CHECK(tensor.descriptor.shape == std::vector<std::uint64_t>{3});
   PS_CHECK(tensor.descriptor.element_type == ElementType::Float32);
   ExecutionContextConfig config;
   config.managed_resources = ResourceLimits{};
   ExecutionContext execution(registry, config);
-  auto run = execution.execute(compiled.value().plan);
+  auto run = execution.execute(compiled.value().plan.value());
   if (!run.ok())
     std::cerr << run.status().message << "\n";
   PS_CHECK(run.ok());
@@ -234,8 +234,9 @@ int inference() {
   doc.nodes[0].parameters["count"] = INT64_C(5);
   GraphContext changed(doc);
   auto changed_plan = compiler.compile(changed);
-  PS_CHECK(changed_plan.ok() && changed_plan.value().semantic.digest().value !=
-                                    compiled.value().semantic.digest().value);
+  PS_CHECK(changed_plan.ok() &&
+           changed_plan.value().ir_versions.front().ir.value().digest().value !=
+               compiled.value().ir_versions.front().ir.value().digest().value);
   doc.nodes[0].parameters["count"] = INT64_C(0);
   GraphContext empty(doc);
   PS_CHECK(!compiler.compile(empty).ok());
@@ -320,7 +321,7 @@ int inference() {
   ExecutionContext widened_execution(borrowed, config);
   const std::vector<float> input_samples{1, 2, 3, 4, -5, -6, -7, -8};
   auto widened_run = widened_execution.execute(
-      widen_plan.value().plan,
+      widen_plan.value().plan.value(),
       {{{"input", source(take(widened_execution.resource_budget()),
                          *field.result_schema, input_samples)}}});
   PS_CHECK(widened_run.ok());
@@ -351,8 +352,8 @@ int inference() {
   GraphContext repeated_graph(repeated_doc);
   auto repeated_plan = Compiler(borrowed).compile(repeated_graph);
   PS_CHECK(repeated_plan.ok());
-  auto repeated_run =
-      widened_execution.execute(repeated_plan.value().plan, repeated_bindings);
+  auto repeated_run = widened_execution.execute(
+      repeated_plan.value().plan.value(), repeated_bindings);
   PS_CHECK(repeated_run.ok());
   const auto& repeated_output = repeated_run.value().results.at("output");
   auto repeated_facts = take(repeated_output.descriptor());
@@ -392,12 +393,13 @@ int dtype_masks() {
     Compiler compiler(registry);
     auto plan = compiler.compile(graph);
     PS_CHECK(plan.ok());
-    digests.push_back(plan.value().semantic.digest().value);
+    digests.push_back(
+        plan.value().ir_versions.front().ir.value().digest().value);
     ExecutionContextConfig config;
     config.managed_resources = ResourceLimits{};
     ExecutionContext context(registry, config);
     auto run = context.execute(
-        plan.value().plan,
+        plan.value().plan.value(),
         {{multi_result::binding(take(context.resource_budget()), "a", 4)}});
     PS_CHECK(run.ok() &&
              multi_result::number(run.value().results.at("result")) == 4);
@@ -486,10 +488,16 @@ int c_contract() {
           GraphContext graph(doc);
           auto compiled = compiler.compile(graph);
           PS_CHECK(compiled.ok());
-          PS_CHECK(compiled.value().plan.steps()[0].traits.repeated_resolved ==
-                   count);
-          const auto& metadata =
-              *compiled.value().semantic.nodes()[0].outputs[0].result_schema;
+          PS_CHECK(compiled.value()
+                       .plan.value()
+                       .steps()[0]
+                       .traits.repeated_resolved == count);
+          const auto& metadata = *compiled.value()
+                                      .ir_versions.front()
+                                      .ir.value()
+                                      .nodes()[0]
+                                      .outputs[0]
+                                      .result_schema;
           PS_CHECK(metadata.tensors[0].descriptor.shape ==
                    std::vector<std::uint64_t>{count});
           PS_CHECK(metadata.tensors[0].descriptor.element_type == output_type);
@@ -497,7 +505,7 @@ int c_contract() {
           for (unsigned i = 0; i < count; ++i)
             bindings.inputs.push_back(
                 source(doc.inputs[i], i == 0 ? 2 : -3, layout));
-          auto run = execution.execute(compiled.value().plan, bindings);
+          auto run = execution.execute(compiled.value().plan.value(), bindings);
           PS_CHECK(run.ok());
           const auto& output = run.value().results.at("output");
           auto facts = output.descriptor().take_value();
@@ -517,7 +525,7 @@ int c_contract() {
                                take(TileSet::from_indices(root, {0})), false});
             auto dirty = run.value().dependencies.dirty_units(changes);
             const auto returned =
-                compiled.value().plan.output("output").record_index;
+                compiled.value().plan.value().output("output").record_index;
             PS_CHECK(dirty.ok() && dirty.value().size() == 2);
             PS_CHECK((dirty.value()[0] == TileUnit{0, 0, 0}));
             PS_CHECK((dirty.value()[1] == TileUnit{returned, 0, 0}));
@@ -544,7 +552,7 @@ int c_contract() {
   GraphContext halves_graph(halves);
   auto half_plan = compiler.compile(halves_graph).take_value();
   auto half_run = execution.execute(
-      half_plan.plan,
+      half_plan.plan.value(),
       {{source(halves.inputs[0], .5, 0), source(halves.inputs[1], .5, 0)}});
   PS_CHECK(half_run.ok());
   auto half_output = half_run.value().results.at("output");
@@ -560,7 +568,7 @@ int c_contract() {
   large.nodes[0].parameters["dtype"] = std::string("float64");
   GraphContext large_graph(large);
   auto large_plan = compiler.compile(large_graph).take_value();
-  auto large_run = execution.execute(large_plan.plan,
+  auto large_run = execution.execute(large_plan.plan.value(),
                                      {{source(large.inputs[0], 1e100, 0),
                                        source(large.inputs[1], -1e100, 0)}});
   PS_CHECK(large_run.ok());
@@ -574,7 +582,8 @@ int c_contract() {
   }
   ExecutionBindings half_bindings{
       {source(halves.inputs[0], .5, 0), source(halves.inputs[1], .5, 0)}};
-  auto frozen = execution.freeze(half_plan.plan, half_bindings).take_value();
+  auto frozen =
+      execution.freeze(half_plan.plan.value(), half_bindings).take_value();
   auto empty = execution.execute_fragments(frozen, {{"output", {}}});
   PS_CHECK(empty.ok());
   const auto& empty_output = empty.value().results.at("output");
@@ -585,15 +594,16 @@ int c_contract() {
       !empty_output.read_tensor(empty_facts, 0, {0}, &unavailable, 4).ok());
   CancellationSource stopped;
   PS_CHECK(stopped.cancel());
-  PS_CHECK(execution.execute(half_plan.plan, half_bindings, stopped.token())
-               .status()
-               .code == ErrorCode::Cancelled);
+  PS_CHECK(
+      execution.execute(half_plan.plan.value(), half_bindings, stopped.token())
+          .status()
+          .code == ErrorCode::Cancelled);
   auto huge = document(2, ElementType::Float64, UINT64_C(1) << 61);
   GraphContext huge_graph(huge);
   auto huge_plan = compiler.compile(huge_graph);
   PS_CHECK(huge_plan.ok());
   auto huge_run = execution.execute(
-      huge_plan.value().plan,
+      huge_plan.value().plan.value(),
       {{source(huge.inputs[0], 2, 3), source(huge.inputs[1], -3, 3)}});
   // A partial source cannot satisfy the complete requested input tile,
   // even when the callback reads only the first sample.

@@ -307,7 +307,8 @@ void alias_diamond() {
   GraphContext graph(doc);
   PlanningOptions geometry;
   geometry.tile_extent = 2;
-  auto plan = Compiler(registry).compile(graph, geometry).take_value().plan;
+  auto plan =
+      Compiler(registry).compile(graph, geometry).take_value().plan.value();
   auto frozen = context.freeze(plan, {{binding}}).take_value();
   const auto q = request({7});
   for (unsigned iteration = 0; iteration < 2; ++iteration) {
@@ -358,8 +359,10 @@ void alias_diamond() {
   doc.nodes[0].parameters = {{"temporal", true}};
   doc.outputs = {{"out", 1, "value"}};
   GraphContext temporal_graph(doc);
-  auto temporal_plan =
-      Compiler(registry).compile(temporal_graph, geometry).take_value().plan;
+  auto temporal_plan = Compiler(registry)
+                           .compile(temporal_graph, geometry)
+                           .take_value()
+                           .plan.value();
   auto result = context.execute_fragments(
       take(context.freeze(temporal_plan, {{binding}})),
       {{"out", request({1})}});
@@ -466,7 +469,7 @@ void all_member_acquisition() {
   GraphContext graph(doc);
   auto plan = take(Compiler(registry).compile(
                        graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
-                  .plan;
+                  .plan.value();
   auto handle = take(context.open_demand(plan, {{binding}}));
   const DemandQuery query{{"out", request({0})}};
   auto result = take(handle.request(query));
@@ -506,7 +509,7 @@ void all_member_acquisition() {
         escaped ? "test.image.escaped" : "test.image.probe";
     invalid.nodes[0].parameters["bad"] = true;
     GraphContext bad_graph(invalid);
-    auto bad_plan = take(Compiler(registry).compile(bad_graph)).plan;
+    auto bad_plan = take(Compiler(registry).compile(bad_graph)).plan.value();
     auto bad = context.execute(bad_plan, {{binding}});
     require(!bad.ok() && bad.status().code == ErrorCode::InvalidArgument,
             "projection escape or ignored out-of-domain read fails");
@@ -716,7 +719,7 @@ void staged_input_retirement() {
           Compiler(registry)
               .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
               .take_value()
-              .plan;
+              .plan.value();
       ExecutionOptions options;
       options.maximum_dependency_work = UINT64_C(1) << 30;
       options.dependencies.maximum_work = UINT64_C(1) << 30;
@@ -964,7 +967,7 @@ void result_blocks() {
           Compiler(registry)
               .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
               .take_value()
-              .plan;
+              .plan.value();
       auto frozen = context->freeze(plan, {{{"x", input}}}).take_value();
       auto point = [&](uint64_t at) { return request({at}); };
       ExecutionOptions options;
@@ -1224,7 +1227,7 @@ void impure_shared_results() {
           Compiler(registry)
               .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
               .take_value()
-              .plan;
+              .plan.value();
       auto frozen = context->freeze(plan, {}).take_value();
       auto point = request({0});
       ExecutionOptions options;
@@ -1384,7 +1387,7 @@ void result_checkpoints() {
           Compiler(registry)
               .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
               .take_value()
-              .plan;
+              .plan.value();
       auto frozen = context->freeze(plan, {{binding}}).take_value();
       const auto point = [](uint64_t at) { return request({at}); };
       ExecutionOptions options;
@@ -1637,7 +1640,7 @@ void storage_owner() {
     ExecutionBinding binding;
     binding.name = "source";
     binding.result = input;
-    auto result = context.execute(plan.value().plan, {{binding}});
+    auto result = context.execute(plan.value().plan.value(), {{binding}});
     require(result.ok(), result.status().message);
     survivor = result.value().results.at("out");
   }

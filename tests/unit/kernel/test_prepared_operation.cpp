@@ -85,8 +85,7 @@ struct Computation {
     }
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        phase.query.tile_extent));
+        phase.query.semantic_key, {}, phase.query.tile_extent));
     check(builder.publish_tensor(
         0, Region::whole({1}),
         ByteView(reinterpret_cast<const std::uint8_t*>(&value),
@@ -171,11 +170,11 @@ int compiled_reuse() {
     GraphContext graph(document);
     auto compiled = take(Compiler(operations).compile(graph));
     PS_CHECK(counts->prepared == 1);
-    const auto& prepared = compiled.semantic.nodes()[0].prepared;
-    PS_CHECK(prepared == compiled.optimized.nodes()[0].prepared);
-    PS_CHECK(prepared == compiled.plan.steps()[0].prepared);
-    PS_CHECK(prepared == compiled.plan.steps()[1].prepared);
-    auto selected = take(compiled.plan.tile_plan(
+    const auto& prepared =
+        compiled.ir_versions.front().ir.value().nodes()[0].prepared;
+    PS_CHECK(prepared == compiled.plan.value().steps()[0].prepared);
+    PS_CHECK(prepared == compiled.plan.value().steps()[1].prepared);
+    auto selected = take(compiled.plan.value().tile_plan(
         "value",
         TileRequest{{{0, take(TileSet::range(ResourceBudget{}, 0, 1))}}}));
     PS_CHECK(selected.steps()[0].prepared == prepared);
@@ -189,7 +188,7 @@ int compiled_reuse() {
     auto root = take(context.resource_budget());
     for (double source : {10., 20.}) {
       auto binding = multi_result::binding(root, "input", source);
-      auto result = take(context.execute(compiled.plan, {{binding}}));
+      auto result = take(context.execute(compiled.plan.value(), {{binding}}));
       PS_CHECK(multi_result::number(result.results.at("value")) == source + 7);
       PS_CHECK(multi_result::number(result.results.at("constant")) == 8);
     }
@@ -385,7 +384,7 @@ int projected_execution() {
     document.outputs = {{"value", 2, "value"}};
     GraphContext graph(document);
     auto compiled = take(Compiler(operations).compile(graph));
-    auto result = context.execute(compiled.plan);
+    auto result = context.execute(compiled.plan.value());
     if (!input) {
       PS_CHECK(result.ok() &&
                multi_result::number(result.value().results.at("value")) == 7);

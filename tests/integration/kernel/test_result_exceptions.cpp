@@ -221,7 +221,7 @@ int workflow(unsigned mode, bool start, bool sticky) {
   config.managed_resources = ResourceLimits{};
   ExecutionContext context(registry, config);
   for (unsigned repeat = 0; repeat < 2; ++repeat) {
-    auto result = context.execute(plan.plan);
+    auto result = context.execute(plan.plan.value());
     if (result.ok() || !expected(result.status(), mode, sticky))
       std::cerr << "mode=" << mode << " start=" << start << " sticky=" << sticky
                 << " code=" << static_cast<unsigned>(result.status().code)

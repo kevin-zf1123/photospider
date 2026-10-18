@@ -9,6 +9,9 @@
 
 #include "photospider/compiler/artifact.hpp"
 #include "photospider/compiler/compiler.hpp"
+#include "photospider/compiler/frontend.hpp"
+#include "photospider/compiler/ir.hpp"
+#include "photospider/compiler/plan.hpp"
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/core/cancellation.hpp"
 #include "photospider/core/resources.hpp"

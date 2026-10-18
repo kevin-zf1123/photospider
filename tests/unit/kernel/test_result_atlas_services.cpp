@@ -213,7 +213,8 @@ int run(unsigned mode, Backend backend, ErrorCode expected,
   options.maximum_dependency_work = work;
   const auto before = root.statistics().live[ResourceKind::Payload];
   {
-    auto result = context.execute(compiled.plan, {{input_result}}, {}, options);
+    auto result =
+        context.execute(compiled.plan.value(), {{input_result}}, {}, options);
     if (result.status().code == ErrorCode::BackendUnavailable &&
         result.status().message == "fixture requires Metal")
       return 77;

@@ -272,7 +272,7 @@ void identity_retains_fragmented_input() {
     document.nodes = {{1, "core.identity", {WorkflowInputReference{1}}, {}}};
     document.outputs = {{"out", 1, "value"}};
     GraphContext graph(document);
-    auto plan = take(Compiler(registry).compile(graph)).plan;
+    auto plan = take(Compiler(registry).compile(graph)).plan.value();
     retained =
         take(context.execute(plan, {{{"input", source}}})).results.at("out");
     auto result_window = take(retained.acquire_tensor(

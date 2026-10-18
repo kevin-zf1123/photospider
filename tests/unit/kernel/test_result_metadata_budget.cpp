@@ -166,7 +166,7 @@ int callback_failure_copy_exhaustion() {
   config.cpu_workers = 1;
   config.managed_resources = ResourceLimits{};
   ExecutionContext context(registry, config);
-  auto result = context.execute(compiled.plan);
+  auto result = context.execute(compiled.plan.value());
   PS_CHECK(!fail_next_allocation && !result.ok() &&
            result.status().code == ErrorCode::InvalidArgument &&
            result.status().reason == FailureReason::MalformedEnvelope &&
