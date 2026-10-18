@@ -57,6 +57,11 @@ ResultProgramMetadata metadata(unsigned mode) {
   result.inputs.push_back(input);
   if (mode == 10)
     result.inputs.push_back(std::move(input));
+  for (const auto& declared : result.inputs) {
+    auto grids = TileGrid::members(*declared.result_schema, 1);
+    require(grids.ok(), "compiled discovery input grids rejected");
+    result.input_tile_grids.push_back(grids.take_value());
+  }
   return result;
 }
 std::shared_ptr<const CpuStorage> table(const ResourceBudget& root,

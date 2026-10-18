@@ -20,11 +20,8 @@ inline Result<ResultProgramPoll> independent_result_tile(
           ResultPublication{result.take_value(), true});
     }
   }
-  ResultProgramNeed need;
-  need.shared_stages = ResourceVector<ResultSharedNeed>(
-      ResourceAllocator<ResultSharedNeed>(phase.resources));
-  need.shared_stages.push_back(stage);
-  return Result<ResultProgramPoll>(std::move(need));
+  return Result<ResultProgramPoll>(
+      Status{ErrorCode::InvalidArgument, "compiled shared input is missing"});
 }
 // Each output has its own full-result stage. This preserves narrower axis
 // dependencies and independent arithmetic failures while sharing each values
@@ -35,6 +32,7 @@ inline OperationDefinition independent_results(OperationDefinition definition) {
   const auto prepare = definition.prepare_static;
   const auto specialize = definition.specialize_metadata;
   const auto start = definition.start_result;
+  const auto mapper = definition.map_dependencies;
   if ((!prepare && !specialize) || !start || !traits.supports_cpu ||
       traits.outputs.empty() || traits.outputs.size() > 64 ||
       traits.supports_gpu || !traits.shared_stages.empty() ||
@@ -75,6 +73,12 @@ inline OperationDefinition independent_results(OperationDefinition definition) {
       OperationSharedStage stage;
       stage.key = traits.outputs[i].key;
       stage.result_schema = *output.metadata.result_schema;
+      ResultPublicationScope complete{ResultPublicationPolicy::CompleteBundle,
+                                      {}};
+      for (std::uint32_t member = 0;
+           member < stage.result_schema.tensors.size(); ++member)
+        complete.members.push_back(member);
+      stage.result_schema.publication_scopes = {std::move(complete)};
       stage.validators = traits.outputs[i].output_schema.validators;
       stage.continuation_bytes = traits.outputs[i].continuation_bytes;
       stage.maximum_dependency_stages =
@@ -119,6 +123,17 @@ inline OperationDefinition independent_results(OperationDefinition definition) {
     output.maximum_dependency_stages = 2;
     output.output_schema.validators.clear();
   }
+  definition.map_dependencies =
+      [mapper](const ResultStaticQuery& query) -> Result<ResultStaticMapping> {
+    if (query.shared_stage != UINT32_MAX) {
+      auto routed = query;
+      routed.output_index = query.shared_stage;
+      return mapper(routed);
+    }
+    ResultStaticMapping result;
+    result.shared_stages.push_back(ResultSharedNeed{query.output_index});
+    return Result<ResultStaticMapping>(std::move(result));
+  };
   definition.start_result = [start](const ResultProgramQuery& query,
                                     const BufferAllocator& allocator) {
     if (query.shared_stage == UINT32_MAX)

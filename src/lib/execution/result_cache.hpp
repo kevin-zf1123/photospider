@@ -78,6 +78,7 @@ class ResultCache final {
     std::lock_guard<std::mutex> lock(mutex_);
     return epoch_;
   }
+  bool enabled() const noexcept { return limit_ != 0; }
   std::uint64_t dependency_metadata_limit() const noexcept {
     return dependency_metadata_limit_;
   }

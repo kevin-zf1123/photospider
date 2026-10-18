@@ -7,6 +7,7 @@
  * @note Individual headers remain supported for compile-time isolation.
  */
 
+#include "photospider/compiler/artifact.hpp"
 #include "photospider/compiler/compiler.hpp"
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/core/cancellation.hpp"

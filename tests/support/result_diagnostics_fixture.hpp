@@ -113,7 +113,8 @@ inline int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape,
            2 * sizeof(double));
   for (const auto* completed :
        {&first_result.value(), &second_result.value()}) {
-    PS_CHECK(completed->diagnostics.operation_timings.size() == 2);
+    PS_CHECK(completed->diagnostics.operation_timings.size() ==
+             1 + schema.tensors.size());
     const auto found = std::find_if(
         completed->diagnostics.operation_timings.begin(),
         completed->diagnostics.operation_timings.end(),

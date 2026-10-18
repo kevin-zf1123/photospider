@@ -167,9 +167,10 @@ struct PHOTOSPIDER_API ExecutionOptions final {
 };
 
 /**
- * @brief Raw timing and outcome for one physical operation attempt.
+ * @brief Raw timing and outcome for one continuation poll or rejected start.
  *
- * @note A GPU rejection followed by CPU fallback produces two attempt records.
+ * @note A GPU rejection is followed by separate records for the CPU polls.
+ * Successful continuation construction has no separate timing record.
  */
 struct PHOTOSPIDER_API OperationTiming final {
   /** @brief Stable source node id. */
@@ -180,8 +181,8 @@ struct PHOTOSPIDER_API OperationTiming final {
   std::uint64_t duration_us = 0;
   /** @brief Attempt outcome category. */
   ErrorCode outcome = ErrorCode::Ok;
-  /** @brief Number of attempts aggregated for this result/backend in regional
-   * execution. */
+  /** @brief Poll/start attempts represented by this record; the static VM
+   * emits one per record. Consumers may aggregate by output/backend/stage. */
   std::uint64_t invocation_count = 1;
   /** @brief Total logical output elements computed by these attempts.
    * Result publication counts newly certified tensor samples;
@@ -511,7 +512,7 @@ class PHOTOSPIDER_API ExecutionContext final {
    * schema mismatch fails TypeMismatch. Result descriptor and payload
    * validation failures use the corresponding typed status.
    * @param cancellation Cooperative cancellation observation.
-   * @param options Per-Run parallelism controls.
+   * @param options Run budgets, diagnostics and intra-operation parallelism.
    * @return Named result or typed cancellation/stale/backend/resource failure.
    * @throws std::bad_alloc If staging/result allocation fails before a
    * recoverable status can be built.
@@ -526,11 +527,11 @@ class PHOTOSPIDER_API ExecutionContext final {
    * result/digest/timing assembly, publication rechecks cancellation before
    * plan currentness under the Run mutex. Passing that last check is the sole
    * success-publication linearization point; rejected local output is
-   * discarded. Every non-side-effect-free operation is an execution root,
-   * including when it has no named output. For a tensor output, the internal
-   * actor identity uses slot zero with full coverage; other slots retain their
-   * original Need and publication checks. Failure or cancellation of a
-   * mandatory root fails this Run.
+   * discarded. The interpreter follows the Plan's tile instructions and CFG.
+   * It does not infer input mappings or construct producer tasks. Effect roots
+   * and their complete static publication closures are compiled into that
+   * instruction stream, including calls without a named output. Failure or
+   * cancellation of an executed mandatory root fails this Run.
    */
   [[nodiscard]] Result<ExecutionResult> execute(
       const ExecutionPlan& plan, ExecutionBindings bindings = {},
@@ -545,33 +546,25 @@ class PHOTOSPIDER_API ExecutionContext final {
   Result<DemandHandle> open_demand(const ExecutionPlan& plan,
                                    ExecutionBindings bindings = {},
                                    DemandConfig config = {});
-  /** @brief Executes arbitrary exact subsets against independently frozen work.
-   * @note Empty revalidates static metadata and skips Result callbacks and
-   * reads. With a positive result cache,
-   * deterministic/side-effect-free/ cacheable ancestry may reuse successful
-   * exact observations after matching the complete old source witness against
-   * current immutable bindings. Hits preserve per-output evidence under the
-   * current bundle identity. Optional cache limits do not change the
-   * observation or failure-isolation contract. CPU and native GPU callbacks use
-   * the existing context workers. Result continuations receive authorized
-   * tensor capabilities through bounded atlas/discovery services.
-   * BackendUnavailable returned by a GPU start_result may retry on CPU only
-   * when the operation supports CPU and permits fallback. This retry occurs
-   * before a continuation or Need exists and starts the original Q again;
-   * per-session limits apply to each attempt, within the shared Run work bound.
-   * Sticky callback/protocol, observer, service, resource, cancellation, or
-   * active-stop failures also block retry. Failures after continuation
-   * startup, including poll and publication failures, do not trigger CPU
-   * fallback. Fallback ancestry is excluded from completed-result, checkpoint
-   * and block reuse.
-   * Diagnostics record actual backends and rejected physical attempts.
-   * Caller must not race direct execution with context destruction.
-   * Callbacks drain before return. A nonempty Q makes every
-   * non-side-effect-free operation a mandatory root, even if its output is
-   * outside Q. A completely Empty Q skips unrelated effect roots. For a tensor
-   * output, the internal actor identity uses slot zero with full coverage;
-   * other slots retain their original Need and publication checks. Failure or
-   * cancellation of a mandatory root fails this Run.
+  /** @brief Executes exact subsets of an independently frozen static plan.
+   * @note Requests must be subsets of the Plan's compiled output selections.
+   * Specialization filters existing instructions before execution and never
+   * calls dependency mappers. Empty selections omit pure output work; saved
+   * CFG control and mandatory effect roots still execute on the chosen path.
+   * With a positive result cache, eligible pure ancestry may reuse completed
+   * values after comparing the fixed input grants against ready bindings.
+   * Hits install current-run dependency evidence. Optional cache limits do not
+   * change numerical results or failure isolation. CPU and native GPU callbacks
+   * use context workers; each instruction receives its precompiled grants.
+   * GPU BackendUnavailable may retry only when the instruction contains a
+   * compiled CPU fallback with sufficient grants. Retry requires an untainted
+   * attempt without input I/O, native work, publication, checkpoint or block
+   * activity. Protocol, observer, resource, cancellation and active-stop errors
+   * veto retry. Attempt limits share the Run budget. Fallback ancestry remains
+   * excluded from completed-result, checkpoint and block reuse.
+   * Diagnostics record actual backends and rejected attempts. Caller must not
+   * race execution with context destruction. Callbacks drain before return;
+   * failure or cancellation of an executed mandatory root fails this Run.
    */
   Result<DemandResult> execute_fragments(
       const FrozenExecution& frozen, const DemandQuery& query,

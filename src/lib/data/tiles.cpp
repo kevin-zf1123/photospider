@@ -360,6 +360,9 @@ Result<Footprint> TileGrid::coverage(const TileSet& tiles,
   }
   if (!n)
     return tiles.empty() ? result : Footprint::all(shape, limits);
+  // Canonicalize the interval decomposition once. Repeated unions make a
+  // sparse selection quadratic in the number of disjoint intervals.
+  std::vector<Region> regions;
   std::uint64_t stride = 1;
   for (auto j = n; j-- > 0;) {
     strides[j] = stride;
@@ -399,17 +402,27 @@ Result<Footprint> TileGrid::coverage(const TileSet& tiles,
             end_tile == counts[j] ? shape_[selected] : end_tile * scale;
         dimensions[selected] = {begin, end - begin};
       }
-      auto part = Footprint::from_regions(
-          shape, {Region(std::move(dimensions))}, limits);
-      if (!part.ok())
-        return part;
-      result = result.value().unite(part.value(), limits);
-      if (!result.ok())
-        return result;
+      if (regions.size() >= limits.maximum_boxes) {
+        // A stripe may normalize to fewer boxes than its interval pieces.
+        // Keep the previous bounded-union acceptance at the box limit.
+        auto batch = Footprint::from_regions(shape, regions, limits);
+        if (!batch.ok())
+          return batch;
+        auto part = Footprint::from_regions(
+            shape, {Region(std::move(dimensions))}, limits);
+        if (!part.ok())
+          return part;
+        auto combined = batch.value().unite(part.value(), limits);
+        if (!combined.ok())
+          return combined;
+        regions = combined.value().boxes();
+      } else {
+        regions.emplace_back(std::move(dimensions));
+      }
       next += run * strides[axis];
     }
   }
-  return result;
+  return Footprint::from_regions(shape, regions, limits);
 }
 Result<TileRequest> TileRequest::all(const std::vector<TileGrid>& grids,
                                      const ResourceBudget& root) {

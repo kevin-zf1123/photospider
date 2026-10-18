@@ -31,7 +31,7 @@ Result<DemandKey> demand_key(const DemandQuery& query,
                  "unknown demand output",
                  FailureReason::None,
                  {FailureOrigin::Protocol, FailureScope::Group}});
-    const auto& step = plan.steps()[found->second];
+    const auto& step = plan.output(item.first);
     const auto& allowed = plan.output_requests().at(item.first);
     if (!core_internal::can_add(item.second.interval_count(),
                                 allowed.interval_count()) ||
@@ -71,7 +71,7 @@ Result<DemandKey> demand_key(const DemandQuery& query,
       DemandKey{hash.finish(), entries, lease.take_value()});
 }
 Result<Footprint> demand_samples(const TileRequest& requested,
-                                 const PlanStep& step, std::uint32_t slot,
+                                 const PlanOutput& step, std::uint32_t slot,
                                  const FootprintLimits& limits) {
   auto normalized = requested.resolve(step.tile_grids);
   if (!normalized.ok())

@@ -218,8 +218,7 @@ FixturePoll publish_backing(const ps::ResultProgramPhase& phase,
       phase.query.output.result_schema->tensors[0].sample_shape();
   auto builder = multi_result::take(ps::ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {},
-      phase.query.tile_extent));
+      phase.query.semantic_key, {}, phase.query.tile_extent));
   const auto output_samples = fixture_outputs(phase);
   for (const auto& region : output_samples.boxes()) {
     multi_result::check(builder.publish_tensor(
@@ -639,68 +638,14 @@ enum class ExternalStopKind : std::uint8_t {
 };
 
 /**
- * @brief Holds one CPU worker and one target GPU callback while the scheduler
- * faults external-stop Status construction and queues a CPU FIFO sentinel.
+ * @brief Holds an active GPU callback while an independent CPU Run progresses.
  *
- * @note A first-wave hook pauses the driver outside backend pool locks. CPU
- * factories precede the separate occupant; the next computation wave keeps
- * both target callbacks admitted in one Run while the sentinel proves CPU
- * retirement before the held GPU callback is released.
+ * @note The static VM executes one Plan instruction at a time. This gate
+ * observes callback ownership across Runs without assuming a scheduling wave
+ * or concurrent instructions inside one Run.
  */
 class ExternalStopRaceController final {
  public:
-  void register_driver() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    driver_ = std::this_thread::get_id();
-  }
-  void hold_factory_wave() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    if (driver_ != std::this_thread::get_id() || factory_wave_entered_)
-      return;
-    factory_wave_entered_ = true;
-    changed_.notify_all();
-    changed_.wait(lock, [this] { return factory_wave_released_; });
-  }
-  bool wait_until_factory_wave(std::chrono::milliseconds timeout) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, timeout,
-                             [this] { return factory_wave_entered_; });
-  }
-  void release_factory_wave() {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      factory_wave_released_ = true;
-    }
-    changed_.notify_all();
-  }
-
-  /**
-   * @brief Holds the separate CPU-worker occupant until explicitly released.
-   * @return No value.
-   * @throws std::system_error If test synchronization fails.
-   * @note Occupying the sole CPU worker prevents the target Run's CPU callback
-   * from racing its scheduler thread after submission.
-   */
-  void hold_cpu_operation() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cpu_active_ = true;
-    changed_.notify_all();
-    changed_.wait(lock, [this] { return cpu_released_; });
-    cpu_active_ = false;
-    changed_.notify_all();
-  }
-
-  /**
-   * @brief Waits until the separate CPU-worker occupant is active.
-   * @param timeout Maximum bounded wait.
-   * @return True when the CPU callback entered before the deadline.
-   * @throws std::system_error If test synchronization fails.
-   */
-  bool wait_until_cpu_active(std::chrono::milliseconds timeout) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, timeout, [this] { return cpu_active_; });
-  }
-
   /**
    * @brief Holds one entered GPU operation until the test releases it.
    * @return No value.
@@ -716,124 +661,18 @@ class ExternalStopRaceController final {
   }
 
   /**
-   * @brief Records target and successor-sentinel CPU FIFO admission in order.
-   * @param backend Exact backend queue that accepted one callback.
-   * @return No value.
-   * @throws std::system_error If test synchronization fails.
-   * @note The sole CPU worker remains occupied while both notifications occur,
-   * so the first CPU callback is the target and the second is its sentinel.
-   */
-  void observe_callback_queued(ps::Backend backend) {
-    if (backend != ps::Backend::Cpu) {
-      return;
-    }
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!factory_wave_released_)
-        return;
-      if (!target_cpu_queued_) {
-        target_cpu_queued_ = true;
-      } else {
-        sentinel_cpu_queued_ = true;
-      }
-    }
-    changed_.notify_all();
-  }
-
-  /**
-   * @brief Waits until the target Run's CPU callback enters the shared FIFO.
+   * @brief Waits until the target GPU callback owns its invocation.
    * @param timeout Maximum bounded wait.
-   * @return True when target admission was observed before the deadline.
+   * @return True when callback entry was observed before the deadline.
    * @throws std::system_error If test synchronization fails.
    */
-  bool wait_until_target_cpu_queued(std::chrono::milliseconds timeout) {
+  bool wait_until_gpu_active(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, timeout,
-                             [this] { return target_cpu_queued_; });
+    return changed_.wait_for(lock, timeout, [this] { return gpu_active_; });
   }
 
   /**
-   * @brief Waits until a successor callback is queued behind the target.
-   * @param timeout Maximum bounded wait.
-   * @return True when sentinel admission was observed before the deadline.
-   * @throws std::system_error If test synchronization fails.
-   */
-  bool wait_until_sentinel_cpu_queued(std::chrono::milliseconds timeout) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, timeout,
-                             [this] { return sentinel_cpu_queued_; });
-  }
-
-  /**
-   * @brief Waits until the GPU callback is active and CPU computation is
-   * queued.
-   * @param timeout Maximum bounded wait.
-   * @return True only when both ordering boundaries were observed.
-   * @throws std::system_error If test synchronization fails.
-   */
-  bool wait_until_race_window(std::chrono::milliseconds timeout) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, timeout, [this] {
-      return cpu_active_ && gpu_active_ && target_cpu_queued_;
-    });
-  }
-
-  /**
-   * @brief Arms the exact external-stop construction fault.
-   * @return No value.
-   * @throws std::system_error If test synchronization fails.
-   */
-  void arm_status_construction_failure() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    status_failure_armed_ = true;
-  }
-
-  /**
-   * @brief Selects the one external-stop construction failure.
-   * @param point Exact protected construction boundary under observation.
-   * @return True once for an armed ExternalStop observation.
-   * @throws std::system_error If test synchronization fails.
-   */
-  bool fail_status_construction(
-      ps::execution_testing::FailureStatusConstructionPoint point) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (point != ps::execution_testing::FailureStatusConstructionPoint::
-                     ExternalStop ||
-        !status_failure_armed_ || status_failure_observed_) {
-      return false;
-    }
-    status_failure_observed_ = true;
-    changed_.notify_all();
-    return true;
-  }
-
-  /**
-   * @brief Allows the separate CPU-worker occupant to return.
-   * @return No value.
-   * @throws std::system_error If test synchronization fails.
-   */
-  void release_cpu_operation() {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      cpu_released_ = true;
-    }
-    changed_.notify_all();
-  }
-
-  /**
-   * @brief Waits for the exact construction-fault hook to be consumed.
-   * @param timeout Maximum bounded wait.
-   * @return True when external-stop construction was faulted.
-   * @throws std::system_error If test synchronization fails.
-   */
-  bool wait_until_status_failure(std::chrono::milliseconds timeout) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, timeout,
-                             [this] { return status_failure_observed_; });
-  }
-
-  /**
-   * @brief Allows the active GPU operation to return.
+   * @brief Allows the active GPU operation and later recovery calls to return.
    * @return No value.
    * @throws std::system_error If test synchronization fails.
    */
@@ -856,28 +695,14 @@ class ExternalStopRaceController final {
   }
 
  private:
-  std::thread::id driver_;
-  bool factory_wave_entered_ = false, factory_wave_released_ = false;
-  /** @brief Serializes every deterministic race observation. */
+  /** @brief Serializes callback ownership observations. */
   mutable std::mutex mutex_;
-  /** @brief Wakes test, submitter, and held GPU callback. */
+  /** @brief Wakes the test and held GPU callback. */
   std::condition_variable changed_;
   /** @brief Whether the GPU operation currently owns its callback. */
   bool gpu_active_ = false;
   /** @brief Whether the test released the GPU operation. */
   bool gpu_released_ = false;
-  /** @brief Whether the separate CPU-worker occupant is active. */
-  bool cpu_active_ = false;
-  /** @brief Whether the test released the CPU-worker occupant. */
-  bool cpu_released_ = false;
-  /** @brief Whether the target CPU callback entered the shared FIFO. */
-  bool target_cpu_queued_ = false;
-  /** @brief Whether the CPU sentinel entered the FIFO after the target. */
-  bool sentinel_cpu_queued_ = false;
-  /** @brief Whether external-stop construction failure is armed. */
-  bool status_failure_armed_ = false;
-  /** @brief Whether the one external-stop fault was consumed. */
-  bool status_failure_observed_ = false;
 };
 
 /**
@@ -1109,9 +934,6 @@ QueueAdmissionGate* g_queue_admission_gate = nullptr;
 /** @brief Borrowed active scheduler-failure controller for one scoped test. */
 SchedulerFailureController* g_scheduler_failure_controller = nullptr;
 
-/** @brief Borrowed external-stop controller for one scoped regression. */
-ExternalStopRaceController* g_external_stop_race_controller = nullptr;
-
 /** @brief Borrowed final-result gate for one scoped execution test. */
 FinalResultReadyGate* g_final_result_ready_gate = nullptr;
 
@@ -1123,13 +945,9 @@ QueuedAttemptAdmissionGate* g_queued_attempt_admission_gate = nullptr;
  * @param backend Exact lane whose queue accepted a callback.
  * @return No value.
  * @throws std::system_error If test synchronization fails; the hook fences it.
- * @note The external-stop observer records FIFO order without blocking; the
- * queue-admission gate may deliberately hold the backend pool mutex.
+ * @note The queue-admission gate may deliberately hold the backend pool mutex.
  */
 void hold_queued_callback(ps::Backend backend) {
-  if (g_external_stop_race_controller) {
-    g_external_stop_race_controller->observe_callback_queued(backend);
-  }
   if (g_queue_admission_gate) {
     g_queue_admission_gate->hold(backend);
   }
@@ -1171,9 +989,6 @@ ps::execution_testing::CallbackSubmitAction select_callback_submit_action(
  */
 bool fail_failure_status_construction(
     ps::execution_testing::FailureStatusConstructionPoint point) {
-  if (g_external_stop_race_controller) {
-    return g_external_stop_race_controller->fail_status_construction(point);
-  }
   return g_scheduler_failure_controller &&
          g_scheduler_failure_controller->fail_status_construction(point);
 }
@@ -1199,8 +1014,6 @@ void hold_final_result_ready() noexcept {
  */
 void hold_post_submit_observation() noexcept {
   try {
-    if (g_external_stop_race_controller)
-      g_external_stop_race_controller->hold_factory_wave();
     if (g_queued_attempt_admission_gate) {
       g_queued_attempt_admission_gate->hold_post_submit_observation();
     }
@@ -1332,13 +1145,20 @@ int result_dso_contracts(bool require_gpu) {
     PS_CHECK(multi_result::number(result.value().results.at("value")) == 12);
     const auto& diagnostics = result.value().diagnostics;
     PS_CHECK(diagnostics.fallback_reasons.size() == 1);
-    PS_CHECK(diagnostics.operation_timings.size() == 2);
+    PS_CHECK(diagnostics.operation_timings.size() == 3);
     PS_CHECK(diagnostics.operation_timings[0].output.node_id == 2);
     PS_CHECK(diagnostics.operation_timings[0].backend == Backend::Gpu);
     PS_CHECK(diagnostics.operation_timings[0].outcome ==
              ErrorCode::BackendUnavailable);
     PS_CHECK(diagnostics.operation_timings[1].backend == Backend::Cpu);
     PS_CHECK(diagnostics.operation_timings[1].outcome == ErrorCode::Ok);
+    PS_CHECK(diagnostics.operation_timings[1].computed_elements == 0);
+    PS_CHECK(diagnostics.operation_timings[2].output.node_id == 2 &&
+             diagnostics.operation_timings[2].backend == Backend::Cpu &&
+             diagnostics.operation_timings[2].outcome == ErrorCode::Ok &&
+             diagnostics.operation_timings[2].computed_elements == 1);
+    for (const auto& timing : diagnostics.operation_timings)
+      PS_CHECK(timing.invocation_count == 1);
     PS_CHECK(diagnostics.selected_backends.at({2, 0}) == Backend::Cpu);
     PS_CHECK(observer.counter("ps_operation_fixture_gpu_invocation_count",
                               kFixtureGpuBackendUnavailable) == gpu_before + 1);
@@ -1639,10 +1459,20 @@ int main(int argc, char** argv) {
            1.0);
   PS_CHECK(ps::test::named_scalar(second_effect_result.value(), "effect") ==
            2.0);
-  PS_CHECK(first_effect_result.value().diagnostics.operation_timings.size() ==
-           4U);
-  PS_CHECK(second_effect_result.value().diagnostics.operation_timings.size() ==
-           4U);
+  for (const auto* result :
+       {&first_effect_result.value(), &second_effect_result.value()}) {
+    std::array<std::array<std::uint64_t, 2>, 2> invocations{};
+    for (const auto& timing : result->diagnostics.operation_timings) {
+      PS_CHECK(timing.output.node_id >= 1 && timing.output.node_id <= 2 &&
+               timing.backend == Backend::Cpu &&
+               timing.outcome == ErrorCode::Ok &&
+               (timing.shared_stage == 0 || timing.shared_stage == UINT32_MAX));
+      invocations[timing.output.node_id - 1]
+                 [timing.shared_stage == UINT32_MAX] += timing.invocation_count;
+    }
+    PS_CHECK(invocations[0][0] == 1 && invocations[0][1] == 1 &&
+             invocations[1][0] == 2 && invocations[1][1] == 1);
+  }
   PS_CHECK(
       std::string_view(first_effect_result.value().diagnostics.plan_digest) ==
       effect_workflow.plan.digest().value);
@@ -2217,17 +2047,8 @@ int main(int argc, char** argv) {
   for (const ExternalStopKind stop_kind :
        {ExternalStopKind::Cancellation, ExternalStopKind::Stale}) {
     ExternalStopRaceController external_stop_control;
+    std::atomic<std::uint32_t> external_cpu_calls{0};
     auto external_stop_operations = std::make_shared<OperationRegistry>();
-    OperationTraits cpu_occupant_traits;
-    PS_CHECK(external_stop_operations
-                 ->register_operation(fixture_operation(
-                     "test.external_stop_cpu_occupant", cpu_occupant_traits,
-                     [&external_stop_control](
-                         const ResultProgramPhase& invocation) -> FixturePoll {
-                       external_stop_control.hold_cpu_operation();
-                       return publish_number(invocation, 3.0);
-                     }))
-                 .ok());
     OperationTraits external_gpu_traits;
     external_gpu_traits.supports_gpu = true;
     PS_CHECK(external_stop_operations
@@ -2243,12 +2064,14 @@ int main(int argc, char** argv) {
         external_stop_operations
             ->register_operation(fixture_operation(
                 "test.external_stop_cpu", external_cpu_traits,
-                [](const ResultProgramPhase& invocation) -> FixturePoll {
+                [&external_cpu_calls](
+                    const ResultProgramPhase& invocation) -> FixturePoll {
                   if (invocation.query.backend != Backend::Cpu) {
                     return FixturePoll(ps::Status::failure(
                         ErrorCode::Internal,
                         "external-stop CPU operation ran on the wrong lane"));
                   }
+                  ++external_cpu_calls;
                   return publish_number(invocation, 11.0);
                 }))
             .ok());
@@ -2257,10 +2080,6 @@ int main(int argc, char** argv) {
     Compiler external_stop_compiler(external_stop_operations);
     ExecutionContext external_stop_execution(
         external_stop_operations, ExecutionContextConfig{1U, true, 8U, 65536U});
-    GraphContext cpu_occupant_graph(
-        single_operation_document("test.external_stop_cpu_occupant"));
-    CompiledWorkflow cpu_occupant_workflow =
-        compile_or_throw(&external_stop_compiler, cpu_occupant_graph);
     GraphContext cpu_sentinel_graph(
         single_operation_document("test.external_stop_cpu"));
     CompiledWorkflow cpu_sentinel_workflow =
@@ -2273,69 +2092,54 @@ int main(int argc, char** argv) {
     PS_CHECK(external_stop_workflow.plan.steps()[1U].backend == Backend::Cpu);
 
     CancellationSource external_stop_cancellation;
-    g_external_stop_race_controller = &external_stop_control;
-    ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
     auto external_stop_future = std::async(std::launch::async, [&] {
-      external_stop_control.register_driver();
       return external_stop_execution.execute(external_stop_workflow.plan, {},
                                              external_stop_cancellation.token(),
                                              ExecutionOptions{2U});
     });
-    // Factories run on the CPU bootstrap lane. Admit them before occupying
-    // its only worker, then retain both computation callbacks in this Run.
-    const bool factory_wave =
-        external_stop_control.wait_until_factory_wave(std::chrono::seconds(2));
-    auto cpu_occupant_future = std::async(std::launch::async, [&] {
-      return external_stop_execution.execute(cpu_occupant_workflow.plan);
-    });
-    const bool cpu_occupant_active =
-        external_stop_control.wait_until_cpu_active(std::chrono::seconds(2));
-    external_stop_control.release_factory_wave();
-    const bool race_window =
-        external_stop_control.wait_until_race_window(std::chrono::seconds(2));
-    external_stop_control.arm_status_construction_failure();
+    const bool gpu_entered =
+        external_stop_control.wait_until_gpu_active(std::chrono::seconds(2));
+    const auto cpu_calls_before_sentinel = external_cpu_calls.load();
     const bool stop_requested =
         stop_kind == ExternalStopKind::Cancellation
             ? external_stop_cancellation.cancel()
             : external_stop_graph.replace(external_stop_document()) != 0U;
-    const bool target_cpu_queued =
-        external_stop_control.wait_until_target_cpu_queued(
-            std::chrono::seconds(2));
-    const bool status_failure_observed =
-        external_stop_control.wait_until_status_failure(
-            std::chrono::seconds(2));
     auto cpu_sentinel_future = std::async(std::launch::async, [&] {
       return external_stop_execution.execute(cpu_sentinel_workflow.plan);
     });
-    const bool sentinel_cpu_queued =
-        external_stop_control.wait_until_sentinel_cpu_queued(
-            std::chrono::seconds(2));
-    external_stop_control.release_cpu_operation();
-    auto cpu_occupant_result = cpu_occupant_future.get();
-    auto cpu_sentinel_result = cpu_sentinel_future.get();
+    const bool cpu_completed_before_gpu_release =
+        cpu_sentinel_future.wait_for(std::chrono::seconds(2)) ==
+        std::future_status::ready;
+    const auto cpu_calls_after_sentinel = external_cpu_calls.load();
     const bool gpu_still_active = external_stop_control.gpu_active();
     const std::future_status completion_after_cpu_retirement =
         external_stop_future.wait_for(std::chrono::milliseconds(0));
+    // Release before checking observations or getting futures: a regression
+    // must fail the test without leaving an owned callback permanently held.
     external_stop_control.release_gpu_operation();
     bool external_stop_exception_escaped = false;
+    bool cpu_sentinel_exception_escaped = false;
     std::optional<Result<ExecutionResult>> external_stop_result;
+    std::optional<Result<ExecutionResult>> cpu_sentinel_result;
     try {
       external_stop_result.emplace(external_stop_future.get());
     } catch (...) {
       external_stop_exception_escaped = true;
     }
-    ps::execution_testing::install_execution_test_hooks(nullptr);
-    g_external_stop_race_controller = nullptr;
+    try {
+      cpu_sentinel_result.emplace(cpu_sentinel_future.get());
+    } catch (...) {
+      cpu_sentinel_exception_escaped = true;
+    }
 
-    PS_CHECK(factory_wave);
-    PS_CHECK(cpu_occupant_active);
-    PS_CHECK(race_window);
+    PS_CHECK(gpu_entered);
     PS_CHECK(stop_requested);
-    PS_CHECK(target_cpu_queued);
-    PS_CHECK(status_failure_observed);
-    PS_CHECK(sentinel_cpu_queued);
-    PS_CHECK(cpu_sentinel_result.ok());
-    PS_CHECK(ps::test::named_scalar(cpu_sentinel_result.value(), "value") ==
+    PS_CHECK(cpu_completed_before_gpu_release);
+    PS_CHECK(cpu_calls_after_sentinel == cpu_calls_before_sentinel + 1);
+    PS_CHECK(!cpu_sentinel_exception_escaped);
+    PS_CHECK(cpu_sentinel_result.has_value());
+    PS_CHECK(cpu_sentinel_result->ok());
+    PS_CHECK(ps::test::named_scalar(cpu_sentinel_result->value(), "value") ==
              11.0);
     PS_CHECK(gpu_still_active);
     PS_CHECK(completion_after_cpu_retirement == std::future_status::timeout);
@@ -2345,8 +2149,6 @@ int main(int argc, char** argv) {
     PS_CHECK(external_stop_result->status().code ==
              (stop_kind == ExternalStopKind::Cancellation ? ErrorCode::Cancelled
                                                           : ErrorCode::Stale));
-    PS_CHECK(external_stop_result->status().message.empty());
-    PS_CHECK(cpu_occupant_result.ok());
     PS_CHECK(!external_stop_control.gpu_active());
 
     CompiledWorkflow healthy_external_stop_workflow =
@@ -2415,7 +2217,19 @@ int main(int argc, char** argv) {
   PS_CHECK(fallback_result.ok());
   PS_CHECK(ps::test::named_scalar(fallback_result.value(), "value") == 9.0);
   PS_CHECK(fallback_result.value().diagnostics.fallback_reasons.size() == 1U);
-  PS_CHECK(fallback_result.value().diagnostics.operation_timings.size() == 3U);
+  // Source publication, rejected GPU start, CPU Need, CPU publication.
+  const auto& fallback_timings =
+      fallback_result.value().diagnostics.operation_timings;
+  PS_CHECK(fallback_timings.size() == 4U);
+  for (std::size_t i = 0; i < fallback_timings.size(); ++i) {
+    const auto& timing = fallback_timings[i];
+    PS_CHECK(timing.output.node_id == (i == 0 ? 1U : 2U));
+    PS_CHECK(timing.backend == (i == 1 ? Backend::Gpu : Backend::Cpu));
+    PS_CHECK(timing.outcome ==
+             (i == 1 ? ErrorCode::BackendUnavailable : ErrorCode::Ok));
+    PS_CHECK(timing.invocation_count == 1);
+    PS_CHECK(timing.computed_elements == (i == 0 || i == 3 ? 1U : 0U));
+  }
   PS_CHECK(fallback_result.value().diagnostics.transfer_count == 0U);
   PS_CHECK(fallback_result.value().diagnostics.transfer_bytes == 0U);
   PS_CHECK(fallback_result.value().diagnostics.selected_backends.at({2U, 0}) ==

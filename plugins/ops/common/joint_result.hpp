@@ -21,11 +21,8 @@ inline Result<ResultProgramPoll> joint_result_tile(
           ResultPublication{result.take_value(), true});
     }
   }
-  ResultProgramNeed need;
-  need.shared_stages = ResourceVector<ResultSharedNeed>(
-      ResourceAllocator<ResultSharedNeed>(phase.resources));
-  need.shared_stages.push_back(0);
-  return Result<ResultProgramPoll>(std::move(need));
+  return Result<ResultProgramPoll>(
+      Status{ErrorCode::InvalidArgument, "compiled shared input is missing"});
 }
 // Joint numeric algorithms explicitly compute one member for each public
 // output. All outputs must have the same potential input projection. Algorithms
@@ -35,6 +32,7 @@ inline OperationDefinition joint_result(OperationDefinition definition) {
   const auto traits = definition.traits;
   const auto specialize = definition.specialize_metadata;
   const auto start = definition.start_result;
+  const auto mapper = definition.map_dependencies;
   if (traits.outputs.empty() || traits.outputs.size() > 16 || !specialize ||
       definition.prepare_static || !start || !traits.supports_cpu ||
       traits.supports_gpu || !traits.shared_stages.empty() ||
@@ -103,6 +101,12 @@ inline OperationDefinition joint_result(OperationDefinition definition) {
       stage.maximum_output_payload_bytes += count.value() * width;
       stage.result_schema.tensors.push_back(std::move(tensor));
     }
+    ResultPublicationScope complete{ResultPublicationPolicy::CompleteBundle,
+                                    {}};
+    for (std::uint32_t member = 0; member < stage.result_schema.tensors.size();
+         ++member)
+      complete.members.push_back(member);
+    stage.result_schema.publication_scopes = {std::move(complete)};
     prepared.shared_stages =
         std::vector<OperationSharedStage>{std::move(stage)};
     return Result<OperationPreparation>(std::move(prepared));
@@ -112,6 +116,15 @@ inline OperationDefinition joint_result(OperationDefinition definition) {
     output.continuation_bytes = 1;
     output.maximum_dependency_stages = 2;
   }
+  definition.map_dependencies =
+      [mapper](const ResultStaticQuery& query) -> Result<ResultStaticMapping> {
+    if (query.shared_stage != UINT32_MAX) {
+      return mapper(query);
+    }
+    ResultStaticMapping result;
+    result.shared_stages.push_back(ResultSharedNeed{0});
+    return Result<ResultStaticMapping>(std::move(result));
+  };
   definition.start_result = [start](const ResultProgramQuery& query,
                                     const BufferAllocator& allocator) {
     if (query.shared_stage != UINT32_MAX)

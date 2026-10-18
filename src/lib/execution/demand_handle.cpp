@@ -168,7 +168,7 @@ Result<DemandQuery> normalize_tile_demands(const DemandQuery& query,
     if (found == plan.outputs().end())
       return Result<DemandQuery>(
           Status{ErrorCode::InvalidArgument, "unknown demand output"});
-    const auto& step = plan.steps()[found->second];
+    const auto& step = plan.output(item.first);
     auto closed = item.second.resolve(step.tile_grids);
     if (!closed.ok())
       return Result<DemandQuery>(closed.status());
@@ -193,7 +193,8 @@ Status unite_named(std::map<std::string, TileRequest>* target,
   }
   return Status::success();
 }
-Result<TileRequest> query_units(const TileRequest& query, const PlanStep& step,
+Result<TileRequest> query_units(const TileRequest& query,
+                                const PlanOutput& step,
                                 const ResourceBudget& root,
                                 std::uint64_t maximum) {
   auto normalized = query.resolve(step.tile_grids);
@@ -213,12 +214,10 @@ Result<std::shared_ptr<const TileRecords>> retained_records(
   TileRecord roots(root);
   for (const auto& item : publications) {
     for (const auto& named : item.second->query) {
-      const auto index = plan.outputs().at(named.first);
+      const auto index = plan.output(named.first).record_index;
       for (const auto& member : named.second.members) {
         auto status = roots.include(
-            {PlanStepInput{index}, plan.steps()[index].output_index,
-             member.first, member.second},
-            root);
+            {PlanStepInput{index}, 0, member.first, member.second}, root);
         if (!status.ok())
           return Result<std::shared_ptr<const TileRecords>>(status);
       }
@@ -229,8 +228,14 @@ Result<std::shared_ptr<const TileRecords>> retained_records(
       [&](const PlanStepInput& input, std::uint32_t output,
           std::uint32_t slot) {
         using Answer = Result<TileRecords::ProducerUnits>;
-        if (input.step_index >= plan.steps().size())
-          return Answer(Status{ErrorCode::InvalidArgument, {}});
+        if (input.step_index >= plan.steps().size()) {
+          const auto index = input.step_index - plan.steps().size();
+          if (index >= plan.return_signature().size() || output != 0 ||
+              slot >= plan.return_signature()[index].tile_grids.size())
+            return Answer(Status{ErrorCode::InvalidArgument, {}});
+          return Answer(TileRecords::ProducerUnits{
+              plan.return_signature()[index].tile_grids[slot].tile_count()});
+        }
         const auto& step = plan.steps()[input.step_index];
         if (output != step.output_index || slot >= step.tile_grids.size())
           return Answer(Status{ErrorCode::InvalidArgument, {}});
@@ -405,14 +410,12 @@ Result<DemandResult> DemandHandle::request(
     auto copied = std::allocate_shared<Impl::Publication>(
         ResourceAllocator<Impl::Publication>(root), *item.second);
     for (auto& named : copied->dirty) {
-      const auto index = lease->bundle->plan().outputs().at(named.first);
+      const auto index = lease->bundle->plan().output(named.first).record_index;
       TileRequest remaining_request;
       for (const auto& member : named.second.members) {
         ResourceVector<TileIndex> remaining{ResourceAllocator<TileIndex>(root)};
         for (auto tile : member.second) {
-          const TileUnit unit{index,
-                              lease->bundle->plan().steps()[index].output_index,
-                              member.first, tile};
+          const TileUnit unit{index, 0, member.first, tile};
           auto fresh = result.dependencies.tile_record(unit);
           if (!fresh.ok())
             return failure(fresh.status());
@@ -620,8 +623,8 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
         ResourceAllocator<Impl::Publication>(*root), *item.second);
     std::map<std::string, TileRequest> coverage;
     for (const auto& named : publication->query) {
-      const auto index = next->plan().outputs().at(named.first);
-      const auto& step = next->plan().steps()[index];
+      const auto& step = next->plan().output(named.first);
+      const auto index = step.record_index;
       auto units = query_units(named.second, step, *root,
                                impl_->config.maximum_metadata_entries);
       if (!units.ok())
@@ -633,7 +636,7 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
           auto work = root->consume({1});
           if (!work.ok())
             return failure(work);
-          if (unit.step == index && unit.output == step.output_index &&
+          if (unit.step == index && unit.output == 0 &&
               unit.tensor_slot == member.first &&
               member.second.contains(unit.tile))
             selected.push_back(unit.tile);

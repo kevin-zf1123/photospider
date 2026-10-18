@@ -11,7 +11,7 @@
 
 namespace ps::plugin_internal::result_c {
 Result<std::vector<ExtensionIdentity>> extension_ids(
-    const ps_result_extension_identity_v6* values, uint32_t count) {
+    const ps_result_extension_identity_v7* values, uint32_t count) {
   using Answer = Result<std::vector<ExtensionIdentity>>;
   if (!array(values, count, 64))
     return Answer(invalid("invalid extension identity array"));
@@ -30,12 +30,12 @@ Result<std::vector<ExtensionIdentity>> extension_ids(
   }
   return Answer(std::move(result));
 }
-ResourceVector<ps_result_resource_view_v6> resource_views(
+ResourceVector<ps_result_resource_view_v7> resource_views(
     const ResourceSet& source) {
-  ResourceVector<ps_result_resource_view_v6> result;
+  ResourceVector<ps_result_resource_view_v7> result;
   for (size_t i = 0; i < source.size(); ++i) {
     const auto resource = source.at(i).take_value();
-    ps_result_resource_view_v6 view{};
+    ps_result_resource_view_v7 view{};
     view.identity.byte_length = resource.identity().byte_length;
     std::copy(resource.identity().sha256.begin(),
               resource.identity().sha256.end(), view.identity.sha256);
@@ -86,7 +86,7 @@ struct ValidationBridge {
   static int cancelled(void* raw) {
     return static_cast<ValidationBridge*>(raw)->source.cancellation.cancelled();
   }
-  static int regions(void* raw, uint32_t slot, ps_result_region_v6* regions,
+  static int regions(void* raw, uint32_t slot, ps_result_region_v7* regions,
                      uint32_t capacity, uint32_t* count) {
     return call(raw, [&](const auto& s) {
       if (!array(count, 1, 1) || !array(regions, capacity, 65536))
@@ -116,7 +116,7 @@ struct ValidationBridge {
     });
   }
 
-  static int tensor(void* raw, uint32_t slot, const ps_result_region_v6* input,
+  static int tensor(void* raw, uint32_t slot, const ps_result_region_v7* input,
                     uint8_t* output, uint32_t bytes) {
     return call(raw, [&](const auto& s) {
       if (!array(input, 1, 1) || input->struct_size != sizeof(*input) ||
@@ -158,7 +158,7 @@ struct ValidationBridge {
 };
 struct PreparedState {
   std::shared_ptr<void> library;
-  ps_result_validation_definition_v6 api;
+  ps_result_validation_definition_v7 api;
   void* state = nullptr;
   ~PreparedState() noexcept {
     if (state) {
@@ -172,7 +172,7 @@ struct PreparedState {
 };
 }  // namespace
 Result<ValidationDefinition> validation_definition(
-    const ps_result_validation_definition_v6& api,
+    const ps_result_validation_definition_v7& api,
     std::shared_ptr<void> library) {
   using Answer = Result<ValidationDefinition>;
   if (api.struct_size != sizeof(api))
@@ -201,7 +201,7 @@ Result<ValidationDefinition> validation_definition(
       return StateAnswer(schema.status);
     auto parameters = parameters_view(source.parameters);
     auto resources = resource_views(source.resources);
-    ps_result_validation_preparation_v6 view{
+    ps_result_validation_preparation_v7 view{
         sizeof(view),
         source.output,
         source.port,
@@ -224,7 +224,7 @@ Result<ValidationDefinition> validation_definition(
       if (!schema.status.ok())
         return schema.status;
       ValidationBridge bridge(source);
-      ps_result_validation_context_v6 view{sizeof(view),
+      ps_result_validation_context_v7 view{sizeof(view),
                                            source.complete,
                                            schema.ports[0].schema,
                                            &bridge,
@@ -245,7 +245,7 @@ Result<ValidationDefinition> validation_definition(
   return Answer(std::move(result));
 }
 Result<DiagnosticDefinition> diagnostic_definition(
-    const ps_result_diagnostic_definition_v6& api,
+    const ps_result_diagnostic_definition_v7& api,
     std::shared_ptr<void> library) {
   using Answer = Result<DiagnosticDefinition>;
   if (api.struct_size != sizeof(api))

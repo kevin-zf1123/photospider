@@ -22,13 +22,13 @@ using result_c::prepare_metadata;
 using result_c::start_c_member;
 using result_c::text;
 Result<ImportedResultPlugin> import_result_plugin(
-    const ps_result_operation_plugin_api_v6* api,
+    const ps_result_operation_plugin_api_v7* api,
     std::shared_ptr<void> library) {
   if (!api ||
       reinterpret_cast<std::uintptr_t>(api) %
-          alignof(ps_result_operation_plugin_api_v6) ||
+          alignof(ps_result_operation_plugin_api_v7) ||
       api->struct_size != sizeof(*api) ||
-      api->abi_version != PS_RESULT_OPERATION_ABI_VERSION_6 ||
+      api->abi_version != PS_RESULT_OPERATION_ABI_VERSION_7 ||
       !array(api->operations, api->operation_count, 1024) ||
       !api->operation_count || !api->destroy)
     return Result<ImportedResultPlugin>(invalid("invalid Result ABI table"));
@@ -67,10 +67,10 @@ Result<ImportedResultPlugin> import_result_plugin(
         !op.maximum_stages || op.maximum_stages > 1048576 ||
         op.cpu_staged_tiles > 1 ||
         (op.flags &
-         ~(PS_RESULT_FLAG_DETERMINISTIC_V6 |
-           PS_RESULT_FLAG_SIDE_EFFECT_FREE_V6 | PS_RESULT_FLAG_CPU_V6 |
-           PS_RESULT_FLAG_GPU_V6 | PS_RESULT_FLAG_CPU_FALLBACK_V6 |
-           PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V6)))
+         ~(PS_RESULT_FLAG_DETERMINISTIC_V7 |
+           PS_RESULT_FLAG_SIDE_EFFECT_FREE_V7 | PS_RESULT_FLAG_CPU_V7 |
+           PS_RESULT_FLAG_GPU_V7 | PS_RESULT_FLAG_CPU_FALLBACK_V7 |
+           PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V7)))
       return Result<ImportedResultPlugin>(
           invalid("invalid Result operation table"));
     auto key = text(op.key, op.key_size);
@@ -88,16 +88,16 @@ Result<ImportedResultPlugin> import_result_plugin(
     traits.repeated_minimum = op.repeated_minimum;
     traits.repeated_maximum = op.repeated_maximum;
     traits.repeated_match = !op.repeated_maximum || op.repeated_match != 0;
-    traits.supports_cpu = (op.flags & PS_RESULT_FLAG_CPU_V6) != 0;
-    traits.supports_gpu = (op.flags & PS_RESULT_FLAG_GPU_V6) != 0;
+    traits.supports_cpu = (op.flags & PS_RESULT_FLAG_CPU_V7) != 0;
+    traits.supports_gpu = (op.flags & PS_RESULT_FLAG_GPU_V7) != 0;
     traits.allows_cpu_fallback =
-        (op.flags & PS_RESULT_FLAG_CPU_FALLBACK_V6) != 0;
-    traits.deterministic = (op.flags & PS_RESULT_FLAG_DETERMINISTIC_V6) != 0;
+        (op.flags & PS_RESULT_FLAG_CPU_FALLBACK_V7) != 0;
+    traits.deterministic = (op.flags & PS_RESULT_FLAG_DETERMINISTIC_V7) != 0;
     traits.side_effect_free =
-        (op.flags & PS_RESULT_FLAG_SIDE_EFFECT_FREE_V6) != 0;
+        (op.flags & PS_RESULT_FLAG_SIDE_EFFECT_FREE_V7) != 0;
     traits.cacheable = traits.deterministic && traits.side_effect_free;
     traits.share_blocks_across_outputs =
-        (op.flags & PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V6) != 0;
+        (op.flags & PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V7) != 0;
     traits.cpu_staged_tiles = op.cpu_staged_tiles != 0;
     traits.workspace_bytes = op.workspace_bytes;
     traits.input_schema.clear();
@@ -123,8 +123,8 @@ Result<ImportedResultPlugin> import_result_plugin(
     for (std::uint32_t output = 0; output < op.output_count; ++output) {
       const auto& declared = op.outputs[output];
       if (declared.struct_size != sizeof(declared) ||
-          (declared.flags & ~(PS_RESULT_OUTPUT_PAYLOAD_BOUND_V6)) ||
-          (!(declared.flags & PS_RESULT_OUTPUT_PAYLOAD_BOUND_V6) &&
+          (declared.flags & ~(PS_RESULT_OUTPUT_PAYLOAD_BOUND_V7)) ||
+          (!(declared.flags & PS_RESULT_OUTPUT_PAYLOAD_BOUND_V7) &&
            declared.maximum_output_payload_bytes) ||
           (declared.input_count != UINT32_MAX &&
            !array(declared.input_indices, declared.input_count, 1024)) ||
@@ -143,7 +143,7 @@ Result<ImportedResultPlugin> import_result_plugin(
       OperationOutputTraits contract;
       contract.output_schema = output_constraint.take_value();
       contract.key = name.take_value();
-      if (declared.flags & PS_RESULT_OUTPUT_PAYLOAD_BOUND_V6)
+      if (declared.flags & PS_RESULT_OUTPUT_PAYLOAD_BOUND_V7)
         contract.maximum_output_payload_bytes =
             declared.maximum_output_payload_bytes;
       contract.continuation_bytes =
@@ -203,6 +203,11 @@ Result<ImportedResultPlugin> import_result_plugin(
     auto owner = std::make_shared<Definition>(
         Definition{op, library, traits, std::move(input_prototypes),
                    std::move(output_prototypes)});
+    if (op.map_dependencies) {
+      definition.map_dependencies = [owner](const ResultStaticQuery& query) {
+        return result_c::map_static_dependencies(*owner, query);
+      };
+    }
     if (op.resolve_metadata) {
       definition.prepare_static =
           [owner](const std::vector<OperationMetadata>& inputs,

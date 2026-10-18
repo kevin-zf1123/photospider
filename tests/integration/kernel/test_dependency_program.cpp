@@ -61,8 +61,7 @@ ExecutionBinding source(const ResourceBudget& root, const std::string& name,
 ResultBuilder builder(const ResultProgramPhase& phase) {
   auto result = multi_result::take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {},
-      phase.query.tile_extent));
+      phase.query.semantic_key, {}, phase.query.tile_extent));
 
   return result;
 }
@@ -264,9 +263,9 @@ int progressive() {
       multi_result::take(result.value().dependencies.tile_record({0, 0, 0}));
   PS_CHECK(record && record->inputs.size() == 2);
   PS_CHECK(record->inputs[0].tiles ==
-           multi_result::take(TileSet::from_indices(root, {0, 1, 3})));
+           multi_result::take(TileSet::range(root, 0, 16)));
   PS_CHECK(record->inputs[1].tiles ==
-           multi_result::take(TileSet::from_indices(root, {15})));
+           multi_result::take(TileSet::range(root, 0, 16)));
   for (auto tile : {2u, 3u}) {
     ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
     changes.push_back({PlanWorkflowInput{0}, 0, 0,
@@ -274,7 +273,12 @@ int progressive() {
                        false});
     auto dirty =
         multi_result::take(result.value().dependencies.dirty_units(changes));
-    PS_CHECK(dirty.size() == (tile == 3 ? 1u : 0u));
+    PS_CHECK(dirty.size() == 2);
+    PS_CHECK(std::find(dirty.begin(), dirty.end(), TileUnit{0, 0, 0, 0}) !=
+             dirty.end());
+    PS_CHECK(std::find(dirty.begin(), dirty.end(),
+                       TileUnit{plan.output("result").record_index, 0, 0, 0}) !=
+             dirty.end());
   }
   auto frozen = multi_result::take(context.freeze(plan, bindings));
   pointers[3] = 0;
@@ -388,6 +392,11 @@ int service_and_identity_regressions() {
             static_cast<void>(phase.consume_work(UINT64_MAX));
           return number(phase);
         });
+    if (action == 1) {
+      op.map_dependencies = [](const ResultStaticQuery&) {
+        return Result<ResultStaticMapping>(ResultStaticMapping{});
+      };
+    }
     auto result = execute_probe(op);
     PS_CHECK(result.status().code == (action == 0 || action == 2
                                           ? ErrorCode::ResourceExhausted
@@ -627,19 +636,22 @@ int root_work_resume() {
           return number(phase);
         });
     upstream.key = "fuel_upstream";
+    upstream.map_dependencies = [](const ResultStaticQuery&) {
+      return Result<ResultStaticMapping>(ResultStaticMapping{});
+    };
     multi_result::check(registry->register_operation(upstream));
     auto parent = probe_definition(counts);
     parent.key = "fuel_parent";
+    parent.map_dependencies = [](const ResultStaticQuery&) {
+      ResultStaticMapping mapping;
+      mapping.inputs.push_back(
+          {0, 0, false,
+           multi_result::take(TileSet::range(ResourceBudget{}, 0, 1))});
+      return Result<ResultStaticMapping>(std::move(mapping));
+    };
     parent.start_result = [counts, &issued](const ResultProgramQuery&,
                                             const BufferAllocator& allocator) {
-      auto callback = [&issued, supplied = false](
-                          const ResultProgramPhase& phase) mutable {
-        if (!supplied) {
-          supplied = true;
-          return Poll(
-              ResultProgramNeed{{multi_result::take(sdk::tile_need_for_samples(
-                  phase.resources, phase.query, 0, 0, point(0)))}});
-        }
+      auto callback = [&issued](const ResultProgramPhase& phase) {
         auto status = phase.consume_work(6000);
         if (!status.ok())
           return Poll(status);
@@ -811,6 +823,7 @@ OperationDefinition copy_definition(std::string key) {
   OperationDefinition copy;
   copy.key = std::move(key);
   copy.traits = staged_traits(1, sizeof(multi_result::Program));
+  copy.map_dependencies = sdk::pointwise_dependencies;
   copy.traits.input_schema[0].element_type = 0;
   copy.traits.requires_metadata_specialization = true;
   copy.specialize_metadata = [](const std::vector<OperationMetadata>& inputs,
@@ -890,9 +903,9 @@ int execution_network() {
       multi_result::take(executed.value().dependencies.tile_record({2, 0, 0}));
   PS_CHECK(record && record->inputs.size() == 2);
   PS_CHECK(record->inputs[0].tiles ==
-           multi_result::take(TileSet::from_indices(root, {0, 1, 3})));
+           multi_result::take(TileSet::range(root, 0, 16)));
   PS_CHECK(record->inputs[1].tiles ==
-           multi_result::take(TileSet::from_indices(root, {15})));
+           multi_result::take(TileSet::range(root, 0, 16)));
   unsigned deliveries = 0;
   ResultTensorReadWindow retained;
   ExecutionOptions publication;

@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "photospider/compiler/workflow_document.hpp"
+#include "photospider/compiler/ir.hpp"
 #include "photospider/core/status.hpp"
 #include "photospider/data/tiles.hpp"
 #include "photospider/plugin/operation_registry.hpp"
@@ -56,61 +56,30 @@ struct PHOTOSPIDER_API PlanCacheKey final {
   std::string value;
 };
 
-/** @brief One independently inferred result in declaration order. */
-struct PHOTOSPIDER_API SemanticOutput final {
-  std::string key;
-  /** @brief Complete resolved Result schema. */
-  std::shared_ptr<const SchemaTemplate> result_schema = {};
-};
-
-/**
- * @brief One normalized typed node in semantic compiler IR.
- *
- * @note Traits are copied values. Optional static preparation owns immutable
- * derived state and its definition lease; neither enters canonical identity.
- */
-struct PHOTOSPIDER_API SemanticNode final {
-  /** @brief Nonzero source node id. */
-  std::uint64_t id = 0;
-  /** @brief Stable registered operation key. */
-  std::string operation;
-  /** @brief Tagged producer references in exact input order. */
-  std::vector<WorkflowInput> inputs;
-  /** @brief Canonically ordered normalized parameters. */
-  std::map<std::string, ParameterValue> parameters;
-  /** @brief Copied compiler-visible operation traits. */
-  OperationTraits traits;
-  /** @brief Immutable static preparation shared across outputs and executions.
-   * Retains its definition; pointer/state bytes are excluded from digests.
-   */
-  std::shared_ptr<const PreparedOperation> prepared = {};
-  /** @brief Independent named result metadata. */
-  std::vector<SemanticOutput> outputs;
-};
-
 /**
  * @brief Immutable normalized and typed semantic graph.
  *
- * @note Node order is deterministic topological order with node-id tie breaks.
+ * @note Call-table order is deterministic metadata order; blocks own execution
+ * order.
  */
 class PHOTOSPIDER_API SemanticGraphIR final {
  public:
   /**
    * @brief Constructs an invalid semantic IR placeholder.
    * @throws Nothing.
-   * @note Only `Compiler::analyze` produces an IR that may be optimized.
+   * @note Analysis and artifact loading produce IR that may be optimized.
    */
   SemanticGraphIR() noexcept = default;
 
   /**
-   * @brief Returns the captured nonzero GraphContext revision.
+   * @brief Returns a captured graph revision, or one for a loaded artifact.
    * @return Source revision, or zero for a default placeholder.
    * @throws Nothing.
    * @note The value participates in stale-publication rejection.
    */
   [[nodiscard]] std::uint64_t revision() const noexcept { return revision_; }
   /**
-   * @brief Returns nodes in deterministic topological order.
+   * @brief Returns prepared call declarations in deterministic metadata order.
    * @return Immutable borrowed node sequence owned by this IR.
    * @throws Nothing.
    * @note The reference remains valid for this IR object's lifetime.
@@ -119,12 +88,13 @@ class PHOTOSPIDER_API SemanticGraphIR final {
     return nodes_;
   }
   /**
-   * @brief Returns exact requested named source outputs.
+   * @brief Returns the ordered function result signature.
    * @return Immutable borrowed output sequence owned by this IR.
    * @throws Nothing.
-   * @note Names and node ids are normalized during semantic analysis.
+   * @note Every return terminator must satisfy this signature.
    */
-  [[nodiscard]] const std::vector<WorkflowOutput>& outputs() const noexcept {
+  [[nodiscard]] const std::vector<IRReturnDeclaration>& outputs()
+      const noexcept {
     return outputs_;
   }
   /**
@@ -152,8 +122,8 @@ class PHOTOSPIDER_API SemanticGraphIR final {
    */
   const ResourceSet& resources() const noexcept { return resources_; }
   /**
-   * @brief Reports whether the captured graph revision remains current.
-   * @return True only for a compiler-produced IR whose context is unchanged.
+   * @brief Reports whether this stage remains valid for its owning context.
+   * @return True for unchanged source context or a linked standalone artifact.
    * @throws Nothing.
    * @note A default placeholder is never current.
    */
@@ -161,9 +131,30 @@ class PHOTOSPIDER_API SemanticGraphIR final {
     return current_check_ && current_check_();
   }
 
+  /** @brief Explicit control flow; call-table order is not execution order. */
+  const std::vector<IRBlock>& blocks() const noexcept { return blocks_; }
+  IRBlockId entry() const noexcept { return entry_; }
+  const std::vector<IRInputBinding>& input_bindings() const noexcept {
+    return input_bindings_;
+  }
+  /** @brief Owning editable copy for another frontend or transformation pass.
+   */
+  IRProgram program() const {
+    return {input_declarations_,
+            input_bindings_,
+            nodes_,
+            blocks_,
+            entry_,
+            outputs_};
+  }
+
  private:
   friend class Compiler;
+  friend class CompilerArtifact;
 
+  std::vector<IRBlock> blocks_;
+  IRBlockId entry_ = 0;
+  std::vector<IRInputBinding> input_bindings_;
   /** @brief Immutable resources explicitly selected by operation preparation.
    */
   ResourceSet resources_;
@@ -171,10 +162,10 @@ class PHOTOSPIDER_API SemanticGraphIR final {
   std::vector<WorkflowInputDeclaration> input_declarations_;
   /** @brief Captured graph revision. */
   std::uint64_t revision_ = 0;
-  /** @brief Deterministic topologically sorted semantic nodes. */
+  /** @brief Prepared semantic calls; blocks define their execution order. */
   std::vector<SemanticNode> nodes_;
   /** @brief Named requested outputs. */
-  std::vector<WorkflowOutput> outputs_;
+  std::vector<IRReturnDeclaration> outputs_;
   /** @brief Canonical non-security stage digest. */
   SemanticGraphDigest digest_;
   /** @brief Runtime-only currentness predicate excluded from identity. */
@@ -194,18 +185,18 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
   /**
    * @brief Constructs an invalid optimized IR placeholder.
    * @throws Nothing.
-   * @note Only `Compiler::optimize` produces an IR that may be planned.
+   * @note Optimization and artifact loading produce IR that may be planned.
    */
   OptimizedGraphIR() noexcept = default;
   /**
-   * @brief Returns the captured GraphContext revision.
+   * @brief Returns a captured graph revision, or one for a loaded artifact.
    * @return Source revision, or zero for a default placeholder.
    * @throws Nothing.
    * @note The revision is preserved from semantic analysis.
    */
   [[nodiscard]] std::uint64_t revision() const noexcept { return revision_; }
   /**
-   * @brief Returns optimized nodes in deterministic topological order.
+   * @brief Returns optimized calls in deterministic metadata order.
    * @return Immutable borrowed node sequence owned by this IR.
    * @throws Nothing.
    * @note Stable source node ids remain available for diagnostics.
@@ -219,7 +210,8 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
    * @throws Nothing.
    * @note Output ordering is deterministic.
    */
-  [[nodiscard]] const std::vector<WorkflowOutput>& outputs() const noexcept {
+  [[nodiscard]] const std::vector<IRReturnDeclaration>& outputs()
+      const noexcept {
     return outputs_;
   }
   /**
@@ -256,8 +248,8 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
    */
   const ResourceSet& resources() const noexcept { return resources_; }
   /**
-   * @brief Reports whether the captured graph revision remains current.
-   * @return True only when the source context still has the captured revision.
+   * @brief Reports whether this stage remains valid for its owning context.
+   * @return True for unchanged source context or a linked standalone artifact.
    * @throws Nothing.
    * @note A default placeholder is never current.
    */
@@ -265,9 +257,30 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
     return current_check_ && current_check_();
   }
 
+  /** @brief Explicit control flow; call-table order is not execution order. */
+  const std::vector<IRBlock>& blocks() const noexcept { return blocks_; }
+  IRBlockId entry() const noexcept { return entry_; }
+  const std::vector<IRInputBinding>& input_bindings() const noexcept {
+    return input_bindings_;
+  }
+  /** @brief Owning editable copy for another frontend or transformation pass.
+   */
+  IRProgram program() const {
+    return {input_declarations_,
+            input_bindings_,
+            nodes_,
+            blocks_,
+            entry_,
+            outputs_};
+  }
+
  private:
   friend class Compiler;
+  friend class CompilerArtifact;
 
+  std::vector<IRBlock> blocks_;
+  IRBlockId entry_ = 0;
+  std::vector<IRInputBinding> input_bindings_;
   /** @brief Immutable resources explicitly selected by operation preparation.
    */
   ResourceSet resources_;
@@ -278,7 +291,7 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
   /** @brief Optimized semantic nodes. */
   std::vector<SemanticNode> nodes_;
   /** @brief Named outputs after optimization. */
-  std::vector<WorkflowOutput> outputs_;
+  std::vector<IRReturnDeclaration> outputs_;
   /** @brief Parent semantic stage digest. */
   SemanticGraphDigest semantic_digest_;
   /** @brief Canonical non-security optimized digest. */
@@ -315,11 +328,15 @@ struct PHOTOSPIDER_API PlanningOptions final {
   /** @brief Plan-wide square tile extent, a positive power of two including 1.
    */
   std::uint64_t tile_extent = 128;
+  /** @brief Bound on static tile instructions and dependency edges. */
+  std::uint64_t maximum_instructions = 4194304;
+  std::uint64_t maximum_dependency_edges = 16777216;
 };
 
-/** @brief Reference to an earlier physical step. */
+/** @brief Reference to a static call result; execution follows blocks. */
 struct PHOTOSPIDER_API PlanStepInput final {
-  /** @brief Earlier step index; contributes a scheduling dependency. */
+  /** @brief Call-result metadata index. Static instructions encode readiness.
+   */
   std::size_t step_index = 0;
 };
 /** @brief Reference to canonical external declaration metadata. */
@@ -328,16 +345,106 @@ struct PHOTOSPIDER_API PlanWorkflowInput final {
   std::size_t declaration_index = 0;
 };
 /** @brief Tagged physical producer reference in input-port order. */
-using PlanInput = std::variant<PlanStepInput, PlanWorkflowInput>;
+/** @brief A block parameter populated by parallel edge transfer. */
+struct PHOTOSPIDER_API PlanArgumentInput final {
+  std::size_t parameter_index = 0;
+};
+// NOLINTBEGIN(whitespace/indent_namespace)
+using PlanInput =
+    std::variant<PlanStepInput, PlanWorkflowInput, PlanArgumentInput>;
+// NOLINTEND
+
+struct PHOTOSPIDER_API PlanParameter final {
+  IRValueId value = 0;
+  IRBlockId block = 0;
+  std::shared_ptr<const SchemaTemplate> result_schema;
+  std::vector<TileGrid> tile_grids;
+};
+struct PHOTOSPIDER_API PlanEdge final {
+  std::size_t target = 0;
+  std::vector<PlanInput> arguments;
+};
+struct PHOTOSPIDER_API PlanJump final {
+  PlanEdge edge;
+};
+struct PHOTOSPIDER_API PlanConditionalJump final {
+  PlanInput condition;
+  PlanEdge if_true;
+  PlanEdge if_false;
+};
+struct PHOTOSPIDER_API PlanReturn final {
+  std::vector<PlanInput> values;
+};
+using PlanTerminator = std::variant<PlanJump, PlanConditionalJump, PlanReturn>;
+
+/** @brief Fully compiled read capability. No runtime coordinate mapping.
+ * Samples are the stored union of the complete tiles in tiles. Descriptor-only
+ * grants carry no samples and authorize no payload access.
+ */
+struct PHOTOSPIDER_API PlanTensorRead final {
+  std::uint32_t input = 0;
+  std::uint32_t tensor_slot = 0;
+  bool descriptor_only = false;
+  TileSet tiles;
+  Footprint samples;
+};
+struct PHOTOSPIDER_API PlanSharedRead final {
+  std::uint32_t stage = 0;
+  TileRequest tiles;
+  std::vector<Footprint> samples;
+};
+/** @brief One static tile or shared-stage publication unit.
+ * Dependencies are earlier instructions in this block. Inputs and shared
+ * commits must be ready when this instruction executes. Poll requests can only
+ * select the precompiled grants; they cannot create work or dependencies.
+ */
+struct PHOTOSPIDER_API PlanTileInstruction final {
+  std::size_t step_index = 0;
+  std::uint32_t shared_stage = UINT32_MAX;
+  std::uint32_t tensor_slot = 0;
+  TileIndex tile_unit = 0;
+  /** @brief Compiled CPU retry using these same ready grants. The planner
+   * proves CPU reads are covered before setting this flag; no remapping occurs
+   * on retry. Shared-stage fallback requires an explicit control-flow path.
+   */
+  bool cpu_fallback = false;
+  std::optional<Footprint> tensor_outputs;
+  TileRequest publication;
+  std::vector<Footprint> publication_samples;
+  std::vector<PlanTensorRead> inputs;
+  std::vector<PlanSharedRead> shared_inputs;
+  std::vector<std::size_t> dependencies;
+};
+struct PHOTOSPIDER_API PlanBlock final {
+  IRBlockId id = 0;
+  std::vector<std::size_t> parameters;
+  std::vector<std::size_t> calls;
+  std::vector<PlanTileInstruction> instructions;
+  PlanTerminator terminator = PlanReturn{};
+};
+struct PHOTOSPIDER_API PlanOutput final {
+  std::string name;
+  std::shared_ptr<const SchemaTemplate> result_schema;
+  std::vector<TileGrid> tile_grids;
+  std::vector<Footprint> requested_samples;
+  /** @brief Synthetic return unit index used by ExecutionDependencies.
+   * This is steps().size() + the return-signature index, with output ordinal 0.
+   * It identifies the named return independently of the branch producing it.
+   */
+  std::size_t record_index = 0;
+};
 
 /**
  * @brief One validated local physical plan step.
  *
- * @note `inputs` distinguishes earlier steps from external declarations.
+ * @note `inputs` distinguishes call results, external declarations and block
+ * parameters. Block instructions define execution order independently.
  */
 struct PHOTOSPIDER_API PlanStep final {
   /** @brief Stable source node id. */
   std::uint64_t node_id = 0;
+  IRBlockId block = 0;
+  IRValueId value = 0;
   /** @brief Selected declaration-order output. */
   std::uint32_t output_index = 0;
   /** @brief Result route independent of physical scheduling. */
@@ -380,22 +487,23 @@ class PHOTOSPIDER_API ExecutionPlan final {
   /**
    * @brief Constructs an invalid execution-plan placeholder.
    * @throws Nothing.
-   * @note Only `Compiler::plan` produces an executable plan.
+   * @note Planning and artifact loading produce executable plans.
    */
   ExecutionPlan() noexcept = default;
   /**
-   * @brief Returns the captured GraphContext revision.
+   * @brief Returns a captured graph revision, or one for a loaded artifact.
    * @return Source revision, or zero for a default placeholder.
    * @throws Nothing.
    * @note Execution rechecks currentness before and after work.
    */
   [[nodiscard]] std::uint64_t revision() const noexcept { return revision_; }
   /**
-   * @brief Returns dependency-ordered local plan steps.
+   * @brief Returns immutable call/output declarations used by tile
+   * instructions.
    * @return Immutable borrowed step sequence owned by this plan.
    * @throws Nothing.
-   * @note Tagged step indexes refer only to earlier steps; declaration indexes
-   * refer to the canonical input_declarations() table.
+   * @note Step indexes name metadata, not execution order. blocks() owns the
+   * executable order. Inputs may name block parameters or dominating calls.
    */
   [[nodiscard]] const std::vector<PlanStep>& steps() const noexcept {
     return steps_;
@@ -405,10 +513,10 @@ class PHOTOSPIDER_API ExecutionPlan final {
     return structured_templates_;
   }
   /**
-   * @brief Returns named output to step-index mapping.
+   * @brief Returns named output to return-signature-index mapping.
    * @return Immutable borrowed sorted mapping owned by this plan.
    * @throws Nothing.
-   * @note Every mapped index is validated against `steps()`.
+   * @note Every mapped index is validated against return_signature().
    */
   [[nodiscard]] const std::map<std::string, std::size_t>& outputs()
       const noexcept {
@@ -457,8 +565,8 @@ class PHOTOSPIDER_API ExecutionPlan final {
    */
   const ResourceSet& resources() const noexcept { return resources_; }
   /**
-   * @brief Reports whether the captured graph revision remains current.
-   * @return True only when the source context still has the captured revision.
+   * @brief Reports whether this stage remains valid for its owning context.
+   * @return True for unchanged source context or a linked standalone artifact.
    * @throws Nothing.
    * @note A default placeholder is never current.
    */
@@ -480,8 +588,8 @@ class PHOTOSPIDER_API ExecutionPlan final {
   /** @brief Explicit placement permission retained when deriving tile plans. */
   ExecutionMode execution_mode() const noexcept { return execution_mode_; }
   /**
-   * @brief Derives one demand-local plan without reanalyzing or enumerating
-   * tiles.
+   * @brief Derives one demand-local plan by filtering compiled tile
+   * instructions.
    * @param output_name Existing named output.
    * @param request Tile subset of that name's normalized plan request.
    * @return A named-output plan or Stale/InvalidArgument for an invalid subset.
@@ -491,11 +599,42 @@ class PHOTOSPIDER_API ExecutionPlan final {
   Result<ExecutionPlan> tile_plan(const std::string& output_name,
                                   const TileRequest& request) const;
 
+  /** @brief Selects named tile subsets from the already compiled program.
+   * Filters existing instructions and preserves control/effect dependencies.
+   * No operation mapper, preparation or optimizer callback is invoked.
+   * Requests must be subsets of this plan; omitted names are not returned.
+   * Returns Stale/InvalidArgument for an invalid parent or subset.
+   */
+  Result<ExecutionPlan> select_outputs(
+      const std::map<std::string, TileRequest>& requests) const;
+
+  /** @brief Serialized instruction blocks; execution never lowers these. */
+  const std::vector<PlanBlock>& blocks() const noexcept { return blocks_; }
+  std::size_t entry() const noexcept { return entry_; }
+  const std::vector<PlanParameter>& parameters() const noexcept {
+    return parameters_;
+  }
+  const std::vector<PlanOutput>& return_signature() const noexcept {
+    return return_signature_;
+  }
+  const PlanOutput& output(const std::string& name) const {
+    return return_signature_.at(outputs_.at(name));
+  }
+  /** @brief Metadata for a statically checked physical value reference. */
+  const SchemaTemplate& input_schema(const PlanInput& input) const;
+  const std::vector<TileGrid>& input_grids(const PlanInput& input) const;
+
  private:
   friend class Compiler;
+  friend class CompilerArtifact;
   friend class ExecutionContext;
   friend class DemandHandle;
 
+  IRProgram linked_program_;
+  std::vector<PlanBlock> blocks_;
+  std::size_t entry_ = 0;
+  std::vector<PlanParameter> parameters_;
+  std::vector<PlanOutput> return_signature_;
   std::map<std::string, TileRequest> output_requests_;
   ExecutionMode execution_mode_ = ExecutionMode::CpuExact;
   std::uint64_t tile_extent_ = 128;
@@ -507,7 +646,7 @@ class PHOTOSPIDER_API ExecutionPlan final {
   std::vector<WorkflowInputDeclaration> input_declarations_;
   /** @brief Captured graph revision. */
   std::uint64_t revision_ = 0;
-  /** @brief Validated dependency-ordered plan steps. */
+  /** @brief Validated call-result metadata; blocks own execution order. */
   std::vector<PlanStep> steps_;
   std::vector<std::string> structured_templates_;
   /** @brief Sorted named output mapping. */
@@ -584,8 +723,17 @@ class PHOTOSPIDER_API Compiler final {
   [[nodiscard]] Result<SemanticGraphIR> analyze(
       const GraphSnapshot& snapshot, ResourceSet resources = {}) const;
 
+  /** @brief Validate and link frontend-neutral SSA IR, including cyclic CFG.
+   * No runtime callback runs here. All schemas, dominance, operation contracts
+   * and edge transfers are validated before returning an immutable stage.
+   * The caller retains its program; callback exceptions become typed failures.
+   */
+  [[nodiscard]] Result<SemanticGraphIR> bind_ir(
+      IRProgram program, ResourceSet resources = {}) const;
+
   /**
-   * @brief Applies deterministic semantics-preserving optimizer rules.
+   * @brief Produces the independently identified optimized IR stage.
+   * The current optimizer preserves all calls, values and control flow.
    * @param semantic Valid semantic IR.
    * @return Optimized IR or stale/invalid-stage failure.
    * @throws std::bad_alloc If staging allocation fails.
@@ -634,6 +782,18 @@ class PHOTOSPIDER_API Compiler final {
   }
 
  private:
+  friend class CompilerArtifact;
+  friend class ExecutionPlan;
+  /** @brief Rebuild derived grids, metadata and cache identity from fixed
+   * steps. Neither backend selection nor graph lowering occurs here.
+   */
+  Result<ExecutionPlan> link_plan(
+      const OptimizedGraphIR& ir, const PlanningOptions& options,
+      const std::vector<Backend>* placements = nullptr) const;
+  Status select_plan(ExecutionPlan* plan) const;
+  Status finalize_plan(ExecutionPlan* plan) const;
+  Status expand_plan(ExecutionPlan* plan, const PlanningOptions& options) const;
+  Status validate_plan(const ExecutionPlan& plan) const;
   /** @brief Frozen shared operation set. */
   std::shared_ptr<OperationRegistry> operations_;
 };

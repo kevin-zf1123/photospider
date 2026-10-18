@@ -47,7 +47,6 @@ inline Status check_tensor(const OperationMetadata& metadata) {
   return metadata.result_schema->validate();
 }
 struct Identity final {
-  bool started = false;
   Footprint output;
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
     auto scratch =
@@ -55,26 +54,12 @@ struct Identity final {
     const auto& schema = *phase.query.output.result_schema;
     const auto& tensor = schema.tensors[0];
     const auto shape = tensor.sample_shape();
-    if (!started) {
-      output = phase.query.tensor_outputs.has_value()
-                   ? *phase.query.tensor_outputs
-                   : take(Footprint::all(shape));
-      started = true;
-      if (!output.empty()) {
-        ResultProgramNeed need;
-        {
-          auto tile_need_0 = sdk::tile_need_for_samples(
-              phase.resources, phase.query, 0, 0, output);
-          if (!tile_need_0.ok())
-            return Result<ResultProgramPoll>(tile_need_0.status());
-          need.tiles.push_back(tile_need_0.take_value());
-        }
-        return Result<ResultProgramPoll>(std::move(need));
-      }
-    }
-    auto builder = take(ResultBuilder::start(
-        phase.resources, schema, phase.query.semantic_key, {},
-        phase.query.tile_extent));
+    output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
+                                        : take(Footprint::all(shape));
+
+    auto builder = take(ResultBuilder::start(phase.resources, schema,
+                                             phase.query.semantic_key, {},
+                                             phase.query.tile_extent));
     std::vector<ResultViewAxis> axes(shape.size());
     for (std::size_t axis = 0; axis < axes.size(); ++axis)
       axes[axis].output_axis = static_cast<std::int32_t>(axis);
@@ -216,6 +201,7 @@ inline OperationDefinition identity(const char* key) {
     return Result<std::vector<OperationOutputSpecialization>>(
         std::vector<OperationOutputSpecialization>{std::move(output)});
   };
+  operation.map_dependencies = sdk::pointwise_dependencies;
   operation.start_result = [](const ResultProgramQuery&,
                               const BufferAllocator& allocator) {
     return ResultContinuation::make<Identity>(allocator);

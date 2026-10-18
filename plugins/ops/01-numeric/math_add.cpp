@@ -11,25 +11,13 @@
 namespace ps::plugin_internal {
 namespace {
 struct Add final {
-  bool started = false;
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
     using namespace tensor_ops;  // NOLINT(build/namespaces)
     auto scratch =
         take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));
     const bool empty =
         phase.query.tensor_outputs && phase.query.tensor_outputs->empty();
-    if (!started && !empty) {
-      started = true;
-      ResultProgramNeed need;
-      for (std::uint32_t port = 0; port < 2; ++port) {
-        auto tile_need_0 = sdk::tile_need_for_samples(
-            phase.resources, phase.query, port, 0, take(Footprint::all({1})));
-        if (!tile_need_0.ok())
-          return Result<ResultProgramPoll>(tile_need_0.status());
-        need.tiles.push_back(tile_need_0.take_value());
-      }
-      return Result<ResultProgramPoll>(std::move(need));
-    }
+
     auto builder = take(ResultBuilder::start(phase.resources,
                                              *phase.query.output.result_schema,
                                              phase.query.semantic_key, {}));

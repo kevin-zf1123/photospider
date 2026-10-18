@@ -226,8 +226,7 @@ using Poll = Result<ResultProgramPoll>;
 ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto result = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {},
-      phase.query.tile_extent));
+      phase.query.semantic_key, {}, phase.query.tile_extent));
 
   return result;
 }
@@ -239,7 +238,6 @@ Poll empty_result(const ResultProgramPhase& phase) try {
 }
 struct ChannelState final {
   Selection selected;
-  bool requested = false;
   explicit ChannelState(Selection value) : selected(value) {}
   Poll poll(const ResultProgramPhase& phase) try {
     auto scratch =
@@ -255,22 +253,6 @@ struct ChannelState final {
         input_shape.size(), input_spec.batch_axes.size() + selected.axis,
         selected.index, selected.keepdims);
 
-    if (!requested) {
-      requested = true;
-      auto support = take(Footprint::none(input_shape));
-      for (const auto& box : output.boxes())
-        support = take(support.unite(take(Footprint::from_regions(
-            input_shape, {format_result::mapped_region(box, axes)}))));
-      ResultProgramNeed need;
-      {
-        auto tile_need_0 = sdk::tile_need_for_samples(
-            phase.resources, phase.query, 0, 0, std::move(support));
-        if (!tile_need_0.ok())
-          return Result<ResultProgramPoll>(tile_need_0.status());
-        need.tiles.push_back(tile_need_0.take_value());
-      }
-      return Poll(std::move(need));
-    }
     auto result = builder(phase, false);
     const auto policy = selected.layout == Layout::View          ? "view"
                         : selected.layout == Layout::Materialize ? "materialize"
@@ -328,6 +310,34 @@ OperationDefinition extraction(const std::string& key, bool named,
   definition.prepare_static = [named, profile](const auto& inputs,
                                                const auto& parameters) {
     return prepare_extraction(inputs, parameters, named, profile);
+  };
+  definition.map_dependencies =
+      [](const ResultStaticQuery& compiled) -> Result<ResultStaticMapping> {
+    try {
+      const auto query = sdk::static_query_view(compiled);
+      const auto& selected =
+          static_cast<const Preparation*>(compiled.prepared.state())->selection;
+      const auto& input = query.inputs[0].result_schema->tensors[0];
+      const auto shape = input.sample_shape();
+      const auto output =
+          query.tensor_outputs
+              ? *query.tensor_outputs
+              : take(Footprint::all(
+                    query.output.result_schema->tensors[0].sample_shape()));
+      const auto axes = format_result::extraction_axes(
+          shape.size(), input.batch_axes.size() + selected.axis, selected.index,
+          selected.keepdims);
+      ResultStaticMapping result;
+      auto support = take(Footprint::none(shape));
+      for (const auto& box : output.boxes())
+        support = take(support.unite(take(Footprint::from_regions(
+            shape, {format_result::mapped_region(box, axes)}))));
+      result.inputs.push_back(
+          take(sdk::tile_need_for_samples(compiled, 0, 0, support)));
+      return Result<ResultStaticMapping>(std::move(result));
+    } catch (const Status& status) {
+      return Result<ResultStaticMapping>(status);
+    }
   };
   definition.start_result = [](const ResultProgramQuery& query,
                                const BufferAllocator& allocator) {

@@ -2,12 +2,14 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
 #include "execution/result_cache_proof.hpp"
 #include "execution/tile_binding_changes.hpp"
 #include "execution/tile_cache.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
@@ -16,27 +18,15 @@ using namespace ps;  // NOLINT(build/namespaces)
 using execution_internal::TileCacheSnapshot;
 using execution_internal::TileRecords;
 struct CacheProgram {
-  bool consumer, requested = false;
+  bool consumer;
   explicit CacheProgram(bool consumer) : consumer(consumer) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     using multi_result::check;
     using multi_result::take;
-    if (!requested) {
-      requested = true;
-      ResultProgramNeed need;
-      need.tiles.push_back(
-          {0, false, false,
-           consumer
-               ? take(TileSet::from_indices(phase.resources, {0, 1}))
-               : take(TileSet::range(phase.resources, phase.query.tile_unit,
-                                     phase.query.tile_unit + 1))});
-      return Result<ResultProgramPoll>(std::move(need));
-    }
     const auto region = phase.query.tensor_outputs->boxes()[0];
-    const auto x = consumer ? 0 : region.dimensions()[1].offset;
     double value = 0;
-    check(phase.read_tensor(0, 0, {0, x, 0}, &value, sizeof(value)));
     if (consumer) {
+      check(phase.read_tensor(0, 0, {0, 0, 0}, &value, sizeof(value)));
       double second = 0;
       check(phase.read_tensor(0, 0, {0, 2, 0}, &second, sizeof(second)));
       value += second;
@@ -46,6 +36,15 @@ struct CacheProgram {
                                              phase.query.semantic_key));
     const auto count = take(region.element_count());
     std::vector<double> values(count, value);
+    if (!consumer) {
+      std::size_t position = 0;
+      check(phase.query.tensor_outputs->visit(
+          [&](const auto& at) {
+            return phase.read_tensor(0, 0, at, &values[position++],
+                                     sizeof(double));
+          },
+          count, phase.query.cancellation));
+    }
     check(builder.publish_tensor(
         0, region,
         ByteView(reinterpret_cast<const std::uint8_t*>(values.data()),
@@ -74,6 +73,18 @@ struct Fixture {
           "value", consumer ? multi_result::schema() : image)};
       operation.traits.cacheable = true;
       operation.traits.workspace_bytes = 1024;
+      operation.map_dependencies =
+          [consumer](
+              const ResultStaticQuery& query) -> Result<ResultStaticMapping> {
+        if (!consumer)
+          return sdk::pointwise_dependencies(query);
+        auto tiles = TileSet::range(ResourceBudget{}, 0, 2);
+        if (!tiles.ok())
+          return Result<ResultStaticMapping>(tiles.status());
+        ResultStaticMapping mapping;
+        mapping.inputs.push_back({0, 0, false, tiles.take_value()});
+        return Result<ResultStaticMapping>(std::move(mapping));
+      };
       operation.start_result = [this, consumer](const auto&,
                                                 const auto& allocator) {
         if (consumer)
@@ -120,20 +131,36 @@ struct Fixture {
     return frozen.plan();
   }
 };
+std::size_t result_step(const ExecutionPlan& plan) {
+  const PlanReturn* returned = nullptr;
+  for (const auto& block : plan.blocks()) {
+    const auto* candidate = std::get_if<PlanReturn>(&block.terminator);
+    if (!candidate)
+      continue;
+    if (returned)
+      throw std::logic_error("DAG fixture has multiple returns");
+    returned = candidate;
+  }
+  if (!returned)
+    throw std::logic_error("DAG fixture has no return");
+  return std::get<PlanStepInput>(
+             returned->values.at(plan.outputs().at("result")))
+      .step_index;
+}
 int portable_routes() {
   Fixture fixture;
   auto original = fixture.plan(false);
   auto changed = fixture.plan(true);
   ResourceBudget root;
   TileRecords records(root);
-  const auto first_root = original.outputs().at("result");
+  const auto first_root = result_step(original);
   const auto first_producer =
       std::get<PlanStepInput>(original.steps()[first_root].inputs[0])
           .step_index;
   const auto first_input =
       std::get<PlanWorkflowInput>(original.steps()[first_producer].inputs[0])
           .declaration_index;
-  const auto next_root = changed.outputs().at("result");
+  const auto next_root = result_step(changed);
   const auto next_producer =
       std::get<PlanStepInput>(changed.steps()[next_root].inputs[0]).step_index;
   const auto next_input =
@@ -194,7 +221,7 @@ int portable_routes() {
            dirty.value()[0].step == next_producer &&
            dirty.value()[1].step == next_root);
   auto ambiguous = fixture.plan(true, true);
-  const auto ambiguous_root = ambiguous.outputs().at("result");
+  const auto ambiguous_root = result_step(ambiguous);
   PS_CHECK(ambiguous.structured_templates()[ambiguous_root] ==
            original.structured_templates()[first_root]);
   auto rejected = captured.value()->rebind(root, ambiguous,
@@ -419,26 +446,32 @@ int cached_execution() {
           .take_value();
   PS_CHECK(old_window.row_run({0}).value().data ==
            new_window.row_run({0}).value().data);
-  const auto next_root = changed.outputs().at("result");
+  const auto next_call = result_step(changed);
+  const auto next_return = changed.output("result").record_index;
   const auto next_producer =
-      std::get<PlanStepInput>(changed.steps()[next_root].inputs[0]).step_index;
+      std::get<PlanStepInput>(changed.steps()[next_call].inputs[0]).step_index;
   const auto next_input =
       std::get<PlanWorkflowInput>(changed.steps()[next_producer].inputs[0])
           .declaration_index;
-  auto record = reused.value().dependencies.tile_record({next_root, 0, 0});
+  const TileUnit producer_unit{next_producer, 0, 0, 0};
+  const TileUnit consumer_unit{next_call, 0, 0, 0};
+  const TileUnit return_unit{next_return, 0, 0, 0};
+  auto record = reused.value().dependencies.tile_record(return_unit);
   PS_REQUIRE_OK(record);
-  PS_CHECK(
-      record.value() && record.value()->inputs.size() == 1 &&
-      std::get<PlanStepInput>(record.value()->inputs[0].producer).step_index ==
-          next_producer);
+  PS_CHECK(record.value() && record.value()->inputs.size() == 1);
+  const auto& dependency = record.value()->inputs[0];
+  const auto* external = std::get_if<PlanWorkflowInput>(&dependency.producer);
+  PS_CHECK(external && external->declaration_index == next_input &&
+           dependency.producer_output == 0 && dependency.tensor_slot == 0 &&
+           dependency.tiles == multi_result::take(TileSet::range(root, 0, 2)));
   ResourceVector<TileChange> edits{ResourceAllocator<TileChange>(root)};
   edits.push_back({PlanWorkflowInput{next_input}, 0, 0,
                    TileSet::from_indices(root, {0}).take_value(), false});
   auto dirty = reused.value().dependencies.dirty_units(edits);
   PS_REQUIRE_OK(dirty);
-  PS_CHECK(dirty.value().size() == 2 &&
-           dirty.value()[0].step == next_producer &&
-           dirty.value()[1].step == next_root);
+  PS_CHECK(dirty.value().size() == 3 && dirty.value()[0] == producer_unit &&
+           dirty.value()[1] == consumer_unit &&
+           dirty.value()[2] == return_unit);
   auto modified =
       context.execute(changed, {{other, input_image(fixture, root, true)}});
   PS_REQUIRE_OK(modified);
@@ -481,7 +514,7 @@ int cached_execution() {
   const auto prior_starts = fixture.consumer_starts.load();
   ExecutionOptions failed_observer;
   failed_observer.result_publication = [&](ValueRef output, const ResultRef&) {
-    if (output == changed.steps()[next_root].result_ref()) {
+    if (output == changed.steps()[next_call].result_ref()) {
       ++notifications;
       return Status{ErrorCode::ResourceExhausted, "observer refused"};
     }
@@ -523,7 +556,7 @@ int shared_cache_evidence() {
   auto plan = fixture.plan(false);
   ResourceBudget source, target;
   TileRecords records(source);
-  const auto consumer = plan.outputs().at("result");
+  const auto consumer = result_step(plan);
   const auto producer =
       std::get<PlanStepInput>(plan.steps()[consumer].inputs[0]).step_index;
   const auto input =

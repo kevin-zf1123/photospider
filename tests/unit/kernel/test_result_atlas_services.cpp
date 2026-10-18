@@ -177,6 +177,13 @@ int run(unsigned mode, Backend backend, ErrorCode expected,
   definition.traits.outputs[0].continuation_bytes = sizeof(State);
   definition.traits.workspace_bytes = 16384;
   definition.traits.supports_gpu = true;
+  definition.map_dependencies = [mode](const ResultStaticQuery& query) {
+    if (mode != 7)
+      return complete_input_dependencies(query);
+    ResultStaticMapping mapping;
+    mapping.inputs.push_back({0, 0, true, {}});
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
   definition.start_result = [&](const auto&, const auto& allocator) {
     return ResultContinuation::make<State>(allocator, mode, &payload);
   };

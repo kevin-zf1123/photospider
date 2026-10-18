@@ -148,6 +148,14 @@ OperationDefinition consumer_definition(bool pair, unsigned width,
   if (pair) {
     definition.traits.outputs.push_back(multi_result::output("right"));
     definition.traits.outputs[1].maximum_dependency_stages = width + 1;
+    definition.map_dependencies = [](const ResultStaticQuery& query) {
+      ResultStaticMapping mapping;
+      mapping.inputs.push_back(
+          {0, 0, false,
+           take(TileSet::range(ResourceBudget{}, query.output_index,
+                               query.output_index + 1))});
+      return Result<ResultStaticMapping>(std::move(mapping));
+    };
   }
   definition.start_result = [pair, width, metadata](const auto&,
                                                     const auto& allocator) {
@@ -237,6 +245,14 @@ OperationDefinition controlled_definition(
 
   source.traits.input_schema[0].result_schema_id = "test.multi_output";
   source.traits.input_schema[0].result_schema_version = 1;
+  source.map_dependencies = [](const ResultStaticQuery& query) {
+    ResultStaticMapping mapping;
+    mapping.inputs.push_back(
+        {0, 0, false,
+         take(TileSet::range(ResourceBudget{}, query.tile_unit,
+                             query.tile_unit + 1))});
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
   source.start_result = [calls](const auto&, const auto& allocator) {
     return ResultContinuation::make<ControlledSource>(allocator, calls);
   };
@@ -267,10 +283,14 @@ int query_dependencies(bool metadata) {
   const auto verify = [&](const DemandResult& result) {
     for (unsigned at = 0; at < 2; ++at) {
       auto units = dirty(result.dependencies, root, at);
-      check(units.size() == 2 && units[0] == TileUnit{0, 0, 0, at} &&
-                    units[1] == TileUnit{at + 1, at, 0}
-                ? Status::success()
-                : Status{ErrorCode::OperationFailed, "tile ancestry mismatch"});
+      check(
+          units.size() == 3 && units[0] == TileUnit{0, 0, 0, at} &&
+                  units[1] == TileUnit{at + 1, at, 0} &&
+                  units[2] ==
+                      TileUnit{plan.output(at ? "right" : "left").record_index,
+                               0, 0}
+              ? Status::success()
+              : Status{ErrorCode::OperationFailed, "tile ancestry mismatch"});
       auto record = take(result.dependencies.tile_record({at + 1, at, 0}));
       check(record && record->inputs.size() == 1 &&
                     record->inputs[0].tiles.size() == 1 &&
@@ -309,8 +329,10 @@ int query_dependencies(bool metadata) {
            *calls == 3 && partial.diagnostics.cache_hits >= 1);
   for (unsigned at = 0; at < 2; ++at) {
     auto units = dirty(partial.dependencies, root, at);
-    PS_CHECK(units.size() == 2 && (units[0] == TileUnit{0, 0, 0, at}) &&
-             (units[1] == TileUnit{at + 1, at, 0}));
+    PS_CHECK(units.size() == 3 && (units[0] == TileUnit{0, 0, 0, at}) &&
+             (units[1] == TileUnit{at + 1, at, 0}) &&
+             (units[2] ==
+              TileUnit{plan.output(at ? "right" : "left").record_index, 0, 0}));
   }
   return 0;
 }
@@ -384,17 +406,28 @@ int shared_publication_dependencies() {
       frozen, {{"value", {{{0, take(TileSet::range(root, 0, 1))}}}}}, {},
       options));
   // The requested tile is exposed only after its shared producer completes.
-  PS_CHECK(notices == 1 && *calls == 2 &&
-           first.object_id() == result.results.at("value").object_id());
+  PS_CHECK(notices == 1 && *calls == 2);
   PS_CHECK(first.descriptor(false).value().tensor_coverage(0) ==
            take(Footprint::from_regions({2}, {Region({{0, 1}})})));
+  PS_CHECK(first.descriptor(false).value().tensor_coverage(0) ==
+           take(result.results.at("value").descriptor()).tensor_coverage(0));
   for (unsigned at = 0; at < 2; ++at) {
     auto units = dirty(result.dependencies, root, at);
-    PS_CHECK(units.size() == 2 && (units[0] == TileUnit{0, 0, 0, at}) &&
-             (units[1] == TileUnit{1, 0, 0}));
+    PS_CHECK(units.size() == 3 && (units[0] == TileUnit{0, 0, 0, at}) &&
+             (units[1] == TileUnit{1, 0, 0}) &&
+             (units[2] == TileUnit{plan.output("value").record_index, 0, 0}));
     if (at == 0)
-      PS_CHECK(multi_result::number(result.results.at("value"), {at}) == 10);
+      PS_CHECK(multi_result::number(result.results.at("value"), {at}) == 10 &&
+               multi_result::number(first, {at}) == 10);
   }
+  double unavailable = 0;
+  PS_CHECK(!first.read_tensor(take(first.descriptor()), 0, {1}, &unavailable, 8)
+                .ok());
+  const auto& returned = result.results.at("value");
+  PS_CHECK(
+      !returned
+           .read_tensor(take(returned.descriptor()), 0, {1}, &unavailable, 8)
+           .ok());
   PS_CHECK(root.statistics().live[ResourceKind::Queue] == 0);
   return 0;
 }
@@ -443,8 +476,10 @@ int mixed_target_dependencies() {
   const auto verify = [&](const DemandResult& result) {
     for (unsigned at = 0; at < 2; ++at) {
       auto units = dirty(result.dependencies, root, at);
-      check(units.size() == 2 && units[0] == TileUnit{0, 0, 0, at} &&
-                    units[1] == TileUnit{1, 0, 0}
+      check(units.size() == 3 && units[0] == TileUnit{0, 0, 0, at} &&
+                    units[1] == TileUnit{1, 0, 0} &&
+                    units[2] ==
+                        TileUnit{plan.output("value").record_index, 0, 0}
                 ? Status::success()
                 : Status{ErrorCode::OperationFailed, "staged Need ancestry"});
     }
@@ -512,11 +547,11 @@ int named_tile_aliases(unsigned width, bool reverse) {
     options.maximum_parallelism = 2;
     return context.execute_fragments(frozen, query, {}, options);
   });
-  const bool concurrent = gate.wait(2);
+  const bool entered = gate.wait();
   gate.release();
   auto result = pending.get();
   PS_REQUIRE_OK(result);
-  PS_CHECK(concurrent && !gate.timed_out && *calls == width);
+  PS_CHECK(entered && !gate.timed_out && *calls == width);
   for (const auto& named : query) {
     const auto& object = result.value().results.at(named.first.c_str());
     const auto facts = take(object.descriptor());

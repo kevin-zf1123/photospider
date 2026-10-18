@@ -132,8 +132,6 @@ struct State {
                                          phase.resources, {1}))});
         return Result<ResultProgramPoll>(std::move(oversized));
       }
-      if (mode != 10 && mode != 18)
-        return Result<ResultProgramPoll>(ResultProgramNeed{});
     }
     float sum = 0;
     if (mode != 10 && mode != 18) {
@@ -164,8 +162,7 @@ struct State {
     }
     auto builder = multi_result::take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        phase.query.tile_extent));
+        phase.query.semantic_key, {}, phase.query.tile_extent));
 
     const auto box = multi_result::take(
         phase.query.output_tile_grids.at(phase.query.tensor_slot)
@@ -226,7 +223,7 @@ int mock_callbacks() {
     phase.discover = [&](std::uint32_t, std::uint32_t, const auto& compute)
         -> Result<std::shared_ptr<const ResultDiscoveryReceipt>> {
       // This intentionally mocked host exercises only callback fencing.
-      // Native table decoding and Need attachment run below on real Metal.
+      // Native table decoding and static grant checks run below on real Metal.
       if (throws) {
         auto table = multi_result::take(allocator.allocate(48));
         static_cast<void>(compute({table.data(), table.size(), 2}));
@@ -298,6 +295,22 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
   output = multi_result::output("value", output_schema);
   output.continuation_bytes = sizeof(State);
   output.maximum_dependency_stages = 3;
+  definition.map_dependencies = [mode, two_inputs](const ResultStaticQuery&) {
+    ResultStaticMapping mapping;
+    if (mode != 18) {
+      for (std::uint32_t port = 0; port < (two_inputs ? 2U : 1U); ++port) {
+        const auto tiles =
+            mode == 25 ? std::vector<TileIndex>{0, UINT64_C(1) << 39}
+            : mode == 24 || mode == 27 ? std::vector<TileIndex>{0}
+            : two_inputs               ? std::vector<TileIndex>{port ? 9U : 1U}
+                                       : std::vector<TileIndex>{1, 9};
+        mapping.inputs.push_back({port, 0, false,
+                                  multi_result::take(TileSet::from_indices(
+                                      ResourceBudget{}, tiles))});
+      }
+    }
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
   definition.start_result = [&](const auto&, const auto& allocator) {
     return ResultContinuation::make<State>(allocator, mode, &cancellation);
   };
@@ -376,16 +389,19 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
           result
               .read_tensor(result.descriptor().take_value(), 0, {0, 0}, &sum, 4)
               .ok());
-      PS_CHECK(sum == (mode == 18 ? 0 : 42));
+      PS_CHECK(sum == (mode == 10 || mode == 18 ? 0 : 42));
       for (TileIndex tile : demand.members.at(0)) {
         PS_CHECK(result
                      .read_tensor(multi_result::take(result.descriptor()), 0,
                                   {0, tile}, &sum, 4)
                      .ok());
-        PS_CHECK(sum == (mode == 18 ? 0 : 42));
+        PS_CHECK(sum == (mode == 10 || mode == 18 ? 0 : 42));
         auto record =
             multi_result::take(progress.value().dependencies.tile_record(
-                {compiled.plan.outputs().at("out"), 0, 0, tile}));
+                {compiled.plan.return_signature()
+                     .at(compiled.plan.outputs().at("out"))
+                     .record_index,
+                 0, 0, tile}));
         PS_CHECK(record && record->inputs.size() == (mode == 18   ? 0
                                                      : two_inputs ? 2
                                                                   : 1));
@@ -455,9 +471,10 @@ int main(int argc, char** argv) try {
   }
   PS_CHECK(native == 0);
   PS_CHECK(run(1, ErrorCode::ResourceExhausted) == 0);
-  for (unsigned mode : {2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15})
+  for (unsigned mode : {2, 3, 4, 5, 6, 7, 8, 9, 14, 15})
     PS_CHECK(run(mode, ErrorCode::InvalidArgument) == 0);
   PS_CHECK(run(16, ErrorCode::OperationFailed) == 0);
+  PS_CHECK(run(10, ErrorCode::Ok) == 0);
   PS_CHECK(run(18, ErrorCode::Ok) == 0);
   PS_CHECK(run(22, ErrorCode::ResourceExhausted) == 0);
   PS_CHECK(run(23, ErrorCode::ResourceExhausted) == 0);

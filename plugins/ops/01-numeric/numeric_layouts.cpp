@@ -27,7 +27,6 @@ enum class LayoutKind { Reshape, Transpose, Slice };
 struct LayoutProgram final {
   LayoutKind kind;
   SequenceProfile profile;
-  bool started = false;
   Footprint output;
   std::array<uint64_t, 8> permutation{};
   std::array<int64_t, 8> starts{}, steps{};
@@ -43,28 +42,10 @@ struct LayoutProgram final {
     const auto& target_shape = schema.tensors[0].descriptor.shape;
     const bool singleton = std::all_of(target_shape.begin(), target_shape.end(),
                                        [](auto n) { return n == 1; });
-    const auto active_ports =
-        kind == LayoutKind::Slice ? (singleton ? 2U : 3U) : 1U;
-    if (!started) {
-      output = phase.query.tensor_outputs
-                   ? *phase.query.tensor_outputs
-                   : math_take(Footprint::all(target_shape));
-      started = true;
-      if (!output.empty()) {
-        ResultProgramNeed need;
-        for (uint32_t port = 0; port < active_ports; ++port) {
-          auto tile_need_0 = sdk::tile_need_for_samples(
-              phase.resources, phase.query, port, 0,
-              math_take(Footprint::all(phase.query.inputs[port]
-                                           .result_schema->tensors[0]
-                                           .sample_shape())));
-          if (!tile_need_0.ok())
-            return Result<ResultProgramPoll>(tile_need_0.status());
-          need.tiles.push_back(tile_need_0.take_value());
-        }
-        return Result<ResultProgramPoll>(std::move(need));
-      }
-    }
+    output = phase.query.tensor_outputs
+                 ? *phase.query.tensor_outputs
+                 : math_take(Footprint::all(target_shape));
+
     auto builder = math_take(ResultBuilder::start(
         phase.resources, schema, phase.query.semantic_key, {}));
     const auto count = math_take(schema.tensors[0].sample_count());

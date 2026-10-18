@@ -231,6 +231,27 @@ Status join(OperationRegistry* registry, const SchemaTemplate& schema) {
   unified_result_fixture::result_output(&op.traits.outputs[0], schema);
   for (auto& port : op.traits.input_schema)
     unified_result_fixture::result_port(&port, schema);
+  op.map_dependencies =
+      [](const ResultStaticQuery& query) -> Result<ResultStaticMapping> {
+    const bool temporal = query.parameters.count("temporal") &&
+                          std::get<bool>(query.parameters.at("temporal"));
+    TileIndex first = query.tile_unit;
+    if (temporal) {
+      const auto& tensor = query.metadata.inputs[0].result_schema->tensors[0];
+      const auto count = query.metadata.input_tile_grids[0][0].tile_count();
+      const auto per_frame = count / tensor.batch_axes[0];
+      first = (first + per_frame) % count;
+    }
+    ResultStaticMapping mapping;
+    for (uint32_t input = 0; input < 2; ++input) {
+      const auto tile = input == 0 ? first : query.tile_unit;
+      auto tiles = TileSet::range(ResourceBudget{}, tile, tile + 1);
+      if (!tiles.ok())
+        return Result<ResultStaticMapping>(tiles.status());
+      mapping.inputs.push_back({input, 0, false, tiles.take_value()});
+    }
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
   op.start_result = [](const ResultProgramQuery&,
                        const BufferAllocator& allocator) {
     return ResultContinuation::make<Join>(allocator);
@@ -309,10 +330,14 @@ void alias_diamond() {
     const auto before_maps = root.statistics().live[ResourceKind::Metadata];
     {
       auto units = dirty(result.value().dependencies, root, 7);
-      require(units.size() == 4, "diamond includes all four computation units");
+      require(units.size() == 6, "diamond includes calls and named returns");
       for (std::size_t step = 0; step < 4; ++step)
         require(units[step] == TileUnit{step, 0, 0, 7},
                 "diamond unit identity");
+      require(
+          units[4] == TileUnit{plan.output("left").record_index, 0, 0, 7} &&
+              units[5] == TileUnit{plan.output("right").record_index, 0, 0, 7},
+          "diamond return unit identity");
       require(root.statistics().live[ResourceKind::Metadata] > before_maps,
               "returned dirty units own root capacity");
     }
@@ -340,8 +365,10 @@ void alias_diamond() {
       {{"out", request({1})}});
   require(result.ok(), result.status().message);
   require(dirty(result.value().dependencies, root, 5) ==
-              ResourceVector<TileUnit>({TileUnit{0, 0, 0, 1}},
-                                       ResourceAllocator<TileUnit>(root)),
+              ResourceVector<TileUnit>(
+                  {TileUnit{0, 0, 0, 1},
+                   TileUnit{temporal_plan.output("out").record_index, 0, 0, 1}},
+                  ResourceAllocator<TileUnit>(root)),
           "cross-frame tile dependency");
   require(dirty(result.value().dependencies, root, 4).empty(),
           "unrequested neighboring tile stays clean");
@@ -349,7 +376,7 @@ void alias_diamond() {
   auto grid = take(TileGrid::from_tensor(schema.tensors[0], 2));
   const uint64_t at[] = {1, 0, 1, 3};
   require(take(sdk::tile_for_coordinate(grid, at, 4)) == 5 &&
-              dirty(result.value().dependencies, root, 5).size() == 1,
+              dirty(result.value().dependencies, root, 5).size() == 2,
           "same-tile edit dirties consumer");
 }
 SchemaTemplate chunk_schema(uint64_t count, ElementType type, const char* id) {
@@ -373,8 +400,9 @@ struct Probe {
       auto acquisition = sdk::to_whole(phase, 0);
       if (!acquisition.ok())
         return Result<ResultProgramPoll>(acquisition.status());
-      return Result<ResultProgramPoll>(
-          std::get<ResultProgramNeed>(acquisition.take_value()));
+      auto acquired = acquisition.take_value();
+      if (auto* need = std::get_if<ResultProgramNeed>(&acquired))
+        return Result<ResultProgramPoll>(std::move(*need));
     }
     float value = 0;
     if (bad)
@@ -491,6 +519,20 @@ struct ChunkObserver {
   bool keep_first = false;
   uint64_t fail_at = UINT64_MAX;
 };
+Result<ResultStaticMapping> input_interval(TileIndex begin, TileIndex end) {
+  auto tiles = TileSet::range(ResourceBudget{}, begin, end);
+  if (!tiles.ok())
+    return Result<ResultStaticMapping>(tiles.status());
+  ResultStaticMapping mapping;
+  mapping.inputs.push_back({0, 0, false, tiles.take_value()});
+  return Result<ResultStaticMapping>(std::move(mapping));
+}
+Result<ResultStaticMapping> copy_mapping(const ResultStaticQuery& query) {
+  return input_interval(query.tile_unit, query.tile_unit + 1);
+}
+Result<ResultStaticMapping> prefix_mapping(const ResultStaticQuery& query) {
+  return input_interval(0, query.tile_unit + 1);
+}
 struct ChunkCopy {
   unsigned stage = 0;
   std::shared_ptr<ChunkObserver> observer;
@@ -568,8 +610,8 @@ struct ChunkSum {
         if (weak.lock().valid())
           ++live;
       observer->maximum_live = std::max(observer->maximum_live, live);
-      require(live == cursor + 1,
-              "completed input tiles remain available until consuming closure "
+      require(live == count,
+              "all static input tiles remain ready until consuming closure "
               "retires");
       sum += value;
       ++cursor;
@@ -617,6 +659,7 @@ void staged_input_retirement() {
     copy.traits = unified_result_fixture::traits(1, sizeof(ChunkCopy));
     unified_result_fixture::result_port(&copy.traits.input_schema[0], schema);
     unified_result_fixture::result_output(&copy.traits.outputs[0], schema);
+    copy.map_dependencies = copy_mapping;
     copy.start_result = [observer](const auto&, const auto& allocator) {
       return ResultContinuation::make<ChunkCopy>(allocator, observer);
     };
@@ -695,8 +738,11 @@ void staged_input_retirement() {
                 "public workflow completes chunk sum");
         for (uint64_t edited : {uint64_t{0}, count / 2, count - 1}) {
           auto units = dirty(result.value().dependencies, root, edited);
-          require(units.size() == 2 && units.back() == TileUnit{1, 0, 0},
-                  "historical tile dependency survives payload retirement");
+          require(
+              units.size() == 3 && units[0] == TileUnit{0, 0, 0, edited} &&
+                  units[1] == TileUnit{1, 0, 0} &&
+                  units[2] == TileUnit{plan.output("out").record_index, 0, 0},
+              "historical tile dependency survives payload retirement");
         }
         auto record = take(result.value().dependencies.tile_record({1, 0, 0}));
         require(record && record->inputs.size() == 1 &&
@@ -868,6 +914,9 @@ void result_blocks() {
     unified_result_fixture::result_port(&operation.traits.input_schema[0],
                                         schema);
     unified_result_fixture::result_output(&operation.traits.outputs[0], schema);
+    operation.map_dependencies = [](const ResultStaticQuery&) {
+      return input_interval(0, 1);
+    };
     operation.start_result = [observer](const auto&, const auto& allocator) {
       return ResultContinuation::make<BlockProgram>(allocator, observer);
     };
@@ -1019,7 +1068,8 @@ struct CheckpointSum {
         observer->restored.push_back(prior.value()->sequence());
         if (observer->bad_read) {
           double ignored = 0;
-          static_cast<void>(phase.read_tensor(0, 0, {0, 0}, &ignored, 8));
+          static_cast<void>(
+              phase.read_tensor(0, 0, {0, target + 1}, &ignored, 8));
         }
         if (observer->cancel) {
           observer->cancel->cancel();
@@ -1147,6 +1197,7 @@ void impure_shared_results() {
     copy.traits = unified_result_fixture::traits(1, sizeof(ChunkCopy));
     unified_result_fixture::result_port(&copy.traits.input_schema[0], schema);
     unified_result_fixture::result_output(&copy.traits.outputs[0], schema);
+    copy.map_dependencies = copy_mapping;
     copy.start_result = [chunks](const auto&, const auto& allocator) {
       return ResultContinuation::make<ChunkCopy>(allocator, chunks);
     };
@@ -1227,6 +1278,7 @@ void result_checkpoints() {
     copy.traits = unified_result_fixture::traits(1, sizeof(ChunkCopy));
     unified_result_fixture::result_port(&copy.traits.input_schema[0], schema);
     unified_result_fixture::result_output(&copy.traits.outputs[0], schema);
+    copy.map_dependencies = copy_mapping;
     copy.start_result = [chunks](const auto&, const auto& allocator) {
       return ResultContinuation::make<ChunkCopy>(allocator, chunks);
     };
@@ -1257,6 +1309,7 @@ void result_checkpoints() {
     sum.traits = unified_result_fixture::traits(1, sizeof(CheckpointSum));
     unified_result_fixture::result_port(&sum.traits.input_schema[0], schema);
     unified_result_fixture::result_output(&sum.traits.outputs[0], schema);
+    sum.map_dependencies = prefix_mapping;
     sum.start_result = [observer](const auto&, const auto& allocator) {
       return ResultContinuation::make<CheckpointSum>(allocator, observer);
     };
@@ -1349,7 +1402,7 @@ void result_checkpoints() {
                          : frozen;
         std::mutex mutex;
         std::condition_variable changed;
-        bool entered = false, release = false;
+        bool entered = false, release = false, finished = false;
         auto held_options = options;
         held_options.result_publication = [&](ValueRef ref, const ResultRef&) {
           if (ref.node_id != 2)
@@ -1363,14 +1416,28 @@ void result_checkpoints() {
           return Status::success();
         };
         auto first = std::async(std::launch::async, [&] {
-          return context->execute_fragments(frozen, {{"a", point(2)}}, {},
-                                            held_options);
+          auto result = context->execute_fragments(frozen, {{"a", point(2)}},
+                                                   {}, held_options);
+          {
+            std::lock_guard<std::mutex> lock(mutex);
+            finished = true;
+          }
+          changed.notify_all();
+          return result;
         });
         {
           std::unique_lock<std::mutex> lock(mutex);
           require(changed.wait_for(lock, std::chrono::seconds(5),
-                                   [&] { return entered; }),
+                                   [&] { return entered || finished; }),
                   "completed checkpoint scope remains active at barrier");
+          if (!entered) {
+            lock.unlock();
+            auto result = first.get();
+            require(result.ok(),
+                    "checkpoint mode=" + std::to_string(mode) +
+                        " before barrier: " + result.status().message);
+            require(false, "checkpoint publication observer was not called");
+          }
         }
         auto second = context->execute_fragments(
             other, {{mode == 9 ? "b" : "a", point(mode == 9 ? 5 : 2)}},
@@ -1411,9 +1478,9 @@ void result_checkpoints() {
           require(mode == 9 ? units.empty() : !units.empty(),
                   "checkpoint restores source tile ancestry");
           if (mode == 7)
-            require(chunks->produced.size() == 3,
-                    "completed peer checkpoint avoids earlier source "
-                    "recomputation");
+            require(chunks->produced.size() == 6,
+                    "each run prepares its static prefix before checkpoint "
+                    "restoration");
           if (mode == 9)
             require(*dynamic_calls == 2 && observer->restored.empty(),
                     "checkpoint sharing excludes an impure upstream closure");
@@ -1469,8 +1536,8 @@ void result_checkpoints() {
             auto units = dirty(result.value().dependencies, root, edited);
             const auto is_dirty = [&](const char* name, TileIndex tile) {
               return std::find(units.begin(), units.end(),
-                               TileUnit{plan.outputs().at(name), 0, 0, tile}) !=
-                     units.end();
+                               TileUnit{plan.output(name).record_index, 0, 0,
+                                        tile}) != units.end();
             };
             require(is_dirty("a", 2) == (edited <= 2) &&
                         (mode == 5 || (is_dirty("b", 5) == (edited <= 5) &&

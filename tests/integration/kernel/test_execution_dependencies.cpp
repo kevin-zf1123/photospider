@@ -125,6 +125,7 @@ OperationDefinition route(std::string key, unsigned inputs = 1,
 int late_delta() {
   ExecutionDependencies evidence;
   ResourceBudget retained_root;
+  std::size_t return_record = 0;
   {
     auto registry = std::make_shared<OperationRegistry>();
     for (const auto* key : {"short", "long1", "long2", "choose", "result"}) {
@@ -147,6 +148,7 @@ int late_delta() {
     document.outputs = {{"y", 5, "value"}};
     GraphContext graph(document);
     auto plan = Compiler(registry).compile(graph).take_value().plan;
+    return_record = plan.output("y").record_index;
     ExecutionContext context(registry, {1, false, 4, 65536});
     retained_root = context.resource_budget().take_value();
     auto executed = context.execute(
@@ -167,14 +169,18 @@ int late_delta() {
     context.clear_result_cache();
   }
   PS_CHECK(retained_root.statistics().live[ResourceKind::Payload] == 0);
-  for (std::size_t step = 0; step < 5; ++step) {
+  PS_CHECK(return_record == 5);
+  for (std::size_t step = 0; step <= return_record; ++step) {
     auto record = evidence.tile_record({step, 0, 0});
     PS_REQUIRE_OK(record);
-    PS_CHECK(record.value() &&
-             record.value()->inputs.size() == (step == 3 ? 2 : 1));
-    for (const auto& input : record.value()->inputs)
+    PS_CHECK(record.value() && record.value()->inputs.size() == 1);
+    for (const auto& input : record.value()->inputs) {
+      PS_CHECK(std::holds_alternative<PlanWorkflowInput>(input.producer) &&
+               std::get<PlanWorkflowInput>(input.producer).declaration_index ==
+                   0);
       PS_CHECK(input.tensor_slot == 0 && input.tiles.size() == 1 &&
                input.tiles.contains(0));
+    }
   }
   ResourceVector<TileChange> changes{
       ResourceAllocator<TileChange>(retained_root)};
@@ -183,8 +189,8 @@ int late_delta() {
                      false});
   auto dirty = evidence.dirty_units(changes);
   PS_REQUIRE_OK(dirty);
-  PS_CHECK(dirty.value().size() == 5);
-  for (std::size_t step = 0; step < 5; ++step)
+  PS_CHECK(dirty.value().size() == return_record + 1);
+  for (std::size_t step = 0; step <= return_record; ++step)
     PS_CHECK((dirty.value()[step] == TileUnit{step, 0, 0}));
   PS_CHECK(!evidence.tile_record({999, 0, 0}).value());
   return 0;
@@ -282,8 +288,11 @@ int metadata_bounds() {
   changes.push_back({PlanWorkflowInput{0}, 0, 0, {}, true});
   const auto expected = evidence.dirty_units(changes);
   PS_REQUIRE_OK(expected);
-  PS_CHECK(expected.value().size() == 1 &&
+  PS_CHECK(expected.value().size() == 18 &&
            (expected.value()[0] == TileUnit{0, 0, 0}));
+  for (std::size_t i = 0; i < plan.return_signature().size(); ++i)
+    PS_CHECK((expected.value()[i + 1] ==
+              TileUnit{plan.return_signature()[i].record_index, 0, 0}));
   {
     const auto remaining = root.available_capacity()[ResourceKind::Metadata] -
                            ResourceBudget::lease_metadata_bytes();

@@ -112,6 +112,7 @@ inline OperationDefinition kernel_identity(const char* key) {
                               const BufferAllocator& allocator) {
     return ResultContinuation::make<TensorIdentity>(allocator);
   };
+  operation.map_dependencies = sdk::pointwise_dependencies;
   return operation;
 }
 inline std::shared_ptr<OperationRegistry> kernel_registry(bool freeze = true) {

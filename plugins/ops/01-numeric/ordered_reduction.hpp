@@ -14,38 +14,6 @@
 #include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
-/** @brief Exact rectangular decomposition of one logical row-major interval.
- * @note At most two boundary paths through rank are needed; there is no
- * bounding-box overread or iteration through individual samples.
- */
-inline Result<Footprint> ordered_range(const std::vector<std::uint64_t>& shape,
-                                       std::uint64_t begin, std::uint64_t end,
-                                       const FootprintLimits& limits) {
-  std::vector<std::uint64_t> strides(shape.size(), 1);
-  for (std::size_t axis = shape.size(); axis > 1; --axis) {
-    if (strides[axis - 1] > UINT64_MAX / shape[axis - 1])
-      return Result<Footprint>(Status{ErrorCode::ResourceExhausted, {}});
-    strides[axis - 2] = strides[axis - 1] * shape[axis - 1];
-  }
-  std::vector<Region> regions;
-  while (begin < end) {
-    std::vector<RegionDimension> dimensions;
-    for (std::size_t axis = 0; axis < shape.size(); ++axis)
-      dimensions.push_back({begin / strides[axis] % shape[axis], 1});
-    std::size_t axis = 0;
-    while (axis + 1 < shape.size() &&
-           (begin % strides[axis] || strides[axis] > end - begin))
-      ++axis;
-    dimensions[axis].extent = std::min(shape[axis] - dimensions[axis].offset,
-                                       (end - begin) / strides[axis]);
-    const auto count = dimensions[axis].extent * strides[axis];
-    for (std::size_t tail = axis + 1; tail < shape.size(); ++tail)
-      dimensions[tail] = {0, shape[tail]};
-    regions.emplace_back(std::move(dimensions));
-    begin += count;
-  }
-  return Footprint::from_regions(shape, std::move(regions), limits);
-}
 /** @brief Strict binary64 carry; stage boundaries never reassociate sums.
  * @note Typed source validation completes before arithmetic, matching the
  * previous Whole input validation. Pass two retains the exact pass-one mean.
@@ -60,7 +28,7 @@ struct OrderedReductionState final {
         total(total),
         channels(channels),
         pass(typed ? 0 : 1) {}
-  bool variance, ready = false;
+  bool variance;
   std::uint64_t block, total, channels, cursor = 0, end = 0;
   unsigned pass;
   double sum = 0, mean = 0;
@@ -71,69 +39,34 @@ struct OrderedReductionState final {
     if (!environment.active())
       return Result<ResultProgramPoll>(Status{
           ErrorCode::InvalidArgument, "numeric environment unavailable"});
-    const auto& spec = phase.query.inputs[0].result_schema->tensors[0];
-    const TensorDescriptor input{spec.descriptor.element_type,
-                                 spec.sample_shape()};
-    if (ready) {
-      // Supply has already validated each declared typed fragment. Validation
-      // pass needs no extra sample read and retains no payload after this poll.
-      if (pass != 0) {
-        auto advanced = advance(phase);
-        if (!advanced.ok())
-          return Result<ResultProgramPoll>(advanced.status());
-        auto value = ordered_read_state(advanced.value(), 0);
-        if (!value.ok())
-          return Result<ResultProgramPoll>(value.status());
-        sum = value.value();
-      }
-
+    // The fixed grant is validated before entering the operation.
+    if (pass == 0)
+      pass = 1;
+    for (;;) {
+      // Preserve the original sample order and channel-aligned block sizes.
+      const auto count =
+          std::min(total - cursor, ((block - 1) / channels + 1) * channels);
+      end = cursor + count;
+      auto advanced = advance(phase);
+      if (!advanced.ok())
+        return Result<ResultProgramPoll>(advanced.status());
+      auto value = ordered_read_state(advanced.value(), 0);
+      if (!value.ok())
+        return Result<ResultProgramPoll>(value.status());
+      sum = value.value();
       cursor = end;
-      if (cursor == total) {
-        if (pass == 0) {
-          pass = 1;
-          cursor = 0;
-        } else if (pass == 1 && variance) {
-          mean = sum / static_cast<double>(total);
-          sum = 0;
-          pass = 2;
-          cursor = 0;
-        } else {
-          const double result = sum / static_cast<double>(total);
-          return ordered_output(phase, Region::whole({1}), result);
-        }
+      if (cursor < total)
+        continue;
+      if (pass == 1 && variance) {
+        mean = sum / static_cast<double>(total);
+        sum = 0;
+        pass = 2;
+        cursor = 0;
+      } else {
+        return ordered_output(phase, Region::whole({1}),
+                              sum / static_cast<double>(total));
       }
     }
-    // Round the block's sample count up to full image pixels. Arithmetic still
-    // visits every channel in the original logical order.
-    const auto count =
-        std::min(total - cursor, ((block - 1) / channels + 1) * channels);
-    end = cursor + count;
-    auto charged = phase.consume_work(1 + 2 * input.shape.size());
-    if (!charged.ok())
-      return Result<ResultProgramPoll>(charged);
-    const auto rank = input.shape.size();
-    auto scratch = phase.resources.reserve(ResourceCapacity::host(
-        (2 * rank + 1) * (sizeof(Region) + rank * sizeof(RegionDimension)) +
-            rank * sizeof(std::uint64_t),
-        (2 * rank + 1) * (sizeof(Region) + rank * sizeof(RegionDimension)) +
-            rank * sizeof(std::uint64_t)));
-    if (!scratch.ok())
-      return Result<ResultProgramPoll>(scratch.status());
-    auto samples =
-        ordered_range(input.shape, cursor, end, ordered_limits(phase));
-    if (!samples.ok())
-      return Result<ResultProgramPoll>(samples.status());
-    ready = true;
-    ResultProgramNeed need;
-    {
-      auto tile_need_0 = sdk::tile_need_for_samples(
-          phase.resources, phase.query, 0, 0, samples.take_value(),
-          ((pass == 0 ? 4U : 5U) & 7U) == 0);
-      if (!tile_need_0.ok())
-        return Result<ResultProgramPoll>(tile_need_0.status());
-      need.tiles.push_back(tile_need_0.take_value());
-    }
-    return Result<ResultProgramPoll>(std::move(need));
   }
   Result<ResultRef> advance(const ResultProgramPhase& phase) const {
     const auto& spec = phase.query.inputs[0].result_schema->tensors[0];

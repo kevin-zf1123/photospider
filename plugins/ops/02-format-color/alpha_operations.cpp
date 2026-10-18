@@ -627,8 +627,7 @@ std::optional<std::uint32_t> output_axis(const Preparation& s,
 ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto result = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {},
-      phase.query.tile_extent));
+      phase.query.semantic_key, {}, phase.query.tile_extent));
   return result;
 }
 Poll empty_result(const ResultProgramPhase& phase) try {
@@ -903,7 +902,6 @@ Status evaluate(const ResultProgramPhase& phase, const Preparation& s,
 }
 struct State final {
   const Preparation* state;
-  bool requested = false;
   Footprint output;
   explicit State(const Preparation* prepared) : state(prepared) {}
   Poll poll(const ResultProgramPhase& phase) try {
@@ -911,52 +909,10 @@ struct State final {
         take(phase.resources.reserve(ResourceCapacity::host(16384, 16384)));
     const auto& spec = phase.query.output.result_schema->tensors[0];
     const auto& s = *state;
-    if (!requested) {
-      requested = true;
-      output = phase.query.tensor_outputs
-                   ? *phase.query.tensor_outputs
-                   : take(Footprint::all(spec.sample_shape()));
-      ResultProgramNeed need;
-      FootprintLimits limits;
-      limits.cancellation = phase.query.cancellation;
-      limits.consume_work = [&](std::uint64_t work) {
-        return phase.consume_work(work);
-      };
-      for (std::uint32_t port = 0; port < phase.query.inputs.size(); ++port) {
-        auto samples = take(Footprint::none(
-            phase.query.inputs[port].result_schema->tensors[0].sample_shape()));
-        for (const auto& span : s.spans) {
-          if (span.map.port != port)
-            continue;
-          require(phase.consume_work(span.map.axes.size() + 1));
-          auto dims = Region::whole(spec.sample_shape()).dimensions();
-          const auto axis = output_axis(s, spec);
-          if (axis)
-            dims[*axis] = {span.first, span.count};
-          const auto selected = take(output.intersect(
-              take(Footprint::from_regions(spec.sample_shape(),
-                                           {Region(std::move(dims))}, limits)),
-              limits));
-          for (const auto& box : selected.boxes())
-            samples = take(samples.unite(
-                take(Footprint::from_regions(
-                    samples.shape(),
-                    {format_result::mapped_region(box, span.map.axes)},
-                    limits)),
-                limits));
-        }
-        const bool descriptor_only = samples.empty();
-        {
-          auto tile_need_0 =
-              sdk::tile_need_for_samples(phase.resources, phase.query, port, 0,
-                                         std::move(samples), descriptor_only);
-          if (!tile_need_0.ok())
-            return Result<ResultProgramPoll>(tile_need_0.status());
-          need.tiles.push_back(tile_need_0.take_value());
-        }
-      }
-      return Poll(std::move(need));
-    }
+    output = phase.query.tensor_outputs
+                 ? *phase.query.tensor_outputs
+                 : take(Footprint::all(spec.sample_shape()));
+
     auto result = builder(phase, false);
     std::string policy = s.layout;
     GenericView proof;
@@ -1075,6 +1031,43 @@ OperationDefinition alpha_definition(const std::string& key, Action action,
   out.maximum_dependency_stages = 2;
   d.prepare_static = [action, profile](const auto& inputs, const auto& params) {
     return prepare_alpha(inputs, params, action, profile);
+  };
+  d.map_dependencies =
+      [](const ResultStaticQuery& compiled) -> Result<ResultStaticMapping> {
+    try {
+      const auto query = sdk::static_query_view(compiled);
+      const auto& s =
+          *static_cast<const Preparation*>(compiled.prepared.state());
+      const auto& spec = query.output.result_schema->tensors[0];
+      const auto output = query.tensor_outputs
+                              ? *query.tensor_outputs
+                              : take(Footprint::all(spec.sample_shape()));
+      ResultStaticMapping result;
+      for (std::uint32_t port = 0; port < query.inputs.size(); ++port) {
+        auto samples = take(Footprint::none(
+            query.inputs[port].result_schema->tensors[0].sample_shape()));
+        for (const auto& span : s.spans) {
+          if (span.map.port != port)
+            continue;
+          auto dims = Region::whole(spec.sample_shape()).dimensions();
+          const auto axis = output_axis(s, spec);
+          if (axis)
+            dims[*axis] = {span.first, span.count};
+          const auto selected =
+              take(output.intersect(take(Footprint::from_regions(
+                  spec.sample_shape(), {Region(std::move(dims))}))));
+          for (const auto& box : selected.boxes())
+            samples = take(samples.unite(take(Footprint::from_regions(
+                samples.shape(),
+                {format_result::mapped_region(box, span.map.axes)}))));
+        }
+        result.inputs.push_back(take(sdk::tile_need_for_samples(
+            compiled, port, 0, samples, samples.empty())));
+      }
+      return Result<ResultStaticMapping>(std::move(result));
+    } catch (const Status& status) {
+      return Result<ResultStaticMapping>(status);
+    }
   };
   d.start_result = [](const ResultProgramQuery& query,
                       const BufferAllocator& allocator) {

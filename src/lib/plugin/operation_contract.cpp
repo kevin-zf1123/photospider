@@ -35,7 +35,7 @@ Result<OperationTraits> resolve_operation_traits(
   auto result = traits;
   if (std::any_of(traits.outputs.begin(), traits.outputs.end(),
                   [](const auto& output) { return !output.result_schema; }) ||
-      count > 1024 || traits.version != 28)
+      count > 1024 || traits.version != 29)
     return Result<OperationTraits>(core_internal::invalid_schema_domain(
         "invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
@@ -63,7 +63,7 @@ Result<OperationMetadata> infer_operation_output(
   if (t.requires_metadata_specialization)
     return Result<OperationMetadata>(core_internal::invalid_schema_domain(
         "operation template requires registry metadata specialization"));
-  if (t.version != 28 || t.outputs.size() != 1 || !t.outputs[0].result_schema)
+  if (t.version != 29 || t.outputs.size() != 1 || !t.outputs[0].result_schema)
     return Result<OperationMetadata>(core_internal::invalid_schema_domain(
         "select one output for singleton inference"));
   const auto mismatch = [](const char* message) {

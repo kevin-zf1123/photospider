@@ -1,4 +1,5 @@
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include "support/multi_output_result_fixture.hpp"
@@ -64,6 +65,12 @@ int cpu_stage_admission() {
   stage.maximum_output_payload_bytes = 8;
   stage.continuation_bytes = 128;
   definition.traits.shared_stages = {stage};
+  definition.map_dependencies = [](const ResultStaticQuery& query) {
+    ResultStaticMapping mapped;
+    if (query.shared_stage == UINT32_MAX)
+      mapped.shared_stages.push_back(0);
+    return Result<ResultStaticMapping>(std::move(mapped));
+  };
   unsigned starts = 0;
   definition.start_result = [&](const auto& query, const auto& allocator) {
     if (query.shared_stage != UINT32_MAX)
@@ -76,11 +83,7 @@ int cpu_stage_admission() {
   doc.nodes = {{1, "test.gpu_stage", {}, {}}};
   doc.outputs = {{"value", 1, "value"}};
   GraphContext graph(doc);
-  auto plan = take(Compiler(registry).compile(graph));
-  ExecutionContextConfig config;
-  config.gpu_enabled = true;
-  ExecutionContext execution(registry, config);
-  auto result = execution.execute(plan.plan, {});
+  auto result = Compiler(registry).compile(graph);
   PS_CHECK(!result.ok() &&
            result.status().code == ErrorCode::BackendUnavailable);
   PS_CHECK(result.status().message ==
@@ -88,7 +91,114 @@ int cpu_stage_admission() {
   PS_CHECK(starts == 0);
   return 0;
 }
+struct BundleProducer {
+  std::optional<ResultBuilder> builder;
+  unsigned member = 0;
+  unsigned* polls;
+  explicit BundleProducer(unsigned* count) : polls(count) {}
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    ++*polls;
+    if (!builder)
+      builder = take(ResultBuilder::start(
+          phase.resources, *phase.query.output.result_schema,
+          phase.query.semantic_key, {}, phase.query.tile_extent));
+    const double value = member ? 7 : 5;
+    multi_result::check(builder->publish_tensor(
+        member++, Region::whole({1}),
+        {reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)}));
+    return Result<ResultProgramPoll>(
+        ResultPublication{member == 2 ? take(builder->seal())
+                                      : take(builder->reference().capture()),
+                          member == 2});
+  }
+};
+struct BundleConsumer {
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    const auto& shared = phase.shared_stages->at(0);
+    const auto facts = take(shared.descriptor());
+    double sum = 0;
+    for (unsigned member = 0; member < 2; ++member) {
+      double value = 0;
+      multi_result::check(
+          shared.read_tensor(facts, member, {0}, &value, sizeof(value)));
+      sum += value;
+    }
+    auto builder = take(ResultBuilder::start(
+        phase.resources, *phase.query.output.result_schema,
+        phase.query.semantic_key, {}, phase.query.tile_extent));
+    multi_result::check(builder.publish_tensor(
+        0, Region::whole({1}),
+        {reinterpret_cast<const std::uint8_t*>(&sum), sizeof(sum)}));
+    return Result<ResultProgramPoll>(
+        ResultPublication{take(builder.seal()), true});
+  }
+};
+int shared_bundle_validation() {
+  auto registry = std::make_shared<OperationRegistry>();
+  unsigned validations = 0, polls = 0;
+  ValidationDefinition validator;
+  validator.identity = {"test.shared_bundle", 1, "complete/1"};
+  validator.requires_complete = true;
+  validator.prepare = [](const ValidationPreparation&) {
+    return Result<std::shared_ptr<const void>>(std::shared_ptr<const void>{});
+  };
+  validator.validate = [&](const void*, const ValidationContext& context) {
+    ++validations;
+    if (!context.complete)
+      return Status{ErrorCode::OperationFailed, "premature shared validation"};
+    for (unsigned member = 0; member < 2; ++member) {
+      auto window = context.acquire_tensor(member, Region::whole({1}));
+      if (!window.ok())
+        return window.status();
+    }
+    return Status::success();
+  };
+  multi_result::check(registry->register_validator(std::move(validator)));
+  OperationDefinition operation;
+  operation.key = "test.shared_bundle";
+  operation.traits.outputs = {multi_result::output("value")};
+  OperationSharedStage stage;
+  stage.key = "bundle";
+  stage.result_schema = multi_result::schema();
+  auto second = stage.result_schema.tensors[0];
+  second.key = "second";
+  stage.result_schema.tensors.push_back(second);
+  stage.result_schema.publication_scopes = {
+      {ResultPublicationPolicy::CompleteBundle, {0, 1}}};
+  stage.validators = {{"test.shared_bundle", 1, "complete/1"}};
+  stage.continuation_bytes = 4096;
+  stage.workspace_bytes = 4096;
+  stage.maximum_work = 1000000;
+  stage.maximum_output_payload_bytes = 4096;
+  stage.maximum_dependency_stages = 8;
+  operation.traits.shared_stages = {stage};
+  operation.map_dependencies = [&](const ResultStaticQuery& query) {
+    ResultStaticMapping result;
+    if (query.shared_stage == UINT32_MAX)
+      result.shared_stages.push_back(0);
+    return Result<ResultStaticMapping>(std::move(result));
+  };
+  operation.start_result = [&](const auto& query, const auto& allocator) {
+    return query.shared_stage == UINT32_MAX
+               ? ResultContinuation::make<BundleConsumer>(allocator)
+               : ResultContinuation::make<BundleProducer>(allocator, &polls);
+  };
+  multi_result::check(registry->register_operation(std::move(operation)));
+  multi_result::check(registry->freeze());
+  WorkflowDocument doc;
+  doc.nodes = {{1, "test.shared_bundle", {}, {}}};
+  doc.outputs = {{"value", 1, "value"}};
+  Compiler compiler(registry);
+  GraphContext graph(doc);
+  auto plan = take(compiler.compile(graph)).plan;
+  ExecutionContext execution(registry);
+  auto result = execution.execute(plan);
+  PS_REQUIRE_OK(result);
+  PS_CHECK(multi_result::number(result.value().results.at("value")) == 12);
+  PS_CHECK(validations == 1 && polls == 2);
+  return 0;
+}
 }  // namespace
 int main() {
-  return c_projection() || cpu_stage_admission();
+  return c_projection() || cpu_stage_admission() || shared_bundle_validation();
 }

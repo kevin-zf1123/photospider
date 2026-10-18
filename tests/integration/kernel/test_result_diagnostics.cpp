@@ -150,9 +150,18 @@ int poll_reports() {
     for (unsigned i = 0; i < 5; ++i)
       sum += multi_result::number(result.results.at("value"), {i});
     PS_CHECK(sum == 35);
-    PS_CHECK(result.diagnostics.operation_timings.size() == 1);
-    const auto& timing = result.diagnostics.operation_timings[0];
-    PS_CHECK(timing.invocation_count == 2 && timing.computed_elements == 5 &&
+    PS_CHECK(result.diagnostics.operation_timings.size() == 2);
+    const auto& request = result.diagnostics.operation_timings[0];
+    const auto& timing = result.diagnostics.operation_timings[1];
+    PS_CHECK(
+        request.output.node_id == 1 && request.backend == Backend::Cpu &&
+        request.outcome == ErrorCode::Ok && request.invocation_count == 1 &&
+        request.computed_elements == 0 && request.reports &&
+        request.reports->find(diagnostic_fixture::identity()).status().code ==
+            ErrorCode::NotFound);
+    PS_CHECK(timing.output.node_id == 1 && timing.backend == Backend::Cpu &&
+             timing.outcome == ErrorCode::Ok && timing.invocation_count == 1 &&
+             timing.computed_elements == 5 &&
              diagnostic_fixture::count(*timing.reports) == 5);
   }
   // Numeric-report accounting must not replace an upstream failure when the

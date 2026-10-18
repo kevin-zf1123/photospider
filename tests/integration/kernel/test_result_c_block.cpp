@@ -101,9 +101,9 @@ int workflow(unsigned mode, bool cache) {
                                           &control_value, 8)
                    .ok() &&
                control_value == 0x1p54 + 16);
-      const auto control_step = plan.outputs().at("control");
-      auto control_record = take(other.dependencies.tile_record(
-          {control_step, plan.steps()[control_step].output_index, 0, 5}));
+      const auto control_step = plan.output("control").record_index;
+      auto control_record =
+          take(other.dependencies.tile_record({control_step, 0, 0, 5}));
       PS_CHECK(control_record && control_record->inputs.size() == 1);
       PS_CHECK(control_record->inputs[0].tensor_slot == 0 &&
                control_record->inputs[0].tiles ==
@@ -127,9 +127,9 @@ int workflow(unsigned mode, bool cache) {
                                           &actual, 8)
                    .ok() &&
                actual == expected);
-      const auto value_step = plan.outputs().at("value");
-      auto value_record = take(changed.dependencies.tile_record(
-          {value_step, plan.steps()[value_step].output_index, 0, 5}));
+      const auto value_step = plan.output("value").record_index;
+      auto value_record =
+          take(changed.dependencies.tile_record({value_step, 0, 0, 5}));
       PS_CHECK(value_record && value_record->inputs.size() == 1);
       PS_CHECK(value_record->inputs[0].tensor_slot == 0 &&
                value_record->inputs[0].tiles ==

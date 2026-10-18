@@ -103,7 +103,11 @@ int staged_outputs() {
       TileRequest{{{0, multi_result::take(TileSet::range(root, 0, 1))}}};
   PS_CHECK(verify_source(first.value().dependencies, {0, 0, 0}, 0) == 0);
   PS_CHECK(verify_source(first.value().dependencies, {1, 1, 0}, 1) == 0);
-  PS_CHECK(verify_dirty(first.value().dependencies, root, 0, {{0, 0, 0}}) == 0);
+  const auto left_return = compiled.value().plan.output("left").record_index;
+  PS_CHECK(verify_source(first.value().dependencies, {left_return, 0, 0}, 0) ==
+           0);
+  PS_CHECK(verify_dirty(first.value().dependencies, root, 0,
+                        {{0, 0, 0}, {left_return, 0, 0}}) == 0);
   bindings.inputs[0] = multi_result::binding(root, "a", 13);
   auto replacement = execution.freeze(compiled.value().plan, bindings);
   PS_CHECK(replacement.ok());
@@ -114,7 +118,7 @@ int staged_outputs() {
   PS_CHECK((*counts)[0] == 2 && (*counts)[1] == 1);
   auto old = execution.execute_fragments(frozen.value(), query);
   PS_CHECK(old.ok() && number(old.value(), "left") == 7);
-  // Renumber sources and node, prune a sibling (physical indices change), and
+  // Renumber sources and node, omit a sibling's instructions, and
   // retain both content reuse and the new graph's dependency records/dirty
   // routes.
   auto renamed = document;
@@ -133,15 +137,17 @@ int staged_outputs() {
   PS_CHECK(renamed_result.ok());
   PS_CHECK((*counts)[1] == before_rename &&
            number(renamed_result.value(), "right") == 11);
-  PS_CHECK(verify_source(renamed_result.value().dependencies, {0, 1, 0}, 0) ==
+  PS_CHECK(verify_source(renamed_result.value().dependencies, {1, 1, 0}, 0) ==
            0);
   PS_CHECK(
       renamed_result.value().diagnostics.selected_backends.count({99, 1}) == 1);
   PS_CHECK(renamed_result.value().diagnostics.selected_backends.count({1, 1}) ==
            0);
-  PS_CHECK(verify_dirty(renamed_result.value().dependencies, root, 0,
-                        {{0, 1, 0}}) == 0);
-  // A cached descendant must rebind its complete upstream record DAG too.
+  PS_CHECK(
+      verify_dirty(
+          renamed_result.value().dependencies, root, 0,
+          {{1, 1, 0}, {renamed_plan.output("right").record_index, 0, 0}}) == 0);
+  // A cached descendant must rebuild current flat upstream evidence too.
   auto chain = document;
   chain.nodes.push_back(
       {2,
@@ -172,18 +178,30 @@ int staged_outputs() {
   PS_CHECK(moved_result.value().diagnostics.selected_backends.count({77, 1}) ==
            1);
   PS_CHECK(verify_source(moved_result.value().dependencies, {1, 1, 0}, 1) == 0);
+  PS_CHECK(verify_source(moved_result.value().dependencies, {3, 1, 0}, 1) == 0);
+  const auto moved_return = moved_plan.output("right").record_index;
+  PS_CHECK(verify_source(moved_result.value().dependencies,
+                         {moved_return, 0, 0}, 1) == 0);
   PS_CHECK(moved_result.value().diagnostics.selected_backends.count({88, 1}) ==
            1);
   PS_CHECK(moved_result.value().diagnostics.selected_backends.count({2, 1}) ==
            0);
   PS_CHECK(verify_dirty(moved_result.value().dependencies, root, 1,
-                        {{1, 1, 0}, {2, 1, 0}}) == 0);
+                        {{1, 1, 0}, {3, 1, 0}, {moved_return, 0, 0}}) == 0);
   execution.clear_result_cache();
-  PS_CHECK(verify_dirty(first.value().dependencies, root, 0, {{0, 0, 0}}) == 0);
+  PS_CHECK(verify_dirty(first.value().dependencies, root, 0,
+                        {{0, 0, 0}, {left_return, 0, 0}}) == 0);
   document.outputs = {{"right", 1, "right"}};
   GraphContext single(document);
   auto selected = compiler.compile(single);
-  PS_CHECK(selected.ok() && selected.value().plan.steps().size() == 1);
+  PS_CHECK(selected.ok() && selected.value().plan.steps().size() == 2);
+  std::size_t instructions = 0;
+  for (const auto& block : selected.value().plan.blocks())
+    for (const auto& instruction : block.instructions) {
+      PS_CHECK(instruction.step_index == 1);
+      ++instructions;
+    }
+  PS_CHECK(instructions == 1);
   const auto left_before = (*counts)[0].load();
   PS_CHECK(execution.execute(selected.value().plan, bindings).ok());
   PS_CHECK((*counts)[0] == left_before);

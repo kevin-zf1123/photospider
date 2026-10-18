@@ -141,9 +141,6 @@ inline bool whole_tensor_port_selected(const ResultProgramQuery& query,
 template <class Kernel>
 struct WholeTensorProgram final {
   Kernel kernel;
-  bool started = false;
-  uint32_t next_input = 0;
-  std::optional<ResultTensorInputs> ready;
   Footprint output;
   template <class... Args>
   explicit WholeTensorProgram(Args&&... args)
@@ -159,50 +156,13 @@ struct WholeTensorProgram final {
         math_take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));
     const auto& schema = *phase.query.output.result_schema;
     const auto shape = schema.tensors[0].sample_shape();
-    if (!ready)
-      ready.emplace(
-          std::less<std::pair<uint32_t, uint32_t>>{},
-          ResourceAllocator<ResultTensorInputs::value_type>(phase.resources));
-    if (phase.tensors && !phase.tensors->empty()) {
-      math_require(phase.consume_work(phase.tensors->size()));
-      for (const auto& input : *phase.tensors)
-        ready->insert_or_assign(input.first, input.second);
-    }
-    if (!started) {
-      output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
-                                          : math_take(Footprint::all(shape));
-      started = true;
-    }
-    if (!output.empty() && next_input < phase.query.inputs.size()) {
-      ResultProgramNeed need;
-      while (next_input < phase.query.inputs.size() && need.tiles.size() < 64) {
-        const auto port = next_input++;
-        if (!whole_tensor_port_selected(phase.query, port))
-          continue;
-        {
-          auto tile_need_0 = sdk::tile_need_for_samples(
-              phase.resources, phase.query, port, 0,
-              math_take(Footprint::all(phase.query.inputs[port]
-                                           .result_schema->tensors[0]
-                                           .sample_shape())));
-          if (!tile_need_0.ok())
-            return Result<ResultProgramPoll>(tile_need_0.status());
-          need.tiles.push_back(tile_need_0.take_value());
-        }
-      }
-      if (!need.tiles.empty())
-        return Result<ResultProgramPoll>(std::move(need));
-    }
-    auto builder = math_take(ResultBuilder::start(
-        phase.resources, schema, phase.query.semantic_key, {},
-        phase.query.tile_extent));
+    output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
+                                        : math_take(Footprint::all(shape));
+    auto builder = math_take(ResultBuilder::start(phase.resources, schema,
+                                                  phase.query.semantic_key, {},
+                                                  phase.query.tile_extent));
     if (!output.empty()) {
-      // The phase container expires after each poll. These owning capabilities
-      // retain only captured input facts and an owning failure latch, so a
-      // bounded multi-envelope gather does not retain any phase callback.
-      auto supplied = phase;
-      supplied.tensors = &*ready;
-      math_require(publish_whole_tensor(kernel, supplied, builder, 0));
+      math_require(publish_whole_tensor(kernel, phase, builder, 0));
     }
     return Result<ResultProgramPoll>(
         ResultPublication{math_take(builder.seal()), true});

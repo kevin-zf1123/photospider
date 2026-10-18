@@ -8,10 +8,10 @@
  * Descriptor=1 requires tensor_slot, begin and end zero. Reserved is zero.
  * An emit beyond capacity sets overflow and writes no record. The caller
  * must bound total attempts by the declared candidate count. The host checks
- * every record before attaching any Need, including member and interval bounds.
+ * every record against fixed grants, including member and interval bounds.
  */
 // NOLINTBEGIN(whitespace/indent_namespace)
-#define PS_RESULT_GPU_DISCOVERY_MSL_V6                                     \
+#define PS_RESULT_GPU_DISCOVERY_MSL_V7                                     \
   "#include <metal_stdlib>\nusing namespace metal;\n"                      \
   "bool ps_result_discovery_emit(device atomic_uint* table,uint capacity," \
   "uint port,uint kind,uint slot,ulong begin,ulong end) {"                 \

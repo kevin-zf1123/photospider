@@ -44,8 +44,7 @@ using Poll = Result<ResultProgramPoll>;
 ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto result = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {},
-      phase.query.tile_extent));
+      phase.query.semantic_key, {}, phase.query.tile_extent));
 
   return result;
 }
@@ -57,25 +56,8 @@ Poll empty_result(const ResultProgramPhase& phase) try {
 }
 struct LiteralState final {
   LiteralPreparation state;
-  bool requested = false;
   explicit LiteralState(LiteralPreparation value) : state(value) {}
   Poll poll(const ResultProgramPhase& phase) try {
-    if (!requested) {
-      requested = true;
-      ResultProgramNeed need;
-      {
-        auto tile_need_0 = sdk::tile_need_for_samples(
-            phase.resources, phase.query, 0, 0,
-            take(Footprint::none(phase.query.inputs[0]
-                                     .result_schema->tensors[0]
-                                     .sample_shape())),
-            true);
-        if (!tile_need_0.ok())
-          return Result<ResultProgramPoll>(tile_need_0.status());
-        need.tiles.push_back(tile_need_0.take_value());
-      }
-      return Poll(std::move(need));
-    }
     if (state.require_view)
       return Poll(unavailable());
     auto scratch =
@@ -283,6 +265,11 @@ Status register_channel_literal_like(OperationRegistry* registry) {
     d.prepare_static = [kind = profile.second](const auto& inputs,
                                                const auto& p) {
       return prepare_channel_literal_like(inputs, p, kind);
+    };
+    d.map_dependencies = [](const ResultStaticQuery&) {
+      ResultStaticMapping mapping;
+      mapping.inputs.push_back({0, 0, true, {}});
+      return Result<ResultStaticMapping>(std::move(mapping));
     };
     d.start_result = [](const ResultProgramQuery& q, const BufferAllocator& a) {
       if (q.tensor_outputs && q.tensor_outputs->empty())

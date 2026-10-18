@@ -136,12 +136,12 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
   std::optional<SchemaTemplate> result_schema = {};
 };
 
-/** @brief Static contract for one Run-shared continuation stage.
- * key is unique within the original node instance. Every Run starts a fresh
- * producer and retains its success/failure until Run end. Input projection is
- * a potential dependency declaration, not read authority. The stage issues
- * ordinary member Needs before reading. Result schema and bounds are fixed
- * during preparation and enter operation identity; no spill or recomputation.
+/** @brief Static contract for one shared continuation stage.
+ * key is unique within the original call. Each block activation starts a fresh
+ * producer, shared by that activation's output units. Input projection limits
+ * the compiler's mapping; the Plan grants exact read authority before polling.
+ * Result schema and bounds are fixed during preparation and enter operation
+ * identity; no spill or recomputation occurs within an activation.
  */
 struct OperationSharedStage final {
   std::string key;
@@ -221,7 +221,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   bool allows_cpu_fallback = false;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 28U;
+  std::uint32_t version = 29U;
   std::vector<OperationSharedStage> shared_stages;
   /** @brief Registered template requires pure per-node metadata resolution.
    * Free inference rejects templates. OperationRegistry::prepare_operation
@@ -391,6 +391,12 @@ class PHOTOSPIDER_API PreparedOperation final {
   PreparedOperation& operator=(const PreparedOperation&) = delete;
   PreparedOperation(PreparedOperation&&) = delete;
   PreparedOperation& operator=(PreparedOperation&&) = delete;
+  /** @brief Invoke the owned pure mapping callback for a static plan unit.
+   * Exceptions and floating environment changes are fenced. An empty callback
+   * is a compilation error, never an empty dependency declaration.
+   */
+  Result<ResultStaticMapping> map_dependencies(
+      const ResultStaticQuery& query) const;
   /** @brief Complete resolved output contracts; valid for handle lifetime. */
   const OperationTraits& traits() const noexcept;
   /** @brief Borrowed immutable operation-defined program, possibly nullptr.
@@ -444,6 +450,11 @@ struct PHOTOSPIDER_API OperationDefinition final {
   std::string key;
   /** @brief Immutable compiler-visible semantic traits. */
   OperationTraits traits;
+  /** @brief Static input and shared-stage mapping, called only by planning.
+   * The baseline contract eagerly reads complete selected inputs. Operations
+   * with narrower or segmented dependencies replace this callback explicitly.
+   */
+  OperationDependencyMapper map_dependencies = complete_input_dependencies;
   /** @brief Alternative structured stage protocol 2; exclusive with callbacks.
    */
   ResultProgramStart start_result = {};
@@ -538,7 +549,7 @@ class PHOTOSPIDER_API OperationRegistry final {
    * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
    * @note Path rejection precedes the platform loader. The loader accepts
-   * only the exact Result operation ABI 6 entry point and full table layout;
+   * only the exact Result operation ABI 7 entry point and full table layout;
    * missing, older, and planar-only C entries are rejected. Result modules
    * publish validated tensor coverage through the structured contract.
    * No signature, trust-store, sandbox, or process isolation is applied.

@@ -243,23 +243,31 @@ int main(int argc, char** argv) try {
         return 1;
     }
     auto evidence = take(result.value().dependencies.tile_record({0, 0, 0, 1}));
-    std::vector<TileIndex> expected{1};
-    for (TileIndex i = 1; i <= 65; ++i)
-      expected.push_back(i * 64);
+    const TileInterval intervals[] = {{1, 2}, {64, 4224}};
+    const auto expected =
+        take(TileSet::from_intervals(ResourceBudget{}, intervals, 2));
     if (check(evidence && evidence->inputs.size() == 1 &&
                   evidence->inputs[0].tensor_slot == 0 &&
-                  evidence->inputs[0].tiles ==
-                      take(TileSet::from_indices(
-                          ResourceBudget{}, expected.data(), expected.size())),
-              "C block state imported obsolete control"))
+                  evidence->inputs[0].tiles == expected &&
+                  !evidence->inputs[0].tiles.contains(0),
+              "C fixed grants included an obsolete control tile"))
       return 1;
     const auto& d = result.value().diagnostics;
     if (check(gpu ? d.native_dispatch_count > 0 : d.native_dispatch_count == 0,
               "C native computation evidence failed"))
       return 1;
-    if (gpu && check(context.cache_statistics().native_retained_bytes == 16,
-                     "C native cache capacity failed"))
+    // Two public floats and two native block states (two floats each) retain
+    // distinct native backing. Different control tiles cannot share a block.
+    if (gpu &&
+        check(context.cache_statistics().native_retained_bytes ==
+                      6 * sizeof(float) &&
+                  d.block_cache_hits == 0,
+              "C native result retention or block-cache boundary failed")) {
+      std::cerr << "native retained="
+                << context.cache_statistics().native_retained_bytes
+                << " block hits=" << d.block_cache_hits << '\n';
       return 1;
+    }
     std::cout << (gpu ? "C Metal" : "C CPU")
               << ": sums=2145,2145; dispatches=" << d.native_dispatch_count
               << "; block_hits=" << d.block_cache_hits << '\n';
@@ -307,10 +315,12 @@ int main(int argc, char** argv) try {
           Compiler(registry).compile(bad_graph, options).take_value();
       ExecutionContextConfig tight;
       tight.gpu_enabled = gpu;
+      // Native allocations above 16 KiB round up independently: the compact
+      // 16644-byte atlas payload and 20480-byte directory each occupy 32 KiB.
       tight.maximum_live_bytes =
-          length * 4 +
+          length * sizeof(float) +
           bad_plan.plan.steps()[0].traits.outputs[0].continuation_bytes + 4 +
-          24 + 65 * 4 + 32768;
+          24 + 2 * 32768;
       ExecutionContext fresh(registry, tight);
       const auto fresh_bindings = inputs(take(fresh.resource_budget()));
       auto bad_frozen =
@@ -322,7 +332,12 @@ int main(int argc, char** argv) try {
                 "C native negative case failed")) {
         std::cerr << "mode=" << mode
                   << ", code=" << static_cast<int>(failed.status().code)
-                  << ", message=" << failed.status().message << '\n';
+                  << ", message=" << failed.status().message
+                  << ", payload peak="
+                  << take(fresh.resource_budget())
+                         .statistics()
+                         .peak[ResourceKind::Payload]
+                  << ", payload limit=" << tight.maximum_live_bytes << '\n';
         return 1;
       }
       if (check(take(fresh.resource_budget())

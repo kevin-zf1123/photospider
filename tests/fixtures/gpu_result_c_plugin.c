@@ -10,15 +10,15 @@ struct State {
   uint32_t stage, mode, box;
   float offset;
 };
-static const ps_result_tensor_spec_v6 state_tensor = {
-    .struct_size = sizeof(ps_result_tensor_spec_v6),
+static const ps_result_tensor_spec_v7 state_tensor = {
+    .struct_size = sizeof(ps_result_tensor_spec_v7),
     .key = "state",
     .key_size = 5,
-    .element_type = PS_RESULT_ELEMENT_FLOAT32_V6,
+    .element_type = PS_RESULT_ELEMENT_FLOAT32_V7,
     .rank = 1,
     .shape = {2}};
-static const ps_result_schema_v6 state_schema = {
-    .struct_size = sizeof(ps_result_schema_v6),
+static const ps_result_schema_v7 state_schema = {
+    .struct_size = sizeof(ps_result_schema_v7),
     .id = "c.gpu.state",
     .id_size = 11,
     .version = 1,
@@ -36,40 +36,40 @@ static const char shader[] = PS_FRAGMENT_ATLAS_MSL_V11
     " sum+=as_type<float>(bits); } "
     "output[0]=as_type<uint>(sum);output[1]=missing;}";
 
-static int start(void* user, void* bytes, const ps_result_query_v6* q,
-                 const ps_result_services_v6* host) {
+static int start(void* user, void* bytes, const ps_result_query_v7* q,
+                 const ps_result_services_v7* host) {
   (void)user;
   (void)host;
   struct State* state = bytes;
   if (q->shared_stage != UINT32_MAX || q->tile_extent != 1)
-    return PS_RESULT_STATUS_INVALID_ARGUMENT_V6;
+    return PS_RESULT_STATUS_INVALID_ARGUMENT_V7;
   state->mode = (uint32_t)q->parameters[0].int64_value;
   return 0;
 }
-static int need(const ps_result_services_v6* host, const ps_result_query_v6* q,
+static int need(const ps_result_services_v7* host, const ps_result_query_v7* q,
                 const struct State* state, int data) {
   (void)q;
-  ps_result_tile_interval_v6 tiles[65];
+  ps_result_tile_interval_v7 tiles[65];
   const uint32_t count = data ? 65 : 1;
   for (uint32_t i = 0; i < count; ++i) {
     tiles[i].begin =
         data ? (uint64_t)state->offset + (i + 1) * 64 : state->coordinate;
     tiles[i].end = tiles[i].begin + 1;
   }
-  const ps_result_tile_need_v6 request = {sizeof(request), 0,    0, 0,
+  const ps_result_tile_need_v7 request = {sizeof(request), 0,    0, 0,
                                           tiles,           count};
-  return host->need_tiles(host->context, &request) ? 1 : PS_RESULT_NEED_V6;
+  return host->need_tiles(host->context, &request) ? 1 : PS_RESULT_NEED_V7;
 }
 struct ComputeContext {
   const struct State* state;
-  const ps_result_services_v6* outer;
+  const ps_result_services_v7* outer;
 };
-static int compute(const ps_result_block_services_v6* host, uint64_t incoming,
+static int compute(const ps_result_block_services_v7* host, uint64_t incoming,
                    uint64_t* outgoing, void* user) {
   const struct ComputeContext* context = user;
   const struct State* state = context->state;
   if (state->mode == 15) {
-    ps_result_need_descriptor_v6(context->outer, 0);
+    ps_result_need_descriptor_v7(context->outer, 0);
     return 1;
   }
   float values[2] = {0};
@@ -77,14 +77,14 @@ static int compute(const ps_result_block_services_v6* host, uint64_t incoming,
                        sizeof(values)))
     return 1;
   if (state->mode == 16) {
-    ps_result_tensor_spec_v6 tensor = state_tensor;
+    ps_result_tensor_spec_v7 tensor = state_tensor;
     tensor.shape[0] = 1;
-    ps_result_schema_v6 schema = state_schema;
+    ps_result_schema_v7 schema = state_schema;
     schema.tensors = &tensor;
     return host->create_state(host->context, &schema, (const uint8_t*)values, 4,
                               outgoing);
   }
-  ps_result_native_atlas_v6 atlas = {0}, again = {0};
+  ps_result_native_atlas_v7 atlas = {0}, again = {0};
   atlas.struct_size = again.struct_size = sizeof(atlas);
   if (host->acquire_native_atlas(host->context, 0, 0, &atlas) ||
       host->acquire_native_atlas(host->context, 0, 0, &again) ||
@@ -111,13 +111,14 @@ static int compute(const ps_result_block_services_v6* host, uint64_t incoming,
       {sizeof(ps_gpu_buffer_binding_v1), 2, output, 0, 8, 1}};
   if (state->mode == 11)
     buffers[0].writable = 1;
-  const uint64_t constants[] = {atlas.slot_count,
-                                atlas.shape[0],
-                                atlas.shape[1],
-                                atlas.tile_shape[0],
-                                atlas.tile_shape[1],
-                                atlas.payload_sample_bytes,
-                                (uint64_t)values[0] + (state->mode == 7)};
+  const uint64_t constants[] = {
+      atlas.slot_count,
+      atlas.shape[0],
+      atlas.shape[1],
+      atlas.tile_shape[0],
+      atlas.tile_shape[1],
+      atlas.payload_sample_bytes,
+      (uint64_t)values[0] + (state->mode == 7 ? 64 : 0)};
   ps_gpu_dispatch_v1 command = {0};
   command.struct_size = sizeof(command);
   command.source = shader;
@@ -144,7 +145,7 @@ static int compute(const ps_result_block_services_v6* host, uint64_t incoming,
     return 1;
   return 0;
 }
-static int invalid_token(const ps_result_services_v6* host, uint64_t token) {
+static int invalid_token(const ps_result_services_v7* host, uint64_t token) {
   const ps_gpu_buffer_binding_v1 binding = {sizeof(binding), 0, token, 0, 4, 0};
   ps_gpu_dispatch_v1 command = {0};
   command.struct_size = sizeof(command);
@@ -156,8 +157,8 @@ static int invalid_token(const ps_result_services_v6* host, uint64_t token) {
 /* Direct mock-host probes isolate bridge rejection from backend validation.
  * 18: invalid writable; 19/20: forged execute/release token;
  * 21/22: expired execute/release token; 23: valid same-poll translation. */
-static int bridge_probe(struct State* state, const ps_result_query_v6* q,
-                        const ps_result_services_v6* host) {
+static int bridge_probe(struct State* state, const ps_result_query_v7* q,
+                        const ps_result_services_v7* host) {
   if (state->mode == 18) {
     uint8_t* scratch = NULL;
     uint64_t token = 0;
@@ -199,12 +200,12 @@ static int bridge_probe(struct State* state, const ps_result_query_v6* q,
     return 1;
   return need(host, q, state, 0);
 }
-static int poll(void* user, void* bytes, const ps_result_query_v6* q,
-                const ps_result_services_v6* host) {
+static int poll(void* user, void* bytes, const ps_result_query_v7* q,
+                const ps_result_services_v7* host) {
   (void)user;
-  ps_result_region_v6 requested_region;
-  if (ps_result_output_region_v6(q, 0, &requested_region))
-    return PS_RESULT_STATUS_INVALID_ARGUMENT_V6;
+  ps_result_region_v7 requested_region;
+  if (ps_result_output_region_v7(q, 0, &requested_region))
+    return PS_RESULT_STATUS_INVALID_ARGUMENT_V7;
   struct State* state = bytes;
   if (state->mode >= 18)
     return bridge_probe(state, q, host);
@@ -223,7 +224,7 @@ static int poll(void* user, void* bytes, const ps_result_query_v6* q,
         state->offset != (float)(uint32_t)state->offset)
       return 1;
     if (state->mode == 1) {
-      ps_result_native_atlas_v6 atlas = {0};
+      ps_result_native_atlas_v7 atlas = {0};
       atlas.struct_size = sizeof(atlas);
       if (host->acquire_native_atlas(host->context, 0, 0, &atlas))
         return 1;
@@ -240,14 +241,14 @@ static int poll(void* user, void* bytes, const ps_result_query_v6* q,
     return need(host, q, state, 1);
   }
   if (state->mode == 1) {
-    ps_result_native_atlas_v6 atlas = {0};
+    ps_result_native_atlas_v7 atlas = {0};
     atlas.struct_size = sizeof(atlas);
     if (host->acquire_native_atlas(host->context, 0, 0, &atlas))
       return 1;
     return invalid_token(host, state->old_token);
   }
   if (state->mode == 2 || state->mode == 8) {
-    ps_result_native_atlas_v6 atlas = {0};
+    ps_result_native_atlas_v7 atlas = {0};
     atlas.struct_size = sizeof(atlas);
     atlas.reserved = state->mode == 2;
     host->acquire_native_atlas(host->context, 0, 0, &atlas);
@@ -277,9 +278,9 @@ static int poll(void* user, void* bytes, const ps_result_query_v6* q,
   if (state->mode == 5)
     return invalid_token(host, UINT64_MAX);
   if (state->mode == 12) {
-    const ps_result_tile_interval_v6 interval = {0, 1};
+    const ps_result_tile_interval_v7 interval = {0, 1};
     host->need_tiles(host->context,
-                     &(ps_result_tile_need_v6){sizeof(ps_result_tile_need_v6),
+                     &(ps_result_tile_need_v7){sizeof(ps_result_tile_need_v7),
                                                0, 0, 0, &interval, 65537});
     return 1;
   }
@@ -322,7 +323,7 @@ static int poll(void* user, void* bytes, const ps_result_query_v6* q,
   if (state->mode == 6 &&
       host->gpu->buffer(host->gpu->context, destination, 4, 1, &token))
     return 1;
-  ps_result_region_v6 region = {.struct_size = sizeof(region),
+  ps_result_region_v7 region = {.struct_size = sizeof(region),
                                 .rank = 2,
                                 .offset = {0, state->coordinate},
                                 .extent = {1, 1}};
@@ -352,7 +353,7 @@ static int poll(void* user, void* bytes, const ps_result_query_v6* q,
       state->coordinate = requested_region.offset[1];
   }
   if (state->box == 1)
-    return host->publish_result(host->context, 1) ? 1 : PS_RESULT_PUBLISH_V6;
+    return host->publish_result(host->context, 1) ? 1 : PS_RESULT_PUBLISH_V7;
   state->stage = 1;
   return need(host, q, state, 0);
 }
@@ -363,45 +364,45 @@ static void destroy(void* user, void* bytes) {
 static void release(void* context) {
   (void)context;
 }
-static const ps_result_tensor_spec_v6 tensor = {
+static const ps_result_tensor_spec_v7 tensor = {
     .struct_size = sizeof(tensor),
     .key = "samples",
     .key_size = 7,
-    .element_type = PS_RESULT_ELEMENT_FLOAT32_V6,
+    .element_type = PS_RESULT_ELEMENT_FLOAT32_V7,
     .rank = 2,
     .shape = {1, 8192},
     .spatial = 1,
     .height_axis = 0,
     .width_axis = 1,
-    .channel_axis = PS_RESULT_NO_CHANNEL_V6};
-static const ps_result_schema_v6 tensor_schema = {
+    .channel_axis = PS_RESULT_NO_CHANNEL_V7};
+static const ps_result_schema_v7 tensor_schema = {
     .struct_size = sizeof(tensor_schema),
     .id = "c.gpu.samples",
     .id_size = 13,
     .version = 1,
     .tensors = &tensor,
     .tensor_count = 1};
-static const ps_result_port_v6 input = {
+static const ps_result_port_v7 input = {
     .struct_size = sizeof(input),
-    .element_type = PS_RESULT_ELEMENT_FLOAT32_V6,
+    .element_type = PS_RESULT_ELEMENT_FLOAT32_V7,
     .rank = 2,
     .tensor_key = "samples",
     .tensor_key_size = 7};
-static const ps_result_output_v6 output = {
+static const ps_result_output_v7 output = {
     .struct_size = sizeof(output),
     .key = "value",
     .key_size = 5,
-    .port = {.struct_size = sizeof(ps_result_port_v6),
+    .port = {.struct_size = sizeof(ps_result_port_v7),
              .schema = &tensor_schema},
     .input_count = UINT32_MAX};
-static const ps_result_parameter_descriptor_v6 parameters[] = {
-    {sizeof(ps_result_parameter_descriptor_v6), "mode", 4,
-     PS_RESULT_PARAMETER_INT64_V6, 1, 1, 0, 23}};
-static int resolve(void* user, const ps_result_port_v6* inputs, uint32_t count,
-                   const ps_result_parameter_value_v6* values,
-                   uint32_t value_count, const ps_result_port_v6* outputs,
+static const ps_result_parameter_descriptor_v7 parameters[] = {
+    {sizeof(ps_result_parameter_descriptor_v7), "mode", 4,
+     PS_RESULT_PARAMETER_INT64_V7, 1, 1, 0, 23}};
+static int resolve(void* user, const ps_result_port_v7* inputs, uint32_t count,
+                   const ps_result_parameter_value_v7* values,
+                   uint32_t value_count, const ps_result_port_v7* outputs,
                    uint32_t output_count,
-                   const ps_result_metadata_sink_v6* sink) {
+                   const ps_result_metadata_sink_v7* sink) {
   (void)user;
   (void)values;
   (void)value_count;
@@ -409,26 +410,44 @@ static int resolve(void* user, const ps_result_port_v6* inputs, uint32_t count,
   if (count != 1 || output_count != 1 || !inputs[0].schema ||
       inputs[0].schema->tensor_count != 1)
     return 5;
-  const ps_result_tensor_spec_v6* source = inputs[0].schema->tensors;
+  const ps_result_tensor_spec_v7* source = inputs[0].schema->tensors;
   if (source->rank != 2 || source->batch_rank || source->shape[0] != 1 ||
       source->shape[1] < 4225 ||
-      source->element_type != PS_RESULT_ELEMENT_FLOAT32_V6)
+      source->element_type != PS_RESULT_ELEMENT_FLOAT32_V7)
     return 5;
-  ps_result_tensor_spec_v6 result_tensor = tensor;
+  ps_result_tensor_spec_v7 result_tensor = tensor;
   result_tensor.shape[1] = source->shape[1];
-  ps_result_schema_v6 result_schema = tensor_schema;
+  ps_result_schema_v7 result_schema = tensor_schema;
   result_schema.tensors = &result_tensor;
-  ps_result_port_v6 result = output.port;
+  ps_result_port_v7 result = output.port;
   result.schema = &result_schema;
   return sink->set_output(sink->context, 0, &result);
 }
-static const ps_result_operation_v6 operation = {
+static int map_dependencies(void* user, const ps_result_static_query_v7* query,
+                            const ps_result_static_mapping_sink_v7* sink) {
+  (void)user;
+  if (query->shared_stage != UINT32_MAX || query->tile_extent != 1 ||
+      query->tile_unit == UINT64_MAX)
+    return PS_RESULT_STATUS_INVALID_ARGUMENT_V7;
+  // Every accepted control value is an integer in [0,64). Compile the union
+  // of its 65 possible data reads; runtime Need only verifies this authority.
+  const ps_result_tile_interval_v7 control = {query->tile_unit,
+                                              query->tile_unit + 1};
+  const ps_result_tile_interval_v7 data = {64, 4224};
+  ps_result_tile_need_v7 read = {sizeof(read), 0, 0, 0, &control, 1};
+  int status = sink->add_input(sink->context, &read);
+  if (status)
+    return status;
+  read.intervals = &data;
+  return sink->add_input(sink->context, &read);
+}
+static const ps_result_operation_v7 operation = {
     .struct_size = sizeof(operation),
     .key = "example.c_native_sum",
     .key_size = 20,
-    .flags = PS_RESULT_FLAG_CPU_V6 | PS_RESULT_FLAG_GPU_V6 |
-             PS_RESULT_FLAG_DETERMINISTIC_V6 |
-             PS_RESULT_FLAG_SIDE_EFFECT_FREE_V6,
+    .flags = PS_RESULT_FLAG_CPU_V7 | PS_RESULT_FLAG_GPU_V7 |
+             PS_RESULT_FLAG_DETERMINISTIC_V7 |
+             PS_RESULT_FLAG_SIDE_EFFECT_FREE_V7,
     .inputs = &input,
     .input_count = 1,
     .outputs = &output,
@@ -441,11 +460,12 @@ static const ps_result_operation_v6 operation = {
     .resolve_metadata = resolve,
     .start = start,
     .poll = poll,
-    .destroy = destroy};
-static const ps_result_operation_plugin_api_v6 api = {
-    sizeof(api), PS_RESULT_OPERATION_ABI_VERSION_6, &operation, 1, NULL,
+    .destroy = destroy,
+    .map_dependencies = map_dependencies};
+static const ps_result_operation_plugin_api_v7 api = {
+    sizeof(api), PS_RESULT_OPERATION_ABI_VERSION_7, &operation, 1, NULL,
     release};
-PS_RESULT_EXPORT const ps_result_operation_plugin_api_v6*
-ps_result_operation_plugin_get_api_v6(void) {
+PS_RESULT_EXPORT const ps_result_operation_plugin_api_v7*
+ps_result_operation_plugin_get_api_v7(void) {
   return &api;
 }

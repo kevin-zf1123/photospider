@@ -72,7 +72,7 @@ inline std::vector<std::string> dependency_cache_templates(
       break;
     const auto& step = plan.steps()[index];
     DependencyTemplateDigest hash(work);
-    hash.text("photospider.dependency-static.v2");
+    hash.text("photospider.dependency-static.v4");
     hash.integer(plan.tile_extent());
     hash.integer(static_cast<std::uint32_t>(plan.execution_mode()));
     hash.integer(static_cast<std::uint32_t>(step.backend));
@@ -104,23 +104,8 @@ inline std::vector<std::string> dependency_cache_templates(
       }
     }
     hash.integer(step.inputs.size());
-    for (const auto& input : step.inputs) {
-      if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
-        hash.integer(1);
-        if (producer->step_index >= index ||
-            keys[producer->step_index].empty()) {
-          hash.disable();
-          break;
-        }
-        hash.text(keys[producer->step_index]);
-      } else {
-        hash.integer(0);
-        const auto& declaration = plan.input_declarations().at(
-            std::get<PlanWorkflowInput>(input).declaration_index);
-        hash.text(declaration.name);
-        hash.schema(*declaration.result_schema);
-      }
-    }
+    for (const auto& input : step.inputs)
+      hash.schema(plan.input_schema(input));
     keys[index] = hash.finish();
   }
   return keys;

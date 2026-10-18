@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/callback_environment.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/utf8_validation.hpp"
 #include "plugin/failure_latch.hpp"
@@ -141,7 +142,7 @@ class OperationLibrary final {
   [[nodiscard]] void* handle() const noexcept { return handle_; }
 
   void attach_result_api(
-      const ps_result_operation_plugin_api_v6* api) noexcept {
+      const ps_result_operation_plugin_api_v7* api) noexcept {
     result_api_ = api;
   }
 
@@ -149,7 +150,7 @@ class OperationLibrary final {
   /** @brief Platform native library handle. */
   void* handle_ = nullptr;
   /** @brief Mapped immutable plugin API table. */
-  const ps_result_operation_plugin_api_v6* result_api_ = nullptr;
+  const ps_result_operation_plugin_api_v7* result_api_ = nullptr;
 };
 
 /**
@@ -297,7 +298,7 @@ bool parameter_type_matches(const ParameterValue& value,
 Status validate_selected_traits(const OperationTraits& traits) {
   const Status schema_status =
       validate_parameter_schema(traits.parameter_schema);
-  if (traits.version != 28U || (!traits.supports_cpu && !traits.supports_gpu) ||
+  if (traits.version != 29U || (!traits.supports_cpu && !traits.supports_gpu) ||
       (traits.share_blocks_across_outputs &&
        (!traits.deterministic || !traits.side_effect_free)) ||
       (traits.allows_cpu_fallback &&
@@ -491,6 +492,23 @@ struct PreparedOperation::Impl final {
 };
 PreparedOperation::PreparedOperation(std::shared_ptr<const Impl> impl)
     : impl_(std::move(impl)) {}
+Result<ResultStaticMapping> PreparedOperation::map_dependencies(
+    const ResultStaticQuery& query) const {
+  if (&query.prepared != this || !impl_->definition->map_dependencies)
+    return Result<ResultStaticMapping>(
+        {ErrorCode::InvalidArgument,
+         "operation has no static dependency mapper"});
+  try {
+    return core_internal::invoke_callback(
+        [&] { return impl_->definition->map_dependencies(query); });
+  } catch (const std::bad_alloc&) {
+    return Result<ResultStaticMapping>(
+        {ErrorCode::ResourceExhausted, "static dependency allocation failed"});
+  } catch (...) {
+    return Result<ResultStaticMapping>(
+        {ErrorCode::OperationFailed, "static dependency mapper threw"});
+  }
+}
 const OperationTraits& PreparedOperation::traits() const noexcept {
   return impl_->traits;
 }
@@ -691,17 +709,18 @@ Status OperationRegistry::load_plugin(const std::string& path) {
                              "ps_result_operation_plugin_get_api_v2",
                              "ps_result_operation_plugin_get_api_v3",
                              "ps_result_operation_plugin_get_api_v4",
-                             "ps_result_operation_plugin_get_api_v5"})
+                             "ps_result_operation_plugin_get_api_v5",
+                             "ps_result_operation_plugin_get_api_v6"})
     if (find_symbol(pending_library.handle(), symbol))
-      return Status{ErrorCode::TypeMismatch, "Result plugins require ABI 6"};
-  using ResultApiFunction = const ps_result_operation_plugin_api_v6* (*)();
+      return Status{ErrorCode::TypeMismatch, "Result plugins require ABI 7"};
+  using ResultApiFunction = const ps_result_operation_plugin_api_v7* (*)();
   ResultApiFunction result_api_function = nullptr;
   void* result_symbol = find_symbol(pending_library.handle(),
-                                    "ps_result_operation_plugin_get_api_v6");
+                                    "ps_result_operation_plugin_get_api_v7");
   std::memcpy(&result_api_function, &result_symbol,
               sizeof(result_api_function));
   if (result_api_function) {
-    const ps_result_operation_plugin_api_v6* table = nullptr;
+    const ps_result_operation_plugin_api_v7* table = nullptr;
     try {
       core_internal::CallbackEnvironment environment;
       if (!environment.active())
@@ -712,9 +731,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     }
     if (!table ||
         reinterpret_cast<std::uintptr_t>(table) %
-            alignof(ps_result_operation_plugin_api_v6) ||
+            alignof(ps_result_operation_plugin_api_v7) ||
         table->struct_size != sizeof(*table) ||
-        table->abi_version != PS_RESULT_OPERATION_ABI_VERSION_6)
+        table->abi_version != PS_RESULT_OPERATION_ABI_VERSION_7)
       return Status{ErrorCode::InvalidArgument,
                     "unsupported Result API version or size"};
     pending_library.attach_result_api(table);
@@ -792,7 +811,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
 
   return Status{ErrorCode::InvalidArgument,
-                "operation plugin must expose Result ABI 6"};
+                "operation plugin must expose Result ABI 7"};
 }
 
 /**

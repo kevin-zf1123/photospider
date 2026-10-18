@@ -83,7 +83,7 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   // The C++ trait schema and the C plugin table have independent versions.
   traits.version = reader.next();
   const auto element_type = static_cast<ps::ElementType>(
-      (reader.next() % 7U) + PS_RESULT_ELEMENT_UINT8_V6);
+      (reader.next() % 7U) + PS_RESULT_ELEMENT_UINT8_V7);
   const std::uint64_t extent = 1U + reader.next() % 16U;
   const auto atomic_axes = reader.next() % 3U;
   auto& output = traits.outputs[0];
@@ -124,8 +124,12 @@ OperationContractIrStage exercise_operation_contract_ir_input(
     return ps::Result<ps::ResultContinuation>(ps::Status::failure(
         ps::ErrorCode::OperationFailed, "fuzz operation is not run"));
   };
-  const ps::Status registered = operations->register_operation(
-      ps::OperationDefinition{"fuzz.operation", traits, start});
+  ps::OperationDefinition definition;
+  definition.key = "fuzz.operation";
+  definition.traits = traits;
+  definition.start_result = start;
+  const ps::Status registered =
+      operations->register_operation(std::move(definition));
   if (!registered.ok()) {
     if (duplicate_schema) {
       // Prove the duplicate is the sole registration defect, rather than
@@ -136,9 +140,11 @@ OperationContractIrStage exercise_operation_contract_ir_input(
       traits.parameter_schema.clear();
       for (const auto& parameter : unique)
         traits.parameter_schema.push_back(parameter.second);
-      if (operations
-              ->register_operation({"fuzz.control", std::move(traits), start})
-              .ok())
+      ps::OperationDefinition control;
+      control.key = "fuzz.control";
+      control.traits = std::move(traits);
+      control.start_result = start;
+      if (operations->register_operation(std::move(control)).ok())
         return OperationContractIrStage::DuplicateSchemaRejected;
     }
     return OperationContractIrStage::RegistrationRejected;

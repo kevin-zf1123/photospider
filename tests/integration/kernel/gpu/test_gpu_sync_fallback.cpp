@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/plugin/tile_helpers.hpp"
 #include "support/gpu_result_fixture.hpp"
 
 namespace {
@@ -48,7 +49,7 @@ Footprint point(std::uint64_t at) {
 TileRequest request(const ResourceBudget& root, std::uint64_t at) {
   return {{{0, gpu_result::take(TileSet::from_indices(root, {at}))}}};
 }
-template <bool FailInPoll>
+template <bool FailInPoll, bool AfterRead = false>
 Result<ResultProgramPoll> increment(const ResultProgramPhase& phase) try {
   const auto demand = gpu_result::demand(phase);
   if (!phase.tensors || phase.tensors->empty())
@@ -70,13 +71,17 @@ Result<ResultProgramPoll> increment(const ResultProgramPhase& phase) try {
         std::memcpy(output.data() + i * 4, &x, 4);
       }
     } else {
+      if (FailInPoll && !AfterRead && unavailable)
+        return Result<ResultProgramPoll>(
+            Status{ErrorCode::BackendUnavailable,
+                   "example native implementation unavailable"});
       auto window = gpu_result::take(phase.acquire_native_tensor(0, 0, box));
       auto row =
           gpu_result::take(window.row_run({0, box.dimensions()[1].offset}));
-      if (row.samples != count || row.sample_stride_bytes != 4)
+      if (row.samples != count || (count > 1 && row.sample_stride_bytes != 4))
         return Result<ResultProgramPoll>(
             Status{ErrorCode::OperationFailed, "native source layout"});
-      if (FailInPoll && unavailable)
+      if (FailInPoll && AfterRead && unavailable)
         return Result<ResultProgramPoll>(
             Status{ErrorCode::BackendUnavailable,
                    "example native implementation unavailable"});
@@ -228,6 +233,7 @@ int fallback_records() {
     ancestor.traits.input_schema[0].result_schema_version = 1;
     ancestor.traits.outputs = {gpu_result::output(image_schema())};
     ancestor.traits.outputs[0].continuation_bytes = sizeof(Ancestor);
+    ancestor.map_dependencies = sdk::pointwise_dependencies;
     ancestor.start_result = [&ancestors, mode](
                                 const ResultProgramQuery&,
                                 const BufferAllocator& allocator) {
@@ -242,6 +248,20 @@ int fallback_records() {
     child.traits.allows_cpu_fallback = true;
     child.traits.outputs[0].continuation_bytes = sizeof(FallbackReads);
     child.traits.outputs[0].maximum_dependency_stages = 4;
+    child.map_dependencies = [mode](const ResultStaticQuery& query) {
+      ResultStaticMapping mapping;
+      const bool cpu_read = mode == 1 || mode == 4;
+      const auto tiles = query.backend == Backend::Gpu
+                             ? (cpu_read ? std::vector<TileIndex>{1, 2}
+                                         : std::vector<TileIndex>{1})
+                             : (cpu_read ? std::vector<TileIndex>{2}
+                                         : std::vector<TileIndex>{});
+      if (!tiles.empty())
+        mapping.inputs.push_back(
+            {0, 0, false,
+             gpu_result::take(TileSet::from_indices(ResourceBudget{}, tiles))});
+      return Result<ResultStaticMapping>(std::move(mapping));
+    };
     child.start_result = [mode](const ResultProgramQuery&,
                                 const BufferAllocator& allocator) {
       return ResultContinuation::make<FallbackReads>(
@@ -283,20 +303,23 @@ int fallback_records() {
     if (verify(result, 0, mode == 0 || mode == 3 ? 7 : 2))
       return 1;
     const auto& evidence = result.value().dependencies;
-    const TileUnit child_unit{plan.outputs().at("y"), 0, 0};
+    const TileUnit child_unit{
+        plan.return_signature().at(plan.outputs().at("y")).record_index, 0, 0};
     auto child_record = gpu_result::take(evidence.tile_record(child_unit));
     const bool cpu_read = mode == 1 || mode == 2 || mode == 4;
-    if (check(
-            child_record && child_record->inputs.size() == (cpu_read ? 1U : 0U),
-            "CPU retry must replace abandoned GPU Needs"))
+    if (check(child_record && child_record->inputs.size() == 1,
+              "CPU retry must preserve the compiled input grant"))
       return 1;
-    if (cpu_read) {
+    {
       const auto& input = child_record->inputs[0];
-      if (check(std::holds_alternative<PlanStepInput>(input.producer) &&
-                    std::get<PlanStepInput>(input.producer).step_index == 0 &&
-                    input.tensor_slot == 0 &&
-                    input.tiles == request(root, 2).members.at(0),
-                "CPU retry dependency differs"))
+      const auto compiled_tiles = gpu_result::take(
+          TileSet::from_indices(root, cpu_read ? std::vector<TileIndex>{1, 2}
+                                               : std::vector<TileIndex>{1}));
+      if (check(std::holds_alternative<PlanWorkflowInput>(input.producer) &&
+                    std::get<PlanWorkflowInput>(input.producer)
+                            .declaration_index == 0 &&
+                    input.tensor_slot == 0 && input.tiles == compiled_tiles,
+                "CPU retry changed the static dependency proof"))
         return 1;
     }
     for (TileIndex edited : {0, 1, 2, 3}) {
@@ -306,14 +329,17 @@ int fallback_records() {
       auto dirty = gpu_result::take(evidence.dirty_units(changes));
       const bool child_dirty =
           std::find(dirty.begin(), dirty.end(), child_unit) != dirty.end();
-      if (check(child_dirty == (cpu_read && (mode == 2 || edited == 2)),
-                "retry retains only current CPU dependency closure"))
+      if (check(child_dirty == (edited == 1 || (cpu_read && edited == 2)),
+                "retry must retain the compiled dependency closure"))
         return 1;
       for (const auto& named :
            {std::pair<const char*, TileIndex>{"a", 0}, {"b", 3}}) {
         if (!plan.outputs().count(named.first))
           continue;
-        const TileUnit unit{plan.outputs().at(named.first), 0, 0, named.second};
+        const TileUnit unit{plan.return_signature()
+                                .at(plan.outputs().at(named.first))
+                                .record_index,
+                            0, 0, named.second};
         const bool affected =
             std::find(dirty.begin(), dirty.end(), unit) != dirty.end();
         if (check(affected == (edited == named.second),
@@ -333,15 +359,16 @@ int fallback_records() {
       if (check(ordinary.ok(), "ordinary fallback execution"))
         return 1;
       auto record = gpu_result::take(ordinary.value().dependencies.tile_record(
-          {tile.outputs().at("y"), 0, 0}));
-      if (check(record && record->inputs.size() == (cpu_read ? 1U : 0U) &&
-                    (!cpu_read || record->inputs[0].tiles.contains(2)),
-                "ordinary fallback preserves CPU tile dependency"))
+          {tile.return_signature().at(tile.outputs().at("y")).record_index, 0,
+           0}));
+      if (check(record && record->inputs.size() == 1 &&
+                    record->inputs[0].tiles.contains(1),
+                "ordinary fallback preserves compiled tile dependency"))
         return 1;
     }
   }
   std::cout
-      << "fallback record rollback: bounded retry, prior publications and tile "
+      << "static fallback grants: bounded retry, prior publications and tile "
          "evidence passed\n";
   return 0;
 }
@@ -359,6 +386,7 @@ int main() {
   op.traits.supports_gpu = true;
   op.traits.allows_cpu_fallback = true;
   op.traits.workspace_bytes = 32768;
+  op.map_dependencies = sdk::pointwise_dependencies;
   op.start_result = [](const ResultProgramQuery&, const BufferAllocator&) {
     return ResultContinuation::stateless<increment<false>>();
   };
@@ -369,6 +397,12 @@ int main() {
     return ResultContinuation::stateless<increment<true>>();
   };
   if (check(registry->register_operation(op).ok(), "register poll failure"))
+    return 1;
+  op.key = "example.fail_after_read";
+  op.start_result = [](const ResultProgramQuery&, const BufferAllocator&) {
+    return ResultContinuation::stateless<increment<true, true>>();
+  };
+  if (check(registry->register_operation(op).ok(), "register late failure"))
     return 1;
   op.key = "example.staged";
   op.traits.outputs[0].continuation_bytes = sizeof(Stage);
@@ -428,7 +462,7 @@ int main() {
       return 1;
     if (!enabled) {
       const auto& diagnostics = result.value().diagnostics;
-      if (check(diagnostics.operation_timings.size() == 3 &&
+      if (check(diagnostics.operation_timings.size() == 4 &&
                     diagnostics.fallback_reasons.size() == 2,
                 "missing-device rejection/CPU attempt pairs"))
         return 1;
@@ -439,7 +473,7 @@ int main() {
         completed +=
             attempt.backend == Backend::Cpu && attempt.outcome == ErrorCode::Ok;
       }
-      if (check(rejected == 2 && completed == 1,
+      if (check(rejected == 2 && completed == 2,
                 "missing-device attempt outcome"))
         return 1;
     }
@@ -542,7 +576,7 @@ int main() {
                 "actual native admission"))
         return 1;
       // Release the successful output before admitting another large tile. A
-      // GPU rejection must retire both rounded allocations before CPU retry.
+      // Early GPU rejection must retire its output allocation before CPU retry.
       result = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
       unavailable = true;
       auto fallback =
@@ -566,6 +600,21 @@ int main() {
           check(retry.value().diagnostics.native_dispatch_count > 0,
                 "fresh native retry"))
         return 1;
+      retry = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
+      GraphContext late_graph(document("example.fail_after_read", false));
+      auto late_plan =
+          Compiler(registry).compile(late_graph, planning).take_value().plan;
+      auto late_frozen = context.freeze(late_plan, bindings).take_value();
+      unavailable = true;
+      const auto cpu_before = cpu_calls.load();
+      auto late =
+          context.execute_fragments(late_frozen, {{"y", request(root, 0)}});
+      if (check(late.status().code == ErrorCode::BackendUnavailable &&
+                    cpu_calls == cpu_before &&
+                    root.statistics().live[ResourceKind::Payload] == length * 4,
+                "tensor I/O must veto retry and retire native owners"))
+        return 1;
+      unavailable = false;
     }
   }
   std::cout << "synchronous GPU fragments, tile fallback, cache "

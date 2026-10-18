@@ -518,8 +518,8 @@ Result<OperationPreparation> prepare(
   output_tensor.descriptor.element_type = state->target;
   output_tensor.atomic_trailing_axes = 0;
   if (output_tensor.layout.spatial && (!state->identity || state->materialize))
-  output.metadata.result_schema =
-      std::make_shared<const SchemaTemplate>(std::move(schema));
+    output.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(std::move(schema));
   OperationPreparation result;
   result.outputs.push_back(std::move(output));
   result.state = std::move(state);
@@ -998,8 +998,7 @@ using Poll = Result<ResultProgramPoll>;
 ResultBuilder result_builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto builder = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {},
-      phase.query.tile_extent));
+      phase.query.semantic_key, {}, phase.query.tile_extent));
 
   return builder;
 }
@@ -1149,26 +1148,14 @@ Status convert_window(const ResultProgramPhase& phase, const Preparation& state,
 }
 struct Continuation final {
   const Preparation* state;
-  bool requested = false;
   Footprint output;
   explicit Continuation(const Preparation* prepared) : state(prepared) {}
   Poll poll(const ResultProgramPhase& phase) try {
     const auto& tensor = phase.query.output.result_schema->tensors[0];
     const auto shape = tensor.sample_shape();
-    if (!requested) {
-      requested = true;
-      output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
-                                          : take(Footprint::all(shape));
-      ResultProgramNeed need;
-      {
-        auto tile_need_0 = sdk::tile_need_for_samples(
-            phase.resources, phase.query, 0, 0, output);
-        if (!tile_need_0.ok())
-          return Result<ResultProgramPoll>(tile_need_0.status());
-        need.tiles.push_back(tile_need_0.take_value());
-      }
-      return Poll(std::move(need));
-    }
+    output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
+                                        : take(Footprint::all(shape));
+
     FloatingEnvironment environment;
     ExactWorkScope exact_work(&phase.consume_work, &phase.query.cancellation);
     auto scratch =
@@ -1240,6 +1227,7 @@ OperationDefinition conversion() {
   definition.prepare_static = [](const auto& inputs, const auto& params) {
     return prepare(inputs, params);
   };
+  definition.map_dependencies = sdk::pointwise_dependencies;
   definition.start_result = [](const ResultProgramQuery& query,
                                const BufferAllocator& allocator) {
     if (query.tensor_outputs && query.tensor_outputs->empty())

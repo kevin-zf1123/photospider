@@ -120,6 +120,14 @@ void scalar_prelude_workflows() {
         consumer ? std::vector<uint32_t>{0} : std::vector<uint32_t>{};
     output.continuation_bytes = sizeof(ScalarPreludeState);
     output.maximum_dependency_stages = 2;
+    if (consumer) {
+      operation.map_dependencies = [](const ResultStaticQuery&) {
+        ResultStaticMapping mapping;
+        mapping.inputs.push_back(
+            {0, 2, false, take(TileSet::range(ResourceBudget{}, 0, 1))});
+        return Result<ResultStaticMapping>(std::move(mapping));
+      };
+    }
     operation.start_result = [consumer, starts, producer_starts, profile](
                                  const ResultProgramQuery&,
                                  const BufferAllocator& allocator) {
@@ -359,7 +367,14 @@ void foundation_tensor_workflows() {
     ExecutionBinding binding;
     binding.name = "samples";
     binding.result = take(builder.seal());
-    auto run = driver.prepare("core.identity", {binding});
+    PlanningOptions planning;
+    const auto planned_grid =
+        take(TileGrid::from_tensor(spec, planning.tile_extent));
+    const auto last_tile = planned_grid.tile_count() - 1;
+    planning.output_requests["out"] = {
+        {{0, take(TileSet::range(driver.root, last_tile, last_tile + 1))}}};
+    auto run =
+        driver.prepare("core.identity", {binding}, {}, "value", planning);
     ResultRef identity;
     const auto& grid = run.plan.steps()[0].tile_grids[0];
     const auto tile = grid.tile_count() - 1;
@@ -396,9 +411,17 @@ void foundation_tensor_workflows() {
   ExecutionBinding binding;
   binding.name = "samples";
   binding.result = take(builder.seal());
-  auto prepared = driver.prepare("core.identity", {binding});
-  const auto last_tile =
-      prepared.plan.steps()[0].tile_grids[0].tile_count() - 1;
+  PlanningOptions planning;
+  const auto planned_grid =
+      take(TileGrid::from_tensor(member, planning.tile_extent));
+  const auto last_tile = planned_grid.tile_count() - 1;
+  planning.output_requests["out"] = {
+      {{0, take(TileSet::range(driver.root, last_tile, last_tile + 1))}}};
+  auto prepared =
+      driver.prepare("core.identity", {binding}, {}, "value", planning);
+  require(prepared.plan.steps()[0].tile_grids[0].tile_count() ==
+              planned_grid.tile_count(),
+          "planning a sparse request preserves the complete logical grid");
   auto huge_output = driver.context->execute_fragments(
       take(driver.context->freeze(prepared.plan, prepared.bindings)),
       {{"out", TileRequest{{{0, take(TileSet::range(driver.root, last_tile,

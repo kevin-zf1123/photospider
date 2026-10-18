@@ -37,12 +37,13 @@ struct StructuredNeedCursor;
  */
 struct DependencyLimits final {
   FootprintLimits sets;
-  /** @brief Result-discovery work budget per Actor, accumulated across polls.
+  /** @brief GPU selection work budget per static unit, accumulated across
+   * polls.
    */
   std::uint64_t maximum_work = 1048576;
   /** @brief Maximum state allocation for a staged Result continuation. */
   std::uint64_t maximum_state_bytes = 1048576;
-  /** @brief Maximum staged Result transitions admitted for one Run. */
+  /** @brief Maximum poll transitions for one continuation activation. */
   std::uint32_t maximum_stages = 4096;
   /** @brief Maximum slots in one GPU discovery table, 0 disables discovery.
    * @note Host hard limit is 65536; work and live-byte bounds also apply.
@@ -85,13 +86,13 @@ struct ResultProgramQuery final {
   const std::vector<std::vector<TileGrid>>& input_tile_grids;
   const std::vector<TileGrid>& output_tile_grids;
   /** @brief Exact complete selected member tile; absent for a shared stage.
-   * The executor supplies this footprint from its static member grid. It does
+   * The executor supplies the footprint stored in the Plan instruction. It does
    * not authorize input reads. Tile identity includes member and local index.
    */
   std::optional<Footprint> tensor_outputs;
   std::uint32_t tensor_slot = 0;
   std::uint64_t tile_extent = 128;
-  /** @brief Selected local tile index; ignored by shared-stage factories. */
+  /** @brief Selected local tile or shared publication-unit index. */
   TileIndex tile_unit = 0;
   Backend backend = Backend::Cpu;
   std::string_view semantic_key;
@@ -101,8 +102,9 @@ struct ResultProgramQuery final {
   std::string_view snapshot_identity;
   std::uint32_t output_index = 0;
   /** @brief UINT32_MAX for a tile; otherwise the prepared shared stage index.
-   * Stage factories use this identity and ignore output_index, tensor_slot and
-   * tile_unit. The output_index value is routing metadata only for a stage. */
+   * Stage factories identify the contract with this index. Every shared poll
+   * receives the current compiled tensor_slot/tile_unit; output_index is
+   * routing metadata only for a stage. */
   std::uint32_t shared_stage = UINT32_MAX;
   std::uint64_t page_bytes = 4096;
   CancellationToken cancellation;
@@ -117,7 +119,7 @@ struct ResultProgramQuery final {
    */
   std::shared_ptr<const PreparedOperation> prepared;
 };
-/** @brief Owning capability restricted to the explicit tensor Need.
+/** @brief Owning capability restricted to a compiled tensor grant.
  * The capability retains its source Result, descriptor and granted samples.
  * Reads and acquired windows remain restricted to those grants.
  */
@@ -134,7 +136,7 @@ class PHOTOSPIDER_API ResultTensorInput final {
               std::size_t bytes,
               const CancellationToken& cancellation = {}) const;
 
-  /** @brief Acquire an exact Need-authorized tensor rectangle.
+  /** @brief Acquire an exact rectangle inside the compiled tensor grant.
    * Acquisition retains the authorized immutable fragments without copying
    * samples. Unauthorized access records a sticky protocol failure. The
    * returned window owns immutable backing independently of this phase.
@@ -163,9 +165,9 @@ class PHOTOSPIDER_API ResultTensorInput final {
   std::shared_ptr<std::atomic<ErrorCode>> failure_;
   std::shared_ptr<plugin_internal::FailureLatch> observer_;
 };
-/** @brief Nonblocking request for a prepared stage's immutable tile commits.
+/** @brief Assertion of already compiled shared-stage read capabilities.
  * An absent selection requests all static members. An explicit empty selection
- * grants no payload and does not start a producer. Only selected tiles are
+ * grants no payload. Only compiled tiles are
  * exposed; inherited evidence grants no original-input access.
  */
 struct ResultSharedNeed final {
@@ -175,16 +177,58 @@ struct ResultSharedNeed final {
   std::uint32_t stage;
   std::optional<TileRequest> tiles;
 };
-/** @brief Requests explicit producer member intervals, stages or descriptors.
- * The input entry count is bounded by the execution limits.
- * The complete envelope is validated before any upstream work begins. Each
- * TileNeed has exactly one request kind and addresses the compiled input grid.
+/** @brief Optional assertion of static member, stage or descriptor grants.
+ * Inputs are ready before the operation starts. Returning this envelope only
+ * validates that every request is within the instruction's compiled grants;
+ * it never schedules work. Each TileNeed has exactly one request kind and
+ * addresses the compiled input grid. An empty payload selection is a no-op.
  */
 struct ResultProgramNeed final {
   ResourceVector<TileNeed> tiles = {};
   /** @brief Prepared stages requested by this poll; no blocking invocation. */
   ResourceVector<ResultSharedNeed> shared_stages = {};
 };
+/** @brief Pure compilation query for one tile or shared publication unit.
+ * Contains fixed metadata and preparation only. Shared units use publication
+ * and tensor_slot/tile_unit explicitly; runtime sample values are unavailable.
+ * Mappers must be deterministic and may not perform I/O or start continuations.
+ */
+struct ResultStaticQuery final {
+  const ResultProgramMetadata& metadata;
+  const std::map<std::string, ParameterValue>& parameters;
+  const PreparedOperation& prepared;
+  Backend backend = Backend::Cpu;
+  std::uint64_t tile_extent = 128;
+  std::uint32_t output_index = 0;
+  std::uint32_t shared_stage = UINT32_MAX;
+  std::uint32_t tensor_slot = 0;
+  TileIndex tile_unit = 0;
+  TileRequest publication;
+  std::optional<Footprint> tensor_outputs;
+};
+/** @brief Owned static reads. The planner resolves and validates every entry.
+ * Overlapping entries are merged before scheduling. No callback may extend
+ * these grants at execution time. Data-dependent algorithms must declare a
+ * finite conservative coverage or express selection using IR control flow.
+ */
+struct ResultStaticMapping final {
+  std::vector<TileNeed> inputs;
+  std::vector<ResultSharedNeed> shared_stages;
+};
+// NOLINTBEGIN(whitespace/indent_namespace)
+using OperationDependencyMapper =
+    std::function<Result<ResultStaticMapping>(const ResultStaticQuery&)>;
+// NOLINTEND
+/** @brief Baseline eager mapping for an operation's complete selected inputs.
+ * Uses the prepared input projection of the selected output or shared stage.
+ * Shared-stage reads must be declared explicitly by a custom mapper; merely
+ * declaring a stage never creates an edge to it.
+ * This is an explicit conservative contract; supply a custom mapper for local
+ * reads, segmented shared dependencies or operations requiring lazy selection.
+ */
+PHOTOSPIDER_API Result<ResultStaticMapping> complete_input_dependencies(
+    const ResultStaticQuery& query);
+
 /** @brief Bounded table borrowed only during synchronous GPU discovery.
  * Layout is a 16-byte header and capacity 32-byte records containing uint32
  * input/kind/tensor_slot/reserved and uint64 begin/end. Kind 0 requests a
@@ -196,15 +240,16 @@ struct ResultGpuRequestTable final {
   std::uint64_t byte_size = 0;
   std::uint32_t capacity = 0;
 };
-/** @brief Immutable input tile requests returned by discovery.
- * The receipt retains no source payload. Its tile Needs describe complete
- * producer units; the executor supplies those Needs before dependent
- * computation continues.
+/** @brief Immutable GPU-selected subset of the instruction's fixed grants.
+ * The receipt retains no source payload and grants no additional reads.
+ * All selected input tiles are already ready; computation may continue in the
+ * same poll. Producer discovery and tile mapping belong to compilation.
  */
 struct ResultDiscoveryReceipt final {
   ResourceVector<TileNeed> tiles;
 };
-/** @brief New certified prefix or complete object, published by one producer.
+/** @brief Candidate prefix or completion returned by a continuation.
+ * The host validates publication scopes before exposing them to consumers.
  */
 struct ResultPublication final {
   ResultRef result;
@@ -278,13 +323,14 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
    */
   void record_failure(const Status& status) const;
   const ResultTensorInputs* tensors = nullptr;
-  /** @brief Completed shared-stage publications, keyed by prepared stage index.
+  /** @brief Certified shared publications admitted by current read grants,
+   * keyed by prepared stage index.
    * Owning Results authorize their own bytes only. Frozen producer dependencies
    * are inherited by this publication without granting original input reads. */
   const ResultObjectInputs* shared_stages = nullptr;
   /** @brief Captured static facts for descriptor-only inputs.
    * Entries own metadata only. They cannot be used to read tensors;
-   * payload access requires an independent member tile Need.
+   * payload access requires an independently supplied payload capability.
    */
   const ResultDescriptorInputs* descriptors = nullptr;
   const ps_cpu_parallel_service_v2* cpu_parallel = nullptr;
@@ -301,9 +347,9 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
   std::function<Status(std::uint32_t, ByteView)> report_diagnostic = {};
   /** @brief Find the greatest saved sequence <= `before` in one checkpoint
    * phase. A miss, including optional cache/capacity exhaustion, returns an
-   * empty optional. Restoring a checkpoint restores dependency history,
-   * not `results`, tensor capabilities, read windows, or Need authorization;
-   * the callback must request current input access separately.
+   * empty optional. A checkpoint retains state only. Each invocation uses its
+   * current compiled tensor capabilities and current dependency evidence;
+   * restoring state cannot enlarge either.
    */
   std::function<Result<std::optional<ResultCheckpoint>>(std::uint32_t,
                                                         std::uint64_t)>
@@ -341,7 +387,7 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
    * the original output demand, or earlier windows not supplied to this call;
    * those provenance facts are deliberately outside the content key. A cache
    * hit publishes a fresh state Result without old dependency evidence.
-   * Need evidence from the current actor remains in
+   * The current instruction's compiled dependency evidence remains in
    * effect. Public output publication, checkpoints and completed-result caches
    * remain independent of block-state reuse. Optional cache-work exhaustion
    * skips caching and computes normally.
@@ -350,23 +396,26 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
                                   std::uint64_t, const ResultRef&,
                                   const std::function<Result<ResultRef>()>&)>
       block = {};
-  /** @brief Run bounded synchronous GPU discovery for additional tensor Needs.
+  /** @brief Run bounded synchronous GPU selection within fixed input grants.
    * Capacity and candidates must be positive. Capacity bounds emitted records;
    * candidates bounds emit attempts. The
    * callback receives a temporary zeroed Root table and must submit actual
    * native GPU work. The host freezes, validates, groups, and returns its
    * immutable footprint receipt. Capacity is limited by the hard 65536 record
    * ceiling, `maximum_gpu_requests`, and dependency `maximum_boxes` bound.
-   * Discovery work is also charged against the actor's remaining discovery
-   * budget across polls, the Run budget, and Root resources.
+   * The decoded receipt must be a subset of the instruction's compiled grants.
+   * It never creates dependencies or changes read authorization. Work is
+   * charged against the unit's selection budget across polls, the Run budget,
+   * and Root resources. Checkpoint, block and nested selection are forbidden
+   * inside the synchronous entry-thread callback.
    */
   std::function<Result<std::shared_ptr<const ResultDiscoveryReceipt>>(
       std::uint32_t, std::uint32_t,
       const std::function<Status(const ResultGpuRequestTable&)>&)>
       discover = {};
   /** @brief Acquire an owning window backed for native GPU access.
-   * The requested Region must be covered by this phase's tensor Need. The
-   * active callback must have a GPU lane; otherwise acquisition returns
+   * The requested Region must be covered by this phase's payload read grant.
+   * The active callback must have a GPU lane; otherwise acquisition returns
    * BackendUnavailable. Unauthorized or missing tensor coverage is an
    * InvalidArgument protocol failure. The method charges Root work and may
    * pack fragmented backing before uploading it; compatible same-device
@@ -378,20 +427,22 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
    */
   Result<ResultTensorReadWindow> acquire_native_tensor(
       std::uint32_t input, std::uint32_t slot, const Region& region) const;
-  /** @brief Acquire an immutable packed atlas for this tensor Need.
+  /** @brief Acquire an immutable packed atlas from the current payload grant.
    * @details Uses only the input port and slot already authorized by this
-   * phase's payload Need. The atlas contains the exact Need coverage; it fills
-   * no holes and grants no further input access. Repeated calls for the same
-   * input and slot in one poll return the same shared atlas. An Empty payload
-   * Need yields a valid atlas with one inert payload byte and a two-slot
-   * directory; it reads no source samples and performs no dispatch. Root-
+   * phase's payload grant. The atlas contains the exact granted coverage; it
+   * fills no holes and grants no further input access. Repeated calls for the
+   * same input and slot in one poll return the same shared atlas. An empty Need
+   * is a no-op and creates no payload capability. A direct host may explicitly
+   * supply an empty payload capability, yielding an inert atlas with no reads
+   * or dispatch. Root-
    * accounted atlas buffers are independent of operation workspace, source
    * Result lifetime, and this phase; the atlas retains no source Result.
-   * @param input Need input-port index.
-   * @param slot Need tensor-slot index.
+   * @param input Input-port index.
+   * @param slot Tensor-slot index.
    * @return Immutable atlas, or a typed failure. Calls from a CPU phase, a
-   * missing Need, or a Descriptor-only Need fail with sticky InvalidArgument.
-   * The returned atlas may outlive the poll and execution context.
+   * missing payload grant, or descriptor-only grant fail with sticky
+   * InvalidArgument. The returned atlas may outlive the poll and execution
+   * context.
    */
   Result<std::shared_ptr<const FragmentAtlas>> acquire_native_atlas(
       std::uint32_t input, std::uint32_t slot) const;

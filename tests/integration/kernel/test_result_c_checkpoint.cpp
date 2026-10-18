@@ -177,7 +177,7 @@ int workflow(unsigned mode, bool cache = true,
                after[0] == 2 && after[1] == 2 && after[2] - before[2] == 5 &&
                after[3] == 0);
       auto record = take(second.value().dependencies.tile_record(
-          {plan.outputs().at("value"), 0, 0, 4}));
+          {plan.output("value").record_index, 0, 0, 4}));
       PS_CHECK(record && record->inputs.size() == 1 &&
                record->inputs[0].tensor_slot == 0 &&
                record->inputs[0].tiles == take(TileSet::range(root, 0, 5)));
@@ -273,6 +273,7 @@ int shared_prefix(unsigned mode, bool restore_prefix = true) {
   if (mode == 8 && restore_prefix) {
     PS_CHECK(!second.ok() &&
              second.status().detail.origin == FailureOrigin::Protocol &&
+             second.status().reason == FailureReason::UnauthorizedRead &&
              after[2] == before[2]);
   } else {
     if (!second.ok())
@@ -281,7 +282,7 @@ int shared_prefix(unsigned mode, bool restore_prefix = true) {
              number(second.value().results.at("value"), 2) == 6 &&
              after[2] - before[2] == (restore_prefix ? 0 : 3));
     auto record = take(second.value().dependencies.tile_record(
-        {plan.outputs().at("value"), 0, 0, 2}));
+        {plan.output("value").record_index, 0, 0, 2}));
     PS_CHECK(record && record->inputs.size() == 1 &&
              record->inputs[0].tensor_slot == 0 &&
              record->inputs[0].tiles == take(TileSet::range(root, 0, 5)));

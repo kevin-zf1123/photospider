@@ -130,7 +130,6 @@ inline double end_slope(double h0, double h1, double d0, double d1) {
 }
 struct Program final {
   Kind kind;
-  std::uint32_t stage = 0;
   explicit Program(Kind kind) : kind(kind) {}
   Footprint input_footprint(const ResultProgramQuery& query,
                             const Footprint& output,
@@ -348,46 +347,9 @@ struct Program final {
     const auto output = phase.query.tensor_outputs
                             ? *phase.query.tensor_outputs
                             : math_take(Footprint::all(shape, limits));
-    const auto ports = kind == Kind::Lut ? 2U : 1U;
-    if (stage < 2 && !output.empty()) {
-      ResultProgramNeed need;
-      bool expanded = false;
-      for (std::uint32_t port = 0; port < ports; ++port) {
-        const auto& input = phase.query.inputs[port].result_schema->tensors[0];
-        auto data =
-            elementwise(kind)
-                ? input_footprint(phase.query, output, limits)
-                : math_take(Footprint::all(input.sample_shape(), limits));
-        if (stage == 0) {
-          auto validation = math_take(input.close_samples(data, limits));
-          expanded |= validation != data;
-          {
-            auto tile_need_0 = sdk::tile_need_for_samples(
-                phase.resources, phase.query, port, 0, std::move(validation));
-            if (!tile_need_0.ok())
-              return Result<ResultProgramPoll>(tile_need_0.status());
-            need.tiles.push_back(tile_need_0.take_value());
-          }
-        } else {
-          {
-            auto tile_need_1 = sdk::tile_need_for_samples(
-                phase.resources, phase.query, port, 0, std::move(data));
-            if (!tile_need_1.ok())
-              return Result<ResultProgramPoll>(tile_need_1.status());
-            need.tiles.push_back(tile_need_1.take_value());
-          }
-        }
-      }
-      if (stage == 0 && !expanded) {
-        stage = 2;
-      } else {
-        ++stage;
-      }
-      return Result<ResultProgramPoll>(std::move(need));
-    }
-    auto builder = math_take(ResultBuilder::start(
-        phase.resources, schema, phase.query.semantic_key, {},
-        phase.query.tile_extent));
+    auto builder = math_take(ResultBuilder::start(phase.resources, schema,
+                                                  phase.query.semantic_key, {},
+                                                  phase.query.tile_extent));
     if (!output.empty()) {
       plugin_internal::FloatingEnvironment environment;
       require(environment.active(), ErrorCode::OperationFailed,
@@ -532,6 +494,31 @@ inline OperationDefinition operation(const char* key, Kind kind) {
       return Answer(status);
     } catch (const basic_internal::Failure& failure) {
       return Answer(failure.status);
+    }
+  };
+  definition.map_dependencies =
+      [kind](const ResultStaticQuery& compiled) -> Result<ResultStaticMapping> {
+    try {
+      const auto query = sdk::static_query_view(compiled);
+      const auto shape = query.output.result_schema->tensors[0].sample_shape();
+      const auto output = query.tensor_outputs
+                              ? *query.tensor_outputs
+                              : math_take(Footprint::all(shape));
+      ResultStaticMapping result;
+      Program geometry(kind);
+      for (std::uint32_t port = 0; port < (kind == Kind::Lut ? 2U : 1U);
+           ++port) {
+        const auto& input = query.inputs[port].result_schema->tensors[0];
+        auto samples = elementwise(kind)
+                           ? geometry.input_footprint(query, output, {})
+                           : math_take(Footprint::all(input.sample_shape()));
+        samples = math_take(input.close_samples(samples));
+        result.inputs.push_back(
+            math_take(sdk::tile_need_for_samples(compiled, port, 0, samples)));
+      }
+      return Result<ResultStaticMapping>(std::move(result));
+    } catch (const Status& status) {
+      return Result<ResultStaticMapping>(status);
     }
   };
   definition.start_result = [kind](const ResultProgramQuery&,

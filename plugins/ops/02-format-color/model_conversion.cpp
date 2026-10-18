@@ -888,7 +888,7 @@ Result<OperationPreparation> prepare(
       }
       image.channel_axis = out.output_axis;
       if (kind != Kind::ColorToGray || out.layout == Layout::Materialize)
-      output_tensor.layout = image;
+        output_tensor.layout = image;
     }
     const auto output_shape = output_tensor.sample_shape();
     if (out.source_axis)
@@ -983,8 +983,7 @@ void check(Status status) {
 ResultBuilder builder_for(const ResultProgramPhase& phase, bool /*empty*/) {
   auto builder = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {},
-      phase.query.tile_extent));
+      phase.query.semantic_key, {}, phase.query.tile_extent));
 
   return builder;
 }
@@ -1208,39 +1207,14 @@ Status run_region(const ResultProgramPhase& phase, const Preparation& p,
 }
 struct State final {
   const Preparation* p;
-  bool requested = false;
   Footprint output;
   explicit State(const Preparation* prepared) : p(prepared) {}
   Poll poll(const ResultProgramPhase& phase) try {
     const auto& spec = phase.query.output.result_schema->tensors[0];
-    if (!requested) {
-      requested = true;
-      output = phase.query.tensor_outputs
-                   ? *phase.query.tensor_outputs
-                   : take(Footprint::all(spec.sample_shape()));
-      std::vector<Region> regions;
-      for (const auto& span : p->spans)
-        for (const auto& box : output.boxes()) {
-          check(phase.consume_work(box.rank() + 1));
-          const auto part = intersection(span.region, box);
-          if (!part)
-            continue;
-          for (const auto& map : span.maps) {
-            regions.push_back(format_result::mapped_region(*part, map));
-          }
-        }
-      ResultProgramNeed need;
-      {
-        auto tile_need_0 = sdk::tile_need_for_samples(
-            phase.resources, phase.query, 0, 0,
-            take(Footprint::from_regions(p->source_shape, regions)),
-            regions.empty());
-        if (!tile_need_0.ok())
-          return Result<ResultProgramPoll>(tile_need_0.status());
-        need.tiles.push_back(tile_need_0.take_value());
-      }
-      return Poll(std::move(need));
-    }
+    output = phase.query.tensor_outputs
+                 ? *phase.query.tensor_outputs
+                 : take(Footprint::all(spec.sample_shape()));
+
     plugin_internal::FloatingEnvironment environment;
     MathConfig config = p->math;
     if (!environment.active())
@@ -1382,6 +1356,35 @@ OperationDefinition definition(Kind kind, SequenceProfile profile,
   output.maximum_dependency_stages = 2;
   def.prepare_static = [kind, profile](const auto& inputs, const auto& params) {
     return prepare(kind, profile, inputs, params);
+  };
+  def.map_dependencies =
+      [](const ResultStaticQuery& compiled) -> Result<ResultStaticMapping> {
+    try {
+      const auto query = sdk::static_query_view(compiled);
+      const auto* p =
+          static_cast<const Preparation*>(compiled.prepared.state());
+      const auto output =
+          query.tensor_outputs
+              ? *query.tensor_outputs
+              : take(Footprint::all(
+                    query.output.result_schema->tensors[0].sample_shape()));
+      ResultStaticMapping result;
+      std::vector<Region> regions;
+      for (const auto& span : p->spans)
+        for (const auto& box : output.boxes()) {
+          const auto part = intersection(span.region, box);
+          if (part)
+            for (const auto& map : span.maps)
+              regions.push_back(format_result::mapped_region(*part, map));
+        }
+      result.inputs.push_back(take(sdk::tile_need_for_samples(
+          compiled, 0, 0,
+          take(Footprint::from_regions(p->source_shape, regions)),
+          regions.empty())));
+      return Result<ResultStaticMapping>(std::move(result));
+    } catch (const Status& status) {
+      return Result<ResultStaticMapping>(status);
+    }
   };
   def.start_result = [](const ResultProgramQuery& query,
                         const BufferAllocator& allocator) {

@@ -28,12 +28,18 @@ bool same_producer(const TileDependency& a, const TileDependency& b) {
     return false;
   if (const auto* step = std::get_if<PlanStepInput>(&a.producer))
     return step->step_index == std::get<PlanStepInput>(b.producer).step_index;
+  if (const auto* parameter = std::get_if<PlanArgumentInput>(&a.producer))
+    return parameter->parameter_index ==
+           std::get<PlanArgumentInput>(b.producer).parameter_index;
   return std::get<PlanWorkflowInput>(a.producer).declaration_index ==
          std::get<PlanWorkflowInput>(b.producer).declaration_index;
 }
 }  // namespace
 Status TileRecord::include(const TileDependency& dependency,
                            const ResourceBudget& root) try {
+  if (std::holds_alternative<PlanArgumentInput>(dependency.producer))
+    return {ErrorCode::InvalidArgument,
+            "block argument needs captured runtime evidence"};
   if (std::holds_alternative<PlanWorkflowInput>(dependency.producer) &&
       dependency.producer_output)
     return Status{ErrorCode::InvalidArgument, "invalid tile dependency"};
@@ -856,6 +862,9 @@ Result<ResourceVector<TileUnit>> TileRecords::dirty(
     return Status::success();
   };
   for (const auto& change : changes) {
+    if (std::holds_alternative<PlanArgumentInput>(change.producer))
+      return Answer(Status{ErrorCode::InvalidArgument,
+                           "block arguments are not external edits"});
     if (std::holds_alternative<PlanWorkflowInput>(change.producer) &&
         change.producer_output)
       return Answer(Status{ErrorCode::InvalidArgument,

@@ -118,12 +118,12 @@ using FailureStatusConstructionHook = bool (*)(FailureStatusConstructionPoint);
 using FinalResultReadyHook = void (*)() noexcept;
 
 /**
- * @brief Callback invoked after post-submit external-stop observation.
+ * @brief Callback invoked after submission and before retirement waiting.
  * @return No value.
  * @throws Nothing.
- * @note The Run mutex remains held and the coordinator has not yet entered
- * `state_changed_` waiting. Tests may hold this otherwise unobservable
- * boundary, but the callback must not re-enter the executing Run.
+ * @note The static coordinator owns the submitted callback and has not yet
+ * waited for its queue owner to retire. Tests may hold this otherwise
+ * unobservable boundary, but must not re-enter the executing Run.
  */
 using PostSubmitObservationHook = void (*)() noexcept;
 
@@ -260,8 +260,7 @@ void notify_final_result_ready() noexcept;
  * @brief Notifies the installed post-submit observation callback.
  * @return No value.
  * @throws Nothing.
- * @note The caller holds the Run mutex after its last post-submit external-stop
- * observation and before possible `state_changed_` waiting. Only the
+ * @note The caller owns the submission before waiting for retirement. Only the
  * noninstalled test-kernel variant invokes this function.
  */
 void notify_post_submit_observation() noexcept;

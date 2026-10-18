@@ -288,13 +288,7 @@ struct EffectState {
   }
 };
 struct EffectReaderState {
-  bool waiting = false;
   Poll poll(const ResultProgramPhase& phase) {
-    if (!waiting) {
-      waiting = true;
-      auto acquired = take(sdk::to_whole(phase, 0));
-      return Poll(std::get<ResultProgramNeed>(std::move(acquired)));
-    }
     double first = 0, second = 0;
     auto status = phase.tensors->at({0, 0}).read({0}, &first, 8);
     if (!status.ok())
@@ -408,17 +402,19 @@ int mandatory_effects() {
   auto captured = context.freeze(independent, {}).take_value();
   DemandQuery empty{{"value", TileRequest{}}};
   const auto before = calls;
-  PS_CHECK(context.execute_fragments(captured, empty).ok() && calls == before);
-  PS_CHECK(context.execute_fragments(captured, {}).ok() && calls == before);
+  // Empty result selections still execute the Plan's mandatory effect roots.
+  PS_CHECK(context.execute_fragments(captured, empty).ok() &&
+           calls == before + 1);
+  PS_CHECK(context.execute_fragments(captured, {}).ok() && calls == before + 2);
   mode = 1;
   auto failure = context.execute(captured);
   PS_CHECK(failure.status().code == ErrorCode::OperationFailed &&
            failure.status().message == "unnamed effect failure" &&
-           calls == before + 1);
+           calls == before + 3);
   mode = 2;
   auto cancelled = context.execute(captured, cancellation.token());
   PS_CHECK(cancelled.status().code == ErrorCode::Cancelled &&
-           calls == before + 2);
+           calls == before + 4);
   return 0;
 }
 int foreign_binding_admission() {
@@ -475,33 +471,25 @@ int foreign_binding_admission() {
   return 0;
 }
 struct SparseNeedPeaks {
-  std::uint64_t before = 0, supplied = 0;
+  std::uint64_t ready = 0;
 };
 struct ManyPartsState {
   const Footprint* requested;
   const TensorSpan* backing;
-  bool waiting = false;
-  std::atomic<unsigned>* needs;
+  std::atomic<unsigned>* polls;
   std::atomic<unsigned>* reads;
   SparseNeedPeaks* peaks;
   ManyPartsState(const Footprint* need, const TensorSpan* value,
-                 std::atomic<unsigned>* need_count,
+                 std::atomic<unsigned>* poll_count,
                  std::atomic<unsigned>* read_count, SparseNeedPeaks* observed)
       : requested(need),
         backing(value),
-        needs(need_count),
+        polls(poll_count),
         reads(read_count),
         peaks(observed) {}
   Poll poll(const ResultProgramPhase& phase) {
-    if (!waiting) {
-      waiting = true;
-      ++*needs;
-      auto need = Poll(ResultProgramNeed{{take(sdk::tile_need_for_samples(
-          phase.resources, phase.query, 0, 0, *requested))}});
-      peaks->before = phase.resources.statistics().peak[ResourceKind::Metadata];
-      return need;
-    }
-    peaks->supplied = phase.resources.statistics().peak[ResourceKind::Metadata];
+    ++*polls;
+    peaks->ready = phase.resources.statistics().peak[ResourceKind::Metadata];
     for (const auto& region : requested->boxes()) {
       std::uint8_t value = 1;
       auto status = phase.read_tensor(0, 0, {0, region.dimensions()[1].offset},
@@ -523,7 +511,7 @@ int sparse_source_need_budget() {
       tensor_schema(ElementType::UInt8, 256, "test.source_bytes");
   input_schema.tensors[0].descriptor.shape = {1, 256};
   input_schema.tensors[0].layout.spatial = true;
-  std::atomic<unsigned> needs{0}, reads{0};
+  std::atomic<unsigned> polls{0}, reads{0};
   SparseNeedPeaks peaks;
   auto registry = std::make_shared<OperationRegistry>();
   OperationDefinition operation;
@@ -532,10 +520,20 @@ int sparse_source_need_budget() {
       traits(tensor_schema(ElementType::Float64, 1, "test.sparse_output"), 1,
              sizeof(ManyPartsState));
   result_port(&operation.traits.input_schema[0], input_schema);
+  operation.map_dependencies =
+      [&requested](
+          const ResultStaticQuery& query) -> Result<ResultStaticMapping> {
+    auto need = sdk::tile_need_for_samples(query, 0, 0, requested);
+    if (!need.ok())
+      return Result<ResultStaticMapping>(need.status());
+    ResultStaticMapping mapping;
+    mapping.inputs.push_back(need.take_value());
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
   operation.start_result = [&](const ResultProgramQuery&,
                                const BufferAllocator& allocator) {
     return ResultContinuation::make<ManyPartsState>(
-        allocator, &requested, &scalar, &needs, &reads, &peaks);
+        allocator, &requested, &scalar, &polls, &reads, &peaks);
   };
   PS_CHECK(registry->register_operation(std::move(operation)).ok());
   PS_CHECK(registry->freeze().ok());
@@ -558,7 +556,7 @@ int sparse_source_need_budget() {
                                   Region::whole({1, 256}), {0, {256, 1}},
                                   std::vector<std::uint8_t>(256))
                    .take_value();
-  // Measure setup and sparse-Need admission on this platform first. Standard
+  // Measure setup and static-grant admission on this platform first. Standard
   // library object sizes affect managed metadata; no fixed KiB threshold can
   // reliably separate these phases across supported toolchains.
   std::uint64_t need_limit = 0;
@@ -574,27 +572,28 @@ int sparse_source_need_budget() {
     auto root = context.resource_budget().take_value();
     auto source = source_result(root, input_schema, input);
     PS_CHECK(source.ok());
-    needs.store(0);
+    auto frozen = context.freeze(plan, {{{"source", source.value()}}});
+    PS_CHECK(frozen.ok());
+    const auto setup_peak = root.statistics().peak[ResourceKind::Metadata];
+    polls.store(0);
     reads.store(0);
     ExecutionOptions options;
     options.maximum_dependency_work = 100000000;
     options.dependencies.sets.maximum_work = 100000000;
-    auto result =
-        context.execute(plan, {{{"source", source.value()}}}, {}, options);
-    if ((!constrained && !result.ok()) || needs.load() != 1)
-      std::cerr << "sparse source Need fixture: "
+    auto result = context.execute(frozen.value(), {}, options);
+    if (!constrained && !result.ok())
+      std::cerr << "sparse static grant fixture: "
                 << static_cast<int>(result.status().code) << " "
                 << result.status().message << "\n";
-    PS_CHECK(needs.load() == 1);
     if (constrained) {
       PS_CHECK(result.status().code == ErrorCode::ResourceExhausted);
-      PS_CHECK(reads.load() == 0);
+      PS_CHECK(polls.load() == 0 && reads.load() == 0);
     } else {
       PS_CHECK(result.ok() &&
                scalar_result(result.value().results.at("value")) == 42);
-      PS_CHECK(reads.load() == 128);
-      PS_CHECK(peaks.supplied > peaks.before);
-      need_limit = peaks.before + (peaks.supplied - peaks.before) / 2;
+      PS_CHECK(polls.load() == 1 && reads.load() == 128);
+      PS_CHECK(peaks.ready > setup_peak);
+      need_limit = setup_peak + (peaks.ready - setup_peak) / 2;
     }
   }
   return 0;

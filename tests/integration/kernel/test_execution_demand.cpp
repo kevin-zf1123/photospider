@@ -158,7 +158,7 @@ int generations() {
   PS_CHECK(dirty_tiles(same_value.value().dependencies, 0, point(3), 0) == q);
   auto old = context.execute_fragments(frozen, query);
   PS_CHECK(old.ok() && old.value().generation == 0);
-  PS_CHECK(dirty_tiles(old.value().dependencies, 0, point(3), 0).empty());
+  PS_CHECK(dirty_tiles(old.value().dependencies, 0, point(3), 0) == q);
   bindings.inputs[0].result =
       source(root, values<double>(ElementType::Float64, {1, 2, 3, 9, 5}));
   auto changed = demand.replace_bindings(bindings);
@@ -170,7 +170,8 @@ int generations() {
                                       &result, 8)
                .ok() &&
            result == 14);
-  // Only currently requested tiles are compared: control[0..4] and data{0,3,4}.
+  // Static grants compare control[0..4] and data{0,3,4} for either control
+  // value.
   bindings.inputs[0].result =
       source(root, values<double>(ElementType::Float64, {1, 2, 777, 9, 5}));
   auto unrelated =
@@ -325,9 +326,9 @@ struct GatedProgram {
       if (!gate->release && ticket > gate->released)
         return Answer(Status{ErrorCode::OperationFailed, "gate deadline"});
     }
-    auto builder = multi_result::take(ResultBuilder::start(
-        phase.resources, schema, phase.query.semantic_key, {},
-        phase.query.tile_extent));
+    auto builder = multi_result::take(
+        ResultBuilder::start(phase.resources, schema, phase.query.semantic_key,
+                             {}, phase.query.tile_extent));
 
     const double effect = effects ? ++*effects : 0;
     for (const auto& box : outputs.boxes()) {
@@ -364,6 +365,7 @@ OperationDefinition copy_definition(const std::string& key,
   op.traits.outputs[0] = multi_result::output("value", tensor_schema());
   op.traits.outputs[0].continuation_bytes = state;
   op.traits.outputs[0].maximum_dependency_stages = 4;
+  op.map_dependencies = sdk::pointwise_dependencies;
   op.traits.workspace_bytes = 256;
   op.traits.requires_metadata_specialization = true;
   op.traits.outputs[0].output_schema.result_schema_id.clear();
@@ -945,7 +947,8 @@ struct ProtocolCancelProgram {
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     ++probe->polls;
     double value = 0;
-    // No Need has granted this input. The real read records Protocol first.
+    // The static mapper grants no payload. The real read records Protocol
+    // first.
     auto failure = phase.read_tensor(0, 0, {0, 0}, &value, sizeof(value));
     probe->latched_before_cancel =
         phase.failure && phase.failure->load() == ErrorCode::InvalidArgument;
@@ -957,6 +960,9 @@ int protocol_first_cause() {
   auto probe = std::make_shared<ProtocolCancellationProbe>();
   auto registry = std::make_shared<OperationRegistry>();
   auto op = copy_definition("wait", sizeof(ProtocolCancelProgram));
+  op.map_dependencies = [](const ResultStaticQuery&) {
+    return Result<ResultStaticMapping>(ResultStaticMapping{});
+  };
   op.start_result = [probe](const ResultProgramQuery&,
                             const BufferAllocator& allocator) {
     return ResultContinuation::make<ProtocolCancelProgram>(allocator, probe);
@@ -1214,7 +1220,9 @@ int cached_atomic_ancestor() {
   PS_CHECK(query.replace_bindings(tight_bindings).ok());
   auto both = query.request({{"a_desc", TileRequest{{{0, point(0, 2)}}}},
                              {"z_ancestor", TileRequest{{{0, point(0, 2)}}}}});
-  PS_CHECK(both.ok() && gate->entered == previous + 1);
+  // Static execution retains B before C looks up its cache entry. The 16-byte
+  // LRU evicts C when admitting B, so both callbacks run.
+  PS_CHECK(both.ok() && gate->entered == previous + 2);
   PS_CHECK(result_input_fixture::read(both.value().results.at("z_ancestor"),
                                       {0, 1}, &value, 8)
                .ok() &&
@@ -1222,8 +1230,8 @@ int cached_atomic_ancestor() {
   PS_CHECK(multi_result::take(both.value().dependencies.tile_record({0, 0, 0}))
                ->inputs[0]
                .tiles == all_tiles(2));
-  // A clear invalidates even an owning candidate whose verification is active.
-  // Restore C to the single-entry LRU, then block its mandatory cold B replay.
+  // Clearing during B invalidates this Run's captured cache epoch. Later B/C
+  // retention must not refill it. Restore C, then block the scheduled B call.
   PS_CHECK(query.replace_bindings(tight_bindings).ok());
   PS_CHECK(query.request({{"a_desc", TileRequest{{{0, point(0, 2)}}}}}).ok());
   PS_CHECK(tight.cache_statistics().retained_bytes == 16);
@@ -1239,7 +1247,8 @@ int cached_atomic_ancestor() {
     return query.request({{"a_desc", TileRequest{{{0, point(0, 2)}}}}});
   });
   PS_CHECK(gate->await(1));
-  // Only B has entered its factory: C is still verifying its cached candidate.
+  // Only B has entered its factory; C's instruction and cache lookup are
+  // pending.
   PS_CHECK(gate->wide_starts == starts_before + 1);
   tight.clear_result_cache();
   PS_CHECK(tight.cache_statistics().retained_bytes == 0);
@@ -1398,7 +1407,7 @@ int content_cache() {
   PS_CHECK(demand.request(query).value().diagnostics.cache_hits > 0);
   auto old = context.execute_fragments(frozen, query);
   PS_CHECK(old.ok() && old.value().diagnostics.cache_hits > 0);
-  PS_CHECK(dirty_tiles(old.value().dependencies, 0, point(3), 0).empty());
+  PS_CHECK(dirty_tiles(old.value().dependencies, 0, point(3), 0) == q);
   bindings.inputs[0].result =
       binding(context, bindings.inputs[0].name,
               values<double>(ElementType::Float64, {1, 2, 777, 9, 5}))

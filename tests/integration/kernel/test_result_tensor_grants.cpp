@@ -143,11 +143,11 @@ struct MetadataConsumer {
       ResultProgramNeed need;
       need.tiles.push_back({0, 0, true, {}});
       if (mode == 2)
-        need.tiles.push_back(take(sdk::tile_need_for_samples(
-            phase.resources, phase.query, 0, 0, point)));
+        need.tiles.push_back(
+            {0, 0, false, take(TileSet::range(phase.resources, 2, 3))});
       return Answer(std::move(need));
     }
-    const bool payload = mode == 2 || round > 2;
+    const bool payload = mode >= 2;
     const auto& facts = phase.descriptors->at(0);
     if (facts.tensor_count() != 1 || facts.object_id() ||
         !facts.tensor_coverage(0).empty() || !phase.results.empty() ||
@@ -168,8 +168,8 @@ struct MetadataConsumer {
     }
     if ((mode == 3 || mode == 4) && round == 2) {
       ResultProgramNeed need;
-      need.tiles.push_back(take(sdk::tile_need_for_samples(
-          phase.resources, phase.query, 0, 0, point)));
+      need.tiles.push_back(
+          {0, 0, false, take(TileSet::range(phase.resources, 2, 3))});
       return Answer(std::move(need));
     }
     double value = 4;
@@ -202,6 +202,14 @@ int metadata_tensor_need(unsigned mode, bool denied = false,
   consumer.traits.outputs = {multi_result::output("value")};
   consumer.traits.outputs[0].maximum_dependency_stages = 3;
   consumer.traits.outputs[0].continuation_bytes = sizeof(MetadataConsumer);
+  consumer.map_dependencies = [mode](const ResultStaticQuery&) {
+    ResultStaticMapping mapping;
+    mapping.inputs.push_back({0, 0, true, {}});
+    if (mode >= 2)
+      mapping.inputs.push_back(
+          {0, 0, false, take(TileSet::range(ResourceBudget{}, 2, 3))});
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
   consumer.start_result = [&](const auto&, const auto& allocator) {
     return ResultContinuation::make<MetadataConsumer>(allocator, mode, denied,
                                                       &retained);
@@ -276,7 +284,6 @@ int metadata_tensor_need(unsigned mode, bool denied = false,
 
 struct BroadConsumer {
   unsigned mode;
-  bool requested = false;
   std::optional<ResultTensorInput>* retained;
   ResultTensorReadWindow* retained_window;
   unsigned* block_calls;
@@ -300,14 +307,6 @@ struct BroadConsumer {
                      shape, {Region({{0, 1}, {0, 1}}), Region({{0, 1}, {2, 1}}),
                              Region({{0, 1}, {4, 1}})}))
                : take(Footprint::all(shape));
-    if (!requested) {
-      requested = true;
-      ResultProgramNeed need;
-      need.tiles.push_back(take(sdk::tile_need_for_samples(
-          phase.resources, phase.query, 0, 0, samples)));
-      need.tiles.push_back(need.tiles.front());
-      return Answer(std::move(need));
-    }
     const auto& input = phase.tensors->at({0, 0});
     if (!input.object_id() || input.coverage() != samples ||
         !phase.results.empty())
@@ -531,6 +530,15 @@ int broad_tensor_need(unsigned mode) {
       "value",
       multi_result::schema(ElementType::Float64, {mode == 5 ? 65u : 1u}));
   consumer.traits.outputs[0].continuation_bytes = sizeof(BroadConsumer);
+  consumer.map_dependencies = [mode](const ResultStaticQuery& query) {
+    if (mode != 1 && mode != 2)
+      return complete_input_dependencies(query);
+    ResultStaticMapping mapping;
+    mapping.inputs.push_back(
+        {0, 0, false,
+         take(TileSet::from_indices(ResourceBudget{}, {0, 2, 4}))});
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
   consumer.start_result = [mode, &held_input, &held_window, &block_calls](
                               const auto&, const auto& allocator) {
     return ResultContinuation::make<BroadConsumer>(allocator, mode, &held_input,

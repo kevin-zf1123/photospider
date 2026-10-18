@@ -17,7 +17,6 @@ namespace ps::plugin_internal::numeric_ops {
 enum class FiniteElementwise { Abs, Minimum, Maximum };
 struct FiniteElementwiseProgram final {
   FiniteElementwise kind;
-  unsigned stage = 0;
   explicit FiniteElementwiseProgram(FiniteElementwise kind) : kind(kind) {}
   template <class Number>
   Status write(const ResultProgramPhase& phase,
@@ -76,43 +75,9 @@ struct FiniteElementwiseProgram final {
     const auto output = phase.query.tensor_outputs
                             ? *phase.query.tensor_outputs
                             : math_take(Footprint::all(shape, limits));
-    const auto inputs = kind == FiniteElementwise::Abs ? 1U : 2U;
-    if (stage < 2 && !output.empty()) {
-      ResultProgramNeed need;
-      bool expanded = false;
-      for (uint32_t port = 0; port < inputs; ++port) {
-        if (stage == 0) {
-          const auto& spec = phase.query.inputs[port].result_schema->tensors[0];
-          auto validation = math_take(spec.close_samples(output, limits));
-          expanded = expanded || validation != output;
-          {
-            auto tile_need_0 = sdk::tile_need_for_samples(
-                phase.resources, phase.query, port, 0, std::move(validation));
-            if (!tile_need_0.ok())
-              return Result<ResultProgramPoll>(tile_need_0.status());
-            need.tiles.push_back(tile_need_0.take_value());
-          }
-        } else {
-          {
-            auto tile_need_1 = sdk::tile_need_for_samples(
-                phase.resources, phase.query, port, 0, output);
-            if (!tile_need_1.ok())
-              return Result<ResultProgramPoll>(tile_need_1.status());
-            need.tiles.push_back(tile_need_1.take_value());
-          }
-        }
-      }
-      if (stage == 0 && !expanded) {
-        // A coincident validation/data footprint needs only one supply poll.
-        stage = 2;
-      } else {
-        ++stage;
-      }
-      return Result<ResultProgramPoll>(std::move(need));
-    }
-    auto builder = math_take(ResultBuilder::start(
-        phase.resources, schema, phase.query.semantic_key, {},
-        phase.query.tile_extent));
+    auto builder = math_take(ResultBuilder::start(phase.resources, schema,
+                                                  phase.query.semantic_key, {},
+                                                  phase.query.tile_extent));
     if (!output.empty()) {
       plugin_internal::FloatingEnvironment environment;
       if (!environment.active())
@@ -181,6 +146,7 @@ inline OperationDefinition finite_elementwise(const char* key,
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(output)});
   };
+  operation.map_dependencies = sdk::pointwise_dependencies;
   operation.start_result = [kind](const auto&, const auto& allocator) {
     return ResultContinuation::make<FiniteElementwiseProgram>(allocator, kind);
   };

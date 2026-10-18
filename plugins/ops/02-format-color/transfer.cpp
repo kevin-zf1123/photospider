@@ -423,8 +423,7 @@ using Poll = Result<ResultProgramPoll>;
 ResultBuilder result_builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto builder = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {},
-      phase.query.tile_extent));
+      phase.query.semantic_key, {}, phase.query.tile_extent));
 
   return builder;
 }
@@ -496,26 +495,14 @@ Status evaluate(const ResultProgramPhase& phase, const Preparation& state,
 }
 struct Continuation final {
   const Preparation* state;
-  bool requested = false;
   Footprint output;
   explicit Continuation(const Preparation* s) : state(s) {}
   Poll poll(const ResultProgramPhase& phase) try {
     const auto& tensor = phase.query.output.result_schema->tensors[0];
-    if (!requested) {
-      requested = true;
-      output = phase.query.tensor_outputs
-                   ? *phase.query.tensor_outputs
-                   : take(Footprint::all(tensor.sample_shape()));
-      ResultProgramNeed need;
-      {
-        auto tile_need_0 = sdk::tile_need_for_samples(
-            phase.resources, phase.query, 0, 0, output);
-        if (!tile_need_0.ok())
-          return Result<ResultProgramPoll>(tile_need_0.status());
-        need.tiles.push_back(tile_need_0.take_value());
-      }
-      return Poll(std::move(need));
-    }
+    output = phase.query.tensor_outputs
+                 ? *phase.query.tensor_outputs
+                 : take(Footprint::all(tensor.sample_shape()));
+
     plugin_internal::FloatingEnvironment environment;
     if (!environment.active())
       return Poll(sample_error("floating environment unavailable"));
@@ -620,6 +607,7 @@ OperationDefinition operation(bool encode, SequenceProfile profile,
   d.prepare_static = [encode, profile](const auto& inputs, const auto& params) {
     return prepare(inputs, params, encode, profile);
   };
+  d.map_dependencies = sdk::pointwise_dependencies;
   d.start_result = [](const ResultProgramQuery& query,
                       const BufferAllocator& allocator) {
     if (query.tensor_outputs && query.tensor_outputs->empty())

@@ -4,7 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <new>
+#include <utility>
 
 #include "photospider/data/footprint.hpp"
 #include "photospider/data/tiles.hpp"
@@ -203,4 +205,58 @@ inline Result<TileNeed> tile_need_for_samples(const ResourceBudget& root,
     return Answer(tiles.status());
   return Answer(TileNeed{input, slot, false, tiles.take_value()});
 }
+/** @brief Borrowed query view for reusing pure SDK geometry helpers.
+ * Valid only during the static mapper call. No execution scope, payload or
+ * services are supplied. The PreparedOperation pointer does not acquire an
+ * independent lifetime; callers must not retain this view.
+ */
+inline ResultProgramQuery static_query_view(const ResultStaticQuery& source) {
+  ResultProgramQuery query(source.metadata, source.parameters);
+  query.prepared = std::shared_ptr<const PreparedOperation>(&source.prepared,
+                                                            [](const auto*) {});
+  query.backend = source.backend;
+  query.output_index = source.output_index;
+  query.shared_stage = source.shared_stage;
+  query.tensor_slot = source.tensor_slot;
+  query.tile_unit = source.tile_unit;
+  query.tile_extent = source.tile_extent;
+  query.tensor_outputs = source.tensor_outputs;
+  return query;
+}
+
+/** @brief Static coordinate-to-tile mapping for a compiler query. */
+inline Result<TileNeed> tile_need_for_samples(const ResultStaticQuery& query,
+                                              std::uint32_t input,
+                                              std::uint32_t slot,
+                                              const Footprint& samples,
+                                              bool descriptor_only = false) {
+  return tile_need_for_samples(ResourceBudget{}, static_query_view(query),
+                               input, slot, samples, descriptor_only);
+}
+
+/** @brief Pointwise selected-input mapping, including schema validation
+ * closure. Input members have the same sample domain as the selected output
+ * member.
+ */
+inline Result<ResultStaticMapping> pointwise_dependencies(
+    const ResultStaticQuery& query) {
+  auto mapping = complete_input_dependencies(query);
+  if (!mapping.ok() || !query.tensor_outputs)
+    return mapping;
+  auto result = mapping.take_value();
+  for (auto& read : result.inputs) {
+    const auto& spec = query.metadata.inputs[read.input]
+                           .result_schema->tensors[read.tensor_slot];
+    auto samples = spec.close_samples(*query.tensor_outputs);
+    if (!samples.ok())
+      return Result<ResultStaticMapping>(samples.status());
+    auto mapped = tile_need_for_samples(query, read.input, read.tensor_slot,
+                                        samples.value());
+    if (!mapped.ok())
+      return Result<ResultStaticMapping>(mapped.status());
+    read = mapped.take_value();
+  }
+  return Result<ResultStaticMapping>(std::move(result));
+}
+
 }  // namespace ps::sdk

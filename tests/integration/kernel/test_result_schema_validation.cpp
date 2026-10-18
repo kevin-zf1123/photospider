@@ -89,11 +89,6 @@ int complete_tiles(unsigned aliases = 0, bool runtime_request = false) {
   auto plan = take(Compiler(registry).compile(graph, planning)).plan;
   ExecutionContext execution(registry);
   const auto verify = [&](const auto& result) {
-    if (aliases == 4) {
-      PS_CHECK(!result.ok() && result.status().code == ErrorCode::TypeMismatch);
-      PS_CHECK(calls == 0 && starts == 0);
-      return 0;
-    }
     PS_REQUIRE_OK(result);
     PS_CHECK(calls == 1 && starts == (aliases ? 3U : 2U));
     if (!aliases) {
@@ -171,16 +166,11 @@ int complete_bundle(bool declared) {
   auto plan = take(Compiler(registry).compile(graph, options)).plan;
   ExecutionContext execution(registry);
   auto result = execution.execute(plan);
-  if (!declared) {
-    PS_CHECK(!result.ok() && result.status().code == ErrorCode::TypeMismatch);
-    PS_CHECK(calls == 0 && starts == 0);
-  } else {
-    PS_REQUIRE_OK(result);
-    PS_CHECK(calls == 1 && starts == 2);
-    auto descriptor = take(result.value().results.at("value").descriptor());
-    PS_CHECK(descriptor.tensor_coverage(0).contains({0}) &&
-             descriptor.tensor_coverage(1).empty());
-  }
+  PS_REQUIRE_OK(result);
+  PS_CHECK(calls == 1 && starts == 2);
+  auto descriptor = take(result.value().results.at("value").descriptor());
+  PS_CHECK(descriptor.tensor_coverage(0).contains({0}) &&
+           descriptor.tensor_coverage(1).empty());
   return 0;
 }
 struct DuplicateInputConsumer {
@@ -205,14 +195,18 @@ struct DuplicateInputConsumer {
     if (!combined) {
       for (unsigned port = 0; port < 2; ++port) {
         const auto& coverage = phase.tensors->at({port, 0}).coverage();
-        if (!coverage.contains({port}) || coverage.contains({1 - port}))
+        const unsigned expected = port == 0 ? 0 : (incomplete ? 0 : 1);
+        if (!coverage.contains({expected}) || coverage.contains({1 - expected}))
           return Result<ResultProgramPoll>(
               Status{ErrorCode::OperationFailed, "port grant was widened"});
       }
     }
     double first = 0, second = 0;
     check(phase.read_tensor(0, 0, {0}, &first, sizeof(first)));
-    check(phase.read_tensor(combined ? 0 : 1, 0, {1}, &second, sizeof(second)));
+    auto read =
+        phase.read_tensor(combined ? 0 : 1, 0, {1}, &second, sizeof(second));
+    if (!read.ok())
+      return Result<ResultProgramPoll>(read);
     const double sum = first + second;
     auto builder = take(ResultBuilder::start(phase.resources,
                                              *phase.query.output.result_schema,
@@ -259,6 +253,18 @@ int duplicate_input_scope(bool combined, bool incomplete, bool distinct) {
   for (auto& input : consumer.traits.input_schema)
     input.tensor_key = "number";
   consumer.traits.outputs = {multi_result::output("sum")};
+  consumer.map_dependencies = [combined, incomplete](const ResultStaticQuery&) {
+    ResultStaticMapping mapping;
+    mapping.inputs.push_back(
+        {0, 0, false,
+         take(TileSet::range(ResourceBudget{}, 0, combined ? 2 : 1))});
+    if (!combined)
+      mapping.inputs.push_back(
+          {1, 0, false,
+           take(TileSet::range(ResourceBudget{}, incomplete ? 0 : 1,
+                               incomplete ? 1 : 2))});
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
   consumer.start_result = [=](const auto&, const auto& allocator) {
     return ResultContinuation::make<DuplicateInputConsumer>(allocator, combined,
                                                             incomplete);
@@ -280,12 +286,15 @@ int duplicate_input_scope(bool combined, bool incomplete, bool distinct) {
   auto plan = take(Compiler(registry).compile(graph, planning)).plan;
   ExecutionContext context(registry);
   auto result = context.execute(plan);
-  if (incomplete || distinct) {
-    PS_CHECK(!result.ok() && result.status().code == ErrorCode::TypeMismatch);
-    PS_CHECK(starts == 0 && validations == 0);
+  if (incomplete) {
+    PS_CHECK(!result.ok() &&
+             result.status().code == ErrorCode::InvalidArgument &&
+             result.status().reason == FailureReason::UnauthorizedRead);
+    PS_CHECK(starts == 2 && validations == 1);
   } else {
     PS_REQUIRE_OK(result);
-    PS_CHECK(starts == 2 && validations == 1);
+    PS_CHECK(starts == (distinct ? 4U : 2U) &&
+             validations == (distinct ? 2U : 1U));
     PS_CHECK(multi_result::number(result.value().results.at("sum")) == 3);
   }
   return 0;

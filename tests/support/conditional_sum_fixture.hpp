@@ -13,7 +13,6 @@ namespace ps::test {
 // A small routing fixture for generation and cache tests. The control vector
 // is observed in full; a nonzero fourth control adds data[3] to other outputs.
 struct ConditionalSum {
-  unsigned stage = 0;
   bool add = false;
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
     using multi_result::check;
@@ -21,34 +20,14 @@ struct ConditionalSum {
     const auto shape = std::vector<std::uint64_t>{1, 5};
     auto output =
         phase.query.tensor_outputs.value_or(take(Footprint::all(shape)));
-    if (!output.empty() && stage == 0) {
-      ++stage;
-      ResultProgramNeed need;
-      need.tiles.push_back(
-          {1, 0, false,
-           take(TileSet::range(
-               phase.resources, 0,
-               phase.query.input_tile_grids[1][0].tile_count()))});
-      return Result<ResultProgramPoll>(std::move(need));
-    }
-    if (!output.empty() && stage == 1) {
-      ++stage;
+    if (!output.empty()) {
       std::int64_t control;
       check(phase.read_tensor(1, 0, {0, 3}, &control, sizeof(control)));
       add = control != 0;
-      auto selected = output;
-      if (add)
-        selected = take(selected.unite(
-            take(Footprint::from_regions(shape, {Region({{0, 1}, {3, 1}})}))));
-      ResultProgramNeed need;
-      need.tiles.push_back(take(sdk::tile_need_for_samples(
-          phase.resources, phase.query, 0, 0, selected)));
-      return Result<ResultProgramPoll>(std::move(need));
     }
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        phase.query.tile_extent));
+        phase.query.semantic_key, {}, phase.query.tile_extent));
     for (const auto& box : output.boxes()) {
       auto bytes = take(
           phase.allocator.allocate(take(box.element_count()) * sizeof(double)));
@@ -72,12 +51,10 @@ struct ConditionalSum {
         ResultPublication{take(builder.seal()), true});
   } catch (const std::bad_alloc&) {
     return Result<ResultProgramPoll>(
-        Status{ErrorCode::ResourceExhausted,
-               "conditional allocation stage " + std::to_string(stage)});
+        Status{ErrorCode::ResourceExhausted, "conditional allocation"});
   } catch (const multi_result::Failure& failure) {
     auto status = failure.status;
-    status.message = "conditional sum stage " + std::to_string(stage) + ": " +
-                     status.message;
+    status.message = "conditional sum: " + status.message;
     return Result<ResultProgramPoll>(status);
   }
 };
@@ -101,7 +78,26 @@ inline std::shared_ptr<OperationRegistry> conditional_sum_registry() {
   output.output_schema.result_schema_id = output.result_schema->id;
   output.output_schema.result_schema_version = output.result_schema->version;
   output.continuation_bytes = sizeof(ConditionalSum);
-  output.maximum_dependency_stages = 3;
+  output.maximum_dependency_stages = 1;
+  operation.map_dependencies =
+      [](const ResultStaticQuery& query) -> Result<ResultStaticMapping> {
+    using multi_result::take;
+    auto baseline = complete_input_dependencies(query);
+    if (!baseline.ok())
+      return baseline;
+    auto mapping = baseline.take_value();
+    auto selected = query.tensor_outputs.value_or(take(Footprint::all({1, 5})));
+    selected = take(selected.unite(
+        take(Footprint::from_regions({1, 5}, {Region({{0, 1}, {3, 1}})}))));
+    for (auto& read : mapping.inputs)
+      if (read.input == 0 && read.tensor_slot == 0 && !read.descriptor_only) {
+        auto mapped = sdk::tile_need_for_samples(query, 0, 0, selected);
+        if (!mapped.ok())
+          return Result<ResultStaticMapping>(mapped.status());
+        read = mapped.take_value();
+      }
+    return Result<ResultStaticMapping>(std::move(mapping));
+  };
   operation.start_result = [](const auto&, const auto& allocator) {
     return ResultContinuation::make<ConditionalSum>(allocator);
   };

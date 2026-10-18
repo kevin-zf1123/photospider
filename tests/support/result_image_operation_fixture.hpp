@@ -31,7 +31,8 @@ struct Driver {
   Run prepare(const std::string& operation,
               std::vector<ExecutionBinding> inputs,
               std::map<std::string, ParameterValue> parameters = {},
-              const std::string& output = "value") {
+              const std::string& output = "value",
+              PlanningOptions planning = {}) {
     WorkflowDocument document;
     WorkflowNode node;
     node.id = 1;
@@ -51,7 +52,6 @@ struct Driver {
     document.nodes.push_back(std::move(node));
     document.outputs = {{"out", 1, output}};
     auto graph = std::make_shared<GraphContext>(document);
-    PlanningOptions planning;
     planning.execution_mode =
         native ? ExecutionMode::NativeGpu : ExecutionMode::CpuExact;
     auto compiled = take(Compiler(registry).compile(*graph, planning));

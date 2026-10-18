@@ -378,8 +378,20 @@ Result<ExecutionResult> run_result_plan(
         ResourceAllocator<execution_internal::NativeRunUploads>(*stage_root),
         native_uploads, *stage_root);
   const auto cache_epoch = dependency_cache ? dependency_cache->epoch() : 0;
+  // Demand selection filters the stored instruction stream before the
+  // interpreter is entered. Loading/running a plan never invokes a mapper.
+  auto executable_owner = plan_owner;
+  if (requested) {
+    auto selected = plan.select_outputs(*requested);
+    if (!selected.ok())
+      return fail(selected.status());
+    executable_owner =
+        std::make_shared<const ExecutionPlan>(selected.take_value());
+  }
+  const auto& executable = executable_owner ? *executable_owner : plan;
   auto result = execution_internal::execute_structured(
-      plan, std::move(bindings), operations, *stage_root, options, cancellation,
+      executable, std::move(bindings), operations, *stage_root, options,
+      cancellation,
       [current, cancellation] {
         return cancellation.cancelled() ? ErrorCode::Cancelled
                : current && current()   ? ErrorCode::Ok
@@ -409,8 +421,8 @@ Result<ExecutionResult> run_result_plan(
                                    dependency_cache, cache_epoch, backend,
                                    std::move(token), std::move(task));
       },
-      requested, snapshot_identity, result_checkpoints, dependency_cache,
-      plan_owner,
+      nullptr, snapshot_identity, result_checkpoints, dependency_cache,
+      executable_owner,
       options.maximum_parallelism ? options.maximum_parallelism
                                   : pool->ranges().workers());
   if (!result.ok())

@@ -387,8 +387,7 @@ ResultBuilder assembly_builder(const ResultProgramPhase& phase,
                                bool /*empty*/) {
   auto result = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {},
-      phase.query.tile_extent));
+      phase.query.semantic_key, {}, phase.query.tile_extent));
   return result;
 }
 Poll empty_result(const ResultProgramPhase& phase) try {
@@ -548,55 +547,16 @@ Status generic_view(const ResultProgramPhase& phase, const Assembly& a,
 }
 struct State final {
   const Assembly* assembly;
-  std::uint32_t next_input = 0;
-  std::optional<ResultTensorInputs> ready;
   Footprint output;
   explicit State(const Assembly* value) : assembly(value) {}
   Poll poll(const ResultProgramPhase& phase) try {
     auto scratch =
         take(phase.resources.reserve(ResourceCapacity::host(16384, 16384)));
     const auto& spec = phase.query.output.result_schema->tensors[0];
-    if (!ready) {
-      ready.emplace(
-          std::less<std::pair<std::uint32_t, std::uint32_t>>{},
-          ResourceAllocator<ResultTensorInputs::value_type>(phase.resources));
-      output = phase.query.tensor_outputs
-                   ? *phase.query.tensor_outputs
-                   : take(Footprint::all(spec.sample_shape()));
-    }
-    if (phase.tensors)
-      for (const auto& input : *phase.tensors)
-        ready->insert_or_assign(input.first, input.second);
-    if (next_input < phase.query.inputs.size()) {
-      ResultProgramNeed need;
-      while (next_input < phase.query.inputs.size() && need.tiles.size() < 64) {
-        const auto port = next_input++;
-        auto samples = take(Footprint::none(
-            phase.query.inputs[port].result_schema->tensors[0].sample_shape()));
-        for (auto index : assembly->by_port[port]) {
-          const auto& span = assembly->spans[index];
-          const auto clipped =
-              take(output.intersect(take(Footprint::from_regions(
-                  spec.sample_shape(), {span_region(spec, *assembly, span)}))));
-          const auto axes = mapping(phase.query, *assembly, span);
-          for (const auto& box : clipped.boxes())
-            samples = take(samples.unite(take(Footprint::from_regions(
-                samples.shape(), {format_result::mapped_region(box, axes)}))));
-        }
-        const bool descriptor_only = samples.empty();
-        {
-          auto tile_need_0 =
-              sdk::tile_need_for_samples(phase.resources, phase.query, port, 0,
-                                         std::move(samples), descriptor_only);
-          if (!tile_need_0.ok())
-            return Result<ResultProgramPoll>(tile_need_0.status());
-          need.tiles.push_back(tile_need_0.take_value());
-        }
-      }
-      return Poll(std::move(need));
-    }
-    auto supplied = phase;
-    supplied.tensors = &*ready;
+    output = phase.query.tensor_outputs
+                 ? *phase.query.tensor_outputs
+                 : take(Footprint::all(spec.sample_shape()));
+    const auto& supplied = phase;
     auto result = assembly_builder(phase, false);
     std::string policy = assembly->layout;
     if (!spec.layout.spatial && policy != "materialize") {
@@ -632,7 +592,7 @@ struct State final {
             ResultTensorViewTransform transform;
             transform.source_axes = mapping(phase.query, *assembly, span);
             windows.push_back(
-                take(ready->at({span.port, 0})
+                take(phase.tensors->at({span.port, 0})
                          .acquire(format_result::mapped_region(
                                       part, transform.source_axes),
                                   phase.query.cancellation)));
@@ -660,7 +620,7 @@ struct State final {
         const auto axes = mapping(phase.query, *assembly, span);
         for (const auto& part : clipped.boxes()) {
           auto window =
-              take(ready->at({span.port, 0})
+              take(phase.tensors->at({span.port, 0})
                        .acquire(format_result::mapped_region(part, axes),
                                 phase.query.cancellation));
           auto status = format_result::publish(
@@ -740,6 +700,38 @@ OperationDefinition definition(const std::string& key, int member,
   op.prepare_static = [member, profile](const auto& inputs,
                                         const auto& params) {
     return prepare(inputs, params, member, profile);
+  };
+  op.map_dependencies =
+      [](const ResultStaticQuery& compiled) -> Result<ResultStaticMapping> {
+    try {
+      const auto query = sdk::static_query_view(compiled);
+      const auto* assembly =
+          static_cast<const Assembly*>(compiled.prepared.state());
+      const auto& spec = query.output.result_schema->tensors[0];
+      const auto output = query.tensor_outputs
+                              ? *query.tensor_outputs
+                              : take(Footprint::all(spec.sample_shape()));
+      ResultStaticMapping result;
+      for (std::uint32_t port = 0; port < query.inputs.size(); ++port) {
+        auto samples = take(Footprint::none(
+            query.inputs[port].result_schema->tensors[0].sample_shape()));
+        for (auto index : assembly->by_port[port]) {
+          const auto& span = assembly->spans[index];
+          const auto clipped =
+              take(output.intersect(take(Footprint::from_regions(
+                  spec.sample_shape(), {span_region(spec, *assembly, span)}))));
+          const auto axes = mapping(query, *assembly, span);
+          for (const auto& box : clipped.boxes())
+            samples = take(samples.unite(take(Footprint::from_regions(
+                samples.shape(), {format_result::mapped_region(box, axes)}))));
+        }
+        result.inputs.push_back(take(sdk::tile_need_for_samples(
+            compiled, port, 0, samples, samples.empty())));
+      }
+      return Result<ResultStaticMapping>(std::move(result));
+    } catch (const Status& status) {
+      return Result<ResultStaticMapping>(status);
+    }
   };
   op.start_result = [](const ResultProgramQuery& query,
                        const BufferAllocator& allocator) {

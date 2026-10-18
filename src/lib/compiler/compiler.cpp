@@ -2,939 +2,602 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstring>
 #include <functional>
-#include <iomanip>
-#include <limits>
 #include <map>
 #include <memory>
-#include <optional>
 #include <queue>
 #include <set>
-#include <sstream>
 #include <stdexcept>
 #include <string>
-#include <string_view>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "plugin/dependency_identity.hpp"
-#include "plugin/operation_identity.hpp"
+#include "compiler/identity.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps {
 namespace {
-
-/**
- * @brief Deterministic non-cryptographic FNV-1a stage digest builder.
- *
- * @note The digest is explicitly non-security identity and is never used for
- * signatures, authentication, or native-code admission.
- */
-class DigestBuilder final {
- public:
-  /** @brief Creates the canonical FNV-1a offset basis. */
-  DigestBuilder() noexcept = default;
-
-  /**
-   * @brief Appends raw canonical bytes.
-   * @param data Byte pointer, possibly null only when size is zero.
-   * @param size Byte count.
-   * @throws Nothing.
-   * @note Input order is part of identity.
-   */
-  void bytes(const void* data, std::size_t size) noexcept {
-    const auto* cursor = static_cast<const std::uint8_t*>(data);
-    for (std::size_t index = 0; index < size; ++index) {
-      value_ ^= cursor[index];
-      value_ *= 1099511628211ULL;
-    }
-  }
-
-  /**
-   * @brief Appends a uint64 in fixed little-endian order.
-   * @param value Canonical integer.
-   * @throws Nothing.
-   * @note Host endianness does not affect the result.
-   */
-  void integer(std::uint64_t value) noexcept {
-    std::uint8_t encoded[8]{};
-    for (std::size_t index = 0; index < 8U; ++index) {
-      encoded[index] =
-          static_cast<std::uint8_t>((value >> (index * 8U)) & 0xffU);
-    }
-    bytes(encoded, sizeof(encoded));
-  }
-
-  /**
-   * @brief Appends a length-framed string.
-   * @param value Exact bytes.
-   * @throws Nothing.
-   * @note UTF-8 validation belongs to the stage validator.
-   */
-  void text(std::string_view value) noexcept {
-    integer(value.size());
-    bytes(value.data(), value.size());
-  }
-
-  /**
-   * @brief Returns fixed lowercase hexadecimal text.
-   * @return Sixteen-character digest.
-   * @throws std::bad_alloc If stream/string allocation fails.
-   * @note Stage domain/version text, not hexadecimal formatting, separates
-   * intentionally incompatible compiler identities.
-   */
-  [[nodiscard]] std::string finish() const {
-    std::ostringstream stream;
-    stream << std::hex << std::setfill('0') << std::setw(16) << value_;
-    return stream.str();
-  }
-
- private:
-  /** @brief Current FNV-1a state. */
-  std::uint64_t value_ = 14695981039346656037ULL;
-};
-
-/**
- * @brief Validates bounded diagnostic/source text.
- * @param value Candidate source string.
- * @param maximum Inclusive byte limit.
- * @return True for nonempty text without ASCII control bytes.
- * @throws Nothing.
- * @note Full Unicode normalization is outside source schema validation.
- */
-bool valid_text(const std::string& value, std::size_t maximum) noexcept {
+Status invalid(const char* message) {
+  return {ErrorCode::InvalidArgument, message};
+}
+bool valid_text(const std::string& value, std::size_t maximum) {
   return !value.empty() && value.size() <= maximum &&
-         std::none_of(value.begin(), value.end(), [](unsigned char byte) {
-           return byte < 0x20U || byte == 0x7fU;
-         });
+         std::none_of(value.begin(), value.end(),
+                      [](unsigned char c) { return c < 32 || c == 127; });
 }
-
-/**
- * @brief Appends one parameter value to a canonical digest.
- * @param digest Destination builder.
- * @param value Closed source parameter variant.
- * @throws Nothing.
- * @note Floating values use their exact IEEE binary representation.
- */
-void append_parameter(DigestBuilder* digest,
-                      const ParameterValue& value) noexcept {
-  if (const auto* integer = std::get_if<std::int64_t>(&value)) {
-    digest->integer(1U);
-    digest->integer(static_cast<std::uint64_t>(*integer));
-  } else if (const auto* floating = std::get_if<double>(&value)) {
-    digest->integer(2U);
-    std::uint64_t bits = 0U;
-    std::memcpy(&bits, floating, sizeof(bits));
-    digest->integer(bits);
-  } else if (const auto* boolean = std::get_if<bool>(&value)) {
-    digest->integer(3U);
-    digest->integer(*boolean ? 1U : 0U);
-  } else {
-    digest->integer(4U);
-    digest->text(std::get<std::string>(value));
-  }
+struct Definition {
+  std::size_t block = SIZE_MAX;
+  std::size_t position = 0;
+  IRCallId call = 0;
+  std::shared_ptr<const SchemaTemplate> schema;
+};
+std::vector<const IREdge*> edges(const IRTerminator& terminator) {
+  if (const auto* jump = std::get_if<IRJump>(&terminator))
+    return {&jump->edge};
+  if (const auto* branch = std::get_if<IRConditionalJump>(&terminator))
+    return {&branch->if_true, &branch->if_false};
+  return {};
 }
-
-/** @brief Encodes canonical declaration metadata without runtime payload. */
-void append_declarations(
-    DigestBuilder* digest,
-    const std::vector<WorkflowInputDeclaration>& declarations) {
-  digest->integer(declarations.size());
-  for (const auto& declaration : declarations) {
-    digest->integer(declaration.id);
-    digest->text(declaration.name);
-    digest->text(declaration.result_schema->canonical());
-  }
+bool condition_schema(const SchemaTemplate& schema) {
+  if (schema.tensors.size() != 1 ||
+      schema.tensors[0].descriptor.element_type != ElementType::UInt8)
+    return false;
+  auto count = schema.tensors[0].sample_count();
+  return count.ok() && count.value() == 1;
 }
-
-/**
- * @brief Builds the canonical semantic digest.
- * @param nodes Deterministic topological semantic nodes.
- * @param outputs Exact requested outputs.
- * @return Non-security digest text.
- * @throws std::bad_alloc If digest text allocation fails.
- * @note Graph revision is excluded so equal semantics across replacements
- * match.
- */
-std::string semantic_digest(
-    const std::vector<SemanticNode>& nodes,
-    const std::vector<WorkflowOutput>& outputs,
-    const std::vector<WorkflowInputDeclaration>& declarations) {
-  DigestBuilder digest;
-  digest.text("semantic-graph-ir-v23");
-  append_declarations(&digest, declarations);
-  digest.integer(nodes.size());
-  for (const SemanticNode& node : nodes) {
-    digest.integer(node.id);
-    digest.text(node.operation);
-    digest.integer(node.inputs.size());
-    for (const WorkflowInput& input : node.inputs) {
-      if (const auto* node_source = std::get_if<WorkflowNodeOutput>(&input)) {
-        digest.integer(1);
-        digest.integer(node_source->source_node);
-        digest.text(node_source->source_port);
-      } else {
-        digest.integer(2);
-        digest.integer(std::get<WorkflowInputReference>(input).input_id);
-      }
-    }
-    digest.integer(node.parameters.size());
-    for (const auto& parameter : node.parameters) {
-      digest.text(parameter.first);
-      append_parameter(&digest, parameter.second);
-    }
-    contract_internal::append_traits(&digest, node.traits);
-    const auto& resources = node.prepared->resource_ids();
-    digest.integer(resources.size());
-    for (const auto& resource : resources) {
-      digest.integer(resource.byte_length);
-      for (auto byte : resource.sha256)
-        digest.integer(byte);
-    }
-    digest.integer(node.outputs.size());
-    for (const auto& output : node.outputs) {
-      digest.text(output.key);
-      digest.integer(static_cast<bool>(output.result_schema));
-      if (output.result_schema)
-        digest.text(output.result_schema->canonical());
-    }
-  }
-  digest.integer(outputs.size());
-  for (const WorkflowOutput& output : outputs) {
-    digest.text(output.name);
-    digest.integer(output.node_id);
-    digest.text(output.port);
-  }
-  return digest.finish();
+std::uint64_t elapsed(std::chrono::steady_clock::time_point start,
+                      std::chrono::steady_clock::time_point end) {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+          .count());
 }
-
-/**
- * @brief Builds the canonical optimized-stage digest.
- * @param semantic Parent semantic digest.
- * @param nodes Optimized deterministic nodes.
- * @param outputs Optimized outputs.
- * @return Non-security digest text.
- * @throws std::bad_alloc If digest text allocation fails.
- * @note Optimizer identity is explicit even for a no-op result.
- */
-std::string optimized_digest(
-    const std::string& semantic, const std::vector<SemanticNode>& nodes,
-    const std::vector<WorkflowOutput>& outputs,
-    const std::vector<WorkflowInputDeclaration>& declarations) {
-  DigestBuilder digest;
-  digest.text("optimizer-v5-canonical-noop");
-  digest.text(semantic);
-  digest.text(semantic_digest(nodes, outputs, declarations));
-  return digest.finish();
-}
-
-/**
- * @brief Builds the canonical physical-plan digest.
- * @param optimized Parent optimized digest.
- * @param steps Validated physical steps.
- * @param outputs Named step indexes.
- * @return Non-security digest text.
- * @throws std::bad_alloc If digest text allocation fails.
- * @note Runtime availability/cancellation/timing is excluded.
- */
-std::string physical_digest(
-    const std::string& optimized, const std::vector<PlanStep>& steps,
-    const std::map<std::string, std::size_t>& outputs,
-    const std::vector<WorkflowInputDeclaration>& declarations,
-    const std::map<std::string, TileRequest>& output_requests,
-    std::uint64_t tile_extent, ExecutionMode execution_mode) {
-  DigestBuilder digest;
-  digest.text("physical-plan-v23");
-  digest.integer(static_cast<std::uint32_t>(execution_mode));
-  digest.integer(tile_extent);
-  digest.integer(output_requests.size());
-  for (const auto& requested : output_requests) {
-    digest.text(requested.first);
-    digest.integer(requested.second.members.size());
-    for (const auto& member : requested.second.members) {
-      digest.integer(member.first);
-      digest.integer(member.second.intervals().size());
-      for (const auto interval : member.second.intervals()) {
-        digest.integer(interval.begin);
-        digest.integer(interval.end);
-      }
-    }
-  }
-  append_declarations(&digest, declarations);
-  digest.text(optimized);
-  digest.integer(steps.size());
-  for (const PlanStep& step : steps) {
-    digest.integer(step.node_id);
-    digest.integer(step.output_index);
-    digest.text(step.operation);
-    digest.integer(step.inputs.size());
-    for (const PlanInput& input : step.inputs) {
-      if (const auto* source = std::get_if<PlanStepInput>(&input)) {
-        digest.integer(1);
-        digest.integer(source->step_index);
-      } else {
-        digest.integer(2);
-        digest.integer(std::get<PlanWorkflowInput>(input).declaration_index);
-      }
-    }
-    digest.integer(static_cast<std::uint32_t>(step.backend));
-    contract_internal::append_traits(&digest, step.traits);
-    digest.integer(static_cast<bool>(step.output_result_schema));
-    if (step.output_result_schema)
-      digest.text(step.output_result_schema->canonical());
-    digest.integer(step.parameters.size());
-    for (const auto& parameter : step.parameters) {
-      digest.text(parameter.first);
-      append_parameter(&digest, parameter.second);
-    }
-  }
-  digest.integer(outputs.size());
-  for (const auto& output : outputs) {
-    digest.text(output.first);
-    digest.integer(output.second);
-  }
-  return digest.finish();
-}
-
-/**
- * @brief Builds a domain-separated disposable plan-cache lookup key.
- * @param plan Canonical physical-plan digest text.
- * @return Non-security cache-key text.
- * @throws std::bad_alloc If formatting allocation fails.
- * @note Cache presence never changes source/result authority.
- */
-std::string plan_cache_key(const std::string& plan) {
-  DigestBuilder digest;
-  digest.text("plan-cache-key-v18");
-  digest.text(plan);
-  return digest.finish();
-}
-
-/**
- * @brief Converts a steady-clock duration to bounded microseconds.
- * @param duration Nonnegative steady duration.
- * @return Saturated uint64 microseconds.
- * @throws Nothing.
- * @note Used only for raw diagnostics.
- */
-std::uint64_t microseconds(
-    std::chrono::steady_clock::duration duration) noexcept {
-  const auto count =
-      std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
-  if (count <= 0) {
-    return 0U;
-  }
-  return static_cast<std::uint64_t>(count);
-}
-
 }  // namespace
 
-Result<ExecutionPlan> ExecutionPlan::tile_plan(
-    const std::string& name, const TileRequest& request) const {
-  if (!current() || operation_registry_.expired())
-    return Result<ExecutionPlan>(
-        Status::failure(ErrorCode::Stale, "tile parent is stale"));
-  const auto named = outputs_.find(name);
-  if (named == outputs_.end())
-    return Result<ExecutionPlan>(
-        Status{ErrorCode::InvalidArgument, "unknown tile output"});
-  const auto& step = steps_[named->second];
-  auto resolved = request.resolve(step.tile_grids);
-  if (!resolved.ok())
-    return Result<ExecutionPlan>(resolved.status());
-  if (!output_requests_.at(name).contains(resolved.value()))
-    return Result<ExecutionPlan>(
-        Status{ErrorCode::InvalidArgument, "tile exceeds requested output"});
-  ExecutionPlan tile = *this;
-  tile.outputs_ = {{name, named->second}};
-  tile.output_requests_ = {{name, resolved.take_value()}};
-  tile.digest_.value =
-      physical_digest(tile.optimized_digest_.value, tile.steps_, tile.outputs_,
-                      tile.input_declarations_, tile.output_requests_,
-                      tile.tile_extent_, tile.execution_mode_);
-  tile.cache_key_.value = plan_cache_key(tile.digest_.value);
-  if (!current())
-    return Result<ExecutionPlan>(
-        Status::failure(ErrorCode::Stale, "dependency template changed"));
-  return Result<ExecutionPlan>(std::move(tile));
-}
-
-/**
- * @brief Implements compiler construction over one frozen operation set.
- * @copydetails Compiler::Compiler
- */
 Compiler::Compiler(std::shared_ptr<OperationRegistry> operations)
     : operations_(std::move(operations)) {
-  if (!operations_ || !operations_->frozen()) {
+  if (!operations_ || !operations_->frozen())
     throw std::invalid_argument(
         "Compiler requires a frozen operation registry");
-  }
 }
 
-/**
- * @brief Implements validated source-to-semantic lowering.
- * @copydetails Compiler::analyze
- */
 Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
                                           ResourceSet resources) const {
-  if (!snapshot.current()) {
+  if (!snapshot.current())
     return Result<SemanticGraphIR>(
-        Status::failure(ErrorCode::Stale, "graph snapshot is stale"));
-  }
-  const WorkflowDocument& document = snapshot.document();
-  if (document.schema_version != 7U || document.nodes.empty() ||
-      document.nodes.size() > 65536U || document.outputs.empty() ||
-      document.outputs.size() > 4096U || document.inputs.size() > 4096U) {
-    return Result<SemanticGraphIR>(
-        Status::failure(ErrorCode::InvalidArgument,
-                        "WorkflowDocument version/count bounds are invalid"));
-  }
-
+        {ErrorCode::Stale, "graph snapshot is stale"});
+  const auto& document = snapshot.document();
+  if (document.schema_version != 7 || document.nodes.size() > 65536 ||
+      document.inputs.size() > 4096 || document.outputs.size() > 4096 ||
+      document.outputs.empty())
+    return Result<SemanticGraphIR>(invalid("unsupported DAG version/counts"));
+  IRProgram program;
+  program.input_declarations = document.inputs;
+  program.entry = 1;
+  IRBlock entry;
+  entry.id = 1;
+  IRValueId next_value = 1;
+  std::map<std::uint64_t, IRValueId> external;
   auto declarations = document.inputs;
-  ResourceSet retained_resources;
   std::sort(declarations.begin(), declarations.end(),
             [](const auto& a, const auto& b) { return a.id < b.id; });
-  std::map<std::uint64_t, std::size_t> declaration_by_id;
-  std::set<std::string> input_names;
-  for (std::size_t i = 0; i < declarations.size(); ++i) {
-    const auto& declaration = declarations[i];
-    if (declaration.id == 0 ||
-        !input_internal::valid_input_name(declaration.name) ||
-        !declaration_by_id.emplace(declaration.id, i).second ||
-        !input_names.insert(declaration.name).second) {
-      return Result<SemanticGraphIR>(Status::failure(
-          ErrorCode::InvalidArgument, "invalid or duplicate input id/name"));
-    }
+  for (const auto& input : declarations) {
+    if (!external.emplace(input.id, next_value).second)
+      return Result<SemanticGraphIR>(invalid("duplicate DAG input"));
+    program.input_bindings.push_back({input.id, next_value++});
   }
-  for (auto& declaration : declarations) {
-    const auto status = input_internal::validate_declaration(&declaration);
-    if (!status.ok())
-      return Result<SemanticGraphIR>(status);
-  }
-
-  std::unordered_map<std::uint64_t, const WorkflowNode*> nodes_by_id;
-  nodes_by_id.reserve(document.nodes.size());
-  std::unordered_map<std::uint64_t, std::size_t> indegree;
-  std::map<std::pair<std::uint64_t, std::string>, ValueRef> result_ports;
-  std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> dependents;
-  for (const WorkflowNode& node : document.nodes) {
-    if (node.id == 0U || !valid_text(node.operation, 1024U) ||
-        !nodes_by_id.emplace(node.id, &node).second ||
-        node.parameters.size() > 1024U || node.inputs.size() > 1024U) {
-      return Result<SemanticGraphIR>(Status::failure(
-          ErrorCode::InvalidArgument,
-          "workflow node id/key/count is invalid or duplicated"));
-    }
-    for (const auto& parameter : node.parameters) {
-      if (!valid_text(parameter.first, 1024U) ||
-          (std::holds_alternative<std::string>(parameter.second) &&
-           std::get<std::string>(parameter.second).size() > 8192U)) {
-        return Result<SemanticGraphIR>(Status::failure(
-            ErrorCode::InvalidArgument, "workflow parameter is malformed"));
-      }
-    }
+  std::map<IRCallId, const WorkflowNode*> sources;
+  std::map<std::pair<IRCallId, std::string>, IRValueId> values;
+  for (const auto& node : document.nodes)
+    if (!node.id || !sources.emplace(node.id, &node).second)
+      return Result<SemanticGraphIR>(invalid("duplicate or zero DAG node"));
+  for (const auto& pair : sources) {
+    const auto& node = *pair.second;
     auto traits = operations_->find_traits(node.operation);
-    if (!traits.ok()) {
+    if (!traits.ok())
       return Result<SemanticGraphIR>(traits.status());
+    SemanticNode call;
+    call.id = node.id;
+    call.operation = node.operation;
+    call.parameters = node.parameters;
+    for (const auto& output : traits.value().outputs) {
+      values.emplace(std::make_pair(node.id, output.key), next_value);
+      call.outputs.push_back({output.key, {}, next_value++});
     }
-    if ((!traits.value().repeated_maximum &&
-         traits.value().input_count != node.inputs.size()) ||
-        (traits.value().repeated_maximum &&
-         (node.inputs.size() <
-              traits.value().input_count + traits.value().repeated_minimum ||
-          node.inputs.size() >
-              traits.value().input_count + traits.value().repeated_maximum))) {
-      return Result<SemanticGraphIR>(Status::failure(
-          ErrorCode::TypeMismatch, "workflow operation input count mismatch"));
-    }
-    const Status parameter_status =
-        validate_operation_parameters(traits.value(), node.parameters);
-    if (!parameter_status.ok()) {
-      return Result<SemanticGraphIR>(parameter_status);
-    }
-    indegree.emplace(node.id, 0);
-    for (std::uint32_t i = 0; i < traits.value().outputs.size(); ++i) {
-      const auto& output = traits.value().outputs[i];
-      const ValueRef ref{node.id, i};
-      result_ports.emplace(std::make_pair(node.id, output.key), ref);
-    }
+    program.calls.push_back(std::move(call));
   }
-
-  for (const WorkflowNode& node : document.nodes) {
-    for (const WorkflowInput& input : node.inputs) {
+  for (auto& call : program.calls) {
+    for (const auto& input : sources.at(call.id)->inputs) {
       if (const auto* source = std::get_if<WorkflowNodeOutput>(&input)) {
-        if (source->source_node == 0 ||
-            !result_ports.count({source->source_node, source->source_port}) ||
-            nodes_by_id.count(source->source_node) == 0) {
+        auto found = values.find({source->source_node, source->source_port});
+        if (found == values.end())
           return Result<SemanticGraphIR>(
-              Status::failure(ErrorCode::NotFound,
-                              "workflow input references a missing producer"));
-        }
-        dependents[source->source_node].push_back(node.id);
-        ++indegree[node.id];
-      } else if (declaration_by_id.count(
-                     std::get<WorkflowInputReference>(input).input_id) == 0) {
-        return Result<SemanticGraphIR>(
-            Status::failure(ErrorCode::NotFound,
-                            "workflow input references a missing declaration"));
-      }
-    }
-  }
-
-  std::set<std::string> output_names;
-  for (const WorkflowOutput& output : document.outputs) {
-    if (!valid_text(output.name, 1024U) ||
-        !result_ports.count({output.node_id, output.port}) ||
-        output.node_id == 0U || nodes_by_id.count(output.node_id) == 0U ||
-        !output_names.insert(output.name).second) {
-      return Result<SemanticGraphIR>(Status::failure(
-          ErrorCode::InvalidArgument,
-          "workflow output is malformed, missing, or duplicated"));
-    }
-  }
-
-  std::priority_queue<std::uint64_t, std::vector<std::uint64_t>,
-                      std::greater<std::uint64_t>>
-      ready;
-  for (const auto& entry : indegree) {
-    if (entry.second == 0U) {
-      ready.push(entry.first);
-    }
-  }
-
-  SemanticGraphIR semantic;
-  semantic.revision_ = snapshot.revision();
-  semantic.input_declarations_ = declarations;
-  semantic.nodes_.reserve(document.nodes.size());
-  std::map<ValueRef, std::shared_ptr<const SchemaTemplate>> result_schemas;
-  while (!ready.empty()) {
-    const std::uint64_t id = ready.top();
-    ready.pop();
-    const WorkflowNode& source = *nodes_by_id.at(id);
-    auto traits = operations_->find_traits(source.operation);
-    if (!traits.ok()) {
-      return Result<SemanticGraphIR>(traits.status());
-    }
-    SemanticNode node;
-    node.id = source.id;
-    node.operation = source.operation;
-    node.parameters = source.parameters;
-    auto resolved = resolve_operation_traits(
-        traits.value(), source.inputs.size(), source.parameters);
-    if (!resolved.ok())
-      return Result<SemanticGraphIR>(resolved.status());
-    node.traits = resolved.take_value();
-    node.inputs.reserve(source.inputs.size());
-    std::vector<OperationMetadata> input_metadata;
-    input_metadata.reserve(source.inputs.size());
-    for (std::size_t position = 0; position < source.inputs.size();
-         ++position) {
-      const auto& input = source.inputs[position];
-      const auto& port = node.traits.input_schema[position];
-      node.inputs.push_back(input);
-      std::shared_ptr<const SchemaTemplate> result_schema;
-      if (const auto* producer = std::get_if<WorkflowNodeOutput>(&input)) {
-        const auto ref =
-            result_ports.at({producer->source_node, producer->source_port});
-        result_schema = result_schemas.at(ref);
+              {ErrorCode::NotFound, "DAG references a missing output"});
+        call.inputs.push_back(found->second);
       } else {
-        const auto id = std::get<WorkflowInputReference>(input).input_id;
-        const auto& declaration = declarations[declaration_by_id.at(id)];
-        result_schema = declaration.result_schema;
-      }
-      auto status = input_internal::validate_port_metadata(
-          port, OperationMetadata{result_schema});
-      if (!status.ok()) {
-        if (status.detail.origin == FailureOrigin::Unspecified &&
-            (status.code == ErrorCode::TypeMismatch ||
-             status.code == ErrorCode::InvalidArgument)) {
-          status.detail.origin = FailureOrigin::Schema;
-          if (status.code == ErrorCode::InvalidArgument &&
-              status.reason == FailureReason::None)
-            status.reason = FailureReason::InvalidDomain;
-        }
-        return Result<SemanticGraphIR>(status);
-      }
-      input_metadata.push_back({std::move(result_schema)});
-    }
-    auto specialized = operations_->prepare_operation(
-        source.operation, input_metadata, source.parameters, resources);
-    if (!specialized.ok())
-      return Result<SemanticGraphIR>(specialized.status());
-    node.prepared = specialized.take_value();
-    auto selected_resources = resources.select(node.prepared->resource_ids());
-    if (!selected_resources.ok())
-      return Result<SemanticGraphIR>(selected_resources.status());
-    auto joined_resources =
-        retained_resources.unite(selected_resources.value());
-    if (!joined_resources.ok())
-      return Result<SemanticGraphIR>(joined_resources.status());
-    retained_resources = joined_resources.take_value();
-    node.traits = node.prepared->traits();
-    auto output =
-        infer_operation_outputs(node.traits, input_metadata, node.parameters);
-    if (!output.ok())
-      return Result<SemanticGraphIR>(output.status());
-    for (std::uint32_t oi = 0; oi < node.traits.outputs.size(); ++oi) {
-      const auto& contract = node.traits.outputs[oi];
-      const auto& metadata = output.value()[oi];
-      const ValueRef ref{node.id, oi};
-      result_schemas.emplace(ref, metadata.result_schema);
-      node.outputs.push_back({contract.key, metadata.result_schema});
-    }
-    semantic.nodes_.push_back(std::move(node));
-    for (std::uint64_t dependent : dependents[id]) {
-      std::size_t& count = indegree[dependent];
-      if (count == 0U) {
-        return Result<SemanticGraphIR>(Status::failure(
-            ErrorCode::Internal, "workflow indegree underflow"));
-      }
-      --count;
-      if (count == 0U) {
-        ready.push(dependent);
+        auto found =
+            external.find(std::get<WorkflowInputReference>(input).input_id);
+        if (found == external.end())
+          return Result<SemanticGraphIR>(
+              {ErrorCode::NotFound, "DAG references a missing input"});
+        call.inputs.push_back(found->second);
       }
     }
   }
-  if (semantic.nodes_.size() != document.nodes.size()) {
-    return Result<SemanticGraphIR>(
-        Status::failure(ErrorCode::Cycle, "workflow graph contains a cycle"));
+  auto outputs = document.outputs;
+  std::sort(outputs.begin(), outputs.end(),
+            [](const auto& a, const auto& b) { return a.name < b.name; });
+  IRReturn returned;
+  std::vector<IRCallId> roots;
+  for (const auto& output : outputs) {
+    auto found = values.find({output.node_id, output.port});
+    if (found == values.end())
+      return Result<SemanticGraphIR>(
+          {ErrorCode::NotFound, "DAG return references a missing output"});
+    program.returns.push_back({output.name, {}});
+    returned.values.push_back(found->second);
+    roots.push_back(output.node_id);
   }
-  semantic.resources_ = std::move(retained_resources);
-  semantic.outputs_ = document.outputs;
-  std::sort(semantic.outputs_.begin(), semantic.outputs_.end(),
-            [](const WorkflowOutput& left, const WorkflowOutput& right) {
-              return left.name < right.name;
-            });
-  semantic.digest_.value = semantic_digest(semantic.nodes_, semantic.outputs_,
-                                           semantic.input_declarations_);
+  // Preserve every frontend call in raw IR. Starting at named results gives
+  // input-ordered depth-first lowering, while subsequent roots retain unused
+  // calls and effects without cloning shared invocations.
+  for (const auto& source : sources)
+    roots.push_back(source.first);
+  std::map<IRCallId, unsigned> color;
+  for (auto root : roots) {
+    if (color[root] == 2)
+      continue;
+    std::vector<std::pair<IRCallId, std::size_t>> stack{{root, 0}};
+    color[root] = 1;
+    while (!stack.empty()) {
+      auto& frame = stack.back();
+      const auto& inputs = sources.at(frame.first)->inputs;
+      if (frame.second == inputs.size()) {
+        color[frame.first] = 2;
+        entry.calls.push_back(frame.first);
+        stack.pop_back();
+        continue;
+      }
+      const auto& input = inputs[frame.second++];
+      const auto* upstream = std::get_if<WorkflowNodeOutput>(&input);
+      if (!upstream || color[upstream->source_node] == 2)
+        continue;
+      if (color[upstream->source_node] == 1)
+        return Result<SemanticGraphIR>(
+            {ErrorCode::Cycle, "DAG contains a cycle"});
+      color[upstream->source_node] = 1;
+      stack.push_back({upstream->source_node, 0});
+    }
+  }
+  if (entry.calls.empty()) {
+    entry.terminator = std::move(returned);
+    program.blocks.push_back(std::move(entry));
+  } else {
+    // The DFS continuation after each upstream call is an explicit jump.
+    // A multi-input node is reached only after all of its input branches;
+    // shared frontend invocations keep one definition and one call site.
+    program.entry = entry.calls.front();
+    for (std::size_t i = 0; i < entry.calls.size(); ++i) {
+      IRBlock block;
+      block.id = entry.calls[i];
+      block.calls = {entry.calls[i]};
+      if (i + 1 < entry.calls.size())
+        block.terminator = IRJump{{entry.calls[i + 1], {}}};
+      else
+        block.terminator = std::move(returned);
+      program.blocks.push_back(std::move(block));
+    }
+  }
+  auto bound = bind_ir(std::move(program), std::move(resources));
+  if (!bound.ok())
+    return bound;
+  auto semantic = bound.take_value();
+  semantic.revision_ = snapshot.revision();
   semantic.current_check_ = [snapshot]() noexcept {
     return snapshot.current();
   };
-  semantic.operation_registry_ = operations_;
-  if (!semantic.current()) {
+  if (!semantic.current())
     return Result<SemanticGraphIR>(
-        Status::failure(ErrorCode::Stale, "graph changed during analysis"));
-  }
+        {ErrorCode::Stale, "DAG changed during lowering"});
   return Result<SemanticGraphIR>(std::move(semantic));
 }
 
-/**
- * @brief Implements the conservative optimized-stage transition.
- * @copydetails Compiler::optimize
- */
+Result<SemanticGraphIR> Compiler::bind_ir(IRProgram program,
+                                          ResourceSet resources) const {
+  if (program.calls.size() > 65536 || program.blocks.empty() ||
+      program.blocks.size() > 65536 ||
+      program.input_declarations.size() > 4096 || program.returns.size() > 4096)
+    return Result<SemanticGraphIR>(invalid("IR count bounds are invalid"));
+  // Freeze mutable frontend owners before validating or preparing any call.
+  std::map<const SchemaTemplate*, std::shared_ptr<const SchemaTemplate>> frozen;
+  auto freeze = [&](std::shared_ptr<const SchemaTemplate>& schema) {
+    if (!schema)
+      return;
+    auto found = frozen.find(schema.get());
+    if (found == frozen.end())
+      found = frozen
+                  .emplace(schema.get(),
+                           std::make_shared<const SchemaTemplate>(*schema))
+                  .first;
+    schema = found->second;
+  };
+  for (auto& declaration : program.input_declarations)
+    freeze(declaration.result_schema);
+  for (auto& block : program.blocks)
+    for (auto& parameter : block.parameters)
+      freeze(parameter.result_schema);
+  for (auto& output : program.returns)
+    freeze(output.result_schema);
+  auto& declarations = program.input_declarations;
+  std::sort(declarations.begin(), declarations.end(),
+            [](const auto& a, const auto& b) { return a.id < b.id; });
+  std::map<std::uint64_t, std::size_t> declaration_by_id;
+  std::set<std::string> names;
+  for (std::size_t i = 0; i < declarations.size(); ++i) {
+    auto& input = declarations[i];
+    if (!input.id || !input_internal::valid_input_name(input.name) ||
+        !declaration_by_id.emplace(input.id, i).second ||
+        !names.insert(input.name).second)
+      return Result<SemanticGraphIR>(invalid("invalid or duplicate IR input"));
+    auto status = input_internal::validate_declaration(&input);
+    if (!status.ok())
+      return Result<SemanticGraphIR>(status);
+  }
+  std::map<IRValueId, Definition> definitions;
+  auto define = [&](IRValueId value, Definition definition) {
+    return value && definitions.emplace(value, std::move(definition)).second;
+  };
+  std::sort(program.input_bindings.begin(), program.input_bindings.end(),
+            [](const auto& a, const auto& b) {
+              return a.declaration_id < b.declaration_id;
+            });
+  if (program.input_bindings.size() != declarations.size())
+    return Result<SemanticGraphIR>(
+        invalid("IR inputs must bind every declaration"));
+  for (std::size_t i = 0; i < declarations.size(); ++i) {
+    const auto& binding = program.input_bindings[i];
+    if (binding.declaration_id != declarations[i].id ||
+        !define(binding.value, {SIZE_MAX, 0, 0, declarations[i].result_schema}))
+      return Result<SemanticGraphIR>(
+          invalid("duplicate or invalid IR input value"));
+  }
+  std::map<IRBlockId, std::size_t> block_by_id;
+  std::map<IRCallId, std::pair<std::size_t, std::size_t>> location;
+  for (std::size_t bi = 0; bi < program.blocks.size(); ++bi) {
+    const auto& block = program.blocks[bi];
+    if (!block.id || !block_by_id.emplace(block.id, bi).second ||
+        block.parameters.size() > 4096 || block.calls.size() > 65536)
+      return Result<SemanticGraphIR>(invalid("invalid IR block"));
+    for (const auto& parameter : block.parameters) {
+      if (!parameter.result_schema)
+        return Result<SemanticGraphIR>(
+            invalid("block parameter requires schema"));
+      auto status = parameter.result_schema->validate();
+      if (!status.ok())
+        return Result<SemanticGraphIR>(status);
+      if (!define(parameter.value, {bi, 0, 0, parameter.result_schema}))
+        return Result<SemanticGraphIR>(invalid("duplicate block parameter"));
+    }
+    for (std::size_t ci = 0; ci < block.calls.size(); ++ci)
+      if (!location.emplace(block.calls[ci], std::make_pair(bi, ci + 1)).second)
+        return Result<SemanticGraphIR>(
+            invalid("call belongs to multiple blocks"));
+  }
+  const auto start = block_by_id.find(program.entry);
+  if (start == block_by_id.end() ||
+      !program.blocks[start->second].parameters.empty())
+    return Result<SemanticGraphIR>(invalid("invalid IR entry block"));
+  const auto entry = start->second;
+  std::map<IRCallId, const SemanticNode*> calls;
+  for (const auto& call : program.calls) {
+    if (!call.id || !valid_text(call.operation, 1024) ||
+        !calls.emplace(call.id, &call).second || !location.count(call.id) ||
+        call.inputs.size() > 1024 || call.parameters.size() > 1024)
+      return Result<SemanticGraphIR>(invalid("invalid or unplaced IR call"));
+    for (const auto& parameter : call.parameters)
+      if (!valid_text(parameter.first, 1024) ||
+          (std::holds_alternative<std::string>(parameter.second) &&
+           std::get<std::string>(parameter.second).size() > 8192))
+        return Result<SemanticGraphIR>(invalid("malformed IR parameter"));
+    auto traits = operations_->find_traits(call.operation);
+    if (!traits.ok())
+      return Result<SemanticGraphIR>(traits.status());
+    const auto& contract = traits.value();
+    const auto count = call.inputs.size();
+    const bool repeated =
+        contract.repeated_maximum && !contract.repeated_resolved;
+    if (count < contract.input_count ||
+        (repeated ? count - contract.input_count < contract.repeated_minimum ||
+                        count - contract.input_count > contract.repeated_maximum
+                  : count != contract.input_count))
+      return Result<SemanticGraphIR>(
+          {ErrorCode::TypeMismatch,
+           "IR call input count mismatch",
+           FailureReason::None,
+           {FailureOrigin::Schema, FailureScope::Group}});
+    if (call.outputs.size() != traits.value().outputs.size())
+      return Result<SemanticGraphIR>(invalid("IR call result count mismatch"));
+    auto at = location.at(call.id);
+    for (std::size_t oi = 0; oi < call.outputs.size(); ++oi)
+      if (call.outputs[oi].key != traits.value().outputs[oi].key ||
+          !define(call.outputs[oi].value, {at.first, at.second, call.id, {}}))
+        return Result<SemanticGraphIR>(
+            invalid("invalid or duplicate call result"));
+  }
+  if (location.size() != calls.size())
+    return Result<SemanticGraphIR>(invalid("block references a missing call"));
+  std::vector<std::vector<std::size_t>> successors(program.blocks.size());
+  std::vector<std::vector<std::size_t>> predecessors(program.blocks.size());
+  for (std::size_t bi = 0; bi < program.blocks.size(); ++bi) {
+    for (const auto* edge : edges(program.blocks[bi].terminator)) {
+      auto target = block_by_id.find(edge->target);
+      if (target == block_by_id.end() ||
+          edge->arguments.size() !=
+              program.blocks[target->second].parameters.size())
+        return Result<SemanticGraphIR>(invalid("invalid IR edge target/arity"));
+      successors[bi].push_back(target->second);
+      predecessors[target->second].push_back(bi);
+    }
+  }
+  // Iterative DFS avoids using the C++ stack for long source graphs.
+  std::vector<bool> seen(program.blocks.size());
+  std::vector<std::size_t> postorder;
+  std::vector<std::pair<std::size_t, std::size_t>> stack{{entry, 0}};
+  seen[entry] = true;
+  while (!stack.empty()) {
+    auto& frame = stack.back();
+    if (frame.second == successors[frame.first].size()) {
+      postorder.push_back(frame.first);
+      stack.pop_back();
+    } else {
+      auto next = successors[frame.first][frame.second++];
+      if (!seen[next]) {
+        seen[next] = true;
+        stack.push_back({next, 0});
+      }
+    }
+  }
+  if (postorder.size() != program.blocks.size())
+    return Result<SemanticGraphIR>(invalid("IR contains unreachable blocks"));
+  std::reverse(postorder.begin(), postorder.end());
+  std::vector<std::size_t> rank(program.blocks.size()),
+      idom(program.blocks.size(), SIZE_MAX);
+  for (std::size_t i = 0; i < postorder.size(); ++i)
+    rank[postorder[i]] = i;
+  idom[entry] = entry;
+  auto intersect = [&](std::size_t a, std::size_t b) {
+    while (a != b) {
+      while (rank[a] > rank[b])
+        a = idom[a];
+      while (rank[b] > rank[a])
+        b = idom[b];
+    }
+    return a;
+  };
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (auto block : postorder) {
+      if (block == entry)
+        continue;
+      std::size_t parent = SIZE_MAX;
+      for (auto predecessor : predecessors[block])
+        if (idom[predecessor] != SIZE_MAX)
+          parent =
+              parent == SIZE_MAX ? predecessor : intersect(parent, predecessor);
+      if (idom[block] != parent) {
+        idom[block] = parent;
+        changed = true;
+      }
+    }
+  }
+  auto dominates = [&](std::size_t a, std::size_t b) {
+    while (b != a && b != entry)
+      b = idom[b];
+    return b == a;
+  };
+  auto check_use = [&](IRValueId value, std::size_t block,
+                       std::size_t position) {
+    auto found = definitions.find(value);
+    if (found == definitions.end())
+      return false;
+    const auto& def = found->second;
+    if (def.block == SIZE_MAX)
+      return true;
+    if (def.block == block)
+      return def.position < position;
+    return dominates(def.block, block);
+  };
+  for (std::size_t bi = 0; bi < program.blocks.size(); ++bi) {
+    const auto& block = program.blocks[bi];
+    for (std::size_t ci = 0; ci < block.calls.size(); ++ci)
+      for (auto value : calls.at(block.calls[ci])->inputs)
+        if (!check_use(value, bi, ci + 1))
+          return Result<SemanticGraphIR>(
+              invalid("SSA definition does not dominate call"));
+    for (const auto* edge : edges(block.terminator))
+      for (auto value : edge->arguments)
+        if (!check_use(value, bi, block.calls.size() + 1))
+          return Result<SemanticGraphIR>(
+              invalid("SSA definition does not dominate edge"));
+    if (const auto* branch =
+            std::get_if<IRConditionalJump>(&block.terminator)) {
+      if (!check_use(branch->condition, bi, block.calls.size() + 1))
+        return Result<SemanticGraphIR>(invalid("undefined branch condition"));
+    }
+    if (const auto* returned = std::get_if<IRReturn>(&block.terminator)) {
+      if (returned->values.size() != program.returns.size())
+        return Result<SemanticGraphIR>(invalid("IR return arity mismatch"));
+      for (auto value : returned->values)
+        if (!check_use(value, bi, block.calls.size() + 1))
+          return Result<SemanticGraphIR>(
+              invalid("SSA definition does not dominate return"));
+    }
+  }
+  std::map<IRCallId, std::size_t> indegree;
+  std::map<IRCallId, std::vector<IRCallId>> dependents;
+  for (const auto& call : program.calls) {
+    indegree.emplace(call.id, 0);
+    for (auto value : call.inputs) {
+      const auto producer = definitions.at(value).call;
+      if (producer) {
+        ++indegree[call.id];
+        dependents[producer].push_back(call.id);
+      }
+    }
+  }
+  std::priority_queue<IRCallId, std::vector<IRCallId>, std::greater<IRCallId>>
+      ready;
+  for (const auto& pair : indegree)
+    if (!pair.second)
+      ready.push(pair.first);
+  SemanticGraphIR semantic;
+  semantic.revision_ = 1;
+  while (!ready.empty()) {
+    auto id = ready.top();
+    ready.pop();
+    auto node = *calls.at(id);
+    std::vector<OperationMetadata> input_metadata;
+    for (auto value : node.inputs)
+      input_metadata.push_back({definitions.at(value).schema});
+    auto prepared = operations_->prepare_operation(
+        node.operation, input_metadata, node.parameters, resources);
+    if (!prepared.ok())
+      return Result<SemanticGraphIR>(prepared.status());
+    node.prepared = prepared.take_value();
+    node.traits = node.prepared->traits();
+    auto inferred =
+        infer_operation_outputs(node.traits, input_metadata, node.parameters);
+    if (!inferred.ok())
+      return Result<SemanticGraphIR>(inferred.status());
+    for (std::size_t oi = 0; oi < node.outputs.size(); ++oi) {
+      auto schema = inferred.value()[oi].result_schema;
+      if (node.outputs[oi].result_schema &&
+          !node.outputs[oi].result_schema->same_schema(*schema))
+        return Result<SemanticGraphIR>(
+            {ErrorCode::TypeMismatch, "IR result schema mismatch"});
+      node.outputs[oi].result_schema = schema;
+      definitions.at(node.outputs[oi].value).schema = std::move(schema);
+    }
+    auto selected = resources.select(node.prepared->resource_ids());
+    if (!selected.ok())
+      return Result<SemanticGraphIR>(selected.status());
+    auto joined = semantic.resources_.unite(selected.value());
+    if (!joined.ok())
+      return Result<SemanticGraphIR>(joined.status());
+    semantic.resources_ = joined.take_value();
+    semantic.nodes_.push_back(std::move(node));
+    for (auto dependent : dependents[id])
+      if (--indegree[dependent] == 0)
+        ready.push(dependent);
+  }
+  if (semantic.nodes_.size() != calls.size())
+    return Result<SemanticGraphIR>(
+        {ErrorCode::Cycle,
+         "recursive SSA definition requires block parameters"});
+  names.clear();
+  for (auto& output : program.returns) {
+    if (!valid_text(output.name, 1024) || !names.insert(output.name).second)
+      return Result<SemanticGraphIR>(invalid("invalid IR return name"));
+    if (output.result_schema) {
+      auto status = output.result_schema->validate();
+      if (!status.ok())
+        return Result<SemanticGraphIR>(status);
+    }
+  }
+  for (const auto& block : program.blocks) {
+    for (const auto* edge : edges(block.terminator)) {
+      const auto& parameters =
+          program.blocks[block_by_id.at(edge->target)].parameters;
+      for (std::size_t i = 0; i < parameters.size(); ++i)
+        if (!definitions.at(edge->arguments[i])
+                 .schema->same_schema(*parameters[i].result_schema))
+          return Result<SemanticGraphIR>(
+              {ErrorCode::TypeMismatch, "IR edge schema mismatch"});
+    }
+    if (const auto* branch = std::get_if<IRConditionalJump>(&block.terminator))
+      if (!condition_schema(*definitions.at(branch->condition).schema))
+        return Result<SemanticGraphIR>(
+            {ErrorCode::TypeMismatch, "branch requires one UInt8 sample"});
+    if (const auto* returned = std::get_if<IRReturn>(&block.terminator)) {
+      for (std::size_t i = 0; i < returned->values.size(); ++i) {
+        auto schema = definitions.at(returned->values[i]).schema;
+        auto& expected = program.returns[i].result_schema;
+        if (!expected)
+          expected = schema;
+        if (!expected->same_schema(*schema))
+          return Result<SemanticGraphIR>(
+              {ErrorCode::TypeMismatch, "IR return schema mismatch"});
+      }
+    }
+  }
+  for (const auto& output : program.returns)
+    if (!output.result_schema)
+      return Result<SemanticGraphIR>(
+          invalid("return signature requires schema"));
+  semantic.input_declarations_ = std::move(program.input_declarations);
+  semantic.input_bindings_ = std::move(program.input_bindings);
+  semantic.blocks_ = std::move(program.blocks);
+  semantic.entry_ = program.entry;
+  semantic.outputs_ = std::move(program.returns);
+  semantic.operation_registry_ = operations_;
+  semantic.current_check_ =
+      [registry = std::weak_ptr<OperationRegistry>(operations_)]() noexcept {
+        return !registry.expired();
+      };
+  semantic.digest_.value =
+      compiler_internal::semantic_digest(semantic.program());
+  return Result<SemanticGraphIR>(std::move(semantic));
+}
+
 Result<OptimizedGraphIR> Compiler::optimize(
     const SemanticGraphIR& semantic) const {
-  const auto source_operations = semantic.operation_registry_.lock();
-  if (semantic.revision() == 0U || semantic.nodes().empty() ||
-      semantic.digest().value.empty() || !semantic.current() ||
-      source_operations.get() != operations_.get()) {
-    return Result<OptimizedGraphIR>(Status::failure(
-        ErrorCode::Stale,
-        "semantic IR is invalid, stale, or from another operation set"));
-  }
+  if (!semantic.current() || !semantic.revision() ||
+      semantic.operation_registry_.lock().get() != operations_.get())
+    return Result<OptimizedGraphIR>({ErrorCode::Stale, "invalid semantic IR"});
   OptimizedGraphIR optimized;
-  optimized.revision_ = semantic.revision();
-  optimized.nodes_ = semantic.nodes();
-  optimized.input_declarations_ = semantic.input_declarations();
-  optimized.resources_ = semantic.resources();
-  optimized.outputs_ = semantic.outputs();
-  optimized.semantic_digest_ = semantic.digest();
-  optimized.digest_.value =
-      optimized_digest(optimized.semantic_digest_.value, optimized.nodes_,
-                       optimized.outputs_, optimized.input_declarations_);
+  optimized.revision_ = semantic.revision_;
+  optimized.nodes_ = semantic.nodes_;
+  optimized.outputs_ = semantic.outputs_;
+  optimized.blocks_ = semantic.blocks_;
+  optimized.entry_ = semantic.entry_;
+  optimized.input_bindings_ = semantic.input_bindings_;
+  optimized.input_declarations_ = semantic.input_declarations_;
+  optimized.resources_ = semantic.resources_;
+  optimized.semantic_digest_ = semantic.digest_;
   optimized.current_check_ = semantic.current_check_;
   optimized.operation_registry_ = operations_;
-  if (!optimized.current()) {
-    return Result<OptimizedGraphIR>(
-        Status::failure(ErrorCode::Stale, "graph changed during optimization"));
-  }
+  optimized.digest_.value = compiler_internal::optimized_digest(
+      optimized.semantic_digest_.value, optimized.program());
   return Result<OptimizedGraphIR>(std::move(optimized));
 }
 
-/**
- * @brief Implements local physical plan construction.
- * @copydetails Compiler::plan
- */
-Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
-                                     const PlanningOptions& options) const {
-  if (options.execution_mode != ExecutionMode::CpuExact &&
-      options.execution_mode != ExecutionMode::NativeGpu)
-    return Result<ExecutionPlan>(
-        Status::failure(ErrorCode::InvalidArgument, "unknown execution mode"));
-  if (!options.tile_extent || (options.tile_extent & (options.tile_extent - 1)))
-    return Result<ExecutionPlan>(
-        Status::failure(ErrorCode::InvalidArgument,
-                        "tile extent must be a positive power of two"));
-  const auto source_operations = optimized.operation_registry_.lock();
-  if (optimized.revision() == 0U || optimized.nodes().empty() ||
-      optimized.digest().value.empty() || !optimized.current() ||
-      source_operations.get() != operations_.get()) {
-    return Result<ExecutionPlan>(Status::failure(
-        ErrorCode::Stale,
-        "optimized IR is invalid, stale, or from another operation set"));
-  }
-  std::map<ValueRef, std::size_t> step_by_value;
-  std::map<std::pair<std::uint64_t, std::string>, ValueRef> result_ports;
-  for (const auto& node : optimized.nodes())
-    for (std::uint32_t oi = 0; oi < node.outputs.size(); ++oi)
-      result_ports.emplace(std::make_pair(node.id, node.outputs[oi].key),
-                           ValueRef{node.id, oi});
-  // Retain the metadata closure of output-reachable results, including excluded
-  // ports. Runtime demand only follows selected relevant ports. Side-effecting
-  // singleton roots remain explicit even without a named consumer.
-  std::set<ValueRef> needed, executable;
-  for (const auto& output : optimized.outputs())
-    executable.insert(result_ports.at({output.node_id, output.port}));
-  needed = executable;
-  for (auto it = optimized.nodes().rbegin(); it != optimized.nodes().rend();
-       ++it) {
-    const auto& node = *it;
-    if (!node.traits.side_effect_free ||
-        std::any_of(node.traits.shared_stages.begin(),
-                    node.traits.shared_stages.end(),
-                    [](const auto& stage) { return stage.mandatory; })) {
-      needed.insert({node.id, 0});
-      executable.insert({node.id, 0});
-    }
-    for (std::uint32_t oi = 0; oi < node.outputs.size(); ++oi) {
-      if (!executable.count({node.id, oi}))
-        continue;
-      const auto& projection = node.traits.outputs[oi].input_indices;
-      for (std::uint32_t input = 0; input < node.inputs.size(); ++input) {
-        if (projection && std::find(projection->begin(), projection->end(),
-                                    input) == projection->end())
-          continue;
-        if (const auto* producer =
-                std::get_if<WorkflowNodeOutput>(&node.inputs[input]))
-          executable.insert(
-              result_ports.at({producer->source_node, producer->source_port}));
-      }
-    }
-    bool used = false;
-    for (std::uint32_t oi = 0; oi < node.outputs.size(); ++oi)
-      used = used || needed.count({node.id, oi});
-    if (used)
-      for (const auto& input : node.inputs)
-        if (const auto* producer = std::get_if<WorkflowNodeOutput>(&input))
-          needed.insert(
-              result_ports.at({producer->source_node, producer->source_port}));
-  }
-  ExecutionPlan plan;
-  plan.execution_mode_ = options.execution_mode;
-  plan.tile_extent_ = options.tile_extent;
-  plan.revision_ = optimized.revision();
-  plan.input_declarations_ = optimized.input_declarations();
-  plan.resources_ = optimized.resources();
-  for (const auto& input : plan.input_declarations_) {
-    auto grid = TileGrid::members(*input.result_schema, options.tile_extent);
-    if (!grid.ok())
-      return Result<ExecutionPlan>(grid.status());
-    plan.input_tile_grids_.push_back(grid.take_value());
-  }
-  std::map<std::uint64_t, std::size_t> declaration_by_id;
-  for (std::size_t i = 0; i < plan.input_declarations_.size(); ++i)
-    declaration_by_id.emplace(plan.input_declarations_[i].id, i);
-  plan.steps_.reserve(optimized.nodes().size());
-  for (const SemanticNode& node : optimized.nodes()) {
-    for (std::uint32_t oi = 0; oi < node.outputs.size(); ++oi) {
-      if (!needed.count({node.id, oi}))
-        continue;
-      const auto& output = node.outputs[oi];
-      PlanStep step;
-      step.output_index = oi;
-      step.node_id = node.id;
-      step.operation = node.operation;
-      step.parameters = node.parameters;
-      step.prepared = node.prepared;
-      step.traits = select_operation_output(node.traits, oi).take_value();
-      step.output_result_schema = output.result_schema;
-      if (step.output_result_schema) {
-        auto grid =
-            TileGrid::members(*step.output_result_schema, options.tile_extent);
-        if (!grid.ok())
-          return Result<ExecutionPlan>(grid.status());
-        step.tile_grids = grid.take_value();
-      }
-      step.backend =
-          executable.count({node.id, oi}) &&
-                  options.execution_mode == ExecutionMode::NativeGpu &&
-                  node.traits.supports_gpu
-              ? Backend::Gpu
-              : Backend::Cpu;
-      if (executable.count({node.id, oi}) && step.backend == Backend::Cpu &&
-          !node.traits.supports_cpu) {
-        return Result<ExecutionPlan>(
-            Status::failure(ErrorCode::BackendUnavailable,
-                            "operation has no required CPU implementation"));
-      }
-      step.inputs.reserve(node.inputs.size());
-      for (const WorkflowInput& input : node.inputs) {
-        if (const auto* source = std::get_if<WorkflowNodeOutput>(&input)) {
-          const auto iterator = step_by_value.find(
-              result_ports.at({source->source_node, source->source_port}));
-          if (iterator == step_by_value.end() ||
-              iterator->second >= plan.steps_.size()) {
-            return Result<ExecutionPlan>(Status::failure(
-                ErrorCode::Internal, "optimized IR input order is invalid"));
-          }
-          step.inputs.push_back(PlanStepInput{iterator->second});
-        } else {
-          step.inputs.push_back(PlanWorkflowInput{declaration_by_id.at(
-              std::get<WorkflowInputReference>(input).input_id)});
-        }
-      }
-      step_by_value.emplace(ValueRef{node.id, oi}, plan.steps_.size());
-      plan.steps_.push_back(std::move(step));
-    }
-  }
-  for (const WorkflowOutput& output : optimized.outputs()) {
-    const auto iterator =
-        step_by_value.find(result_ports.at({output.node_id, output.port}));
-    if (iterator == step_by_value.end() ||
-        !plan.outputs_.emplace(output.name, iterator->second).second) {
-      return Result<ExecutionPlan>(Status::failure(
-          ErrorCode::Internal, "optimized output mapping is invalid"));
-    }
-  }
-  if (options.output_requests.size() > plan.outputs_.size()) {
-    return Result<ExecutionPlan>(Status::failure(
-        ErrorCode::InvalidArgument,
-        "planning options contain too many named output requests"));
-  }
-  for (const auto& requested : options.output_requests)
-    if (!plan.outputs_.count(requested.first))
-      return Result<ExecutionPlan>(Status::failure(
-          ErrorCode::InvalidArgument, "unknown dependency output"));
-  for (const auto& output : plan.outputs_) {
-    const auto& step = plan.steps_[output.second];
-    const auto requested = options.output_requests.find(output.first);
-    auto resolved = requested == options.output_requests.end()
-                        ? TileRequest::all(step.tile_grids, ResourceBudget{})
-                        : requested->second.resolve(step.tile_grids);
-    if (!resolved.ok())
-      return Result<ExecutionPlan>(resolved.status());
-    plan.output_requests_.emplace(output.first, resolved.take_value());
-  }
-  plan.optimized_digest_ = optimized.digest();
-  plan.digest_.value =
-      physical_digest(plan.optimized_digest_.value, plan.steps_, plan.outputs_,
-                      plan.input_declarations_, plan.output_requests_,
-                      plan.tile_extent_, plan.execution_mode_);
-  plan.cache_key_.value = plan_cache_key(plan.digest_.value);
-  plan.current_check_ = optimized.current_check_;
-  plan.operation_registry_ = operations_;
-  for (auto& step : plan.steps_) {
-    auto metadata = std::make_shared<ResultProgramMetadata>();
-    metadata->output = {step.output_result_schema};
-    metadata->output_tile_grids = step.tile_grids;
-    for (const auto& input : step.inputs) {
-      if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
-        const auto& source = plan.steps_[producer->step_index];
-        metadata->input_tile_grids.push_back(source.tile_grids);
-        metadata->inputs.push_back({source.output_result_schema});
-      } else {
-        metadata->input_tile_grids.push_back(
-            plan.input_tile_grids_[std::get<PlanWorkflowInput>(input)
-                                       .declaration_index]);
-        const auto& source =
-            plan.input_declarations_[std::get<PlanWorkflowInput>(input)
-                                         .declaration_index];
-        metadata->inputs.push_back({source.result_schema});
-      }
-    }
-    step.structured_metadata = std::move(metadata);
-  }
-  std::map<std::uint64_t, std::vector<std::shared_ptr<const PlanStep>>>
-      stage_plans;
-  for (auto& step : plan.steps_) {
-    auto found = stage_plans.find(step.node_id);
-    if (found == stage_plans.end()) {
-      std::vector<std::shared_ptr<const PlanStep>> stages;
-      for (const auto& declared : step.prepared->traits().shared_stages) {
-        auto stage = std::make_shared<PlanStep>(step);
-        stage->shared_stages.clear();
-        stage->output_result_schema =
-            std::make_shared<const SchemaTemplate>(declared.result_schema);
-        auto grids =
-            TileGrid::members(declared.result_schema, plan.tile_extent_);
-        if (!grids.ok())
-          return Result<ExecutionPlan>(grids.status());
-        stage->tile_grids = grids.take_value();
-        stage->backend = declared.backend;
-        stage->traits.cacheable = false;
-        stage->traits.workspace_bytes = declared.workspace_bytes;
-        auto& output = stage->traits.outputs[0];
-        output.result_schema = declared.result_schema;
-        output.output_schema = {};
-        output.output_schema.result_schema_id = declared.result_schema.id;
-        output.output_schema.result_schema_version =
-            declared.result_schema.version;
-        output.input_indices = declared.input_indices;
-        output.continuation_bytes = declared.continuation_bytes;
-        output.maximum_dependency_stages = declared.maximum_dependency_stages;
-        output.maximum_output_payload_bytes =
-            declared.maximum_output_payload_bytes;
-        auto metadata =
-            std::make_shared<ResultProgramMetadata>(*step.structured_metadata);
-        metadata->output = {stage->output_result_schema};
-        metadata->output_tile_grids = stage->tile_grids;
-        stage->structured_metadata = std::move(metadata);
-        stages.push_back(std::move(stage));
-      }
-      found = stage_plans.emplace(step.node_id, std::move(stages)).first;
-    }
-    step.shared_stages = found->second;
-  }
-  auto work = UINT64_MAX;
-  plan.structured_templates_ =
-      contract_internal::dependency_cache_templates(plan, {}, &work, {});
-  if (!plan.current())
-    return Result<ExecutionPlan>(
-        Status::failure(ErrorCode::Stale, "dependency template changed"));
-  return Result<ExecutionPlan>(std::move(plan));
-}
-
-/**
- * @brief Implements the complete fail-before-publication compiler pipeline.
- * @copydetails Compiler::compile
- */
 Result<CompiledWorkflow> Compiler::compile(const GraphContext& context,
                                            const PlanningOptions& options,
                                            ResourceSet resources) const {
-  const GraphSnapshot snapshot = context.snapshot();
-  const auto analyze_start = std::chrono::steady_clock::now();
+  auto snapshot = context.snapshot();
+  auto start = std::chrono::steady_clock::now();
   auto semantic = analyze(snapshot, std::move(resources));
-  const auto analyze_end = std::chrono::steady_clock::now();
-  if (!semantic.ok()) {
+  auto analyzed = std::chrono::steady_clock::now();
+  if (!semantic.ok())
     return Result<CompiledWorkflow>(semantic.status());
-  }
-  const auto optimize_start = std::chrono::steady_clock::now();
   auto optimized = optimize(semantic.value());
-  const auto optimize_end = std::chrono::steady_clock::now();
-  if (!optimized.ok()) {
+  auto optimized_at = std::chrono::steady_clock::now();
+  if (!optimized.ok())
     return Result<CompiledWorkflow>(optimized.status());
-  }
-  const auto plan_start = std::chrono::steady_clock::now();
   auto physical = plan(optimized.value(), options);
-  const auto plan_end = std::chrono::steady_clock::now();
-  if (!physical.ok()) {
+  auto planned = std::chrono::steady_clock::now();
+  if (!physical.ok())
     return Result<CompiledWorkflow>(physical.status());
-  }
-  if (!snapshot.current()) {
+  if (!snapshot.current())
     return Result<CompiledWorkflow>(
-        Status::failure(ErrorCode::Stale, "graph changed during compilation"));
-  }
+        {ErrorCode::Stale, "DAG changed during compilation"});
   CompiledWorkflow compiled;
   compiled.semantic = semantic.take_value();
   compiled.optimized = optimized.take_value();
   compiled.plan = physical.take_value();
-  compiled.diagnostics.analyze_us = microseconds(analyze_end - analyze_start);
-  compiled.diagnostics.optimize_us =
-      microseconds(optimize_end - optimize_start);
-  compiled.diagnostics.plan_us = microseconds(plan_end - plan_start);
+  compiled.diagnostics = {elapsed(start, analyzed),
+                          elapsed(analyzed, optimized_at),
+                          elapsed(optimized_at, planned)};
   return Result<CompiledWorkflow>(std::move(compiled));
 }
-
 }  // namespace ps

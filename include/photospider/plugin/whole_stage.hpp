@@ -11,36 +11,33 @@
 #include "photospider/plugin/tensor_helpers.hpp"
 
 namespace ps::sdk {
-/** @brief A tile continuation borrowing one complete Run-shared Result.
- * The Need grants only the stage Result. Original input read authority is not
- * inherited. The host attaches the stage's frozen dependency evidence.
+/** @brief A tile continuation borrowing one complete call-shared Result.
+ * The compiled read grants only the stage Result. Original input read authority
+ * is not inherited. The host attaches the stage's frozen dependency evidence.
  */
 inline Result<ResultProgramPoll> shared_result_tile(
     const ResultProgramPhase& phase) {
   if (phase.shared_stages) {
     const auto found = phase.shared_stages->find(0);
     if (found != phase.shared_stages->end()) {
-      auto tile = to_tile(phase, found->second);
+      auto tile = to_tile(phase, found->second, phase.query.tensor_slot);
       if (!tile.ok())
         return Result<ResultProgramPoll>(tile.status());
       return Result<ResultProgramPoll>(
           ResultPublication{tile.take_value(), true});
     }
   }
-  ResultProgramNeed need;
-  need.shared_stages = ResourceVector<ResultSharedNeed>(
-      ResourceAllocator<ResultSharedNeed>(phase.resources));
-  need.shared_stages.push_back(0);
-  return Result<ResultProgramPoll>(std::move(need));
+  return Result<ResultProgramPoll>(
+      Status{ErrorCode::InvalidArgument, "compiled shared input is missing"});
 }
-/** @brief Adapt a single-output full-tensor algorithm to a Run-shared stage.
+/** @brief Adapt a single-output full-tensor algorithm to a call-shared stage.
  * This is an explicit SDK policy, selected by the operation author. The
- * original factory runs once per Run on CPU, with complete output schema and no
- * selected tile. It remains responsible for nonblocking input Needs, numerical
- * policy, and resource-bounded computation. Output callbacks only publish
- * retained tile views. Preparation fixes the projection, schema and all stage
- * bounds. No dense conversion, cache, spill, or implicit recomputation is
- * introduced.
+ * original factory runs once per dynamic call activation on CPU, with complete
+ * output schema and statically prepared inputs. Its mapper runs at compilation;
+ * its continuation owns numerical policy and bounded computation. Output
+ * callbacks only publish retained tile views. Preparation fixes the projection,
+ * schema and all stage bounds. No dense conversion, cache, spill, or implicit
+ * recomputation is introduced.
  *
  * The definition must have one CPU-only output and no existing shared stages.
  * work_bound is the cumulative stage work allowance, including publication
@@ -61,6 +58,7 @@ inline OperationDefinition with_whole_stage(OperationDefinition definition,
   const auto prepare = definition.prepare_static;
   const auto specialize = definition.specialize_metadata;
   const auto start = definition.start_result;
+  const auto mapper = definition.map_dependencies;
   definition.traits.requires_metadata_specialization = true;
   definition.specialize_metadata = {};
   definition.prepare_static =
@@ -102,6 +100,11 @@ inline OperationDefinition with_whole_stage(OperationDefinition definition,
     stage.key = "whole";
     stage.validators = traits.outputs[0].output_schema.validators;
     stage.result_schema = *result.outputs[0].metadata.result_schema;
+    stage.result_schema.publication_scopes = {
+        ResultPublicationScope{ResultPublicationPolicy::CompleteBundle, {}}};
+    for (std::uint32_t member = 0; member < stage.result_schema.tensors.size();
+         ++member)
+      stage.result_schema.publication_scopes[0].members.push_back(member);
     stage.continuation_bytes = traits.outputs[0].continuation_bytes;
     stage.maximum_dependency_stages =
         traits.outputs[0].maximum_dependency_stages;
@@ -151,6 +154,11 @@ inline OperationDefinition with_whole_stage(OperationDefinition definition,
   prototype.key = "whole";
   prototype.validators = traits.outputs[0].output_schema.validators;
   prototype.result_schema = *traits.outputs[0].result_schema;
+  prototype.result_schema.publication_scopes = {
+      ResultPublicationScope{ResultPublicationPolicy::CompleteBundle, {}}};
+  for (std::uint32_t member = 0;
+       member < prototype.result_schema.tensors.size(); ++member)
+    prototype.result_schema.publication_scopes[0].members.push_back(member);
   prototype.continuation_bytes = traits.outputs[0].continuation_bytes;
   prototype.maximum_dependency_stages =
       traits.outputs[0].maximum_dependency_stages;
@@ -164,6 +172,15 @@ inline OperationDefinition with_whole_stage(OperationDefinition definition,
   definition.traits.outputs[0].output_schema.validators.clear();
   definition.traits.outputs[0].continuation_bytes = 1;
   definition.traits.outputs[0].maximum_dependency_stages = 2;
+  definition.map_dependencies =
+      [mapper](const ResultStaticQuery& query) -> Result<ResultStaticMapping> {
+    if (query.shared_stage != UINT32_MAX) {
+      return mapper(query);
+    }
+    ResultStaticMapping result;
+    result.shared_stages.push_back(ResultSharedNeed{0});
+    return Result<ResultStaticMapping>(std::move(result));
+  };
   definition.start_result = [start](const ResultProgramQuery& query,
                                     const BufferAllocator& allocator) {
     if (query.shared_stage != UINT32_MAX)

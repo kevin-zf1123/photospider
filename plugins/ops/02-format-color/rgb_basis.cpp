@@ -489,8 +489,8 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
   }
   if (output_tensor.layout.spatial &&
       (!state->is_identity || state->materialize))
-  output.metadata.result_schema =
-      std::make_shared<SchemaTemplate>(std::move(schema));
+    output.metadata.result_schema =
+        std::make_shared<SchemaTemplate>(std::move(schema));
   std::vector<std::uint64_t> boundaries{0, shape[axis]};
   for (auto c : selected) {
     boundaries.push_back(c);
@@ -645,8 +645,7 @@ using Poll = Result<ResultProgramPoll>;
 ResultBuilder result_builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto builder = checked(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {},
-      phase.query.tile_extent));
+      phase.query.semantic_key, {}, phase.query.tile_extent));
 
   return builder;
 }
@@ -784,51 +783,14 @@ Status run_plane(const ResultProgramPhase& phase, const Preparation& state,
 }
 struct Continuation final {
   const Preparation* state;
-  bool requested = false;
   Footprint output;
   explicit Continuation(const Preparation* p) : state(p) {}
   Poll poll(const ResultProgramPhase& phase) try {
     const auto& spec = phase.query.output.result_schema->tensors[0];
     const auto shape = spec.sample_shape();
-    if (!requested) {
-      requested = true;
-      output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
-                                          : checked(Footprint::all(shape));
-      std::vector<Region> regions;
-      for (const auto& span : state->spans)
-        for (const auto& box : output.boxes()) {
-          checked(phase.consume_work(shape.size() + 1));
-          std::vector<RegionDimension> dims;
-          for (unsigned axis = 0; axis < shape.size(); ++axis) {
-            const auto a = span.region.dimensions()[axis];
-            const auto b = box.dimensions()[axis];
-            const auto first = std::max(a.offset, b.offset);
-            const auto last =
-                std::min(a.offset + a.extent, b.offset + b.extent);
-            if (last <= first)
-              break;
-            dims.push_back({first, last - first});
-          }
-          if (dims.size() != shape.size())
-            continue;
-          for (unsigned j = 0; j < span.terms; ++j) {
-            auto source = dims;
-            if (span.terms == 3)
-              source[state->axis] = {state->selected[j], 1};
-            regions.emplace_back(std::move(source));
-          }
-        }
-      ResultProgramNeed need;
-      {
-        auto tile_need_0 = sdk::tile_need_for_samples(
-            phase.resources, phase.query, 0, 0,
-            checked(Footprint::from_regions(shape, regions)), regions.empty());
-        if (!tile_need_0.ok())
-          return Result<ResultProgramPoll>(tile_need_0.status());
-        need.tiles.push_back(tile_need_0.take_value());
-      }
-      return Poll(std::move(need));
-    }
+    output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
+                                        : checked(Footprint::all(shape));
+
     plugin_internal::FloatingEnvironment environment;
     if (!environment.active())
       return Poll(mismatch("floating environment unavailable"));
@@ -981,6 +943,47 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
   op.prepare_static = [member, profile](const auto& inputs,
                                         const auto& params) {
     return prepare(inputs, params, member, profile);
+  };
+  op.map_dependencies =
+      [](const ResultStaticQuery& compiled) -> Result<ResultStaticMapping> {
+    try {
+      const auto query = sdk::static_query_view(compiled);
+      const auto* state =
+          static_cast<const Preparation*>(compiled.prepared.state());
+      const auto shape = query.output.result_schema->tensors[0].sample_shape();
+      const auto output = query.tensor_outputs ? *query.tensor_outputs
+                                               : checked(Footprint::all(shape));
+      ResultStaticMapping result;
+      std::vector<Region> regions;
+      for (const auto& span : state->spans)
+        for (const auto& box : output.boxes()) {
+          std::vector<RegionDimension> dims;
+          for (unsigned axis = 0; axis < shape.size(); ++axis) {
+            const auto a = span.region.dimensions()[axis];
+            const auto b = box.dimensions()[axis];
+            const auto first = std::max(a.offset, b.offset);
+            const auto last =
+                std::min(a.offset + a.extent, b.offset + b.extent);
+            if (last <= first)
+              break;
+            dims.push_back({first, last - first});
+          }
+          if (dims.size() != shape.size())
+            continue;
+          for (unsigned j = 0; j < span.terms; ++j) {
+            auto source = dims;
+            if (span.terms == 3)
+              source[state->axis] = {state->selected[j], 1};
+            regions.emplace_back(std::move(source));
+          }
+        }
+      result.inputs.push_back(checked(sdk::tile_need_for_samples(
+          compiled, 0, 0, checked(Footprint::from_regions(shape, regions)),
+          regions.empty())));
+      return Result<ResultStaticMapping>(std::move(result));
+    } catch (const Status& status) {
+      return Result<ResultStaticMapping>(status);
+    }
   };
   op.start_result = [](const ResultProgramQuery& query,
                        const BufferAllocator& allocator) {

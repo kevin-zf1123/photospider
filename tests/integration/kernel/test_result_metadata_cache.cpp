@@ -92,8 +92,7 @@ struct MetadataIdentityProgram {
     }
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        phase.query.tile_extent));
+        phase.query.semantic_key, {}, phase.query.tile_extent));
     if (!empty) {
       check(phase.consume_work(shape.size() + 1));
       double number = std::get<double>(phase.query.parameters.at("offset")) +
@@ -185,8 +184,8 @@ int compact_identity() {
       return false;
     const auto& first_result = a.value().results.at("result");
     const auto& second_result = b.value().results.at("result");
-    const auto record =
-        b.value().dependencies.tile_record({plan.outputs().at("result"), 0, 0});
+    const auto record = b.value().dependencies.tile_record(
+        {plan.output("result").record_index, 0, 0});
     if (!record.ok() || !record.value() || record.value()->inputs.size() != 1)
       return false;
     const auto& dependency = record.value()->inputs[0];
@@ -260,9 +259,10 @@ int compact_identity() {
       {{PlanWorkflowInput{0}, 0, 0, take(TileSet::from_indices(root, {0})),
         false}});
   PS_REQUIRE_OK(dirty);
-  PS_CHECK(dirty.value().size() == 1 &&
-           dirty.value()[0] ==
-               (TileUnit{partial.outputs().at("result"), 0, 0}));
+  PS_CHECK(dirty.value().size() == 2 &&
+           dirty.value()[0] == (TileUnit{0, 0, 0}) &&
+           dirty.value()[1] ==
+               (TileUnit{partial.output("result").record_index, 0, 0}));
   ResultRef retained;
   ResourceBudget retained_root;
   {

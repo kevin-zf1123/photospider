@@ -516,13 +516,25 @@ int c_contract() {
             changes.push_back({PlanWorkflowInput{i}, 0, 0,
                                take(TileSet::from_indices(root, {0})), false});
             auto dirty = run.value().dependencies.dirty_units(changes);
-            PS_CHECK(dirty.ok() && dirty.value().size() == 1);
+            const auto returned =
+                compiled.value().plan.output("output").record_index;
+            PS_CHECK(dirty.ok() && dirty.value().size() == 2);
             PS_CHECK((dirty.value()[0] == TileUnit{0, 0, 0}));
-            auto record = take(run.value().dependencies.tile_record({0, 0, 0}));
-            PS_CHECK(record && record->inputs.size() == count);
-            for (const auto& input : record->inputs)
-              PS_CHECK(input.tensor_slot == 0 && input.tiles.size() == 1 &&
-                       input.tiles.contains(0));
+            PS_CHECK((dirty.value()[1] == TileUnit{returned, 0, 0}));
+            for (const auto step : {std::size_t{0}, returned}) {
+              auto record =
+                  take(run.value().dependencies.tile_record({step, 0, 0}));
+              PS_CHECK(record && record->inputs.size() == count);
+              for (std::size_t port = 0; port < count; ++port) {
+                const auto& input = record->inputs[port];
+                PS_CHECK(
+                    std::holds_alternative<PlanWorkflowInput>(input.producer) &&
+                    std::get<PlanWorkflowInput>(input.producer)
+                            .declaration_index == port &&
+                    input.tensor_slot == 0 && input.tiles.size() == 1 &&
+                    input.tiles.contains(0));
+              }
+            }
           }
         }
       }

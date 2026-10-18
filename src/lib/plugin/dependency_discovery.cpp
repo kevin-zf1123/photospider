@@ -89,12 +89,12 @@ Result<ResourceVector<TileNeed>> decode_result_discovery(
           return core_internal::invalid_argument(
               "invalid Result GPU discovery input");
         if (row.kind == 0) {
-          auto grid =
-              TileGrid::from_schema(*query.inputs[row.input].result_schema,
-                                    query.tile_extent, row.tensor_slot);
-          if (!grid.ok())
-            return grid.status();
-          if (row.end > grid.value().tile_count())
+          if (row.input >= query.input_tile_grids.size() ||
+              row.tensor_slot >= query.input_tile_grids[row.input].size())
+            return core_internal::invalid_argument(
+                "missing compiled GPU discovery grid");
+          if (row.end >
+              query.input_tile_grids[row.input][row.tensor_slot].tile_count())
             return core_internal::invalid_argument(
                 "GPU discovery tile outside compiled input grid");
         }

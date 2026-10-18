@@ -361,8 +361,8 @@ int cache_shared_route_budget() {
        TileRequest{{{0, TileSet::range(resource_root, 0, 1).take_value()}}}}};
   PS_CHECK(execution.execute_fragments(frozen, query).ok() && *calls == 1);
   // Split the old shared producer into two equivalent new source nodes.
-  // Ambiguous shared-to-cloned ancestry must recompute the merge. Each
-  // resulting route still participates in dirty propagation.
+  // Fixed per-port content proofs allow equivalent cloned routes to reuse
+  // the merge while rebuilding dependency evidence for the current plan.
   document.nodes = {
       {10, leaf.key, {WorkflowInputReference{1}}, {}},
       {11, leaf.key, {WorkflowInputReference{1}}, {}},
@@ -381,7 +381,7 @@ int cache_shared_route_budget() {
                   {{multi_result::binding(resource_root, "x", 7, schema)}})
           .take_value();
   auto result = execution.execute_fragments(changed_frozen, query);
-  PS_CHECK(result.ok() && *calls == 2);
+  PS_CHECK(result.ok() && *calls == 1);
   double actual = 0;
   PS_CHECK(result_input_fixture::read(result.value().results.at("y"), {0},
                                       &actual, sizeof(actual))
@@ -389,7 +389,7 @@ int cache_shared_route_budget() {
            actual == 14);
   auto warm = execution.execute_fragments(changed_frozen, query);
   PS_REQUIRE_OK(warm);
-  PS_CHECK(*calls == 2);
+  PS_CHECK(*calls == 1 && warm.value().diagnostics.cache_hits > 0);
   ResourceVector<TileChange> changes{
       ResourceAllocator<TileChange>(resource_root)};
   changes.push_back({PlanWorkflowInput{0}, 0, 0,
@@ -397,7 +397,7 @@ int cache_shared_route_budget() {
                      false});
   auto dirty = warm.value().dependencies.dirty_units(changes);
   PS_CHECK(dirty.ok());
-  const TileUnit output{changed_plan.outputs().at("y"), 0, 0};
+  const TileUnit output{changed_plan.output("y").record_index, 0, 0};
   PS_CHECK(std::find(dirty.value().begin(), dirty.value().end(), output) !=
            dirty.value().end());
   return 0;
@@ -438,14 +438,23 @@ int diamond_cache_support() {
           .take_value();
   auto computed = context.execute_fragments(frozen, {{"y", q}});
   PS_CHECK(computed.ok());
-  const TileUnit unit{plan.outputs().at("y"), 0, 0};
+  const TileUnit unit{plan.output("y").record_index, 0, 0};
   auto support = computed.value().dependencies.tile_record(unit).take_value();
-  PS_CHECK(support && support->inputs.size() == 4);
+  const auto external_evidence = [&](const auto& record) {
+    if (!record || record->inputs.size() != 1)
+      return false;
+    const auto& input = record->inputs[0];
+    const auto* source = std::get_if<PlanWorkflowInput>(&input.producer);
+    return source && source->declaration_index == 0 &&
+           input.producer_output == 0 && input.tensor_slot == 0 &&
+           input.tiles == q.members.at(0);
+  };
+  PS_CHECK(external_evidence(support));
   auto reused = context.execute_fragments(frozen, {{"y", q}});
   PS_REQUIRE_OK(reused);
   PS_CHECK(reused.value().diagnostics.cache_hits > 0);
   auto replayed = reused.value().dependencies.tile_record(unit).take_value();
-  PS_CHECK(replayed && replayed->inputs.size() == 4);
+  PS_CHECK(external_evidence(replayed));
   auto root = context.resource_budget().take_value();
   ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
   changes.push_back({PlanWorkflowInput{0}, 0, 0,

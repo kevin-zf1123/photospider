@@ -26,6 +26,9 @@ bool same_input(const PlanInput& a, const PlanInput& b) {
     return false;
   if (const auto* step = std::get_if<PlanStepInput>(&a))
     return step->step_index == std::get<PlanStepInput>(b).step_index;
+  if (const auto* parameter = std::get_if<PlanArgumentInput>(&a))
+    return parameter->parameter_index ==
+           std::get<PlanArgumentInput>(b).parameter_index;
   return std::get<PlanWorkflowInput>(a).declaration_index ==
          std::get<PlanWorkflowInput>(b).declaration_index;
 }
@@ -147,6 +150,8 @@ Result<std::shared_ptr<const TileCacheSnapshot>> TileCacheSnapshot::capture(
           return Answer(status);
         route.contract.assign(contracts[producer->step_index]);
       } else {
+        if (!std::holds_alternative<PlanWorkflowInput>(dependency.producer))
+          return Answer(mismatch());
         const auto input =
             std::get<PlanWorkflowInput>(dependency.producer).declaration_index;
         if (input >= plan.input_declarations().size())
@@ -313,6 +318,8 @@ Result<ReboundTileCache> TileCacheSnapshot::rebind(
         if (!inserted.second && inserted.first->second != producer->step_index)
           return Answer(mismatch());
       } else {
+        if (!std::holds_alternative<PlanWorkflowInput>(*target))
+          return Answer(mismatch());
         const auto input =
             std::get<PlanWorkflowInput>(*target).declaration_index;
         if (input >= plan.input_declarations().size() ||

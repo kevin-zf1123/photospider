@@ -16,24 +16,21 @@
 namespace ps::plugin_internal {
 namespace {
 /** @brief One Run-shared inclusive scan over complete authorized input.
- * Input acquisition may suspend; the numerical pass runs once and writes each
- * prefix into host windows. block bounds each cancellation/work checkpoint.
- * Optional completed-result reuse remains a host concern.
+ * The compiler binds complete input; the numerical pass runs once and writes
+ * each prefix into host windows. block bounds each cancellation/work
+ * checkpoint. Optional completed-result reuse remains a host concern.
  */
 struct ScanState final {
   std::uint64_t block;
   explicit ScanState(std::uint64_t block) : block(block) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    auto acquired = sdk::to_whole(phase, 0, 0);
+    auto acquired = phase.tensors->at({0, 0}).acquire(
+        Region::whole(
+            phase.query.inputs[0].result_schema->tensors[0].sample_shape()),
+        phase.query.cancellation);
     if (!acquired.ok())
       return Result<ResultProgramPoll>(acquired.status());
-    auto step = acquired.take_value();
-    if (auto* need = std::get_if<ResultProgramNeed>(&step))
-      return Result<ResultProgramPoll>(std::move(*need));
-    const auto& windows = std::get<sdk::WholeTensorWindows>(step);
-    if (windows.size() != 1)
-      return Result<ResultProgramPoll>(
-          Status{ErrorCode::InvalidArgument, "invalid ordered scan input"});
+    const auto& window = acquired.value();
     FloatingEnvironment environment;
     if (!environment.active())
       return Result<ResultProgramPoll>(Status{
@@ -55,7 +52,7 @@ struct ScanState final {
             for (auto cursor = d.offset; cursor < d.offset + d.extent;) {
               if (phase.query.cancellation.cancelled())
                 return Status{ErrorCode::Cancelled, {}};
-              auto source = windows[0].row_run({cursor});
+              auto source = window.row_run({cursor});
               auto target = output.row_run({cursor});
               if (!source.ok() || !target.ok())
                 return source.ok() ? target.status() : source.status();

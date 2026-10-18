@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.36.0
+  VERSION 0.37.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -85,6 +85,11 @@ set(
   PHOTOSPIDER_KERNEL_SOURCES
 
   src/lib/compiler/compiler.cpp
+  src/lib/compiler/planning.cpp
+  src/lib/compiler/static_mapping.cpp
+  src/lib/compiler/identity.cpp
+  src/lib/compiler/artifact.cpp
+  src/lib/compiler/artifact_text.cpp
   src/lib/data/footprint.cpp
   src/lib/data/tensor.cpp
   src/lib/data/fragment_atlas.cpp
@@ -157,6 +162,9 @@ endif()
 set_source_files_properties(
   src/lib/data/tensor_validation.cpp
   src/lib/plugin/port_validation.cpp src/lib/compiler/compiler.cpp
+  src/lib/compiler/planning.cpp src/lib/compiler/static_mapping.cpp
+  src/lib/compiler/identity.cpp src/lib/compiler/artifact.cpp
+  src/lib/compiler/artifact_text.cpp
   src/lib/plugin/operation_registry.cpp PROPERTIES
   COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
 # Native GPU cache identities include the maintained implementation.

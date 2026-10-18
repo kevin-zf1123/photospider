@@ -1,4 +1,5 @@
 # Kernel behavior tests register their own operations and require no bundled ops.
+photospider_add_kernel_test(test_static_compiler Photospider::kernel tests/unit/kernel/test_static_compiler.cpp)
 photospider_add_kernel_test(test_result_publication Photospider::kernel tests/unit/kernel/test_result_publication.cpp)
 photospider_add_kernel_test(test_tiles Photospider::kernel tests/unit/kernel/test_tiles.cpp)
 photospider_add_kernel_test(test_tile_records photospider_internal_kernel tests/unit/kernel/test_tile_records.cpp)
@@ -169,7 +170,7 @@ target_include_directories(test_resource_internals PRIVATE src/lib)
 photospider_add_kernel_test(test_prepared_workspace Photospider::kernel tests/integration/kernel/test_prepared_workspace.cpp)
 photospider_add_kernel_test(test_backend_admission Photospider::kernel tests/integration/kernel/test_backend_admission.cpp)
 
-photospider_add_kernel_test(test_result_dag_parallel Photospider::kernel tests/integration/kernel/test_result_dag_parallel.cpp)
+photospider_add_kernel_test(test_result_plan_order Photospider::kernel tests/integration/kernel/test_result_plan_order.cpp)
 photospider_add_kernel_test(test_cpu_tiles Photospider::kernel tests/integration/kernel/test_cpu_tiles.cpp)
 photospider_add_kernel_test(test_cpu_parallel Photospider::kernel tests/integration/kernel/test_cpu_parallel.cpp)
 photospider_add_kernel_test(test_managed_dispatch Photospider::kernel tests/integration/kernel/test_managed_dispatch.cpp)
@@ -302,6 +303,8 @@ photospider_add_kernel_test(test_checked_math Photospider::kernel tests/unit/ker
 target_include_directories(test_checked_math PRIVATE src/lib)
 photospider_add_kernel_test(
     test_compiler Photospider::kernel tests/unit/kernel/test_compiler.cpp)
+photospider_add_kernel_test(
+    test_compiler_artifact Photospider::kernel tests/unit/kernel/test_compiler_artifact.cpp)
 photospider_add_kernel_test(
     test_operation_contract_validation
     Photospider::kernel

@@ -120,7 +120,6 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
   return Answer(std::vector<OperationOutputSpecialization>{std::move(output)});
 }
 struct MeasureState {
-  unsigned stage = 0;
   std::uint64_t row = 0, batch = 0;
   Lut3dBakeReport report;
   numeric_ops::ExactBakeError arithmetic;
@@ -128,70 +127,33 @@ struct MeasureState {
   ColorModel input_model = ColorModel::Rgb, output_model = ColorModel::Rgb;
   std::uint64_t atol = 0, rtol = 0;
   ResultBuilder builder;
-  Poll need(const ResultProgramPhase& phase) {
-    batch = std::min<std::uint64_t>(
-        kMeasureRows, tensor_descriptor(phase.query.inputs[3]).shape[0] - row);
-    ResultProgramNeed need;
-    for (unsigned port : {3U, 4U, 5U}) {
-      auto region =
-          rows(tensor_descriptor(phase.query.inputs[port]), row, batch);
-      if (!region.ok())
-        return Poll(region.status());
-      {
-        auto tile_need_0 = sdk::tile_need_for_samples(
-            phase.resources, phase.query, port, 0, region.take_value());
-        if (!tile_need_0.ok())
-          return Result<ResultProgramPoll>(tile_need_0.status());
-        need.tiles.push_back(tile_need_0.take_value());
-      }
-    }
-    stage = 2;
-    return Poll(std::move(need));
-  }
+
   Poll poll(const ResultProgramPhase& phase) {
     auto scratch =
         phase.resources.reserve(ResourceCapacity::host(65536, 65536));
     if (!scratch.ok())
       return Poll(scratch.status());
-    if (!stage) {
-      const auto& program =
-          *static_cast<const BakeProgram*>(phase.query.prepared->state());
-      input_model = program.input_model;
-      output_model = program.output_model;
-      atol = program.atol;
-      rtol = program.rtol;
-      ResultProgramNeed need;
-      // A source may ignore generated colors entirely. The complete original
-      // grid therefore remains an explicit global validation prerequisite.
-      for (unsigned port : {0U, 1U, 2U}) {
-        auto support = all(phase, port);
-        if (!support.ok())
-          return Poll(support.status());
-        {
-          auto tile_need_1 = sdk::tile_need_for_samples(
-              phase.resources, phase.query, port, 0, support.take_value());
-          if (!tile_need_1.ok())
-            return Result<ResultProgramPoll>(tile_need_1.status());
-          need.tiles.push_back(tile_need_1.take_value());
-        }
-      }
-      stage = 1;
-      return Poll(std::move(need));
+    const auto& program =
+        *static_cast<const BakeProgram*>(phase.query.prepared->state());
+    input_model = program.input_model;
+    output_model = program.output_model;
+    atol = program.atol;
+    rtol = program.rtol;
+
+    table = phase.tensors->at({2, 0});
+    for (unsigned i = 0; i < 9; ++i) {
+      auto value = read(phase, 0, {i / 3, i % 3});
+      if (!value.ok())
+        return Poll(value.status());
+      const auto bits = value.value();
+      std::memcpy(&report.axis[i], &bits, 8);
     }
-    if (stage == 1) {
-      table = phase.tensors->at({2, 0});
-      for (unsigned i = 0; i < 9; ++i) {
-        auto value = read(phase, 0, {i / 3, i % 3});
-        if (!value.ok())
-          return Poll(value.status());
-        const auto bits = value.value();
-        std::memcpy(&report.axis[i], &bits, 8);
-      }
-      report.validation_count =
-          tensor_descriptor(phase.query.inputs[3]).shape[0];
-      return need(phase);
-    }
-    if (stage == 2) {
+    report.validation_count = tensor_descriptor(phase.query.inputs[3]).shape[0];
+
+    while (row < static_cast<std::uint64_t>(report.validation_count)) {
+      batch =
+          std::min<std::uint64_t>(kMeasureRows, report.validation_count - row);
+
       for (std::uint64_t i = 0; i < batch; ++i) {
         auto work = phase.consume_work(9);
         if (!work.ok())
@@ -239,77 +201,76 @@ struct MeasureState {
         }
       }
       row += batch;
-      if (row < static_cast<std::uint64_t>(report.validation_count))
-        return need(phase);
-      report.passed = report.failed_count == 0;
-      for (unsigned c = 0; c < 3; ++c) {
-        auto value = arithmetic.upward(c, phase.consume_work);
-        if (!value.ok())
-          return Poll(value.status());
-        const auto bits = value.value();
-        std::memcpy(&report.max_abs_error[c], &bits, 8);
-      }
-      auto made = ResultBuilder::start(phase.resources,
-                                       *phase.query.output.result_schema,
-                                       phase.query.semantic_key, {});
-      if (!made.ok())
-        return Poll(made.status());
-      builder = made.take_value();
-      auto description_value = description(phase.query.parameters);
-      if (!description_value.ok())
-        return Poll(description_value.status());
-      auto identity = lut3d_bake_configuration_id(description_value.value());
-      if (!identity.ok())
-        return Poll(identity.status());
-      auto identity_written = builder.publish_tensor(
-          11,
-          Region::whole(
-              phase.query.output.result_schema->tensors[11].sample_shape()),
-          {reinterpret_cast<const std::uint8_t*>(identity.value().data()), 64},
-          phase.query.cancellation);
-      if (!identity_written.ok())
-        return Poll(identity_written);
-      // Report data survives shared grants and member projections unchanged.
-      // The identity is Run-local and must not be inferred from association.
-      std::array<std::uint8_t, 8> measured_table_id{};
-      for (unsigned i = 0; i < measured_table_id.size(); ++i)
-        measured_table_id[i] = (table.object_id() >> (8 * i)) & 255;
-      auto measured_written = builder.publish_tensor(
-          12, Region::whole({1, 8}),
-          {measured_table_id.data(), measured_table_id.size()},
-          phase.query.cancellation);
-      if (!measured_written.ok())
-        return Poll(measured_written);
-      const std::uint8_t passed = report.passed;
-      const std::array<const void*, 11> values{
-          &passed,
-          report.axis.data(),
-          &report.validation_count,
-          &report.failed_count,
-          report.max_abs_error.data(),
-          report.max_error_point.data(),
-          report.max_error_index.data(),
-          &report.first_failure_index,
-          report.first_failure_input.data(),
-          report.first_failure_reference.data(),
-          report.first_failure_lut.data()};
-      const std::array<std::uint64_t, 11> sizes{1,  72, 8,  8,  24, 72,
-                                                24, 8,  24, 24, 24};
-      for (unsigned f = 0; f < 11; ++f) {
-        if (sizes[f] > phase.query.page_bytes)
-          return Poll(Status{ErrorCode::ResourceExhausted,
-                             "bake report field exceeds Result window",
-                             FailureReason::CapacityLimit});
-        auto written = builder.publish_tensor(
-            f,
-            Region::whole(
-                phase.query.output.result_schema->tensors[f].sample_shape()),
-            {static_cast<const std::uint8_t*>(values[f]), sizes[f]},
-            phase.query.cancellation);
-        if (!written.ok())
-          return Poll(written);
-      }
     }
+    report.passed = report.failed_count == 0;
+    for (unsigned c = 0; c < 3; ++c) {
+      auto value = arithmetic.upward(c, phase.consume_work);
+      if (!value.ok())
+        return Poll(value.status());
+      const auto bits = value.value();
+      std::memcpy(&report.max_abs_error[c], &bits, 8);
+    }
+    auto made =
+        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
+                             phase.query.semantic_key, {});
+    if (!made.ok())
+      return Poll(made.status());
+    builder = made.take_value();
+    auto description_value = description(phase.query.parameters);
+    if (!description_value.ok())
+      return Poll(description_value.status());
+    auto identity = lut3d_bake_configuration_id(description_value.value());
+    if (!identity.ok())
+      return Poll(identity.status());
+    auto identity_written = builder.publish_tensor(
+        11,
+        Region::whole(
+            phase.query.output.result_schema->tensors[11].sample_shape()),
+        {reinterpret_cast<const std::uint8_t*>(identity.value().data()), 64},
+        phase.query.cancellation);
+    if (!identity_written.ok())
+      return Poll(identity_written);
+    // Report data survives shared grants and member projections unchanged.
+    // The identity is Run-local and must not be inferred from association.
+    std::array<std::uint8_t, 8> measured_table_id{};
+    for (unsigned i = 0; i < measured_table_id.size(); ++i)
+      measured_table_id[i] = (table.object_id() >> (8 * i)) & 255;
+    auto measured_written = builder.publish_tensor(
+        12, Region::whole({1, 8}),
+        {measured_table_id.data(), measured_table_id.size()},
+        phase.query.cancellation);
+    if (!measured_written.ok())
+      return Poll(measured_written);
+    const std::uint8_t passed = report.passed;
+    const std::array<const void*, 11> values{
+        &passed,
+        report.axis.data(),
+        &report.validation_count,
+        &report.failed_count,
+        report.max_abs_error.data(),
+        report.max_error_point.data(),
+        report.max_error_index.data(),
+        &report.first_failure_index,
+        report.first_failure_input.data(),
+        report.first_failure_reference.data(),
+        report.first_failure_lut.data()};
+    const std::array<std::uint64_t, 11> sizes{1,  72, 8,  8,  24, 72,
+                                              24, 8,  24, 24, 24};
+    for (unsigned f = 0; f < 11; ++f) {
+      if (sizes[f] > phase.query.page_bytes)
+        return Poll(Status{ErrorCode::ResourceExhausted,
+                           "bake report field exceeds Result window",
+                           FailureReason::CapacityLimit});
+      auto written = builder.publish_tensor(
+          f,
+          Region::whole(
+              phase.query.output.result_schema->tensors[f].sample_shape()),
+          {static_cast<const std::uint8_t*>(values[f]), sizes[f]},
+          phase.query.cancellation);
+      if (!written.ok())
+        return Poll(written);
+    }
+
     auto sealed = builder.seal();
     return sealed.ok() ? Poll(ResultPublication{sealed.take_value(), true})
                        : Poll(sealed.status());
@@ -317,28 +278,13 @@ struct MeasureState {
 };
 struct TensorViewState {
   bool gate, pack;
-  unsigned stage = 0;
   std::array<std::uint8_t, 8> measured_table_id{};
   numeric_ops::ExactBakeError arithmetic;
   Footprint output;
   Lut3dBakeReport fields;
   explicit TensorViewState(bool gated, bool packing)
       : gate(gated), pack(packing) {}
-  Poll need_table(const ResultProgramPhase& phase) {
-    stage = 2;
-    ResultProgramNeed need;
-    auto samples = all(phase, 0);
-    if (!samples.ok())
-      return Poll(samples.status());
-    {
-      auto tile_need_2 = sdk::tile_need_for_samples(
-          phase.resources, phase.query, 0, 0, samples.take_value());
-      if (!tile_need_2.ok())
-        return Result<ResultProgramPoll>(tile_need_2.status());
-      need.tiles.push_back(tile_need_2.take_value());
-    }
-    return Poll(std::move(need));
-  }
+
   Poll publish(const ResultProgramPhase& phase) {
     using namespace numeric_ops;  // NOLINT(build/namespaces)
     const auto& schema = *phase.query.output.result_schema;
@@ -407,111 +353,99 @@ struct TensorViewState {
     using namespace numeric_ops;  // NOLINT(build/namespaces)
     auto scratch = math_take(
         phase.resources.reserve(ResourceCapacity::host(65536, 65536)));
-    if (!stage) {
-      const auto shape =
-          phase.query.output.result_schema->tensors[0].sample_shape();
-      output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
-                                          : math_take(Footprint::all(shape));
-      if (output.empty())
-        return publish(phase);
-      if (pack)
-        output = math_take(Footprint::all(shape));
-      if (!gate)
-        return need_table(phase);
-      stage = 1;
-      auto step = sdk::to_whole(phase, 1);
-      if (!step.ok())
-        return Poll(step.status());
-      if (const auto* need = std::get_if<ResultProgramNeed>(&step.value()))
-        return Poll(*need);
+    const auto shape =
+        phase.query.output.result_schema->tensors[0].sample_shape();
+    output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
+                                        : math_take(Footprint::all(shape));
+    if (output.empty())
+      return publish(phase);
+    if (pack)
+      output = math_take(Footprint::all(shape));
+    if (!gate)
+      return publish(phase);
+
+    const auto report_input =
+        [&](std::uint32_t member) -> const ResultTensorInput& {
+      return phase.tensors->at({1, member});
+    };
+    auto identity_window = report_input(12).acquire(
+        Region::whole(report_input(12).spec().sample_shape()),
+        phase.query.cancellation);
+    if (!identity_window.ok())
+      return Poll(identity_window.status());
+    auto identity_copied = identity_window.value().copy_to(
+        measured_table_id.data(), measured_table_id.size());
+    if (!identity_copied.ok())
+      return Poll(identity_copied);
+    std::uint8_t passed = 0;
+    const std::array<void*, 11> targets{&passed,
+                                        fields.axis.data(),
+                                        &fields.validation_count,
+                                        &fields.failed_count,
+                                        fields.max_abs_error.data(),
+                                        fields.max_error_point.data(),
+                                        fields.max_error_index.data(),
+                                        &fields.first_failure_index,
+                                        fields.first_failure_input.data(),
+                                        fields.first_failure_reference.data(),
+                                        fields.first_failure_lut.data()};
+    const std::array<std::uint64_t, 11> sizes{1,  72, 8,  8,  24, 72,
+                                              24, 8,  24, 24, 24};
+    for (unsigned f = 0; f < targets.size(); ++f) {
+      if (sizes[f] > phase.query.page_bytes)
+        return Poll(Status{ErrorCode::ResourceExhausted, {}});
+      auto window = report_input(f).acquire(
+          Region::whole(report_input(f).spec().sample_shape()),
+          phase.query.cancellation);
+      if (!window.ok())
+        return Poll(window.status());
+      auto copied = window.value().copy_to(
+          static_cast<std::uint8_t*>(targets[f]), sizes[f]);
+      if (!copied.ok())
+        return Poll(copied);
     }
-    if (stage == 1) {
-      auto step = sdk::to_whole(phase, 1);
-      if (!step.ok())
-        return Poll(step.status());
-      if (const auto* need = std::get_if<ResultProgramNeed>(&step.value()))
-        return Poll(*need);
-      const auto& inputs = std::get<sdk::WholeTensorInputs>(step.value());
-      auto identity_window =
-          inputs[12].acquire(Region::whole(inputs[12].spec().sample_shape()),
-                             phase.query.cancellation);
-      if (!identity_window.ok())
-        return Poll(identity_window.status());
-      auto identity_copied = identity_window.value().copy_to(
-          measured_table_id.data(), measured_table_id.size());
-      if (!identity_copied.ok())
-        return Poll(identity_copied);
-      std::uint8_t passed = 0;
-      const std::array<void*, 11> targets{&passed,
-                                          fields.axis.data(),
-                                          &fields.validation_count,
-                                          &fields.failed_count,
-                                          fields.max_abs_error.data(),
-                                          fields.max_error_point.data(),
-                                          fields.max_error_index.data(),
-                                          &fields.first_failure_index,
-                                          fields.first_failure_input.data(),
-                                          fields.first_failure_reference.data(),
-                                          fields.first_failure_lut.data()};
-      const std::array<std::uint64_t, 11> sizes{1,  72, 8,  8,  24, 72,
-                                                24, 8,  24, 24, 24};
-      for (unsigned f = 0; f < targets.size(); ++f) {
-        if (sizes[f] > phase.query.page_bytes)
-          return Poll(Status{ErrorCode::ResourceExhausted, {}});
-        auto window =
-            inputs[f].acquire(Region::whole(inputs[f].spec().sample_shape()),
-                              phase.query.cancellation);
-        if (!window.ok())
-          return Poll(window.status());
-        auto copied = window.value().copy_to(
-            static_cast<std::uint8_t*>(targets[f]), sizes[f]);
-        if (!copied.ok())
-          return Poll(copied);
+    auto spec = math_take(description(phase.query.parameters));
+    auto checked = input_internal::validate_lut3d_bake_report_values(
+        spec, &fields, passed, phase.consume_work);
+    if (!checked.ok())
+      return Poll(checked);
+    if (!fields.passed) {
+      const auto index = fields.first_failure_index;
+      std::array<std::uint64_t, 3> point{}, reference{}, lut{};
+      std::memcpy(point.data(), fields.first_failure_input.data(), 24);
+      std::memcpy(reference.data(), fields.first_failure_reference.data(), 24);
+      std::memcpy(lut.data(), fields.first_failure_lut.data(), 24);
+      const auto& program =
+          *static_cast<const BakeProgram*>(phase.query.prepared->state());
+      unsigned component = 0;
+      for (; component < 3; ++component) {
+        auto accepted =
+            arithmetic.check(reference[component], lut[component], program.atol,
+                             program.rtol, phase.consume_work);
+        if (!accepted.ok())
+          return Poll(accepted.status());
+        if (!accepted.value())
+          break;
       }
-      auto spec = math_take(description(phase.query.parameters));
-      auto checked = input_internal::validate_lut3d_bake_report_values(
-          spec, &fields, passed, phase.consume_work);
-      if (!checked.ok())
-        return Poll(checked);
-      if (!fields.passed) {
-        const auto index = fields.first_failure_index;
-        std::array<std::uint64_t, 3> point{}, reference{}, lut{};
-        std::memcpy(point.data(), fields.first_failure_input.data(), 24);
-        std::memcpy(reference.data(), fields.first_failure_reference.data(),
-                    24);
-        std::memcpy(lut.data(), fields.first_failure_lut.data(), 24);
-        const auto& program =
-            *static_cast<const BakeProgram*>(phase.query.prepared->state());
-        unsigned component = 0;
-        for (; component < 3; ++component) {
-          auto accepted =
-              arithmetic.check(reference[component], lut[component],
-                               program.atol, program.rtol, phase.consume_work);
-          if (!accepted.ok())
-            return Poll(accepted.status());
-          if (!accepted.value())
-            break;
-        }
-        if (component == 3)
-          return Poll(domain("inconsistent failed bake report"));
-        arithmetic.maxima[0] = arithmetic.difference;
-        auto error = arithmetic.upward(0, phase.consume_work);
-        if (!error.ok())
-          return Poll(error.status());
-        return Poll(Status{
-            ErrorCode::OperationFailed,
-            "LutApproximationToleranceExceeded index=" + std::to_string(index) +
-                " component=" + std::to_string(component) +
-                " point_bits=" + std::to_string(point[0]) + "," +
-                std::to_string(point[1]) + "," + std::to_string(point[2]) +
-                " reference_bits=" + std::to_string(reference[component]) +
-                " lut_bits=" + std::to_string(lut[component]) +
-                " error_upper_bits=" + std::to_string(error.value()),
-            FailureReason::InvalidDomain,
-            {FailureOrigin::Domain, FailureScope::Group}});
-      }
-      return need_table(phase);
+      if (component == 3)
+        return Poll(domain("inconsistent failed bake report"));
+      arithmetic.maxima[0] = arithmetic.difference;
+      auto error = arithmetic.upward(0, phase.consume_work);
+      if (!error.ok())
+        return Poll(error.status());
+      return Poll(Status{
+          ErrorCode::OperationFailed,
+          "LutApproximationToleranceExceeded index=" + std::to_string(index) +
+              " component=" + std::to_string(component) +
+              " point_bits=" + std::to_string(point[0]) + "," +
+              std::to_string(point[1]) + "," + std::to_string(point[2]) +
+              " reference_bits=" + std::to_string(reference[component]) +
+              " lut_bits=" + std::to_string(lut[component]) +
+              " error_upper_bits=" + std::to_string(error.value()),
+          FailureReason::InvalidDomain,
+          {FailureOrigin::Domain, FailureScope::Group}});
     }
+
     return publish(phase);
   } catch (const Status& status) {
     numeric_ops::math_record_failure(phase, status);

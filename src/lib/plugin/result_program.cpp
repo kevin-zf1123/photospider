@@ -78,6 +78,8 @@ Status ResultTensorInput::read_granted(
 Status ResultTensorInput::read(const std::vector<std::uint64_t>& coordinate,
                                void* destination, std::size_t bytes,
                                const CancellationToken& cancellation) const {
+  if (observer_)
+    observer_->veto_backend_retry();
   auto status = read_granted(coordinate, destination, bytes, cancellation);
   if (!status.ok()) {
     if (observer_)
@@ -92,6 +94,8 @@ Status ResultTensorInput::read(const std::vector<std::uint64_t>& coordinate,
 Result<ResultTensorReadWindow> ResultTensorInput::acquire(
     const Region& region, const CancellationToken& cancellation) const try {
   using Answer = Result<ResultTensorReadWindow>;
+  if (observer_)
+    observer_->veto_backend_retry();
   if (!payload_authorized_) {
     Status status{ErrorCode::InvalidArgument,
                   "descriptor-only image Need cannot read payload",
@@ -213,6 +217,8 @@ Result<std::shared_ptr<const FragmentAtlas>>
 ResultProgramPhase::acquire_native_atlas(std::uint32_t input,
                                          std::uint32_t slot) const {
   using Answer = Result<std::shared_ptr<const FragmentAtlas>>;
+  if (failure_latch)
+    failure_latch->veto_backend_retry();
   auto answer = [&]() -> Answer {
     try {
       if (!tensors || tensors->find({input, slot}) == tensors->end())
@@ -593,6 +599,9 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
   }();
   if (!answer.ok())
     record_returned_failure(answer.status());
+  else if (normalized.failure_latch &&
+           std::holds_alternative<ResultPublication>(answer.value()))
+    normalized.failure_latch->veto_backend_retry();
   // Mandatory service failures fence every prepared continuation, including
   // ordinary outputs without a declared payload bound.
   auto stopped_status = stopped();
@@ -684,9 +693,9 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
             delta.members.emplace(member.first, added.take_value());
         }
         if (!visible_publication_) {
-          auto builder = ResultBuilder::start(
-              normalized.resources, *output_schema_, semantic_key_, {},
-              query.tile_extent);
+          auto builder =
+              ResultBuilder::start(normalized.resources, *output_schema_,
+                                   semantic_key_, {}, query.tile_extent);
           if (!builder.ok())
             return reject_bound(builder.status());
           visible_publication_ = builder.take_value();

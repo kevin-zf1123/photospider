@@ -99,7 +99,6 @@ struct Program final {
   };
   Boundary mode;
   std::size_t rank = 0, height_axis = 0, width_axis = 0;
-  unsigned stage = 0;
   Footprint outputs;
   ResourceVector<Coordinate> source_coordinates;
   ResourceVector<Block> blocks;
@@ -315,7 +314,7 @@ struct Program final {
       }
     });
   }
-  TileNeed prepare_source(const ResultProgramPhase& phase) {
+  void prepare_samples(const ResultProgramPhase& phase) {
     const auto& source = phase.query.inputs[0].result_schema->tensors[0];
     // Retain at most one owner/directory entry per long logical row. Sparse,
     // partial and multi-Result maps keep the compact per-pixel copy. A raw
@@ -390,23 +389,6 @@ struct Program final {
         std::unique(source_coordinates.begin(), source_coordinates.end()),
         source_coordinates.end());
     math_require(phase.consume_work(source_coordinates.size() * 6));
-    if (source_coordinates.empty())
-      return TileNeed{0, 0, true, {}};
-    const auto grid = phase.query.input_tile_grids.empty()
-                          ? math_take(TileGrid::from_schema(
-                                *phase.query.inputs[0].result_schema,
-                                phase.query.tile_extent))
-                          : phase.query.input_tile_grids.at(0).at(0);
-    ResourceVector<TileIndex> tiles{
-        ResourceAllocator<TileIndex>(phase.resources)};
-    tiles.reserve(source_coordinates.size());
-    for (const auto& at : source_coordinates) {
-      tiles.push_back(
-          math_take(sdk::tile_for_coordinate(grid, at.data(), rank)));
-    }
-    return TileNeed{0, 0, false,
-                    math_take(TileSet::from_indices(
-                        phase.resources, tiles.data(), tiles.size()))};
   }
   void read_source(const ResultProgramPhase& phase) {
     source_pixels.resize(source_coordinates.size());
@@ -642,78 +624,49 @@ struct Program final {
                    "STMap numeric environment unavailable"};
     const auto& output = *phase.query.output.result_schema;
     const auto limits = phase_sets(phase);
-    if (stage == 0) {
-      const auto shape = output.tensors[0].sample_shape();
-      rank = shape.size();
-      height_axis = rank - 3;
-      width_axis = rank - 2;
-      outputs = math_take(output.tensors[0].close_samples(
-          phase.query.tensor_outputs ? *phase.query.tensor_outputs
-                                     : math_take(Footprint::all(shape, limits)),
-          limits));
-      if (outputs.empty()) {
-        auto empty = math_take(ResultBuilder::start(phase.resources, output,
-                                                    phase.query.semantic_key));
-        return Result<ResultProgramPoll>(
-            ResultPublication{math_take(empty.seal()), true});
-      }
-      blocks = ResourceVector<Block>(ResourceAllocator<Block>(phase.resources));
-      uv = ResourceVector<MapValue>(
-          ResourceAllocator<MapValue>(phase.resources));
-      map_rows =
-          ResourceVector<MapRow>(ResourceAllocator<MapRow>(phase.resources));
-      source_pixels = ResourceVector<std::array<float, 4>>(
-          ResourceAllocator<std::array<float, 4>>(phase.resources));
-      source_coordinates = ResourceVector<Coordinate>(
-          ResourceAllocator<Coordinate>(phase.resources));
-      std::vector<Region> map_boxes;
-      std::uint64_t count = 0;
-      for (const auto& box : outputs.boxes()) {
-        const auto pixels = math_take(box.element_count()) / 4;
-        if (pixels > UINT64_MAX - count)
-          throw Status{ErrorCode::ResourceExhausted,
-                       "STMap requested pixel count"};
-        const auto bytes = box.rank() * sizeof(RegionDimension);
-        auto lease = math_take(
-            phase.resources.reserve(ResourceCapacity::host(bytes, bytes)));
-        blocks.push_back({box, std::move(lease), count, pixels, row_count});
-        row_count += pixels / box.dimensions()[width_axis].extent;
-        count += pixels;
-        map_boxes.push_back(map_region(phase.query, box));
-      }
-      pixel_count = count;
-      const auto& source = phase.query.inputs[0].result_schema->tensors[0];
-      const auto& map = phase.query.inputs[1].result_schema->tensors[0];
-      ResultProgramNeed need;
-      {
-        auto tile_need_0 = sdk::tile_need_for_samples(
-            phase.resources, phase.query, 0, 0,
-            math_take(Footprint::none(source.sample_shape(), limits)), true);
-        if (!tile_need_0.ok())
-          return Result<ResultProgramPoll>(tile_need_0.status());
-        need.tiles.push_back(tile_need_0.take_value());
-      }
-      {
-        auto tile_need_1 = sdk::tile_need_for_samples(
-            phase.resources, phase.query, 1, 0,
-            math_take(Footprint::from_regions(map.sample_shape(), map_boxes,
-                                              limits)));
-        if (!tile_need_1.ok())
-          return Result<ResultProgramPoll>(tile_need_1.status());
-        need.tiles.push_back(tile_need_1.take_value());
-      }
-      stage = 1;
-      return Result<ResultProgramPoll>(std::move(need));
+
+    const auto shape = output.tensors[0].sample_shape();
+    rank = shape.size();
+    height_axis = rank - 3;
+    width_axis = rank - 2;
+    outputs = math_take(output.tensors[0].close_samples(
+        phase.query.tensor_outputs ? *phase.query.tensor_outputs
+                                   : math_take(Footprint::all(shape, limits)),
+        limits));
+    if (outputs.empty()) {
+      auto empty = math_take(ResultBuilder::start(phase.resources, output,
+                                                  phase.query.semantic_key));
+      return Result<ResultProgramPoll>(
+          ResultPublication{math_take(empty.seal()), true});
     }
-    if (stage == 1) {
-      builder.emplace(math_take(ResultBuilder::start(
-          phase.resources, output, phase.query.semantic_key, {},
-          phase.query.tile_extent)));
-      ResultProgramNeed need;
-      need.tiles.push_back(prepare_source(phase));
-      stage = 2;
-      return Result<ResultProgramPoll>(std::move(need));
+    blocks = ResourceVector<Block>(ResourceAllocator<Block>(phase.resources));
+    uv = ResourceVector<MapValue>(ResourceAllocator<MapValue>(phase.resources));
+    map_rows =
+        ResourceVector<MapRow>(ResourceAllocator<MapRow>(phase.resources));
+    source_pixels = ResourceVector<std::array<float, 4>>(
+        ResourceAllocator<std::array<float, 4>>(phase.resources));
+    source_coordinates = ResourceVector<Coordinate>(
+        ResourceAllocator<Coordinate>(phase.resources));
+    std::uint64_t count = 0;
+    for (const auto& box : outputs.boxes()) {
+      const auto pixels = math_take(box.element_count()) / 4;
+      if (pixels > UINT64_MAX - count)
+        throw Status{ErrorCode::ResourceExhausted,
+                     "STMap requested pixel count"};
+      const auto bytes = box.rank() * sizeof(RegionDimension);
+      auto lease = math_take(
+          phase.resources.reserve(ResourceCapacity::host(bytes, bytes)));
+      blocks.push_back({box, std::move(lease), count, pixels, row_count});
+      row_count += pixels / box.dimensions()[width_axis].extent;
+      count += pixels;
     }
+    pixel_count = count;
+
+    builder.emplace(math_take(ResultBuilder::start(phase.resources, output,
+                                                   phase.query.semantic_key, {},
+                                                   phase.query.tile_extent)));
+    prepare_samples(phase);
+
     read_source(phase);
     publish(phase);
     return Result<ResultProgramPoll>(
@@ -773,6 +726,35 @@ inline OperationDefinition operation() {
           std::vector<OperationOutputSpecialization>{std::move(output)});
     } catch (const Status& status) {
       return Result<std::vector<OperationOutputSpecialization>>(status);
+    }
+  };
+  definition.map_dependencies =
+      [](const ResultStaticQuery& compiled) -> Result<ResultStaticMapping> {
+    try {
+      const auto query = sdk::static_query_view(compiled);
+      const auto& output = query.output.result_schema->tensors[0];
+      const auto samples = math_take(output.close_samples(
+          query.tensor_outputs
+              ? *query.tensor_outputs
+              : math_take(Footprint::all(output.sample_shape()))));
+      std::vector<Region> map_boxes;
+      for (const auto& box : samples.boxes())
+        map_boxes.push_back(Program::map_region(query, box));
+      ResultStaticMapping mapping;
+      // UV values select numeric samples at run time from this fixed source
+      // grant.
+      mapping.inputs.push_back(math_take(sdk::tile_need_for_samples(
+          compiled, 0, 0,
+          math_take(Footprint::all(
+              query.inputs[0].result_schema->tensors[0].sample_shape())))));
+      mapping.inputs.push_back(math_take(sdk::tile_need_for_samples(
+          compiled, 1, 0,
+          math_take(Footprint::from_regions(
+              query.inputs[1].result_schema->tensors[0].sample_shape(),
+              map_boxes)))));
+      return Result<ResultStaticMapping>(std::move(mapping));
+    } catch (const Status& status) {
+      return Result<ResultStaticMapping>(status);
     }
   };
   definition.start_result = [](const ResultProgramQuery& query,

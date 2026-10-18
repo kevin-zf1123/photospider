@@ -1,6 +1,4 @@
 #include <atomic>
-#include <chrono>
-#include <condition_variable>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -19,11 +17,8 @@ using multi_result::check;
 using multi_result::take;
 struct Control {
   std::mutex mutex;
-  std::condition_variable changed;
-  bool overlap = true, left_entered = false, right_done = false;
-  bool check_release = true, cancel = false;
-  unsigned backed = 0;
-  bool allocation_failed = false;
+  std::vector<unsigned> order;
+  bool cancel = false;
   std::weak_ptr<const CpuStorage> source;
   CancellationSource cancellation;
   std::atomic<unsigned> sources{0}, active{0}, peak{0};
@@ -31,17 +26,8 @@ struct Control {
 struct Program {
   Control* control;
   unsigned mode;
-  bool requested = false;
   Program(Control* control, unsigned mode) : control(control), mode(mode) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    if (mode && !requested) {
-      requested = true;
-      ResultProgramNeed need;
-      for (unsigned port = 0; port < (mode == 3 ? 2U : 1U); ++port)
-        need.tiles.push_back(
-            {port, 0, false, take(TileSet::range(phase.resources, 0, 1))});
-      return Result<ResultProgramPoll>(std::move(need));
-    }
     const auto active = ++control->active;
     auto peak = control->peak.load();
     while (peak < active &&
@@ -51,6 +37,10 @@ struct Program {
       Control* control;
       ~Retire() { --control->active; }
     } retire{control};
+    {
+      std::lock_guard<std::mutex> lock(control->mutex);
+      control->order.push_back(mode);
+    }
     double number = 2;
     if (mode) {
       check(phase.read_tensor(0, 0, {0}, &number, sizeof(number)));
@@ -58,33 +48,14 @@ struct Program {
         double right = 0;
         check(phase.read_tensor(1, 0, {0}, &right, sizeof(right)));
         number += right;
-        // Completed tiles remain available while downstream adaptive Needs
-        // can still revisit their producers. Run retirement releases them.
-        if (control->check_release && control->source.expired())
+        // Compiled producer values remain retained through this Run.
+        if (control->source.expired())
           return Result<ResultProgramPoll>(
               Status{ErrorCode::OperationFailed,
                      "source released before downstream completion"});
       } else {
-        std::unique_lock<std::mutex> lock(control->mutex);
-        if (mode == 1) {
-          control->left_entered = true;
-          control->changed.notify_all();
-          if (control->overlap &&
-              !control->changed.wait_for(lock, std::chrono::seconds(2),
-                                         [&] { return control->right_done; }))
-            return Result<ResultProgramPoll>(Status{
-                ErrorCode::OperationFailed, "independent right did not run"});
-        } else {
-          if (control->overlap &&
-              !control->changed.wait_for(lock, std::chrono::seconds(2),
-                                         [&] { return control->left_entered; }))
-            return Result<ResultProgramPoll>(Status{
-                ErrorCode::OperationFailed, "independent left did not run"});
-          control->right_done = true;
-          if (control->cancel)
-            control->cancellation.cancel();
-          control->changed.notify_all();
-        }
+        if (mode == 2 && control->cancel)
+          control->cancellation.cancel();
         if (control->source.expired())
           return Result<ResultProgramPoll>(
               Status{ErrorCode::OperationFailed, "source released during use"});
@@ -93,35 +64,17 @@ struct Program {
     } else {
       ++control->sources;
     }
-    check(phase.consume_work(1));
+    auto status = phase.consume_work(1);
+    if (!status.ok())
+      return Result<ResultProgramPoll>(status);
     auto builder = take(ResultBuilder::start(phase.resources,
                                              *phase.query.output.result_schema,
                                              phase.query.semantic_key, {}));
 
     auto made = phase.resources.allocator().allocate(sizeof(number));
-    if (!made.ok()) {
-      std::lock_guard<std::mutex> lock(control->mutex);
-      control->allocation_failed = true;
-      control->changed.notify_all();
+    if (!made.ok())
       return Result<ResultProgramPoll>(made.status());
-    }
     auto buffer = made.take_value();
-    if ((mode == 1 || mode == 2) && control->overlap) {
-      std::unique_lock<std::mutex> lock(control->mutex);
-      ++control->backed;
-      control->changed.notify_all();
-      if (!control->changed.wait_for(lock, std::chrono::seconds(2), [&] {
-            return control->backed == 2 || control->allocation_failed ||
-                   control->cancellation.token().cancelled();
-          }))
-        return Result<ResultProgramPoll>(
-            Status{ErrorCode::OperationFailed, "parallel backing barrier"});
-      if (control->cancellation.token().cancelled())
-        return Result<ResultProgramPoll>(Status{ErrorCode::Cancelled, {}});
-      if (control->allocation_failed)
-        return Result<ResultProgramPoll>(
-            Status{ErrorCode::ResourceExhausted, {}});
-    }
     std::memcpy(buffer.data(), &number, sizeof(number));
     auto storage = std::move(buffer).freeze();
     if (!mode)
@@ -132,6 +85,8 @@ struct Program {
         ResultPublication{take(builder.seal()), true});
   }
 };
+constexpr std::uint64_t kJoinedPayload = sizeof(Program) + 4 * sizeof(double);
+constexpr std::uint64_t kNamedPayload = sizeof(Program) + 3 * sizeof(double);
 std::shared_ptr<OperationRegistry> registry(Control* control) {
   auto registry = std::make_shared<OperationRegistry>();
   const std::string keys[] = {"source", "left", "right", "join"};
@@ -159,7 +114,6 @@ int fork(unsigned parallelism, bool cancel = false,
          ResultRef* retained = nullptr,
          ResourceBudget* retained_root = nullptr) {
   Control control;
-  control.overlap = parallelism > 1;
   control.cancel = cancel;
   auto operations = registry(&control);
   WorkflowDocument document;
@@ -186,14 +140,10 @@ int fork(unsigned parallelism, bool cancel = false,
   options.maximum_parallelism = parallelism;
   auto result =
       context.execute(plan.plan, {}, control.cancellation.token(), options);
-  if (maximum_payload == 71) {
+  const bool exhausted = maximum_payload == kJoinedPayload - 1;
+  if (exhausted) {
     PS_CHECK(!result.ok() &&
              result.status().code == ErrorCode::ResourceExhausted);
-    PS_CHECK(control.active == 0);
-    PS_CHECK(take(context.resource_budget())
-                 .statistics()
-                 .live[ResourceKind::Queue] == 0);
-    return 0;
   } else if (cancel) {
     PS_CHECK(!result.ok() && result.status().code == ErrorCode::Cancelled);
   } else {
@@ -206,35 +156,46 @@ int fork(unsigned parallelism, bool cancel = false,
     } else {
       PS_CHECK(multi_result::number(result.value().results.at("result")) == 7);
     }
-    PS_CHECK(result.value().diagnostics.peak_active_tasks <= parallelism);
-    if (parallelism > 1)
-      PS_CHECK(control.peak == 2);
-    else
-      PS_CHECK(control.peak == 1);
+    PS_CHECK(result.value().diagnostics.peak_active_tasks == 1);
   }
-  PS_CHECK(control.active == 0 && control.sources == 1);
+  PS_CHECK(control.peak == 1 && control.active == 0 && control.sources == 1);
+  const std::vector<unsigned> expected =
+      named || cancel ? std::vector<unsigned>{0, 1, 2}
+                      : std::vector<unsigned>{0, 1, 2, 3};
+  PS_CHECK(control.order == expected);
   PS_CHECK(control.source.expired());
-  const auto stats = take(context.resource_budget()).statistics();
+  const auto root = take(context.resource_budget());
+  const auto stats = root.statistics();
   PS_CHECK(stats.live[ResourceKind::Queue] == 0);
-  if (!cancel) {
+  if (cancel || exhausted) {
+    PS_CHECK(stats.live[ResourceKind::Payload] == 0);
+  } else {
     PS_CHECK(stats.live[ResourceKind::Payload] == (named ? 16 : 8));
-    PS_CHECK(stats.peak[ResourceKind::Payload] <= 72);
+    PS_CHECK(stats.peak[ResourceKind::Payload] ==
+             (named ? kNamedPayload : kJoinedPayload));
   }
-  if (maximum_payload == 72) {
-    control.left_entered = control.right_done = false;
-    control.backed = 0;
-    control.allocation_failed = false;
+  if (maximum_payload == kJoinedPayload) {
+    control.order.clear();
+    control.sources = 0;
     auto held = context.execute(plan.plan, {}, {}, options);
     PS_CHECK(!held.ok() && held.status().code == ErrorCode::ResourceExhausted);
+    PS_CHECK(control.order == expected && control.sources == 1 &&
+             control.active == 0 && control.source.expired());
+    PS_CHECK(root.statistics().live[ResourceKind::Payload] == 8 &&
+             root.statistics().live[ResourceKind::Queue] == 0);
     result = Result<ExecutionResult>(ExecutionResult{});
-    control.left_entered = control.right_done = false;
-    control.backed = 0;
-    control.allocation_failed = false;
+    PS_CHECK(root.statistics().live[ResourceKind::Payload] == 0);
+    control.order.clear();
+    control.sources = 0;
     auto recovered = context.execute(plan.plan, {}, {}, options);
     if (!recovered.ok())
       std::cerr << recovered.status().message << '\n';
     PS_CHECK(recovered.ok());
     PS_CHECK(multi_result::number(recovered.value().results.at("result")) == 7);
+    PS_CHECK(control.order == expected && control.sources == 1 &&
+             control.active == 0 && control.source.expired());
+    PS_CHECK(root.statistics().live[ResourceKind::Queue] == 0 &&
+             root.statistics().live[ResourceKind::Payload] == 8);
   }
   if (retained)
     *retained = result.value().results.at("result");
@@ -247,8 +208,8 @@ int main() try {
   PS_CHECK(fork(2) == 0);
   PS_CHECK(fork(1) == 0);
   PS_CHECK(fork(2, true) == 0);
-  PS_CHECK(fork(2, false, 72) == 0);
-  PS_CHECK(fork(2, false, 71) == 0);
+  PS_CHECK(fork(2, false, kJoinedPayload) == 0);
+  PS_CHECK(fork(2, false, kJoinedPayload - 1) == 0);
   PS_CHECK(fork(2, false, UINT64_MAX, true) == 0);
   ResultRef retained;
   ResourceBudget root;

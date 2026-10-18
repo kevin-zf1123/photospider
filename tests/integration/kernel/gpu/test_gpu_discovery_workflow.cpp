@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -268,13 +269,18 @@ int main(int argc, char** argv) try {
                 "discovery arithmetic oracle failed"))
         return 1;
     }
-    const auto step = compiled.plan.outputs().at("sum");
-    if (check(input_tiles(result.value(), step, 0, 0,
-                          take(TileSet::from_indices(root, {0, 4096}))) &&
-                  input_tiles(result.value(), step, 0, 1,
-                              take(TileSet::from_indices(root, {0}))),
-              "discovery tile dependencies differ"))
-      return 1;
+    const auto step = compiled.plan.return_signature()
+                          .at(compiled.plan.outputs().at("sum"))
+                          .record_index;
+    const TileInterval all{0, length};
+    const auto fixed = take(TileSet::from_intervals(root, &all, 1));
+    for (TileIndex output : {0, 1})
+      for (std::size_t input : {0, 1})
+        if (check(
+                input_tiles(result.value(), step, output, input,
+                            input ? point(root, output).members.at(0) : fixed),
+                "discovery changed compiled tile grants"))
+          return 1;
     if (check((gpu ? result.value().diagnostics.native_dispatch_count > 0
                    : result.value().diagnostics.native_dispatch_count == 0),
               "discovery/resume dispatch count failed"))
@@ -293,9 +299,10 @@ int main(int argc, char** argv) try {
     if (check(number(changed.value().results.at("sum"), 0) == 24,
               "new GPU address selection failed"))
       return 1;
-    if (check(input_tiles(changed.value(), step, 0, 0,
-                          take(TileSet::from_indices(root, {1, 4097}))),
-              "discovery retained old data edges"))
+    if (check(input_tiles(changed.value(), step, 0, 0, fixed) &&
+                  input_tiles(changed.value(), step, 0, 1,
+                              point(root, 0).members.at(0)),
+              "control values changed compiled grants"))
       return 1;
     auto edit = [&](std::uint64_t at) {
       auto builder = take(
@@ -313,13 +320,14 @@ int main(int argc, char** argv) try {
                    length * 4)));
       return take(builder.seal());
     };
-    auto clean = take(demand.replace_bindings(
+    auto changed_old_selection = take(demand.replace_bindings(
         bind(edit(0), source(root, ElementType::Int64, 1))));
     auto dirty = take(demand.replace_bindings(
         bind(edit(1), source(root, ElementType::Int64, 1))));
-    if (check(clean.potential_dirty.at("sum").empty() &&
-                  dirty.potential_dirty.at("sum") == point(root, 0),
-              "discovery dirty transpose retained old edge"))
+    if (check(
+            changed_old_selection.potential_dirty.at("sum") == point(root, 0) &&
+                dirty.potential_dirty.at("sum") == point(root, 0),
+            "dirty evidence must cover the complete compiled grant"))
       return 1;
     auto bad_control =
         context
@@ -336,7 +344,7 @@ int main(int argc, char** argv) try {
               "frozen discovery changed"))
       return 1;
     std::cout << (gpu ? "Metal" : "CPU")
-              << " discovery: sums=8,24; exact controls/data; changed=24; "
+              << " discovery: sums=8,24; fixed controls/data; changed=24; "
                  "frozen=8; dispatches="
               << result.value().diagnostics.native_dispatch_count << '\n';
     if (!gpu)
@@ -400,8 +408,8 @@ int main(int argc, char** argv) try {
                                     {{"sum", point(root, 0)}}));
       if (check(number(run.results.at("sum"), 0) == 8 &&
                     run.diagnostics.native_dispatch_count > 0 &&
-                    input_tiles(run, plan.plan.outputs().at("sum"), 0, 0,
-                                take(TileSet::from_indices(root, {0, 4096}))),
+                    input_tiles(run, plan.plan.output("sum").record_index, 0, 0,
+                                fixed),
                 "unordered discovery tile normalization failed"))
         return 1;
       auto empty = take(context.execute_fragments(
@@ -423,7 +431,7 @@ int main(int argc, char** argv) try {
         return 1;
       if (mode == 18) {
         auto record = take(run.dependencies.tile_record(
-            {plan.plan.outputs().at("sum"), 0, 0, 0}));
+            {plan.plan.output("sum").record_index, 0, 0, 0}));
         bool whole = false;
         for (const auto& need : record->inputs) {
           const auto* source = std::get_if<PlanWorkflowInput>(&need.producer);
@@ -451,6 +459,9 @@ int main(int argc, char** argv) try {
         auto single =
             fresh.execute_fragments(take(fresh.freeze(plan.plan, inputs)),
                                     {{"sum", point(root, 0)}}, {}, bounds);
+        if (!single.ok())
+          std::cerr << "single run_limit=" << run_limit << " "
+                    << single.status().message << '\n';
         if (check(single.ok() &&
                       single.value().diagnostics.native_dispatch_count > 0,
                   "one discovery rejected by cumulative work fixture"))
@@ -475,14 +486,17 @@ int main(int argc, char** argv) try {
     thread_probes(registry, &entered);
     GraphContext large(document(128));
     auto large_plan = Compiler(registry).compile(large, options).take_value();
-    // Table: 4112 logical bytes and exact native capacity. Control atlas:
-    // 8+160. Discovery allocates neither the output nor the declared scratch;
-    // those allocations occur in the later compute phase after its table
-    // retires.
+    // The control atlas (8 + 160 bytes) survives selection. The table retires
+    // before computation allocates 8 scratch bytes and the full static data
+    // atlas: 8192 float samples plus 256 directory slots for 128 atlas tiles.
+    // The 20,480-byte directory has two 16 KiB native capacity pages.
+    const auto directory_bytes = (length / 64) * 2 * kFragmentAtlasSlotBytes;
+    const auto directory_capacity = ((directory_bytes + 16383) / 16384) * 16384;
+    const auto data_atlas_bytes = length * 4 + directory_capacity;
     const auto minimum =
         source_bytes +
-        large_plan.plan.steps()[0].traits.outputs[0].continuation_bytes + 4112 +
-        168;
+        large_plan.plan.steps()[0].traits.outputs[0].continuation_bytes + 168 +
+        std::max<std::uint64_t>(4112, 8 + data_atlas_bytes);
     for (auto bytes : {minimum - 1, minimum}) {
       ExecutionContextConfig tight;
       tight.gpu_enabled = true;
@@ -493,6 +507,10 @@ int main(int argc, char** argv) try {
                                        source(small_root, ElementType::Int64));
       auto query = small.freeze(large_plan.plan, small_bindings).take_value();
       auto run = small.execute_fragments(query, {{"sum", point(root, 0)}});
+      if (!run.ok() && bytes == minimum)
+        std::cerr << "frontier bytes=" << bytes << " peak="
+                  << small_root.statistics().peak[ResourceKind::Payload] << " "
+                  << run.status().message << '\n';
       if (check(bytes == minimum
                     ? run.ok()
                     : run.status().code == ErrorCode::ResourceExhausted,

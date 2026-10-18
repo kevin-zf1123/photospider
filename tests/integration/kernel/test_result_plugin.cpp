@@ -30,10 +30,10 @@ void require_dirty_unit(const ExecutionDependencies& dependencies,
       {{PlanWorkflowInput{input}, 0, 0,
         TileSet::from_indices(root, {tile}).take_value(), false}});
   require(dirty.ok(), dirty.status().message);
-  require(dirty.value().size() == count &&
+  require(dirty.value().size() == count * 2 &&
               std::find(dirty.value().begin(), dirty.value().end(), unit) !=
                   dirty.value().end(),
-          "source edit reaches exactly the recorded computation unit");
+          "source edit reaches the computation and named return units");
 }
 void require_whole_input(const ExecutionDependencies& dependencies,
                          TileUnit unit) {
@@ -653,12 +653,26 @@ void run() {
     require(source.data == view.data && source_window.storage_owner_token() ==
                                             view_window.storage_owner_token(),
             "C ABI view retains actual source pointer without payload copy");
-    const auto& timing = output.value().diagnostics.operation_timings.back();
-    require(timing.reports &&
-                diagnostic_fixture::count(*timing.reports, 2) == 0 &&
-                diagnostic_fixture::count(*timing.reports, 1) ==
-                    (std::string(key) == "fixture.result.view" ? 4U : 32U),
-            "C ABI numeric diagnostics preserve actual view and copy counts");
+    std::uint64_t copied_samples = 0, viewed_samples = 0;
+    std::size_t report_count = 0;
+    for (const auto& timing : output.value().diagnostics.operation_timings) {
+      require(timing.reports.has_value(), "C ABI numeric reports present");
+      auto bytes = timing.reports->find(diagnostic_fixture::identity());
+      if (!bytes.ok()) {
+        require(bytes.status().code == ErrorCode::NotFound,
+                bytes.status().message);
+        require(timing.computed_elements == 0,
+                "publication timing missing work report");
+        continue;
+      }
+      ++report_count;
+      copied_samples += diagnostic_fixture::count(*timing.reports, 2);
+      viewed_samples += diagnostic_fixture::count(*timing.reports, 1);
+    }
+    require(report_count == (whole ? 8U : 1U) && copied_samples == 0 &&
+                viewed_samples == (whole ? 32U : 4U),
+            "C ABI numeric diagnostics preserve every tile report and "
+            "actual view and copy counts");
     if (std::string(key) == "fixture.result.view") {
       float hole = 0;
       require(!result
@@ -935,6 +949,8 @@ void c_sparse_wide_output() {
     GraphContext graph(document);
     PlanningOptions planning;
     planning.tile_extent = 1;
+    planning.output_requests["out"].members.emplace(
+        0, take(TileSet::from_indices(ResourceBudget{}, {0, extent - 1})));
     auto plan = take(Compiler(registry).compile(graph, planning)).plan;
     ExecutionContextConfig config;
     config.cpu_workers = 1;
@@ -1103,7 +1119,7 @@ void c_reshape_views() {
                   byte == (broadcast ? 9 : 5 - i),
               "C reverse and zero strides preserve logical reshape samples");
     }
-    const TileUnit unit{plan.outputs().at("out"), 0, 0};
+    const TileUnit unit{plan.output("out").record_index, 0, 0};
     require_whole_input(executed.value().dependencies, unit);
     require_dirty_unit(executed.value().dependencies, root, unit, 0);
     binding = {};
@@ -1162,7 +1178,7 @@ void c_whole_tensor_programs() {
             value == expected,
         "C prefix fixture arithmetic");
   }
-  const TileUnit prefix_unit{plan.outputs().at("out"), 0, 0};
+  const TileUnit prefix_unit{plan.output("out").record_index, 0, 0};
   require_whole_input(executed.value().dependencies, prefix_unit);
   require_dirty_unit(executed.value().dependencies, root, prefix_unit, 0);
   document.nodes[0].operation = "fixture.result.neighborhood";
@@ -1191,7 +1207,7 @@ void c_whole_tensor_programs() {
                   value == sum,
               "C compact neighborhood sums actual clipped or periodic taps");
     }
-    const TileUnit unit{neighborhood_plan.outputs().at("out"), 0, 0};
+    const TileUnit unit{neighborhood_plan.output("out").record_index, 0, 0};
     require_whole_input(executed.value().dependencies, unit);
     require_dirty_unit(executed.value().dependencies, root, unit, 0);
   }
@@ -1211,7 +1227,7 @@ void c_whole_tensor_programs() {
                   value == 9,
               "C Cartesian bounded source sum survives handle release");
     }
-    const TileUnit unit{compiled.plan.outputs().at("out"), 0, 0};
+    const TileUnit unit{compiled.plan.output("out").record_index, 0, 0};
     require_whole_input(output.value().dependencies, unit);
     require_dirty_unit(output.value().dependencies, root, unit, 0);
   }
@@ -1374,8 +1390,7 @@ void native_check(Status status) {
 ResultBuilder native_builder(const ResultProgramPhase& phase) {
   return native_take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {},
-      phase.query.tile_extent));
+      phase.query.semantic_key, {}, phase.query.tile_extent));
 }
 struct ScalarImage {
   unsigned stage = 0;

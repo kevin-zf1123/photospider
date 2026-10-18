@@ -82,7 +82,8 @@ std::array<std::uint8_t, 12> block_bytes(const ResultRef& state) {
   return bytes;
 }
 Result<ResultRef> native_sum(const ResultProgramPhase& phase,
-                             const ResultRef& incoming, unsigned mode) try {
+                             const ResultRef& incoming, unsigned mode,
+                             bool fixed_offset) try {
   const auto bytes = block_bytes(incoming);
   std::uint64_t offset = 0;
   std::memcpy(&offset, bytes.data(), 8);
@@ -91,7 +92,8 @@ Result<ResultRef> native_sum(const ResultProgramPhase& phase,
     throw std::runtime_error("atlas not reused within poll");
   if (atlas->payload_bytes !=
           take(phase.tensors->at({0, 0}).coverage().element_count()) * 4 ||
-      atlas->address({0, offset + 1}).status().code != ErrorCode::NotFound)
+      atlas->address({0, fixed_offset ? offset + 1 : 65 * 64}).status().code !=
+          ErrorCode::NotFound)
     throw std::runtime_error("atlas filled a sparse hole");
   auto memory = take(phase.allocator.allocate(8));
   const auto* api = phase.gpu;
@@ -152,14 +154,16 @@ struct SparseState {
   MutableBuffer sums;
   std::uint64_t cursor = 0, offset = 0;
   unsigned stage = 0, mode = 0;
-  explicit SparseState(unsigned mode = 0) : mode(mode) {}
+  bool fixed_offset = false;
+  explicit SparseState(unsigned mode = 0, bool fixed_offset = false)
+      : mode(mode), fixed_offset(fixed_offset) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
     if (mode >= 8 && mode <= 11) {
       if (phase.gpu->buffer(nullptr, nullptr, 1, 0, nullptr) !=
-              PS_RESULT_STATUS_FAILURE_V6 ||
+              PS_RESULT_STATUS_FAILURE_V7 ||
           phase.gpu->execute(nullptr, nullptr, 0) !=
-              PS_RESULT_STATUS_FAILURE_V6 ||
-          phase.gpu->release(nullptr, 0) != PS_RESULT_STATUS_FAILURE_V6)
+              PS_RESULT_STATUS_FAILURE_V7 ||
+          phase.gpu->release(nullptr, 0) != PS_RESULT_STATUS_FAILURE_V7)
         throw std::runtime_error("null native service context accepted");
       if (mode == 9)
         static_cast<void>(phase.consume_work(UINT64_MAX));
@@ -193,7 +197,7 @@ struct SparseState {
     } else if (stage == 1) {
       std::int64_t control = 0;
       check(phase.read_tensor(1, 0, {0, outputs[cursor]}, &control, 8));
-      if (control < 0 || control >= 64)
+      if (control < 0 || control >= 64 || (fixed_offset && control != 0))
         return Result<ResultProgramPoll>(
             Status{ErrorCode::OperationFailed, "invalid control"});
       offset = control;
@@ -226,7 +230,7 @@ struct SparseState {
         const auto incoming = block_state(phase, offset);
         const auto evaluated = take(phase.block(1, 0, 65, 1, incoming, [&] {
           return mode == 6 ? Result<ResultRef>(block_state(phase, offset, 2145))
-                           : native_sum(phase, incoming, mode);
+                           : native_sum(phase, incoming, mode, fixed_offset);
         }));
         const auto bytes = block_bytes(evaluated);
         std::memcpy(&sum, bytes.data() + 8, 4);
@@ -239,8 +243,7 @@ struct SparseState {
     }
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        phase.query.tile_extent));
+        phase.query.semantic_key, {}, phase.query.tile_extent));
     auto storage = std::move(sums).freeze();
     for (std::size_t i = 0; i < outputs.size(); ++i)
       check(builder.publish_tensor(0, Region({{0, 1}, {outputs[i], 1}}),
@@ -252,6 +255,30 @@ struct SparseState {
     return Result<ResultProgramPoll>(failed.status);
   }
 };
+Result<ResultStaticMapping> sparse_mapping(const ResultStaticQuery& query,
+                                           unsigned mode = 0,
+                                           bool fixed_offset = false) {
+  ResultStaticMapping mapping;
+  if (mode == 3) {
+    mapping.inputs.push_back({0, 0, true, {}});
+  } else {
+    std::vector<Region> regions;
+    const auto count = mode == 1 ? 64U : 65U;
+    if (fixed_offset) {
+      for (std::uint64_t i = 0; i < count; ++i)
+        regions.push_back(Region({{0, 1}, {i * 64, 1}}));
+    } else {
+      // Runtime controls may select any of the 64 columns. All possible
+      // samples are granted before the continuation reads the control.
+      regions.push_back(Region({{0, 1}, {0, count * 64}}));
+    }
+    mapping.inputs.push_back(take(sdk::tile_need_for_samples(
+        query, 0, 0, take(Footprint::from_regions({1, length}, regions)))));
+  }
+  mapping.inputs.push_back(
+      take(sdk::tile_need_for_samples(query, 1, 0, *query.tensor_outputs)));
+  return Result<ResultStaticMapping>(std::move(mapping));
+}
 int require(bool valid, const char* message);
 
 // NOLINTBEGIN(whitespace/indent_namespace)
@@ -364,6 +391,16 @@ int spatial_owner() {
     op.traits.outputs[0].continuation_bytes = sizeof(AtlasProbe);
     op.traits.supports_gpu = true;
     op.traits.workspace_bytes = 8;
+    op.map_dependencies = [](const ResultStaticQuery& query) {
+      std::vector<Region> boxes;
+      for (std::uint64_t n = 0; n < 2; ++n)
+        for (std::uint64_t l = 0; l < 2; ++l)
+          boxes.push_back(Region({{n, 1}, {l, 1}, {0, 2}, {1, 1}}));
+      ResultStaticMapping mapping;
+      mapping.inputs.push_back(take(sdk::tile_need_for_samples(
+          query, 0, 0, take(Footprint::from_regions({2, 2, 2, 4}, boxes)))));
+      return Result<ResultStaticMapping>(std::move(mapping));
+    };
     op.start_result = [&survivor](const ResultProgramQuery&,
                                   const BufferAllocator& allocator) {
       return ResultContinuation::make<AtlasProbe>(allocator, &survivor);
@@ -503,16 +540,32 @@ int main() try {
   traits.outputs[0].continuation_bytes = sizeof(SparseState);
   traits.workspace_bytes = length * 4 + 32;
   traits.outputs[0].maximum_dependency_stages = length * 2 + 1;
+  definition.map_dependencies = [](const ResultStaticQuery& query) {
+    return sparse_mapping(query);
+  };
   definition.start_result = [](const ResultProgramQuery&,
                                const BufferAllocator& allocator) {
     return ResultContinuation::make<SparseState>(allocator);
   };
   check(registry->register_operation(definition));
+  auto fixed = definition;
+  fixed.key = "example.sparse_fixed_sum";
+  fixed.map_dependencies = [](const ResultStaticQuery& query) {
+    return sparse_mapping(query, 0, true);
+  };
+  fixed.start_result = [](const ResultProgramQuery&,
+                          const BufferAllocator& allocator) {
+    return ResultContinuation::make<SparseState>(allocator, 0U, true);
+  };
+  check(registry->register_operation(fixed));
   for (unsigned mode = 1; mode <= 11; ++mode) {
     if (mode == 7)
       continue;
     auto op = definition;
     op.key = "example.atlas_failure_" + std::to_string(mode);
+    op.map_dependencies = [mode](const ResultStaticQuery& query) {
+      return sparse_mapping(query, mode);
+    };
     op.start_result = [mode](const ResultProgramQuery&,
                              const BufferAllocator& allocator) {
       return ResultContinuation::make<SparseState>(allocator, mode);
@@ -568,9 +621,6 @@ int main() try {
               number(result.results.at("sum"), i) == 2145 * (i == 1 ? 2 : 1),
               "independent arithmetic oracle failed"))
         return 1;
-    std::vector<TileIndex> data;
-    for (TileIndex i = 0; i < 65; ++i)
-      data.push_back(i * 64);
     for (TileIndex output : {0u, 2u}) {
       auto record = take(result.dependencies.tile_record({0, 0, 0, output}));
       if (require(record && record->inputs.size() == 2, "sparse tile record"))
@@ -579,11 +629,10 @@ int main() try {
         const auto source =
             std::get<PlanWorkflowInput>(input.producer).declaration_index;
         const auto expected =
-            source == 0 ? take(TileSet::from_indices(ResourceBudget{},
-                                                     data.data(), data.size()))
+            source == 0 ? take(TileSet::range(ResourceBudget{}, 0, 65 * 64))
                         : request({output}).members.at(0);
         if (require(input.tensor_slot == 0 && input.tiles == expected,
-                    "sparse dependency or current block witness"))
+                    "static control/data grants or current block witness"))
           return 1;
       }
     }
@@ -618,6 +667,11 @@ int main() try {
   planning.tile_extent = 1;
   planning.execution_mode = ExecutionMode::NativeGpu;
   const auto plan = take(Compiler(registry).compile(graph, planning)).plan;
+  auto fixed_document = document;
+  fixed_document.nodes[0].operation = "example.sparse_fixed_sum";
+  GraphContext fixed_graph(fixed_document);
+  const auto fixed_plan =
+      take(Compiler(registry).compile(fixed_graph, planning)).plan;
   constexpr std::uint64_t source_bytes = length * 12;
   constexpr std::uint64_t minimum =
       source_bytes + sizeof(SparseState) + 4 + 12 + 12 + 8 + 65 * 4 + 32768;
@@ -628,7 +682,7 @@ int main() try {
     ExecutionContext small(registry, bounded);
     const auto root = take(small.resource_budget());
     const auto bound = inputs(root);
-    const auto frozen = take(small.freeze(plan, bound));
+    const auto frozen = take(small.freeze(fixed_plan, bound));
     auto result = small.execute_fragments(frozen, {{"sum", request({0})}});
     if (require(bytes == minimum
                     ? result.ok()
@@ -657,7 +711,8 @@ int main() try {
   for (unsigned layout : {1U, 2U, 3U}) {
     ExecutionContext arranged(registry, config);
     const auto bound = inputs(take(arranged.resource_budget()), layout);
-    const auto frozen = take(arranged.freeze(plan, bound));
+    const auto frozen =
+        take(arranged.freeze(layout == 3 ? fixed_plan : plan, bound));
     auto result =
         take(arranged.execute_fragments(frozen, {{"sum", request({0})}}));
     if (require(
