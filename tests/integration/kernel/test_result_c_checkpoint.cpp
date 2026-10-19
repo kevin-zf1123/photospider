@@ -250,14 +250,16 @@ int shared_prefix(unsigned mode, bool restore_prefix = true) {
   config.managed_resources = ResourceLimits{};
   ExecutionContext context(registry, config);
   auto root = take(context.resource_budget());
-  auto frozen = take(context.freeze(plan, binding(root)));
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = binding(root);
   module.gate(1);
   struct Release {
     const Module& module;
     ~Release() { module.gate(2); }
   };
   auto first = std::async(std::launch::async, [&] {
-    return context.execute_fragments(frozen, {{"value", point(root, 2)}});
+    return context.execute_fragments(run_plan, run_bindings,
+                                     {{"value", point(root, 2)}});
   });
   Release release{module};
   PS_CHECK(module.wait());
@@ -265,8 +267,8 @@ int shared_prefix(unsigned mode, bool restore_prefix = true) {
   ExecutionOptions options;
   if (!restore_prefix)
     options.maximum_dependency_cache_work = 0;
-  auto second = context.execute_fragments(frozen, {{"value", point(root, 2)}},
-                                          {}, options);
+  auto second = context.execute_fragments(
+      run_plan, run_bindings, {{"value", point(root, 2)}}, {}, options);
   const auto after = module.counts();
   PS_CHECK(before[2] == 3 && before[3] == 0 &&
            after[3] == (restore_prefix ? 1 : 0));
@@ -313,11 +315,13 @@ int cancelled_read() {
   config.managed_resources = ResourceLimits{};
   ExecutionContext context(registry, config);
   auto root = take(context.resource_budget());
-  auto frozen = take(context.freeze(plan, binding(root)));
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = binding(root);
   CancellationSource cancellation;
   module.gate(1);
   auto pending = std::async(std::launch::async, [&] {
-    return context.execute_fragments(frozen, {{"value", point(root, 2)}},
+    return context.execute_fragments(run_plan, run_bindings,
+                                     {{"value", point(root, 2)}},
                                      cancellation.token());
   });
   struct Release {

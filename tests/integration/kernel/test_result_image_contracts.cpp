@@ -309,11 +309,12 @@ void alias_diamond() {
   geometry.tile_extent = 2;
   auto plan =
       Compiler(registry).compile(graph, geometry).take_value().plan.value();
-  auto frozen = context.freeze(plan, {{binding}}).take_value();
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = {{binding}};
   const auto q = request({7});
   for (unsigned iteration = 0; iteration < 2; ++iteration) {
-    auto result =
-        context.execute_fragments(frozen, {{"left", q}, {"right", q}});
+    auto result = context.execute_fragments(run_plan, run_bindings,
+                                            {{"left", q}, {"right", q}});
     require(result.ok(), result.status().message);
     ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
     changes.push_back({PlanWorkflowInput{0}, 0, 0, q.members.at(0), false});
@@ -363,9 +364,8 @@ void alias_diamond() {
                            .compile(temporal_graph, geometry)
                            .take_value()
                            .plan.value();
-  auto result = context.execute_fragments(
-      take(context.freeze(temporal_plan, {{binding}})),
-      {{"out", request({1})}});
+  auto result = context.execute_fragments(temporal_plan, {{binding}},
+                                          {{"out", request({1})}});
   require(result.ok(), result.status().message);
   require(dirty(result.value().dependencies, root, 5) ==
               ResourceVector<TileUnit>(
@@ -968,13 +968,15 @@ void result_blocks() {
               .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
               .take_value()
               .plan.value();
-      auto frozen = context->freeze(plan, {{{"x", input}}}).take_value();
+      auto run_plan = plan;
+      ExecutionBindings run_bindings = {{{"x", input}}};
       auto point = [&](uint64_t at) { return request({at}); };
       ExecutionOptions options;
       if (mode == 12)
         options.maximum_dependency_cache_work = 16;
       auto first = context->execute_fragments(
-          frozen, {{"out", point(0)}}, observer->cancellation.token(), options);
+          run_plan, run_bindings, {{"out", point(0)}},
+          observer->cancellation.token(), options);
       if (mode == 0 || mode >= 7) {
         require(first.ok(),
                 "valid Result block execution mode=" + std::to_string(mode) +
@@ -982,7 +984,8 @@ void result_blocks() {
                     std::to_string(static_cast<unsigned>(first.status().code)) +
                     " message=" + first.status().message);
         if (mode == 0 || mode == 9) {
-          auto second = context->execute_fragments(frozen, {{"out", point(1)}});
+          auto second = context->execute_fragments(run_plan, run_bindings,
+                                                   {{"out", point(1)}});
           require(second.ok() && observer->computations == 1,
                   "completed block reuse excludes requested output footprint");
           observer->previous_owner = {};
@@ -1003,7 +1006,8 @@ void result_blocks() {
                   "optional metadata read refusals do not poison later "
                   "mandatory computation");
         } else if (mode == 10) {
-          auto second = context->execute_fragments(frozen, {{"out", point(1)}});
+          auto second = context->execute_fragments(run_plan, run_bindings,
+                                                   {{"out", point(1)}});
           require(second.ok() && observer->computations == 1,
                   "multi-element block states reuse completed data");
         } else {
@@ -1228,7 +1232,8 @@ void impure_shared_results() {
               .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
               .take_value()
               .plan.value();
-      auto frozen = context->freeze(plan, {}).take_value();
+      auto run_plan = plan;
+      ExecutionBindings run_bindings = {};
       auto point = request({0});
       ExecutionOptions options;
       options.maximum_parallelism = 1;
@@ -1237,11 +1242,13 @@ void impure_shared_results() {
                                {"b", request({0, 1, 2, 3, 4, 5, 6, 7})},
                                {"c", point},
                                {"d", point}};
-      auto first = context->execute_fragments(frozen, demand, {}, options);
+      auto first = context->execute_fragments(run_plan, run_bindings, demand,
+                                              {}, options);
       require(first.ok(), first.status().message);
       require(*calls == 2,
               "identical non-pure nodes each execute once within a Run");
-      auto second = context->execute_fragments(frozen, demand, {}, options);
+      auto second = context->execute_fragments(run_plan, run_bindings, demand,
+                                               {}, options);
       require(second.ok(), second.status().message);
       require(*calls == 4,
               "non-pure closure recomputes while prior Result owners survive");
@@ -1388,7 +1395,8 @@ void result_checkpoints() {
               .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
               .take_value()
               .plan.value();
-      auto frozen = context->freeze(plan, {{binding}}).take_value();
+      auto run_plan = plan;
+      ExecutionBindings run_bindings = {{binding}};
       const auto point = [](uint64_t at) { return request({at}); };
       ExecutionOptions options;
       options.maximum_parallelism = 1;
@@ -1400,9 +1408,7 @@ void result_checkpoints() {
         ExecutionBinding alternate = binding;
         if (mode == 6)
           alternate.result = make_source(root, 100);
-        auto other = mode == 6
-                         ? context->freeze(plan, {{alternate}}).take_value()
-                         : frozen;
+        const ExecutionBindings other_bindings = {{alternate}};
         std::mutex mutex;
         std::condition_variable changed;
         bool entered = false, release = false, finished = false;
@@ -1419,8 +1425,8 @@ void result_checkpoints() {
           return Status::success();
         };
         auto first = std::async(std::launch::async, [&] {
-          auto result = context->execute_fragments(frozen, {{"a", point(2)}},
-                                                   {}, held_options);
+          auto result = context->execute_fragments(
+              run_plan, run_bindings, {{"a", point(2)}}, {}, held_options);
           {
             std::lock_guard<std::mutex> lock(mutex);
             finished = true;
@@ -1443,7 +1449,8 @@ void result_checkpoints() {
           }
         }
         auto second = context->execute_fragments(
-            other, {{mode == 9 ? "b" : "a", point(mode == 9 ? 5 : 2)}},
+            plan, other_bindings,
+            {{mode == 9 ? "b" : "a", point(mode == 9 ? 5 : 2)}},
             cancelled.token());
         {
           std::lock_guard<std::mutex> lock(mutex);
@@ -1464,19 +1471,18 @@ void result_checkpoints() {
           require(second.ok(), second.status().message);
           const auto& output = second.value().results.at(mode == 9 ? "b" : "a");
           double actual = 0;
-          require(
-              output.read_tensor(output.descriptor().take_value(), 0,
-                                 {0, mode == 9 ? 5U : 2U}, &actual, 8)
-                      .ok() &&
-                  actual == (mode == 6   ? 306.0
-                             : mode == 9 ? 27.0
-                                         : 6.0),
-              "active frozen runs isolate bindings and share only completed "
-              "state");
+          require(output.read_tensor(output.descriptor().take_value(), 0,
+                                     {0, mode == 9 ? 5U : 2U}, &actual, 8)
+                          .ok() &&
+                      actual == (mode == 6   ? 306.0
+                                 : mode == 9 ? 27.0
+                                             : 6.0),
+                  "active runs isolate bindings and share only completed "
+                  "state");
           require(observer->starts == (mode == 6 || mode == 9
                                            ? std::vector<uint64_t>{0, 0}
                                            : std::vector<uint64_t>{0, 3}),
-                  "checkpoint sharing uses the full frozen input basis");
+                  "checkpoint sharing uses the full input content");
           auto units = dirty(second.value().dependencies, root, 0);
           require(mode == 9 ? units.empty() : !units.empty(),
                   "checkpoint restores source tile ancestry");
@@ -1493,8 +1499,8 @@ void result_checkpoints() {
                                                 : DemandQuery{{"a", point(2)},
                                                               {"b", point(5)},
                                                               {"c", point(0)}};
-        auto result = context->execute_fragments(frozen, requested,
-                                                 cancelled.token(), options);
+        auto result = context->execute_fragments(
+            run_plan, run_bindings, requested, cancelled.token(), options);
         if (mode == 2) {
           require(!result.ok() && result.status().code ==
                                       (mode == 3 ? ErrorCode::Cancelled

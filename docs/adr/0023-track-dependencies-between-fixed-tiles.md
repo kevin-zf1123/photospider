@@ -3,7 +3,7 @@
 - Status: Accepted
 - Reader mirror: [Chinese](zh/0023-track-dependencies-between-fixed-tiles.zh.md)
 - Current boundary: package 0.36.0 implements per-member tile grids, member-local interval Needs, and Run-shared stages as declared in §3. A producer's semantic descriptor is its resolved static Result schema; Results carry no facets or attached resource identities.
-- Related: [ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md), [ADR 0017](0017-cpu-regional-execution-and-storage.md), [ADR 0018](0018-local-result-caches-and-frozen-execution.md), [ADR 0021](0021-independent-node-results.md), [ADR 0022](0022-freeze-operation-c-abi-v3.md)
+- Related: [ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md), [ADR 0017](0017-cpu-regional-execution-and-storage.md), [ADR 0018](0018-local-result-caches.md), [ADR 0021](0021-independent-node-results.md), [ADR 0022](0022-freeze-operation-c-abi-v3.md)
 
 ## 1. Core summary (TL;DR)
 

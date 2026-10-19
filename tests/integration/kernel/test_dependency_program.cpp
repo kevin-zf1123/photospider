@@ -280,14 +280,15 @@ int progressive() {
                        TileUnit{plan.output("result").record_index, 0, 0, 0}) !=
              dirty.end());
   }
-  auto frozen = multi_result::take(context.freeze(plan, bindings));
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = bindings;
   pointers[3] = 0;
   bindings.inputs[0] =
       source(root, "control", values(ElementType::Int64, pointers));
   auto cycle = context.execute(plan, bindings);
   PS_CHECK(cycle.status().code == ErrorCode::ResourceExhausted);
   PS_CHECK(counts->starts == counts->destroyed);
-  PS_CHECK(context.execute(frozen).ok());
+  PS_CHECK(context.execute(run_plan, run_bindings).ok());
   auto demand = multi_result::take(context.open_demand(plan, bindings));
   const auto before = counts->starts.load();
   const auto polls_before = counts->polls.load();
@@ -486,7 +487,6 @@ struct DirectHost {
     metadata.output.result_schema = metadata.inputs[0].result_schema;
     query.tensor_outputs = point(0);
     query.semantic_key = "probe";
-    query.snapshot_identity = "bundle";
   }
 };
 int concurrent_and_reentrant() {
@@ -931,18 +931,16 @@ int execution_network() {
   cancel.cancel();
   PS_CHECK(execution.execute(plan, bindings, cancel.token()).status().code ==
            ErrorCode::Cancelled);
-  auto frozen = multi_result::take(execution.freeze(plan, bindings));
-  PS_CHECK(graph.replace(document) > 0);
-  PS_CHECK(execution.execute(plan, bindings).status().code == ErrorCode::Stale);
-  PS_CHECK(execution.execute(frozen).ok());
   CancellationSource auxiliary;
   auxiliary.cancel();
   ExecutionOptions stopped;
   stopped.dependencies.sets.cancellation = auxiliary.token();
   const auto prior = counts->starts.load();
-  PS_CHECK(execution.execute(frozen, {}, stopped).status().code ==
+  PS_CHECK(execution.execute(plan, bindings, {}, stopped).status().code ==
            ErrorCode::Cancelled);
   PS_CHECK(counts->starts == prior);
+  PS_CHECK(graph.replace(document) > 0);
+  PS_CHECK(execution.execute(plan, bindings).status().code == ErrorCode::Stale);
   return 0;
 }
 }  // namespace

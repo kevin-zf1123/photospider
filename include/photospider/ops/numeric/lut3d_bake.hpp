@@ -45,7 +45,7 @@ struct Lut3dBakeReport {
   /** @brief ObjectId of the complete table acquired during measurement.
    * Encoded as eight little-endian bytes in the report. Valid only for this
    * process object; equal contents do not authorize a different table object.
-   * Equal frozen inputs may produce a different identity on each Run.
+   * Equal immutable inputs may produce a different identity on each Run.
    */
   std::uint64_t measured_table_id = 0;
   std::array<double, 9> axis{};

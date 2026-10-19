@@ -163,8 +163,6 @@ int overlapping_queries() {
   auto initial = demand.request(all);
   PS_REQUIRE_OK(initial);
   PS_CHECK(initial.value().generation == 1);
-  auto frozen = demand.freeze();
-  PS_REQUIRE_OK(frozen);
   auto equivalent = fixture.bindings(values, 0);
   std::reverse(equivalent.inputs.begin(), equivalent.inputs.end());
   auto equal = demand.replace_bindings(std::move(equivalent));
@@ -192,10 +190,6 @@ int overlapping_queries() {
   auto refused = demand.replace_bindings(fixture.bindings(values, 1), {0, {}});
   PS_CHECK(refused.status().code == ErrorCode::ResourceExhausted &&
            demand.generation().value() == generation);
-  auto old = fixture.context->execute_fragments(frozen.value(), all);
-  PS_REQUIRE_OK(old);
-  PS_CHECK(multi_result::number(old.value().results.at("result"), {0, 0, 0}) ==
-           10);
   PS_CHECK(demand.release(all).ok() && demand.release(first).ok() &&
            demand.release(second).ok());
   PS_CHECK(demand.release(first).code == ErrorCode::NotFound);

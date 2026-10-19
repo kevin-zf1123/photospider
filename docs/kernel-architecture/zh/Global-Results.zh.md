@@ -79,7 +79,7 @@ class ResultRef {
 
 `ResultBuilder::start` 接受长度为 1..4096 字节的 scope，将其字节复制到 Root 计费的存储，计入复制工作量，并分配新的 ObjectId。`ResultRef::matches_scope` 把已存储的字节与传入字符串做精确比较。执行宿主还会分别校验 Root ownership、结构 schema、producer scope、revision 递增以及发布 coverage；只匹配 scope 不足以准入 Result。这里的 producer scope 与控制成员 tile 可见性的 `SchemaTemplate::publication_scopes` 不同。
 
-在编译执行中，producer scope 是 Run 局部的调用 key，由 plan digest、冻结的 snapshot identity、Run、block activation，以及指令的 call、stage、输出、成员和 tile 派生。它标识一次发布尝试；内容复用使用下文独立的缓存 identity。物理页大小、文件偏移、descriptor revision 和资源上限不改变语义身份。`ResultRef::capture()` 在某个 revision 捕获已认证 descriptor，因此早期 capture 的覆盖不会随生产进度扩大。`ResultRef::read_tensor()` 使用该 descriptor 并仅读取已认证样本。`ResultDescriptor` 为最多 16 个成员分别保存覆盖 `Footprint`。`ResultTensorInput` 把已编译授权、成员 slot、descriptor 与授权的样本集带入回调；phase 仅在一次 poll 中借用，拥有型 capability 遵循各自的生命周期规则。
+在编译执行中，producer scope 是 Run 局部的调用 key，由 plan digest、Run、block activation，以及指令的 call、stage、输出、成员和 tile 派生。它标识一次发布尝试；内容复用使用下文独立的缓存 identity。物理页大小、文件偏移、descriptor revision 和资源上限不改变语义身份。`ResultRef::capture()` 在某个 revision 捕获已认证 descriptor，因此早期 capture 的覆盖不会随生产进度扩大。`ResultRef::read_tensor()` 使用该 descriptor 并仅读取已认证样本。`ResultDescriptor` 为最多 16 个成员分别保存覆盖 `Footprint`。`ResultTensorInput` 把已编译授权、成员 slot、descriptor 与授权的样本集带入回调；phase 仅在一次 poll 中借用，拥有型 capability 遵循各自的生命周期规则。
 
 `ResultObjectInputs` 另外跨 poll 保存每个输入端口当前拥有的 ResultRef；指令完成或退役时 host 清空该映射。已存储的 `ResultTensorInput` capability 拥有其 ResultRef 与捕获 descriptor，获取的读窗口拥有该授权覆盖的 backing。物理 tensor view 独立保留其来源 Result、schema 与 backing。
 

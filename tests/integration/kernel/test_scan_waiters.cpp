@@ -126,7 +126,8 @@ int concurrent_scans(bool cancel_owner, bool finite, bool cache) {
   check(builder.publish_tensor(
       0, Region::whole({2}),
       ByteView(reinterpret_cast<const std::uint8_t*>(values), sizeof(values))));
-  auto frozen = take(context.freeze(plan, {{{"x", take(builder.seal())}}}));
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = {{{"x", take(builder.seal())}}};
   execution_testing::ExecutionTestHooks hooks;
   hooks.checkpoint_published = published;
   hooks.checkpoint_borrowed = borrowed;
@@ -141,11 +142,12 @@ int concurrent_scans(bool cancel_owner, bool finite, bool cache) {
   CancellationSource cancellation;
   // The same Whole unit misses twice while the first callback is held.
   auto owner = std::async(std::launch::async, [&] {
-    return context.execute(frozen, cancellation.token());
+    return context.execute(run_plan, run_bindings, cancellation.token());
   });
   const bool entered = gate.wait();
-  auto peer =
-      std::async(std::launch::async, [&] { return context.execute(frozen); });
+  auto peer = std::async(std::launch::async, [&] {
+    return context.execute(run_plan, run_bindings);
+  });
   const bool independent =
       peer.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
   if (cancel_owner)
@@ -173,13 +175,13 @@ int concurrent_scans(bool cancel_owner, bool finite, bool cache) {
     }
   }
   if (finite) {
-    auto warm = take(context.execute(frozen));
+    auto warm = take(context.execute(run_plan, run_bindings));
     PS_CHECK(multi_result::number(warm.results.at("y")) == 3);
     PS_CHECK(cache ? warm.diagnostics.cache_hits > 0
                    : warm.diagnostics.cache_hits == 0);
     context.clear_result_cache();
     const auto before = gate.prefixes.load();
-    auto cold = take(context.execute(frozen));
+    auto cold = take(context.execute(run_plan, run_bindings));
     PS_CHECK(multi_result::number(cold.results.at("y")) == 3);
     PS_CHECK(gate.prefixes == before + 1 && cold.diagnostics.cache_hits == 0);
   }
@@ -272,7 +274,8 @@ int checkpoint_restore_capacity(bool enough) {
   for (unsigned port = 0; port < 100; ++port)
     bindings.inputs.push_back(
         multi_result::binding(root, "input" + std::to_string(port), 1));
-  auto frozen = take(context.freeze(plan, bindings));
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = bindings;
   execution_testing::ExecutionTestHooks hooks;
   hooks.checkpoint_published = published;
   hooks.checkpoint_borrowed = borrowed;
@@ -284,11 +287,13 @@ int checkpoint_restore_capacity(bool enough) {
       active = nullptr;
     }
   } cleanup;
-  auto owner =
-      std::async(std::launch::async, [&] { return context.execute(frozen); });
+  auto owner = std::async(std::launch::async, [&] {
+    return context.execute(run_plan, run_bindings);
+  });
   const bool entered = probe.gate.wait();
-  auto peer =
-      std::async(std::launch::async, [&] { return context.execute(frozen); });
+  auto peer = std::async(std::launch::async, [&] {
+    return context.execute(run_plan, run_bindings);
+  });
   const bool finished =
       peer.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
   probe.gate.release();

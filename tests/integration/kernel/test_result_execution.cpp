@@ -373,9 +373,10 @@ int mandatory_effects() {
           .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
           .take_value()
           .plan.value();
-  auto frozen = context.freeze(plan, {}).take_value();
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = {};
   for (unsigned run = 1; run <= 2; ++run) {
-    auto result = context.execute(frozen);
+    auto result = context.execute(run_plan, run_bindings);
     PS_CHECK(result.ok() && calls == run &&
              scalar_result(result.value().results.at("value")) == 86);
   }
@@ -394,7 +395,7 @@ int mandatory_effects() {
     }
     return Status::success();
   };
-  auto sparse = context.execute(frozen, {}, sparse_options);
+  auto sparse = context.execute(run_plan, run_bindings, {}, sparse_options);
   PS_CHECK(sparse.status().code == ErrorCode::InvalidArgument &&
            sparse.status().detail.origin == FailureOrigin::Protocol &&
            !sealed_sparse && calls == missing_slot_calls + 1);
@@ -403,20 +404,25 @@ int mandatory_effects() {
   GraphContext unrelated(document);
   auto independent =
       Compiler(registry).compile(unrelated).take_value().plan.value();
-  auto captured = context.freeze(independent, {}).take_value();
+  auto captured_plan = independent;
+  ExecutionBindings captured_bindings = {};
   DemandQuery empty{{"value", TileRequest{}}};
   const auto before = calls;
   // Empty result selections still execute the Plan's mandatory effect roots.
-  PS_CHECK(context.execute_fragments(captured, empty).ok() &&
-           calls == before + 1);
-  PS_CHECK(context.execute_fragments(captured, {}).ok() && calls == before + 2);
+  PS_CHECK(
+      context.execute_fragments(captured_plan, captured_bindings, empty).ok() &&
+      calls == before + 1);
+  PS_CHECK(
+      context.execute_fragments(captured_plan, captured_bindings, {}).ok() &&
+      calls == before + 2);
   mode = 1;
-  auto failure = context.execute(captured);
+  auto failure = context.execute(captured_plan, captured_bindings);
   PS_CHECK(failure.status().code == ErrorCode::OperationFailed &&
            failure.status().message == "unnamed effect failure" &&
            calls == before + 3);
   mode = 2;
-  auto cancelled = context.execute(captured, cancellation.token());
+  auto cancelled =
+      context.execute(captured_plan, captured_bindings, cancellation.token());
   PS_CHECK(cancelled.status().code == ErrorCode::Cancelled &&
            calls == before + 4);
   return 0;
@@ -468,8 +474,6 @@ int foreign_binding_admission() {
   PS_CHECK(foreign.consume({limits.maximum_work - used}).ok());
   const auto before = foreign.statistics().issued.work;
   PS_CHECK(context.execute(plan, {{{"scalar", input}}}).status().code ==
-           ErrorCode::InvalidArgument);
-  PS_CHECK(context.freeze(plan, {{{"scalar", input}}}).status().code ==
            ErrorCode::InvalidArgument);
   PS_CHECK(foreign.statistics().issued.work == before);
   return 0;
@@ -576,15 +580,15 @@ int sparse_source_need_budget() {
     auto root = context.resource_budget().take_value();
     auto source = source_result(root, input_schema, input);
     PS_CHECK(source.ok());
-    auto frozen = context.freeze(plan, {{{"source", source.value()}}});
-    PS_CHECK(frozen.ok());
+    auto run_plan = plan;
+    ExecutionBindings run_bindings = {{{"source", source.value()}}};
     const auto setup_peak = root.statistics().peak[ResourceKind::Metadata];
     polls.store(0);
     reads.store(0);
     ExecutionOptions options;
     options.maximum_dependency_work = 100000000;
     options.dependencies.sets.maximum_work = 100000000;
-    auto result = context.execute(frozen.value(), {}, options);
+    auto result = context.execute(run_plan, run_bindings, {}, options);
     if (!constrained && !result.ok())
       std::cerr << "sparse static grant fixture: "
                 << static_cast<int>(result.status().code) << " "

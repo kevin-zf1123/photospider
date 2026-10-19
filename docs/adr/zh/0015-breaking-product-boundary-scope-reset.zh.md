@@ -75,7 +75,7 @@ daemon 拥有本地 IPC，以及围绕公开内核软件包的临时进程编排
 
 ## 5. 后果与代价 (Consequences)
 
-内核调用方管理自己的 graph 和 execution context、输入分配、并发调用及结果生命周期。受控执行缓冲区受 context 配置限制；调用方拥有的输入和未计账的进程开销不受 RSS 上限约束。普通执行以协作方式观察取消，并拒绝从过期 graph revision 发布结果。已捕获的 frozen work 遵循其独立的 captured-plan 生命周期契约。
+内核调用方管理自己的 graph 和 execution context、输入分配、并发调用及结果生命周期。受控执行缓冲区受 context 配置限制；调用方拥有的输入和未计账的进程开销不受 RSS 上限约束。普通执行以协作方式观察取消，并拒绝从过期 graph revision 发布结果。
 
 daemon 调用方通过公开 package target 与 API 集成。本内核仓库不能证明与某个 daemon 修订版兼容，也不规定 daemon 的清理和重启行为。
 

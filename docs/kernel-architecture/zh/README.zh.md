@@ -10,7 +10,7 @@
 4. [数据模型](Data-Model.zh.md)：Tensor、Region、布局与保留的存储。
 5. [Graph 生命周期](Graph-Lifecycle.zh.md)：图版本与编译阶段的生命周期。
 6. [Compute 边界](Compute-Boundaries.zh.md)：CPU/GPU 放置与回退规则。
-7. [Cache 模型](Cache-Model.zh.md)：冻结输入与有界本地结果复用。
+7. [Cache 模型](Cache-Model.zh.md)：不可变输入快照与有界本地结果复用。
 8. [Plugin ABI](Plugin-ABI.zh.md)：可信进程内 operation 接口。
 9. [图像算子](Image-Operations.zh.md)：图像描述符、端口与当前图像契约。
 10. [Region 语义](Region-Semantics.zh.md)：逻辑覆盖、输入需求与边界行为。

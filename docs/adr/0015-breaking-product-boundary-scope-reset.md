@@ -75,7 +75,7 @@ Maintained benchmarks report raw compile/plan/execute/operation timings, selecte
 
 ## 5. Consequences
 
-Kernel callers manage their own graph and execution contexts, input allocations, concurrent calls, and result lifetimes. Controlled execution buffers are bounded by context configuration; caller-owned inputs and uninstrumented process overhead are not an RSS limit. Ordinary execution observes cooperative cancellation and rejects publication from a stale graph revision. Captured frozen work follows its own captured-plan lifetime contract.
+Kernel callers manage their own graph and execution contexts, input allocations, concurrent calls, and result lifetimes. Controlled execution buffers are bounded by context configuration; caller-owned inputs and uninstrumented process overhead are not an RSS limit. Ordinary execution observes cooperative cancellation and rejects publication from a stale graph revision.
 
 Daemon callers integrate through public package targets and APIs. This kernel repository does not establish compatibility with a particular daemon revision or specify daemon cleanup and restart behavior.
 

@@ -91,17 +91,17 @@ struct BakedLut3d {
  * coordinates. Measure and gate validate bounded report windows before table
  * publication; a passed gate checks measured_table_id against the owned-table
  * input after complete table validation. Measure and gate are declared
- * nondeterministic and non-cacheable: equal frozen inputs may produce different
- * intermediate ObjectIds in each Run. Their downstream closure cannot reuse
- * completed results, checkpoints or blocks across Runs.
- * Every nonempty table or report request validates all grid colors, complete
- * source outputs, centers and extra points. report successfully records
- * passed=false on exceeded tolerances; table then fails OperationFailed/
- * InvalidDomain with LutApproximationToleranceExceeded. Axis-only observes no
- * source or extra points. Source/shape/domain/work/capacity/cancellation/stale
- * failures retain their categories. Result owners survive context teardown.
- * Measured acceptance applies only at listed points using
- * the chosen interpolation and table output dtype, never the continuous domain.
+ * nondeterministic and non-cacheable: equal immutable inputs may produce
+ * different intermediate ObjectIds in each Run. Their downstream closure cannot
+ * reuse completed results, checkpoints or blocks across Runs. Every nonempty
+ * table or report request validates all grid colors, complete source outputs,
+ * centers and extra points. report successfully records passed=false on
+ * exceeded tolerances; table then fails OperationFailed/ InvalidDomain with
+ * LutApproximationToleranceExceeded. Axis-only observes no source or extra
+ * points. Source/shape/domain/work/capacity/cancellation/stale failures retain
+ * their categories. Result owners survive context teardown. Measured acceptance
+ * applies only at listed points using the chosen interpolation and table output
+ * dtype, never the continuous domain.
  *
  * Calls modifying one document must be serialized. All authoring is staged;
  * failure or exception leaves document unchanged. Allocation or a source

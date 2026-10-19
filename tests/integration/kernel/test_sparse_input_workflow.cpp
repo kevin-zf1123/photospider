@@ -58,10 +58,10 @@ void data_workflow() {
   const auto coverage = checked(Footprint::from_regions(
       {1, width},
       {Region({{0, 1}, {1, 1}}), Region({{0, 1}, {width - 2, 1}})}));
-  const auto frozen =
-      checked(execution.freeze(compiled.plan.value(), {{source}}));
-  auto result =
-      checked(execution.execute_fragments(frozen, {{"result", request}}));
+  auto run_plan = compiled.plan.value();
+  ExecutionBindings run_bindings = {{source}};
+  auto result = checked(execution.execute_fragments(run_plan, run_bindings,
+                                                    {{"result", request}}));
   const auto& fragments = result.results.at("result");
   require(multi_result::number(fragments, {0, 1}) == 1 &&
               multi_result::number(fragments, {0, width - 2}) == 999999998,

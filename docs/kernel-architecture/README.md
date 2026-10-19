@@ -10,7 +10,7 @@ These guides describe the kernel's current contracts and runtime behavior. Engli
 4. [Data Model](Data-Model.md): Tensors, Regions, layouts, and retained storage.
 5. [Graph Lifecycle](Graph-Lifecycle.md): graph revisions and compiled-stage lifetimes.
 6. [Compute Boundaries](Compute-Boundaries.md): CPU/GPU placement and fallback.
-7. [Cache Model](Cache-Model.md): frozen inputs and bounded local result reuse.
+7. [Cache Model](Cache-Model.md): immutable input snapshots and bounded local result reuse.
 8. [Plugin ABI](Plugin-ABI.md): trusted in-process operation interfaces.
 9. [Image Operations](Image-Operations.md): image descriptors, ports, and current image contracts.
 10. [Region Semantics](Region-Semantics.md): logical coverage, input demand, and boundary behavior.

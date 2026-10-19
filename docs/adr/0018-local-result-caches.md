@@ -1,7 +1,7 @@
-# ADR 0018: Freeze Inputs and Reuse Exact Local Results
+# ADR 0018: Retain Immutable Inputs and Reuse Exact Local Results
 
 - Status: Accepted
-- Reader mirror: [Chinese](zh/0018-local-result-caches-and-frozen-execution.zh.md)
+- Reader mirror: [Chinese](zh/0018-local-result-caches.zh.md)
 - Current boundary: in 0.36.0 the snapshot facets and the import rejection of image, color-array, `ImagePlane` and `Mask` Values of the original decision are superseded. Snapshots validate structure only; run data is bound as Result static Tensor members.
 
 ## Current implementation: content identity and call activation
@@ -26,19 +26,19 @@ outputs as well as block state. Fallback-tainted results bypass reuse.
 Shared computation is unique within one call activation. Entering a block again
 clears that block's values and shared-stage state, so a loop recomputes the next
 activation rather than retaining one producer result for the whole Run. Compiler
-artifacts persist compiled stages only; frozen bindings and disposable caches
+artifacts persist compiled stages only; per-call bindings and disposable caches
 remain in-memory state.
 
 ## 1. Core summary (TL;DR)
 
-Mutable workflow graphs and edited inputs need stable execution inputs, while tiled work benefits from reusing tiles whose recorded dependencies have not changed. The kernel owns immutable input snapshots, frozen execution bundles and bounded disposable result caches. Content identity and tile dependency records permit reuse without making cache state authoritative.
+Mutable workflow graphs and edited inputs need stable execution inputs, while tiled work benefits from reusing tiles whose recorded dependencies have not changed. The kernel owns immutable input snapshots, per-call Result bindings and bounded disposable result caches. Content identity and tile dependency records permit reuse without making cache state authoritative.
 
 ## 2. Mental model and intuition
 
-`InputSnapshotStore` works like a versioned block store: a patch copies the blocks it intersects and shares the rest with earlier versions. A frozen execution pins one compiled plan, its registry and its immutable bindings, so later graph edits do not change that run.
+`InputSnapshotStore` works like a versioned block store: a patch copies the blocks it intersects and shares the rest with earlier versions. Each Run uses a current compiled plan and retains its immutable bindings until callbacks retire.
 
 ```text
-Graph + bindings --freeze--> Frozen plan and input owners
+Current plan + bindings --> Run and input owners
                                   |
                      requested member tile
                            /             \
@@ -80,11 +80,15 @@ struct ExecutionContextConfig {
 
 class ExecutionContext {
  public:
-  Result<FrozenExecution> freeze(const ExecutionPlan&,
-                                 ExecutionBindings = {}) const;
-  Result<ExecutionResult> execute(const FrozenExecution&,
+  Result<ExecutionResult> execute(const ExecutionPlan&,
+                                  ExecutionBindings = {},
                                   const CancellationToken& = {},
                                   const ExecutionOptions& = {});
+  Result<DemandResult> execute_fragments(const ExecutionPlan&,
+                                         ExecutionBindings,
+                                         const DemandQuery&,
+                                         const CancellationToken& = {},
+                                         const ExecutionOptions& = {});
 };
 ```
 
@@ -94,16 +98,16 @@ Snapshots contain complete rank-1..8 `Tensor` inputs of any built-in element typ
 
 `content_identity` hashes a versioned identity prefix, the element type, shape, requested region coordinates and the requested exact sample bits. Allocation address, layout and block geometry do not participate. Read and identity operations accept sample bounds and cooperative cancellation. A cancelled read may have partially filled the caller's destination, which the caller must discard.
 
-`freeze` captures a current matching plan, immutable bindings and the operation registry owner. Each workflow input binding is an `ExecutionBinding` that names one declaration and supplies an immutable `ResultRef`. Preflight checks that a Result binding matches the declared schema and has a valid final descriptor. Execution admission checks root ownership when the context uses managed resources, and demand reads remain bounded by the declared domain and published support. Capture invokes no operation callback and rechecks graph currentness before returning. Frozen execution uses the captured input versions after graph replacement or destruction; ordinary execution retains its normal currentness checks. Each execute call supplies independent cancellation, and owners remain alive until admitted callbacks retire. A Result input binding retains its immutable `ResultRef` owner. Callers capture a Result with `ResultRef::capture()` and read tensor samples through `ResultRef::read_tensor()` or `ResultRef::acquire_tensor()` using the captured descriptor.
+Each execution validates a current plan and copies its immutable Result bindings. An `ExecutionBinding` names one workflow input declaration and supplies a schema-matching `ResultRef`. Preflight validates descriptors and schemas; execution admission checks resource-root ownership. Graph replacement or destruction makes a borrowed-graph plan stale, including plans retained by a `DemandHandle`. A demand request also checks its binding generation. Each call supplies independent cancellation and retains input owners until admitted callbacks retire. Callers capture a Result with `ResultRef::capture()` and read samples through `ResultRef::read_tensor()` or `ResultRef::acquire_tensor()` using the captured descriptor.
 
 Completed-result retention is optional. Its capacity is a sublimit of `maximum_live_bytes`; zero disables retention. The reuse unit is one member tile. Its key combines the step's physical identity (operation contract and implementation, tile extent, resolved output schema, and relevant backend and resource identities), the unit index and the identities of the producer units recorded for it, as defined by [ADR 0023](0023-track-dependencies-between-fixed-tiles.md); workflow-input identities are computed over logical content. Compiler graph revision and unrelated branches do not enter a local result key. A dirty hint can narrow work but cannot establish reuse without content identity. Reuse requires every participating operation to be deterministic, side-effect-free and cacheable.
 
-Each Run computes its own cache misses; identical requests in concurrent Runs are not merged. A Run's producers own their frozen inputs and registry until admitted callbacks retire. It does not block a worker by waiting for another callback in the same pool. Only validated successful immutable results enter completed caches.
+Each Run computes its own cache misses; identical requests in concurrent Runs are not merged. A Run's producers own their immutable inputs and registry until admitted callbacks retire. It does not block a worker by waiting for another callback in the same pool. Only validated successful immutable results enter completed caches.
 
 ## 4. Non-goals and explicit boundaries
 
 - Snapshots cover immutable input Tensors and their content; they do not serialize an execution plan or workflow document.
-- A frozen execution pins one in-memory plan and its inputs; it does not make later graph edits current for ordinary execution. Workflow input bindings must be schema-matching immutable Result owners.
+- Workflow input bindings must be schema-matching immutable Result owners. A borrowed-graph plan requires its graph revision to remain current throughout execution.
 - Result caches are disposable accelerators. They do not provide transactional recovery, durable commits, request history or authoritative artifacts.
 - The kernel does not own preview queues, edit coalescing, user-visible freshness policy or publication decisions.
 - Unproven mutable sources may execute, but their dependent results cannot be reused across runs.

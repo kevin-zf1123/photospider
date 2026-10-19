@@ -94,7 +94,6 @@ int direct(unsigned mode, bool start, bool sticky,
     const std::map<std::string, ParameterValue> parameters;
     ResultProgramQuery query(metadata, parameters);
     query.semantic_key = "test.result_exception.left";
-    query.snapshot_identity = "exception.snapshot";
     ResultObjectInputs objects;
     auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
     auto allocator =

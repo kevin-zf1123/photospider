@@ -15,7 +15,7 @@ ADR 记录长期有效的架构约束及其理由。了解边界为何存在时�
 | [0015](0015-breaking-product-boundary-scope-reset.zh.md) | 将编译与执行保留在可嵌入 kernel 中。 |
 | [0016](0016-workflow-inputs-and-execution-bindings.zh.md) | 每次执行都绑定已声明的 workflow 输入。 |
 | [0017](0017-cpu-regional-execution-and-storage.zh.md) | 使用有界 CPU 存储执行区域工作。 |
-| [0018](0018-local-result-caches-and-frozen-execution.zh.md) | 冻结执行输入，并复用精确匹配的本地结果。 |
+| [0018](0018-local-result-caches.zh.md) | 保留不可变输入，并复用精确匹配的本地结果。 |
 | [0019](0019-metal-resident-image-workflows.zh.md) | 让受支持的图像工作流驻留于 Metal 存储。 |
 | [0020](0020-composable-operation-foundations.zh.md) | 在算子间组合数值、语义和输出契约。 |
 | [0021](0021-independent-node-results.zh.md) | 独立路由命名节点结果。 |

@@ -488,9 +488,10 @@ OperationDefinition operation(Kind kind) {
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = report_parameters();
   traits.workspace_bytes = kind == Kind::Measure ? 361 : 0;
-  // Object identity is Run-local, even with identical frozen inputs. Mark the
-  // identity-producing/checking operations nondeterministic so their downstream
-  // closure cannot share checkpoint or block state between Runs either.
+  // Object identity is Run-local, even with identical immutable inputs. Mark
+  // the identity-producing/checking operations nondeterministic so their
+  // downstream closure cannot share checkpoint or block state between Runs
+  // either.
   if (kind == Kind::Measure || kind == Kind::Gate) {
     traits.deterministic = false;
     traits.cacheable = false;

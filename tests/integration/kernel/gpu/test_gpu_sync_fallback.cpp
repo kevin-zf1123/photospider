@@ -293,12 +293,14 @@ int fallback_records() {
     ExecutionContext context(registry, {1, true, 8, 1 << 20, 0});
     const auto root = context.resource_budget().take_value();
     const auto bindings = make_bindings(root);
-    auto frozen = context.freeze(plan, bindings).take_value();
+    auto run_plan = plan;
+    ExecutionBindings run_bindings = bindings;
     ExecutionOptions options;
     options.dependencies.sets.maximum_boxes = mode == 0   ? 16
                                               : mode == 3 ? 12
                                                           : 64;
-    auto result = context.execute_fragments(frozen, query, {}, options);
+    auto result =
+        context.execute_fragments(run_plan, run_bindings, query, {}, options);
     if (!result.ok())
       std::cerr << "fallback records mode=" << mode << '\n';
     if (verify(result, 0, mode == 0 || mode == 3 ? 7 : 2))
@@ -448,10 +450,11 @@ int main() {
         Compiler(registry).compile(graph, planning).take_value().plan.value();
     const auto root = context.resource_budget().take_value();
     const auto bindings = make_bindings(root);
-    auto frozen = context.freeze(plan, bindings).take_value();
+    auto run_plan = plan;
+    ExecutionBindings run_bindings = bindings;
     const TileRequest q{
         {{0, gpu_result::take(TileSet::from_indices(root, {0, 2}))}}};
-    auto result = context.execute_fragments(frozen, {{"y", q}});
+    auto result = context.execute_fragments(run_plan, run_bindings, {{"y", q}});
     if (!result.ok())
       std::cerr << "increment enabled=" << enabled << '\n';
     if (verify(result, 0, 1) || verify(result, 2, 3) ||
@@ -480,8 +483,10 @@ int main() {
         return 1;
     }
     result = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
-    auto warm_scope = context.freeze(plan, bindings).take_value();
-    auto warm = context.execute_fragments(warm_scope, {{"y", q}});
+    auto warm_scope_plan = plan;
+    ExecutionBindings warm_scope_bindings = bindings;
+    auto warm = context.execute_fragments(warm_scope_plan, warm_scope_bindings,
+                                          {{"y", q}});
     if (!warm.ok())
       std::cerr << "warm increment enabled=" << enabled << '\n';
     if (verify(warm, 2, 3) ||
@@ -498,11 +503,12 @@ int main() {
       GraphContext chain(document(key, true));
       auto chain_plan =
           Compiler(registry).compile(chain, planning).take_value().plan.value();
-      auto captured = context.freeze(chain_plan, bindings).take_value();
+      auto captured_plan = chain_plan;
+      ExecutionBindings captured_bindings = bindings;
       unavailable = true;
       const auto before = starts.load();
-      auto fallback =
-          context.execute_fragments(captured, {{"y", request(root, 0)}});
+      auto fallback = context.execute_fragments(
+          captured_plan, captured_bindings, {{"y", request(root, 0)}});
       if (!fallback.ok())
         std::cerr << "chain " << key << " enabled=" << enabled << '\n';
       const bool staged = std::string(key) != "example.fail_in_poll";
@@ -536,8 +542,8 @@ int main() {
       }
       fallback = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
       unavailable = false;
-      auto retry =
-          context.execute_fragments(captured, {{"y", request(root, 0)}});
+      auto retry = context.execute_fragments(captured_plan, captured_bindings,
+                                             {{"y", request(root, 0)}});
       if (verify(retry, 0, expected) ||
           check(retry.value().diagnostics.cache_hits == 0,
                 "fallback ancestry reused"))
@@ -562,11 +568,13 @@ int main() {
     ExecutionContext context(registry, {1, true, 8, limit, 0});
     const auto root = context.resource_budget().take_value();
     const auto bindings = make_bindings(root);
-    auto frozen = context.freeze(plan, bindings).take_value();
+    auto run_plan = plan;
+    ExecutionBindings run_bindings = bindings;
     if (check(root.statistics().live[ResourceKind::Payload] == length * 4,
               "Result source payload admission"))
       return 1;
-    auto result = context.execute_fragments(frozen, {{"y", request(root, 0)}});
+    auto result = context.execute_fragments(run_plan, run_bindings,
+                                            {{"y", request(root, 0)}});
     if (native_limit == 65535) {
       if (check(result.status().code == ErrorCode::ResourceExhausted &&
                     root.statistics().live[ResourceKind::Payload] == length * 4,
@@ -582,8 +590,8 @@ int main() {
       // Early GPU rejection must retire its output allocation before CPU retry.
       result = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
       unavailable = true;
-      auto fallback =
-          context.execute_fragments(frozen, {{"y", request(root, 0)}});
+      auto fallback = context.execute_fragments(run_plan, run_bindings,
+                                                {{"y", request(root, 0)}});
       if (verify(fallback, 0, 1) ||
           check(
               root.statistics().peak[ResourceKind::Payload] == limit &&
@@ -598,7 +606,8 @@ int main() {
                 "released large tile Result owner"))
         return 1;
       unavailable = false;
-      auto retry = context.execute_fragments(frozen, {{"y", request(root, 0)}});
+      auto retry = context.execute_fragments(run_plan, run_bindings,
+                                             {{"y", request(root, 0)}});
       if (verify(retry, 0, 1) ||
           check(retry.value().diagnostics.native_dispatch_count > 0,
                 "fresh native retry"))
@@ -609,11 +618,12 @@ int main() {
                            .compile(late_graph, planning)
                            .take_value()
                            .plan.value();
-      auto late_frozen = context.freeze(late_plan, bindings).take_value();
+      auto late_run_plan = late_plan;
+      ExecutionBindings late_run_bindings = bindings;
       unavailable = true;
       const auto cpu_before = cpu_calls.load();
-      auto late =
-          context.execute_fragments(late_frozen, {{"y", request(root, 0)}});
+      auto late = context.execute_fragments(late_run_plan, late_run_bindings,
+                                            {{"y", request(root, 0)}});
       if (check(late.status().code == ErrorCode::BackendUnavailable &&
                     cpu_calls == cpu_before &&
                     root.statistics().live[ResourceKind::Payload] == length * 4,

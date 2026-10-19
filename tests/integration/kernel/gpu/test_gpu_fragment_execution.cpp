@@ -614,9 +614,11 @@ int main() try {
         gpu ? ExecutionMode::NativeGpu : ExecutionMode::CpuExact;
     const auto plan =
         take(Compiler(registry).compile(graph, planning)).plan.value();
-    const auto frozen = take(context.freeze(plan, bindings));
+    auto run_plan = plan;
+    ExecutionBindings run_bindings = bindings;
     const auto query = request({0, 1, 2});
-    auto result = take(context.execute_fragments(frozen, {{"sum", query}}));
+    auto result = take(
+        context.execute_fragments(run_plan, run_bindings, {{"sum", query}}));
     for (std::uint64_t i = 0; i < 3; ++i)
       if (require(
               number(result.results.at("sum"), i) == 2145 * (i == 1 ? 2 : 1),
@@ -656,9 +658,10 @@ int main() try {
               << diagnostics.native_dispatch_count
               << "; block_hits=" << diagnostics.block_cache_hits << '\n';
     if (gpu) {
-      auto fresh = take(context.freeze(plan, bindings));
-      auto hit =
-          take(context.execute_fragments(fresh, {{"sum", request({2})}}));
+      auto fresh_plan = plan;
+      ExecutionBindings fresh_bindings = bindings;
+      auto hit = take(context.execute_fragments(fresh_plan, fresh_bindings,
+                                                {{"sum", request({2})}}));
       if (require(number(hit.results.at("sum"), 2) == 2145,
                   "native result across repeated Result requests"))
         return 1;
@@ -684,8 +687,10 @@ int main() try {
     ExecutionContext small(registry, bounded);
     const auto root = take(small.resource_budget());
     const auto bound = inputs(root);
-    const auto frozen = take(small.freeze(fixed_plan, bound));
-    auto result = small.execute_fragments(frozen, {{"sum", request({0})}});
+    auto run_plan = fixed_plan;
+    ExecutionBindings run_bindings = bound;
+    auto result = small.execute_fragments(run_plan, run_bindings,
+                                          {{"sum", request({0})}});
     if (require(bytes == minimum
                     ? result.ok()
                     : result.status().code == ErrorCode::ResourceExhausted,
@@ -700,8 +705,8 @@ int main() try {
       if (require(root.statistics().live[ResourceKind::Payload] == source_bytes,
                   "native owner retirement"))
         return 1;
-      auto retry =
-          take(small.execute_fragments(frozen, {{"sum", request({0})}}));
+      auto retry = take(small.execute_fragments(run_plan, run_bindings,
+                                                {{"sum", request({0})}}));
       if (require(retry.diagnostics.native_dispatch_count > 0 &&
                       number(retry.results.at("sum"), 0) == 2145,
                   "native retry after owner retirement"))
@@ -713,10 +718,10 @@ int main() try {
   for (unsigned layout : {1U, 2U, 3U}) {
     ExecutionContext arranged(registry, config);
     const auto bound = inputs(take(arranged.resource_budget()), layout);
-    const auto frozen =
-        take(arranged.freeze(layout == 3 ? fixed_plan : plan, bound));
-    auto result =
-        take(arranged.execute_fragments(frozen, {{"sum", request({0})}}));
+    auto run_plan = layout == 3 ? fixed_plan : plan;
+    ExecutionBindings run_bindings = bound;
+    auto result = take(arranged.execute_fragments(run_plan, run_bindings,
+                                                  {{"sum", request({0})}}));
     if (require(
             number(result.results.at("sum"), 0) == (layout == 2 ? 65 : 2145) &&
                 result.diagnostics.native_dispatch_count > 0,
@@ -737,8 +742,10 @@ int main() try {
     const auto root = take(isolated.resource_budget());
     const auto bound = inputs(root);
     for (unsigned attempt = 0; attempt < 2; ++attempt) {
-      const auto frozen = take(isolated.freeze(bad_plan, bound));
-      auto failed = isolated.execute_fragments(frozen, {{"sum", request({0})}});
+      auto run_plan = bad_plan;
+      ExecutionBindings run_bindings = bound;
+      auto failed = isolated.execute_fragments(run_plan, run_bindings,
+                                               {{"sum", request({0})}});
       if (mode == 6) {
         if (require(failed.ok() &&
                         number(failed.value().results.at("sum"), 0) == 2145 &&
@@ -771,9 +778,10 @@ int main() try {
         return 1;
       }
     }
-    const auto frozen = take(isolated.freeze(plan, bound));
-    auto recovered =
-        take(isolated.execute_fragments(frozen, {{"sum", request({0})}}));
+    auto run_plan = plan;
+    ExecutionBindings run_bindings = bound;
+    auto recovered = take(isolated.execute_fragments(run_plan, run_bindings,
+                                                     {{"sum", request({0})}}));
     if (require(recovered.diagnostics.native_dispatch_count > 0 &&
                     number(recovered.results.at("sum"), 0) == 2145,
                 "fresh native retry after atlas failure"))
@@ -787,9 +795,10 @@ int main() try {
     ExecutionContext empty_context(registry, config);
     const auto root = take(empty_context.resource_budget());
     const auto bound = inputs(root, 4);
-    const auto frozen = take(empty_context.freeze(empty_plan, bound));
-    auto output =
-        take(empty_context.execute_fragments(frozen, {{"sum", TileRequest{}}}));
+    auto run_plan = empty_plan;
+    ExecutionBindings run_bindings = bound;
+    auto output = take(empty_context.execute_fragments(
+        run_plan, run_bindings, {{"sum", TileRequest{}}}));
     if (require(take(output.results.at("sum").descriptor())
                         .tensor_coverage(0)
                         .empty() &&
@@ -814,9 +823,10 @@ int main() try {
       ++delivered;
       return Status::success();
     };
-    auto frozen = take(context.freeze(cancelled_plan, bindings));
-    auto result =
-        context.execute_fragments(frozen, {{"sum", request({0})}}, {}, options);
+    auto run_plan = cancelled_plan;
+    ExecutionBindings run_bindings = bindings;
+    auto result = context.execute_fragments(
+        run_plan, run_bindings, {{"sum", request({0})}}, {}, options);
     const auto& status = result.status();
     if (require(
             delivered == 0 &&

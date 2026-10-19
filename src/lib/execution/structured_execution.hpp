@@ -5,7 +5,6 @@
 #include <future>
 #include <map>
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -41,9 +40,8 @@ struct StructuredServices final {
  * @note For a queued task, the future becomes ready only after task captures
  * and callback services retire. Queue acceptance followed by dropping the
  * work resolves as Cancelled after captures retire. The caller drains
- * retirement before borrowed coordinator state leaves scope. A supplied
- * `plan_owner` pins the plan through this boundary. Destruction of this object
- * does not wait.
+ * retirement before the borrowed coordinator and plan leave scope.
+ * Destruction of this object does not wait.
  */
 struct StructuredSubmission final {
   std::shared_ptr<const void> retirement;
@@ -68,17 +66,15 @@ struct StructuredSubmission final {
  * are observed through `StructuredSubmission::finish`. The caller's dispatch
  * drain must wait for retirement before the borrowed coordinator or any
  * caller-owned state referenced by the task can leave scope. The coordinator
- * copies options and borrows `plan` unless `plan_owner` pins it.
+ * copies options and borrows `plan` for the synchronous execution call.
  */
 using StructuredDispatch = std::function<Result<StructuredSubmission>(
     Backend, bool, CancellationToken,
     std::function<Status(const StructuredServices&)>)>;
 /** @brief Runs one structured coordinator with captured run inputs.
  * @details The coordinator is allocated with the supplied execution Root,
- * owns the binding vector, copies the options, and copies the snapshot identity
- * into Root-managed storage. When `plan_owner` is supplied, the
- * coordinator aliases its plan while retaining that owner; otherwise `plan`
- * is borrowed. The call drains pending callbacks before return, including
+ * owns the binding vector, copies the options, and borrows the plan.
+ * The call drains pending callbacks before return, including
  * exception cleanup.
  * @param requested Named output sample queries.
  * @param maximum_parallelism Caps the number of queued callback tasks the
@@ -92,8 +88,6 @@ Result<ExecutionResult> execute_structured(
     const ExecutionOptions& options, const CancellationToken& cancellation,
     const std::function<ErrorCode()>& stop, const StructuredDispatch& dispatch,
     const DemandQuery* requested = nullptr,
-    const std::string& snapshot_identity = {},
     ResultCheckpoints* checkpoints = nullptr, ResultCache* blocks = nullptr,
-    std::shared_ptr<const ExecutionPlan> plan_owner = {},
     std::uint32_t maximum_parallelism = 1);
 }  // namespace ps::execution_internal

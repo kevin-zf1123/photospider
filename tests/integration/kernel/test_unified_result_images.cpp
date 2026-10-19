@@ -77,11 +77,12 @@ std::pair<ResultRef, ResultRef> run() {
                   .ok() &&
               count == 32,
           "numeric Result sibling");
-  auto frozen = context.freeze(planned.value().plan.value(), {{a, b, c}});
-  require(frozen.ok(), "freeze typed Result bindings");
+  auto run_plan = planned.value().plan.value();
+  ExecutionBindings run_bindings = {{a, b, c}};
   const auto wanted_tiles = TileSet::from_indices(budget, {22}).take_value();
   const TileRequest wanted{{{0, wanted_tiles}}};
-  auto sparse = context.execute_fragments(frozen.value(), {{"out", wanted}});
+  auto sparse =
+      context.execute_fragments(run_plan, run_bindings, {{"out", wanted}});
   require(sparse.ok(), sparse.status().message);
   auto sparse_result = sparse.value().results.at("out");
   auto captured = sparse_result.descriptor().take_value();
@@ -161,9 +162,8 @@ std::pair<ResultRef, ResultRef> run() {
       unrelated.value().potential_dirty.at("out").members.at(0) == wanted_tiles,
       "Full control payload edits conservatively invalidate subscribed tiles");
   const auto evaluate = [&](const DemandQuery& query) {
-    auto current = context.freeze(planned.value().plan.value(), {{a, b, c}});
-    require(current.ok(), current.status().message);
-    return context.execute_fragments(current.value(), query);
+    return context.execute_fragments(planned.value().plan.value(), {{a, b, c}},
+                                     query);
   };
   selectors[0] = 99;
   c.result = unified_result_fixture::input_control(budget, selectors);

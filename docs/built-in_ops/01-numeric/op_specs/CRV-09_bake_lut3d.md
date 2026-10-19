@@ -284,7 +284,7 @@ Its authoring-only `Lut3dSourceBuilder` runs for generated grid and validation
 shapes, appends ordinary nodes and returns Result outputs. The helper protects
 existing input declarations, Result schemas, nodes and exports; it retains no
 builder or capture. Both expansions are analyzed by Compiler and execute under
-one frozen binding snapshot, including shared inputs and optional
+the same immutable Result bindings, including shared inputs and optional
 `ResourceSet`. Pointwise independence remains the caller's assertion.
 
 `BakedLut3d` returns connectable Result references for table, axis and report,

@@ -83,10 +83,7 @@ FFT 有两代完整临时 complex backing，连通域有独立于最终 K 的 un
 驱动及 OS cache 等属于排除范围。
 详见[Managed resources](../../kernel-architecture/Managed-Resources.md)。
 
-执行身份包含 operation contract、参数、ordered inputs、冻结输入身份和 canonical schema；
-Result 的页大小、文件偏移、descriptor revision 和资源限额不进入语义身份。物理计划选择
-保留在 physical plan identity。外部 LUT/profile/model 由宿主载入不可变快照，路径字符串
-本身不能代表内容身份；后端/质量选项按对应节点契约参与身份。
+内容缓存身份包含 operation contract、参数、ordered inputs、已授权输入样本内容和 canonical schema。执行调用身份使用 plan digest、Run、block activation 和指令坐标。Result 的页大小、文件偏移、descriptor revision 和资源限额不进入内容缓存身份。物理计划选择保留在 physical plan identity。外部 LUT/profile/model 由宿主载入不可变快照，路径字符串本身不能代表内容身份；后端/质量选项按对应节点契约参与身份。
 
 ## 错误与数值质量
 

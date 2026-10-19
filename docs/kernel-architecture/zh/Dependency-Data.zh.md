@@ -73,9 +73,9 @@ Checkpoint 查找返回不大于上界的最大 sequence，未命中时返回 ha
 
 ## 精确 demand 与不可变 binding replacement
 
-`DemandQuery` 把名称映射到 `TileRequest`，后者按成员槽选择紧凑 tile 集合。`open_demand(plan, bindings)` 捕获 plan 和不可变 Results。每个请求保留其 generation 和所请求的成员 tile。`execute_fragments` 使用显式 frozen bundle，并在执行前用 `select_outputs` 过滤 frozen plan；请求必须是该 plan 已编译输出请求的子集。Descriptor 访问不需要产出样本。
+`DemandQuery` 把名称映射到 `TileRequest`，后者按成员槽选择紧凑 tile 集合。`open_demand(plan, bindings)` 捕获 plan 和不可变 Results。每个请求保留其 generation 和所请求的成员 tile。`execute_fragments(plan, bindings, query)` 接受每次调用提供的 bindings，并在执行前用 `select_outputs` 过滤当前 plan；请求必须是该 plan 已编译输出请求的子集。Descriptor 访问不需要产出样本。
 
-Replacement 在发布前验证全部 bindings 和静态 schema。失败时保留旧 generation。与发布或 replacement 竞争时按规定返回 Stale；取消优先。Frozen bundle 不受后续编辑影响。`release` 移除订阅但不取消活动请求；`cancel` 请求取消，并清除保留的发布与 bundle，但不等待活动调用。这些调用协作退出；context close 会等待它们。Context shutdown 在 worker 退出前排空活动 demand 调用。Handle 既不拥有 worker，也没有单独的 payload cache。
+Replacement 在发布前验证全部 bindings 和静态 schema。失败时保留旧 generation。与发布或 replacement 竞争时按规定返回 Stale；取消优先。图被替换或销毁后，保留的借用图版本 plan 返回 Stale。Bindings 推进到下一 generation 时，活动请求也返回 Stale。`release` 移除订阅但不取消活动请求；`cancel` 请求取消，并清除保留的发布与 bundle，但不等待活动调用。这些调用协作退出；context close 会等待它们。Context shutdown 在 worker 退出前排空活动 demand 调用。Handle 既不拥有 worker，也没有单独的 payload cache。
 
 变更内容按 plan 网格在观察到的成员 tile 上比较。仅有额外提交覆盖、descriptor revision 或 producer 进度并不意味着内容被编辑。Schema 改变需要重新 preparation 和编译。证据恢复不会恢复读取权限。
 

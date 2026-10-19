@@ -144,7 +144,6 @@ set(
   src/lib/execution/callback_pool.cpp
   src/lib/execution/result_stage_submission.cpp
   src/lib/execution/execution_bindings.cpp
-  src/lib/execution/frozen_execution.cpp
   src/lib/execution/demand_query.cpp
   src/lib/execution/tile_records.cpp
   src/lib/execution/tile_cache.cpp

@@ -15,7 +15,7 @@ ADRs record durable architecture constraints and their rationale. Use them to un
 | [0015](0015-breaking-product-boundary-scope-reset.md) | Keep compilation and execution in the embeddable kernel. |
 | [0016](0016-workflow-inputs-and-execution-bindings.md) | Bind declared workflow inputs for each execution. |
 | [0017](0017-cpu-regional-execution-and-storage.md) | Execute regional work with bounded CPU storage. |
-| [0018](0018-local-result-caches-and-frozen-execution.md) | Freeze execution inputs and reuse exact local results. |
+| [0018](0018-local-result-caches.md) | Retain immutable inputs and reuse exact local results. |
 | [0019](0019-metal-resident-image-workflows.md) | Keep supported image workflows resident in Metal storage. |
 | [0020](0020-composable-operation-foundations.md) | Compose numeric, semantic, and output contracts across operations. |
 | [0021](0021-independent-node-results.md) | Route named node results independently. |

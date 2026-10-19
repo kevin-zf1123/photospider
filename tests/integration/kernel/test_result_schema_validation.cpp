@@ -197,8 +197,7 @@ int complete_tiles(unsigned aliases = 0, bool runtime_request = false) {
     return 0;
   };
   if (runtime_request)
-    return verify(
-        execution.execute_fragments(take(execution.freeze(plan)), requests));
+    return verify(execution.execute_fragments(plan, {}, requests));
   return verify(execution.execute(plan));
 }
 

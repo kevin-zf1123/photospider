@@ -229,11 +229,12 @@ int main(int argc, char** argv) try {
     auto compiled = Compiler(registry).compile(graph, options);
     if (check(compiled.ok(), "C workflow compile failed"))
       return 1;
-    auto frozen =
-        context.freeze(compiled.value().plan.value(), bindings).take_value();
+    auto run_plan = compiled.value().plan.value();
+    ExecutionBindings run_bindings = bindings;
     auto result = context.execute_fragments(
-        frozen, {{"sum", TileRequest{{{0, take(TileSet::from_indices(
-                                              ResourceBudget{}, {0, 1}))}}}}});
+        run_plan, run_bindings,
+        {{"sum", TileRequest{{{0, take(TileSet::from_indices(ResourceBudget{},
+                                                             {0, 1}))}}}}});
     if (!result.ok())
       std::cerr << result.status().message << '\n';
     if (check(result.ok(), "C workflow failed"))
@@ -272,8 +273,8 @@ int main(int argc, char** argv) try {
     std::cout << (gpu ? "C Metal" : "C CPU")
               << ": sums=2145,2145; dispatches=" << d.native_dispatch_count
               << "; block_hits=" << d.block_cache_hits << '\n';
-    auto empty =
-        take(context.execute_fragments(frozen, {{"sum", TileRequest{}}}));
+    auto empty = take(context.execute_fragments(run_plan, run_bindings,
+                                                {{"sum", TileRequest{}}}));
     if (check(take(empty.results.at("sum").descriptor())
                       .tensor_coverage(0)
                       .empty() &&
@@ -284,10 +285,10 @@ int main(int argc, char** argv) try {
     auto minimum_plan =
         take(Compiler(registry).compile(minimum_graph, options));
     auto minimum_binding = inputs(take(context.resource_budget()), 4225);
-    auto minimum_frozen =
-        take(context.freeze(minimum_plan.plan.value(), minimum_binding));
-    auto minimum_output =
-        take(context.execute_fragments(minimum_frozen, {{"sum", point(0)}}));
+    auto minimum_run_plan = minimum_plan.plan.value();
+    ExecutionBindings minimum_run_bindings = minimum_binding;
+    auto minimum_output = take(context.execute_fragments(
+        minimum_run_plan, minimum_run_bindings, {{"sum", point(0)}}));
     if (check(number(minimum_output.results.at("sum"), 0) == 2145,
               "C dynamic Result metadata changed minimum input"))
       return 1;
@@ -299,10 +300,10 @@ int main(int argc, char** argv) try {
       GraphContext renewed_graph(document(17));
       auto renewed_plan =
           take(Compiler(registry).compile(renewed_graph, options));
-      auto renewed_frozen =
-          take(context.freeze(renewed_plan.plan.value(), bindings));
-      auto renewed =
-          take(context.execute_fragments(renewed_frozen, {{"sum", point(0)}}));
+      auto renewed_run_plan = renewed_plan.plan.value();
+      ExecutionBindings renewed_run_bindings = bindings;
+      auto renewed = take(context.execute_fragments(
+          renewed_run_plan, renewed_run_bindings, {{"sum", point(0)}}));
       if (check(number(renewed.results.at("sum"), 0) == 2145 &&
                     renewed.diagnostics.native_dispatch_count > 0,
                 "C released atlas token could not be reacquired"))
@@ -327,9 +328,10 @@ int main(int argc, char** argv) try {
                                  4 + 24 + 2 * 32768;
       ExecutionContext fresh(registry, tight);
       const auto fresh_bindings = inputs(take(fresh.resource_budget()));
-      auto bad_frozen =
-          fresh.freeze(bad_plan.plan.value(), fresh_bindings).take_value();
-      auto failed = fresh.execute_fragments(bad_frozen, {{"sum", point(0)}});
+      auto bad_run_plan = bad_plan.plan.value();
+      ExecutionBindings bad_run_bindings = fresh_bindings;
+      auto failed = fresh.execute_fragments(bad_run_plan, bad_run_bindings,
+                                            {{"sum", point(0)}});
       const auto expected =
           mode == 7 ? ErrorCode::OperationFailed : ErrorCode::InvalidArgument;
       if (check(failed.status().code == expected,
@@ -350,10 +352,10 @@ int main(int argc, char** argv) try {
                     fresh.cache_statistics().entries == 0,
                 "C failed Result retained payload or cached output"))
         return 1;
-      auto retry_frozen =
-          fresh.freeze(compiled.value().plan.value(), fresh_bindings)
-              .take_value();
-      auto retry = fresh.execute_fragments(retry_frozen, {{"sum", point(0)}});
+      auto retry_run_plan = compiled.value().plan.value();
+      ExecutionBindings retry_run_bindings = fresh_bindings;
+      auto retry = fresh.execute_fragments(retry_run_plan, retry_run_bindings,
+                                           {{"sum", point(0)}});
       if (check(
               retry.ok() &&
                   number(retry.value().results.at("sum"), 0) == 2145 &&

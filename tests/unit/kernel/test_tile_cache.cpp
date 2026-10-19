@@ -58,6 +58,7 @@ struct Fixture {
   std::shared_ptr<OperationRegistry> operations =
       std::make_shared<OperationRegistry>();
   std::atomic<unsigned> consumer_starts{0};
+  std::vector<std::unique_ptr<GraphContext>> graphs;
   Fixture() {
     image.tensors[0].layout.spatial = true;
     image.tensors[0].atomic_trailing_axes = 1;
@@ -117,19 +118,13 @@ struct Fixture {
                                WorkflowNodeOutput{clones ? 3U : 2U, "value"}},
                               {}});
     document.outputs.push_back({"result", 4, "value"});
-    // Freeze below pins the compiled plan before this editable graph retires.
-    GraphContext graph(std::move(document));
+    graphs.push_back(std::make_unique<GraphContext>(std::move(document)));
+    auto& graph = *graphs.back();
     PlanningOptions options;
     options.tile_extent = 2;
     auto compiled =
         multi_result::take(Compiler(operations).compile(graph, options));
-    ExecutionContext context(operations);
-    auto root = multi_result::take(context.resource_budget());
-    auto frozen = multi_result::take(
-        context.freeze(compiled.plan.value(),
-                       {{multi_result::binding(root, "image", 1, image),
-                         multi_result::binding(root, "other", 2, image)}}));
-    return frozen.plan();
+    return compiled.plan.value();
   }
 };
 std::size_t result_step(const ExecutionPlan& plan) {
@@ -480,18 +475,17 @@ int cached_execution() {
   PS_CHECK(fixture.consumer_starts == 2 &&
            modified.value().diagnostics.cache_hits > 0);
   PS_CHECK(multi_result::number(modified.value().results.at("result")) == 2);
-  auto frozen =
-      context.freeze(changed, {{other, input_image(fixture, root, false)}});
-  PS_REQUIRE_OK(frozen);
+  auto run_plan = changed;
+  ExecutionBindings run_bindings = {{other, input_image(fixture, root, false)}};
   context.clear_result_cache();
-  auto seed = context.execute(frozen.value());
+  auto seed = context.execute(run_plan, run_bindings);
   PS_REQUIRE_OK(seed);
   ExecutionOptions bounded;
   bounded.maximum_dependency_cache_work = 0;
   std::uint64_t low = 0, high = 65536;
   while (low + 1 < high) {
     bounded.maximum_dependency_work = low + (high - low) / 2;
-    auto attempted = context.execute(frozen.value(), {}, bounded);
+    auto attempted = context.execute(run_plan, run_bindings, {}, bounded);
     if (attempted.ok()) {
       high = bounded.maximum_dependency_work;
     } else {
@@ -504,7 +498,7 @@ int cached_execution() {
   // work for the same computation that succeeds with the cache disabled.
   for (std::uint64_t fuel = 0; fuel <= 32768; fuel = fuel ? fuel * 2 : 1) {
     bounded.maximum_dependency_cache_work = fuel;
-    auto completed = context.execute(frozen.value(), {}, bounded);
+    auto completed = context.execute(run_plan, run_bindings, {}, bounded);
     if (!completed.ok())
       std::cerr << "cache fuel=" << fuel << " Run fuel=" << high << '\n';
     PS_REQUIRE_OK(completed);
@@ -521,19 +515,20 @@ int cached_execution() {
     }
     return Status::success();
   };
-  auto observed = context.execute(frozen.value(), {}, failed_observer);
+  auto observed = context.execute(run_plan, run_bindings, {}, failed_observer);
   PS_CHECK(observed.status().code == ErrorCode::ResourceExhausted &&
            notifications == 1 && fixture.consumer_starts == prior_starts);
-  auto different_scope =
-      context.freeze(changed, {{other, input_image(fixture, root, false)}});
-  PS_REQUIRE_OK(different_scope);
+  auto different_scope_plan = changed;
+  ExecutionBindings different_scope_bindings = {
+      {other, input_image(fixture, root, false)}};
   bounded = {};
   bounded.maximum_dependency_cache_work = 0;
   low = 0;
   high = 4096;
   while (low + 1 < high) {
     bounded.dependencies.sets.maximum_boxes = low + (high - low) / 2;
-    auto attempted = context.execute(different_scope.value(), {}, bounded);
+    auto attempted = context.execute(different_scope_plan,
+                                     different_scope_bindings, {}, bounded);
     if (attempted.ok()) {
       high = bounded.dependencies.sets.maximum_boxes;
     } else {
@@ -544,7 +539,8 @@ int cached_execution() {
   bounded.dependencies.sets.maximum_boxes = high;
   for (std::uint64_t fuel : {512, 1024, 2048, 4096, 8192, 16384, 32768}) {
     bounded.maximum_dependency_cache_work = fuel;
-    auto completed = context.execute(different_scope.value(), {}, bounded);
+    auto completed = context.execute(different_scope_plan,
+                                     different_scope_bindings, {}, bounded);
     PS_REQUIRE_OK(completed);
     PS_CHECK(multi_result::number(completed.value().results.at("result")) == 2);
   }

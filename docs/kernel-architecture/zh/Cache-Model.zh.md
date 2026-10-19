@@ -52,7 +52,7 @@ Checkpoint 与 block 服务只要求纯度。因此即使其自身算子或某�
 
 Completed-result 查找计算指令的固定授权内容 key，读取该 key 下至多八个候选，跳过后端不同的候选，并以新 ObjectId 和当前 producer scope 重新绑定匹配项。重新绑定的 Result 像计算所得发布一样被校验（包括输出 payload 上限），并共享缓存的物理 backing。Run 安装它时，依赖证据由当前 plan 的授权重建。Cache metadata、key 哈希、样本读取和保留的 payload 计入各自 Root/cache 限制。可选 work 耗尽、metadata 超限或保留容量不足时，跳过复用或保留并继续计算。命中不产生 `OperationTiming` 记录，也不增加 `computed_elements`。
 
-Frozen execution 固定其 plan 与不可变 Result bindings；调用方替换 bindings 不会改变已捕获的输入。Borrowed-graph execution 继续严格检查 graph currentness。
+每次 execute 调用持有不可变 Result binding 快照，直到 callback 退出。直接执行与 demand 执行都检查 plan currentness；图被替换或销毁后，借用该图版本的 plan 返回 Stale。
 
 `ExecutionContextConfig::result_cache_bytes` 默认为 0，即禁用 completed-result 保留与 block 复用。`maximum_dependency_cache_metadata` 默认 65536 proof units，范围为 1..1048576。`ExecutionOptions::maximum_dependency_cache_work` 是单独的每 Run 可选配额，默认 1048576，设为零会禁用该 Run 的 completed-result、checkpoint 与 block 复用。Key 构造、样本哈希、重新绑定、checkpoint witness 和 block key 在 Root 必需 work 之外使用该配额。耗尽时跳过复用或保留并继续计算；不会退还已经消耗的 Root work。
 
@@ -67,8 +67,8 @@ Block 状态复用把 block 契约与固定 block 输入证明，同 block kind�
 - Native GPU results 与 CPU-exact result keys 隔离，因为执行模式与后端同时属于 template 和内容 key。带 fallback 污染的结果不进入任何复用缓存，近似 native results 不替代 exact CPU results。
 - `ResultCacheStatistics::native_retained_bytes` 统计缓存保留的唯一原生分配，同时包括保留的 GPU 输出和保留的 GPU block 状态。它不是仅 block 的容量。
 - Native input-copy reuse 与 completed Result computation reuse 分离。它可复用已授权 Result tensor backing 的 transport，但不会使上游 producer computation 获得缓存资格。
-- LRU eviction 撤销条目今后的查找资格；持有 Result 或读窗口的调用方保留其 backing。`clear()` 推进缓存 epoch，因此更早 epoch 的工作不能重新填充已清空的缓存。Frozen executions 是内存 owners，不是序列化 plans。
+- LRU eviction 撤销条目今后的查找资格；持有 Result 或读窗口的调用方保留其 backing。`clear()` 推进缓存 epoch，因此更早 epoch 的工作不能重新填充已清空的缓存。
 
-当前 production image operation 可用性见[图像 operations](Image-Operations.zh.md)。Snapshot 和 generic cache 行为由 `test_input_snapshot`、`test_frozen_execution`、`test_generic_result_cache` 与 `test_computed_scalar` 覆盖。跨编辑后 descriptor 授权的内容 identity 复用，以及跨物理 step 的 checkpoint 共享，由 `test_static_compiler` 覆盖。Result capture 和 owner release 由 `test_result_image_contracts` 与 `test_result_objects` 覆盖。
+当前 production image operation 可用性见[图像 operations](Image-Operations.zh.md)。Snapshot 和 generic cache 行为由 `test_input_snapshot`、`test_generic_result_cache` 与 `test_computed_scalar` 覆盖。跨编辑后 descriptor 授权的内容 identity 复用，以及跨物理 step 的 checkpoint 共享，由 `test_static_compiler` 覆盖。Result capture 和 owner release 由 `test_result_image_contracts` 与 `test_result_objects` 覆盖。
 
 Run 共享 stage 由 plan 本身在每个 call、stage 和 block activation 中执行一次，独立于可选缓存。它们不提供 checkpoint 或 block 服务，也不跨 Run 保留活动状态。带共享 stage 读取的指令绕过 completed-result 缓存；见[全局结果](Global-Results.zh.md#completed-result-缓存)。Snapshot block 几何独立于 plan tile extent。

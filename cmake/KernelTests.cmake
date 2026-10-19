@@ -331,7 +331,6 @@ photospider_add_kernel_test(
     test_result_diagnostics Photospider::kernel
     tests/integration/kernel/test_result_diagnostics.cpp)
 
-photospider_add_kernel_test(test_frozen_execution Photospider::kernel tests/integration/kernel/test_frozen_execution.cpp)
 
 photospider_add_kernel_test(test_result_image_views Photospider::kernel tests/integration/kernel/image/test_result_image_views.cpp)
 

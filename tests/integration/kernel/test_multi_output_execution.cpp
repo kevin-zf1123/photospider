@@ -87,14 +87,14 @@ int staged_outputs() {
   const auto root = multi_result::take(execution.resource_budget());
   ExecutionBindings bindings{{multi_result::binding(root, "a", 7),
                               multi_result::binding(root, "b", 11)}};
-  auto frozen = execution.freeze(compiled.value().plan.value(), bindings);
-  PS_CHECK(frozen.ok());
+  auto run_plan = compiled.value().plan.value();
+  ExecutionBindings run_bindings = bindings;
   const DemandQuery query{
       {"left",
        TileRequest{{{0, multi_result::take(TileSet::range(root, 0, 1))}}}},
       {"right",
        TileRequest{{{0, multi_result::take(TileSet::range(root, 0, 1))}}}}};
-  auto first = execution.execute_fragments(frozen.value(), query);
+  auto first = execution.execute_fragments(run_plan, run_bindings, query);
   PS_CHECK(first.ok());
   PS_CHECK(number(first.value(), "left") == 7);
   PS_CHECK(number(first.value(), "right") == 11);
@@ -110,14 +110,15 @@ int staged_outputs() {
   PS_CHECK(verify_dirty(first.value().dependencies, root, 0,
                         {{0, 0, 0}, {left_return, 0, 0}}) == 0);
   bindings.inputs[0] = multi_result::binding(root, "a", 13);
-  auto replacement = execution.freeze(compiled.value().plan.value(), bindings);
-  PS_CHECK(replacement.ok());
-  auto changed = execution.execute_fragments(replacement.value(), query);
+  auto replacement_plan = compiled.value().plan.value();
+  ExecutionBindings replacement_bindings = bindings;
+  auto changed = execution.execute_fragments(replacement_plan,
+                                             replacement_bindings, query);
   PS_CHECK(changed.ok());
   PS_CHECK(number(changed.value(), "left") == 13);
   PS_CHECK(number(changed.value(), "right") == 11);
   PS_CHECK((*counts)[0] == 2 && (*counts)[1] == 1);
-  auto old = execution.execute_fragments(frozen.value(), query);
+  auto old = execution.execute_fragments(run_plan, run_bindings, query);
   PS_CHECK(old.ok() && number(old.value(), "left") == 7);
   // Renumber sources and node, omit a sibling's instructions, and
   // retain both content reuse and the new graph's dependency records/dirty
@@ -132,9 +133,10 @@ int staged_outputs() {
   GraphContext renamed_graph(renamed);
   auto renamed_plan = compiler.compile(renamed_graph).take_value().plan.value();
   const auto before_rename = (*counts)[1].load();
-  auto renamed_frozen = execution.freeze(renamed_plan, bindings).take_value();
-  auto renamed_result =
-      execution.execute_fragments(renamed_frozen, {{"right", point}});
+  auto renamed_run_plan = renamed_plan;
+  ExecutionBindings renamed_run_bindings = bindings;
+  auto renamed_result = execution.execute_fragments(
+      renamed_run_plan, renamed_run_bindings, {{"right", point}});
   PS_CHECK(renamed_result.ok());
   PS_CHECK((*counts)[1] == before_rename &&
            number(renamed_result.value(), "right") == 11);
@@ -158,8 +160,10 @@ int staged_outputs() {
   chain.outputs = {{"left", 2, "left"}, {"right", 2, "right"}};
   GraphContext chain_graph(chain);
   auto chain_plan = compiler.compile(chain_graph).take_value().plan.value();
-  auto chain_frozen = execution.freeze(chain_plan, bindings).take_value();
-  auto seeded_chain = execution.execute_fragments(chain_frozen, query);
+  auto chain_run_plan = chain_plan;
+  ExecutionBindings chain_run_bindings = bindings;
+  auto seeded_chain =
+      execution.execute_fragments(chain_run_plan, chain_run_bindings, query);
   PS_CHECK(seeded_chain.ok());
   chain.nodes[0].id = 77;
   chain.nodes[1].id = 88;
@@ -168,11 +172,12 @@ int staged_outputs() {
   chain.outputs = {{"right", 88, "right"}};
   GraphContext moved_chain(chain);
   auto moved_plan = compiler.compile(moved_chain).take_value().plan.value();
-  auto moved_frozen = execution.freeze(moved_plan, bindings).take_value();
+  auto moved_run_plan = moved_plan;
+  ExecutionBindings moved_run_bindings = bindings;
   const auto before_chain = (*counts)[1].load();
   const auto left_before_chain = (*counts)[0].load();
-  auto moved_result =
-      execution.execute_fragments(moved_frozen, {{"right", point}});
+  auto moved_result = execution.execute_fragments(
+      moved_run_plan, moved_run_bindings, {{"right", point}});
   PS_CHECK(moved_result.ok());
   PS_CHECK((*counts)[1] == before_chain && (*counts)[0] == left_before_chain);
   PS_CHECK(number(moved_result.value(), "right") == 11);
@@ -271,20 +276,20 @@ int projected_sync_inputs() {
   PS_CHECK(multi_result::number(result.value().results.at("constant")) == 29);
   PS_CHECK(unwanted_calls->load() == 0);
   execution.clear_result_cache();
-  auto frozen = execution
-                    .freeze(compiled.value().plan.value(),
-                            {{multi_result::binding(root, "a", 17)}})
-                    .take_value();
-  auto independent = execution
-                         .freeze(compiled.value().plan.value(),
-                                 {{multi_result::binding(root, "a", 23)}})
-                         .take_value();
+  auto run_plan = compiled.value().plan.value();
+  ExecutionBindings run_bindings = {{multi_result::binding(root, "a", 17)}};
+  auto independent_plan = compiled.value().plan.value();
+
+  ExecutionBindings independent_bindings = {
+      {multi_result::binding(root, "a", 23)}};
   const DemandQuery only_constant{
       {"constant",
        TileRequest{{{0, multi_result::take(TileSet::range(root, 0, 1))}}}}};
   const auto before = (*projected_calls)[1].load();
-  auto first = execution.execute_fragments(frozen, only_constant);
-  auto cached = execution.execute_fragments(independent, only_constant);
+  auto first =
+      execution.execute_fragments(run_plan, run_bindings, only_constant);
+  auto cached = execution.execute_fragments(
+      independent_plan, independent_bindings, only_constant);
   PS_CHECK(first.ok() && cached.ok());
   PS_CHECK((*projected_calls)[1] == before + 1 && unwanted_calls->load() == 0);
   PS_CHECK(number(cached.value(), "constant") == 29);

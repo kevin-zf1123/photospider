@@ -582,9 +582,10 @@ int c_contract() {
   }
   ExecutionBindings half_bindings{
       {source(halves.inputs[0], .5, 0), source(halves.inputs[1], .5, 0)}};
-  auto frozen =
-      execution.freeze(half_plan.plan.value(), half_bindings).take_value();
-  auto empty = execution.execute_fragments(frozen, {{"output", {}}});
+  auto run_plan = half_plan.plan.value();
+  ExecutionBindings run_bindings = half_bindings;
+  auto empty =
+      execution.execute_fragments(run_plan, run_bindings, {{"output", {}}});
   PS_CHECK(empty.ok());
   const auto& empty_output = empty.value().results.at("output");
   auto empty_facts = empty_output.descriptor().take_value();

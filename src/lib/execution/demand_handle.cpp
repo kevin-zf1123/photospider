@@ -11,8 +11,8 @@
 
 #include "execution/demand_context.hpp"
 #include "execution/demand_query.hpp"
+#include "execution/execution_bindings.hpp"
 #include "execution/execution_context_state.hpp"
-#include "execution/frozen_execution_state.hpp"
 #include "execution/tile_binding_changes.hpp"
 #include "execution/tile_records.hpp"
 #include "photospider/core/checked_math.hpp"
@@ -39,12 +39,18 @@ Result<std::uint64_t> diagnostic_byte_sum(std::uint64_t left,
 // raw context borrow is granted only by an active call lease. close waits for
 // all such leases before clearing it; owning bundles retire outside this lock.
 struct DemandHandle::Impl {
+  struct Bundle {
+    explicit Bundle(const ResourceBudget& root) : resources(root) {}
+    ResourceBudget resources;
+    ExecutionPlan plan;
+    ExecutionBindings bindings;
+  };
   struct Publication {
     DemandQuery query;
     std::map<std::string, TileRequest> dirty;
   };
   std::weak_ptr<execution_internal::DemandCoordinator> owner;
-  std::shared_ptr<const FrozenExecution> bundle;
+  std::shared_ptr<const DemandHandle::Impl::Bundle> bundle;
   std::shared_ptr<const TileRecords> records;
   std::atomic<std::uint64_t> generation{1};
   CancellationSource cancellation;
@@ -74,7 +80,7 @@ struct DemandCoordinator : std::enable_shared_from_this<DemandCoordinator> {
   struct Lease {
     std::shared_ptr<DemandCoordinator> owner;
     std::shared_ptr<DemandHandle::Impl> handle;
-    std::shared_ptr<const FrozenExecution> bundle;
+    std::shared_ptr<const DemandHandle::Impl::Bundle> bundle;
     std::uint64_t generation = 0, revision = 0;
     CancellationToken cancellation;
     bool active = false;
@@ -90,7 +96,8 @@ struct DemandCoordinator : std::enable_shared_from_this<DemandCoordinator> {
         return status;
       if (cancellation.cancelled())
         return Status{ErrorCode::Cancelled, {}};
-      if (handle->generation.load(std::memory_order_acquire) != generation)
+      if (!bundle->plan.current() ||
+          handle->generation.load(std::memory_order_acquire) != generation)
         return Status{ErrorCode::Stale, {}};
       return status;
     }
@@ -109,7 +116,7 @@ struct DemandCoordinator : std::enable_shared_from_this<DemandCoordinator> {
     std::lock_guard<std::mutex> lock(mutex);
     if (closing || lease->cancellation.cancelled())
       return Result<std::shared_ptr<Lease>>(Status{ErrorCode::Cancelled, {}});
-    if (!handle->bundle)
+    if (!handle->bundle || !handle->bundle->plan.current())
       return Result<std::shared_ptr<Lease>>(Status{ErrorCode::Stale, {}});
     if (calls >= maximum_calls)
       return Result<std::shared_ptr<Lease>>(
@@ -289,16 +296,23 @@ Result<DemandHandle> ExecutionContext::open_demand(const ExecutionPlan& plan,
       config.maximum_metadata_entries > 1048576)
     return Result<DemandHandle>(
         Status{ErrorCode::InvalidArgument, "invalid demand metadata limit"});
-  auto frozen = freeze(plan, std::move(bindings));
-  if (!frozen.ok())
-    return Result<DemandHandle>(frozen.status());
+  auto validated = execution_internal::preflight_regional_bindings(
+      plan, bindings, {}, *impl_->budget);
+  if (!validated.ok())
+    return Result<DemandHandle>(validated.status());
+  const auto root = *impl_->budget;
+  auto bundle = std::allocate_shared<DemandHandle::Impl::Bundle>(
+      ResourceAllocator<DemandHandle::Impl::Bundle>(root), root);
+  bundle->plan = plan;
+  bundle->bindings = std::move(bindings);
+  if (!plan.current())
+    return Result<DemandHandle>(Status{ErrorCode::Stale, {}});
   auto state = std::make_shared<DemandHandle::Impl>();
   state->owner = impl_->demands;
   state->config = config;
-  const auto root = frozen.value().state_->resources;
   state->records = std::allocate_shared<TileRecords>(
       ResourceAllocator<TileRecords>(root), root, 1);
-  state->bundle = std::make_shared<const FrozenExecution>(frozen.take_value());
+  state->bundle = std::move(bundle);
   auto& owner = *impl_->demands;
   std::lock_guard<std::mutex> lock(owner.mutex);
   if (owner.closing)
@@ -346,34 +360,30 @@ Result<DemandResult> DemandHandle::request(
     return Result<DemandResult>(lease->stop(std::move(status)));
   };
   auto normalized = normalize_tile_demands(
-      query, lease->bundle->plan(), options.dependencies.sets.maximum_boxes,
-      lease->bundle->state_->resources);
+      query, lease->bundle->plan, options.dependencies.sets.maximum_boxes,
+      lease->bundle->resources);
   if (!normalized.ok())
     return failure(normalized.status());
   DemandQuery original = normalized.take_value();
-  auto key = demand_key(original, lease->bundle->plan(),
+  auto key = demand_key(original, lease->bundle->plan,
                         std::min(impl_->config.maximum_metadata_entries,
                                  options.dependencies.sets.maximum_boxes),
-                        lease->bundle->state_->resources);
+                        lease->bundle->resources);
   if (!key.ok())
     return failure(key.status());
-  auto state = std::allocate_shared<FrozenExecution::State>(
-      ResourceAllocator<FrozenExecution::State>(
-          lease->bundle->state_->resources),
-      *lease->bundle->state_);
-  state->plan.current_check_ = [handle = impl_,
-                                generation = lease->generation] {
-    return handle->generation.load(std::memory_order_acquire) == generation;
+  auto run = lease->bundle->plan;
+  run.current_check_ = [current = run.current_check_, handle = impl_,
+                        generation = lease->generation] {
+    return current && current() &&
+           handle->generation.load(std::memory_order_acquire) == generation;
   };
-  FrozenExecution run;
-  run.state_ = std::move(state);
   auto executed = owner->context->execute_fragments(
-      run, original, lease->cancellation, options);
+      run, lease->bundle->bindings, original, lease->cancellation, options);
   if (!executed.ok())
     return failure(executed.status());
   auto result = executed.take_value();
   result.generation = lease->generation;
-  const auto& root = lease->bundle->state_->resources;
+  const auto& root = lease->bundle->resources;
   ResourceAllocationScope allocation(root);
   auto publication = std::allocate_shared<Impl::Publication>(
       ResourceAllocator<Impl::Publication>(root));
@@ -410,7 +420,7 @@ Result<DemandResult> DemandHandle::request(
     auto copied = std::allocate_shared<Impl::Publication>(
         ResourceAllocator<Impl::Publication>(root), *item.second);
     for (auto& named : copied->dirty) {
-      const auto index = lease->bundle->plan().output(named.first).record_index;
+      const auto index = lease->bundle->plan.output(named.first).record_index;
       TileRequest remaining_request;
       for (const auto& member : named.second.members) {
         ResourceVector<TileIndex> remaining{ResourceAllocator<TileIndex>(root)};
@@ -435,13 +445,13 @@ Result<DemandResult> DemandHandle::request(
     item.second = std::move(copied);
   }
   auto records = retained_records(*current_records, updates.value(),
-                                  publications, lease->bundle->plan(), root,
+                                  publications, lease->bundle->plan, root,
                                   lease->generation, lease->cancellation);
   if (!records.ok())
     return failure(records.status());
   auto weight =
-      retained_weight(publications, *records.value(), lease->bundle->plan(),
-                      root, impl_->config.maximum_metadata_entries);
+      retained_weight(publications, *records.value(), lease->bundle->plan, root,
+                      impl_->config.maximum_metadata_entries);
   if (!weight.ok())
     return failure(weight.status());
   std::lock_guard<std::mutex> lock(owner->mutex);
@@ -457,17 +467,6 @@ Result<DemandResult> DemandHandle::request(
   impl_->metadata_entries = weight.value();
   ++impl_->revision;
   return Result<DemandResult>(std::move(result));
-}
-Result<FrozenExecution> DemandHandle::freeze() const {
-  if (!impl_)
-    return Result<FrozenExecution>(Status{ErrorCode::Stale, {}});
-  auto owner = impl_->owner.lock();
-  if (!owner)
-    return Result<FrozenExecution>(Status{ErrorCode::Cancelled, {}});
-  std::lock_guard<std::mutex> lock(owner->mutex);
-  if (owner->closing || impl_->cancellation.token().cancelled())
-    return Result<FrozenExecution>(Status{ErrorCode::Cancelled, {}});
-  return Result<FrozenExecution>(*impl_->bundle);
 }
 Result<std::uint64_t> DemandHandle::generation() const {
   if (!impl_)
@@ -491,13 +490,13 @@ Status DemandHandle::release(const DemandQuery& query) const {
     return begun.status();
   auto lease = begun.take_value();
   auto normalized = normalize_tile_demands(
-      query, lease->bundle->plan(), impl_->config.maximum_metadata_entries,
-      lease->bundle->state_->resources);
+      query, lease->bundle->plan, impl_->config.maximum_metadata_entries,
+      lease->bundle->resources);
   if (!normalized.ok())
     return lease->stop(normalized.status());
-  auto key = demand_key(normalized.value(), lease->bundle->plan(),
+  auto key = demand_key(normalized.value(), lease->bundle->plan,
                         impl_->config.maximum_metadata_entries,
-                        lease->bundle->state_->resources);
+                        lease->bundle->resources);
   if (!key.ok())
     return lease->stop(key.status());
   std::map<std::string, std::shared_ptr<const Impl::Publication>> publications;
@@ -517,17 +516,17 @@ Status DemandHandle::release(const DemandQuery& query) const {
     current_records = impl_->records;
     lease->revision = impl_->revision;
   }
-  const auto& root = lease->bundle->state_->resources;
+  const auto& root = lease->bundle->resources;
   ResourceAllocationScope allocation(root);
   publications.erase(key.value().value);
-  auto records = retained_records(*current_records, {}, publications,
-                                  lease->bundle->plan(), root,
-                                  lease->generation, lease->cancellation);
+  auto records =
+      retained_records(*current_records, {}, publications, lease->bundle->plan,
+                       root, lease->generation, lease->cancellation);
   if (!records.ok())
     return lease->stop(records.status());
   auto weight =
-      retained_weight(publications, *records.value(), lease->bundle->plan(),
-                      root, impl_->config.maximum_metadata_entries);
+      retained_weight(publications, *records.value(), lease->bundle->plan, root,
+                      impl_->config.maximum_metadata_entries);
   if (!weight.ok())
     return lease->stop(weight.status());
   std::lock_guard<std::mutex> lock(owner->mutex);
@@ -547,7 +546,7 @@ bool DemandHandle::cancel() const noexcept {
   if (!impl_)
     return false;
   const bool first = impl_->cancellation.cancel();
-  std::shared_ptr<const FrozenExecution> retired;
+  std::shared_ptr<const DemandHandle::Impl::Bundle> retired;
   if (auto owner = impl_->owner.lock()) {
     std::lock_guard<std::mutex> lock(owner->mutex);
     impl_->publications.clear();
@@ -573,7 +572,7 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
   {
     std::lock_guard<std::mutex> lock(owner->mutex);
     if (impl_->bundle)
-      root = impl_->bundle->state_->resources;
+      root = impl_->bundle->resources;
   }
   std::optional<ResourceAllocationScope> root_scope;
   if (root)
@@ -596,19 +595,22 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
     current_records = impl_->records;
     lease->revision = impl_->revision;
   }
-  auto frozen =
-      owner->context->freeze(lease->bundle->state_->plan, std::move(bindings));
-  if (!frozen.ok())
-    return failure(frozen.status());
-  auto next = std::make_shared<const FrozenExecution>(frozen.take_value());
+  auto validated = execution_internal::preflight_regional_bindings(
+      lease->bundle->plan, bindings, lease->cancellation, *root);
+  if (!validated.ok())
+    return failure(validated.status());
+  auto next = std::allocate_shared<Impl::Bundle>(
+      ResourceAllocator<Impl::Bundle>(*root), *root);
+  next->plan = lease->bundle->plan;
+  next->bindings = std::move(bindings);
   auto support = current_records->workflow_dependencies();
   if (!support.ok())
     return failure(support.status());
   auto access = options;
   access.cancellation = lease->cancellation;
   auto changes = execution_internal::tile_binding_changes(
-      lease->bundle->plan(), lease->bundle->state_->bindings,
-      next->state_->bindings, support.value(), *root, access);
+      lease->bundle->plan, lease->bundle->bindings, next->bindings,
+      support.value(), *root, access);
   if (!changes.ok())
     return failure(changes.status());
   auto dirty = current_records->dirty(changes.value());
@@ -623,7 +625,7 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
         ResourceAllocator<Impl::Publication>(*root), *item.second);
     std::map<std::string, TileRequest> coverage;
     for (const auto& named : publication->query) {
-      const auto& step = next->plan().output(named.first);
+      const auto& step = next->plan.output(named.first);
       const auto index = step.record_index;
       auto units = query_units(named.second, step, *root,
                                impl_->config.maximum_metadata_entries);
@@ -662,15 +664,15 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
     item.second = std::move(publication);
   }
   auto records =
-      retained_records(*current_records, {}, publications, next->plan(), *root,
+      retained_records(*current_records, {}, publications, next->plan, *root,
                        update.generation, lease->cancellation);
   if (!records.ok())
     return failure(records.status());
-  auto weight = retained_weight(publications, *records.value(), next->plan(),
+  auto weight = retained_weight(publications, *records.value(), next->plan,
                                 *root, impl_->config.maximum_metadata_entries);
   if (!weight.ok())
     return failure(weight.status());
-  std::shared_ptr<const FrozenExecution> retired;
+  std::shared_ptr<const DemandHandle::Impl::Bundle> retired;
   std::lock_guard<std::mutex> lock(owner->mutex);
   auto status = lease->stop();
   if (!status.ok())

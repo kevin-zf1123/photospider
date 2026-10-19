@@ -121,8 +121,10 @@ int empty_input_request() {
                   .plan.value();
   ExecutionContext context(registry, {1, false, 16, 1048576, 0});
   auto root = take(context.resource_budget());
-  auto frozen = take(context.freeze(plan, {}));
-  auto empty = context.execute_fragments(frozen, {{"out", TileRequest{}}});
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = {};
+  auto empty = context.execute_fragments(run_plan, run_bindings,
+                                         {{"out", TileRequest{}}});
   PS_CHECK(empty.ok());
   PS_CHECK(source_counts->starts == 0 && output_counts->starts == 0);
   PS_CHECK(root.statistics().live[ResourceKind::Queue] == 0);
@@ -231,11 +233,13 @@ int metadata_tensor_need(unsigned mode, bool denied = false,
             .plan.value();
     ExecutionContext context(registry, {1, false, 16, 1048576, 0});
     root = take(context.resource_budget());
-    auto frozen = take(context.freeze(plan));
+    auto run_plan = plan;
+    ExecutionBindings run_bindings = {};
     ExecutionOptions options;
     auto run = context.execute_fragments(
-        frozen, {{"out", TileRequest{{{0, take(TileSet::range(root, 0, 1))}}}}},
-        {}, options);
+        run_plan, run_bindings,
+        {{"out", TileRequest{{{0, take(TileSet::range(root, 0, 1))}}}}}, {},
+        options);
     if (denied) {
       PS_CHECK(!run.ok() &&
                run.status().reason == FailureReason::UnauthorizedRead &&
@@ -256,7 +260,7 @@ int metadata_tensor_need(unsigned mode, bool denied = false,
     if (!failing_source || mode < 2) {
       // A later data query validates its own requested payload.
       auto actual = context.execute_fragments(
-          frozen,
+          run_plan, run_bindings,
           {{"source",
             TileRequest{{{0, take(TileSet::from_indices(root, {0}))}}}}},
           {}, options);

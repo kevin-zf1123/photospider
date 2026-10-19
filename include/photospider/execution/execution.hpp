@@ -330,36 +330,6 @@ struct PHOTOSPIDER_API ExecutionResult final {
   ResourceMap<ResultRef> results = {};
 };
 
-/**
- * @brief Shared owner for a pinned plan, immutable input bindings, and
- * registry.
- * @note Copies share one immutable state containing the plan, binding snapshot,
- * operation registry, and execution identity. The state survives replacement
- * or destruction of the source graph. Default objects fail Stale; capture does
- * not start work. A derived region owns a separate tile plan and state.
- */
-class PHOTOSPIDER_API FrozenExecution final {
- public:
-  FrozenExecution() = default;
-  bool valid() const noexcept { return state_ != nullptr; }
-  /** @brief Borrowed immutable pinned plan, valid for this object's lifetime.
-   */
-  const ExecutionPlan& plan() const noexcept;
-  /** @brief Derives a frozen named-output tile request without recompilation.
-   * Creates an independent plan sharing captured bindings and registry owners.
-   * @return Pinned tiles or Stale/InvalidArgument for invalid/outside demand.
-   * @throws std::bad_alloc For copied metadata.
-   */
-  Result<FrozenExecution> for_tiles(const std::string& output,
-                                    const TileRequest& request) const;
-
- private:
-  friend class ExecutionContext;
-  friend class DemandHandle;
-  struct State;
-  std::shared_ptr<const State> state_;
-};
-
 /** @brief Named tile subsets or complete outputs of the compiled plan.
  * Empty tile sets request no computation. Each member interval is checked
  * against its compiled grid before starting any requested producer.
@@ -370,7 +340,7 @@ struct PHOTOSPIDER_API DemandResult final {
   ResourceMap<ResultRef> results;
   ExecutionDiagnostics diagnostics;
   ExecutionDependencies dependencies;
-  /** @brief Captured demand generation; zero for direct frozen execution. */
+  /** @brief Captured demand generation; zero for direct fragment execution. */
   std::uint64_t generation = 0;
 };
 /** @brief Bounds the total retained structural publications for one handle. */
@@ -418,10 +388,6 @@ class PHOTOSPIDER_API DemandHandle final {
   Result<DemandUpdate> replace_bindings(
       ExecutionBindings bindings,
       const SnapshotAccessOptions& options = {}) const;
-  /** @brief Pins the current bundle for ordinary independent frozen execution.
-   * @return Owning frozen work or Cancelled/Stale for an unusable handle.
-   */
-  Result<FrozenExecution> freeze() const;
   /** @brief Removes one exact query's retained structural subscription.
    * @note Does not cancel active requests. An already-running request for Q
    * can publish a new subscription after this removal.
@@ -468,7 +434,7 @@ class PHOTOSPIDER_API ExecutionContext final {
   /**
    * @brief Stops admission, joins workers, and verifies resource settlement.
    * @throws Nothing.
-   * @note Direct execute/open/freeze calls must not race destruction. Existing
+   * @note Direct execute/open calls must not race destruction. Existing
    * demand-handle calls may race shutdown; they are cancelled and drained.
    */
   ~ExecutionContext() noexcept;
@@ -540,14 +506,27 @@ class PHOTOSPIDER_API ExecutionContext final {
 
   /** @brief Opens an immutable latest-demand bundle without starting callbacks.
    * @note Requires Result bindings that match the workflow declarations. The
-   * handle owns its captured plan independently from later graph replacement.
+   * Requests and binding replacement check the retained plan currentness.
+   * Graph replacement or destruction makes a borrowed-graph plan stale.
    * @return Handle or Stale/typed validation/resource failure.
    */
   Result<DemandHandle> open_demand(const ExecutionPlan& plan,
                                    ExecutionBindings bindings = {},
                                    DemandConfig config = {});
-  /** @brief Executes exact subsets of an independently frozen static plan.
-   * @note Requests must be subsets of the Plan's compiled output selections.
+  /** @brief Executes exact subsets of a current static plan with per-call
+   * bindings.
+   * @param plan Current plan from this context's operation registry.
+   * @param bindings Immutable Result owners, validated as for execute().
+   * @param query Named subsets of the compiled output tile requests.
+   * @param cancellation Cooperative per-call cancellation.
+   * @param options Resource, work and notification controls for this Run.
+   * @return Complete fragments or typed binding, query, stale, cancellation,
+   * backend, protocol or resource failure; no partial success.
+   * @throws std::bad_alloc If call-argument allocation fails.
+   * @note The plan, query and options must remain valid and immutable until
+   * return. Bindings are copied per call; input owners survive callback
+   * retirement. Graph currentness and cancellation follow execute().
+   * Requests must be subsets of the Plan's compiled output selections.
    * Specialization filters existing instructions before execution and never
    * calls dependency mappers. Empty selections omit pure output work; saved
    * CFG control and mandatory effect roots still execute on the chosen path.
@@ -567,27 +546,9 @@ class PHOTOSPIDER_API ExecutionContext final {
    * failure or cancellation of an executed mandatory root fails this Run.
    */
   Result<DemandResult> execute_fragments(
-      const FrozenExecution& frozen, const DemandQuery& query,
-      const CancellationToken& cancellation = {},
+      const ExecutionPlan& plan, ExecutionBindings bindings,
+      const DemandQuery& query, const CancellationToken& cancellation = {},
       const ExecutionOptions& options = {});
-
-  /**
-   * @brief Pins a current matching plan and immutable Result bindings.
-   * @return Frozen work or Stale/typed binding validation error.
-   * @throws std::bad_alloc For snapshot metadata.
-   * @note Capture rechecks graph currentness before returning. No callback
-   * executes, and frozen work never observes later edits.
-   */
-  Result<FrozenExecution> freeze(const ExecutionPlan& plan,
-                                 ExecutionBindings bindings = {}) const;
-  /** @brief Executes pinned work, independently cancellable per call.
-   * @return Named result or typed failure. Ordinary completion drains callbacks
-   * before return.
-   * @throws std::bad_alloc For metadata allocation.
-   */
-  Result<ExecutionResult> execute(const FrozenExecution& frozen,
-                                  const CancellationToken& cancellation = {},
-                                  const ExecutionOptions& options = {});
 
   /** @brief Drops optional retained results; active readers remain valid.
    * @note Concurrent-safe; active producers cannot refill the cleared epoch.
@@ -629,9 +590,7 @@ class PHOTOSPIDER_API ExecutionContext final {
   Result<ExecutionResult> execute_regions(
       const ExecutionPlan& plan, ExecutionBindings bindings,
       const CancellationToken& cancellation, const ExecutionOptions& options,
-      const std::string& snapshot_identity = {},
-      const DemandQuery* requested = nullptr,
-      std::shared_ptr<const ExecutionPlan> plan_owner = {});
+      const DemandQuery* requested = nullptr);
   /** @brief Opaque pools, shared waiting admission, and resource ledger. */
   struct Impl;
   /** @brief Unique local execution ownership. */

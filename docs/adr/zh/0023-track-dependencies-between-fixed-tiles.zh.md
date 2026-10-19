@@ -3,7 +3,7 @@
 - 状态：Accepted
 - 英文权威文档：[ADR 0023](../0023-track-dependencies-between-fixed-tiles.md)
 - 当前边界：package 0.36.0 实现了 §3 所述的逐成员 tile 网格、成员局部区间 Need 和 Run 共享 stage。生产者的语义 descriptor 是其解析后的静态 Result schema；Result 不携带 facet 或附着的资源身份。
-- 相关：[ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)、[ADR 0017](0017-cpu-regional-execution-and-storage.zh.md)、[ADR 0018](0018-local-result-caches-and-frozen-execution.zh.md)、[ADR 0021](0021-independent-node-results.zh.md)、[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md)
+- 相关：[ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)、[ADR 0017](0017-cpu-regional-execution-and-storage.zh.md)、[ADR 0018](0018-local-result-caches.zh.md)、[ADR 0021](0021-independent-node-results.zh.md)、[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md)
 
 ## 1. 核心摘要（TL;DR）
 

@@ -351,15 +351,14 @@ int cache_shared_route_budget() {
   auto plan = Compiler(registry).compile(graph).take_value().plan.value();
   ExecutionContext execution(registry, configuration());
   auto resource_root = execution.resource_budget().take_value();
-  auto frozen =
-      execution
-          .freeze(plan,
-                  {{multi_result::binding(resource_root, "x", 7, schema)}})
-          .take_value();
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = {
+      {multi_result::binding(resource_root, "x", 7, schema)}};
   const DemandQuery query{
       {"y",
        TileRequest{{{0, TileSet::range(resource_root, 0, 1).take_value()}}}}};
-  PS_CHECK(execution.execute_fragments(frozen, query).ok() && *calls == 1);
+  PS_CHECK(execution.execute_fragments(run_plan, run_bindings, query).ok() &&
+           *calls == 1);
   // Split the old shared producer into two equivalent new source nodes.
   // Fixed per-port content proofs allow equivalent cloned routes to reuse
   // the merge while rebuilding dependency evidence for the current plan.
@@ -376,19 +375,19 @@ int cache_shared_route_budget() {
   GraphContext changed(document);
   auto changed_plan =
       Compiler(registry).compile(changed).take_value().plan.value();
-  auto changed_frozen =
-      execution
-          .freeze(changed_plan,
-                  {{multi_result::binding(resource_root, "x", 7, schema)}})
-          .take_value();
-  auto result = execution.execute_fragments(changed_frozen, query);
+  auto changed_run_plan = changed_plan;
+  ExecutionBindings changed_run_bindings = {
+      {multi_result::binding(resource_root, "x", 7, schema)}};
+  auto result = execution.execute_fragments(changed_run_plan,
+                                            changed_run_bindings, query);
   PS_CHECK(result.ok() && *calls == 1);
   double actual = 0;
   PS_CHECK(result_input_fixture::read(result.value().results.at("y"), {0},
                                       &actual, sizeof(actual))
                .ok() &&
            actual == 14);
-  auto warm = execution.execute_fragments(changed_frozen, query);
+  auto warm = execution.execute_fragments(changed_run_plan,
+                                          changed_run_bindings, query);
   PS_REQUIRE_OK(warm);
   PS_CHECK(*calls == 1 && warm.value().diagnostics.cache_hits > 0);
   ResourceVector<TileChange> changes{
@@ -431,13 +430,10 @@ int diamond_cache_support() {
       {{0, TileSet::range(ResourceBudget{}, 0, 1).take_value()}}};
   // Public execution and retained-result replay must preserve diamond ancestry.
   ExecutionContext context(registry, configuration());
-  auto frozen =
-      context
-          .freeze(plan,
-                  {{multi_result::binding(
-                      context.resource_budget().take_value(), "x", 7, schema)}})
-          .take_value();
-  auto computed = context.execute_fragments(frozen, {{"y", q}});
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = {{multi_result::binding(
+      context.resource_budget().take_value(), "x", 7, schema)}};
+  auto computed = context.execute_fragments(run_plan, run_bindings, {{"y", q}});
   PS_CHECK(computed.ok());
   const TileUnit unit{plan.output("y").record_index, 0, 0};
   auto support = computed.value().dependencies.tile_record(unit).take_value();
@@ -451,7 +447,7 @@ int diamond_cache_support() {
            input.tiles == q.members.at(0);
   };
   PS_CHECK(external_evidence(support));
-  auto reused = context.execute_fragments(frozen, {{"y", q}});
+  auto reused = context.execute_fragments(run_plan, run_bindings, {{"y", q}});
   PS_REQUIRE_OK(reused);
   PS_CHECK(reused.value().diagnostics.cache_hits > 0);
   auto replayed = reused.value().dependencies.tile_record(unit).take_value();

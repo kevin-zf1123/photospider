@@ -140,7 +140,6 @@ int generations() {
                                       {0, 0}, &result, 8)
                .ok() &&
            result == 1);
-  auto frozen = demand.freeze().take_value();
   bindings.inputs[1].result =
       source(root, values<std::int64_t>(ElementType::Int64, {0, 0, 0, 1, 0}));
   auto edit = demand.replace_bindings(bindings);
@@ -156,9 +155,6 @@ int generations() {
                .ok() &&
            result == 1);
   PS_CHECK(dirty_tiles(same_value.value().dependencies, 0, point(3), 0) == q);
-  auto old = context.execute_fragments(frozen, query);
-  PS_CHECK(old.ok() && old.value().generation == 0);
-  PS_CHECK(dirty_tiles(old.value().dependencies, 0, point(3), 0) == q);
   bindings.inputs[0].result =
       source(root, values<double>(ElementType::Float64, {1, 2, 3, 9, 5}));
   auto changed = demand.replace_bindings(bindings);
@@ -208,7 +204,6 @@ int generations() {
   PS_CHECK(demand.request({}).ok());
   PS_CHECK(demand.cancel() && !demand.cancel());
   PS_CHECK(demand.request(query).status().code == ErrorCode::Cancelled);
-  PS_CHECK(context.execute_fragments(frozen, query).ok());
   return 0;
 }
 struct Gate {
@@ -583,11 +578,20 @@ int isolation_and_limits() {
       demand.request({{"y", TileRequest{{{0, all_tiles(2)}}}}}).status().code ==
       ErrorCode::OperationFailed);
   PS_CHECK(demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}}).ok());
-  auto frozen = demand.freeze().take_value();
   PS_CHECK(graph.replace(gate_document()) > 0);
-  PS_CHECK(demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}}).ok());
+  PS_CHECK(
+      demand.request({{"y", TileRequest{{{0, point(0, 2)}}}}}).status().code ==
+      ErrorCode::Stale);
+  PS_CHECK(demand.replace_bindings(bindings).status().code == ErrorCode::Stale);
+  PS_CHECK(context.execute_fragments(plan, bindings, {}).status().code ==
+           ErrorCode::Stale);
   PS_CHECK(demand.cancel());
-  auto fresh = context.open_demand(frozen.plan(), bindings, DemandConfig{1});
+  auto fresh = context.open_demand(
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan.value(),
+      bindings, DemandConfig{1});
   PS_CHECK(fresh.ok());
   PS_CHECK(fresh.value()
                .request({{"y", TileRequest{{{0, point(0, 2)}}}}})
@@ -663,7 +667,6 @@ int snapshot_replacement() {
     const auto q =
         point(0, 3).unite(point(2, 3), ResourceBudget{}).take_value();
     PS_CHECK(demand.request({{"result", TileRequest{{{0, q}}}}}).ok());
-    auto frozen = demand.freeze().take_value();
     for (auto at : {0U, 2U}) {
       auto patch =
           TensorWriter::allocate(initial.descriptor(),
@@ -699,14 +702,6 @@ int snapshot_replacement() {
                  .ok());
     for (unsigned i = 0; i < width; ++i)
       PS_CHECK(bytes[i] == 0xff);
-    auto old =
-        context.execute_fragments(frozen, {{"result", TileRequest{{{0, q}}}}});
-    PS_CHECK(old.ok() &&
-             result_input_fixture::read(old.value().results.at("result"),
-                                        {0, 2}, bytes, width)
-                 .ok());
-    for (unsigned i = 0; i < width; ++i)
-      PS_CHECK(bytes[i] == 0);
     auto same = demand.replace_bindings(bindings, {2, {}});
     PS_CHECK(same.ok() && same.value().potential_dirty.at("result").empty());
   }
@@ -996,7 +991,7 @@ int protocol_first_cause() {
   PS_CHECK(context.cache_statistics().retained_bytes == 0);
   return 0;
 }
-int cancelled_run_and_frozen() {
+int cancelled_run_and_replacement() {
   auto gate = std::make_shared<Gate>();
   gate->ignore_cancellation = true;
   auto registry = gated_registry(gate, true);
@@ -1033,8 +1028,7 @@ int cancelled_run_and_frozen() {
   PS_CHECK(gate->entered == 3);
   // Retire the completed caller before exercising a new producer.
   joined = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
-  // A frozen waiter retains the old bundle while latest publication is stale.
-  auto frozen = demand.freeze().take_value();
+  // Binding replacement makes an active request stale.
   {
     std::lock_guard<std::mutex> lock(gate->mutex);
     gate->entered = 0;
@@ -1045,10 +1039,6 @@ int cancelled_run_and_frozen() {
   auto latest =
       std::async(std::launch::async, [&] { return demand.request(query); });
   PS_CHECK(gate->await(1));
-  auto pinned = std::async(std::launch::async, [&] {
-    return context.execute_fragments(frozen, query);
-  });
-  PS_CHECK(gate->await(2));
   bindings.inputs[0].result =
       binding(context, bindings.inputs[0].name,
               values<double>(ElementType::Float64, {8, 9}))
@@ -1056,20 +1046,31 @@ int cancelled_run_and_frozen() {
   PS_CHECK(demand.replace_bindings(bindings).ok());
   gate->open();
   PS_CHECK(latest.get().status().code == ErrorCode::Stale);
-  auto old = pinned.get();
   double result = 0;
-  PS_CHECK(old.ok() &&
-           result_input_fixture::read(old.value().results.at("y"), {0, 0},
-                                      &result, 8)
-               .ok() &&
-           result == 7);
-  PS_CHECK(gate->entered == 2);
+  PS_CHECK(gate->entered == 1);
   auto current = demand.request(query);
   PS_CHECK(current.ok() &&
            result_input_fixture::read(current.value().results.at("y"), {0, 0},
                                       &result, 8)
                .ok() &&
            result == 8);
+  // A graph edit invalidates an in-flight request and subsequent calls.
+  current = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
+  {
+    std::lock_guard<std::mutex> lock(gate->mutex);
+    gate->entered = 0;
+    gate->released = 0;
+    gate->release = false;
+  }
+  auto editing =
+      std::async(std::launch::async, [&] { return demand.request(query); });
+  PS_CHECK(gate->await(1));
+  PS_CHECK(graph.replace(gate_document()) > 0);
+  gate->open();
+  PS_CHECK(editing.get().status().code == ErrorCode::Stale);
+  PS_CHECK(demand.request(query).status().code == ErrorCode::Stale);
+  PS_CHECK(demand.request(query, stop.token()).status().code ==
+           ErrorCode::Cancelled);
   return 0;
 }
 
@@ -1193,7 +1194,6 @@ int cached_atomic_ancestor() {
   PS_CHECK(query.request({{"a_desc", TileRequest{{{0, point(0, 2)}}}}}).ok());
   // A -> B -> C: the 16-byte LRU retains C and evicts B pixels. The
   // active C subscription must still transpose an A edit through B evidence.
-  const auto old_bundle = query.freeze().take_value();
   tight_bindings.inputs[0] =
       binding(tight, "x", values<double>(ElementType::Float64, {11, 9}));
   auto change = query.replace_bindings(tight_bindings);
@@ -1206,15 +1206,6 @@ int cached_atomic_ancestor() {
                                       {0, 0}, &value, 8)
                .ok() &&
            value == 11);
-  auto pinned = tight.execute_fragments(
-      old_bundle, {{"a_desc", TileRequest{{{0, point(0, 2)}}}}});
-  PS_CHECK(pinned.ok() &&
-           result_input_fixture::read(pinned.value().results.at("a_desc"),
-                                      {0, 0}, &value, 8)
-               .ok() &&
-           value == 7);
-  // Restore the current descendant to the single-entry LRU before asking for
-  // both nodes; the old frozen computation must not replace current evidence.
   PS_CHECK(query.replace_bindings(tight_bindings).ok());
   PS_CHECK(query.request({{"a_desc", TileRequest{{{0, point(0, 2)}}}}}).ok());
   const auto previous = gate->entered;
@@ -1365,7 +1356,8 @@ int content_cache() {
   DemandQuery query{{"sum", TileRequest{{{0, q}}}}};
   auto first = demand.request(query);
   PS_CHECK(first.ok() && first.value().diagnostics.cache_hits == 0);
-  auto frozen = context.freeze(plan, bindings).take_value();
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = bindings;
   auto reused = demand.request(query);
   PS_CHECK(reused.ok() && reused.value().diagnostics.cache_hits > 0 &&
            reused.value().diagnostics.operation_timings.empty());
@@ -1406,7 +1398,7 @@ int content_cache() {
            q);
   PS_CHECK(demand.replace_bindings(bindings).ok());
   PS_CHECK(demand.request(query).value().diagnostics.cache_hits > 0);
-  auto old = context.execute_fragments(frozen, query);
+  auto old = context.execute_fragments(run_plan, run_bindings, query);
   PS_CHECK(old.ok() && old.value().diagnostics.cache_hits > 0);
   PS_CHECK(dirty_tiles(old.value().dependencies, 0, point(3), 0) == q);
   bindings.inputs[0].result =
@@ -1538,14 +1530,17 @@ int structured_content_cache() {
   PS_CHECK(low_work.ok() && low_work.value().diagnostics.cache_hits == 0 &&
            context.cache_statistics().retained_bytes == 0);
   {
-    auto fresh = context.freeze(plan, bindings).take_value();
-    auto seed = context.execute_fragments(fresh, query);
+    auto fresh_plan = plan;
+    ExecutionBindings fresh_bindings = bindings;
+    auto seed = context.execute_fragments(fresh_plan, fresh_bindings, query);
     PS_CHECK(seed.ok());
   }
   for (std::uint64_t fuel : {0U, 8U, 64U, 128U, 256U, 512U, 1024U}) {
-    auto fresh = context.freeze(plan, bindings).take_value();
+    auto fresh_plan = plan;
+    ExecutionBindings fresh_bindings = bindings;
     bounded.maximum_dependency_cache_work = fuel;
-    auto completed = context.execute_fragments(fresh, query, {}, bounded);
+    auto completed = context.execute_fragments(fresh_plan, fresh_bindings,
+                                               query, {}, bounded);
     PS_CHECK(completed.ok() &&
              result_input_fixture::read(completed.value().results.at("sum"),
                                         {0, 4}, &number, 8)
@@ -1553,18 +1548,13 @@ int structured_content_cache() {
              number == 14);
   }
   bounded.maximum_dependency_cache_work = 0;
-  // Compare optional proof budgets on one frozen identity. Creating another
-  // owner changes mandatory identity/capture work and invalidates the measured
-  // minimal Run budget before the cache path is exercised.
-  auto budget_owner = context.freeze(plan, bindings);
-  PS_REQUIRE_OK(budget_owner);
-  const auto budget_frozen = budget_owner.take_value();
+  // Compare optional proof budgets against the same plan and bindings.
   std::uint64_t lower = 0, upper = 4096;
   while (lower + 1 < upper) {
     const auto middle = lower + (upper - lower) / 2;
     bounded.maximum_dependency_work = middle;
     auto attempted =
-        context.execute_fragments(budget_frozen, query, {}, bounded);
+        context.execute_fragments(plan, bindings, query, {}, bounded);
     if (attempted.ok()) {
       upper = middle;
     } else {
@@ -1576,7 +1566,7 @@ int structured_content_cache() {
   for (std::uint64_t fuel : {8U, 64U, 128U, 256U, 512U, 1024U}) {
     bounded.maximum_dependency_cache_work = fuel;
     auto completed =
-        context.execute_fragments(budget_frozen, query, {}, bounded);
+        context.execute_fragments(plan, bindings, query, {}, bounded);
     if (!completed.ok())
       std::cerr << "cache fuel=" << fuel << " Run fuel=" << upper << ' '
                 << completed.status().message << '\n';
@@ -1595,8 +1585,9 @@ int structured_content_cache() {
            {"control",
             source(aggregate_root, values<std::int64_t>(ElementType::Int64,
                                                         {0, 0, 0, 0, 0}))}}};
-      auto frozen = aggregate.freeze(plan, current).take_value();
-      auto output = aggregate.execute_fragments(frozen, query);
+      auto run_plan = plan;
+      ExecutionBindings run_bindings = current;
+      auto output = aggregate.execute_fragments(run_plan, run_bindings, query);
       PS_CHECK(output.ok());
     }
     const auto stats = aggregate.cache_statistics();
@@ -1691,7 +1682,7 @@ int main() {
   PS_CHECK(structured_content_cache() == 0);
   PS_CHECK(cache_work_and_epoch() == 0);
   PS_CHECK(cache_snapshot_bits() == 0);
-  PS_CHECK(cancelled_run_and_frozen() == 0);
+  PS_CHECK(cancelled_run_and_replacement() == 0);
   PS_CHECK(cached_atomic_ancestor() == 0);
   return 0;
 }

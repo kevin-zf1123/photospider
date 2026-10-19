@@ -6,7 +6,6 @@
 #include <mutex>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -32,7 +31,6 @@ struct StructuredCacheContext final {
   const ExecutionPlan& plan;
   const std::vector<ExecutionBinding>& bindings;
   const std::vector<std::string>& templates;
-  std::string_view snapshot;
   const FootprintLimits& limits;
   const ResourceVector<bool>& eligible;
   ResultCache* table;

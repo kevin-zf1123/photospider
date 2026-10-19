@@ -96,10 +96,6 @@ struct ResultProgramQuery final {
   TileIndex tile_unit = 0;
   Backend backend = Backend::Cpu;
   std::string_view semantic_key;
-  /** @brief Routing identity for the captured execution snapshot.
-   * It identifies provenance and does not supply numeric input semantics.
-   */
-  std::string_view snapshot_identity;
   std::uint32_t output_index = 0;
   /** @brief UINT32_MAX for a tile; otherwise the prepared shared stage index.
    * Stage factories identify the contract with this index. Every shared poll
@@ -371,7 +367,7 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
    * applies only to cacheable operations with a pure selected-input producer
    * closure. Its key uses the operation contract, range, mode, incoming state
    * schema/coverage/raw bits, and currently supplied Tensor coverage, metadata,
-   * and raw bits; it excludes output demand, execution snapshot, and ObjectIds.
+   * and raw bits; it excludes output demand and ObjectIds.
    * When the operation opts into cross-output sharing, its namespace also
    * includes all resolved output contracts, backend, execution mode, static
    * parameters and actual input metadata. The selected output index and

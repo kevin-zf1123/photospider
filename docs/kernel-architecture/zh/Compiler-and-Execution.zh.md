@@ -233,7 +233,7 @@ Block 中的 calls 完成后，conditional jump 读取条件 sample，只执行�
 
 Coordinator 每次计入 work 时都检查取消、plan 有效性、observer 失败和宿主 stop 信号：进入 block 时、每条指令处，以及算子 work 回调内部。它不会抢占进程内 callback。Callback 进入后，Run 等它退出再释放借用 phase 和 owners。失败的 Run 不返回部分输出集合。指令失败时携带产出 call 的 `node_id`；输入校验器失败保留外部 `input_id`（错误为 `InvalidArgument`）或上游 `node_id`（错误为 `OperationFailed`），使非法调用方数据与非法算子输出保持可区分。
 
-`FrozenExecution` 共享包含 plan、binding snapshot、operation registry 和 execution identity 的不可变状态。只要 handle 仍持有该状态，`plan()` 返回的借用引用就有效。`ExecutionContext::execute_fragments` 先对请求子集调用 `select_outputs`，再运行过滤后的程序；它从不调用 mapper。`DemandHandle` 请求会以当前 generation 捕获 frozen plan；replacement 推进 generation，旧请求仍保留原 plan 和输入 owners。`replace_bindings` 在持有 handle mutex 时复制 frozen bundle 的 owning Root，建立其 Root allocation scope 后再获取 call lease。
+`ExecutionContext::execute_fragments(plan, bindings, query)` 校验当前 plan 与不可变 Result bindings，通过 `select_outputs` 筛选请求子集，再执行筛选后的程序，期间不调用 mapper。`DemandHandle` 保留 plan 与 binding generation。每个请求同时检查原 plan currentness 谓词和捕获的 generation；图被替换或销毁，以及 bindings 被替换，都会使活动请求返回 Stale。旧请求持有输入 owners，直到 callback 退出。`replace_bindings` 在持有 handle mutex 时复制 bundle 的 owning Root，建立其 Root allocation scope 后再获取 call lease。
 
 ## Compiler 产物
 

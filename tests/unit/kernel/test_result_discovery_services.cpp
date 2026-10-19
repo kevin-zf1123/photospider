@@ -356,8 +356,8 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
   ExecutionBindings bindings{{{"input", input_result}}};
   if (two_inputs)
     bindings.inputs.push_back({"input2", input_result});
-  auto frozen =
-      multi_result::take(context.freeze(compiled.plan.value(), bindings));
+  auto run_plan = compiled.plan.value();
+  ExecutionBindings run_bindings = bindings;
   ExecutionOptions options;
   options.dependencies.maximum_work = work;
   options.dependencies.maximum_gpu_requests = capacity;
@@ -371,8 +371,9 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
                                 : std::vector<TileIndex>{0}))}}};
   const auto before = root.statistics().live[ResourceKind::Payload];
   {
-    auto progress = context.execute_fragments(frozen, {{"out", demand}},
-                                              cancellation.token(), options);
+    auto progress =
+        context.execute_fragments(run_plan, run_bindings, {{"out", demand}},
+                                  cancellation.token(), options);
     if (progress.status().code == ErrorCode::BackendUnavailable &&
         progress.status().message == "fixture requires Metal")
       return 77;

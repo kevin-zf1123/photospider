@@ -200,12 +200,13 @@ void impure_c_whole() {
   GraphContext graph(doc);
   auto compiled = Compiler(registry).compile(graph);
   require(compiled.ok(), compiled.status().message);
-  auto frozen = context.freeze(compiled.value().plan.value(), {}).take_value();
+  auto run_plan = compiled.value().plan.value();
+  ExecutionBindings run_bindings = {};
   ExecutionOptions options;
   options.maximum_parallelism = 1;
-  auto first = context.execute(frozen, {}, options);
+  auto first = context.execute(run_plan, run_bindings, {}, options);
   require(first.ok(), first.status().message);
-  auto second = context.execute(frozen, {}, options);
+  auto second = context.execute(run_plan, run_bindings, {}, options);
   require(second.ok(), second.status().message);
   const auto independent = [&](const auto& result, uint32_t minimum) {
     const auto a = read_number(result.results.at("a"));
@@ -219,10 +220,11 @@ void impure_c_whole() {
   doc.outputs = {{"a", 1, "number"}};
   GraphContext single(doc);
   auto mandatory = Compiler(registry).compile(single).take_value();
-  auto captured = context.freeze(mandatory.plan.value(), {}).take_value();
+  auto captured_plan = mandatory.plan.value();
+  ExecutionBindings captured_bindings = {};
   const auto mandatory_before = calls();
-  auto third = context.execute(captured, {}, options);
-  auto fourth = context.execute(captured, {}, options);
+  auto third = context.execute(captured_plan, captured_bindings, {}, options);
+  auto fourth = context.execute(captured_plan, captured_bindings, {}, options);
   require(
       third.ok() && fourth.ok() && calls() == mandatory_before + 4 &&
           read_number(third.value().results.at("a")) == mandatory_before + 1 &&
@@ -580,14 +582,15 @@ void run() {
     GraphContext graph(document(key));
     auto compiled = Compiler(registry).compile(graph, tile_planning);
     require(compiled.ok(), compiled.status().message);
-    auto frozen =
-        context.freeze(compiled.value().plan.value(), {{a, c}}).take_value();
+    auto run_plan = compiled.value().plan.value();
+    ExecutionBindings run_bindings = {{a, c}};
     const bool whole = std::string(key) != "fixture.result.copy";
     const auto q =
         whole ? TileRequest{{{0, TileSet::range(root, 0, 8).take_value()}}}
               : selected_tile;
     const TileUnit unit{0, 0, 0, whole ? 0U : 5U};
-    auto output = context.execute_fragments(frozen, {{"out", q}});
+    auto output =
+        context.execute_fragments(run_plan, run_bindings, {{"out", q}});
     require(output.ok(), output.status().message);
     auto result = output.value().results.at("out");
     require_image_values(result, whole, true, whole ? 1 : 0);
@@ -604,8 +607,8 @@ void run() {
       require(output.value().diagnostics.cpu_stage_count > 0 &&
                   output.value().diagnostics.cpu_tile_callback_count > 0,
               "C tile diagnostics");
-    auto empty_image =
-        context.execute_fragments(frozen, {{"out", TileRequest{}}});
+    auto empty_image = context.execute_fragments(run_plan, run_bindings,
+                                                 {{"out", TileRequest{}}});
     require(empty_image.ok(), empty_image.status().message);
     auto empty_record = empty_image.value().dependencies.tile_record(unit);
     require(empty_record.ok() && !empty_record.value() &&
@@ -617,7 +620,7 @@ void run() {
                     .empty() &&
                 empty_image.value().diagnostics.operation_timings.empty(),
             "Empty image performs no computation or input Need");
-    auto warm = context.execute_fragments(frozen, {{"out", q}});
+    auto warm = context.execute_fragments(run_plan, run_bindings, {{"out", q}});
     require(warm.ok(), warm.status().message);
     const auto& repeated = warm.value().results.at("out");
     float repeated_pixel = 0;
@@ -634,13 +637,15 @@ void run() {
     GraphContext graph(document(key));
     auto compiled =
         Compiler(registry).compile(graph, tile_planning).take_value();
-    auto frozen = context.freeze(compiled.plan.value(), {{a, c}}).take_value();
+    auto run_plan = compiled.plan.value();
+    ExecutionBindings run_bindings = {{a, c}};
     const bool whole = std::string(key).find("whole") != std::string::npos;
     const auto q =
         whole ? TileRequest{{{0, TileSet::range(root, 0, 8).take_value()}}}
               : selected_tile;
     const TileUnit unit{0, 0, 0, whole ? 0U : 5U};
-    auto output = context.execute_fragments(frozen, {{"out", q}});
+    auto output =
+        context.execute_fragments(run_plan, run_bindings, {{"out", q}});
     require(output.ok(), output.status().message);
     const Region selected({{1, 1}, {0, 1}, {1, 1}, {2, 1}});
     auto source_window =
@@ -692,7 +697,8 @@ void run() {
       require_dirty_unit(output.value().dependencies, root, unit, 0, 5);
     }
     source_window = {};
-    frozen = {};
+    run_plan = {};
+    run_bindings = {};
     view_window = {};
     float retained = 0;
     require(result.read_tensor(result.descriptor().value(), 0, {1, 0, 1, 2},
@@ -818,9 +824,10 @@ void run() {
   scalar.outputs = {{"out", 1, "number"}};
   GraphContext graph(scalar);
   auto plan = Compiler(registry).compile(graph).take_value().plan.value();
-  auto frozen = context.freeze(plan).take_value();
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = {};
   auto result = context.execute_fragments(
-      frozen,
+      run_plan, run_bindings,
       {{"out", TileRequest{{{0, TileSet::range(root, 0, 1).take_value()}}}}});
   require(result.ok(), result.status().message);
   const auto& sequence = result.value().results.at("out");
@@ -829,7 +836,8 @@ void run() {
   require(sequence.descriptor().value().tensor_coverage(0) ==
               Footprint::all({128}).take_value(),
           "C non-spatial Result completes its Whole unit");
-  auto empty = context.execute_fragments(frozen, {{"out", TileRequest{}}});
+  auto empty = context.execute_fragments(run_plan, run_bindings,
+                                         {{"out", TileRequest{}}});
   require(empty.ok(), empty.status().message);
   require(empty.value()
               .results.at("out")
@@ -962,13 +970,15 @@ void c_sparse_wide_output() {
     config.managed_resources->capacity[ResourceKind::Payload] = 65536;
     ExecutionContext context(registry, config);
     root = take(context.resource_budget());
-    auto frozen = take(context.freeze(plan));
+    auto run_plan = plan;
+    ExecutionBindings run_bindings = {};
     for (auto coordinate : {std::uint64_t{0}, extent - 1}) {
       auto point = take(Footprint::from_regions(
           {1, extent}, {Region({{0, 1}, {coordinate, 1}})}));
       const TileRequest request{
           {{0, take(TileSet::from_indices(root, {coordinate}))}}};
-      auto result = take(context.execute_fragments(frozen, {{"out", request}}));
+      auto result = take(context.execute_fragments(run_plan, run_bindings,
+                                                   {{"out", request}}));
       const auto& output = result.results.at("out");
       auto descriptor = take(output.descriptor());
       require(output.schema().tensors[0].descriptor.shape ==

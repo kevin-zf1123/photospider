@@ -330,7 +330,8 @@ int retirement_notification() {
 }
 int cancelled_subscription() {
   Fixture fixture(0, false, 2);
-  auto frozen = take(fixture.context->freeze(fixture.plan, {}));
+  auto run_plan = fixture.plan;
+  ExecutionBindings run_bindings = {};
   std::mutex mutex;
   std::condition_variable changed;
   unsigned entered_runs = 0;
@@ -355,8 +356,8 @@ int cancelled_subscription() {
     return Status::success();
   };
   auto first = std::async(std::launch::async, [&] {
-    return fixture.context->execute(frozen, cancellation.token(),
-                                    first_options);
+    return fixture.context->execute(run_plan, run_bindings,
+                                    cancellation.token(), first_options);
   });
   bool first_entered;
   {
@@ -365,7 +366,7 @@ int cancelled_subscription() {
                                      [&] { return entered_runs == 1; });
   }
   auto peer = std::async(std::launch::async, [&] {
-    return fixture.context->execute(frozen, {}, peer_options);
+    return fixture.context->execute(run_plan, run_bindings, {}, peer_options);
   });
   bool both_entered;
   {
@@ -512,10 +513,12 @@ int worker_cancellation() {
                               [&] { return resume_work; }))
           timeout = true;
       };
-      auto frozen = take(fixture.context->freeze(fixture.plan, {}));
+      auto run_plan = fixture.plan;
+      ExecutionBindings run_bindings = {};
       CancellationSource cancellation;
       auto first = std::async(std::launch::async, [&] {
-        return fixture.context->execute(frozen, cancellation.token());
+        return fixture.context->execute(run_plan, run_bindings,
+                                        cancellation.token());
       });
       bool entered_now;
       {
@@ -542,9 +545,10 @@ int worker_cancellation() {
   return 0;
 }
 int pending_dependency() {
-  for (unsigned mode : {0U, 2U, 3U}) {
+  for (unsigned mode : {0U, 2U}) {
     Fixture fixture(0, true);
-    auto frozen = take(fixture.context->freeze(fixture.plan, {}));
+    auto run_plan = fixture.plan;
+    ExecutionBindings run_bindings = {};
     selected_retirement = 4;
     entered = release = timed_out = false;
     retired_bodies = 0;
@@ -553,7 +557,8 @@ int pending_dependency() {
     execution_testing::install_execution_test_hooks(&hooks);
     CancellationSource cancellation;
     auto first = std::async(std::launch::async, [&] {
-      return fixture.context->execute(frozen, cancellation.token());
+      return fixture.context->execute(run_plan, run_bindings,
+                                      cancellation.token());
     });
     bool reached;
     {
@@ -572,10 +577,6 @@ int pending_dependency() {
       cancellation.cancel();
     const bool drains = first.wait_for(std::chrono::milliseconds(20)) !=
                         std::future_status::ready;
-    if (mode == 3) {
-      frozen = {};
-      fixture.plan = {};
-    }
     {
       std::lock_guard<std::mutex> lock(gate_mutex);
       release = true;

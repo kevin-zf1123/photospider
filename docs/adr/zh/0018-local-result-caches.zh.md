@@ -1,7 +1,7 @@
-# ADR 0018：冻结输入并复用精确局部结果
+# ADR 0018：保留不可变输入并复用精确局部结果
 
 - 状态：Accepted
-- 英文权威文档：[ADR 0018](../0018-local-result-caches-and-frozen-execution.md)
+- 英文权威文档：[ADR 0018](../0018-local-result-caches.md)
 - 当前边界：0.36.0 中，原决定里的快照 facets，以及 import 拒绝图像、color-array、`ImagePlane` 和 `Mask` Tensor 的规则已被取代。快照只校验结构；运行数据以 Result 静态 Tensor 成员 绑定。
 
 ## 当前实现：内容身份与 call activation
@@ -20,19 +20,19 @@ GPU block 保留要求 compute 期间发生原生 dispatch；`native_retained_by
 
 共享计算在一次 call activation 内唯一。重新进入 block 会清空该 block 的值和
 共享 stage 状态，因此循环重新计算下一次 activation，不会为整个 Run 保留一次
-producer 结果。编译产物只保存编译阶段；冻结 bindings 和可丢弃 caches 仍属于
+producer 结果。编译产物只保存编译阶段；每次调用的 bindings 和可丢弃 caches 仍属于
 内存状态。
 
 ## 1. 核心摘要（TL;DR）
 
-可变 workflow 图和编辑中的输入需要稳定的执行输入，tile 计算也需要在记录的依赖未改变时复用 tile。内核拥有不可变输入快照、冻结执行包和有界的派生结果缓存。内容身份与 tile 依赖记录允许复用，同时缓存仍只是加速器。
+可变 workflow 图和编辑中的输入需要稳定的执行输入，tile 计算也需要在记录的依赖未改变时复用 tile。内核拥有不可变输入快照、每次调用的 Result bindings 和有界的派生结果缓存。内容身份与 tile 依赖记录允许复用，同时缓存仍只是加速器。
 
 ## 2. 架构心智模型（Mental Model & Intuition）
 
-`InputSnapshotStore` 类似带版本的分块存储：补丁只复制与其相交的块，其余块继续由旧版本共享。冻结执行固定一份已编译计划、对应注册表及不可变绑定，因此后续图编辑不会改变该次运行。
+`InputSnapshotStore` 类似带版本的分块存储：补丁只复制与其相交的块，其余块继续由旧版本共享。每个 Run 使用当前已编译计划，并持有不可变 bindings，直到 callback 退出。
 
 ```text
-图 + 绑定 --freeze--> 冻结计划与输入所有者
+当前计划 + 绑定 --> Run 与输入所有者
                            |
                   请求的 成员 tile
                        /        \
@@ -74,11 +74,15 @@ struct ExecutionContextConfig {
 
 class ExecutionContext {
  public:
-  Result<FrozenExecution> freeze(const ExecutionPlan&,
-                                 ExecutionBindings = {}) const;
-  Result<ExecutionResult> execute(const FrozenExecution&,
+  Result<ExecutionResult> execute(const ExecutionPlan&,
+                                  ExecutionBindings = {},
                                   const CancellationToken& = {},
                                   const ExecutionOptions& = {});
+  Result<DemandResult> execute_fragments(const ExecutionPlan&,
+                                         ExecutionBindings,
+                                         const DemandQuery&,
+                                         const CancellationToken& = {},
+                                         const ExecutionOptions& = {});
 };
 ```
 
@@ -88,16 +92,16 @@ class ExecutionContext {
 
 `content_identity` 对带版本的身份前缀、元素类型、shape、请求区域坐标和请求区域中的精确样本位计算哈希。分配地址、布局和分块几何不参与。读取和身份计算支持样本上限及协作式取消。读取被取消时，调用方目标缓冲区可能只写入一部分，调用方应丢弃它。
 
-`freeze` 捕获当前有效且匹配的计划、不可变绑定和 operation registry 所有者。每个 workflow input binding 是一个 `ExecutionBinding`，指定一个声明名称并提供一个不可变 `ResultRef`。Preflight 会核验 Result binding 与声明的 schema 匹配且具有有效 final descriptor。context 使用 managed resources 时，execution admission 会核验 Result 的 root ownership；demand read 受声明 domain 和已发布 support 限制。捕获过程不调用 operation callback，并在返回前重新检查图的 currentness。图被替换或销毁后，冻结执行仍使用捕获的输入版本；普通执行仍执行其 currentness 检查。每次 execute 调用独立提供取消状态，所有者会保留到已准入 callback 退出。Result input binding 保留不可变的 `ResultRef` owner。调用方通过 `ResultRef::capture()` 捕获 Result，并使用捕获的 descriptor 调用 `ResultRef::read_tensor()` 或 `ResultRef::acquire_tensor()` 读取 tensor 样本。
+每次执行校验当前 plan，并复制不可变 Result bindings。`ExecutionBinding` 指定一个 workflow 输入声明名称，提供 schema 匹配的 `ResultRef`。Preflight 校验 descriptor 和 schema，执行准入检查资源 Root ownership。图被替换或销毁后，借用该图版本的 plan 返回 Stale，包括 `DemandHandle` 保留的 plan。Demand 请求还检查 binding generation。每次调用独立提供取消状态，输入 owners 保留到已准入 callback 退出。调用方通过 `ResultRef::capture()` 捕获 Result，并使用捕获的 descriptor 调用 `ResultRef::read_tensor()` 或 `ResultRef::acquire_tensor()` 读取样本。
 
 已完成结果的保留是可选的，其容量是 `maximum_live_bytes` 的子限额；设为零会关闭保留。复用单位是 一个成员 tile。其键由 step 的物理身份（operation 契约和实现、tile 边长、已解析的输出 schema、相关 backend 与资源身份）、单元编号和为其记录的生产者单元身份组成，见 [ADR 0023](0023-track-dependencies-between-fixed-tiles.zh.md)；workflow 输入的身份按逻辑内容计算。编译图 revision 和无关分支不进入局部结果键。dirty 提示可以缩小计算范围，但不能在缺少内容身份时证明结果可复用。参与计算的每个 operation 都必须确定、无副作用且声明可缓存，结果才可复用。
 
-每个 Run 自行计算未命中缓存的部分；并发 Run 中相同的请求不合并。Run 的 producer 持有冻结输入和 registry，直到已准入 callback 退出。producer 不会占用 worker 等待同一线程池的另一个 callback。只有验证成功的不可变结果才进入完成缓存。
+每个 Run 自行计算未命中缓存的部分；并发 Run 中相同的请求不合并。Run 的 producer 持有不可变输入和 registry，直到已准入 callback 退出。producer 不会占用 worker 等待同一线程池的另一个 callback。只有验证成功的不可变结果才进入完成缓存。
 
 ## 4. 负面清单与边界（Non-Goals & Explicit Boundaries）
 
 - 快照覆盖不可变输入 `Tensor` 及其内容，不序列化 execution plan 或 workflow document。
-- 冻结执行固定一份内存中的计划及输入，不会让后续图编辑自动成为普通执行的当前状态。Workflow input bindings 必须是 schema 匹配的不可变 Result owner。
+- Workflow input bindings 必须是 schema 匹配的不可变 Result owner。借用图版本的 plan 要求该图版本在执行期间保持 current。
 - 结果缓存是可丢弃的加速数据，不提供事务恢复、持久提交、请求历史或权威 artifact。
 - 预览队列、编辑合并、面向用户的新鲜度策略和发布决策由内核之外负责。
 - 未证明的可变输入可以执行，但其依赖结果不能跨运行复用。

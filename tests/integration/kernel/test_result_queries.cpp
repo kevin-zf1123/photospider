@@ -164,7 +164,7 @@ OperationDefinition consumer_definition(bool pair, unsigned width,
   };
   return definition;
 }
-int workflow(bool pair, bool frozen) {
+int workflow(bool pair) {
   const unsigned width = pair ? 2 : 64;
   auto calls = std::make_shared<std::atomic<unsigned>>(0);
   auto registry = std::make_shared<OperationRegistry>();
@@ -197,9 +197,7 @@ int workflow(bool pair, bool frozen) {
     sources.push_back(object.weak());
     return Status::success();
   };
-  auto result = frozen
-                    ? context.execute(take(context.freeze(plan)), {}, options)
-                    : context.execute(plan, {}, {}, options);
+  auto result = context.execute(plan, {}, {}, options);
   if (!result.ok())
     std::cerr << "query workflow: " << result.status().message << '\n';
   PS_CHECK(result.ok() && *calls == width && notices == width);
@@ -275,9 +273,9 @@ int query_dependencies(bool metadata) {
   ExecutionContextConfig config{1, false, 16, 1024 * 1024, 1048576};
   ExecutionContext context(registry, config);
   auto root = take(context.resource_budget());
-  auto frozen = take(context.freeze(
-      plan,
-      ExecutionBindings{{multi_result::binding(root, "control", 1, schema)}}));
+  auto run_plan = plan;
+  ExecutionBindings run_bindings =
+      ExecutionBindings{{multi_result::binding(root, "control", 1, schema)}};
   const TileRequest one{{{0, take(TileSet::range(root, 0, 1))}}};
   const DemandQuery wanted{{"left", one}, {"right", one}};
   const auto verify = [&](const DemandResult& result) {
@@ -303,13 +301,14 @@ int query_dependencies(bool metadata) {
               ? Status::success()
               : Status{ErrorCode::OperationFailed, "query values changed"});
   };
-  auto cold = take(context.execute_fragments(frozen, wanted));
+  auto cold = take(context.execute_fragments(run_plan, run_bindings, wanted));
   verify(cold);
   PS_CHECK(*calls == 2);
-  auto equivalent = take(context.freeze(
-      plan,
-      ExecutionBindings{{multi_result::binding(root, "control", 1, schema)}}));
-  auto warm = take(context.execute_fragments(equivalent, wanted));
+  auto equivalent_plan = plan;
+  ExecutionBindings equivalent_bindings =
+      ExecutionBindings{{multi_result::binding(root, "control", 1, schema)}};
+  auto warm = take(
+      context.execute_fragments(equivalent_plan, equivalent_bindings, wanted));
   verify(warm);
   PS_CHECK(*calls == 2 && warm.diagnostics.cache_hits >= 2 &&
            root.statistics().live[ResourceKind::Queue] == 0);
@@ -322,8 +321,10 @@ int query_dependencies(bool metadata) {
   ExecutionBinding binding;
   binding.name = "control";
   binding.result = take(builder.seal());
-  auto changed = take(context.freeze(plan, ExecutionBindings{{binding}}));
-  auto partial = take(context.execute_fragments(changed, wanted));
+  auto changed_plan = plan;
+  ExecutionBindings changed_bindings = ExecutionBindings{{binding}};
+  auto partial =
+      take(context.execute_fragments(changed_plan, changed_bindings, wanted));
   PS_CHECK(multi_result::number(partial.results.at("left")) == 10 &&
            multi_result::number(partial.results.at("right")) == 21 &&
            *calls == 3 && partial.diagnostics.cache_hits >= 1);
@@ -399,12 +400,12 @@ int shared_publication_dependencies() {
       first = object;
     return Status::success();
   };
-  auto frozen = take(context.freeze(
-      plan,
-      ExecutionBindings{{multi_result::binding(root, "control", 1, schema)}}));
+  auto run_plan = plan;
+  ExecutionBindings run_bindings =
+      ExecutionBindings{{multi_result::binding(root, "control", 1, schema)}};
   auto result = take(context.execute_fragments(
-      frozen, {{"value", {{{0, take(TileSet::range(root, 0, 1))}}}}}, {},
-      options));
+      run_plan, run_bindings,
+      {{"value", {{{0, take(TileSet::range(root, 0, 1))}}}}}, {}, options));
   // The requested tile is exposed only after its shared producer completes.
   PS_CHECK(notices == 1 && *calls == 2);
   PS_CHECK(first.descriptor(false).value().tensor_coverage(0) ==
@@ -467,11 +468,9 @@ int mixed_target_dependencies() {
   ExecutionContext context(registry, {1, false, 16, 1024 * 1024, 1048576});
   auto root = take(context.resource_budget());
   const auto run = [&] {
-    auto frozen =
-        take(context.freeze(plan, ExecutionBindings{{multi_result::binding(
-                                      root, "control", 1, schema)}}));
     return take(context.execute_fragments(
-        frozen, {{"value", {{{0, take(TileSet::range(root, 0, 1))}}}}}));
+        plan, {{multi_result::binding(root, "control", 1, schema)}},
+        {{"value", {{{0, take(TileSet::range(root, 0, 1))}}}}}));
   };
   const auto verify = [&](const DemandResult& result) {
     for (unsigned at = 0; at < 2; ++at) {
@@ -541,11 +540,13 @@ int named_tile_aliases(unsigned width, bool reverse) {
   const DemandQuery query{{"a", reverse ? high : low},
                           {"b", reverse ? low : high},
                           {"c", reverse ? high : low}};
-  auto frozen = take(context.freeze(plan));
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = {};
   auto pending = std::async(std::launch::async, [&] {
     ExecutionOptions options;
     options.maximum_parallelism = 2;
-    return context.execute_fragments(frozen, query, {}, options);
+    return context.execute_fragments(run_plan, run_bindings, query, {},
+                                     options);
   });
   const bool entered = gate.wait();
   gate.release();
@@ -585,14 +586,16 @@ int upstream_run_cancellation() {
   auto plan = compile(registry, graph);
   ExecutionContext context(registry, {2, false, 16, 1024 * 1024, 0});
   auto root = take(context.resource_budget());
-  auto frozen = take(context.freeze(plan));
+  auto run_plan = plan;
+  ExecutionBindings run_bindings = {};
   CancellationSource cancellation;
   auto first = std::async(std::launch::async, [&] {
-    return context.execute(frozen, cancellation.token());
+    return context.execute(run_plan, run_bindings, cancellation.token());
   });
   const bool entered = gate.wait();
-  auto peer =
-      std::async(std::launch::async, [&] { return context.execute(frozen); });
+  auto peer = std::async(std::launch::async, [&] {
+    return context.execute(run_plan, run_bindings);
+  });
   const bool independent = gate.wait(2);
   cancellation.cancel();
   const bool drains = first.wait_for(std::chrono::milliseconds(20)) !=
@@ -609,10 +612,8 @@ int upstream_run_cancellation() {
 }
 }  // namespace
 int main() try {
-  PS_CHECK(workflow(true, false) == 0);
-  PS_CHECK(workflow(false, false) == 0);
-  PS_CHECK(workflow(true, true) == 0);
-  PS_CHECK(workflow(false, true) == 0);
+  PS_CHECK(workflow(true) == 0);
+  PS_CHECK(workflow(false) == 0);
   PS_CHECK(named_tile_aliases(2, true) == 0);
   PS_CHECK(named_tile_aliases(8, false) == 0);
   PS_CHECK(upstream_run_cancellation() == 0);

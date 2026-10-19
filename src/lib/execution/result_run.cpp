@@ -322,10 +322,8 @@ Result<ExecutionResult> run_result_plan(
     std::vector<ExecutionBinding> bindings,
     const CancellationToken& caller_cancellation,
     const ExecutionOptions& options, const DemandQuery* requested,
-    const std::string& snapshot_identity,
     execution_internal::ResultCache* dependency_cache,
-    execution_internal::ResultCheckpoints* result_checkpoints,
-    std::shared_ptr<const ExecutionPlan> plan_owner) {
+    execution_internal::ResultCheckpoints* result_checkpoints) {
   auto payload_observation =
       std::allocate_shared<core_internal::PayloadObservation>(
           ResourceAllocator<core_internal::PayloadObservation>(*stage_root));
@@ -333,7 +331,7 @@ Result<ExecutionResult> run_result_plan(
       *stage_root, core_internal::PayloadCapture{payload_observation});
   ErrorCode coordinator_metadata_failure = ErrorCode::Ok;
   std::optional<ResourceAllocationScope> coordinator_resources;
-  // Frozen cache paths install their own optional-retention scopes;
+  // Result cache paths install their own optional-retention scopes;
   // keep their best-effort allocation failures outside this sticky fence.
   if (!dependency_cache)
     coordinator_resources.emplace(*stage_root, &coordinator_metadata_failure);
@@ -380,15 +378,14 @@ Result<ExecutionResult> run_result_plan(
   const auto cache_epoch = dependency_cache ? dependency_cache->epoch() : 0;
   // Demand selection filters the stored instruction stream before the
   // interpreter is entered. Loading/running a plan never invokes a mapper.
-  auto executable_owner = plan_owner;
+  std::optional<ExecutionPlan> selected_plan;
   if (requested) {
     auto selected = plan.select_outputs(*requested);
     if (!selected.ok())
       return fail(selected.status());
-    executable_owner =
-        std::make_shared<const ExecutionPlan>(selected.take_value());
+    selected_plan.emplace(selected.take_value());
   }
-  const auto& executable = executable_owner ? *executable_owner : plan;
+  const auto& executable = selected_plan ? *selected_plan : plan;
   auto result = execution_internal::execute_structured(
       executable, std::move(bindings), operations, *stage_root, options,
       cancellation,
@@ -421,8 +418,7 @@ Result<ExecutionResult> run_result_plan(
                                    dependency_cache, cache_epoch, backend,
                                    std::move(token), std::move(task));
       },
-      nullptr, snapshot_identity, result_checkpoints, dependency_cache,
-      executable_owner,
+      nullptr, result_checkpoints, dependency_cache,
       options.maximum_parallelism ? options.maximum_parallelism
                                   : pool->ranges().workers());
   if (!result.ok())

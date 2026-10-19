@@ -328,7 +328,6 @@ void output_payload_bounds() {
     const std::map<std::string, ps::ParameterValue> parameters;
     ps::ResultProgramQuery request(metadata, parameters);
     request.semantic_key = "payload-probe";
-    request.snapshot_identity = "payload-inputs";
     auto session = take(registry->start_result("manual.output_payload", request,
                                                root.allocator()));
 
@@ -506,14 +505,15 @@ void output_payload_bounds() {
   ps::GraphContext mixed_graph(document);
   auto mixed_plan = take(ps::Compiler(mixed).compile(mixed_graph)).plan.value();
   ps::ExecutionContext mixed_context(mixed);
-  auto frozen = take(mixed_context.freeze(mixed_plan));
+  auto run_plan = mixed_plan;
+  ps::ExecutionBindings run_bindings = {};
   auto bad = mixed_context.execute_fragments(
-      frozen,
+      run_plan, run_bindings,
       {{"a", ps::TileRequest{{{0, take(ps::TileSet::range(root, 0, 1))}}}}});
   require(!bad.ok() && bad.status().reason == ps::FailureReason::CapacityLimit,
           "selected output enforces its own payload bound");
   auto good = take(mixed_context.execute_fragments(
-      frozen,
+      run_plan, run_bindings,
       {{"b", ps::TileRequest{{{0, take(ps::TileSet::range(root, 0, 1))}}}}}));
   require(good.results.size() == 1 && good.results.at("b").valid(),
           "independent request permits the legal sibling output");
@@ -553,7 +553,6 @@ void output_payload_bounds() {
     ps::CancellationSource stop;
     ps::ResultProgramQuery first_query(metadata, parameters);
     first_query.semantic_key = "payload.cancel.first";
-    first_query.snapshot_identity = "payload.cancel.inputs";
     first_query.cancellation = stop.token();
     auto state = take(cancellation_registry->start_result(
         "manual.output_payload", first_query, cancellation_root.allocator()));

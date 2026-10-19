@@ -304,15 +304,17 @@ void scalar_prelude_workflows() {
   auto shared_graph = std::make_shared<GraphContext>(shared);
   auto shared_plan =
       take(Compiler(registry).compile(*shared_graph)).plan.value();
-  auto frozen = take(context.freeze(shared_plan, {{ignored}}));
+  auto run_plan = shared_plan;
+  ExecutionBindings run_bindings = {{ignored}};
   auto warm_source = context.execute_fragments(
-      frozen,
+      run_plan, run_bindings,
       {{"loose", TileRequest{{{0, take(TileSet::range(root, 0, 1))}}}}});
   require(warm_source.ok(),
           "unbounded producer can publish a value valid for a looser consumer");
   const auto produced = *producer_starts, consumed = *starts;
   auto restricted = context.execute_fragments(
-      frozen, {{"out", TileRequest{{{0, take(TileSet::range(root, 0, 1))}}}}});
+      run_plan, run_bindings,
+      {{"out", TileRequest{{{0, take(TileSet::range(root, 0, 1))}}}}});
   require(!restricted.ok() &&
               restricted.status().code == ErrorCode::OperationFailed &&
               restricted.status().detail.node_id == 70 &&
@@ -425,7 +427,7 @@ void foundation_tensor_workflows() {
               planned_grid.tile_count(),
           "planning a sparse request preserves the complete logical grid");
   auto huge_output = driver.context->execute_fragments(
-      take(driver.context->freeze(prepared.plan, prepared.bindings)),
+      prepared.plan, prepared.bindings,
       {{"out", TileRequest{{{0, take(TileSet::range(driver.root, last_tile,
                                                     last_tile + 1))}}}}});
   require(huge_output.ok(), huge_output.status().message.c_str());

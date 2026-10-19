@@ -1,7 +1,6 @@
 #pragma once
 #include <functional>
 #include <memory>
-#include <string>
 #include <vector>
 
 #include "photospider/execution/execution.hpp"
@@ -15,8 +14,7 @@ class NativeUploadRegistry;
 class ResultCache;
 class ResultCheckpoints;
 // Captured binding/options owners survive callback retirement. Pools, admission
-// and requested demands are borrowed for this synchronous call. A frozen plan
-// owner pins the captured graph through callback retirement.
+// and the plan and requested demands are borrowed for this synchronous call.
 Result<ExecutionResult> run_result_plan(
     ThreadPool* pool, ThreadPool* gpu_pool,
     const std::shared_ptr<gpu_internal::Device>& native_device,
@@ -29,8 +27,6 @@ Result<ExecutionResult> run_result_plan(
     std::vector<ExecutionBinding> bindings,
     const CancellationToken& caller_cancellation,
     const ExecutionOptions& options, const DemandQuery* requested,
-    const std::string& snapshot_identity = {},
     execution_internal::ResultCache* dependency_cache = nullptr,
-    execution_internal::ResultCheckpoints* result_checkpoints = nullptr,
-    std::shared_ptr<const ExecutionPlan> plan_owner = {});
+    execution_internal::ResultCheckpoints* result_checkpoints = nullptr);
 }  // namespace ps::execution_internal

@@ -673,7 +673,7 @@ checks both expansions with Compiler metadata analysis. The helper protects
 existing declarations, Result schemas, nodes and exports; a failed builder
 leaves the document unchanged. It retains no builder or capture. A SHA-256
 recipe identity includes the expanded source, designated endpoints and compiler
-semantic identity. Both expansions execute under one frozen binding snapshot,
+semantic identity. Both expansions execute under the same immutable Result bindings,
 including shared dynamic inputs and optional `ResourceSet`. Pointwise
 independence is the caller's assertion.
 

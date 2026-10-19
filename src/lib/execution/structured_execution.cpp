@@ -48,11 +48,9 @@ class StructuredExecution final {
                       ResourceBudget resources, const ExecutionOptions& options,
                       CancellationToken cancellation,
                       std::function<ErrorCode()> stop,
-                      StructuredDispatch dispatch, std::string snapshot,
-                      std::shared_ptr<const ExecutionPlan> owner,
+                      StructuredDispatch dispatch,
                       ResultCheckpoints* checkpoints, ResultCache* cache)
-      : owner_(std::move(owner)),
-        plan_(owner_ ? *owner_ : plan),
+      : plan_(plan),
         bindings_(std::move(bindings)),
         operations_(std::move(operations)),
         resources_(std::move(resources)),
@@ -60,7 +58,6 @@ class StructuredExecution final {
         cancellation_(std::move(cancellation)),
         stop_(std::move(stop)),
         dispatch_(std::move(dispatch)),
-        snapshot_(std::move(snapshot)),
         subscription_(resources_, cancellation_, options_.result_publication),
         remaining_(options_.maximum_dependency_work),
         control_(resources_),
@@ -412,7 +409,6 @@ class StructuredExecution final {
     content_internal::Sha256 digest;
     digest.text("photospider.static-invocation.v1");
     digest.text(plan_.digest().value);
-    digest.text(snapshot_);
     digest.integer(run_identity_);
     digest.integer(activation_);
     digest.text(suffix);
@@ -1622,7 +1618,6 @@ class StructuredExecution final {
                       std::to_string(instruction.tensor_slot) + "/" +
                       std::to_string(instruction.tile_unit));
       unit->query.semantic_key = unit->key;
-      unit->query.snapshot_identity = snapshot_;
       unit->remaining = instruction.shared_stage == UINT32_MAX
                             ? UINT64_MAX
                             : contract.prepared->traits()
@@ -2054,7 +2049,6 @@ class StructuredExecution final {
     return Status::success();
   }
 
-  std::shared_ptr<const ExecutionPlan> owner_;
   const ExecutionPlan& plan_;
   std::vector<ExecutionBinding> bindings_;
   std::shared_ptr<OperationRegistry> operations_;
@@ -2063,7 +2057,6 @@ class StructuredExecution final {
   CancellationToken cancellation_;
   std::function<ErrorCode()> stop_;
   StructuredDispatch dispatch_;
-  std::string snapshot_;
   ResultSubscription subscription_;
   std::atomic<std::uint64_t> remaining_{0};
   std::uint64_t activation_ = 0, run_identity_ = 0;
@@ -2093,9 +2086,8 @@ Result<ExecutionResult> execute_structured(
     std::shared_ptr<OperationRegistry> operations, ResourceBudget resources,
     const ExecutionOptions& options, const CancellationToken& cancellation,
     const std::function<ErrorCode()>& stop, const StructuredDispatch& dispatch,
-    const DemandQuery* requested, const std::string& snapshot_identity,
-    ResultCheckpoints* checkpoints, ResultCache* cache,
-    std::shared_ptr<const ExecutionPlan> plan_owner, std::uint32_t) {
+    const DemandQuery* requested, ResultCheckpoints* checkpoints,
+    ResultCache* cache, std::uint32_t) {
   try {
     // Demand specialization must finish before entering the interpreter.
     if (requested)
@@ -2106,8 +2098,7 @@ Result<ExecutionResult> execute_structured(
               "execution request requires a specialized plan"));
     StructuredExecution execution(
         plan, std::move(bindings), std::move(operations), std::move(resources),
-        options, cancellation, stop, dispatch, snapshot_identity,
-        std::move(plan_owner), checkpoints, cache);
+        options, cancellation, stop, dispatch, checkpoints, cache);
     return execution.run();
   } catch (const std::bad_alloc&) {
     return Result<ExecutionResult>(
