@@ -1,5 +1,7 @@
 # 结构化 Result 与 tensor 成员
 
+本文描述当前 continuation 实现。替换执行器的目标契约见[新设计](Compiler-and-Execution.zh.md)，本页的认证、缓存和 continuation 行为不属于新目标。
+
 英文权威文档：[Global-Results.md](../Global-Results.md)。
 
 ## 模块边界与所有权
@@ -295,7 +297,7 @@ Checkpoint 范围是内容 identity。其 key 是指令的固定授权内容 key
 
 恢复 checkpoint 只恢复状态内容。当前指令保留自己的固定授权、依赖证据和 `TileRecord`；更早的 witness 从不替换它们，也不会引入另一个 call 的物理 tile 身份。恢复不会填充当前 phase 的 `results` 或 `tensors`，不会重建读窗口，也不授予读取权限；回调通过已绑定的授权读取当前输入。容量拒绝返回空 checkpoint，且不改变该指令。Work 上限、取消和协议失败仍是错误。
 
-上下文目录持有 checkpoint 范围的弱引用，活动执行持有其范围的强引用；`ExecutionContextConfig::maximum_result_checkpoint_scopes` 限制存活范围数。每个范围至多保留 64 个条目，一个范围的 witness 总权重不超过依赖 `maximum_boxes` 上限；最旧条目先退役。运行时在构造查找 key 或复制 witness 记录之前先扣除可选 checkpoint work。可选缓存 work 为零或不足时跳过查找或拒绝发布；不会复制未准入的 witness 数据。复制得到的 `ResultCheckpoint` 在索引或上下文清除后仍拥有其状态与 witness。C Result ABI 通过 poll 作用域的不透明句柄和已封存的通用状态 Result 提供 `checkpoint_before`、`checkpoint_read` 与 `checkpoint_publish`；见 [C checkpoint 服务](Dependency-Data.zh.md#c-checkpoint-服务)契约。
+上下文目录持有 checkpoint 范围的弱引用，活动执行持有其范围的强引用；`ExecutionContextConfig::maximum_result_checkpoint_scopes` 限制存活范围数。每个范围至多保留 64 个条目，一个范围的 witness 总权重不超过依赖 `maximum_boxes` 上限；最旧条目先退役。运行时在构造查找 key 或复制 witness 记录之前先扣除可选 checkpoint work。可选缓存 work 为零或不足时跳过查找或拒绝发布；不会复制未准入的 witness 数据。复制得到的 `ResultCheckpoint` 在索引或上下文清除后仍拥有其状态与 witness。C Result ABI 通过 poll 作用域的不透明句柄和已封存的通用状态 Result 提供 `checkpoint_before`、`checkpoint_read` 与 `checkpoint_publish`；见 [C checkpoint 声明](../../../include/photospider/plugin/result_operation_plugin_api.h)契约。
 
 Checkpoint 与 block 资格取决于纯度，与 completed-result 缓存无关：即使算子或其某个祖先以 `cacheable = false` 关闭 completed-result 保留，纯指令仍可使用这两项服务。二者仍受上述指令限制。声明 `deterministic = false` 的算子（例如其输出包含 Run 局部 ObjectId）会使每个依赖它的消费方变为不纯，并把它排除在 checkpoint 查找与保留以及 block 缓存准入之外。
 

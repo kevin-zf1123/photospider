@@ -1,5 +1,7 @@
 # Numeric operations
 
+This page describes the current continuation implementation. The [replacement design](Compiler-and-Execution.md) defines the target executor; certification, caches and continuation behavior here are not target requirements.
+
 The default registry contains unsuffixed finite-domain arithmetic and clamp keys, staged scalar reductions, an ordered scan, and profile-specific numeric families. Their parameter, execution and output contracts differ, so choose a key by its exact name. These are bundled operations in `plugins/ops/01-numeric/`, not kernel code; the kernel supplies only the generic Result execution, resource, cancellation, and failure contracts they use. Operation plugins use the Result operation C ABI 7. Numeric work reports, LUT bake reports, and quality reports are operations-SDK types (`photospider/ops/numeric/`); see [Atom errors and quality](Atom-Errors-and-Quality.md).
 
 ## Unsuffixed Result numeric operations
@@ -39,7 +41,7 @@ Mean and variance consume one Float32/Float64 Tensor in logical row-major interv
 
 For all three operations, an Empty output demand runs static preflight and returns a sealed Result with no tensor coverage. It issues no input Need.
 
-The generic block service operates on sealed single-Tensor state with no publication scope. It is separate from the Run-shared scan above; shared stages expose no block or checkpoint service. Optional transition retention is not the unique-producer mechanism. See [Dependency Data](Dependency-Data.md#result-block-state-transitions).
+The generic block service operates on sealed single-Tensor state with no publication scope. It is separate from the Run-shared scan above; shared stages expose no block or checkpoint service. Optional transition retention is not the unique-producer mechanism. See [block-state sharing](Global-Results.md#cross-output-block-state-sharing).
 
 ## Profile-specific pointwise operations
 

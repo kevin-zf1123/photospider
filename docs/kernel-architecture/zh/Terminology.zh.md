@@ -1,48 +1,50 @@
 # Kernel 术语
 
+下列执行术语采用[提出的 breaking design](Compiler-and-Execution.zh.md)，描述替换契约，不表示当前 C++ 类布局。[英文权威文档](../Terminology.md)。
+
 | 术语 | 含义 |
 | --- | --- |
-| `WorkflowDocument` | 调用方持有、作为 compiler 输入的 source graph。 |
-| `GraphContext` | 持有复制的 workflow document 和当前 revision。 |
-| `GraphSnapshot` | 编译使用的一致 source/revision 快照。 |
-| `IRProgram` | 可编辑、与前端无关的 SSA 程序：输入声明与绑定、唯一 call 声明、blocks、entry block、有序 return 签名及 `IRForm`。由 `Compiler::bind_ir` 接受。 |
-| `ValidatedIR` | 不可变、已校验和准备的 IR；前端、导入和可选 optimizer 发布同一类型，两种形式都可直接规划。 |
-| `IRForm::DependencyPaths` | 原始 IR 形式，在有序路径中保留重复 Call ID 请求。相同 ID 指向同一次调用及其 SSA 结果，包括副作用。完整 DAG 路径展开由 `analyze` 生成，去重由优化执行。 |
-| `IRForm::ControlFlow` | 每个 call 有一个静态调用位置的可执行 SSA 控制流。分支与循环通过显式 terminators 和 block 参数表示。 |
-| dependency chain（依赖链） | 原始路径中的一段，在切换上游分支、多输入汇合点和新根处划分。共享祖先可以出现在多条 chain 中；chain 划分不要求图中节点没有分叉。 |
-| SSA value | 以 `IRValueId` 命名、恰好由一个 call 输出、block 参数或外部输入绑定定义一次的 Result。每次使用都必须被其定义支配。 |
-| basic block / CFG | `IRBlock`：以一个 terminator 结尾的有序 call 列表。在 ControlFlow 中，blocks 与边构成可执行 CFG，每个 call 有一个调用位置。在 DependencyPaths 中，blocks 构成线性、无参数的请求 chain 序列，以最终 return 结束。 |
-| block 参数 | 边进入 block 时赋值的带类型值；同一条边的全部参数先被捕获，再修改任何参数。循环通过 block 参数携带值。 |
-| conditional jump | 基于恰好含一个 `UInt8` sample 的 Result 的分支：零选择 `if_false`，其他值选择 `if_true`；只运行所选后继。 |
-| `ExecutionPlan` | 已验证的本地程序：`steps()` 声明每个 call 输出及其后端与固定网格，`blocks()` 保存执行所遵循的 tile 指令与 terminator。 |
-| plan step | `PlanStep`：一个 call 输出的声明。Step 可以没有指令；step 数量不是执行次数。 |
-| tile 指令 | `PlanTileInstruction`：一个输出 tile 或共享 stage 目标，带有 publication 目标、固定输入与共享授权、block 内依赖和编译期 CPU 回退标志。 |
-| 静态 mapping | `OperationDefinition::map_dependencies`（C：`map_dependencies` hook）：纯编译期回调，返回一个目标可以读取的 tile。`complete_input_dependencies` 覆盖 projection 中的普通输入；共享 stage 读取需要显式 mapping 条目。 |
-| 固定授权 | 保存在指令中的 `PlanTensorRead` 或 `PlanSharedRead`；该指令在运行时唯一可以读取的数据。Descriptor-only 授权暴露 schema 事实，不暴露 payload。 |
-| synthetic return 记录 | 具名 return 的依赖记录，索引为 `steps().size()` 加 return 序号，由 `ExecutionPlan::output(name).record_index` 返回。 |
-| compiler 产物 | v4 文本：`.psir` 保存任一合法 IR 形式及来源，`.psxp` 保存完整物理 Plan；旧版本需要重新导出。 |
-| 产物 manifest | 产物中列出的 operation key 及其 contract digest 和资源 identity，可通过 `CompilerArtifact::inspect` 在没有 registry 的情况下读取。 |
-| `ExecutionContext` | 持有有界 worker、冻结的 operation definition、缓存和资源计费。 |
-| `ExecutionRun` | 单次同步执行调用的私有状态：program counter、block 值、已绑定授权、证据和诊断。 |
-| 静态 VM | Run 内部的解释器。它按保存的顺序一次执行一条 plan 指令并遵循 CFG；从不映射依赖、创建 producer task 或重排指令。 |
-| `ExecutionBindings` | 每次 Run 按精确名称提供的输入 owner，每个都是按 declaration schema 校验的 owning `ResultRef`。 |
-| `ResultRef` | 拥有静态 Tensor-only Result schema、捕获覆盖、backing owner 和 ObjectId 来源历史。 |
-| `Tensor` | Descriptor、精确授权 Footprint 和拥有型 TensorSpan 片段组成的唯一数值载体。 |
-| operation metadata | `OperationMetadata`：算子边界上的完整 Result schema。Specialization 根据输入结构和静态参数推导输出结构。 |
-| `metadata_owner` | 为 schema 的 managed 嵌套容器付费的资源租约；属于预算所有权，不是解释。 |
-| `ImmutableResource` / `ResourceSet` | 内容寻址的不可变字节（长度与 SHA-256）及其不可变集合。算子在 preparation 时按 identity 选择资源，plan 保留它们。 |
-| validator（校验器） | 已注册的 `ValidationDefinition`，通过 key、version 和 implementation 显式绑定到端口，检查宿主授权的样本。 |
-| diagnostic report（诊断报告） | 注册为 `DiagnosticDefinition`、由 `DiagnosticAccumulator` 合并的固定大小不透明记录类型。 |
-| `DomainErrorCode` | 不透明的 64 位失败码，内核把它保存在 `FailureDetail::domain_code` 中且不解释。 |
-| operations SDK（算子 SDK） | `Photospider::ops_sdk`，头文件位于 `include/photospider/ops/`：颜色描述、领域 codec 与算术、描述编辑、LUT bake 契约、质量与数值报告、Layer 类型。不属于内核。 |
-| `Region` | descriptor 轴坐标中的逻辑子集，不表示字节范围。 |
-| `TensorSpan` | Tensor 内一个拥有型矩形映射，记录实际有符号 stride 和 backing owner。 |
-| operation traits | 冻结的输入/输出契约、资源上限和 backend 能力声明。 |
-| operation registry | 编译与执行 plan 所用的受信任 operation definition 集合，注册后冻结。 |
-| digest / cache key | 用于复现检查或可丢弃缓存查找的非安全 identity。Compiler digest 包含程序标识符；内容缓存 key 不包含。 |
-| cancellation | 协作式停止请求，阻止较晚的结果成功发布。 |
-| CPU fallback | GPU callback 在发布输出或读取输入之前报告 backend unavailable 后，以相同授权新发起的 CPU attempt；仅在 planner 设置了指令的 `cpu_fallback` 标志时允许。 |
-| canonical image（规范图像） | 算子领域约定：普通图像算子默认 straight alpha，宿主 backing 默认 tiled planar。不要求 Tensor 合规标签或自动 validator；显式 association 转换仍可使用。 |
-| boundary payload（边界 payload） | FMT-04 适配器为导出或外部接口生成或消费的 premultiplied 数值 tensor。关联方式由适配器的显式参数说明；tensor 本身不带标签，因此消费者依靠自己的显式参数或绑定的校验器。 |
+| WorkflowDocument | 调用方持有的源图，包含具名输入与输出。 |
+| GraphContext / GraphSnapshot | 源版本所有者和一致的编译快照。 |
+| IRProgram / ValidatedIR | 可编辑 SSA 程序及其已校验不可变形式。 |
+| DependencyPaths | 原始 DAG call 请求；重复 Call ID 表示同一调用。规划去重并合并符合条件的路径 block。 |
+| ControlFlow / CFG | 包含有序 call site、类型化 block 参数和 Jump/Branch/Return terminator 的 block 图。 |
+| SSA Result value | 具有唯一静态定义且使用受支配的 call 结果、外部输入或 block 参数。 |
+| ExecutionPlan | 不可变可序列化 Task/Tile/Call/Block 表、常量、依赖、placement 要求和资源上界。 |
+| PreparedPlan | 已绑定设备的不可变 kernel、解码 layout、直接入口，以及跨 Run 保留的 resource/module owner。 |
+| PreparedKernel | 设备 prepare 生成的不可变 operation context；共享 invocation 可以并发读取。 |
+| Run / RunHandle | 一次可变执行，包含固定 binding、动态 activation、completion record 和 result owner。 |
+| block activation | 实际进入某静态 block 的一次实例；循环再次进入时创建新 activation。 |
+| Task | Kernel、显式 COPY 或终端 effect 构成的调度单元，可以产生多个独立 tile。 |
+| TileId | 静态 tile descriptor 索引；`(RunId, ActivationId, TileId)` 标识物化运行时 tile。 |
+| CallGroup / CallDesc | 一个 IR call 的选中 task、返回声明与退休序号，也包括零 task 的 elided call。 |
+| predecessor / successor | 去重后的 producer-task readiness 边及其转置。 |
+| pending | 尚未成功完成的不同 predecessor 数量。 |
+| fixed read / view | Compiler 解析的输入端口、tile、逻辑坐标、stride 和字节边界。 |
+| schema-only read | 读取不可变 prepared schema，不建立 payload 依赖。 |
+| ready | 依赖成功，可申请资源；额度仍可能延迟发射。 |
+| issue / submission | 将 prepared invocation 及其 owner 交给 worker/backend。 |
+| completion | Task 全部访问结束，成功写入具备所需可见性，内部消费者可以就绪。 |
+| retirement | 按序将一个 call 的 status 与选定导出值移交 delivery stream。 |
+| release | 最后一个 hold 结束，allocation 可独立于退休顺序释放。 |
+| failure cut | 最小已观察失败 call ordinal；较早必要工作继续，cut 及之后未提交工作被跳过。 |
+| abort | Run 关闭所有准入后 drain，用于取消、过期和 context 失败。 |
+| Effect | 一个 call 的终端外部动作，只在退休头且 preparation 成功后发射。 |
+| COPY | 显式传输/物化，在声明 domain 中产生新 tile allocation。 |
+| packet / submission unit | 可选同 call GPU task 组，使用一个提交额度/完成事件和完整资源上界。 |
+| SubmissionId | 已接受 task/packet 提交的标识，映射到成员，与 TaskId/CallId 独立。 |
+| queue timepoint | 按实际 queue submission 排序的 backend 完成坐标，独立于 call 退休序号。 |
+| block argument | 已有不可变值的新名称/owner；修改目标前捕获全部来源。 |
+| live-through hold | 为后续 block 保留值，包括未作为显式参数传递的支配值。 |
+| Result / ResultRef | 静态 schema、选中 tile handle 和 owning lease，不自动组装稠密输出。 |
+| Tensor / Region | 数值存储 descriptor 和逻辑坐标区域；逻辑覆盖与物理 stride 分开。 |
+| ExecutionBindings | 每个 Run 固定的精确名称、不可变输入 owner 和结构 schema。 |
+| unchecked operator contract | 数值合法、声明访问和真实完成属于实现前置条件；executor 不认证样本。 |
+| admission | 发射前原子取得 block 的 output/state/queue/completion/delivery/scratch 容量。 |
+| compiler artifact | 版本化规范 IR/Plan 内容，不含 native pointer 或可变 Run 状态。 |
+| digest | 用于复现的非安全内容 identity，不认证 native code。 |
+| operation registry | 用于编译和链接的冻结受信任实现目录。 |
+| ImmutableResource / ResourceSet | 内容寻址的不可变 preparation 输入，由 prepared owner 保留。 |
+| operations SDK | 通用 scheduler 之外的领域算法、codec 和数值语义。 |
 
-`SessionId`、`JobId`、daemon IPC 和进程生命周期属于 `photospider-daemon`；Daemon Job 是临时状态。持久 result 与恢复能力在当前产品边界之外。Kernel result 是内存中的值，其 backing 生命周期由 owner 决定。
+`SessionId`、`JobId`、daemon IPC 和进程生命周期属于 `photospider-daemon`。持久结果与恢复仍在产品范围之外。替换后的 executor 不含 payload 多级缓存、隐式 CPU fallback 或运行时 Need 协议。

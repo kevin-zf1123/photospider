@@ -88,6 +88,7 @@
 !docs/**/*.md
 !docs/**/*.png
 !docs/**/*.jpg
+!docs/kernel-architecture/prototypes/ooo_executor.py
 
 # Personal overlay ownership. These paths remain ignored by primary Git even
 # after the broad docs allowance above.

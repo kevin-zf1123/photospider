@@ -1,5 +1,7 @@
 # 数值算子
 
+本文描述当前 continuation 实现。替换执行器的目标契约见[新设计](Compiler-and-Execution.zh.md)，本页的认证、缓存和 continuation 行为不属于新目标。
+
 默认 registry 提供未带后缀的有限域算术与 clamp、分阶段标量归约、有序扫描，以及带 profile 的数值算子族。各 key 的参数、执行和输出契约不同，调用方应按完整 key 选择。这些是 `plugins/ops/01-numeric/` 中的 bundled operations，不是内核代码；内核只提供它们所用的通用 Result 执行、资源、取消和失败契约。Operation plugin 使用 Result operation C ABI 7。数值工作报告、LUT bake 报告和质量报告是算子 SDK 类型（`photospider/ops/numeric/`）；见 [Atom 错误与质量](Atom-Errors-and-Quality.zh.md)。
 
 ## 未带后缀的 Result 数值算子
@@ -39,7 +41,7 @@ Mean 和 variance 通过 tile Need 按逻辑 row-major 区间读取一个 Float3
 
 这三个操作遇到 Empty 输出 demand 时执行静态 preflight，并返回没有 tensor coverage 的 sealed Result，不发出 input Need。
 
-通用 block 服务使用已 seal、无 publication scope 的单 Tensor 状态，与上述 Run 共享 scan 分开。共享 stage 不提供 block 或 checkpoint 服务，可选转换保留不承担唯一 producer 保证。见 [Dependency Data](Dependency-Data.zh.md)。
+通用 block 服务使用已 seal、无 publication scope 的单 Tensor 状态，与上述 Run 共享 scan 分开。共享 stage 不提供 block 或 checkpoint 服务，可选转换保留不承担唯一 producer 保证。见 [block 状态共享](Global-Results.zh.md#跨输出-block-状态共享)。
 
 ## 带 profile 后缀的逐元素算子
 

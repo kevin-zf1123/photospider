@@ -1,139 +1,135 @@
-# 并行执行模型
+# 并行执行与有序退休
 
-## 1. 核心摘要 (TL;DR)
+状态：Proposed breaking design，实现状态见 [Plan 契约](Compiler-and-Execution.zh.md)。[英文权威文档](../Parallel-Execution-Model.md)。
 
-`ExecutionContext` 拥有固定 CPU worker pool、独立的 CPU/GPU callback lane，以及共享的等待 callback 上限。在一个 Run 内，静态 VM 按 plan 顺序一次执行一条 plan 指令。并行工作来自共享 context 的独立 Runs、与空闲 pool worker 共同执行 range work 的 ordinary CPU callback、提交单线程 tile 并在每个 stage 等待完成的 planar staged callback，以及 native GPU dispatch。取消会停止后续领取和发布，再等待已运行的工作及已提交设备任务结束。
+## 范围与职责
 
-## 2. 架构心智模型 (Mental Model & Intuition)
+每个 Run 的 coordinator 是状态、依赖计数、ready queue、call record 与 hold 的唯一修改者。Context 提供 Run 共享的有界 CPU pool 和 GPU submission queue。Worker 与设备 callback 写入预留完成记录，不修改依赖或退休状态。
 
-不同 Run 竞争同一 context 的 worker 容量。ordinary callback 的调用线程处理 range block，空闲 worker 可领取其他 block；被其他 callback 占用的 worker 必须等其返回后才能协助。共享调度器在普通 callback 和 range block 之间轮换机会，并在领取后轮转可执行的 range job。
-
-```mermaid
-flowchart LR
-    A[Run A callback] --> Q[CPU callback FIFO]
-    B[Run B callback] --> Q
-    Q --> S[共享调度器与 pool mutex]
-    R[ordinary range jobs] --> JQ[共享 range/stage job queue]
-    JQ --> S
-    S --> W1[Worker 1]
-    S --> W2[Worker 2]
-    S --> WN[Worker W]
-    W1 -->|helper 领取不相交 block| J[Range barrier]
-    Caller[ordinary callback 调用线程] -->|参与 range work| J
-    WN -->|完成其他 Run 工作| O[独立 callback]
-    J -->|活动 block 全部退出| P[最终检查后发布]
-    C[Planar CPU_STAGES coordinator] -->|提交一个 stage job| JQ
-    W1 -->|单个 tile task| TB[Stage barrier]
-    W2 -->|单个 tile task| TB
-    TB -->|下一 stage| C
-    G[GPU callback] --> GQ[单一 GPU callback lane]
-    GQ --> D[同步 native dispatch]
-    D -->|完成后返回| GQ
+```text
+                        Run coordinator
+                  /            |            \
+             CPU ready      GPU ready    calls + retire_head
+                 |              |                |
+             CPU workers    GPU submit      ordered delivery
+                 \              /
+                reserved completion records
+                           |
+                    Run coordinator
 ```
 
-普通 callback 使用 CPU callback FIFO。ordinary range job 与 planar `CPU_STAGES` job 使用另一个共享 range/stage job list。两个结构共用 scheduler mutex 和 worker pool，因此 callback、range job 和 staged job 会争用 worker 容量。调度器在 callback 与 range 工作之间轮换机会；range worker 领取互不重叠的 block，stage coordinator 提交 tile 工作并在每个 stage barrier 等待。ordinary callback 调用线程也直接参与自己的 range barrier。GPU callback lane 使用独立队列，但共享 context 的等待容量。Range block 和 stage tile 会增加普通 callback 的等待时间。
+多发射表示在一次 coordinator 推进中准入所有符合条件且资源允许的 task。各 backend 的 ready heap 按 `(call ordinal, task ID)` 排序，context 公平轮转可执行 Run。依赖处理为 O(T + E)，heap 增加 O(T log T)，不模拟硬件时钟。
 
-### CPU range service
+## 状态与不变量
 
-```c
-#include <stdint.h>
-
-typedef int (*ps_cpu_range_callback_v2)(
-    void* user, uint64_t begin, uint64_t end, uint32_t slot);
-
-typedef struct ps_cpu_parallel_service_v2 {
-  uint32_t struct_size;
-  uint32_t abi_version;
-  uint32_t maximum_workers;
-  void* context;
-  int (*run)(void* context, uint64_t count, uint64_t grain,
-             uint32_t workers, ps_cpu_range_callback_v2 callback,
-             void* user);
-} ps_cpu_parallel_service_v2;
+```cpp
+#include <cstdint>
+namespace ps_executor_design {
+enum class TaskState : std::uint8_t {
+  Waiting, Ready, Submitted, Succeeded, Failed, Skipped
+};
+struct TaskRuntime { TaskState state; std::uint32_t pending; };
+struct CallRuntime {
+  std::uint32_t unsettled, first_failed_task;
+};
+struct CompletionKey {
+  std::uint64_t run, activation;
+  std::uint64_t submission;
+};
+}  // namespace ps_executor_design
 ```
 
-该 service 借给 CPU ordinary callback。它把 `[0, count)` 划分为有限、不相交且不超过 `grain` 的区间。`workers == 0` 使用最大 grant；正数请求 1 到最大参与者，其中包含调用线程。实际并行 block 数可以少于 grant。每个活动 block 获得唯一存活的 scratch slot。输入和 callback user data 借用至同步 barrier 返回；scratch 不得逃逸该调用。
+`pending(t)` 统计尚未成功完成的不同 predecessor。同一 producer 的两个输出只等待一个事件。生命周期 hold 则按不同 `(consumer task, tile)` 计数；两个端口读取同一 tile 只持有一次。Producer 完成前，未来消费者的 hold 已全部建立。
 
-非空 run 在启动任何 block callback 前，先按 Root Host 和 Metadata 容量预留 job record 与一个 Root Entry，再扣除 `work=count` 和 `stages=ceil(count/grain)`。预留或扣费失败时，run 返回 sticky resource failure，block callback 调用数为零。`count=0` 不创建 job，也不扣 work 或 stages；常规参数检查和取消检查仍会执行。
+每次被接受的提交恰好拥有一条终态完成记录。SubmissionId 映射到一个 task 或不可变 packet 成员范围，与 TaskId 独立。Coordinator 先检查 submission key/state 一次，再将事件分发到各成员状态。`Submitted` 包括已排入 worker 的 CPU 工作和已接受的设备工作。成功表示全部输出写入以及 input/scratch 访问结束，并具备所需可见性。拒绝提交不转移所有权，也不产生 callback，由 coordinator 处理局部失败。成功一次性公开 task 的全部输出；失败不公开输出。
 
-一个参与者的 grant 或可装入一个 block 的 range 会在调用线程内联执行。长 block 必须轮询给定取消 token。Service 停止新领取，并在返回前等待活动 block 退出。Block 使用不可变输入和预分配输出；行访问、分配、发布、准备和诊断 service 属于 callback 线程，range block 不可调用。嵌套 range 调用会拒绝，service 违规保持 sticky。
+执行额度和 scratch 在完成时归还。Call 的全部成员进入终态后视为 settled，只能在 `retire_head` 退休。选中的 call 只有在全部 task 成功时才成功；零 task 纯 call 以 `Elided` 退休。100 个 task 的 call 可以使用两个执行槽，因为执行槽不等待退休。
 
-对元素数 `N` 和正 grain `B`，block count 采用避免 `N + B - 1` 溢出的计算：
+成功处理依次标记输出可用、访问每个 successor 一次、结算 call 成员、释放 input hold/scratch 并归还额度，然后退休连续的 settled 前缀并准入新工作。消费者就绪不等待退休。用户交付独立执行。
 
-$$
-N_{blocks}=N/B + (N\bmod B\ne0),\qquad
-end=begin+\min(B,N-begin).
-$$
-
-Structured CPU Result ordinary poll 会通过 `ResultProgramPhase::cpu_parallel` 收到此借用 service。它只在当前 ordinary callback 内调度 block，不会并行执行 plan 指令。`tests/integration/kernel/test_cpu_parallel.cpp` 在 Root 已发行 work 后请求 `UINT64_MAX` range，并检查资源拒绝发生在任何 block callback 之前。`tests/unit/kernel/test_cpu_range.cpp` 在没有 Root 预算时检查端点算术，因此不能证明 Root admission 行为。
-
-### 静态 plan 执行顺序
-
-Run 遵循每个 `PlanBlock` 中保存的指令顺序以及 block 之间的 CFG。Coordinator 把一条指令的 start 或 poll callback 提交到 CPU callback FIFO 或 GPU lane，等待其退役并应用结果，之后才转到下一条指令。不存在 frontier、ready queue、producer task 或 wave；DAG 中相互独立的分支按 plan 顺序依次运行，被多个消费者使用的 tile 只运行一次，因为 planner 已对其去重。此路径下 `ExecutionDiagnostics::peak_active_tasks` 为 1。`ExecutionOptions::maximum_parallelism` 不再限制 plan 指令；它限制 planar staged tile 服务的 worker 数（为零时使用 CPU pool 的 worker 数）。
-
-同一 context 上的不同 Run 相互独立。每个 Run 有自己的 coordinator，因此当第一个 Run 等待 GPU callback 时，第二个 Run 的 CPU callback 可以执行并完成。`tests/integration/kernel/test_result_plan_order.cpp` 检查分叉 plan 保持单个活动 callback、对共享来源去重、跳过未选节点、观察取消并释放精确的 payload 上限；`tests/integration/kernel/test_execution.cpp` 检查当另一个 Run 的 GPU callback 处于活动状态时，独立的 CPU Run 能够完成。
-
-Run coordinator 拥有执行顺序和发布顺序。每次提交的 transfer、tile 和 native observations 保留在各自 callback 中直到退役，再由 coordinator 合并。Result poll timing 从 phase 创建计至 coordinator 退休，包括排队等待，因此不是纯计算时长。同步 Run 完成和 shutdown 会先排空已提交工作，再释放借给 callback 的状态。
-
-### Planar staged tile service
-
-```c
-#include <stdint.h>
-
-#define PS_CPU_TILES_ABI_VERSION_2 2U
-
-typedef struct ps_cpu_tile_v2 {
-  uint32_t struct_size, slot;
-  uint64_t index, begin[3], end[3];
-} ps_cpu_tile_v2;
-
-typedef int (*ps_cpu_tile_callback_v2)(void* user,
-                                       const ps_cpu_tile_v2* tile);
-
-typedef struct ps_cpu_tile_stage_v2 {
-  uint32_t struct_size;
-  uint64_t extent[3], tile[3];
-  uint32_t workers;
-} ps_cpu_tile_stage_v2;
-
-typedef struct ps_cpu_tiles_service_v2 {
-  uint32_t struct_size, abi_version, maximum_workers;
-  void* context;
-  int (*run)(void*, const ps_cpu_tile_stage_v2*,
-             ps_cpu_tile_callback_v2, void*);
-} ps_cpu_tiles_service_v2;
+```text
+Two CPU slots:
+call order:       A(10), C(A,1), B(2), D(B,1), E(C,D,1)
+issue order:      A, B, D, C, E
+completion order: B, D, A, C, E
+retirement order: A, C, B, D, E
+elapsed ticks:    12
 ```
 
-Coordinator 提交一个三维 work-item grid，并等待全部 tile callback 退出后才开始下一 stage。每个 callback 收到半开 tile box，作为一个不可分割任务运行于共享 CPU worker。Coordinator 执行分配、行访问和 stage 转换。`workers == 0` 使用 Run grant 上限；正数只限制并行参与数，不改变 tile 几何。
+## 准入与推进
 
-对 `(height, width, channel)` 张量，operation 可令一个 tile 跨完整 channel extent，使像素矩形保留每个像素的全部 RGBA 样本。这些坐标描述计算 work，不是物理 planar storage page。任一 extent 为零时不产生 tile callback。宿主检查 tile size 为正、ceil-div 与三轴乘积后才提交队列。一个 stage 持有其等待 admission 和 managed Queue lease，直至 callback 退出且 job 从队列摘除。
+第一版在 block 第一个 task 之前预留全部输出、持久 frame 状态、有界交付存储、可用 scratch lane 和完成容量，计算公式见 [tile 存储](Cache-Model.zh.md)。失败时返回 `ResourceExhausted`，本 block 没有 task 开始；先前 block 的结果和 effect 仍可观察。
 
-### 取消、资源与发布
+Task 必须处于活动、未提交、依赖就绪、failure cut 之前的状态，并取得全部额度。Effect 还要求其 call 等于退休头。Scratch lane 忙时可暂时绕过，通过公平选择重新访问。Task 原子获取完整的跨内存域资源向量。
 
-Context 在创建时确定 CPU worker 数；`cpu_workers` 为零时解析为有界硬件线程数。CPU 始终可用，native GPU 可选。`maximum_queued_tasks` 限制 CPU/GPU lane 共享的等待 callback 数。普通 callback 在 worker 开始执行时释放等待 slot；planar `CPU_STAGES` job 会保留 admission 和 managed Queue lease，直到所有已提交 tile 退出且 job 从队列摘除，具体规则见上文。活动 job 在退役前保留输入 owner、callback state、scratch 和输出 storage。
+Coordinator 接收事件、应用 stop、跳过工作、退休 call 并填充 lane。只有已接受工作或具体 context-credit 事件能够推动进展时才等待。Block reservation 被拒绝后失败，不无限等待。成功准入后，若仍有未完成工作但没有在途或可执行 task，属于 `Internal` 不变量错误。
 
-取消会关闭后续 range/tile 领取，并阻止后续 device submission。同步 range call 等待活动 block；GPU service 在返回前排空已提交工作。最终取消和 currentness 检查通过后才发布输出。Sticky host-service failure 优先于 callback success。宿主不能抢占任意 plugin code 或已提交 native dispatch。
+推进保证以有限 DAG、同 call 或更早 call 的依赖、有限 callback、设备最终完成、context 公平服务及完整预留为前提。最早未完成前缀 call 必有在途工作，或有 predecessor 能够完成的 task。当前工作完成后，该 call 的 ready task 可装入保底 lane，每次完成减少未结束工作。这是上述假设下的资源与调度保证，不是任意 native code 的终止证明。
 
-长时间运行的 CPU block 只在自身循环中轮询 token 的位置观察取消。例如，一个在 262,144 次迭代的循环中每次检查 `phase.query.cancellation` 的 block，在第 64 次迭代后被取消就会提前返回。Run 随后报告 `Cancelled`，此时只完成了计划迭代中的一部分；没有 block 仍处于活动状态，Root 的 Queue 用量回到零。`test_cpu_parallel` 覆盖这一情形。从不轮询的 block 会执行完整个区间，Run 之后才观察到取消。
+## 失败、副作用与取消
 
-Kernel helper 保存和恢复调用线程浮点环境，不强制数值模式。算子在每个实际 poll、worker、数值 preparation 和 validator callback 内建立所需模式，并在返回或暂停前恢复。算子自行定义归约顺序与兼容的工作分块。
+`failure_cut` 是已经观察到 task 失败的最小 call ordinal，初始为 call 数量。严格早于 cut 的工作继续运行。Cut 及之后尚未提交的工作被跳过，已经接受的工作必须 drain。失败不满足成功依赖；被跳过消费者的未来 hold 释放一次。更早 call 的失败事件可以继续向前移动 cut。
 
-`ExecutionContextConfig::collect_scheduler_timing` 默认为 false。启用后，`scheduler_statistics()` 分别返回 CPU/GPU lane 快照，并分别同步。Accepted 统计成功插入 FIFO 的 callback；started 统计 worker 从 FIFO 取出的 callback。`submission_ns` 从提交入口计至插入 FIFO，包括 mutex 获取和队列存储。`queue_wait_ns` 从成功插入计至 worker 取出。计时不包括 callback runtime 和 device execution。FIFO 统计不包含 range/tile claim，但这些工作占用 worker 时会增加 callback 等待。多个 Run 共享 context 的累计计数；仅当快照未饱和时，计数和耗时总和的差可用于选定区间。`maximum_queue_wait_ns` 与 `maximum_queued_callbacks` 是 context 生命周期最大值，不能通过差分得到区间最大值。不同 lane 快照可能对应不同时间点。
+先退休成功的较早前缀，再在失败 call 的已接受成员全部停止访问后退休一条失败记录。更晚 call 不退休，最终错误必须等待全部更晚在途工作也排空。同一 call 多个 task 失败时，从实际失败 task 中选择最小静态 TaskId；不为被跳过 task 编造错误。该规则对已观察失败稳定，不承诺执行所有 sibling 以发现每种可能错误。Failure-cut 使用独立内部停止机制，不得通过用户取消 token 取消较早前缀。
 
-## 4. 负面清单与边界 (Non-Goals & Explicit Boundaries)
+原型为每次实际失败的 completion 在 `task_failures` 中记录 `TaskFailure(activation, task_id, call, task_name)`。失败退休时，`retired_failures[call]` 记录该 call 中最小已观察 TaskId。终态 `failure` 只在 Run 为 `OperationFailed` 时设置；取消保留已观察/已退休失败诊断，但不把它们作为最终原因。跳过的 task 不生成失败 detail。Packet 级错误归属独立处理，当前原型尚未覆盖。
 
-- 同一 invocation 的 ordinary range callback 与 planar CPU staged callback 使用互斥服务。
-- Tile callback 不拥有 coordinator 的行、分配、发布、诊断或准备服务。
-- 调度器不承诺 work stealing、抢占，也不保证实际并发数等于 worker grant。
-- 一个 Run 不会并发执行 plan 指令；同一 plan 中相互独立的 call 按 plan 顺序运行。
-- GPU callback 经每 context 单 lane 同步提交；已提交 dispatch 完成后才能释放 owner。
-- Planar GPU callback 在图边界使用 host row window。跨图节点共享的 device-resident planar page 不属于当前接口。
-- Managed accounting 不包括线程栈、driver 私有分配和未建模容器存储。
+Effectful call 包含纯 preparation 与一个终端 effect task。它仅在退休头且自身 predecessor 成功后启动，因此更早 call 已全部成功退休。更晚纯计算可能已运行。Effect 失败前已发生的外部写入不能回滚。多个有序外部 effect 需要拆成不同 call，或由算子实现事务协议。
 
-## 5. 后果与代价 (Consequences)
+用户取消属于 Run abort。Coordinator 关闭准入、跳过未提交工作、排空已接受工作并停止进一步退休。已移交的记录继续有效，交付可以继续完成。终态锁定前，已观察用户取消优先于 Stale，再优先于 context/device/observer abort，最后是 task 局部失败；context/device/observer 类别内部保留 coordinator 首先观察到的原因；锁定后新请求不再改变结果。设备永久失败导致更早工作无法完成时，使用 context/device abort，不承诺普通的成功前缀完成。
 
-CPU worker 全忙时，ready callback 会留在对应 lane queue 等待。共享等待额度用尽时，提交返回 `ResourceExhausted`，执行器不会自动重试。调用方若要重试，须先释放容量或减少并发工作。
+图或 binding 失效以及 observer 失败同样 abort。同 Run callback 串行化、交付失败与终态锁定遵循[返回接口](Compiler-and-Execution.zh.md#run控制流与返回接口)。Device loss 必须确认 DMA/callback 停止访问，才能释放存储，backend 在此之前保留 lease。虚假成功、逃逸 CPU 工作或越界写入违反受信任算子契约。
 
-取消延迟由活动 block 和已提交 dispatch 的剩余运行时间决定。长 CPU block 必须轮询取消；慢 callback 会延迟结果清理和 context shutdown。单一 GPU callback lane 会串行执行该 context 的 GPU callback，planar 边界复制会增加传输开销。
+## CPU 与 GPU 完成边界
 
-等待队列限额和 managed memory/work 限额控制不同资源。Run 按其 owner 生命周期保留输入、中间结果、callback state 和结果 storage。ABI 兼容规则见 [Plugin ABI](Plugin-ABI.zh.md)。
+CPU invocation 接收不可变输入 view、独占预分配输出、私有有界 scratch、参数和 cancellation。同步 `invoke` 在全部访问与内部工作结束后返回 status。Worker 以 release 顺序发布，coordinator 以 acquire 顺序消费。基础 kernel 每 task 使用一个 worker；并行阶段降低为 task，不通过嵌套 pool job 阻塞 worker。
+
+Backend 逻辑接口为 `SubmitResult submit(const Invocation&, CompletionSlot&) noexcept`，返回 `Rejected(Status)` 或 `Accepted(Ticket)`。接受后转移 owner，直到恰好一次 completion；拒绝时 owner 留在 coordinator，且不排入 completion。Submit 前先准备 slot，因此允许同步完成。Callback 只写有界 status 并唤醒，不分配、不运行用户代码。
+
+GPU encode 和 queue 接受不使输出可读。Input/output/scratch、参数、command、pipeline/module owner 和 completion slot 保持到设备停止访问。Host 可见完成包含必要 cache maintenance。GPU 消费者需要 access/layout transition 与内存可见性，共享内存也需要同步。跨域传输使用显式 COPY task。
+
+Completion key 与 queue timepoint 分离。Task 7 完成不代表 task 0 至 6 完成。GPU timeline 按同一有序 queue 的实际提交顺序编号，独立 queue 使用独立 timeline。TaskId 和 CallId 不得作为通用完成计数器。
+
+### Device packet
+
+基础设计逐 task 提交。可选 compiler packet 将同设备子图合包，要求全部外部输入边在提交前满足，全部对外输出边在 packet 完成后可用。第一版 packet 不含 effect，并只属于一个 call。收缩后的 packet 图必须无环；围绕一个依赖 B 的中间 task 合并两侧 A task 可能产生 A/B 环。
+
+Packet 消耗一个 backend submission credit 和一个 completion slot，其全部成员在该单一事件处理前保持 Submitted。设备 barrier 实现内部依赖。提交前预留全部输出和完整 packet scratch/command 上界。成功时在一个事件中按拓扑顺序结算成员。缺乏逐成员失败信息时以 `PacketFailure(submission, members)` 使整个 call 失败，不公开 packet 输出。不编造首个失败成员，packet 级来源与 task 局部错误选择分开记录。限制为一个 call 可保持跨 call 失败归属；跨 call 链在 backend 提供充分逐 task 完成语义前保持独立提交。合包可能延迟消费者，需要与提交开销一起测量。
+
+## 诊断与检查
+
+分别测量 ready、submit、start、device completion 和 retirement，保留 backend 在途峰值、ready/scratch 等待、传输及 drain 延迟。只对可比较时钟域的时间戳作差。第一版 C++ 实现额外输出以下指标：
+
+| 指标 | 定义 |
+| --- | --- |
+| `reserved_bytes_by_domain` | 按内存域统计当前准入预算容量，包含未使用的 block reservation；每个 lease 计一次 |
+| `live_bytes_by_domain` | 各域当前实际分配的受控字节，包含保留的返回 owner；按 allocation 大小计费，不等同于逻辑图像大小或 RSS |
+| `allocation_count` | Run 内成功物化 tile allocation 的累计数量，排除 scratch、command 和借用的 input owner |
+| `block_admission_failure` | 准入失败次数及 block/activation、资源维度、所需容量和可用容量；在该 block 发射前报告 |
+| `retirement_head_wait` | Call 成为退休头至其 settled 且可退休的单调时钟时间；不含 callback 交付延迟，abort 时单独报告尚未结束的等待 |
+
+同时报告 reserved/live 当前值与峰值。Block 结束后归还未使用 reservation，导出 owner 保持计费；Run 完成后释放这些 owner 仍更新计费。Block 内 live bytes 下降不表示 reserved bytes 同步下降。[容量示例](Cache-Model.zh.md#容量成本与测量)量化这一基线成本。
+
+第一批 native GPU 评估覆盖四种独立工作负载：
+
+| 工作负载 | 必需观察 |
+| --- | --- |
+| 同 call 大量 tile | 吞吐、packet 大小、提交数、分配数和容量峰值 |
+| 独立 calls | 真实重叠、queue 占用和退休头等待时间 |
+| 相互依赖的 GPU call，例如 blur -> color transform -> blend | Device complete 到下一次 submit 的间隔、各 call 延迟和 host 唤醒次数 |
+| 带显式 COPY 的 CPU/GPU 链 | 传输字节/时间、host/device 同步与 drain 期间的生命周期 |
+
+在基于完成事件判断就绪的规则下，同 call packet 不能预先提交存在依赖的跨 call 链。先测量这段 host 推进间隔，再决定是否引入更细设备完成点或跨 call 编排。比较时固定 shape、tile extent、placement、worker/queue grant 和资源限制，并记录物理设备与 driver。Block 合并必须与容量和准入失败一起评估；在独立论证替代策略之前保留全 block reservation。这些是实现验收测量要求，不是 Python 模型的测量结果。
+
+原型检查不增加 payload hold 的显式顺序、独立退休/RET 所有权、已观察 task 错误选择、退休前转发、大 group、failure cut、effect、取消和释放。它使用逻辑 tick，并为可读性扫描/排序任务表。C++ 使用预编译邻接表、依赖计数、ready queue 和 call 未结束计数。剩余检查包括完整 CFG/loop、选择闭包重建、callback 交付和 finalization 竞争、多域/metadata 容量、Accepted/Rejected 所有权竞争、inline completion、device loss、可见性和真实 packet 完成/失败。
+
+## 一手设计参考
+
+- [BOOM ROB](https://docs.boom-core.org/en/latest/sections/reorder-buffer.html)：有序 commit 与队头异常处理为 call record 和退休游标提供参考，不引入投机寄存器状态。
+- [IREE Stream](https://iree.dev/reference/mlir-dialects/Stream/) 与 [HAL](https://iree.dev/reference/mlir-dialects/HAL/)：异步资源与 wait/signal fence 为显式完成依赖提供参考。
+- [CUDA Graphs](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html)：分离定义、实例化与执行，为 prepare-once 数据和可选 packet 提供参考。
+- [Metal completion](https://developer.apple.com/documentation/metal/mtlcommandbuffer/addcompletedhandler(_:))：设备完成通知支持区分 submit 与 Done。
+  Apple 的[归档 command guide](https://developer.apple.com/library/archive/documentation/Miscellaneous/Conceptual/MetalProgrammingGuide/Cmd-Submiss/Cmd-Submiss.html)（2016-12-12 更新）同时说明 command-buffer 保活与快速完成 handler；这里只引用这些基础生命周期机制。
+- [Vulkan synchronization](https://docs.vulkan.org/spec/latest/chapters/synchronization.html)：执行顺序、可用性和可见性需要显式 backend 同步。
+
+这些来源为特定机制提供依据，不构成 Photospider 已实现该执行器的证据。

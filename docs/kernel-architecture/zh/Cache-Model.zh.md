@@ -1,74 +1,85 @@
-# 缓存模型
+# Tile 存储、生命周期与准入
 
-## 范围与 ownership
+状态：Proposed breaking design。本页以唯一 tile 存储替换 executor 缓存设计。参见 [Plan 契约](Compiler-and-Execution.zh.md)和[英文权威文档](../Cache-Model.md)。
 
-Kernel 分别管理编译阶段、plan cache key、不可变输入快照、已完成结构化 Result 复用、checkpoint 与 block 状态，以及 native backend input-copy cache 的 identity。进入缓存只赋予复用资格；活动 Results、snapshots、Tensor backing 和 read windows 在 entry 清除或淘汰后仍由各自 owner 与资源租约持有。每个 Run 执行静态 plan，VM 为其正在执行的指令直接进行 completed-result、checkpoint 与 block 查找，并使用自己的可选 cache-work 配额。
+## 数据布局与所有权
 
-## Identity 域
+动态物化 tile 的 identity 为 `(RunId, ActivationId, TileId)`，具有一个 producer、一个 allocation 和一个不可变 domain。不同的同时存活物化 tile 使用独立 backing allocation。消费者共享同一 tile 的只读 handle。View 与 block 参数名称引用同一个值，不产生第二次物化。
 
-| Identity | 域标签 | 内容 | 何时改变 |
-| --- | --- | --- | --- |
-| IR content digest | `validated-ssa-ir-v26` | 程序形式及规范 SSA 程序：declarations、calls、values、blocks、terminators、参数、traits、资源 identity、schemas | 任何程序变化，包括 call 或 value 重新编号 |
-| Physical plan digest | `static-tile-program-v27` | 实际输入 IR digest、执行模式、tile extent、steps 与放置、输出请求，以及每个 block 的指令、授权、依赖和 terminator | 任何指令、授权或请求变化，或重新编号 |
-| Plan cache key | `plan-cache-key-v20` | Plan digest 的域分离包装 | 与 plan digest 相同 |
-| Step structured template | `photospider.dependency-static.v4` | Tile extent、执行模式、后端、operation key、输出索引、traits、资源 identity、参数、输入 schema | 契约、参数、资源或输入 schema 变化；重新编号不改变 |
-| 固定授权内容 key | `photospider.fixed-grant-cache.v2` | Step template、后端、成员、tile、publication samples、descriptor 授权端口、已授权输入的 schema 与样本字节 | 任何输入字节或授权变化；重新编号不改变 |
-| 固定 block 输入证明 | `photospider.fixed-block-inputs.v2` | Block 契约加上相同的授权内容（不含成员与 tile） | 与内容 key 相同 |
-| 已保存算子契约 | `artifact-static-operation-contract-v2` | 一个 operation key 的注册 traits 与 validator/report 引用 | 算子契约变化 |
+第一版在 admission 时分别分配当前 block 的输出 buffer，不使用大 slab 切分多个逻辑输出 buffer。旧 allocation 最后一个 owner 释放后，allocator 可以复用地址；Plan 不为存活 tile 建立别名。Scratch 属于提交，在完成后可以复用 lane。
 
-前四个 identity 是编译器 identity。它们包含程序标识符，因此即使计算等价，重新编号 call 或 value 也会改变它们；它们是可复现辅助，不是安全 identity。Template 与内容 identity 不含物理 node、step 或 plan 标识符。因此位于不同 step 的两个等价 call、重命名或重新编号的 plan，或从 `.psxp` 重新加载的 plan，在其固定输入内容相同时共享 completed-result、checkpoint 与 block 条目。依赖记录仍属于当前 plan；复用从不导入另一个 plan 的记录。
+外部 Result binding 可以使用已有合法 Tensor backing。Preflight 检查 name、schema、coverage、layout 和 owner，不扫描样本。显式 import COPY task 将所需外部 tile 物化为 Plan 表示，归属最早消费它的 call，并进入依赖图。零拷贝绑定只允许独立、兼容、不可变的 tile allocation，不创建隐藏 input-copy cache。
 
-Descriptor-only 授权按端口索引进入内容 key。编辑已保存的 plan 使某个 descriptor 授权指向不同端口时，key 随之改变，编辑后的 plan 不能复用原 plan 的缓存值。
+Run 在 import/direct read 期间保留 binding。参数、prepared resource、pipeline 和 module 保持到已接受提交结束。返回 Result 保留 tile allocation，以及在 execution context 销毁后释放它所需的 allocator/device release context。
 
-## 不可变 Tensor snapshots
+## Hold 与释放
 
-```cpp
-#include "photospider/data/input_snapshot.hpp"
+对 tile `v`，维护：
 
-namespace ps {
-Result<InputSnapshot> import_snapshot(const InputSnapshotStore& store,
-                                      const Tensor& value) {
-  return store.import_tensor(value);
-}
-}
-```
+$$
+H(v)=P(v)+U(v)+L(v)+R_{\mathrm{call}}(v)+R_{\mathrm{ret}}(v)+X(v).
+$$
 
-`InputSnapshotStore` 为受支持的内建 numeric Tensor 类型保留 rank 1 至 rank 8 的不可变 blocks。Import 保留所有位模式，只检查 Tensor 的 descriptor 与 coverage，不解释样本值。Store 分别限制 block 数量、跨版本实际 payload bytes 和目录 metadata。调用方持有的 Tensor 与 snapshot metadata 不计入 retained-payload 字节限额。
+`P` 是预留/尚未结束的 producer hold；`U` 统计不同的未结束 consumer task；`L` 统计 frame/跨 block/terminator 义务；`R_call` 统计等待 call 退休的 export，`R_ret` 统计等待最终 RET 的值；`X` 统计外部 owning handle。在途 input 访问由 consumer hold 覆盖，output 写入由 producer hold 覆盖。额外 view 必须在这些提交下借用，或取得自己的 owner。
 
-Patch 要求类型和 shape 匹配，并替换一个精确非空 Footprint。Store 复制相交 blocks 并保留先前版本。Reads 与 patches 接受 cancellation 和样本上限。取消的 read 可能已部分写入调用方 destination；只有成功才能确认结果完整。
+| 事件 | Hold 变化 |
+| --- | --- |
+| Admission | 在任何 task 开始前建立 producer、全部未来 consumer、跨 block 和 export hold |
+| Task 完成 | 结束访问，释放 producer/input hold 与 scratch 一次 |
+| 跳过未提交 task | 释放未来 input hold 与未使用 output producer hold |
+| Call 退休 | 将选中 export hold 转移给交付记录，或丢弃无用 hold |
+| Block 边 | 先取得所选后继/跨 block hold，再释放旧 frame hold |
+| RET | 把 return hold 转给最终具名 Result |
+| 外部释放 | 释放 owning reference |
 
-`content_identity(region)` 使用规范 framing 对 dtype、shape、请求坐标和精确 sample bits 进行 hash。Block geometry、origin、stride 和 allocation 不影响 identity。正负零与不同 NaN payload 保持区分。Snapshot/session identifiers 描述 provenance；deterministic operations 不能从 identifier 字符串推导样本值或依赖。
+仅在 `H(v) == 0` 时释放存储。完成、退休和释放是不同事件。没有 export/跨 block 义务的未退休中间值，可以在消费者结束后释放；已退休输出则在 host 保留时继续存活。Abort cleanup 丢弃不再需要的 live/export hold，但在停止访问之前保留每个已接受提交的 producer/consumer hold。
 
-## 纯度与可缓存性
+Call 交付与最终 RET 是独立义务。同一 tile 同时被两者选中时，在 producer/consumer hold 之外再取得两个 hold。Call 成功退休只把 `R_call` 转交 delivery owner。Run 成功时把 `R_ret` 转交最终 result owner；失败或取消时丢弃全部待交付 `R_ret`，即使对应 producer call 已经成功退休。此前已移交的 call value 保持其外部 owner。失败 call 不移交任何值，即使部分 sibling task 已成功。
 
-VM 为每条指令和每个值跟踪两个独立属性：
+[原型](../prototypes/ooo_executor.py) 分别以 `retirement_exports` 和 `return_values` 选择两类值。已取得的内部义务位于 `retirement_holds` 与 `return_holds`；退休时转入 `retired_values`，成功 RET 时转入 `results`。这些 dictionary 模拟拥有型结果集合，不表示任意复制裸 handle 就能增加所有权。通过 `release_retired_values()` 与 `release_results()` 独立释放，两种顺序均合法，重复释放空集合无操作。准入失败不取得任何一类 hold。模型把未移交的 export 义务保留到终态 drain，然后丢弃。
 
-- **Pure（纯）**：算子确定且无副作用，指令没有共享 stage 读取且本身不是共享 stage，attempt 未被 fallback 污染，每个 payload 输入都来自 workflow 输入或纯 producer，本次 activation 的控制证据是纯的，且没有 payload 输入是 block 参数。
-- **Cacheable（可缓存）**：纯，并且算子带有 `cacheable` trait、producer 可缓存、控制证据可缓存。
+分支处 frame 保留所有可能后继 live value 的并集，再丢弃未选 hold。循环的新 activation 在分配新输出时保留传入值。Compiler liveness 覆盖跨越直接后继使用的支配值。Host 保留的 export 跨迭代继续计费。
 
-Checkpoint 与 block 服务只要求纯度。因此即使其自身算子或某个祖先设置了 `cacheable = false`，纯指令仍可使用这两项服务。Completed-result 查找与保留要求可缓存性。Block 参数、共享闭包和回退路径绕过全部可选复用；这是保守策略，因为 block 参数在每轮循环中可能携带不同的值。
+## Block reservation
 
-## 完成 Result 复用
+Admission 使用 host payload、device payload、metadata、queue 与 completion 容量组成的向量。每个内存域 `d` 的充分容量条件为：
 
-Completed-result 查找计算指令的固定授权内容 key，读取该 key 下至多八个候选，跳过后端不同的候选，并以新 ObjectId 和当前 producer scope 重新绑定匹配项。重新绑定的 Result 像计算所得发布一样被校验（包括输出 payload 上限），并共享缓存的物理 backing。Run 安装它时，依赖证据由当前 plan 的授权重建。Cache metadata、key 哈希、样本读取和保留的 payload 计入各自 Root/cache 限制。可选 work 耗尽、metadata 超限或保留容量不足时，跳过复用或保留并继续计算。命中不产生 `OperationTiming` 记录，也不增加 `computed_elements`。
+$$
+A_d=L_d+\sum_{v\in O_b}\operatorname{allocatedBytes}(v)
+       +\sum_q C_q S_{q,d}+M_d.
+$$
 
-每次 execute 调用持有不可变 Result binding 快照，直到 callback 退出。直接执行与 demand 执行都检查 plan currentness；图被替换或销毁后，借用该图版本的 plan 返回 Stale。
+`L` 为已计入预算的存活传入/export 容量；`O_b` 为新 block 输出和持久临时 tile；`C_q` 为 backend 类别 `q` 获得的在途容量；`S_{q,d}` 为该类允许提交单元（task 或 packet）在域 `d` 的最大 scratch/command 容量；`M` 覆盖 frame 状态、descriptor、queue 与交付记录。大小包含 rounding/alignment，求和与乘积检查溢出。每个 task 原子获取完整资源向量。`A_d` 是总容量要求；新增 reservation 只申请 `A_d - L_d`，不重复计费已有 owner。
 
-`ExecutionContextConfig::result_cache_bytes` 默认为 0，即禁用 completed-result 保留与 block 复用。`maximum_dependency_cache_metadata` 默认 65536 proof units，范围为 1..1048576。`ExecutionOptions::maximum_dependency_cache_work` 是单独的每 Run 可选配额，默认 1048576，设为零会禁用该 Run 的 completed-result、checkpoint 与 block 复用。Key 构造、样本哈希、重新绑定、checkpoint witness 和 block key 在 Root 必需 work 之外使用该配额。耗尽时跳过复用或保留并继续计算；不会退还已经消耗的 Root work。
+Block 使用的每个 backend 类别至少有一个可用 lane。Completion 容量覆盖所有可能在途提交，完成事件 producer 不等待 retirement 或普通工作队列 slot。完成、跳过和退休所需 metadata 全部预留。发射前完成分配；分配失败撤销 admission，本 block 启动 task 数为零。不透明 driver 分配仍可能产生操作性失败。
 
-## Checkpoint 与 block 状态
+Reservation 属于 block，其他 Run 不得撤回。Tile 释放的容量在 block 结束前不借给其他 Run，但物理 buffer 可在最后使用时释放。保留 export 以实际容量跨边界计费，其余容量归还 context。Host 保留值可能导致下一 block 准入失败，executor 不无限等待外部释放。
 
-Checkpoint 范围是固定授权内容 key 加 `/checkpoint` 后缀，因此等价 call 独立于其物理 step 共享 checkpoint 状态。恢复 checkpoint 只恢复状态内容；当前指令保留自己的固定授权与证据，旧 witness 从不替换它们。`ExecutionContextConfig::maximum_result_checkpoint_scopes` 限制存活范围数，每个范围至多保留 64 个条目。Checkpoint 不需要正的 `result_cache_bytes`。
+此保守上界以更高内存需求换取明确推进保证。Oldest-ready 优先不足以保证 lazy allocation 安全。例如 `A -> B` 和独立 C，三个输出各 4 bytes，B/C 保留到 RET，预算 8。C 与 A 先完成后都被 hold 保留，B 无法分配。顺序 A,B,C 可在 8 bytes 内完成，整 block 输出预留却要求 12 并拒绝。将来 lazy 策略需要独立证明的保留容量规则。更小的合法调度 block 或更窄输出选择可以降低容量，但减少并行度。
 
-Block 状态复用把 block 契约与固定 block 输入证明，同 block kind、range、mode 和输入状态绑定在一起。只有当 compute 回调在该 block 期间确实 dispatch 了原生工作时，GPU block 才进入缓存；后端与固定输入证明都是 key 的一部分，因此没有原生计算证明的 GPU 路径从不被复用。见[全局结果](Global-Results.zh.md#跨输出-block-状态共享)。
+## 容量成本与测量
 
-## 限制与当前入口
+8192 × 8192 的 RGBA Float32 图像含 `8192 * 8192 * 4 * 4 = 1073741824` payload bytes，即 1 GiB。Extent 为 128 时共有 4096 个 tile，每个 262144 bytes（256 KiB）。若同一调度 block 中每个 call 都完整物化一张这样的图像，仅输出的预留为：
 
-- Native GPU results 与 CPU-exact result keys 隔离，因为执行模式与后端同时属于 template 和内容 key。带 fallback 污染的结果不进入任何复用缓存，近似 native results 不替代 exact CPU results。
-- `ResultCacheStatistics::native_retained_bytes` 统计缓存保留的唯一原生分配，同时包括保留的 GPU 输出和保留的 GPU block 状态。它不是仅 block 的容量。
-- Native input-copy reuse 与 completed Result computation reuse 分离。它可复用已授权 Result tensor backing 的 transport，但不会使上游 producer computation 获得缓存资格。
-- LRU eviction 撤销条目今后的查找资格；持有 Result 或读窗口的调用方保留其 backing。`clear()` 推进缓存 epoch，因此更早 epoch 的工作不能重新填充已清空的缓存。
+| 完整物化图像值数量 | 输出 payload 预留 | 独立 tile allocation |
+| ---: | ---: | ---: |
+| 1 | 1 GiB | 4096 |
+| 4 | 4 GiB | 16384 |
+| 8 | 8 GiB | 32768 |
+| 16 | 16 GiB | 65536 |
 
-当前 production image operation 可用性见[图像 operations](Image-Operations.zh.md)。Snapshot 和 generic cache 行为由 `test_input_snapshot`、`test_generic_result_cache` 与 `test_computed_scalar` 覆盖。跨编辑后 descriptor 授权的内容 identity 复用，以及跨物理 step 的 checkpoint 共享，由 `test_static_compiler` 覆盖。Result capture 和 owner release 由 `test_result_image_contracts` 与 `test_result_objects` 覆盖。
+这些是布局计算，不含 incoming/export 值、scratch、metadata、allocation padding 和 driver 开销，不是 RSS 或耗时测量。临时 tile 可在最后使用后释放物理 buffer，而所属 block 仍持有预留预算。因此按[诊断契约](Parallel-Execution-Model.zh.md#诊断与检查)分别报告 reserved/live bytes、allocation count 和 admission failure detail。
 
-Run 共享 stage 由 plan 本身在每个 call、stage 和 block activation 中执行一次，独立于可选缓存。它们不提供 checkpoint 或 block 服务，也不跨 Run 保留活动状态。带共享 stage 读取的指令绕过 completed-result 缓存；见[全局结果](Global-Results.zh.md#completed-result-缓存)。Snapshot block 几何独立于 plan tile extent。
+合并 DAG 路径 block 会扩大调度空间，也可能增加准入工作集。对相同 workflow 比较合并 block 与较小合法 block，分别记录容量拒绝、排队延迟和退休延迟。基线保持全 block reservation；按容量划分需要实际收益与明确 compiler 策略，不引入存活 tile 别名或 payload 多级缓存。
+
+## Identity 与缓存边界
+
+IR/Plan identity 用于复现与可选 host artifact 查找。PreparedPlan 复用共享不可变 code/resource。不可变输入 snapshot 工具可以在 executor 外保留，提供 binding owner，不授予执行结果复用资格。
+
+替换后的 executor 没有 completed-result、checkpoint、block-state cache，没有 residency mirror、自动 input-copy cache，也不在热路径进行 tile content hash。每个准入 task 执行一次，除非因 abort/failure 跳过或编译期省略。Host 可按自己的策略把缓存输出绑定为显式输入。
+
+`COPY host -> device` 产生不同 tile。共享 coherent memory 是一个声明的 domain，使用一个 allocation 并执行同步。更改 backend 需要不同 prepared/compiled placement 契约，不为同一 tile 隐式创建替代 allocation。
+
+## 限制
+
+容量上界针对受控分配，不代表 RSS、线程栈或不透明 driver 内存。没有 spill、eviction、重算或 storage donation。整 block admission 可能拒绝较小内存串行调度可完成的程序。原型验证抽象字节预算和 hold，不验证实际设备或操作系统分配行为。

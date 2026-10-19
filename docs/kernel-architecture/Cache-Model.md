@@ -1,74 +1,85 @@
-# Cache model
+# Tile Storage, Lifetimes and Admission
 
-## Scope and ownership
+Status: Proposed breaking design. This page replaces the executor cache design with unique tile storage. See the [Plan contract](Compiler-and-Execution.md) and [Chinese reader version](zh/Cache-Model.zh.md).
 
-The kernel keeps separate identities for compiler stages, plan cache keys, immutable input snapshots, completed structured Result reuse, checkpoint and block state, and native backend input-copy caches. Cache membership grants reuse eligibility only; active Results, snapshots, Tensor backing, and read windows retain their own owners and resource leases after an entry is cleared or evicted. Each Run executes a static plan, and the VM performs completed-result, checkpoint and block lookups directly for the instruction it is executing, with its own optional cache-work quota.
+## Data layout and ownership
 
-## Identity domains
+A dynamic materialized tile has identity `(RunId, ActivationId, TileId)`, one producer, one allocation and one immutable domain. Different simultaneously live materialized tiles have distinct backing allocations. Consumers share a tile's read-only handle. Views and block-argument names for that tile refer to the same value rather than materializing another one.
 
-| Identity | Domain tag | Contents | Changes when |
-| --- | --- | --- | --- |
-| IR content digest | `validated-ssa-ir-v26` | Program form and canonical SSA program: declarations, calls, values, blocks, terminators, parameters, traits, resource identities, schemas | Any program change, including renumbered calls or values |
-| Physical plan digest | `static-tile-program-v27` | Actual input IR digest, execution mode, tile extent, steps and placements, output requests, and every block's instructions, grants, dependencies and terminator | Any instruction, grant or request change, or renumbering |
-| Plan cache key | `plan-cache-key-v20` | Domain-separated wrapper of the plan digest | Same as the plan digest |
-| Step structured template | `photospider.dependency-static.v4` | Tile extent, execution mode, backend, operation key, output index, traits, resource identities, parameters, input schemas | Contract, parameter, resource or input-schema change; not renumbering |
-| Fixed-grant content key | `photospider.fixed-grant-cache.v2` | Step template, backend, member, tile, publication samples, descriptor-grant ports, granted input schemas and sample bytes | Any input byte or grant change; not renumbering |
-| Fixed block-input proof | `photospider.fixed-block-inputs.v2` | Block contract plus the same grant content (without member and tile) | Same as the content key |
-| Saved operation contract | `artifact-static-operation-contract-v2` | Registered traits and validator/report references of one operation key | Operation contract change |
+The baseline separately allocates the current block's output buffers at admission. A slab sliced into several logical output buffers is outside this baseline. Allocators may reuse addresses after the previous allocation's final owner releases it; the Plan never aliases live tiles. Scratch is private to a submission and its lane can be reused after completion.
 
-The first four identities are compiler identities. They include program identifiers, so renumbering calls or values changes them even when the computation is equivalent; they are reproducibility aids, not security identities. The template and content identities contain no physical node, step or plan identifier. Two equivalent calls at different steps, a renamed or renumbered plan, or a plan reloaded from `.psxp` therefore share completed-result, checkpoint and block entries when their fixed inputs have the same content. Dependency records still belong to the current plan; reuse never imports another plan's records.
+External Result bindings may use existing valid Tensor backing. Preflight checks names, schemas, coverage, layout and owners without scanning samples. Explicit import COPY tasks materialize the required external tiles into the Plan representation. They belong to the earliest consuming call and participate in its dependency graph. Zero-copy binding is permitted only for separate, compatible immutable tile allocations. No hidden input-copy cache exists.
 
-Descriptor-only grants enter the content key by port index. Editing a saved plan so that a descriptor grant names a different port changes the key, and the edited plan cannot reuse the original plan's cached value.
+The Run retains bindings through imports/direct reads. Parameters, prepared resources, pipelines and modules survive accepted submissions. Returned Results retain tile allocations and the allocator/device release context needed after execution context destruction.
 
-## Immutable Tensor snapshots
+## Holds and release
 
-```cpp
-#include "photospider/data/input_snapshot.hpp"
+For tile `v`, maintain:
 
-namespace ps {
-Result<InputSnapshot> import_snapshot(const InputSnapshotStore& store,
-                                      const Tensor& value) {
-  return store.import_tensor(value);
-}
-}
-```
+$$
+H(v)=P(v)+U(v)+L(v)+R_{\mathrm{call}}(v)+R_{\mathrm{ret}}(v)+X(v).
+$$
 
-`InputSnapshotStore` retains immutable rank-1 through rank-8 blocks for supported built-in numeric Tensor types. Import preserves every bit pattern and checks only the Tensor's descriptor and coverage; it does not interpret sample values. The store bounds block count, actual payload bytes across versions, and directory metadata separately. Caller-owned Tensors and snapshot metadata are outside the retained-payload byte limit.
+`P` is its reserved/unsettled producer hold; `U` counts distinct unfinished consumer tasks; `L` counts frame/live-through/terminator obligations; `R_call` counts pending call-retirement exports and `R_ret` counts pending final-RET values; `X` counts external owning handles. In-flight input accesses are covered by consumer holds and output writes by the producer hold. Additional views borrow under those submissions or acquire their own owner.
 
-Patches require matching type and shape and replace one exact nonempty Footprint. The store copies intersecting blocks and preserves earlier versions. Reads and patches accept cancellation and sample bounds. A cancelled read may have partially written the caller's destination; only success certifies the complete result.
+| Event | Hold transition |
+| --- | --- |
+| Admission | Establish producer, all future consumer, live-through and export holds before any task starts |
+| Task completion | Finish accesses; release producer/input holds and scratch once |
+| Skip unsubmitted task | Release future input holds and unused output producer holds |
+| Call retirement | Transfer selected export holds to delivery records, or drop unused holds |
+| Block edge | Acquire chosen successor/live-through holds before releasing old frame holds |
+| RET | Transfer return holds into final named Results |
+| External release | Drop the owning reference |
 
-`content_identity(region)` hashes dtype, shape, requested coordinates, and exact sample bits with canonical framing. Block geometry, origin, stride, and allocation do not affect identity. Signed zeros and distinct NaN payloads remain distinct. Snapshot/session identifiers describe provenance; deterministic operations cannot derive sample values or dependencies from identifier spelling.
+Free storage exactly at `H(v) == 0`. Completion, retirement and release are distinct. An unretired intermediate can be freed after its consumers finish if it has no export/live-through obligation. A retired output stays alive while the host retains it. Abort cleanup drops unneeded live/export holds, but preserves every accepted submission's producer and consumer holds until quiescence.
 
-## Purity and cacheability
+Call delivery and final RET are independent obligations. A tile selected for both receives two holds in addition to its producer/consumer holds. Successful call retirement transfers only `R_call` to the delivery owner. A successful Run transfers `R_ret` to the final result owner; failure or cancellation drops every pending `R_ret`, including values whose producing calls already retired successfully. Already handed-off call values retain their external owners. Failed calls hand off no values, even when some sibling tasks succeeded.
 
-The VM tracks two separate properties for every instruction and value:
+The [prototype](prototypes/ooo_executor.py) exposes `retirement_exports` and `return_values` as separate selections. Acquired internal obligations live in `retirement_holds` and `return_holds`; retirement transfers into `retired_values`, while successful RET transfers into `results`. These dictionaries model owning result collections, not raw handles whose arbitrary copies add ownership. Release through `release_retired_values()` and `release_results()` independently; either release order is valid, and calling release on an empty collection is harmless. Admission failure acquires neither set of holds. The model retains unfinished export obligations until terminal drain, then discards those not handed off.
 
-- **Pure**: the operation is deterministic and side-effect-free, the instruction has no shared-stage reads and is not a shared stage, the attempt is not fallback-tainted, every payload input comes from a workflow input or a pure producer, the activation's control evidence is pure, and no payload input is a block parameter.
-- **Cacheable**: pure, plus the operation's `cacheable` trait, cacheable producers and cacheable control evidence.
+At a branch, the frame holds the union of possible successor live values, then drops unchosen holds. A loop's new activation retains incoming values while allocating fresh outputs. Compiler liveness accounts for dominating values used beyond the immediate successor. Host-retained exports remain charged across iterations.
 
-Checkpoint and block services require purity only. A pure instruction can therefore use them even when its own operation or an ancestor sets `cacheable = false`. Completed-result lookup and retention require cacheability. Block parameters, shared closures and fallback paths bypass all optional reuse; this is conservative, because a block parameter can carry a different value on each loop iteration.
+## Block reservation
 
-## Completed Result reuse
+Admission uses a vector of host payload, device payload, metadata, queue and completion capacities. For each memory domain `d`, a sufficient bound is:
 
-A completed-result lookup computes the instruction's fixed-grant content key, reads up to eight candidates for that key, skips candidates with another backend, and rebinds a match with a new ObjectId and the current producer scope. The rebound Result is validated like a computed publication, including the output payload bound, and shares the cached physical backing. The Run installs it with dependency evidence rebuilt from the current plan's grants. Cache metadata, key hashing, sample reads and retained payload are charged to their Root and cache limits. Optional work exhaustion, metadata exhaustion, or insufficient retention capacity skips reuse or retention and lets computation proceed. A hit creates no `OperationTiming` record and adds no `computed_elements`.
+$$
+A_d=L_d+\sum_{v\in O_b}\operatorname{allocatedBytes}(v)
+       +\sum_q C_q S_{q,d}+M_d.
+$$
 
-Each execute call owns its immutable Result binding snapshot until callbacks retire. Direct and demand execution check plan currentness; graph replacement or destruction makes a borrowed-graph plan stale.
+`L` is already live incoming/exported capacity charged to the budget. `O_b` contains new block outputs and persistent temporary tiles. `C_q` is granted in-flight capacity for backend class `q`; `S_{q,d}` is its maximum admitted submission-unit (task or packet) scratch/command capacity in domain `d`; `M` covers frame state, descriptors, queues and delivery records. Sizes include rounding/alignment. Checked sums/products reject overflow. Each task obtains its whole resource vector atomically. A is the total sufficient capacity; new admission acquires only A minus the already charged L, without charging existing owners twice.
 
-`ExecutionContextConfig::result_cache_bytes` defaults to 0, which disables completed-result retention and block reuse. `maximum_dependency_cache_metadata` defaults to 65536 proof units and is bounded to 1..1048576. `ExecutionOptions::maximum_dependency_cache_work` is a separate per-Run optional quota, defaults to 1048576, and zero disables completed-result, checkpoint and block reuse for that Run. Key construction, sample hashing, rebinding, checkpoint witnesses and block keys use it alongside mandatory Root work. Exhaustion skips reuse or retention and permits computation to continue; it does not refund Root work already consumed.
+At least one usable lane exists for each backend class used by the block. Completion capacity covers every possible in-flight submission. A completion producer never waits for retirement or an ordinary work-queue slot. All metadata needed for completion, skip and retirement is reserved. Allocate before issuing; allocation failure tears down admission with zero tasks started in that block. Opaque driver allocations can still fail operationally.
 
-## Checkpoints and block state
+Reservation belongs to the block and cannot be revoked by other Runs. Capacity freed by a tile is not lent elsewhere until the block ends, although the physical buffer can be freed at its final use. Remaining exports keep their actual charges across the boundary; unused capacity returns to the context. Host-retained values can cause the next block to fail admission. The executor does not wait indefinitely for external release.
 
-A checkpoint scope is the fixed-grant content key with a `/checkpoint` suffix, so equivalent calls share checkpoint state independently of their physical step. Restoring a checkpoint restores state content only; the current instruction keeps its own fixed grants and evidence, and an old witness never replaces them. `ExecutionContextConfig::maximum_result_checkpoint_scopes` bounds live scopes, and each scope keeps at most 64 entries. Checkpoints work without a positive `result_cache_bytes`.
+This conservative bound trades memory for a clear progress guarantee. Oldest-ready priority alone cannot make lazy allocation safe. Example: `A -> B`, independent C, all outputs 4 bytes, B/C retained for RET, budget 8. If C and A finish first, both remain held and B cannot allocate. The serial order A,B,C fits in 8 bytes; baseline full-output reservation requires 12 and rejects it. A future lazy policy needs a separate proved protected-capacity rule. Smaller legal scheduling blocks or narrower output selections reduce baseline capacity at the cost of parallelism.
 
-Block state reuse binds a block contract and the fixed block-input proof with the block kind, range, mode and incoming state. A GPU block enters the cache only when the compute callback actually dispatched native work during that block; the backend and the fixed-input proof are part of the key, so a GPU path without a native computation proof is never reused. See [Global Results](Global-Results.md#cross-output-block-state-sharing).
+## Capacity cost and measurement
 
-## Limits and current entry points
+An 8192 by 8192 RGBA Float32 image contains `8192 * 8192 * 4 * 4 = 1073741824` payload bytes, or 1 GiB. At extent 128 it has 4096 tiles of 262144 bytes (256 KiB) each. If each call in one scheduling block fully materializes such an image, its output-only reservation is:
 
-- Native GPU results remain isolated from CPU-exact result keys, because execution mode and backend are part of both the template and the content key. A fallback-tainted result does not enter any reuse cache, and approximate native results do not replace exact CPU results.
-- `ResultCacheStatistics::native_retained_bytes` counts unique native allocations retained by the cache, including both retained GPU outputs and retained GPU block states. It is not a block-only capacity.
-- Native input-copy reuse is separate from completed Result computation reuse. It can reuse transport for granted Result tensor backing, but it does not make an upstream producer computation cacheable.
-- LRU eviction removes an entry from future lookup eligibility; callers holding a Result or read window keep its backing. `clear()` advances the cache epoch, so work from an earlier epoch cannot refill the cleared cache.
+| Fully materialized image values | Output payload reservation | Separate tile allocations |
+| ---: | ---: | ---: |
+| 1 | 1 GiB | 4096 |
+| 4 | 4 GiB | 16384 |
+| 8 | 8 GiB | 32768 |
+| 16 | 16 GiB | 65536 |
 
-Current production image operation availability is listed in [Image operations](Image-Operations.md). Snapshot and generic cache behavior is exercised by `test_input_snapshot`, `test_generic_result_cache`, and `test_computed_scalar`. Content-identity reuse across edited descriptor grants and checkpoint sharing across physical steps are exercised by `test_static_compiler`. Result capture and owner release are covered by `test_result_image_contracts` and `test_result_objects`.
+These are layout calculations, excluding incoming/exported values, scratch, metadata, allocation padding and driver overhead. They are not RSS or timing measurements. A temporary tile can be physically freed at its last use while its block still owns the reserved budget. Report reserved and live bytes separately, together with allocation count and admission failure details, as defined in [diagnostics](Parallel-Execution-Model.md#diagnostics-and-checks).
 
-Run-shared stages are executed once per call, stage and block activation by the plan itself, independently of optional caches. They expose no checkpoint or block services and do not hold active state across Runs. Instructions with shared-stage reads bypass completed-result caching; see [Global Results](Global-Results.md#completed-result-cache). Snapshot block geometry is independent of plan tile extent.
+Coalescing DAG path blocks increases scheduling freedom and can also increase the admitted working set. Evaluate coalesced and smaller legal blocks on the same workflow, separating capacity rejection from queue delay and retirement delay. The baseline remains full-block reservation; capacity-aware partitioning requires measured benefit and an explicit compiler policy, without introducing live tile aliases or a payload cache hierarchy.
+
+## Identity and cache boundary
+
+IR/Plan identities serve reproducibility and optional host artifact lookup. PreparedPlan reuse shares immutable code/resources. Immutable input snapshot utilities can remain outside the executor and provide binding owners; they do not authorize execution-result reuse.
+
+The replacement executor has no completed-result cache, checkpoint cache, block-state cache, residency mirror, automatic input-copy cache or hot-path tile-content hashing. Each admitted task executes once unless skipped by abort/failure or elided during planning. A host can bind cached outputs as explicit inputs under its own policy.
+
+`COPY host -> device` produces a different tile. Shared coherent memory is one declared domain with one allocation and synchronization. Changing backend requires a different prepared/compiled placement contract, never a hidden alternate allocation for the same tile.
+
+## Limits
+
+The bound covers controlled capacity, not RSS, stacks or opaque driver memory. There is no spill, eviction, recomputation or storage donation. Full-block admission may reject programs executable under a smaller-memory serial schedule. The prototype checks abstract byte budgets and holds, not physical device or operating-system allocation behavior.

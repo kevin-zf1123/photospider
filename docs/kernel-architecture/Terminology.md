@@ -1,48 +1,50 @@
 # Kernel Terminology
 
+The execution terms below follow the [proposed breaking design](Compiler-and-Execution.md). They describe the replacement contract, not the current C++ class layout. [Chinese reader version](zh/Terminology.zh.md).
+
 | Term | Meaning |
 | --- | --- |
-| `WorkflowDocument` | Caller-owned source graph used as compiler input. |
-| `GraphContext` | Owner of a copied workflow document and its current revision. |
-| `GraphSnapshot` | Coherent source and revision capture used by compilation. |
-| `IRProgram` | Editable frontend-neutral SSA program: input declarations and bindings, unique call declarations, blocks, an entry block, an ordered return signature and an `IRForm`. Accepted by `Compiler::bind_ir`. |
-| `ValidatedIR` | Immutable validated, prepared IR; frontend, import and optional optimizers publish this type. Both forms can be planned directly. |
-| `IRForm::DependencyPaths` | Raw IR form retaining repeated Call ID requests in ordered paths. The same ID denotes one invocation and its SSA results, including effects. `analyze` emits complete DAG path expansion; optimization removes duplicate requests. |
-| `IRForm::ControlFlow` | Executable SSA control flow with one static site per call. Branches and loops use explicit terminators and block parameters. |
-| dependency chain | A raw path segment split at upstream branch switches, multi-input joins and new roots. Shared ancestors may occur in several chains; chain boundaries do not require graph nodes to have no fan-out. |
-| SSA value | `IRValueId`-named Result defined exactly once by a call output, a block parameter or an external input binding. Every use must be dominated by its definition. |
-| basic block / CFG | `IRBlock`: an ordered call list ending in one terminator. In ControlFlow, blocks and edges form the executable CFG and each call has one site. In DependencyPaths, blocks form a linear, parameterless sequence of request chains with a final return. |
-| block parameter | Typed value assigned when an edge enters a block; all arguments of one edge are captured before any parameter changes. Loops carry values through block parameters. |
-| conditional jump | Branch on a Result with exactly one `UInt8` sample: zero selects `if_false`, any other value `if_true`; only the chosen successor runs. |
-| `ExecutionPlan` | Validated local program: `steps()` declares every call output with its backend and fixed grids, and `blocks()` holds the tile instructions and terminators that execution follows. |
-| plan step | `PlanStep`: declaration of one call output. A step can have no instructions; the number of steps is not an execution count. |
-| tile instruction | `PlanTileInstruction`: one output tile or shared-stage target with its publication target, fixed input and shared grants, block-local dependencies and compiled CPU fallback flag. |
-| static mapping | `OperationDefinition::map_dependencies` (C: `map_dependencies` hook): pure compile-time callback that returns the tiles one target may read. `complete_input_dependencies` covers projected ordinary inputs; shared-stage reads require explicit mapping entries. |
-| fixed grant | `PlanTensorRead` or `PlanSharedRead` stored in an instruction; the only data that instruction may read at run time. A descriptor-only grant exposes schema facts and no payload. |
-| synthetic return record | Dependency record of a named return at index `steps().size()` plus the return ordinal, returned by `ExecutionPlan::output(name).record_index`. |
-| compiler artifact | Version-4 text: `.psir` stores either validated IR form and provenance; `.psxp` stores the complete physical plan. Earlier versions require re-export. |
-| artifact manifest | Operation keys with contract digests and resource identities listed in an artifact, readable through `CompilerArtifact::inspect` without a registry. |
-| `ExecutionContext` | Owner of bounded workers, frozen operation definitions, caches, and resource accounting. |
-| `ExecutionRun` | Private state for one synchronous execution call: program counter, block values, bound grants, evidence and diagnostics. |
-| static VM | The interpreter inside a Run. It executes one plan instruction at a time in stored order and follows the CFG; it never maps dependencies, creates producer tasks or reorders instructions. |
-| `ExecutionBindings` | Exact-name per-run input owners, each an owning `ResultRef` checked against its declaration schema. |
-| `ResultRef` | Owns a static Tensor-only Result schema, captured coverage, backing owners and ObjectId provenance. |
-| `Tensor` | A descriptor, exact authorized Footprint and owned TensorSpan fragments; the single numerical carrier. |
-| operation metadata | `OperationMetadata`: the complete Result schema at an operation boundary. Specialization infers output structure from input structure and static parameters. |
-| `metadata_owner` | Resource lease that pays for a schema's managed nested containers; budget ownership, not interpretation. |
-| `ImmutableResource` / `ResourceSet` | Content-addressed immutable bytes (length and SHA-256) and an immutable set of them. Operations select resources by identity at preparation; plans retain them. |
-| validator | Registered `ValidationDefinition` bound explicitly to a port by key, version, and implementation. It checks host-authorized Tensor samples. |
-| diagnostic report | Fixed-size opaque record type registered as `DiagnosticDefinition` and merged by `DiagnosticAccumulator`. |
-| `DomainErrorCode` | Opaque 64-bit failure code that the kernel stores in `FailureDetail::domain_code` without interpretation. |
-| operations SDK | `Photospider::ops_sdk`, headers under `include/photospider/ops/`: color descriptions, domain codecs and arithmetic, description editing, LUT bake contract, quality and numeric reports, Layer types. Not part of the kernel. |
-| `Region` | Logical subset in descriptor-axis coordinates; it does not describe bytes. |
-| `TensorSpan` | One owned rectangular mapping inside Tensor; actual signed strides and backing ownership. |
-| operation traits | Frozen metadata that declares input/output contracts, resource bounds, and backend capabilities. |
-| operation registry | Frozen set of trusted operation definitions used to compile and execute plans. |
-| digest / cache key | Non-security identity used for reproducibility checks or disposable cache lookup. Compiler digests include program identifiers; content cache keys do not. |
-| cancellation | Cooperative request that prevents successful late result publication. |
-| CPU fallback | A new CPU attempt with the same grants after a GPU callback reports backend unavailability before publishing output or reading input, allowed only where the planner set the instruction's `cpu_fallback` flag. |
-| canonical image | An operation-domain convention: ordinary image operations default to straight alpha and host backing defaults to tiled planar. No Tensor conformance label or automatic validator is required; explicit association conversions remain available. |
-| boundary payload | Premultiplied numeric tensor produced or consumed by FMT-04 adapters for export or external interfaces. The association is stated by the adapter's explicit parameters; the tensor itself carries no label, so a consumer relies on its own explicit parameters or bound validator. |
+| WorkflowDocument | Caller-owned source graph with named inputs and outputs. |
+| GraphContext / GraphSnapshot | Source revision owner and coherent compilation snapshot. |
+| IRProgram / ValidatedIR | Editable SSA program and its validated immutable form. |
+| DependencyPaths | Raw DAG call requests; repeated Call IDs identify one invocation. Planning deduplicates requests and coalesces eligible path blocks. |
+| ControlFlow / CFG | Blocks with ordered call sites, typed block arguments and Jump/Branch/Return terminators. |
+| SSA Result value | A call result, external input or block parameter with one static definition and dominated uses. |
+| ExecutionPlan | Immutable serializable Task/Tile/Call/Block tables, constants, dependencies, placement requirements and resource bounds. |
+| PreparedPlan | Device-bound immutable kernels, decoded layouts, direct entry points and resource/module owners retained across Runs. |
+| PreparedKernel | Immutable operation context produced by device prepare; shared invocations may read it concurrently. |
+| Run / RunHandle | One mutable execution with fixed bindings, dynamic activations, completion records and result owners. |
+| block activation | One actual entry into a static block. Re-entering a loop creates a fresh activation. |
+| Task | Scheduling unit: kernel, explicit COPY or terminal effect. It may produce several independent tiles. |
+| TileId | Static tile descriptor index; `(RunId, ActivationId, TileId)` identifies a materialized runtime tile. |
+| CallGroup / CallDesc | One IR call's selected tasks, return declarations and retirement ordinal, including a zero-task elided call. |
+| predecessor / successor | Deduplicated producer-task readiness edge and its transpose. |
+| pending | Number of distinct predecessors that have not completed successfully. |
+| fixed read / view | Compiler-resolved input port, tile, logical coordinates, strides and byte bounds. |
+| schema-only read | Read of immutable prepared schema facts without a payload dependency. |
+| ready | Dependencies succeeded and the task can seek resources; resource credit may still delay issue. |
+| issue / submission | Transfer of a prepared invocation and its owners to a worker/backend. |
+| completion | All task accesses ended and successful writes have required visibility; enables internal consumers. |
+| retirement | Ordered handoff of one call's status and selected exported values to the delivery stream. |
+| release | Last hold ended; the allocation can be freed independently of retirement order. |
+| failure cut | Smallest observed failed call ordinal; older necessary work continues, unsubmitted work at/after it is skipped. |
+| abort | Run-wide admission stop followed by drain, used for cancellation, staleness and context failure. |
+| Effect | One terminal external action in a call, issued only at retirement head after its preparation succeeds. |
+| COPY | Explicit transfer/materialization that produces a new tile allocation in a declared domain. |
+| packet / submission unit | Optional same-call GPU task group with one submission credit/completion event and a complete resource bound. |
+| SubmissionId | Identity of an accepted task/packet submission, mapped to members; distinct from TaskId and CallId. |
+| queue timepoint | Backend completion coordinate ordered by actual queue submissions, independent of call retirement ordinals. |
+| block argument | A new name/owner for an existing immutable value; all sources are captured before destinations change. |
+| live-through hold | Ownership preserving a value for a later block, including dominating values not passed as explicit arguments. |
+| Result / ResultRef | Static schema plus selected tile handles and owning leases; no automatic dense output assembly. |
+| Tensor / Region | Numeric storage descriptor and logical coordinate region; logical coverage is separate from physical strides. |
+| ExecutionBindings | Exact-name immutable input owners and structural schemas fixed per Run. |
+| unchecked operator contract | Numerical validity, declared access and truthful completion are implementation preconditions; the executor performs no sample certification. |
+| admission | Atomic acquisition of the block's output/state/queue/completion/delivery/scratch capacity before issue. |
+| compiler artifact | Versioned canonical IR/Plan content, without native pointers or mutable Run state. |
+| digest | Non-security content identity for reproducibility, not native-code authentication. |
+| operation registry | Frozen catalog of trusted implementations used for compilation and linking. |
+| ImmutableResource / ResourceSet | Content-addressed immutable preparation inputs retained by prepared owners. |
+| operations SDK | Domain algorithms/codecs and numerical semantics outside the generic scheduler. |
 
-`SessionId`, `JobId`, daemon IPC, and process lifecycle belong to `photospider-daemon`; its Jobs are ephemeral. Persistent results and recovery are outside the current product boundary. Kernel results remain in-memory values whose backing lifetime follows their owners.
+`SessionId`, `JobId`, daemon IPC and process lifecycle belong to `photospider-daemon`. Persistent results and recovery remain outside the product boundary. The replacement executor contains no payload cache hierarchy, implicit CPU fallback or runtime Need protocol.

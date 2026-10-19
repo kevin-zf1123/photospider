@@ -1,139 +1,135 @@
-# Parallel execution model
+# Parallel Execution and Ordered Retirement
 
-## 1. Core summary (TL;DR)
+Status: Proposed breaking design; see the [Plan contract](Compiler-and-Execution.md) for implementation status. [Chinese reader version](zh/Parallel-Execution-Model.zh.md).
 
-An `ExecutionContext` owns a fixed CPU worker pool, separate CPU and GPU callback lanes, and one shared waiting-callback bound. Inside one Run, the static VM executes plan instructions one at a time in plan order. Parallel work comes from independent Runs sharing the context, from ordinary CPU callbacks that share range work with idle pool workers, from planar staged callbacks that submit single-threaded tiles and join each stage, and from native GPU dispatch. Cancellation stops future claims and publication, then waits for work already running or submitted to the device.
+## Scope and ownership
 
-## 2. Mental model & intuition
+One coordinator owns each Run's states, dependency counters, ready queues, call records and holds. A context supplies a bounded CPU pool and GPU submission queues shared by Runs. Workers and device callbacks write reserved completion records; they never mutate dependency or retirement state.
 
-Independent Runs compete for the same context worker capacity. A ordinary callback's calling thread processes range blocks while idle workers may claim other blocks; a worker occupied by another callback cannot help until it returns. The shared scheduler alternates ordinary callback and range-block opportunities and rotates eligible range jobs after claims.
-
-```mermaid
-flowchart LR
-    A[Run A callback] --> Q[CPU callback FIFO]
-    B[Run B callback] --> Q
-    Q --> S[Shared scheduler and pool mutex]
-    R[ordinary range jobs] --> JQ[Shared range and stage job queue]
-    JQ --> S
-    S --> W1[Worker 1]
-    S --> W2[Worker 2]
-    S --> WN[Worker W]
-    W1 -->|helper claims disjoint block| J[Range barrier]
-    Caller[ordinary callback thread] -->|participates in range work| J
-    WN -->|other Run work completes| O[Independent callback]
-    J -->|all active blocks retire| P[Publish after final checks]
-    C[Planar CPU_STAGES coordinator] -->|submit one stage job| JQ
-    W1 -->|single tile task| TB[Stage barrier]
-    W2 -->|single tile task| TB
-    TB -->|next stage| C
-    G[GPU callback] --> GQ[Single GPU callback lane]
-    GQ --> D[Synchronous native dispatch]
-    D -->|drain before return| GQ
+```text
+                        Run coordinator
+                  /            |            \
+             CPU ready      GPU ready    calls + retire_head
+                 |              |                |
+             CPU workers    GPU submit      ordered delivery
+                 \              /
+                reserved completion records
+                           |
+                    Run coordinator
 ```
 
-Ordinary callbacks use the CPU callback FIFO. ordinary range jobs and planar `CPU_STAGES` jobs use a separate shared range/stage job list. Both structures share the scheduler mutex and worker pool, so callbacks, range jobs, and staged jobs compete for worker capacity. The scheduler alternates callback and range opportunities; range workers claim disjoint blocks, while the stage coordinator submits tile work and waits at each stage barrier. The ordinary callback thread also participates directly in its range barrier. The GPU callback lane has a separate queue but shares the context's aggregate waiting allowance. Range blocks and stage tiles can increase an ordinary callback's wait.
+Multi-issue means admitting all eligible tasks that fit available credits during one coordinator turn. Per-backend ready heaps prioritize `(call ordinal, task ID)`; context admission rotates eligible Runs fairly. Dependency processing is O(T + E); heaps add O(T log T). No hardware clock is simulated.
 
-### CPU range service
+## State and invariants
 
-```c
-#include <stdint.h>
-
-typedef int (*ps_cpu_range_callback_v2)(
-    void* user, uint64_t begin, uint64_t end, uint32_t slot);
-
-typedef struct ps_cpu_parallel_service_v2 {
-  uint32_t struct_size;
-  uint32_t abi_version;
-  uint32_t maximum_workers;
-  void* context;
-  int (*run)(void* context, uint64_t count, uint64_t grain,
-             uint32_t workers, ps_cpu_range_callback_v2 callback,
-             void* user);
-} ps_cpu_parallel_service_v2;
+```cpp
+#include <cstdint>
+namespace ps_executor_design {
+enum class TaskState : std::uint8_t {
+  Waiting, Ready, Submitted, Succeeded, Failed, Skipped
+};
+struct TaskRuntime { TaskState state; std::uint32_t pending; };
+struct CallRuntime {
+  std::uint32_t unsettled, first_failed_task;
+};
+struct CompletionKey {
+  std::uint64_t run, activation;
+  std::uint64_t submission;
+};
+}  // namespace ps_executor_design
 ```
 
-The service is borrowed by a CPU ordinary callback. It partitions `[0, count)` into finite, disjoint intervals no larger than `grain`. `workers == 0` selects the grant maximum; a positive value requests between one and that maximum participants, including the calling thread. The service may run fewer blocks concurrently than the grant. Each active block receives a unique live scratch slot. Inputs and callback user data remain borrowed until the synchronous barrier returns; scratch must not escape the call.
+`pending(t)` counts distinct predecessors that have not completed successfully. Reading two outputs from one producer waits for one event. Lifetime holds count distinct `(consumer task, tile)` pairs instead; two ports reading one tile hold it once. Every future consumer hold exists before producers can finish.
 
-Before a nonempty run starts any block callback, the host reserves the job record against Root Host and Metadata capacity and one Root Entry, then charges `work=count` and `stages=ceil(count/grain)`. These charges use the same Root budget as work already issued by the execution, so prior work reduces the remaining allowance. If reservation or charging fails, the run returns a sticky resource failure and invokes zero block callbacks. A zero-count run creates no job and charges no work or stages; the ordinary argument and cancellation checks still apply.
+Each accepted submission owns exactly one terminal completion record. A SubmissionId maps to one task or one immutable packet member span; it is distinct from TaskId. The coordinator checks the submission key/state once before fanning its event out to member task states. `Submitted` includes CPU work queued to a worker and accepted device work. Success means every output write and input/scratch access has ended, with required visibility. Rejection transfers no ownership and enqueues no callback; the coordinator handles a local failure. Success makes all task outputs available together; failure exposes none.
 
-A one-participant grant or a range that fits in one block executes inline on the caller. Long blocks poll the supplied cancellation token. The service stops future claims and drains active blocks before returning. A block uses immutable inputs and preallocated outputs; row, allocation, publication, preparation, and diagnostics services belong to the callback thread and are unavailable to range blocks. Nested range calls are rejected, and service violations remain sticky.
+Execution credit and scratch return on completion. A call is settled when all members are terminal; it retires only at `retire_head`. A selected call succeeds only if all its tasks succeed. Zero-task pure calls retire as `Elided`. A call with 100 tasks can run with two execution slots because task slots do not wait for retirement.
 
-For count `N` and positive grain `B`, the block count avoids overflow from `N + B - 1`:
+On success, the coordinator marks outputs available, visits each successor once, settles the call member, releases input holds/scratch and returns credit. It then retires the contiguous settled prefix and admits more work. Consumer readiness does not wait for retirement. User delivery runs separately.
 
-$$
-N_{blocks}=N/B + (N\bmod B\ne0),\qquad
-end=begin+\min(B,N-begin).
-$$
-
-Structured CPU Result ordinary polls receive this borrowed service as `ResultProgramPhase::cpu_parallel`. It schedules blocks within the active ordinary callback; it does not run plan instructions in parallel. `tests/integration/kernel/test_cpu_parallel.cpp` exercises a `UINT64_MAX` range after earlier Root work and verifies resource rejection before any block callback. `tests/unit/kernel/test_cpu_range.cpp` checks endpoint arithmetic without a Root budget and therefore does not establish Root admission behavior.
-
-### Static plan execution order
-
-A Run follows the instruction order stored in each `PlanBlock` and the CFG between blocks. The coordinator submits one instruction's start or poll callback to the CPU callback FIFO or the GPU lane, waits for it to retire, applies its result, and only then moves to the next instruction. There is no frontier, ready queue, producer task or wave; independent branches of a DAG run one after another in plan order, and a tile used by several consumers runs once because the planner deduplicated it. `ExecutionDiagnostics::peak_active_tasks` is 1 for this path. `ExecutionOptions::maximum_parallelism` no longer bounds plan instructions; it caps the workers of the planar staged tile service (zero selects the CPU pool's worker count).
-
-Separate Runs on the same context are independent. Each Run has its own coordinator, so a second Run's CPU callback can execute and finish while the first Run waits on a GPU callback. `tests/integration/kernel/test_result_plan_order.cpp` checks that a forked plan keeps one active callback, deduplicates a shared source, skips unselected nodes, observes cancellation and releases the exact payload bound; `tests/integration/kernel/test_execution.cpp` checks that an independent CPU Run completes while another Run's GPU callback is active.
-
-The Run coordinator owns execution order and publication order. Submission-local transfer, tile and native observations remain with each callback until retirement, when the coordinator merges them. Result poll timing spans phase creation through coordinator retirement, including queue waiting, so it is not a compute-only duration. Shutdown and synchronous Run completion drain submitted work before releasing borrowed callback state.
-
-### Planar staged tile service
-
-```c
-#include <stdint.h>
-
-#define PS_CPU_TILES_ABI_VERSION_2 2U
-
-typedef struct ps_cpu_tile_v2 {
-  uint32_t struct_size, slot;
-  uint64_t index, begin[3], end[3];
-} ps_cpu_tile_v2;
-
-typedef int (*ps_cpu_tile_callback_v2)(void* user,
-                                       const ps_cpu_tile_v2* tile);
-
-typedef struct ps_cpu_tile_stage_v2 {
-  uint32_t struct_size;
-  uint64_t extent[3], tile[3];
-  uint32_t workers;
-} ps_cpu_tile_stage_v2;
-
-typedef struct ps_cpu_tiles_service_v2 {
-  uint32_t struct_size, abi_version, maximum_workers;
-  void* context;
-  int (*run)(void*, const ps_cpu_tile_stage_v2*,
-             ps_cpu_tile_callback_v2, void*);
-} ps_cpu_tiles_service_v2;
+```text
+Two CPU slots:
+call order:       A(10), C(A,1), B(2), D(B,1), E(C,D,1)
+issue order:      A, B, D, C, E
+completion order: B, D, A, C, E
+retirement order: A, C, B, D, E
+elapsed ticks:    12
 ```
 
-The coordinator submits one three-dimensional work-item grid and waits for every tile callback before starting the next stage. Each callback receives one half-open tile box and runs as one indivisible task on a shared CPU worker. The coordinator performs allocation, row access, and stage transitions. `workers == 0` uses the Run grant maximum; a positive value caps parallel participation without changing tile geometry.
+## Admission and progress
 
-For a tensor shaped `(height, width, channel)`, an operation may keep the channel extent in one tile so each pixel tile contains all RGBA samples. These work-item coordinates describe computation, not physical planar storage pages. A zero extent creates zero tile callbacks. The host checks positive tile sizes, ceil-divisions, and the three-axis product before queueing work. A stage holds its waiting admission and managed Queue lease until callbacks retire and its job leaves the queue.
+The baseline reserves the block's full output set, persistent frame state, bounded delivery storage, usable scratch lanes and completion capacity before its first task. [Tile storage](Cache-Model.md) defines the bound. Failure returns `ResourceExhausted` before any task in that block starts; earlier blocks' results/effects remain observable.
 
-### Cancellation, resources, and publication
+A task is eligible when active, unsubmitted, dependency-ready, before the failure cut and able to acquire all credits. An effect additionally requires its call to equal retirement head. A busy scratch lane can be bypassed temporarily; fair selection revisits it. Tasks acquire their complete multi-domain resource vector atomically.
 
-The context's CPU worker count is fixed at construction; zero `cpu_workers` resolves to a bounded hardware count. CPU execution is always available, while native GPU execution is optional. `maximum_queued_tasks` bounds waiting callbacks across CPU and GPU lanes. An ordinary callback releases its waiting slot when a worker starts it; a planar `CPU_STAGES` job retains its admission and managed Queue lease until all submitted tiles retire and the job is unlinked, as described above. Active jobs retain their input owners, callback state, scratch, and output storage until they retire.
+The coordinator drains events, applies stops, skips work, retires calls and fills lanes. It sleeps only if accepted work or a concrete context-credit event can make progress. A rejected block reservation fails instead of waiting indefinitely. Unfinished work with no in-flight or eligible task after successful admission is an invariant failure (`Internal`).
 
-Cancellation closes future range or tile claims and prevents later device submissions. A synchronous range call joins active blocks, and the GPU service drains submitted work before returning. Final cancellation and currentness checks precede output publication. Sticky host-service failures take precedence over a callback success code. The host cannot preempt arbitrary plugin code or a submitted native dispatch.
+Progress assumes a finite DAG, dependencies within the same or earlier call, finite callbacks, eventual device completion, fair context service and the complete reservation. The earliest unfinished prefix call has either in-flight work or a task whose predecessors can finish. Its remaining ready work fits a guaranteed lane after current work completes. Each completion reduces unfinished work. This is a resource/scheduling guarantee under these assumptions, not a termination proof for arbitrary native code.
 
-A long CPU block observes cancellation only where it polls the token inside its own loop. For example, a block that checks `phase.query.cancellation` on each iteration of a 262,144-iteration loop and is cancelled after 64 iterations returns early. The Run then reports `Cancelled` after only part of the planned iterations; no block remains active and the Root Queue usage returns to zero. `test_cpu_parallel` covers this case. A block that never polls runs to the end of its range before the Run observes cancellation.
+## Failure, effects and cancellation
 
-Kernel helpers save and restore the calling thread floating-point environment without imposing a numerical mode. Operations establish their required mode inside each actual poll, worker, numerical preparation or validator callback and restore it before return or suspension. Each operation defines its reduction order and the block geometries compatible with that order.
+`failure_cut` is the smallest ordinal of an observed task-failing call, initially the call count. Continue all work strictly older than the cut. Skip unsubmitted work at or after it; drain accepted work there. Failure never satisfies a successful dependency. Skipped consumers release their future holds once. A later event from an older failing call moves the cut backward.
 
-`ExecutionContextConfig::collect_scheduler_timing` defaults to false. When enabled, `scheduler_statistics()` returns separately synchronized CPU and GPU lane snapshots. Accepted counts successful FIFO insertions; started counts worker removals. `submission_ns` measures entry through FIFO insertion, including mutex acquisition and queue storage. `queue_wait_ns` measures successful insertion through worker removal. Timing excludes callback runtime and device execution. FIFO statistics exclude range and tile claims, although those jobs can keep a worker busy and increase measured wait. Cumulative counters include all Runs sharing the context. Count and duration deltas can describe a selected interval only when snapshots are unsaturated; `maximum_queue_wait_ns` and `maximum_queued_callbacks` are context-lifetime maxima and cannot be differenced to obtain interval maxima. Lane snapshots can represent different instants.
+Retire the successful older prefix and then one failure record for the cut call after its accepted members quiesce. No younger call retires. Return final failure only after all younger accepted work drains too. For several failures in that call, select the lowest static TaskId among actually failed tasks. Skipped tasks have no invented error. This is stable for the observed failures, not a promise to evaluate every possible sibling failure. Failure-cut suppression uses a separate internal stop mechanism; it must not cancel the older prefix with the user cancellation token.
 
-## 4. Non-goals & explicit boundaries
+The prototype records `TaskFailure(activation, task_id, call, task_name)` for each actual failed completion in `task_failures`. At failure retirement, `retired_failures[call]` records the lowest observed TaskId in that call. The terminal `failure` is set only for an `OperationFailed` Run; cancellation keeps observed/retired failure diagnostics without presenting them as the terminal cause. Skipped tasks produce no failure detail. Packet-scoped attribution remains separate and is not modeled by this prototype.
 
-- ordinary range callbacks and planar CPU staged callbacks use mutually exclusive services for one invocation.
-- Tile callbacks do not receive the coordinator's row, allocation, publication, diagnostics, or preparation services.
-- The scheduler does not promise work stealing, preemption, or a worker grant equal to observed concurrent execution.
-- One Run does not execute plan instructions concurrently; independent calls inside one plan run in plan order.
-- GPU callbacks submit synchronously through one callback lane per context; a submitted dispatch runs to completion before its owners retire.
-- Planar GPU callbacks use host row windows at graph boundaries. Device-resident planar pages shared across graph nodes are outside this interface.
-- Managed accounting excludes thread stacks, driver-private allocations, and unmodeled container storage.
+An effectful call has pure preparation and one terminal effect task. It starts only at retirement head after its own predecessors succeed, so all earlier calls have retired successfully. Later pure computations may already have run. Partial external writes before an effect failure cannot be rolled back. Several ordered external effects require separate calls or an operator-owned transactional protocol.
 
-## 5. Consequences
+User cancellation is a Run abort. The coordinator closes admission, skips unsubmitted work, drains accepted work and suppresses further retirement. Already handed-off records remain valid and their delivery may finish. Before terminal status is latched, observed cancellation takes priority over Stale, then context/device/observer abort, then task-local failure. Within the context/device/observer category, retain the first coordinator-observed cause. Later requests cannot alter a latched outcome. Fatal device loss that prevents older work from completing uses context/device abort rather than claiming ordinary successful-prefix completion.
 
-When every CPU worker is busy, a ready callback waits in its lane queue. If the shared waiting allowance is full, submission returns `ResourceExhausted` and the executor does not retry automatically. Callers that retry must first release capacity or reduce concurrent work.
+Graph/binding invalidation and observer failure also abort. Same-Run callback serialization, delivery failure and terminal latching follow the [return interface](Compiler-and-Execution.md#run-control-flow-and-return-interface). Device loss must establish DMA/callback quiescence before freeing storage. The backend retains leases until then. A false success, escaped CPU task or out-of-range write violates the trusted operator contract.
 
-Cancellation latency is bounded by the remaining time in active blocks and submitted dispatches. Long CPU blocks must poll cancellation; slow callbacks delay result cleanup and context shutdown. A single GPU callback lane serializes callbacks for that context, and planar boundary copies add transfer cost.
+## CPU and GPU completion boundary
 
-The waiting-queue limit and managed memory/work limits govern separate resources. Runs retain inputs, intermediates, callback state, and result storage through their documented owner lifetimes. Operation ABI compatibility is specified in [Plugin ABI](Plugin-ABI.md).
+A CPU invocation receives immutable input views, exclusive preallocated outputs, private bounded scratch, parameters and cancellation. Synchronous `invoke` returns status after all accesses and internal work end. Workers publish with release ordering and the coordinator consumes with acquire ordering. Baseline kernels use one worker each; parallel phases lower into tasks rather than block workers on nested pool jobs.
+
+The backend interface is logically `SubmitResult submit(const Invocation&, CompletionSlot&) noexcept`, returning `Rejected(Status)` or `Accepted(Ticket)`. Acceptance transfers owners until exactly one completion; rejection keeps them with the coordinator and enqueues no completion. Arm the slot before submit, so synchronous completion is legal. Callbacks only write bounded status and signal a wakeup; they allocate nothing and invoke no user code.
+
+GPU encoding and queue acceptance do not make outputs readable. Input/output/scratch, parameters, commands, pipeline/module owners and completion slots live through device quiescence. Host-visible completion includes required cache maintenance. GPU consumers require access/layout transitions and memory visibility, including in shared memory. Cross-domain transfers are explicit COPY tasks.
+
+Completion keys and queue timepoints are different. Task 7 completing does not imply tasks 0 through 6 completed. GPU timeline values follow actual submission order on one ordered queue; independent queues use independent timelines. TaskId and CallId must never be used as a universal completed counter.
+
+### Device packets
+
+Individual submissions are the baseline. Optional compiler packets batch a same-device subgraph whose external incoming edges are all satisfied before submission and whose outgoing edges become visible at packet completion. First-version packets contain no effect and belong to one call. Validate the contracted packet graph for cycles: grouping A tasks around an intervening dependent B can create an A/B cycle.
+
+A packet consumes one backend submission credit and one completion slot; its member tasks are all Submitted until that single event is processed. Device barriers enforce internal edges. Reserve all outputs and the full packet scratch/command bound first. Success settles packet members in topological order in one event. If member-level failure information is unavailable, fail the whole call with `PacketFailure(submission, members)` and expose no packet output. Do not invent a first failed member; retain packet-scoped provenance separately from task-local error selection. Restricting packets to one call preserves cross-call failure attribution. Cross-call chains remain separate until a backend offers adequate per-task completion semantics. Batching can delay consumers; measure that cost against submission overhead.
+
+## Diagnostics and checks
+
+Measure ready, submit, start, device completion and retirement separately. Keep backend in-flight peaks, ready/scratch waits, transfers and drain latency. Only subtract timestamps in a comparable clock domain. The first C++ implementation exposes these additional counters:
+
+| Metric | Definition |
+| --- | --- |
+| `reserved_bytes_by_domain` | Current admitted budget capacity by memory domain, including unused block reservation; count each lease once |
+| `live_bytes_by_domain` | Currently allocated controlled bytes by domain, including retained returned owners; allocation-size accounting, not logical image size or RSS |
+| `allocation_count` | Cumulative successful materialized tile allocations in the Run; exclude scratch, commands and borrowed input owners |
+| `block_admission_failure` | Admission-failure count plus block/activation, resource dimension, requested capacity and available capacity; report before issuing that block |
+| `retirement_head_wait` | Monotonic time from a call becoming head until it is settled and eligible to retire; exclude callback delivery delay and report unfinished waits separately on abort |
+
+Report current and peak reserved/live capacity. At block end, unused reservation returns to the context while exported owners remain charged; releasing those owners updates the accounting even after Run completion. Declining live bytes does not imply declining reserved bytes within a block. [Capacity examples](Cache-Model.md#capacity-cost-and-measurement) quantify this baseline cost.
+
+The first native GPU evaluation covers four distinct workload shapes:
+
+| Workload | Required observations |
+| --- | --- |
+| Many tiles within one call | Throughput, packet size, submissions, allocation count and peak capacity |
+| Independent calls | Actual overlap, queue occupancy and time waiting for retirement head |
+| Dependent GPU calls, such as blur -> color transform -> blend | Device-complete to next-submit gap, per-call latency and host wakeups |
+| CPU/GPU chain with explicit COPY | Transfer bytes/time, host/device synchronization and lifetime through drain |
+
+Same-call packets cannot pre-submit a dependent cross-call chain under completion-based readiness. Measure that host-mediated gap before deciding on finer device completion points or cross-call orchestration. Compare identical shapes, tile extent, placement, worker/queue grants and resource limits, recording the physical device and driver. Block coalescing must be evaluated together with capacity and admission failures; keep full-block reservation until a separately justified policy replaces it. These are implementation acceptance measurements, not results from the Python model.
+
+The prototype checks explicit ordering without payload holds, independent retirement/RET ownership, observed task-error selection, forwarding before retirement, large groups, failure cuts, effects, cancellation and release. It uses logical ticks and scans/sorts tables for clarity. C++ uses precompiled adjacency, dependency counters, ready queues and unsettled call counts. Remaining checks include complete CFG/loops, selection closure rebuilding, callback delivery and finalization races, multi-domain/metadata capacity, Accepted/Rejected ownership races, inline completion, device loss, visibility and real packet completion/failure.
+
+## Primary design references
+
+- [BOOM ROB](https://docs.boom-core.org/en/latest/sections/reorder-buffer.html): in-order commit and head exception handling motivate call records and a retirement cursor, without speculative register state.
+- [IREE Stream](https://iree.dev/reference/mlir-dialects/Stream/) and [HAL](https://iree.dev/reference/mlir-dialects/HAL/): explicit asynchronous resources and wait/signal fences motivate declared completion dependencies.
+- [CUDA Graphs](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html): separate graph definition, instantiation and execution motivate prepare-once data and optional packets.
+- [Metal completion](https://developer.apple.com/documentation/metal/mtlcommandbuffer/addcompletedhandler(_:)): GPU completion notification motivates the distinction between submit and Done.
+  Apple's [archived command guide](https://developer.apple.com/library/archive/documentation/Miscellaneous/Conceptual/MetalProgrammingGuide/Cmd-Submiss/Cmd-Submiss.html) (updated 2016-12-12) also documents command-buffer retention and short completion handlers; only these foundational lifetime rules are used here.
+- [Vulkan synchronization](https://docs.vulkan.org/spec/latest/chapters/synchronization.html): execution order, availability and visibility require explicit backend synchronization.
+
+These sources motivate selected mechanisms; they provide no evidence of a completed Photospider implementation.
