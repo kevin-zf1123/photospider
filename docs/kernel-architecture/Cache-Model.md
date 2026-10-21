@@ -70,6 +70,8 @@ An 8192 by 8192 RGBA Float32 image contains `8192 * 8192 * 4 * 4 = 1073741824` p
 
 These are layout calculations, excluding incoming/exported values, scratch, metadata, allocation padding and driver overhead. They are not RSS or timing measurements. A temporary tile can be physically freed at its last use while its block still owns the reserved budget. Report reserved and live bytes separately, together with allocation count and admission failure details, as defined in [diagnostics](Parallel-Execution-Model.md#diagnostics-and-checks).
 
+The [2026-10-20 native measurements](Parallel-Execution-Model.md#native-measurements) compare the same four-stage 4 MiB-per-stage chain in one block and four blocks on Metal and Vulkan. Coalesced Shared backing peaked at 16 MiB; splitting peaked at 8 MiB. A 12 MiB Payload limit rejected the coalesced block before any task or backing allocation and admitted the split variant. The measurement section reports timing distributions and separate metadata, COPY and drain results.
+
 Coalescing DAG path blocks increases scheduling freedom and can also increase the admitted working set. Evaluate coalesced and smaller legal blocks on the same workflow, separating capacity rejection from queue delay and retirement delay. The baseline remains full-block reservation; capacity-aware partitioning requires measured benefit and an explicit compiler policy, without introducing live tile aliases or a payload cache hierarchy.
 
 ## Identity and cache boundary

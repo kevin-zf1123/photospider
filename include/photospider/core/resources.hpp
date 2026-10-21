@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 
 #include "photospider/core/status.hpp"
 
@@ -12,9 +13,14 @@ namespace ps {
 class ExecutionContext;
 class CpuStorage;
 class BufferAllocator;
+namespace data_internal {
+class ResourceStorageAccess;
+}
 namespace core_internal {
 struct ResourcePayloadAccess;
+struct ResourceMetadataAccess;
 class ResourcePayloadScope;
+class ResourceMetadataScope;
 }  // namespace core_internal
 
 /** @brief Independent capacity constraints; overlapping dimensions are not
@@ -49,6 +55,16 @@ struct PHOTOSPIDER_API ResourceCapacity final {
   static ResourceCapacity host(std::uint64_t bytes, std::uint64_t metadata = 0);
 };
 
+/** @brief Allocation-free details of one failed reservation.
+ * requested includes lease metadata. available is sampled under the admission
+ * lock at rejection; exhausted is the first insufficient dimension, or empty
+ * for allocator failure/overflow. It does not predict a later reservation.
+ */
+struct ResourceAdmissionFailure final {
+  ResourceCapacity requested, available;
+  std::optional<ResourceKind> exhausted;
+};
+
 /** @brief Explicit managed-capacity limits, independent of optional cache.
  * The scope is requested payload and C++ object capacity, not allocator
  * headers, thread stacks, provider-private state, OS page cache, device drivers
@@ -75,6 +91,22 @@ struct ResourceWork final {
 struct ResourceStatistics final {
   ResourceCapacity live, peak, protected_cleanup, quarantined;
   ResourceWork issued;
+  /** @brief Current/peak bytes at instrumented metadata allocation fences.
+   * Includes lease objects and managed allocator blocks (only their headers
+   * in Payload mode). Reservation alone does not commit its declared storage.
+   * Excludes allocator-private overhead and uninstrumented owner storage.
+   */
+  std::uint64_t allocated_metadata_bytes = 0, peak_allocated_metadata_bytes = 0;
+};
+
+/** @brief Metadata capacity and allocation bytes attributed to one owner.
+ * Reserved includes unused admitted capacity and lease objects. Allocated
+ * counts successful managed allocations, excluding allocator-private overhead.
+ * Copies of existing owners retain their original attribution.
+ */
+struct ResourceMetadataStatistics final {
+  std::uint64_t reserved_bytes = 0, peak_reserved_bytes = 0;
+  std::uint64_t allocated_bytes = 0, peak_allocated_bytes = 0;
 };
 
 class ResourceBudget;
@@ -106,6 +138,7 @@ class PHOTOSPIDER_API ResourceLease final {
  private:
   friend class ResourceBudget;
   friend struct core_internal::ResourcePayloadAccess;
+  friend struct core_internal::ResourceMetadataAccess;
   struct Impl;
   std::shared_ptr<Impl> impl_;
 };
@@ -125,7 +158,9 @@ class PHOTOSPIDER_API ResourceBudget final {
    * Allocator control blocks and heap headers remain outside this model.
    */
   static std::uint64_t lease_metadata_bytes() noexcept;
-  Result<ResourceLease> reserve(ResourceCapacity capacity) const;
+  Result<ResourceLease> reserve(
+      ResourceCapacity capacity,
+      ResourceAdmissionFailure* failure = nullptr) const;
   Status consume(ResourceWork work) const;
   /** @brief Atomically admits all work dimensions before computation.
    * @param failure Receives the owning failure only when returning false;
@@ -164,6 +199,8 @@ class PHOTOSPIDER_API ResourceBudget final {
   friend class ResourceLease;
   friend class ExecutionContext;
   friend class core_internal::ResourcePayloadScope;
+  friend class core_internal::ResourceMetadataScope;
+  friend class data_internal::ResourceStorageAccess;
   void set_reclaimer(
       std::function<void(const ResourceCapacity&)> reclaim) const;
   struct Impl;

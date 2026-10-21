@@ -37,7 +37,7 @@ is no parameter, arbitrary-base mode or `log` alias. Integer conversion is expli
 Strict positive finite results are RN_dtype(ln(exact(x))), directly rounded
 to the output dtype. Accelerated nonzero finite results may differ by at most
 four representable steps, but NaN/infinity/zero classification and sign match
-strict. Use a verified argument-domain fast path or strict fallback, with the same complete-input diagnostic boundary as exp.
+strict. Use a verified argument-domain fast path or strict fallback, with the same fixed-kernel diagnostic boundary as exp.
 
 | Input | Output |
 | --- | --- |
@@ -60,15 +60,14 @@ mathematical natural log, with high-precision/directed-bound refinement or a
 proved correctly rounded implementation. Near one, cancellation-sensitive
 algorithms cannot replace a missing rounding proof with a small absolute error.
 Accelerated argument ranges, constants/library versions and fallback predicates
-must be explicit. Charge actual reduction/refinement work and scratch under the
-inherited budgets, with cancellation points inside long work.
+must be explicit. Use preallocated scratch with cancellation points inside long refinement. Checkpoints do not debit a dynamic sample-work budget.
 
 Test ln(1)=+0, both signed zeros -> -Inf, negative finite/-Inf -> canonical NaN,
 +Inf unchanged, signed NaN payloads, smallest positive subnormal, powers of two,
 neighbors immediately above/below one, and large positive finite inputs. Resolve
 oracle rounding independently; strict compares bits and accelerated compares
-ULP distance plus exact classification. Apply common ROI/read-witness/cache/
-resource/ownership tests, including an unrequested domain-error sample.
+ULP distance plus exact classification. Apply common ROI/fixed-read/
+resource/ownership tests, including an unrequested negative sample.
 
 Conceptual public fixture: bind `[1,+0,-0,-1,+Inf]`, compile one selected ln
 key and request values -> `[+0,-Inf,-Inf,canonical_NaN,+Inf]`. This target is
@@ -77,6 +76,5 @@ the maintained public run command is documented below; local timing is recorded 
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
-atomic failure for the complete invocation. Its numerical path follows
+exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

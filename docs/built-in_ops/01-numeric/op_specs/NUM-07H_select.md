@@ -30,57 +30,23 @@ Select an element from one of two arrays using a boolean-valued UInt8 condition.
 Inputs in order are `condition`, `when_true`, `when_false`; all have the same
 rank-1..8 positive shape. Both value branches share one dtype chosen from UInt8,
 Int64, Float32 and Float64. Output `values` uses the branch dtype, unchanged
-shape and no attached domain description. Infer dtype from when_true, not the UInt8 condition;
-the registry's output_dtype_input field can identify this source input.
+shape and no attached domain description. Metadata specialization derives output dtype from the value branches.
 There are no static numeric parameters or implicit broadcasts/casts.
 
-At every logical position in a nonempty request, condition must be exactly 0 or 1. Zero selects
-when_false; one selects when_true. Other UInt8 values fail with InvalidArgument,
-FailureReason::InvalidDomain and diagnostic tag InvalidCondition, global linear index and actual byte. Output copies the
-selected element's exact bits, including NaN payload, signaling NaN, infinity
-and signed zero. This is copying: it does not apply arithmetic NaN quieting.
-All three CPU versions are bitwise equivalent; platform-specific keys require
-their named CPU platform.
+The caller supplies condition bytes exactly 0 or 1 at every computed coordinate. This is an unchecked numerical precondition; no error outcome is promised for other bytes. Zero selects `when_false`; one selects `when_true`. The kernel copies the selected element's exact bits, including NaN payload, signaling NaN, infinity and signed zero, without arithmetic quieting. All three CPU profiles are bitwise equivalent and require their named host capability.
 
-## Run-shared complete-input computation and invalidation
+## Fixed tasks and input dependencies
 
-Both branches' dtype/shape metadata is checked at compile/preflight. Every
-nonempty request collects and validates condition and both complete branches
-before entering a synchronous callback. The callback verifies each condition
-byte and copies the chosen value bits into a complete packed owned output.
-The executor projects it to requested global coordinates. Empty reads no payload
-and invokes no callback.
+Metadata specialization checks UInt8 conditions, equal branch dtypes and equal complete shapes, including batch axes. Each requested output tile lowers to one CPU task. All three input ports declare every intersecting tile, using their own grids. Both branch owners remain dependencies even when every condition selects the same branch. Upstream operational failure in a declared branch can prevent issue. The kernel reads the selected branch sample and writes its raw bits into a separate preallocated dense output tile.
 
-An unselected branch source or typed failure affects the invocation. Input
-collection and typed validation may fail before the callback can diagnose an
-invalid condition. After successful input collection, an invalid byte anywhere,
-including outside the consumer projection, fails with InvalidArgument/InvalidDomain,
-Run scope and no Atom key. No partial output is published.
-
-Any edit to condition or either branch invalidates all observed outputs, including
-edits at unselected locations. Numerical bit selection remains unchanged; source
-NaNs, signaling NaNs and signed zeros use raw integer/byte transport.
+Prepare validates complete fixed slot coverage, each port's dtype and output layout. Empty selection emits no task or payload reads. Sparse requests compute only requested output tiles, without constructing a full internal output.
 
 ## Storage and resources
 
-Read legal immutable strided/offset/unaligned arrays, including zero/negative
-strides and shifted origins. Capacity includes the full UInt8 condition, both
-full branch collections and N × branch-width output. Fixed scalar locals replace
-condition-dependent set/continuation state. Sparse requests may cost more memory
-and work. Work is O(N), cancellation is checked before each element and final
-publication, and unpublished output is released on all failures. Published owners
-remain valid after context destruction. Per-value numeric diagnostics are N/A.
+Inputs use the Plan's admitted immutable affine layouts, including signed strides and shifted origins. Output allocations contain only selected complete tiles. The kernel uses bounded stack coordinates and cached views, with zero task scratch and no payload allocation during invocation. Cancellation is queried at most every 1024 samples. Failures discard unpublished output after accepted callbacks return; successful Result owners remain valid after context destruction.
 
 ## Acceptance and implementation status
 
-Conceptual fixture: condition=[1,0,1], when_true=[10,20,30],
-when_false=[1,2,3] -> [10,2,30]. All three source supports cover {0,1,2}.
-Check that unselected source/typed failures are visible, collection failure
-precedes invalid-condition evaluation, byte 2 outside a consumer projection
-fails the invocation, and edits to either branch invalidate cache reuse.
-Cover all-true/all-false/alternating conditions, all four branch dtypes, distinct
-sNaN payloads, strides, output budgets, cancellation and escaped output owners.
+Conceptual fixture: condition=[1,0,1], when_true=[10,20,30], when_false=[1,2,3] produces [10,2,30]. Check all-true, all-false and alternating conditions, all four branch dtypes, distinct signaling-NaN payloads and signed zero. Include different batch/atomic input grids, signed strides, nonzero tile origins, sparse/empty selections, upstream failure on a declared branch, cancellation and retained output owners. Invalid condition bytes have no required diagnostic outcome.
 
-Validate these complete-input rules through a temporary public workflow on each admitted
-profile. See [NUM-07 execution](../comparison-whole.md) for the behavior and
-validation boundary. Specification status remains Proposed.
+All three profile definitions use fixed invocation ABI 8. Validate available profiles through temporary public execution checks. See [NUM-07 fixed execution](../comparison-execution.md); specification status remains Proposed.

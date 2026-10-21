@@ -5,7 +5,7 @@ kind: mathematical_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 ---
 
@@ -126,15 +126,14 @@ operation; nonidentity zero entries do not prune source dependencies.
 
 ## Native rounding and nonfinite behavior
 
-For each requested output row of A/B/C, strict evaluates all three terms plus
+For each output row within retained A/B/C tiles, strict evaluates all three terms plus
 an implicit +0 bias using exact rational coefficients and exact input values,
 then rounds once to the unchanged output dtype. This follows NUM-14 dot-product
 semantics, specialized to statically derived geometry instead of dynamic
 machine-valued matrix/bias ports. There is no independently rounded coefficient,
 product, matrix-inversion result or hidden cone-response intermediate.
 
-Semantic mode requires all three consumed inputs finite and the requested final
-rounded output finite. Negative/HDR values are otherwise allowed. Overflow of
+Semantic callers guarantee all three consumed inputs and the final rounded output finite; fixed invocations do not validate this sample-domain precondition. Negative/HDR values are otherwise allowed. Overflow of
 an unused output row is not evaluated or manufactured. Raw applies NUM-14
 nonfinite classification: first source NaN in canonical triple order is quieted
 with payload/sign preserved; without source NaN, 0*Inf or conflicting signed
@@ -144,7 +143,7 @@ zero sum returns +0 due to the implicit +0 bias, and nonzero underflow retains
 its sign. Raw final overflow produces the NUM infinity result.
 
 The family's static exact-I bit-identity exception precedes
-this dot evaluation and follows that family's copy/validation contract. An
+this dot evaluation and follows that family's copy/precondition contract. An
 approximate identity, or an identity obtained only by multiplying several
 separate node matrices, does not establish that exception.
 
@@ -159,8 +158,7 @@ c = RN_dtype(K * a)       # only for explicit adapt
 out = RN_dtype(inverse(Mt) * (c if adapt else a))
 ```
 
-Every native row evaluation and required sample validation follows its own node
-contract, including intermediate overflow and failure. preserve_xyz omits K;
+Every native row follows its own rounding and caller-precondition contract. Intermediate raw infinity and NaN remain visible to downstream rows; operational failures retain their stage attribution. preserve_xyz omits K;
 it does not mean that floating A/B rounding disappears. When whites differ,
 B's explicit preserve_xyz option changes the destination basis interpretation
 without altering XYZ through a hidden adaptation or metadata-only C substitute.

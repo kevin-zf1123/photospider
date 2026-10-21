@@ -17,7 +17,7 @@ implemented_operation_keys:
 
 # FMT-02B: concatenate existing channel axes
 
-The default C++ `OperationRegistry` registers this member's `strict`, `accelerated_apple_silicon` and `accelerated_x86_64` CPU variants as Result operations. External C modules use Result C ABI 6, which is separate from the built-in C++ registration path. Public authoring helpers are installed in `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT specification remains Proposed independently of the registered implementation.
+The default C++ `OperationRegistry` registers this member's `strict`, `accelerated_apple_silicon` and `accelerated_x86_64` CPU variants as Result operations. These built-ins execute through fixed invocation ABI 8. Public authoring helpers are installed in `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT specification remains Proposed independently of the registered implementation.
 
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md).
 The implemented keys are separate default-registry primitives.
@@ -46,16 +46,7 @@ sample rank, including batch and cell axes, is at most 8.
 The family defines axis assertions, raw requirements, dtype/count/arity limits,
 description/descriptor consistency and the complete support matrix.
 
-For requested Q and input i, intersect output channels with [pi,p(i+1)),
-subtract pi, and move the channel coordinate from output_axis to ai. That
-exact footprint is Data; an empty intersection reads no payload. Descriptor
-checks still cover all connected inputs; no Control or additional sample
-Validation payload is needed. Dirty mapping moves ai to output_axis and adds
-pi, then intersects the observed output. Preserve gaps and global coordinates.
-
-Use the family's algorithm, resource/error rules and performance cases. For spatial output, the implementation builds an affine view piece for each selected source channel block, binds it to an owning window, and submits one target-box transaction. Different source owners are permitted when every piece is representable and the aggregate mapping is complete. `auto` copies only after a physical `ViewUnavailable`; `view` fails and `materialize` writes a new destination directly.
-
-Prefix construction costs O(n); the implementation does not search all n inputs for every sample. It counts source aliases once per backing identity while retaining each input port's logical contribution. For one input with matching source/output axes, shape and samples are identical, although materialization may change backing. The result carries no attached description.
+For each complete selected output tile, intersect channels with input i's prefix interval, subtract pi and move the channel coordinate to ai. Lowering unions the source-grid tiles for those mapped regions. Empty intersections are schema-only. Auto/materialize copy to independent output tiles; nonempty view fails without source payload reads. Runtime uses a binary span lookup rather than scanning every input for every sample. The family defines cancellation, ownership and bounded storage.
 
 ## Independent analytic fixture
 
@@ -69,8 +60,7 @@ c1 = [[20,21]]
 Input X1 has shape [1,2,1], channel axis 2, and logical samples
 `[[[30],[31]]]`. Both nonchannel shapes are [1,2]. With output_axis=2, output
 shape is [1,2,3] and samples are `[[[10,20,30],[11,21,31]]]`.
-Requesting only (0,1,2) reads X1[0,1,0]=31 and no X0 payload. An X0-only change
-cannot dirty that observation. Output channels 1..2 map to X0 channel 1 and
+At (0,1,2), the value comes from X1[0,1,0]=31. X0 payload is omitted only when normalized output tiles contain no X0-backed channels. Output channels 1..2 map to X0 channel 1 and
 X1 channel 0 at their separate source-axis positions.
 
 The independent oracle derives input channel intervals from prefix sums and

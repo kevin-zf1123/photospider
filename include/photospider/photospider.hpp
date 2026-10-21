@@ -28,5 +28,6 @@
 #include "photospider/data/tensor_layout.hpp"
 #include "photospider/data/tensor_span.hpp"
 #include "photospider/execution/execution.hpp"
-#include "photospider/plugin/operation_plugin.hpp"
+#include "photospider/plugin/native_kernel_api.h"
+#include "photospider/plugin/operation_module_api.h"
 #include "photospider/plugin/operation_registry.hpp"

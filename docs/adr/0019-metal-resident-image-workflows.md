@@ -3,89 +3,76 @@
 - Status: Accepted
 - Reader mirror: [Chinese](zh/0019-metal-resident-image-workflows.zh.md)
 
-## 1. Core summary (TL;DR)
+## 1. Core summary
 
-Some operations can run on a configured native GPU while CPU execution remains available where an operation declares it. `NativeGpu` selects placement permission; the operation contract defines numerical behavior, and the kernel owns the device queue, buffers, accounting and synchronous completion. The C operation interface exposes bounded host services rather than device handles.
+The physical Plan fixes CPU/GPU placement and explicit transfers before execution. Operations own numerical behavior; the kernel owns native buffers, pipelines, submission credits and completion lifetimes. An accepted GPU invocation borrows its inputs, outputs and scratch until terminal completion.
 
-## 2. Mental model and intuition
+## 2. Execution model
 
-The compiler labels each operation step for CPU or GPU placement from the selected mode and copied operation capabilities. The context owns a CPU worker pool and, when enabled and available, one GPU worker lane. GPU callbacks acquire bounded views, submit native commands, and return only after those commands complete.
+Preparation links each task to an immutable kernel. The Run issues ready CPU tasks to its context's worker pool and ready GPU tasks through asynchronous submission. A shared context limit bounds accepted GPU submissions; terminal completion returns that credit. CallGroups retire in IR order independently of task completion order.
 
 ```text
-                  ExecutionPlan
-                 /             \
-        CPU operation        GPU operation
-             |                    |
-       CPU worker pool     single GPU worker lane
-                                  |
-                         host-owned device queue
-                                  |
-                       synchronous native commands
-                                  |
-                      validated host-visible output
-                                  |
-       +--------------------------+------------------+
-       |                                             |
-   publish success                   BackendUnavailable before publish
-                                                   |
-                                      trait-permitted CPU restart
+                    PreparedPlan
+                   /            \
+           ready CPU task     ready GPU task
+                 |                  |
+          CPU worker pool     context GPU credit
+                 |                  |
+          direct invocation   prepared native submission
+                 |                  |
+          synchronous return  device terminal completion
+                   \              /
+                    completion ingestion
+                            |
+                  IR-ordered call retirement
 ```
 
-Each build selects at most one native backend: Metal on supported Apple builds or optional Vulkan. `ExecutionContext` determines whether that backend has a usable device. A backend label records placement; dispatch and submission diagnostics record actual device work.
+Each build selects at most one native backend: Metal on supported Apple builds or optional Vulkan. Metal uses command-buffer completion handlers. Vulkan retains independent command, descriptor and fence objects for each submission and uses one device completion worker to drain them. The Run keeps accepted work alive through cancellation and failure.
 
-## 3. Formal contracts and APIs
+## 3. Contracts and APIs
 
-```cpp
-enum class ExecutionMode : std::uint32_t {
-  CpuExact = 1,
-  NativeGpu = 2
-};
-
-struct PlanningOptions {
-  ExecutionMode execution_mode = ExecutionMode::CpuExact;
-};
-
-struct ExecutionContextConfig {
-  bool gpu_enabled = false;
-  std::uint32_t cpu_workers = 0;
-};
-```
-
-Result operation callbacks use operation ABI 6. Native GPU services have an independent ABI 1 in the standalone C header `photospider/plugin/native_gpu_api.h`; C Result services and C++ Result phases expose this table for the current invocation. Including the native GPU header does not require the operation plugin header.
+Operation modules use `photospider/plugin/operation_module_api.h` (ABI 8). Fixed invocations use `fixed_invocation_api.h` (ABI 8). Kernel preparation may borrow `ps_native_gpu_service_v2` from `native_kernel_api.h`:
 
 ```c
-#include <photospider/plugin/native_gpu_api.h>
+#include <photospider/plugin/native_kernel_api.h>
 
-static int execute_native(const ps_gpu_service_v1 *gpu,
-                          const ps_gpu_dispatch_v1 *commands,
-                          uint32_t command_count) {
-  if (!gpu || gpu->struct_size != sizeof(*gpu) ||
-      gpu->abi_version != PS_GPU_ABI_VERSION_1)
-    return PS_GPU_RESULT_FAILURE_V1;
-  return gpu->execute(gpu->context, commands, command_count);
+static ps_kernel_status_v8 prepare_native(
+    const ps_native_gpu_service_v2* service,
+    const ps_native_program_v2* program,
+    const ps_kernel_preparation_v8* query,
+    ps_prepared_kernel_v8* result) {
+  if (!service || service->struct_size != sizeof(*service) ||
+      service->abi_version != PS_NATIVE_GPU_ABI_VERSION_2) {
+    const ps_kernel_status_v8 unavailable = {
+        .code = PS_KERNEL_BACKEND_UNAVAILABLE_V8};
+    return unavailable;
+  }
+  return service->prepare(service->context, program, query, result);
 }
 ```
 
-`NativeGpu` selects GPU implementations that declare support. A step without a GPU implementation uses its CPU implementation when available; planning fails with `BackendUnavailable` when the selected requirements leave no supported implementation. The mode does not select a numeric profile. Operation parameters and traits define accepted values, precision and fallback permission.
+The example receives a valid empty output record and a program/query supplied by the enclosing preparation callback. A successful call transfers one prepared kernel owner. The service table expires when preparation returns; the kernel retains the device and pipeline independently.
 
-The host lends buffers as opaque invocation-local tokens. Tokens refer only to bounded host-owned input, output or scratch views. Inputs remain read-only; output and scratch allocation use the execution context's controlled-buffer budget. The plugin supplies MSL for Metal or SPIR-V for Vulkan. The host validates records, owns device and pipeline state, and keeps service pointers and tokens valid only for the callback. `execute` accepts a bounded batch and returns after submitted work drains, including cancellation and errors. A successful nonempty GPU callback must report native dispatch work.
+A native program supplies MSL for Metal or SPIR-V for Vulkan, fixed bindings, constants and dispatch dimensions. Preparation validates binding ranges and output coverage against the static task signature. Every output is bound once over its full accessible range. Both native adapters accept Shared views and opaque Device handles. Submission checks each binding's memory domain against the prepared signature and resolves its owner through the device's allocation registry.
 
-The context has one GPU worker lane and the service submits synchronously. Completed shared host/device storage can be read by the CPU after the access transition; this path does not imply an extra device-to-host copy. Results may retain native allocation owners and budget leases after the context retires. Native result keys include execution mode, selected backend and native implementation identity. A GPU fallback marks that result and its descendants ineligible for native result-cache entries; see the [cache model](../kernel-architecture/Cache-Model.md) for owner and reuse rules.
+Shared allocations expose CPU bytes. Device allocations expose an opaque identity and retain their native resource and capacity lease independently of the device wrapper. Metal uses a separate private heap for each allocation; Vulkan uses unmapped device-local memory. Sealing an allocation after producer completion revokes subsequent writable bindings. Explicit CPU COPY tasks connect Host and Shared storage when required by the Plan. GPU COPY supports every Host/Shared/Device pair and preserves raw sample bytes from signed or broadcast affine layouts. Host endpoints use Shared staging declared in the Plan: one output-sized segment per endpoint. Native completion performs any Host destination copy before reporting task completion.
 
-For Result operation callbacks, runtime fallback occurs only when a GPU attempt returns `BackendUnavailable` before publication, the operation also supports CPU, its traits permit fallback, and cancellation/currentness still allow work. The kernel retires the failed GPU continuation and its temporary owners before restarting the same observation on CPU. Submitted device execution errors terminate the Run.
+RET and ordered call exports retain Device tiles in their Results. A Result may contain CPU and Device regions in one member; CPU reads intersecting Device backing return `BackendUnavailable`. `PlanningOptions::input_domains` fixes the domain of each external input, defaulting to Host. A subsequent Run in the same context can bind a Device Result directly; a foreign device owner fails `TypeMismatch`. `DenseHost` inputs require the Host domain. Integer byte offsets locate subviews inside Device buffers while opaque allocation identities stay unchanged.
 
-## 4. Non-goals and explicit boundaries
+Submission binds actual device-owned allocations. Rejection transfers no invocation borrow and delivers no completion. Acceptance delivers exactly one terminal completion after all device accesses end and writes become visible. Cancellation requests stop further work but cannot shorten this borrow. A device command failure makes the device unavailable and aborts the Run while other accepted submissions drain. The executor preserves compiled placement when reporting a backend failure.
 
-- `NativeGpu` grants placement; it does not guarantee that every step runs on a device.
-- The kernel does not provide automatic numeric-equivalence guarantees across CPU, Metal and Vulkan. Each operation owns its numerical contract.
-- Native GPU callbacks are trusted process code. Record validation does not sandbox shader execution or protect the process from malicious code.
-- Device handles, queue ownership and pipeline management remain host-owned. Plugins do not retain service pointers or invocation tokens.
-- This contract does not promise device-resident output pages across graph nodes, a remote GPU, automatic measured placement or a multi-device scheduler.
+The Plan owns structural facts; each Run owns its bindings and activation state. The operation owns numerical correctness and the requirement to initialize every output sample. Structural validation does not certify shader arithmetic.
+
+## 4. Boundaries
+
+- Native callbacks and shader code are trusted in-process code; ABI validation provides no sandbox.
+- Runtime backend retry, implicit transfers, remote GPU execution and multi-device scheduling are outside this contract.
+- CPU, Metal and Vulkan numerical equivalence requires an operation-specific contract and validation.
 
 ## 5. Consequences
 
-The execution context accounts for native input copies, outputs, scratch and staging using actual allocation capacity. If the working set cannot fit, admission fails with `ResourceExhausted`; reducing concurrency or releasing retained Tensors can reduce pressure. Pipeline metadata and driver allocations are outside the pixel-buffer budget.
+Block admission reserves the actual native output and scratch capacities before issue. Shared allocations count against Host, Device, Shared and Payload capacity. The private allocation API reserves Device and Payload capacity through its caller's reservation callback; native resources retire before that reservation. Metal private capacity includes heap page rounding. Prepared Vulkan constants retain their own native allocation charge. Host allocation owners, pipeline keys, prepared contexts and submission records use the device's metadata root; opaque driver-internal allocations are not an RSS guarantee.
 
-Device absence prevents GPU-only operations from running. An operation with a permitted CPU implementation may use that path when the GPU reports pre-publication unavailability. Ordinary operation failures and submitted device errors are returned to the caller; the kernel does not retry them as CPU work. Callers can inspect fallback reasons and actual dispatch/submission counters to distinguish device work from CPU execution.
+Insufficient capacity returns `ResourceExhausted`. Releasing retained Results or reducing concurrency can reduce the live working set. Results retain native backing and leases independently of context lifetime. Pipeline cache eviction releases cache ownership while prepared kernels retain the pipelines they use.
 
-The synchronous lane makes buffer lifetime and publication ordering explicit, but one long GPU callback occupies the lane until its commands drain. Cancellation stops new admission and waits for submitted commands to retire before the callback releases its resources. Result operation ABI 6 and native GPU service ABI 1 are independent plugin boundaries. C modules that compile against `native_gpu_api.h` must be rebuilt when that header changes; no older GPU-service alias is provided.
+Slow device work delays drain and retirement. The completion path must retain every borrowed owner until the device reaches a terminal state, including when cancellation is already requested. Module ABI and native service versions are independent; consumers rebuild against the matching headers. Detailed limits and lifecycle rules are in [Plugin ABI](../kernel-architecture/Plugin-ABI.md) and [Compiler and execution](../kernel-architecture/Compiler-and-Execution.md).

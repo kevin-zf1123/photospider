@@ -1,29 +1,39 @@
 # 01-numeric implementation work
 
-The current FP32 quality contract, backend, measured results and limitations are
-maintained in the [accelerated specification](op_specs/NUM_accelerated_contract.md#current-implementation).
-Formal complete-input profiles, including the fifteen LUT3D baking geometry
-keys, use explicitly prepared shared stages. Their static mapper grants the
-active inputs before execution; requested output tiles read the shared result.
-The original numerical callback runs once per call activation, including a new
-activation on a loop backedge. Sparse output selection retains the algorithm's
-complete input and internal output requirements. Empty selections omit pure
-output work while preserving any control flow and mandatory effects.
+All registered numeric definitions lower to physical operation programs and
+prepare fixed invocation ABI 8 kernels or explicit COPY tasks. The module
+interface is ABI 8. Each family fixes its input reads, selected output tiles,
+scratch and task dependencies before a Run starts. Shared computation uses
+tasks and private values within the call.
 
-The four structured LUT3D Result keys use the current Result continuation
-protocol. Pack and Measure use shared stages; Unpack and Gate consume fixed
-input grants directly. Measurement uses bounded row windows within its complete
-grants. It does not extend input dependencies between polls. The authoring
-templates continue to expand ordinary nodes with independent output identities.
-Legacy unsuffixed sample keys remain separate; pointwise helpers use explicit
-pointwise mappings where registered.
+Complete input support is an algorithmic read requirement. It does not by
+itself require allocating or computing every output tile: each fixed family
+declares the output closure it actually needs. Empty selections omit pure
+output work while preserving control flow and mandatory effects. A loop
+backedge starts a new call activation with independent working storage.
 
-Complete-input policy determines storage, invalidation and failure scope as
-specified per family. Numerical formulas and profile error contracts are
-unchanged. See [mathematical implementation](math-implementation.md),
-[LUT3D baking](op_specs/CRV-09_bake_lut3d.md#maintained-implementation-and-validation)
-and the [static mapping contract](../../kernel-architecture/Dependency-Data.md#static-mapping-contract).
+The fifteen LUT3D baking geometry keys emit tasks for selected output tiles.
+The four structured LUT3D keys also use fixed CPU invocations. Pack, Unpack
+and Gate copy selected samples into independent dense tiles. Measure waits for
+the complete owned table and reads all validation point/reference/applied
+colors, then writes its thirteen report members with fixed exact-integer
+scratch. The report records the actual owned-table ObjectId. Gate checks
+configuration, table identity and tolerance in that order. An ordered
+retirement observer may retain a successful report when a later Gate fails.
 
-Primitive keys and authoring templates
-retain the distinctions in their individual specifications. Specification
-acceptance and implementation completion remain separate states.
+Authoring templates expand ordinary workflow nodes with independent output
+identities. Their output projection and dependency rules remain explicit in
+the family specifications. Numerical formulas, profile accuracy contracts and
+caller preconditions belong to those specifications, separately from kernel
+scheduling and resource behavior.
+
+See the [numeric implementation reference](../../kernel-architecture/Numeric-Operations.md),
+[accelerated specification](op_specs/NUM_accelerated_contract.md#current-implementation),
+[mathematical implementation](math-implementation.md),
+[LUT3D baking](op_specs/CRV-09_bake_lut3d.md#fixed-geometry-tasks) and
+[static mapping contract](../../kernel-architecture/Dependency-Data.md#static-mapping-contract).
+
+Numerical and workflow checks for bundled operations are created for the
+change and removed after use; independent oracles and package contracts are
+retained. Specification acceptance and implementation completion remain
+separate states.

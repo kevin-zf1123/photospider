@@ -139,6 +139,12 @@ Status profile_id(ByteView bytes,
   return core_internal::invalid_domain("ICC Profile ID checksum mismatch");
 }
 }  // namespace
+Status color_internal::validate_icc_resource(
+    ByteView bytes, const ResourceBudget& resources,
+    const std::function<Status(std::uint64_t)>& consume) {
+  auto status = validate_icc(bytes, resources, consume);
+  return status.ok() ? profile_id(bytes, consume) : status;
+}
 struct IccProfile::Impl {
   ImmutableResource resource;
 };
@@ -188,10 +194,7 @@ Result<IccProfile> IccProfile::import(ByteView bytes,
   }
   auto storage = std::move(writer).freeze();
   bytes = storage->bytes();
-  status = color_internal::validate_icc(bytes, resources, consume);
-  if (!status.ok())
-    return Result<IccProfile>(status);
-  status = profile_id(bytes, consume);
+  status = color_internal::validate_icc_resource(bytes, resources, consume);
   if (!status.ok())
     return Result<IccProfile>(status);
   status = consume(1);

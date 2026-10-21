@@ -1,4 +1,3 @@
-#include "photospider/ops/numeric/diagnostics.hpp"
 #pragma once
 
 #include <array>
@@ -10,6 +9,7 @@
 #include <vector>
 
 #include "photospider/ops/numeric/arrays.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 #include "photospider/ops/numeric/sequences.hpp"
 #include "photospider/ops/numeric/workflow_authoring.hpp"
 
@@ -91,8 +91,8 @@ inline Result<WorkflowNodeOutput> linear(
   WorkflowInput checked_lower = lower;
   if (inverse) {
     const auto id = ids.value()[next++];
-    // The scalar source interval forces lower<upper even though the final
-    // inverse remap would otherwise permit unordered target bounds.
+    // Keep the scalar bound dependency in the inverse composition. Ordered
+    // finite bounds are a caller precondition of the fixed remap kernel.
     nodes.push_back({id, remap, {lower, lower, upper, lower, lower}, {}});
     checked_lower = WorkflowNodeOutput{id, "values"};
   }
@@ -102,12 +102,12 @@ inline Result<WorkflowNodeOutput> linear(
   for (unsigned i = 0; i < 4; ++i) {
     const auto id = ids.value()[next++];
     // constant_node requires its source to be exactly [1], so actual scalar
-    // bounds are verified by Compiler independently of the shape hint.
-    auto view = constant_node(id, sources[i], descriptor.shape,
-                              ArrayLayout::View, profile);
-    if (!view.ok())
-      return Answer(view.status());
-    nodes.push_back(view.take_value());
+    // input shapes are verified by Compiler independently of the shape hint.
+    auto expanded_node =
+        constant_node(id, sources[i], descriptor.shape, profile);
+    if (!expanded_node.ok())
+      return Answer(expanded_node.status());
+    nodes.push_back(expanded_node.take_value());
     expanded[i] = {id, "values"};
   }
   const auto output = ids.value()[next++];
@@ -152,26 +152,23 @@ inline Result<WorkflowNode> logarithmic(std::uint64_t id, bool inverse,
  * @param upper Result with one same-dtype tensor of `sample_shape()` [1],
  * finite and strictly greater than the finite lower bound.
  * @param descriptor Authoring input shape/dtype hint; Compiler checks actual
- * Result edges and scalar bounds. Mismatches fail TypeMismatch before payload.
- * @param profile CPU suffix used by all numeric views and remap operations.
+ * Result edges and scalar bound schemas. Mismatches fail TypeMismatch before
+ * payload.
+ * @param profile CPU suffix used by all constant and remap operations.
  * @return Connectable values reference. Adds only ordinary nodes, leaving
  * document outputs unchanged. IDs avoid all existing/referenced producer IDs.
  * Invalid authoring fails Schema status; allocation may throw bad_alloc.
  * Failure/exception leaves the graph unchanged. Different graphs are safe to
  * author concurrently. No payload, registry or runtime resource is accessed.
  * @note Runtime returns `values` as an immutable Result with
- * `photospider.tensor` v1/member `samples`, preserving shape/dtype and raw
- * data. The complete remap formula rounds once, extends without clipping and
- * preserves its IEEE special values/zero rules. Every nonempty Whole request
- * validates both finite ordered bounds, including for NaN inputs and endpoint
- * requests, and reads all inputs with Data, Validation and Descriptor (role
- * 13); Result readers use authorized windows without collecting or copying the
- * full input. Output allocation is full-shape and any input edit dirties all
- * recorded demand. Empty reads no payload. Numeric failures have Run scope.
- * Invalid bounds use InvalidArgument/InvalidDomain; upstream, backend, work,
- * capacity, cancellation and stale failures retain their categories. Output
- * owners outlive context; all expanded views/intermediates remain subject to
- * host resource admission.
+ * `photospider.tensor` v1/member `samples`, preserving shape/dtype. The
+ * complete remap formula rounds once, extends without clipping and
+ * preserves its IEEE special values/zero rules. Finite ordered bounds are an
+ * unchecked caller precondition. Fixed constant/remap tasks compute selected
+ * dense tiles; Empty issues no payload work. Operational resource/backend and
+ * cancellation failures prevent successful publication. Output owners outlive
+ * context; all selected intermediates enter block resource admission.
+ * Float32 literal creation additionally depends on linspace availability.
  */
 inline Result<WorkflowNodeOutput> linear_shaper(
     WorkflowDocument& document, WorkflowInput input, WorkflowInput lower,
@@ -180,11 +177,11 @@ inline Result<WorkflowNodeOutput> linear_shaper(
   return shaper_detail::linear(document, std::move(input), std::move(lower),
                                std::move(upper), descriptor, profile, false);
 }
-/** @brief Expands [0,1] to [lower,upper], including a scalar lower<upper guard.
+/** @brief Expands [0,1] to caller-supplied finite ordered [lower,upper].
  * `input`, `lower` and `upper` are single-tensor Results with arbitrary schema
  * ids/member keys and the same Float32/64 dtype. Output is a
  * `photospider.tensor` v1 `samples` Result. Shares linear_shaper's authoring,
- * IEEE, shared-stage validation, demand and ownership contract.
+ * IEEE, unchecked-bound, selection and ownership contract.
  * Finite coordinates outside [0,1] extrapolate; infinities retain their signs.
  */
 inline Result<WorkflowNodeOutput> linear_shaper_inverse(
@@ -194,37 +191,37 @@ inline Result<WorkflowNodeOutput> linear_shaper_inverse(
   return shaper_detail::linear(document, std::move(input), std::move(lower),
                                std::move(upper), descriptor, profile, true);
 }
-/** @brief Whole-expression log coordinate
- * (ln(input)-ln(lower))/(ln(upper)-ln(lower)). Ordered inputs are Results with
- * one tensor member each under arbitrary schema ids/member keys; all three
- * share the same Float32 or Float64 dtype, and bounds have `sample_shape()`
- * [1]. Bounds require
- * 0<lower<upper before any input special-value handling. Output `values` is a
- * `photospider.tensor` v1/member `samples` Result with input shape/dtype and
- * ordinary data.
- * No static mode or clipping parameter. Construction is pure/thread-safe and
- * may throw bad_alloc; invalid id/profile fails
- * InvalidArgument/InvalidDomain/Schema. Endpoints return +0/1 exactly; input
- * NaN retains its sign/payload and is quieted, either zero returns -Inf,
- * negative input returns canonical quiet NaN, and +Inf returns +Inf.
- * @note Every profile currently correctly rounds the complete expression.
- * Accelerated profiles retain strict certified interval arithmetic when needed.
- * Static preparation retains the operation direction and CPU profile in
- * immutable program state; callbacks reuse it for each execution.
- * Whole counters are unavailable. Exact/certified paths remain monotone.
- * independently of request order. Refinement uses 128..4096 fraction bits;
- * unresolved rounding fails ResourceExhausted/CapacityLimit. Work/cancellation
- * can interrupt refinement and retain their original failure categories.
- * @note Every nonempty request uses a Run-shared stage with complete input
- * tensors for all three inputs. Authorized windows feed the math directly; the
- * callback does not collect or copy the full input through TensorSpan. Bounds
- * precede IEEE evaluation inside the callback; typed/upstream failures can
- * occur first. Invalid bounds fail InvalidArgument/InvalidDomain with port and
- * Run scope. Empty reads no payload. Any input edit dirties all recorded
- * demand. The complete immutable output backs sparse fragments and outlives
- * context. Arbitrary legal input strides remain supported. Output and fixed
- * exact workspace use host budgets; provenance is retained and cancellation
- * frees unpublished output.
+/** @brief Whole-expression (ln(input)-ln(lower))/(ln(upper)-ln(lower)).
+ * Ordered input/lower/upper Results each contain one tensor member under any
+ * schema id/version/key. Full sample_shape includes batch axes; input rank is
+ * 1..8, positive extents and <=2^40 elements. All ports share Float32/64 dtype;
+ * bounds have shape [1]. Finite 0<lower<upper is an unchecked caller
+ * precondition. Output values uses photospider.tensor v1/member samples with
+ * the complete input shape/dtype as ordinary axes and no domain description. No
+ * static mode or clipping parameter. Construction is pure/thread-safe and may
+ * throw bad_alloc; invalid id/profile fails InvalidArgument/InvalidDomain.
+ * Input NaNs preserve sign/payload and are quieted. Both zeros return -Inf,
+ * negative inputs canonical quiet NaN, +Inf returns +Inf; endpoints give +0/1.
+ * Overflow/underflow remain successful IEEE values. Current profiles correctly
+ * round the whole expression and are monotone for fixed valid bounds.
+ *
+ * Each selected output tile has one fixed CPU task reading its input region
+ * and both scalar bounds, closed through source grids. Only selected output is
+ * computed/allocated. ExactShaper scratch is fixed per invocation; checked
+ * arithmetic state carries retry/range/failure without exception allocation.
+ * Refinement uses 128..4096 fractional bits; unresolved precision/capacity
+ * fails ResourceExhausted. Cancellation is checked in output and arithmetic
+ * work. A zero-significand guard protects integer decomposition, not full bound
+ * validation; invalid numerical bounds have no diagnostic precedence guarantee.
+ *
+ * Preparation validates metadata, exact source slots, output and scratch.
+ * Views are borrowed during invocation; Runs share immutable preparation and
+ * own scratch/output. Legal affine strides/offsets are supported. Caller fenv
+ * is preserved. Empty reads no payload. Required tasks share one call's ordered
+ * publication outcome; output owners survive context teardown. Compatible
+ * rebinding reuses preparation; content caching/repeated identity and per-value
+ * diagnostic counters are outside this contract. Operational static, binding,
+ * resource, backend and cancellation errors retain their categories.
  */
 inline Result<WorkflowNode> log2_shaper_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput lower,
@@ -233,11 +230,12 @@ inline Result<WorkflowNode> log2_shaper_node(
   return shaper_detail::logarithmic(
       id, false, std::move(input), std::move(lower), std::move(upper), profile);
 }
-/** @brief Whole-expression lower*(upper/lower)^input, with exact t=0/1
- * endpoints. Shares log2_shaper_node's Result schema, shared-stage input
- * validation, interface and authoring contract.
- * Positive finite bounds precede NaN propagation; inverse -Inf maps to +0, +Inf
- * to +Inf.
+/** @brief Whole-expression lower*(upper/lower)^input.
+ * Shares log2_shaper_node's schemas, unchecked finite positive ordered-bound
+ * precondition, fixed execution, precision, ownership and authoring contract.
+ * Input +/-0 returns lower bits and input=1 returns upper bits. NaNs preserve
+ * sign/payload and are quieted; -Inf maps to +0, +Inf to +Inf. Finite inputs
+ * can produce successful positive overflow/underflow values without clipping.
  */
 inline Result<WorkflowNode> log2_shaper_inverse_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput lower,

@@ -5,13 +5,13 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 ---
 
 # FMT-11: color-model conversions
 
-The family specification remains Proposed. Native members are registered as CPU Result ABI 6 operations; S is a public helper that lowers to the MASK threshold operation. Inherit the
+The family specification remains Proposed. Native members are registered as fixed invocation ABI 8 CPU operations; S is a public helper that lowers to the MASK threshold operation. Inherit the
 [FMT common contract](FMT_common_contract.md) and the confirmed
 [model coverage](FMT_model_conversion_coverage.md). Ordinary numerical behavior
 inherits NUM; the [model mathematics](FMT-11_model_math.md) is normative.
@@ -94,7 +94,7 @@ Negative XYZ uses the low linear branch, not a sign-symmetric cube-root extensio
 Do not clip l to 0..1 or restrict finite Cartesian opponent coordinates to a
 nominal range. Semantic consumed inputs and requested results must be finite.
 Exact point support for A is l<-Y, a*<-X,Y, b*<-Y,Z; for B it is X<-l,a*,
-Y<-l, Z<-l,b*. Validation follows those sets; unrelated components are not read.
+Y<-l, Z<-l,b*. Caller numerical preconditions follow those sets over complete retained output tiles.
 
 The [CIE definition](https://cie.co.at/eilvterm/17-23-076) provides the forward
 piecewise equations. The inverse and extended-domain contract are specified
@@ -114,12 +114,11 @@ periodic trigonometry without mutating that stored input. Cartesian coordinates
 cannot retain winding count or achromatic source hue. A round trip through a/b
 therefore regenerates principal hue rather than recovering those lost values.
 
-D/H semantic requests for a or b read and validate both C and hue, even when
+D/H semantic requests for a or b read both C and hue, even when
 C=0. Require finite C>=0 and finite hue; zero C produces canonical +0 in each
 requested Cartesian opponent component. Positive C follows C*cos(h) or C*sin(h).
 Raw admits negative C under its numerical formula. L-only requests in either
-direction read only L, copy its bits and, in semantic mode, check its finiteness.
-The semantic zero-chroma shortcut does not waive hue validation.
+direction read only L and copy its bits. Semantic finiteness is a caller precondition, including hue at zero chroma.
 
 ## Confirmed OKLab coefficient definition
 
@@ -136,7 +135,7 @@ FMT-10C adaptation and absolute values explicit normalization before E. Preserve
 scene/display reference. Use the real signed cube root of LMS and its cubic
 inverse for all finite extended coordinates; do not clip OKLab L to 0..1 or
 restrict finite opponent coordinates. Every requested transformed component
-reads and validates the complete source triple in semantic mode. Intermediate
+reads the complete source triple; semantic finiteness is a caller precondition. Intermediate
 LMS is mathematical computation, not a separately published rounded tensor.
 
 ## Confirmed HSL/HSV source interpretation
@@ -153,7 +152,7 @@ Use an explicit algebraic extension of the max/min formulas without clipping
 finite negative/HDR RGB or the resulting S,L,V. With M=max(R,G,B), m=min(R,G,B),
 chroma=M-m: HSV has V=M and S=chroma/V; HSL has L=(M+m)/2 and
 S=chroma/(1-abs(2*L-1)). Exact chroma=0 selects H=+0,S=+0. For non-gray input,
-a zero denominator makes the requested saturation invalid in semantic mode;
+a zero denominator violates the caller precondition for semantic saturation;
 raw retains NUM division semantics. In particular RGB=(1,0,-1) has a singular
 HSL saturation and RGB=(0,-1,-2) a singular HSV saturation. Exact request scope
 for these singularities is specified with the member dependency contract.
@@ -163,8 +162,7 @@ pi_multiple, with explicitly selected output unit. Gray generates +0. Final
 floating rounding remains NUM rounding, not an extra wrap of a value rounded
 to the upper endpoint. J/L accept arbitrary finite multi-turn hue and use
 periodic evaluation without rewriting input metadata/samples. Every requested
-inverse RGB component reads and semantically validates the full H,S,L/V triple,
-including S=0 or V=0; do not suppress invalid input through an achromatic shortcut.
+inverse RGB component reads the full H,S,L/V triple. Its semantic validity is a caller precondition, including S=0 or V=0.
 
 ## Confirmed YCbCr scope
 
@@ -181,22 +179,19 @@ option or an implicit nonlinear stage in an otherwise NCL matrix transform.
 M/N semantic interpretation requires a declared encoded RGB basis, not linear
 RGB; raw can apply the matrix directly to numerical components. M requests for
 any transformed output read all R',G',B'. N requests for R' read Y',Cr; B' read
-Y',Cb; G' read all Y',Cb,Cr. Semantic sample validation follows exactly those
-sets. Thus invalid Cb does not fail an R'-only request in N.
+Y',Cb; G' read all Y',Cb,Cr. Semantic sample preconditions follow those sets. Complete output tiles determine which formulas execute and therefore which supports apply.
 
 ## Confirmed XYZ/xyY singularities
 
-O preserves Y by an independent bit copy, validating only Y when that is the
-sole requested transformed output. x/y require X,Y,Z and exact sum T=X+Y+Z.
+O preserves Y by an independent bit copy; its semantic precondition concerns only Y when no other transformed component is retained. x/y require X,Y,Z and exact sum T=X+Y+Z.
 For semantic exact black (all three equal zero, irrespective of zero signs),
-return the effective reference-white x/y. A nonzero triple with T=0 fails a
-requested x/y in semantic mode; no epsilon or fallback chromaticity is used.
+return the effective reference-white x/y. A nonzero triple with T=0 is outside the semantic precondition for x/y; no epsilon or fallback chromaticity is used.
 Other finite inputs use X/T,Y/T without physical-triangle clipping. These sample
 chromaticities are distinct from the strictly positive reference-white parameter.
 
 P computes X=x*Y/y and Z=(1-x-y)*Y/y. Requested X/Z require finite x,y,Y and
 nonzero y in semantic mode even when Y=0. No guessed black shortcut is present.
-Y-only output independently copies and validates Y without reading x/y.
+Y-only output independently copies Y without reading x/y.
 O/P preserve relative or absolute cd/m² Y scale, observer, white and scene/display
 reference; they do not normalize luminance. Finite signed/HDR coordinates remain
 allowed outside the explicit singularities. O's semantic black fallback has
@@ -231,12 +226,11 @@ channel axis requires an explicit axis insertion for R. Other output orderings
 use FMT-03. Shape inference is static; Q reduces channel count by two and R
 increases it by two (or inserts size three for axis-free Gray).
 
-Q reads and semantically validates only the extracted coordinate, not discarded
-chroma. R requests read Gray only where the requested formula depends on it;
+Q reads only the extracted coordinate, not discarded chroma. R requests read Gray only where the requested formula depends on it;
 new constant-zero opponent/chroma components have no Gray sample dependency.
-Actual Gray reads still validate finite semantic coordinates regardless of alpha.
+Actual Gray reads require finite semantic coordinates as a caller precondition, regardless of alpha.
 Thus invalid Lab a*/b* does not prevent extraction of finite l, and requesting
-only R's new Lab a*=0 does not read or validate its Gray l source sample.
+only R's new Lab a*=0 has no Gray sample dependency. Tile closure may retain other output components with their own dependencies.
 
 ## Confirmed Black/White members
 
@@ -249,8 +243,7 @@ Dither/halftone remain GRD-29/30, integer encoding FMT-06 and bit packing codecs
 
 S/T preserve Float32/Float64 dtype, shape and slots, replacing only the selected
 Gray/binary component and copying all unrelated channels. T requires exact 0 or
-1 input in every mode, with -0 selecting black. All other numbers, NaN and Inf
-fail as invalid two-level selectors; raw does not reinterpret nonzero as white.
+1 input as a caller precondition in every mode, with -0 selecting black. Other numbers, NaN and Inf lie outside this contract; no runtime selector validation is performed.
 The required black_value and white_value are finite same-dtype typed constants;
 they may coincide or be reversed. Select their exact stored bits without
 interpolation. Integer code-domain binary data must first be explicitly decoded.
@@ -259,7 +252,7 @@ S is implemented by the registered `mask.threshold_channel_<profile>` operation.
 
 ## Static interface and interpretation
 
-Each native member accepts one Result containing one tensor , then publishes one `values` Result containing one tensor. The tensor dtype is Float32 or Float64. Input and output full sample rank, including batch and cell axes, is at most 8. Sample counts follow Result schema representability and execution resource limits. The source channel extent is at most 65536; axis-free R insertion also requires room within the rank limit. Cell-axis parameters exclude the batch prefix. Connected inputs receive Descriptor support (8). Semantic selected samples request Data (1) and Validation (4); raw T additionally validates its binary selector. Raw S and bypass-only samples request Data without Validation. R constant outputs request Descriptor only. Empty demand creates no run payload state.
+Each native member accepts one Result containing one tensor , then publishes one `values` Result containing one tensor. The tensor dtype is Float32 or Float64. Input and output full sample rank, including batch and cell axes, is at most 8. Sample counts follow Result schema representability and execution resource limits. The source channel extent is at most 65536; axis-free R insertion also requires room within the rank limit. Cell-axis parameters exclude the batch prefix. Every connected input undergoes static schema checking. Each complete retained output tile maps its formula supports to input regions and closes them through the source tile grid. A task with only source-independent constants retains a schema dependency without payload reads. Empty selection creates no payload task. Semantic numerical validity and T's exact binary selector rule are caller preconditions, not runtime validation requests.
 
 | Static logical field | Requirement |
 | --- | --- |
@@ -275,7 +268,7 @@ Each native member accepts one Result containing one tensor , then publishes one
 | output_axis | Required only for axis-free R insertion; otherwise preserve existing axis |
 | threshold | S required finite Float64, no default, in native Gray units |
 | black_value/white_value | T required finite typed constants matching input dtype, no defaults |
-| layout | auto default, view or materialize; forced view is accepted only by Q. |
+| layout | auto default or materialize produce independent tiles; only Q accepts view statically, and a nonempty view task fails ViewUnavailable. |
 | algorithm | auto default, scalar or reference. |
 
 Reject unknown, contradictory and inapplicable fields before samples, including
@@ -303,57 +296,30 @@ or selections. No rounded intermediate matrix, l*100, root, luma or hue conversi
 is inserted. Finite branch predicates and static validity are exact. Accelerated
 finite results inherit NUM's final FP32-scaled bound, including Float64; copies,
 selections, classification and errors remain exact. The math supplement defines
-raw NaN/Inf and zero behavior. Semantic validation follows actual component
-support and requires finite consumed values and requested results. Alpha is
-never read and alpha=0 never suppresses actual color work. Intermediate machine
+raw NaN/Inf and zero behavior. Semantic validity follows actual component support over complete retained output tiles and requires finite consumed values and results as caller preconditions. Converted formulas do not consume alpha, while retained bypass alpha is read and copied. Alpha=0 never suppresses actual color work. Intermediate machine
 overflow cannot fail a representable final result. Negative/HDR samples remain
 legal except the explicit chroma, singularity and binary-selector rules.
 
 Raw does not apply semantic black or zero-chroma substitutions. Static structural
 and parameter legality, plus T's intrinsic binary selector rule, still apply.
-Copied samples retain all bits, including signaling NaN when no semantic check
-rejects them. Computed exact cancellation is +0; specified trigonometric/atan2
+Copied samples retain all bits, including signaling NaN; semantic callers remain responsible for their numerical preconditions. Computed exact cancellation is +0; specified trigonometric/atan2
 and copy rules take precedence. Nonzero underflow retains its sign.
 
-## Exact demand, layout, dirty mapping and publication
+## Fixed tile dependencies, layout and ownership
 
-Demand is the union of the same-position component sets listed in the math and
-member files. No halo, neighborhood or complete-input fallback occurs. Dirty propagation
-is their forward relation restricted to observed outputs. Constant R zero
-outputs have no sample dependency. All descriptors still undergo static checks;
-Empty reads no payload. Bypass alpha/AOV/other groups read only corresponding
-source samples. Required upstream complete-input computations retain their own scope.
+Each selected complete output tile lowers to one CPU Host task. Lowering intersects that tile with the immutable channel spans, maps each formula's source coordinates and unions tiles on the source's own grid. Disjoint selected channels do not introduce a bounding-box dependency across unused channels. Source tiles can contain extra samples, and output tile closure can retain additional formulas; the formula support is evaluated for every retained output sample. Bypass slots copy their corresponding source, while constant R opponents retain only schema dependencies when no other output in the task reads payload.
 
-Q may return a read-only view when the complete requested mapping is physically representable from a compatible owner. Generic mappings must be affine; spatial mappings must satisfy the Result builder's canonical spatial view proof, so sparse or noncanonical spatial mappings can be unavailable. A forced Q view then returns `ViewUnavailable`; `auto` materializes. Other members materialize output and reject forced view during preflight, including bypass-only requests.
-materialize forces new storage and computes only requested coverage. There is
-no cross-owner view, source mutation or implicit complete-image scan.
+Auto/materialize write independent dense output allocations. Q accepts forced view as a static option, but every nonempty view task has schema-only input dependencies, zero scratch and returns InvalidArgument/ViewUnavailable. Other members reject forced view statically, including bypass-only selections. Empty creates no tasks while retaining all static parameter and schema checks. Generic and spatial layouts use the same point mappings; input grids respect their own batch and atomic axes. Source owners are borrowed through task completion, and published outputs retain only their own allocations.
 
-The implementation supports generic and spatial tensor layouts. It materializes only requested coverage, preserves source ownership for copied data as permitted by Result, and publishes transactionally. Empty observations are stateless. Each run owns independent state; compiled preparation may be reused concurrently. Resource admission and cancellation follow the Result execution root.
+S expands to the registered MASK channel-threshold operation with its selected CPU profile. No unsuffixed model-conversion alias is registered.
 
-S expands to the MASK channel-threshold operation with its registered CPU profile. There is no universal model-conversion dispatcher or unsuffixed alias.
+## CPU arithmetic, resources and cancellation
 
-## CPU algorithm, resources and cancellation
+The profiles are strict, accelerated_apple_silicon and accelerated_x86_64. Unsupported platform profiles fail BackendUnavailable; this family provides no GPU implementation. Kernel preparation checks the exact immutable read slots, output tile, dtype, Host placement, empty task-parameter payload and scratch bound before returning the fixed entry point. Expected source closure is bounded before enumeration, including malformed preparations with too few supplied reads.
 
-Native members specify strict, accelerated_apple_silicon and accelerated_x86_64
-CPU profiles. S uses conforming constituent profiles and has no native key. No
-GPU implementation is promised. Unsupported platform keys fail BackendUnavailable.
-Reference evaluation traverses requested samples through kernel windows,
-validates actual support, computes the formula and publishes valid coverage.
-Exact rational/directed-interval refinement establishes strict root, atan2 and
-trigonometric rounding; ordinary libm or Float64 intermediates alone do not prove
-conformance. Vectorization may share work but cannot change reads or failures.
+Pure copy and constant tasks declare zero scratch. Arithmetic tasks reserve one fixed ModelMath workspace plus a 64-point gather/candidate block. The workspace owns bounded rational limbs and one checked interval pool shared by roots, powers, trigonometry and atan2. Strict rounds the complete formula; auto/scalar retain independently checked fast candidates and their specified SIMD policy. Scalar classification preserves raw IEEE behavior and semantic mathematical special cases, including the configured black-XYZ and zero-chroma substitutions. Numerical preconditions are not scanned or certified at runtime.
 
-For Nq requested and Dq distinct demanded samples, mapping/fixed arithmetic is
-O(Nq+Dq), plus actual refinement and metadata/region traversal. Budget fixed
-matrices, exact limbs/interval scratch, mappings, page/window sets, output pages,
-source ancestry and S intermediates. Distinguish virtual reservation, committed
-backing, managed peak and RSS. Sparse requests do not commit or scan all pixels.
-Optional sample caching starts off; no mutable process-global math cache.
-Poll cancellation before preparation/publication, at least every 1024 visited
-sample positions and inside bounded exact-refinement/metadata loops. Charge
-fallback work; exhausted proof/work/capacity fails ResourceExhausted, never
-reduced-precision success. Release scratch/windows on all exits and published
-owners at final retirement. Preserve upstream/cancellation errors.
+Precision retry is distinct from cancellation and capacity failure. The first operational error is retained, and no work callback runs after it. Invocation arithmetic and its error-state transitions allocate no heap storage; the work callback borrows the invocation for its synchronous lifetime. Each run has separate scratch, and immutable prepared kernels may be reused concurrently. Cancellation is checked before work, between at most 64 copied/gathered samples and inside exact arithmetic loops. The floating environment is restored on return. The executor publishes successful calls in order and drains accepted tasks before releasing their borrowed inputs. Per-operation numeric diagnostic reports are not emitted by this fixed ABI path.
 
 ## Errors and prerequisites
 
@@ -362,9 +328,9 @@ owners at final retirement. Preserve upstream/cancellation errors.
 | Invalid/missing parameters, selector, unit, white/NCL data, insertion axis or conflicting metadata | Compile/direct preflight: InvalidArgument / InvalidDomain |
 | Unsupported dtype/model/scale/reference, description mismatch or premultiplied semantic source | Compile/direct preflight: TypeMismatch |
 | Forced view for a member other than Q | Compile/direct preflight: InvalidArgument / InvalidDomain |
-| Q view whose physical mapping cannot cover the complete requested region | Evaluation: ViewUnavailable; `auto` materializes |
-| Nonfinite semantic support, negative semantic chroma, requested singular S or xyY ratio, illegal T selector | Evaluation: OperationFailed / InvalidDomain, requested publication scope and coordinate/component attribution |
-| Rounded nonfinite result from finite semantic arithmetic | Evaluation: OperationFailed / ArithmeticOverflow |
+| Nonempty Q forced view | Fixed task: InvalidArgument / ViewUnavailable; auto/materialize allocate independent outputs |
+| Nonfinite semantic support, negative semantic chroma, singular semantic saturation/xyY ratio, illegal T selector | Outside caller numerical preconditions; no runtime validation guarantee |
+| Rounded nonfinite result from finite semantic arithmetic | Outside caller numerical preconditions |
 | Capacity/work/shape overflow, cancellation, stale or upstream failure | Preserve NUM/kernel category, scope and origin |
 
 The implementation uses explicit model and unit metadata, normalized CIE
@@ -378,7 +344,7 @@ Inherit independent formula fixtures and each member's workflow obligations.
 Cover both dtypes/profiles, noncanonical role slots, offset/disjoint/cross-tile
 regions, selected versus unselected NaN, hidden colors, bypass/Empty, signed
 zeros, threshold neighbors, extreme finite values, raw special values, metadata
-conflicts, Q/R structural mapping, budgets/cancellation, cache-off and lifetime.
+conflicts, Q/R structural mapping, budgets/cancellation and lifetime.
 Do not substitute a bitwise round-trip promise for a lossy conversion or rounded
 composition. Report actual execution separately from these future obligations.
 Sources are pinned with each formula. Physical validity outside nominal domains,

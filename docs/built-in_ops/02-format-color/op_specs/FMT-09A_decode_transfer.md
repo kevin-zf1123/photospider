@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.transfer_decode_strict
@@ -19,7 +19,7 @@ registered_operation_keys:
 
 Inherit the complete [FMT-09 contract](FMT-09_transfer_contract.md) and
 [scalar definitions](FMT-09_transfer_math.md). This direction has strict,
-accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 6 keys. The
+accelerated Apple Silicon and accelerated x86-64 CPU fixed invocation ABI 8 keys. The
 specification remains Proposed.
 
 ## Interface and observable behavior
@@ -34,11 +34,7 @@ A may resolve the complete curve and parameters from input_description. Explicit
 assertions must match that explicit description. Raw always specifies them.
 No source interpretation is inferred from primaries, channel count or dtype.
 
-For each requested participating coordinate q, read only input[q], perform the
-family's semantic validation or raw evaluation, and output RN_dtype(D(input[q])).
-Linear and gamma=1 obey the special bit-copy identity. Copy all requested
-nonparticipating coordinates exactly. Alpha=0 causes no hidden-color shortcut;
-alpha itself is not read when only a color component is requested.
+For every participating coordinate q in a complete retained output tile, evaluate RN_dtype(D(input[q])). Semantic callers establish the family input-domain and finite-output preconditions. Raw uses the full IEEE formula. Linear and gamma=1 copy bits; nonparticipating coordinates also copy exactly. Input payload reads are the source-grid closure of the output tile, with no alpha-dependent hidden-color shortcut.
 
 Decode produces the corresponding linear quantity: PQ/1886 return absolute
 display-linear cd/m²; OETF and ACES paths return their specified scene-relative
@@ -47,19 +43,9 @@ explicitly with the resulting units, transfer, basis and white.
 
 ## Dependencies, errors and storage
 
-Inherit pointwise Data/Validation/dirty mapping and all static description checks.
-Static incoherence can fail even for alpha-only/Empty output; unrelated pixel
-values cannot. Source transfer mismatch, unsupported units/model/dtype, selected
-invalid samples, output overflow, resource and cancellation outcomes follow the
-family table. complete-input upstream failures keep their original scope.
+Inherit the fixed source tile closure, static checks, scratch, operational failures and owner lifetime of the family. Static incoherence can fail even for bypass-only or Empty requests. Semantic sample-domain violations have no promised runtime diagnostic.
 
-Auto/view/materialize and exact produced coverage follow the family. Only
-linear/gamma=1 can use a legal whole-map generic or spatial Result view; identity
-still validates requested semantic inputs. Nonidentity conversion materializes
-requested coverage. Intrinsic zero/cap branches still depend on the requested
-source sample and cannot erase validation or dirty witnesses. A forced view of a
-statically nonidentity map fails in compile/direct preflight; an identity view
-whose physical mapping cannot be proven fails during observation evaluation.
+Auto/materialize initialize independent dense output tiles. Nonidentity forced view fails statically; nonempty identity view is a schema-only task that returns ViewUnavailable. Intrinsic zero/cap branches retain their source reads. Empty requests retain static checks and emit no payload task.
 
 ## Independent acceptance fixtures
 
@@ -72,24 +58,17 @@ whose physical mapping cannot be proven fails during observation evaluation.
    rounded_10bit and 709 produce equal values but different transfer identity.
    Smooth coefficients are checked against independent root isolation.
 4. BT.1886 with Lb=1,Lw=100: D(0)=1 and D(1)=100 exactly; finite outside [0,1]
-   fails in semantic mode. Raw sufficiently negative V reaches the exact zero
+   is outside the semantic input precondition. Raw sufficiently negative V reaches the exact zero
    plateau. Parameters violating 0<=Lb<Lw fail before samples.
 5. PQ: D(0)=0 and D(1)=10000; values on the exact zero plateau yield +0.
-   Negative or above-one finite values fail semantically; raw evaluates the
-   formula. Check an independent high-precision oracle around c1^m2.
+   Negative or above-one values are outside the semantic precondition; raw evaluates the formula. Check an independent high-precision oracle around c1^m2.
 6. HLG: D(0)=0; D(0.5)=RN_dtype(1/12). Float64 D(1) is approximately
-   1.0000000269348073 and succeeds, but feeding that into semantic B fails its
-   domain check. Float32 D(1) rounds to 1. This dtype difference is deliberate.
+   1.0000000269348073; feeding that into semantic B violates its domain precondition. Float32 D(1) rounds to 1. This dtype difference is deliberate.
 7. ACEScc/cct: code 2 decodes to exactly 65504. Check neighbors of h and toe
    breakpoints, below-floor encoded values, and negative cct toe values. Do not
    reinterpret the cap as a Float16 output restriction.
-8. R-only query with invalid G, alpha and AOV: only R is read and checked.
-   Query invalid G later to observe its failure. Alpha-only copies even a NaN
-   alpha without running D. Hidden invalid R at alpha=0 still fails R's request.
-9. Raw identity copies NaN payloads and signed zeros, including materialize;
-   semantic identity rejects requested nonfinite color. Force view of PQ fails
-   even for an alpha-only query. Check raw nonidentity NUM special values and
-   unchanged-but-unverified metadata separately.
+8. Use output tiles that separate participating and bypass components. Bypass-only tiles copy NaN alpha/AOV bits with zero scratch. Extra source-grid closure does not evaluate unselected peers. Alpha=0 does not waive semantic color preconditions.
+9. Raw identity copies NaN payloads and signed zeros under auto/materialize; semantic identity requires finite participating samples. Forced PQ view fails even for bypass-only requests. Linear/gamma=1 identity view fails at invocation with schema-only dependency.
 
 Keep the curve's scalar definition separate from RGB basis conversion and scene/display
 reference conversion. An explicit D -> basis/reference stage -> E workflow composes

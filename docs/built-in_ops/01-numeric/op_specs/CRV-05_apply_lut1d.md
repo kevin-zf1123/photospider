@@ -38,67 +38,24 @@ Specification acceptance remains Proposed.
 - [Curve category](../curves.md).
 - [Operator template](../../00-foundation/spec-template.md).
 
-## Run-shared complete-input computation
+## Fixed execution, resources and caller preconditions
 
-Each input is a Result containing one tensor member under any schema id/version and member key. Its complete `sample_shape()` supplies the input/table/axis shape. The Run-shared Result program requests all three inputs with Data, Validation and Descriptor, including recognized typed validation and upstream failure handling.
+Each input Result has one tensor member under any schema id/version/key. Complete `sample_shape()` includes batch axes. Static preparation checks all three input schemas and parameters, including inputs whose payload is inactive. Output `values` uses `photospider.tensor` v1/member `samples`, preserves the complete input shape as ordinary axes and selects Float32 or Float64.
 
-It validates the complete reconstructed axis, then every finite/domain query before table arithmetic. It computes every output element/channel and publishes an immutable packed dense Result using `photospider.tensor` v1/member `samples`, with the complete input shape, selected Float32/Float64 dtype and no attached domain description. A nonempty request returns complete internal coverage, with public coverage restricted to requested tiles with global sample coordinates. Empty reads no payload; all static metadata checks still apply.
+Each selected output tile has one fixed CPU task. For L>1 its reads cover the matching input region, all L table rows and axis positions 0 and 1. The channel operation restricts table columns to the output tile's final-axis interval. Each source's own tile grid closes these regions; an atomic source axis can enlarge coverage. Step is a consistency precondition and has no separate payload dependency. The kernel reconstructs RN64 knots on demand during bounded binary search and reads the selected one/two table entries through prepared input views.
 
-Mathematical table selection is unchanged: knot/clamp/singleton converts one
-entry; interpolation/extrapolation uses its adjacent pair, independently per
-channel. Generic entries outside all evaluated stencils receive no additional
-finite scan. Typed validation and upstream collection cover the complete table.
-Errors in otherwise-unrequested queries or evaluated channels can fail the Run.
-Any input/table/axis edit invalidates the recorded output demand; dirty mapping
-follows that recorded demand. Cache identity
-retains all input versions, profile, metadata and parameters. There is no
-per-channel Atom success isolation. Output dtype, shape and no attached domain description remain
-unchanged; arbitrary input offsets, unaligned and signed/zero strides remain
-legal. The complete immutable owner survives context destruction.
+For L=1 the task reads only the sole table row, restricted to selected columns for channels. Input and axis have schema-only references and no payload reads; their producers need not execute for this observation. The singleton axis `[a,a,+0]`, finite input and reject's equality to a remain caller preconditions. This constant-output path does not diagnose violations. It converts the selected table entry directly and uses zero scratch; a valid invocation may supply `scratch=nullptr` and `scratch_count=0`.
 
-For M input elements, work is O(L+M log L) plus exact arithmetic and typed
-validation. Singleton lookup is constant time per query. `UniformAxis` stores
-the directly reconstructed Float64 grid in a Root-owned, host-accounted 8*L-byte
-buffer (up to 8 MiB), plus allocator/metadata overhead; fixed exact workspace
-and O(rank) coordinate state are also admitted. Input/table reads use authorized zero-copy
-Root windows over their source storage; the operator does not create a dense copy
-of the complete table merely to collect it. Root accounts actual retained owners
-and provided windows. The operator retains no per-output certificates, rows or
-lookup table. Output costs dtype_bytes*M, regardless of requested coverage.
+Callers guarantee finite consumed queries/table entries, a valid complete axis, the selected reject domain and finite representable outputs. For L>1 this includes endpoint/step consistency and strict ordering of the entire endpoint-weighted RN64 grid. These numerical properties are unchecked. Generic table entries outside mathematical stencils have no additional finite requirement, although their declared source tiles remain dependencies. An upstream producer must satisfy its own contract for every output tile selected by that closure.
 
-The complete axis uses endpoint-weighted RN64 coordinates. One caller-preserving
-floating environment covers axis reconstruction and curve evaluation; unresolved
-accelerated bounds still use the same exact fallback. Work/cancellation is checked
-in axis generation, input reads, lookup and exact arithmetic, and before publishing.
-Resource failure never authorizes skipping axis validation or weaker arithmetic.
-Unpublished output/workspace is released; the Result output transaction is
-all-or-nothing.
-Numeric InvalidDomain/ArithmeticOverflow failures have Run scope. Typed, upstream,
-resource, stale, backend and cancellation failures retain their categories.
-complete-input does not expose per-value fallback counters; report those as unavailable.
+Scratch for L>1 contains one preallocated `ExactSampling` plus `ExactCurve` state per invocation, independent of L and the full output shape. Lookup costs O(M log L) coordinate reconstructions plus exact arithmetic for M selected elements. L=1 costs O(M) conversions. Output storage covers selected tiles; metadata and source tile descriptors scale with the physical closure. The operation allocates neither a full axis grid nor a complete dense output/table copy. DirectTiles may retain affine source views, while DenseHost imports use explicit Plan COPY tasks and their declared storage.
+
+The invocation borrows prepared views and writes only preallocated output. Independent Runs share immutable preparation and own their arithmetic state. FloatingEnvironment establishes round-to-nearest and gradual underflow, preserving the caller's state; cancellation is checked per output, search iteration and exact arithmetic step. Internal exact-capacity and divisor guards remain operational errors. Static schema/parameter, binding/layout, resource, backend and cancellation failures retain their categories. Numerical precondition violations have no promised diagnostic or numerical result. Successful tile writes become internal dependencies; the public call Result appears only after all required writes succeed and the call retires in order. Retained output owners survive context destruction. Empty output requests read no payload. Content caching and repeated Result identity are outside this operation contract.
 
 ## Maintained implementation and validation
 
-`plugins/ops/01-numeric/lut1d_application.cpp` registers the six scalar/channel profile keys as Run-shared Result operations. `UniformAxis` validates all raw axis values and step, then stores the directly reconstructed grid in an 8*L-byte Root allocation charged to Metadata by the default resource allocator.
+`plugins/ops/01-numeric/lut1d_application.cpp` registers six fixed CPU profile keys. Preparation verifies the selected symbol, exact scratch size, canonical output write and exact source tile sets. Descending lookup compares keys in table order and swaps both x and y before the positive-denominator `ExactCurve` calculation. The endpoint-weighted coordinate formula and single final conversion are specified in [CRV-05A](CRV-05A_apply_lut1d.md).
 
-Queries are checked before table arithmetic, and descending pairs reorder x/y together before `ExactCurve` applies its positive-denominator formula. Input and table data are read through authorized Result windows; the operation does not copy the entire table into dense storage. The complete-input continuation publishes the complete packed Result and releases temporary state on failure or cancellation.
+Use the retained [Fraction reference](../../../../oracle/ops/numeric/crv05/reference.py) for valid numerical inputs and temporary public Compiler/ExecutionContext checks. Include both axis directions, each domain policy, singleton tables, mixed input/table/output dtypes, independent channel queries, signed zero and subnormal values. Check selected output tiles with ordinary, atomic and batch source axes, reverse/unaligned/zero strides, concurrent Runs, source rebinding and exported/imported plans.
 
-Use independent Fraction goldens for temporary checks. Acceptance should include scalar and channel Float32/Float64, all-port reversed unaligned inputs, zero-stride aliases, caller and worker floating-point modes, explicit validator coverage, without automatic RGBA or alpha validation, upstream Result failure propagation, static metadata bounds, Empty, dirty mapping and full complete-input coverage after sparse queries.
-
-Check same-demand Result identity, cache hits for fresh equivalent source Results, and reuse of static preparation after input/table/axis replacement. All six CRV-04 baking templates feed the Result application nodes.
-
-Temporary acceptance should cover custom Result schemas, channel batch shape
-[2,2,2], Fraction goldens, axis/query/table error precedence and cancellation
-during exact arithmetic. Under a 1 MiB Payload cap, reject a sparse request from
-input[262144] because the complete Float64 output requires 2 MiB. A zero-stride
-Float32 table [262145] should retain source storage while a scalar Float64 result
-adds only its 8-byte output payload.
-
-Resource checks exercise cancellation and work limits during the continuation,
-capacity rejection for an output and scratch, and release of all Root resources.
-An L=1,048,576 dynamic-grid case succeeds; Root diagnostics show the 8*L-byte
-axis allocation charged to Metadata while Payload remains below 8*L, so the
-operator does not materialize a dense table copy. A sparse request with 2^39
-channels fails with `ResourceExhausted/CapacityLimit` at the LUT node. Escaped
-scalar and channel Results each retain 16 Payload bytes while a read window is
-alive; releasing both handles returns every Root resource to zero.
+Exercise schema-only singleton input/axis edges, omission of an ordinary step-only source tile, Empty, malformed preparation, low output/scratch budgets, huge sparse logical shapes, maximum L with affine table storage, cancellation and retained output lifetime. Connect all six CRV-04 templates to the consumer and check each producer's own numerical preconditions. Source samplers may legally produce repeated coordinates; callers must choose a grid satisfying this consumer's stricter axis precondition. Numerical precondition violations are outside the valid-input oracle checks.

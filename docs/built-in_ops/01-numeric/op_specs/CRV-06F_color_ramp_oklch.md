@@ -14,7 +14,7 @@ clarification_status: complete
 
 # CRV-06F: OKLCh ramps
 
-Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member , under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -48,14 +48,9 @@ The shared lightness revision does not rescale OKLab coordinates. Specifically:
   retaining multiple turns. There is no hue_path or normalization parameter.
 - C=0 never discards hue. Unit conversion and interpolation are performed as
   one mathematical formula with final correct rounding; all versions match bits.
-- complete-input requests validate all Result inputs; authorized tensor windows supply selected complete rows for the mathematics.
-  Any channel request observes the full color, including rational numerator and
-  denominator, and carries an output OKLCh/D65/hue-unit description.
+- Each selected output tile preserves a complete color. Source reads include the corresponding query region and conservative stops/colors/p/q closure on independent grids. Model, finite and selected-denominator conditions are caller preconditions, including at C=0.
 
-Attached descriptions must match the explicit input model and hue representation;
-CIELCh descriptors cannot be relabeled as OKLCh. Rational L/C ports alone are not
-complete ColorArrays. All shapes, immutable owners, complete-input dirty support,
-cancellation and publication scopes are inherited without relaxation.
+Static descriptions must identify the input model and hue representation. The Result carries no color description. Rational L/C ports alone are not complete ColorArrays. Shapes, owners, fixed scratch, cancellation and ordered call publication follow the [family fixed contract](CRV-06_color_ramp.md#fixed-execution-and-caller-preconditions).
 
 ## Acceptance and entrypoints
 
@@ -63,7 +58,7 @@ Use stops=[0,1], pi colors=[[0.25,0.125,1.75],[0.75,0.375,0.25]], input=[0.5].
 The result is [[0.5,0.25,1]]. Rational hues 7/4 and 1/4 agree. Repeat with C=0:
 hue remains 1. With hues 0 and 4, midpoint hue is 2. Reject CIELCh/custom-white
 metadata. Use the full CRV-06D independent oracle and execution/resource checks
-with the OKLCh description. The maintained public workflow and current execution evidence are linked below.
+with the OKLCh description. The linked family defines fixed execution and independent acceptance requirements.
 
 - [Radian entrypoint](CRV-06F1_color_ramp_oklch.md).
 - [Floating pi entrypoint](CRV-06F2_color_ramp_oklch_pi.md).

@@ -16,90 +16,28 @@ implementation_status: implemented
 
 # NUM-13A: prefix_sum
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+The three `numeric.prefix_sum_<profile>` keys accept one Result tensor member under any member key. Output port `values` uses `photospider.tensor` with member `samples`. The output takes the complete input `sample_shape()`, including batch axes, as ordinary axes and extends the selected axis from N to N+1. Boundary k sums source positions [0,k); k=0 is zero and k=N includes the complete line. Other axes retain their extents. No inclusive/exclusive mode or image-role inference is provided.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Input rank is 1..8, extents are positive and both input/output logical counts are at most 2^40. Required static Int64 `axis` is a nonnegative index below rank. Required String `dtype` selects `uint8`, `int64`, `float32` or `float64` in the same integer/floating domain as the input. The public helper defaults to Int64 for integer inputs and Float64 for floating inputs. Shape addition, products, axes and dtype compatibility are checked before execution.
 
-The `numeric.prefix_sum_*` operations accept one `Result` tensor member under
-any member key. The output port key is `values`; its Result schema is
-`photospider.tensor` with tensor member `samples`. The source
-`sample_shape()` includes batch axes; the output uses that complete shape as
-ordinary axes and has no batch topology. The operation computes
-boundary prefix sums along the required static Int64 axis. For an input
-axis length N, output axis length is N+1; output[k] sums input axis positions
-[0,k). The first boundary k=0 is zero, and k=N includes the whole line. Other
-axis lengths and rank are preserved. There is no inclusive/exclusive mode.
+## Exact prefix semantics
 
-Shapes are rank 1..8 with positive extents and input/output logical count <=2^40. Axis is a
-nonnegative index less than rank. Shape addition and product are checked before
-execution. This generic numeric scan does not infer physical units or image roles.
+Inherit [reduce_sum's arithmetic rules](NUM-11A_reduce_sum.md). Each boundary is the exact sum of its original source interval, followed by one destination conversion. Integer final representability is an unchecked caller precondition. Strict floating conversion is correctly rounded and bitwise reproducible. Accelerated profiles follow the [shared floating bound](NUM_accelerated_contract.md); discrete results and special-value classification remain exact. These fixed tasks use the shared exact accumulator and require CPU Host placement.
 
-## Dtype and exact prefix semantics
+Empty mathematical prefixes produce integer zero or floating +0. That padding is not an arithmetic contribution: a nonempty prefix of only negative zeros produces -0. Source NaN priority follows logical axis order, with the sum contract's quieting and payload conversion. Mixed infinities follow the sum rules. A generated NaN from an earlier boundary never becomes a source element; `[+Inf,-Inf,NaN_payload]` produces `[+0,+Inf,canonical_NaN,quiet_payload_NaN]`.
 
-Inherit [reduce_sum's dtype and numeric rules](NUM-11A_reduce_sum.md): four input
-dtypes, required static dtype with integer default Int64 or floating default
-Float64, explicit same-domain destination selection and one final range check
-or correctly rounded conversion. Each complete-output prefix is the exact sum of its
-own source interval, not a recurrence on previously rounded output values.
-Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
+Each declared output boundary is converted independently. The exact accumulator may exceed the destination range. Floating overflow produces infinity without contaminating later carry. For Int64 `[INT64_MAX,1,-1]`, a freshly compiled tile containing only boundary 3 can return `INT64_MAX`; any declared tile containing boundary 2 violates integer representability. No runtime diagnostic is promised for invalid integer inputs.
 
-Empty mathematical prefixes yield integer zero or floating +0. For every
-nonempty output demand, complete-input requests complete input support with Data,
-Validation and Descriptor , including a request limited to k=0. The
-kernel reads through authorized Result windows and does not pack the complete
-input into another payload. The shared stage computes and retains the complete internal output in global
-coordinates. Public actors publish requested complete tiles only; consumers may
-read only authorized coverage, regardless of retained backing or evidence. Empty demand has no sample coverage or arithmetic and issues no input
-payload Need.
-For nonempty prefixes, source NaN priority follows original logical axis order,
-with shared quieting/payload conversion. Mixed signed infinities and finite zero
-signs follow reduce_sum. The leading +0 is a boundary output, not an extra
-arithmetic contribution: an all-negative-zero nonempty prefix yields -0.
+## Selection and resources
 
-A newly generated NaN at an earlier prefix is not a source element for later
-prefixes. For source [+Inf,-Inf,NaN_payload], outputs are [+0,+Inf,canonical_NaN,
-quiet_payload_NaN], following the actual source NaN priority at each boundary.
+Requested output tiles with equal non-scan-axis origins and extents form one fixed task. Its source covers those non-scan coordinates and the prefix ending at its largest required positive boundary. The task reads all input tiles intersecting this region and writes its selected dense output tiles. A group containing only boundary zero has no input payload dependency and no arithmetic scratch. Empty selection emits no task. Tile granularity can require more source than a single mathematical boundary.
 
-Every output prefix undergoes final conversion. For Int64 [INT64_MAX,1,-1],
-output k=2 overflows and fails the Run even when the consumer requests only k=3.
-The exact accumulator itself can exceed destination range; only an actual
-complete-output final conversion fails. Floating overflow remains a numerical
-infinity and does not contaminate the exact carry used by later outputs.
+`ExecutionPlan::select_outputs` retains whole compiled tasks. Keeping one output tile from a multi-write task retains its other writes, reads and scratch, and integer representability applies to all retained writes. A fresh compilation with smaller output requests can shrink the prefix. The final Result exposes only selected output coverage.
 
-## complete-input demand, state and invalidation
+Each source sample is visited once per group. A task uses two fixed exact workspaces in preallocated private scratch: one aggregate and one conversion snapshot. Output storage consists of declared dense tiles; there is no complete intermediate output. Prepare validates the complete immutable invocation signature. Concurrent Runs use separate mutable arithmetic state. Cancellation checks cover initialization, sample reads and exact arithmetic; there are no per-value diagnostics or sample work-limit counters. Successful Result owners outlive the execution context.
 
-Nonempty demand requests and validates the complete input support, then computes
-complete output, including all lines and boundaries. A request only at k=0 still
-has full input validation and can fail upstream or typed checks, although that
-boundary performs no sample addition. Any active source edit invalidates all
-recorded observations. Each line uses an exact accumulator and a separate
-conversion snapshot, preserving NaN/Inf/zero source classifications.
+## Acceptance and implementation
 
-## Resources, errors and acceptance
+Temporary checks compare `[1,2,3] -> [0,1,3,6]` and independent exact enumeration, including batch/nonadjacent axes, same-domain dtypes, negative/zero strides, special values, partial/empty selection, zero-only requests, artifact roundtrips, concurrent Runs and cancellation. Verify that an upstream tail failure affects a full scan but does not enter a freshly compiled earlier prefix when tile boundaries exclude the tail. Invalid schema/static parameters and malformed kernel signatures must fail before invocation.
 
-Work is O(full_input_count) plus exact arithmetic and full-output conversions.
-The operation owns the complete packed output and uses authorized source windows
-with fixed exact state; it does not create a full input copy. Coordinate vectors
-are bounded by rank 8. Work/cancellation checks cover each input, carry snapshot
-and final conversion/publication. Integer `ArithmeticOverflow` is a Domain/Run
-failure with the output coordinate; failures release unpublished output and
-state. Schema caps, dtype rules and owner lifetime remain.
-
-Temporary acceptance should check `[1,2,3] -> [0,1,3,6]`,
-independent small-integer enumeration, batch and nonadjacent axes, negative and
-unaligned strides, special values, zero-boundary validation, Empty demand,
-resource budgets and cancellation. Check complete-output integer overflow,
-including coordinates outside the requested projection.
-
-## Implementation and executable acceptance
-
-The six registered profile keys use Run-shared complete-input computation. Public authoring helpers are
-declared in `photospider/ops/numeric/scans.hpp`; current execution and focused
-validation details are in [NUM-13 Run-shared complete-input computation](../scans-whole.md). Proposed
-specification status is unchanged.
+The public helpers are in `photospider/ops/numeric/scans.hpp`. See [fixed scan execution](../scans-execution.md) for task grouping, ownership and validation. This family overrides the [NUM baseline](NUM_common_contract.md) where fixed execution or unchecked numerical preconditions differ. Proposed specification status is unchanged.

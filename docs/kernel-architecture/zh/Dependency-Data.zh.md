@@ -6,7 +6,7 @@
 
 Compiler 解析全部读取与 task 拓扑。Mapper 读取固定 schema、grid、静态参数、实现 profile 和选中输出，返回有限 input tile 集合及内部 stage 图。它必须确定、有界且不执行运行时 I/O。Payload 不成为隐式 mapper 输入。
 
-静态 preparation 描述 output schema、input projection、内部 SSA tile/task、实现 symbol、参数编码、scratch 上界和 effect。Compiler 将其展平并校验。共享算法可在一个 task 中产生多个独立输出 tile。运行时 continuation 和 stage factory 不创建额外工作。
+静态 preparation 描述 output schema、input projection、内部 SSA tile/task、实现 symbol、参数编码、scratch 上界和 effect。Compiler 将其展平并校验。共享算法可在一个 task 中产生多个独立输出 tile。固定 invocation 路径不能在运行时增加依赖或 task。
 
 执行 ABI 提供固定 invocation。以下 C++17 草图描述逻辑接口，不是最终 C ABI 8 的记录布局：
 
@@ -82,7 +82,7 @@ CPU adapter 在一个 worker 上调用，并在返回后完成。Kernel 可轮�
 
 GPU adapter 使用固定 view/parameter 编码 dispatch/transfer，返回 accepted ticket 或拒绝。[提交规则](Parallel-Execution-Model.zh.md#cpu-与-gpu-完成边界)覆盖立即完成、恰好一次事件、可见性和 drain。Input、output、scratch、参数字节、module 和 command object 保持到真实完成。
 
-目标 C ABI 8 使用固定宽度 count、包含 size/version 的 record、不可变 input view、独占 output/scratch view、不透明 native handle、status 和 completion service，不传递 STL layout 或持久化指针。最终 header 必须为每个 handle 定义 retain/release 与借用规则。ABI 7 module 被拒绝，不提供 Need/Publication 兼容 adapter。生产 header 与 native adapter 是语义原型之外的实现工作。Native GPU service 还需独立改变同步 version-1 契约；只升级 operation ABI 不能使其异步。
+已实现的 C module 与 fixed invocation ABI 8 使用固定宽度 count、精确 size/version record、不可变 input、独占 output/scratch、不透明 native handle、status 和 completion service。公共头文件为每种记录定义所有权及借用关系，不导出 STL layout。旧 module getter 被拒绝。Native GPU service ABI 2 独立定义异步 Metal/Vulkan preparation 与已接受工作完成前的所有权。具体记录和验证见 [Plugin ABI](Plugin-ABI.zh.md)。
 
 ## Checked 边界与 unchecked 执行
 

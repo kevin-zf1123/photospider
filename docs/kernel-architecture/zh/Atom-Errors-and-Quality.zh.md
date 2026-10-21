@@ -19,6 +19,8 @@ struct FailureDetail final {
   FailureScope scope = FailureScope::Unspecified;
   std::optional<AtomKey> atom = {};
   std::uint64_t node_id = 0, input_id = 0;
+  std::optional<std::uint64_t> call_sequence = {};
+  std::optional<std::uint32_t> task_id = {};
   std::uint64_t domain_code = 0;  // 不透明，原样保留且不解释
 };
 struct AtomKey final {
@@ -56,15 +58,15 @@ class QualityReport final {
 - Atom 精确标识一个逻辑 producer 观测。
 - Group、Run 和 Waiter 描述操作范围，不会在任意坐标上虚构一个失败的语义值。
 
-`FailureScope` 的数值为 `Unspecified=0`、`Atom=1`、`Group=4`、`Run=5`、`Waiter=6`。`AtomKey` 标识 output index 和 1..8 维坐标，未使用坐标为零。`FailureDetail` 保存 `origin`、`scope`、可选 `atom`、`node_id`、`input_id` 和不透明的 `domain_code`。算子 SDK 的领域码 `InvalidAssociation` 表示显式操作数据身份不匹配，例如 LUT 报告测量表的 ObjectId。这些数值范围用于失败分类，不定义逐样本依赖语义。
+`FailureScope` 的数值为 `Unspecified=0`、`Atom=1`、`Group=4`、`Run=5`、`Waiter=6`。`AtomKey` 标识 output index 和 1..8 维坐标，未使用坐标为零。`FailureDetail` 保存 `origin`、`scope`、可选 `atom`、`node_id`、`input_id`、可选 `call_sequence`/`task_id` 和不透明的 `domain_code`。算子 SDK 的领域码 `InvalidAssociation` 表示显式操作数据身份不匹配，例如 LUT 报告测量表的 ObjectId。这些数值范围用于失败分类，不定义逐样本依赖语义。
 
-宿主把 `node_id` 或 `input_id` 绑定到失败的实际来源。传播过程保留该身份和原始 atom。传输读取失败保持为 Io/Group，并带有其输入声明身份。失败记录没有成功 Tensor，也没有成功依赖证书。
+固定调用 ABI 8 使用 `ps_kernel_status_v8` 返回 `code`、`reason`、不透明的 `domain_code` 及包含终止符的 256 字节消息数组。内核不解释领域码。C++ 调用方可以构造带 `DomainErrorCode` 的 `Status`；C kernel 直接填写 status 记录。稳定的算子领域码定义在 `photospider/ops/errors.hpp`。
 
-`FailureReason` 只包含内核通用原因。需要更细领域含义的算子构造 `Status(code, message, DomainErrorCode{value}, detail)`，或在 C 中调用 `fail_domain(status_code, domain_code)`。内核把该值复制到 `FailureDetail::domain_code` 并原样传递；它不解释也不校验这个数字。算子 SDK 在 `photospider/ops/errors.hpp` 中定义其稳定码，例如 `ops_error::DivideByZero` 和 `ops_error::InvalidAssociation`。按这些码分支的调用方需要包含该 SDK 头文件。
+Coordinator 将失败 task 的 origin/scope 设为 Backend/Run，并填写实际 `node_id` 与 `task_id`。Observer 异常使用 Observer/Run，包含来源 call 与动态 `call_sequence`。这些身份字段与可选 atom 描述诊断来源，不建立成功输出或依赖就绪关系。
 
-读取、工作量和分配服务错误是 sticky 的，包括回调捕获的异常。回调不能通过返回值或另一个同码状态替换先前的服务失败。已记录的领域失败同样不会被之后的回调状态、异常或诊断报告失败替换。检测到的 Protocol 违规在之后的取消中仍然保留。
+运行期间，Cancelled 优先于 Stale，Stale 优先于其他中止原因；同类原因保留首先观察到的一个。这个顺序在 Run 锁定终态前适用，也涵盖 completion protocol 故障。已接受的工作必须完成清理后才能返回终态。普通 task 失败按 CallGroup 顺序退役；更年轻 task 的失败不会跳过尚未结算的较老 call。
 
-失败的 ResultRef 和结构化 actor 在有界内联诊断存储（最多 256 个诊断字节）中保留第一个原因、reason、scope 和领域码。宿主可以为同一原因补齐缺失的 producer 身份/范围；它不会改变已指定的上游身份。诊断复制分配失败时，返回固定的机器可读字段和空诊断。这些内联字节与其所属的 managed 运行时对象一起计费。
+Task 失败消息在 issue 前预留的存储中复制。非法或重复 completion 使用空消息的 `Internal`/`MalformedEnvelope`，保持无分配错误路径。失败 Result 的构造状态独立保留第一项失败的固定字段与至多 256 个诊断字节。复制拥有型 `Status` 时若分配失败，返回固定字段及空消息。`RunHandle::join()` 的重复读取同样保留已锁定的错误类别与身份。
 
 ## 算法与数学质量界（算子 SDK）
 
@@ -87,8 +89,8 @@ const double bound = residual
 
 每个证明行在访问前通过 `consume_work` 计费；取消或工作量失败时不返回报告。该证明不覆盖任意 Float64 系统、仅基于残差的停止规则、其他范数或相对误差。
 
-数值证据与依赖保证相互独立。Conservative 关系仍为 Conservative。Managed 资源计量保持其[文档说明的范围](Managed-Resources.zh.md)；数值界不能确立产品 RSS 硬上界。
+数值证据与依赖保证相互独立。Managed 资源计量保持其[文档说明的范围](Managed-Resources.zh.md)；数值界不能确立产品 RSS 硬上界。
 
 ## 限制与调用方处理
 
-普通 `execute` 仍然 fail-fast。质量证据描述数值估计，与依赖完整性分开。内核的通用报告通道是 `DiagnosticAccumulator`（见[端口校验器与诊断报告](Global-Results.zh.md#端口校验器与诊断报告)）；`QualityReport` 不通过它传递。
+质量证据描述数值估计，与 task 完成和依赖就绪相互独立。`DiagnosticAccumulator` 是显式报告合并 API（见[结构契约与诊断记录](Global-Results.zh.md#结构契约与诊断记录)）；固定调用 ABI 8 没有报告提交回调，`QualityReport` 保持为独立 SDK 对象。

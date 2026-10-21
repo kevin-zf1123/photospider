@@ -14,13 +14,13 @@ Result 和 Tensor 不附着颜色、alpha、transfer 或 LUT 解释。算法需�
 
 支持 UInt8、Int8、UInt16、Int16、Int64、Float32 和 Float64。完整样本 rank 仍为 1 到 8，extent 必须为正。Scalar 使用 `[1]`。不引入 rank-zero、零 extent、ragged 或运行期 rank。样本 shape 由显式 batch extent 和 cell shape 拼接。`InputAxis` 与 `InputElements` 尺寸表达式在执行前根据静态输入结构解析。
 
-数据依赖的记录数量使用静态容量，例如 `records: Float32[N,R]` 和 `count: Int64[1]`，或同形状数据加 mask。这些名称和数值都是普通 payload。读取 count 或 mask 需要 payload Need 并记录依赖。每个发布 tile 都完整定义，包括按算子契约填充的未使用位置。缺失 tile 不缩短数组。容量不足时失败，除非算子明确承诺最多 K 个结果。
+数据依赖的记录数量使用静态容量，例如 `records: Float32[N,R]` 和 `count: Int64[1]`，或同形状数据加 mask。这些名称和数值都是普通 payload。读取 count 或 mask 需要静态声明 payload read 和 producer 依赖。每个发布 tile 都完整定义，包括按算子契约填充的未使用位置。缺失 tile 不缩短数组。容量不足时失败，除非算子明确承诺最多 K 个结果。
 
 宿主新建的 Result backing 默认使用 tiled planar 存储。逻辑网格独立于物理分配。物理 tile 和目录随实际生产覆盖增长，不要求预留完整逻辑画布或建立稠密目录。小 Tensor 和边缘 tile 按实际覆盖分配。同一 backing 可以服务不同逻辑 tile extent 的 plan。
 
 `Tensor::create` 校验 descriptor、精确授权和不可变片段。兼容重叠去重，覆盖缺失失败。负 stride、zero-stride broadcast、共享 owner 的多个片段和合法外部 backing 保留其映射。结构检查覆盖 dtype、rank、坐标、字节跨度、溢出、所有权和同步。
 
-算子获取拥有型 `ResultTensorReadWindow`，通过受限 `ResultTensorWriteWindow` callback 写入。`row_run()` 与 `rectangle_run()` 返回真实地址和 stride，并在授权、物理 tile 和片段边界截断。保留窗口会保留 backing。借用的 callback 服务在返回时失效，包括 poll 暂停时。
+Host Result API 获取拥有型 `ResultTensorReadWindow`，通过 `ResultTensorWriteWindow` callback 发布。`row_run()` 与 `rectangle_run()` 在授权覆盖内暴露真实地址和 stride。固定 operation kernel 借用预编译 input/output/scratch view，直到同步返回或已接受的 GPU 工作完成。Executor 在有序 call 退休和最终 RET 时，从成功 task 的输出构造 Result owner。
 
 稠密收集是显式操作。`Tensor::collect` 和 SDK collection 检查覆盖与容量、计费复制并观察取消。设备不支持的映射需要显式、计费的 packing 或 transfer。完整逻辑覆盖不意味着连续存储。
 
@@ -28,9 +28,9 @@ Result 和 Tensor 不附着颜色、alpha、transfer 或 LUT 解释。算法需�
 
 一个 Run 固定 plan、binding snapshot 和 generation。每个成员在 plan-wide `tile_extent` 下拥有逻辑网格；该值是正二次幂，默认 128。空间成员切分 H/W，非空间成员切分最后两个非 atomic cell 轴。显式 batch 坐标保持独立，atomic 末尾轴保持完整。见 [ADR 0023](../../adr/zh/0023-track-dependencies-between-fixed-tiles.zh.md#31-成员-tile-网格)。
 
-Payload Need 使用成员 slot 和紧凑 tile 区间寻址。Descriptor-only 请求必须显式提出，且不授予样本。空 payload 集合不执行工作。Continuation 可以跨多次 poll 请求输入。普通输出 actor 恰好发布一个完整成员 tile；Run 共享 stage 承担全局计算，可以生产多个 tile。见 [Global Results](Global-Results.zh.md)。
+静态 lowering 声明输入成员 tile、schema-only input、私有 SSA value 和全部 task 依赖。一个 task 可以生产多个独立输出 tile，成功完成时同时变为可用。空纯 call 保留记录并以 `Elided` 退休。全局算法使用普通 task 和显式私有 value 边，见 [Global Results](Global-Results.zh.md)。
 
-Metadata 闭包包括 schema 和 identity 所需的静态输入。可执行闭包遵循所选输出投影和声明的共享 stage 依赖。仅用于 metadata 的 producer 不执行 payload callback。Binding schema 在 callback 前检查，plan 不保留调用方样本地址。
+Metadata 闭包包括 schema 和 identity 所需的静态输入。可执行闭包遵循选中输出、task read、显式依赖、control root 和 effect。Schema-only producer 仅在其他 root 要求时产生 payload task。Binding schema 在 callback 前检查，plan 不保留调用方样本地址。
 
 Workflow 输入 id 和 node id 分属不同命名空间。最多 4096 个输入声明使用唯一非零 id 和唯一的 1 到 128 字节可打印 ASCII 名称。Context 退役后，Result owner 和读窗口仍保留 backing 与 Root 租约。执行保留的外部 backing 计入 Referenced 容量。
 
@@ -38,8 +38,8 @@ Workflow 输入 id 和 node id 分属不同命名空间。最多 4096 个输入�
 
 逻辑 schema 不必能装入一个稠密 allocation。实际分配和寻址字节跨度必须满足表示范围与预算。Tile 数、区间端点和索引运算检查溢出。Tensor 存储保留整数和浮点位模式；数值域约束由算子和显式绑定的 validator 施加。
 
-`SchemaTemplate::id` 与 `version` 标识结构契约并进入编译 identity，不在内核中选择领域语义。LUT bake 等领域报告 schema 属于 ops SDK。完整 validator 要求其范围内所有成员均已获得完整授权，不自动增加输入 Need。
+`SchemaTemplate::id` 与 `version` 标识结构契约并进入编译 identity，不在内核中选择领域语义。LUT bake 等领域报告 schema 属于 ops SDK。数值校验是显式 operation，声明其完整输入读取集合；executor 不自动执行数值认证。
 
 ## 5. 限制与非目标
 
-Result 不具有持久序列化或恢复契约。静态 schema 和 tile 几何不意味着稠密驻留。Batch 轴不携带时间含义。内核不提供动态 field 行或独立的整体 Result 执行模式。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) 仍为 Proposed，其目标 ABI 设计与已实现的 ABI 7 分开描述。
+Result 不具有持久序列化或恢复契约。静态 schema 和 tile 几何不意味着稠密驻留。Batch 轴不携带时间含义。内核不提供动态 field 行或独立的整体 Result 执行模式。已实现的 operation module 与 fixed invocation 契约使用 ABI 8，精确大小与所有权见 [Plugin ABI](Plugin-ABI.zh.md)。ADR 0022 中历史性的 staged/前缀协商提议不定义当前实现。

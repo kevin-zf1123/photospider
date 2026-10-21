@@ -73,9 +73,9 @@ void print_common_help() {
                "  --time-report --version -h --help\n";
 }
 void print_version(const char* name) {
-  std::cout
-      << name << " " << PHOTOSPIDER_CLI_VERSION
-      << "\nDAG JSON v1 / WorkflowDocument 7; psir 4; psxp 4; Result ABI 7\n";
+  std::cout << name << " " << PHOTOSPIDER_CLI_VERSION
+            << "\nDAG JSON v1 / WorkflowDocument 7; psir 5; psxp 5; fixed "
+               "invocation ABI 8; operation module ABI 8\n";
 }
 int run_cli(int argc, char** argv, int (*driver)(int, char**, Diagnostics*)) {
 #if defined(_WIN32)

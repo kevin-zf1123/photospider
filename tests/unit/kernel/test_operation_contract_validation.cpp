@@ -56,6 +56,24 @@ int main() {
   PS_CHECK(!valid.empty() && valid[0] == ps::OperationTraits{}.version);
   PS_CHECK(exercise_operation_contract_ir_input(valid.data(), valid.size()) ==
            OperationContractIrStage::CompilerAccepted);
+  // Physical lowering handles all scalar types and both free and atomic
+  // rank-one members. Invalid atomic rank fails before lowering.
+  for (std::uint8_t type = 0; type < 7; ++type) {
+    for (std::uint8_t atomic = 0; atomic < 2; ++atomic) {
+      auto tensor = valid;
+      tensor[1] = type;
+      tensor[2] = 15;  // Largest bounded source extent.
+      tensor[3] = atomic;
+      PS_CHECK(
+          exercise_operation_contract_ir_input(tensor.data(), tensor.size()) ==
+          OperationContractIrStage::CompilerAccepted);
+    }
+  }
+  auto invalid_rank = valid;
+  invalid_rank[3] = 2;
+  PS_CHECK(exercise_operation_contract_ir_input(invalid_rank.data(),
+                                                invalid_rank.size()) ==
+           OperationContractIrStage::RegistrationRejected);
 
   auto invalid_workflow = valid;
   invalid_workflow[6] =

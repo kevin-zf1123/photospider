@@ -36,7 +36,7 @@ mapping differs from CRV-05's independent per-input-channel table application.
 
 ## Result tensor ports
 
-Each dynamic port is a Result containing exactly one tensor member .
+Each dynamic port is a Result containing exactly one tensor member.
 Any structurally valid schema id/version/member key is accepted. Validate shapes
 against each member's complete `sample_shape()`, including batch axes. The ports
 are `input` (rank 1..7, Float32/64), `stops` (rank 1, K=1..65536, Float32/64),
@@ -46,8 +46,7 @@ use [K,2] model-specific component arrays; all other colors use [K,C]. The
 first three floating inputs independently select their dtype. All input, color
 and output logical element products are limited to 2^40. Only a mathematically
 selected RationalPi denominator q must be positive; an unselected generic
-q<=0 value adds no mathematical-domain failure. Typed/upstream validation still
-covers every input tensor.
+q<=0 value adds no numerical precondition. Upstream failures propagate through all declared source tiles.
 
 The maintainer requires separate implementations/specifications for RGB, CMYK,
 XYZ, CIELAB, CIELCh(ab), OKLab, OKLCh, HSL and YCbCr. They are implemented as
@@ -109,58 +108,32 @@ the output itself carries only structure and numerical samples.
 - [Operator specification template](../../00-foundation/spec-template.md).
 - [Foundation color and execution contracts](../../00-foundation/contracts.md).
 
+## Fixed execution and caller preconditions
+
+Static preparation validates complete input schemas, port arity, K, shape products, dtypes and color descriptions. `values` uses a fresh `photospider.tensor` v1 schema, member `samples`, descriptor shape `sample_shape(input)+[C]` and `atomic_trailing_axes=1`. It carries no color description and does not preserve the input's batch-axis partition. The output channel axis stays complete in each selected tile.
+
+Each selected output tile lowers to one CPU `color-ramp` / `color-ramp-fixed-v1` task using invocation ABI 8. Its query region is the output region without the component axis. Stops, colors and optional p/q arrays have conservative complete closures because row selection depends on query samples. Every region closes on its own source grid; physical grants may contain unused samples. Empty emits no tasks or sample reads. K=1 still reads the requested query positions and selected stop/color row.
+
+The caller guarantees all stops are finite and strictly increasing, consumed queries are finite, and reject-policy queries lie in the closed stop domain. Selected complete colors must be finite and obey their model and association rules; selected rational denominators must be positive, including at zero chroma/saturation. Unselected generic color rows and p/q pairs carry no consumer numerical precondition. Final components must be finite in the output dtype. For RGBA, a positive exact alpha that rounds to zero requires all rounded RGB components to be zero; this valid transparent tuple canonicalizes to +0. Numerical violations have no promised runtime domain or overflow diagnostic.
+
+The kernel locates a selected row or adjacent pair by binary search in the source stops. Direct selection and complete stored-row identity retain the model's direct conversion rules. For rational hue, identity compares raw p/q as well as both floating components; equivalent unreduced fractions alone do not imply row identity. RGB interpolation evaluates the full transfer/association expression. Other models interpolate their coordinates, with certified pi multiplication/division for cross-unit hues. There is no modulo reduction, shortest-arc selection or achromatic hue substitution.
+
+Preparation checks exact output metadata, canonical regions, source slot order and completeness, dtypes, Host placement, encoded parameters and scratch bounds. Each invocation borrows immutable source views and owns its mutable arithmetic scratch. Offsets, unaligned addresses and negative/zero source strides are supported within host-validated bounds. The kernel allocates no heap storage and writes only preallocated selected output tiles. The executor publishes successful call Results after all required tasks succeed in retirement order. Output backing survives context teardown.
+
+Lookup costs O(P log K) for P query points in a tile, plus exact/certified arithmetic. Stops are searched directly without copying an O(K) index. Scratch contains one ExactRgb or ExactColorCoordinate instance, independent of P and K; complete current color packets and coordinates have fixed bounds. Source-tile records, retained source owners, input COPY tasks and output allocations have separate costs. Lowering bounds read-tile counts before enumeration. Cancellation is polled in lookup and arithmetic. Checked arithmetic separates retryable precision uncertainty from terminal capacity/cancellation failures, and each refinement checks status before accepting results. The floating environment is restored at return.
+
+Malformed static parameters/descriptions fail with InvalidArgument; incompatible shapes, dtypes and schemas use TypeMismatch. Resource admission, unavailable profiles, stale-plan, upstream failures and cancellation retain operational status. Incomplete certification returns ResourceExhausted and never selects an approximate substitute.
+
+## CMYK resources
+
+CMYK declares the profile's content identity in `OperationPreparation.resources`. `OperationDefinition.validate_resources` inspects the selected frozen bytes once per PreparedOperation, including Empty calls and artifact import. It requires a valid ICC v2/v4 `prtr`/`CMYK` profile, validates header/tag structure and optional v4 Profile ID, and has a 64 MiB static work limit. It borrows frozen bytes without a full-profile copy or filesystem I/O. Changing profile identity requires recompilation.
+
+Preparation, Plan and active kernel owners retain the selected resource. Color Results retain their output data; they acquire no profile owner through a color description. Interpolation does not execute ICC transforms or infer total-ink limits.
+
 ## Maintained implementation and validation
 
-The current runtime registers 45 CRV-06 keys and exposes 15 primitive helpers
-through `photospider/ops/numeric/color_ramps.hpp`; this shared contract is not itself
-a registered operation. ColorArray codecs and domain validation belong to the SDK. Atomic trailing
-axes express complete-color tuple structure. CMYK preparation explicitly selects
-its ICC resource identity; schemas do not select or retain color resources.
+[`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp) registers 45 profile keys for 15 independent entrypoints. [`color_ramps.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/color_ramps.hpp) supplies their public constructors. All profiles currently use exact/certified whole-expression arithmetic. RGB uses a 40960-bit polynomial arena; coordinates use 9216-bit integers. Directed work has a 12288-bit arena and a 128..4096 fractional precision ladder. Checked state and borrowed WorkConsumer callbacks propagate cancellation and capacity without exception-based control flow.
 
-RGB direct, linear and gamma=2 paths are exact; sRGB and general-gamma paths use
-certified full expressions. Gamma normalization and deferred scaling preserve HDR
-and alpha precision. Coordinate arithmetic uses up to 9,216 bits; RGB polynomial
-work uses 40,960 bits. The 4,096-bit value is the interval precision ceiling for
-relevant certified steps, not the integer-capacity bound. Accelerated RGB permits
-the shared FP32 4 ULP by contract. Current implementations return strict bits,
-while the same accelerated allowance applies to non-RGB arithmetic.
+Temporary acceptance uses the independent [coordinate oracle](../../../../oracle/ops/numeric/crv06/reference.py), [RGB oracle](../../../../oracle/ops/numeric/crv06/rgb.py) and [ICC fixtures](../../../../oracle/ops/numeric/crv06/icc.py). Cover valid numerical cases, explicit raw negative zeros, all model/unit/dtype combinations, RGB association, sparse tiles, mixed source grids, concurrent Runs, direct affine layouts, cancellation, allocation counts, scratch/output boundaries, resource admission and lifetime. Static malformed ICC cases remain rejection tests; invalid numerical preconditions do not define runtime failure tests. Remove temporary operator tests after validation and retain the independent oracles.
 
-Its
-`color_ramp_workflows`, `color_ramp_boundaries`, `color_ramp_icc` and
-`color_ramp_active_cancel` coverage includes Empty ICC behavior, generic clamp
-resource selection, ICC ownership, and cancellation during actual exact work
-(RGB's 640-limb slot and the coordinate path's 144-limb slot). Those active
-cancellation paths return Root resources to baseline after context teardown.
-Successful ICC and Result-lifetime cases retain their valid owners.
-
-Use independent Fraction/Machin-pi references for hue interpolation and exact rational/root references for RGB cases. Check repeated-request values after rebinding. Equal values alone do not establish a warm-cache hit.
-
-Reproduce the focused suite, Strict/Apple manual groups and independent oracles
-with:
-
-These checks cover Strict and the local Apple profile only. No x86 numerical,
-maximum-shape, or performance rerun is included. CRV-06 has no GPU variant.
-The ColorArray v1 CIELAB/CIELCh implicit L* scale difference from the native
-`l=L*/100` contract remains open. See [math implementation](../math-implementation.md#crv-06-colorarray-and-color-ramps)
-for the implementation and evidence boundaries.
-## Run-shared complete-input computation and resources
-
-All formal strict and accelerated keys use Run-shared Result programs. A nonempty
-Run declares ordinary payload tile Needs  for every input, so
-typed and upstream validation covers complete tensor members. The executor reads
-authorized windows directly; the callback does not collect or copy complete input
-arrays. It validates all stops, then every input position, before color arithmetic.
-Each position uses one exact hit/clamp/singleton row or two enclosing rows for its
-mathematics. Generic color rows outside all evaluated stencils remain numerically
-unused, while their typed/upstream validation still applies. Empty reads no sample
-payload after static preparation.
-
-The `values` port uses `photospider.tensor` v1/member `samples`, shape `sample_shape(input)+[C]`, with one atomic trailing axis. One prepared Run-shared stage acquires complete input coverage through ordinary tile Needs and computes the complete internal output. Acquiring owning windows does not implicitly collect dense arrays. Ordinary output actors publish only their requested complete member tiles as retained views. Global coordinates are preserved; operation resources stay in prepared state. Shared input edits invalidate dependent output tiles. Failed computation exposes no partial tile.
-
-Lookup work remains O(K+N log K), plus exact or certified arithmetic. Full output
-payload is N*C*sizeof(dtype), even for a small request. Account source owners/windows,
-fixed arithmetic workspace, the Root-owned ResourceVector stop index (8K element
-bytes plus allocator/metadata overhead), output and retained descriptors/resources.
-No per-output dependency records or point-state array is retained. Work/capacity and
-cancellation checks apply during scans, lookup, arithmetic and before publication;
-incomplete certification fails ResourceExhausted. No reduced-precision fallback is added.
+The CIELAB/CIELCh ColorArray v1 lightness interpretation remains distinct from the revised native `l=L*/100` contract described above. Profile registration does not establish physical x86 or GPU execution. This family has CPU implementations and remains Proposed.

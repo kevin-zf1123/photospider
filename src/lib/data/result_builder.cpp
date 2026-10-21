@@ -16,8 +16,9 @@
 #include <utility>
 #include <vector>
 
+#include "core/resource_observation.hpp"
 #include "data/affine_view.hpp"
-#include "data/result_host_access.hpp"
+#include "data/result_identity.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
@@ -25,6 +26,22 @@
 #include "photospider/data/result.hpp"
 
 namespace ps {
+Result<data_internal::ResultIdentity> data_internal::ResultIdentity::reserve() {
+  static std::atomic<std::uint64_t> next{1};
+  auto id = next.load(std::memory_order_relaxed);
+  do {
+    if (id == UINT64_MAX)
+      return Result<ResultIdentity>(
+          {ErrorCode::ResourceExhausted, "result object ids exhausted"});
+  } while (!next.compare_exchange_weak(id, id + 1, std::memory_order_relaxed));
+  return Result<ResultIdentity>(ResultIdentity(id));
+}
+Result<ResultBuilder> data_internal::ResultIdentity::materialize(
+    ResourceBudget budget, const SchemaTemplate& schema, std::string_view scope,
+    ResultGrowthLimits limits, std::uint64_t tile_extent) && {
+  return ResultBuilder::start_reserved(std::move(*this), std::move(budget),
+                                       schema, scope, limits, tile_extent);
+}
 ResultBuilder::ResultBuilder(ResultBuilder&& other) noexcept
     : impl_(std::move(other.impl_)) {}
 ResultBuilder& ResultBuilder::operator=(ResultBuilder&& other) noexcept {
@@ -42,6 +59,19 @@ Result<ResultBuilder> ResultBuilder::start(ResourceBudget budget,
                                            std::string_view scope,
                                            ResultGrowthLimits limits,
                                            std::uint64_t tile_extent) {
+  auto identity = data_internal::ResultIdentity::reserve();
+  if (!identity.ok())
+    return Result<ResultBuilder>(identity.status());
+  return identity.take_value().materialize(std::move(budget), schema, scope,
+                                           limits, tile_extent);
+}
+Result<ResultBuilder> ResultBuilder::start_reserved(
+    data_internal::ResultIdentity identity, ResourceBudget budget,
+    const SchemaTemplate& schema, std::string_view scope,
+    ResultGrowthLimits limits, std::uint64_t tile_extent) {
+  if (!identity.id())
+    return Result<ResultBuilder>(
+        {ErrorCode::InvalidArgument, "consumed result identity"});
   std::optional<ResourceAllocationScope> metadata_scope;
   const auto* active_root = resource_internal::metadata_budget();
   if (!active_root || !active_root->same_owner(budget))
@@ -68,13 +98,17 @@ Result<ResultBuilder> ResultBuilder::start(ResourceBudget budget,
   if (!lease.ok())
     return Result<ResultBuilder>(lease.status());
   try {
-    auto impl = std::shared_ptr<ResultRef::Impl>(new ResultRef::Impl(budget));
-    impl->lease = lease.take_value();
+    auto owned = std::unique_ptr<ResultRef::Impl>(new ResultRef::Impl(budget));
+    owned->lease = lease.take_value();
+    core_internal::ResourceMetadataAccess::commit(owned->lease,
+                                                  sizeof(ResultRef::Impl));
+    auto impl = std::shared_ptr<ResultRef::Impl>(std::move(owned));
     impl->schema = copied.take_value();
     impl->scope = ResourceString(scope.data(), scope.size(),
                                  ResourceAllocator<char>(budget));
     impl->limits = limits;
-    impl->image_budget = std::make_shared<TensorBudget>(limits.maximum_bytes);
+    impl->image_budget = std::allocate_shared<TensorBudget>(
+        ResourceAllocator<TensorBudget>(budget), limits.maximum_bytes);
     for (std::size_t i = 0; i < impl->schema.tensors.size(); ++i) {
       const auto& spec = impl->schema.tensors[i];
       auto& image = impl->tensors[i];
@@ -82,14 +116,7 @@ Result<ResultBuilder> ResultBuilder::start(ResourceBudget budget,
       if (!initialized.ok())
         return Result<ResultBuilder>(initialized);
     }
-    static std::atomic<std::uint64_t> next{1};
-    auto id = next.load();
-    do {
-      if (id == UINT64_MAX)
-        return Result<ResultBuilder>(Status{ErrorCode::ResourceExhausted,
-                                            "result object ids exhausted"});
-    } while (!next.compare_exchange_weak(id, id + 1));
-    impl->object = id;
+    impl->object = identity.id();
     ResultBuilder builder;
     builder.impl_ = std::move(impl);
     return Result<ResultBuilder>(std::move(builder));
@@ -108,19 +135,6 @@ void ResultBuilder::fail(Status status) noexcept {
   std::lock_guard<std::timed_mutex> lock(impl_->mutex);
   if (!impl_->complete && impl_->status().ok())
     impl_->failure.record(status);
-}
-Result<ResultRef> ResultBuilder::seal_empty() {
-  if (!impl_)
-    return Result<ResultRef>(Status{ErrorCode::Stale, {}});
-  std::lock_guard<std::timed_mutex> lock(impl_->mutex);
-  if (impl_->revision != 1 || impl_->complete || !impl_->status().ok())
-    return Result<ResultRef>(data_internal::invalid_schema());
-  for (std::size_t i = 0; i < impl_->schema.tensors.size(); ++i)
-    if (!impl_->tensors[i].tensor.coverage().empty())
-      return Result<ResultRef>(data_internal::invalid_schema());
-  impl_->complete = true;
-  ++impl_->revision;
-  return Result<ResultRef>(reference());
 }
 Result<ResultRef> ResultBuilder::seal() {
   if (!impl_)

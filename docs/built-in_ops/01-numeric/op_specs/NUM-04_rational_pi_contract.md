@@ -32,15 +32,12 @@ Float64 sinpi/cospi/tanpi/sincpi interfaces; these new representations do not
 replace them or silently interpret a rounded 1/3 as exact one third.
 
 The ordered Result inputs provide numerator and denominator, each in a Result
-with exactly one tensor member in slot 0; the Result schema may also carry
-fields. Both tensors have Int64 dtype and identical sample shape. Structural checks and explicitly bound validators retain their declared scope; no data label triggers domain validation.
+with exactly one tensor member in slot 0. Both tensors have Int64 dtype and identical sample shape. Structural metadata and fixed views are checked before issue.
 The output is a Result on port
 `values`, with the same shape and a static Float32 or Float64 dtype; the
 constructors default to Float64. Its schema is `photospider.tensor`, with tensor
 key `samples` and no attached domain description. The denominator must be positive at every
-logical position; unreduced fractions are valid. Exact ratio processing and
-denominator validation apply to every input position, so any invalid
-denominator fails a nonempty invocation.
+computed position as an unchecked caller precondition; unreduced fractions are valid. No diagnostic outcome is promised for nonpositive denominators.
 Each operation has strict and independently named Apple Silicon/x86-64 CPU
 accelerated versions. Strict correctly rounds the exact mathematical result;
 accelerated allows at most four final FP32-scaled representable steps, retaining
@@ -72,8 +69,7 @@ For p=numerator and q=denominator>0, the exact real multiplier is r=p/q. It has
 no negative-zero representation. Retain original numerator sign for specified
 integer zero signs. Reduce by exact gcd for canonical ratio evaluation, without
 signed overflow at INT64_MIN. Equivalent fractions must yield the same result
-within each fixed profile. Cache identities still retain both original sources
-and their witnesses. Do not treat ratio equality as permission to ignore an input.
+within each fixed profile. Both source tile sets remain fixed dependencies.
 
 Recognize integers, halves, quarters and the selected reduced common-angle
 denominators using integer arithmetic before approximation. Integer p/q gives
@@ -93,19 +89,11 @@ or rounded rational division may define this reference. Special NaN uses
 result without leaking host floating flags. Other profile classification and
 signed-zero rules are exact. Sine/cosine outputs stay in [-1,1] in every profile.
 
-Nonpositive q fails the complete invocation with InvalidArgument/InvalidDomain
-and Run scope, retaining the offending denominator bits in the diagnostic. There
-is no Atom key. Malformed parameters use InvalidArgument; wrong dtype/shape uses
-TypeMismatch at compile/preflight. Upstream/typed/resource/cancellation failures
-preserve their categories. Exact poles remain successful numeric results.
+Positive q is a caller precondition. Malformed static parameters use `InvalidArgument`; wrong dtype/shape uses `TypeMismatch` before issue. Upstream, resource and cancellation failures preserve their operational categories. Exact poles remain successful numeric results.
 
 ## Demand, algorithm and resource bounds
 
-For nonempty output Q, both input tensors have full-input support and typed validation. The coordinator supplies authorized Result tensor windows that preserve legal immutable strides and offsets, including zero/negative strides and unaligned Int64 values; the operation does not require packed input collection. The operation writes one complete packed Result, and the executor projects requested global coordinates afterward.
-
-Empty Result queries retain static validation and resource admission, then return empty tensor coverage without input reads, denominator checking or arithmetic work. A nonpositive denominator outside Q still fails a nonempty Run-shared computation. Consumers may read only authorized member tiles; retaining the complete internal backing does not widen access.
-
-Changes to either source invalidate all observed outputs. Descriptor inference uses static metadata only. Output Results keep their owners valid after context destruction; cache-off preserves active ownership.
+Each requested output tile lowers to one fixed task reading the intersecting tiles of both Int64 inputs and writing a preallocated dense Float32/Float64 tile. Inputs may have different batch/atomic grids and use the Plan's admitted affine layouts. Prepare validates each port's dtype and view independently of output width. Empty selection emits no tasks or payload reads. Metadata remains static, and successful Result owners survive the context.
 
 Use exact integer reduction modulo two for sine/cosine or one for tangent,
 retaining full magnitude for sincpi. Products such as 2*q, 4*p and absolute
@@ -118,25 +106,16 @@ Float64 quotient treated as exact. Refine until final rounding is proved.
 Accelerated evaluation may use a native pi function only with a proved combined
 argument/evaluation error meeting the final contract. At non-dyadic r, ordinary
 sinpi(float(r)) alone is not that guarantee. Unsupported ranges use strict
-fallback. This complete-input callback does not emit per-value fallback counters. Runtime
+fallback. This fixed invocation does not emit per-value fallback counters. Runtime
 cancellation and resource errors are sticky failures, not fallback
 opportunities that erase them.
 
-For N full logical results, output payload is N*b even for a sparse consumer.
-The authorized operand windows use their Result backing; the operation does not
-stage full packed copies of the Int64 inputs. Account source owners, gcd and
-reduction state, exact-ratio and transcendental limb capacity, output storage,
-region/validation metadata and all refinement work. Fixed Int64 operand sizes
-bound basic reduction width, but do not authorize unbudgeted arbitrary-precision
-refinement. Poll at least every 64 samples, within long arithmetic and before
-publication. Insufficient precision, work, capacity or stage allowance returns
-`ResourceExhausted`, never an unverified angle or a fallback to the old
-floating-input semantics.
+Only selected output tiles allocate payload. The complete arithmetic and batch-buffer aggregate is reserved as Host scratch per active worker lane. Int64 operand sizes bound basic reduction width; directed refinement retains fixed capacity and precision limits. Query cancellation before each batch of at most 64 samples and within long arithmetic. Insufficient capacity or unresolved precision returns `ResourceExhausted`. Arithmetic checkpoints do not debit a dynamic sample-work budget.
 
 ## Shared acceptance
 
 Test unreduced equivalent fractions, negative numerators, zero, INT64_MIN/MAX,
-q=1 and q=INT64_MAX, invalid q inside and outside consumer projections, all common-angle
+q=1 and q=INT64_MAX, sparse output selections, all common-angle
 denominators and their near neighbors, and exact tan poles. For example,
 p=2^53+1,q=1 has cos(pi*r)=-1 even though converting p to Float64 loses parity;
 p=2^53+1,q=2 is a tan pole even when floating p/q rounds to an integer.
@@ -149,7 +128,7 @@ other accelerated results compare final ULP and exact classification separately.
 Each child spec supplies an analytic fixture. Delivery must execute its actual
 public WorkflowDocument through Compiler/ExecutionContext with numerator and
 denominator bindings, explicit dtype and named values, supplying real commands.
-Exercise sparse/disjoint/strided demands, source changes, cache-off, low budgets,
+Exercise sparse/disjoint/strided demands, new bindings, low budgets,
 cancellation, fallback behavior and post-context result lifetime. The maintained
 implementation uses its own directed arithmetic backend; LLVM libc is not selected.
 
@@ -166,11 +145,4 @@ implementation uses its own directed arithmetic backend; LLVM libc is not select
 
 ## Maintained implementation and validation
 
-These four operations share the Result-backed `WholeTensorProgram` in
-`plugins/ops/01-numeric/numeric_math_operation.hpp` and are registered with the
-other unary operations by `numeric_unary.cpp`. Each continuation receives full
-authorized Int64 tensor windows, computes the complete output with the selected
-Float32/Float64 dtype, and publishes one packed Result. Strict and accelerated
-evaluation retain the rational contracts above; per-value fallback counters
-are not emitted by this complete-input callback, while execution-level computed-element
-diagnostics remain separate.
+These four operations share the fixed invocation implementation in `numeric_math_operation.hpp` and are registered by `numeric_unary.cpp`. Prepared input widths remain Int64 for both Float32 and Float64 output. Each requested tile uses immutable prepared metadata and private invocation scratch. See [fixed mathematical execution](../point-math-execution.md).

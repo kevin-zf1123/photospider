@@ -61,7 +61,8 @@ enum class FailureOrigin {
   Io,
   Backend,
   Cancellation,
-  Protocol
+  Protocol,
+  Observer
 };
 enum class FailureScope { Unspecified = 0, Atom, Group = 4, Run, Waiter };
 /** @brief Structured context paired with Status::code/reason. Unspecified is
@@ -83,6 +84,10 @@ struct FailureDetail final {
   /** @brief Opaque domain-owned code; the kernel preserves it without
    * interpretation. */
   std::uint64_t domain_code = 0;
+  /** @brief Dynamic retirement sequence for an observer or call failure. */
+  std::optional<std::uint64_t> call_sequence = {};
+  /** @brief Physical task responsible for an execution failure, if known. */
+  std::optional<std::uint32_t> task_id = {};
 };
 
 /**

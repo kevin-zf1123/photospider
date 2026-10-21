@@ -34,14 +34,12 @@ input may use any tensor member key; all share Float32 or Float64 dtype. Require
 no attached domain description. There are no static numeric parameters or
 implicit casts/axis extraction.
 
+```text
 values[0] = initial
-    values[i] = initial + step * sum_{k=0..i-1}(samples[k]+samples[k+1])/2
+values[i] = initial + step * sum_{k=0..i-1}(samples[k]+samples[k+1])/2
+```
 
-Output0 copies initial raw bits, including sNaN/Inf/signed zero. When N=1,
-static runtime projection excludes samples and step completely, including their
-failed producers, while all port metadata is checked. For N>1, every nonempty
-demand reads/validates full samples, step and initial; step must be finite nonzero,
-including when only output0 is projected. Negative step remains valid.
+Output zero copies initial raw bits, including sNaN, Inf and signed zero. A canonical output tile containing only zero is a separate initial-only task: this occurs for N=1 and for the first tile at extent one. It records only samples/step schemas and excludes their payloads and producers. All input metadata remains checked. Positive outputs require a finite nonzero step as a caller numerical precondition; negative step is valid.
 
 ## Complete-formula quality and special values
 
@@ -49,7 +47,9 @@ At i>0, evaluate the entire initial-plus-area expression mathematically, roundin
 only once to output dtype. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
 For finite sources, an equivalent exact expression is
 
+```text
 initial + step/2 * (samples[0] + 2*sum(samples[1:i]) + samples[i])
+```
 
 Do not round trapezoids, prefixes or the area before adding initial. Unrequested
 intermediate output overflows do not fail a later representable requested value.
@@ -68,66 +68,22 @@ contract; a generated prior-output NaN is never treated as a new source operand.
 Fixed NaN patterns and floating-environment preservation follow
 [NUM-04](NUM-04_unary_contract.md); output 0 retains its explicit raw-copy exception.
 
-## Validation, dependence and invalidation
+## Fixed dependencies and publication
 
-For N>1 complete-input input preparation precedes callback step validation. Invalid step
-returns Domain/Run InvalidArgument/InvalidDomain with InvalidSampleStep; source
-failure may occur first, and initial NaN cannot suppress required source failure.
-For N=1 only initial is active. Empty reads nothing. Any active input edit
-invalidates all recorded output observations, including index0 for N>1.
+All selected tiles other than the zero-only tile share one fixed prefix task. Its source support is `[0,E)`, where E is the end of the largest selected output tile. It also reads step and initial. Source tile rounding uses the source's own geometry. A tile containing both zero and positive coordinates belongs to this task. Empty selections create no tasks or payload reads.
 
-## Algorithms, resources and publication
+The separate zero-only task reads initial, has zero scratch and checks samples/step schemas. Selecting only this task from a saved Plan removes the positive prefix task and its producers. Retaining a prefix task retains every declared read and write, even when the final return exposes fewer tiles. Recompilation can shorten its prefix.
 
-Keep the exact unweighted source prefix, first/last samples and source special
-classifications. A separate ratio workspace forms2*sum-first-last, multiplies the
-exact step and adds aligned initial, with final scale-2149 rounding. The prefix
-survives every conversion; public rounded outputs never become state. Compute
-all N outputs before consumer projection. Fixed ExactCalculus state, complete
-output and full collected active inputs replace regional windows, point plans
-and per-output associations. No persistent checkpoint is retained.
+Step is an unchecked numerical precondition whenever a prefix task is active, and no out-of-domain diagnostic is guaranteed. Source and initial support all IEEE patterns. Operational failure prevents successful publication of the IR call, including the zero-only output when its call also contains a failing selected prefix task. Resource, source, backend and cancellation failures retain their categories. Successful Result owners can outlive ExecutionContext.
 
-Source/control strides and offsets remain valid. Work/cancellation checks cover
-reads, exact accumulation/refinement, stores and publication. Errors retain their
-categories and release all unpublished memory. N=1 copies initial without
-constructing numerical state, while registered workspace admission remains a
-conservative common bound. Metadata violations remain schema errors.
+## Exact state and resources
 
-## Acceptance and implementation status
+The prefix task keeps the exact unweighted source sum, first/last values and special classifications. A separate ratio workspace computes `2*sum-first-last`, multiplies the exact step and adds aligned initial before final conversion. Source accumulation visits each prefix coordinate once, and only selected output coordinates are converted. The exact carry survives conversion; rounded results never become state.
 
-Conceptual fixture: samples=[0,1,2], step=[1], initial=[0] -> [0,0.5,2].
-For constant samples=[2,2,2], step=[0.5], initial=[3], result is [3,4,5].
-Use independent exact weighted-prefix arithmetic and explicit nonfinite tables.
-Test negative step, N=1, raw sNaN/negative-zero initial at output 0, invalid step
-ignored only for N=1 and rejected for all N>1 demands, NaN source priority,
-infinity cancellation, subnormals and finite cancellation after large areas.
+Each prefix invocation uses preallocated `sizeof(ExactCalculus)` scratch; the initial-only task uses zero. Only selected output tiles are allocated, each with separate dense storage. There is no runtime payload/carry allocation. Root admits maximum scratch per CPU lane, selected output bytes and executor metadata. Cancellation is checked during source traversal and arithmetic. Prepare validates all schemas, canonical sorted Host writes, zero-only separation, exact source/control reads, empty parameters and scratch. Static schema incompatibility returns TypeMismatch. Accepted work drains before unpublished storage is released.
 
-Focused coverage exercises public workflows, exact weighted-prefix arithmetic,
-raw output-zero copying, N=1, invalid step validation, NaN priority, infinities,
-pre-cancellation, resource limits and output lifetime. For N=1, the tests connect
-deliberately failing producers to samples and step; neither producer starts, the
-initial sNaN bits are copied, and dependency observations name only initial.
-Empty demand also starts no producer. For N>1, an output-zero request starts
-required producers and propagates their failure; statically excluding step still
-retains dtype validation. This trapezoidal rule approximates an underlying
-function's integral; exact rounding concerns the stated discrete formula.
+## Acceptance
 
-## Implementation and executable acceptance
+For samples `[0,1,2]`, step `[1]`, initial `[0]`, expect `[0,0.5,2]`. For constant samples `[2,2,2]`, step `[0.5]`, initial `[3]`, expect `[3,4,5]`. Use independent weighted-prefix Fraction arithmetic and explicit IEEE tables for negative/subnormal step, raw zero-output NaNs, signed zero, infinity cancellation, NaN priority and representable outputs following large intermediate areas.
 
-All six registered profile keys execute Run-shared Result programs and preserve the
-`ExactCalculus` weighted-prefix arithmetic. For N=1, static specialization
-selects only input 2 (initial); samples and step metadata remain checked, but
-runtime support excludes them and their failed producers remain unstarted. Empty
-demand starts no producer and publishes empty tensor coverage. For N>1, each
-nonempty query prepares all active inputs even when it requests output 0, then
-publishes the complete output with full tensor coverage. The query scopes the
-recorded dependency observation and dirty mapping; it does not trim Result
-coverage. Temporary acceptance should verify failure ordering, raw output-zero
-copying, sparse requests, negative and zero strides, unaligned
-storage, caller and worker floating environments on actual continuation polls,
-resource limits, cancellation, and Result/window lifetime through Root release.
-
-Use independent exact Fraction references for temporary numerical acceptance.
-Strict results must match the final rounded reference bits. Accelerated results
-use the shared final FP32-scaled bound and need not be bit-exact. Compile the
-checker with `-fno-fast-math -frounding-math -ffp-contract=off`; execution details
-and validation cases are in [NUM-15 Run-shared complete-input computation](../calculus-whole.md).
+Connect failing samples/step producers to a zero-only selection at N=1 and at larger N with extent one; neither producer should run. Selecting positive tiles must retain the corresponding source prefix and controls. Verify both fresh compilation and saved Plan selection, source atomic geometry, disjoint writes, negative/zero strides, unaligned storage, concurrent Runs, artifact import, binding replacement, capacity rejection, cancellation, preparation rejection and Result lifetime. See [fixed calculus execution](../calculus-execution.md). Temporary numerical checkers are removed after validation; the oracle remains available.

@@ -36,7 +36,8 @@ Status multiply_fixed(const FixedInteger<Words>& a,
       }
       const auto slot = static_cast<std::size_t>(i + j);
       if (slot >= Words)
-        return Status{ErrorCode::ResourceExhausted, "fixed product capacity",
+        return Status{ErrorCode::ResourceExhausted,
+                      {},
                       FailureReason::CapacityLimit};
       const auto product =
           static_cast<unsigned __int128>(a.words[i]) * b.words[j] +
@@ -47,7 +48,8 @@ Status multiply_fixed(const FixedInteger<Words>& a,
     const auto slot = static_cast<std::size_t>(i + b_size);
     if (carry) {
       if (slot >= Words)
-        return Status{ErrorCode::ResourceExhausted, "fixed carry capacity",
+        return Status{ErrorCode::ResourceExhausted,
+                      {},
                       FailureReason::CapacityLimit};
       output->words[slot] = static_cast<std::uint64_t>(carry);
     }

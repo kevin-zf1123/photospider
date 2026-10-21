@@ -2,6 +2,8 @@
 
 `psc` 是编译驱动程序；`psx` 加载并执行已编译 Plan。前端、校验、优化、规划和执行仍是可独立调用的库组件。驱动程序负责路径、JSON manifest、诊断、会话保留和输出发布。其职责划分参考 Clang 的编译驱动设计，由主目标决定执行哪些库阶段；实现不依赖 LLVM 或 LLVM IR。
 
+驱动程序使用物理 Plan v5 和固定 invocation ABI 8。外部算子通过 [operation module ABI 8](../../kernel-architecture/zh/Plugin-ABI.zh.md)提供静态 preparation、task lowering 和固定 kernel。只返回输入的 IR 可以使用空算子 registry 运行。
+
 ## 构建与算子加载
 
 `PHOTOSPIDER_BUILD_TOOLS=ON`（默认）构建 `psc` 和 `psx`。在已有构建目录执行：
@@ -10,7 +12,7 @@
 cmake --build build/kernel-dev --target psc psx -j 2
 ```
 
-`PHOTOSPIDER_BUILD_OPS=ON` 时，工具先注册内置算子，再按命令行顺序加载显式 `--load-ops PATH` 指定的受信任进程内 ABI-7 库；OFF 时 registry 初始为空。加载后冻结 registry。重复库、重复算子名称和不兼容契约均失败。`--list-operations` 输出已加载名称、traits 版本与 CPU/GPU 能力。Artifact 不指定或加载库。`--resources` 提供不可变静态资源身份与字节；每次运行的 Tensor 输入由 `psx --bindings` 提供。
+`PHOTOSPIDER_BUILD_OPS=ON` 时，工具先注册内置算子，再按命令行顺序加载显式 `--load-ops PATH` 指定的受信任进程内 ABI 8 module；OFF 时 registry 初始为空。加载后冻结 registry。重复库、重复算子名称和不兼容契约均失败。`--list-operations` 输出已加载名称、traits 版本与 CPU/GPU 能力。Artifact 不指定或加载库。`--resources` 提供不可变静态资源身份与字节；每次运行的 Tensor 输入由 `psx --bindings` 提供。
 
 工具私有 JSON codec 依赖 yyjson 0.13.0，固定提交 `6447536015f3d600f3d65323b10976103b337ca7`，附 MIT 许可证。配置前，按照 [yyjson 准备说明](../../../third_party/YYJSON.md)，将 `yyjson.c`、`yyjson.h` 和 `LICENSE` 放到 `third_party/yyjson/`。该目录由 Git 忽略，不包含在仓库检出内容中；CMake 不下载源码。设置 `PHOTOSPIDER_BUILD_TOOLS=OFF` 可关闭工具及其 yyjson 依赖。yyjson 不进入内核公共头文件或导出依赖。不支持 YAML 输入。
 
@@ -56,20 +58,20 @@ psc input.json -O optimize -O optimize --save-ir 1=once.psir -o twice.psxp
 | 参数 | 默认值/含义 |
 | --- | --- |
 | `--planner NAME` | 按 registry 查找，默认 `static-tiles`；内置后端按依赖顺序展开所需 tile。未知名称返回参数错误；与 `--check`、IR 输出目标冲突。 |
-| `--backend cpu\|gpu` | 默认 `cpu`；GPU 允许已声明的 GPU placement。CPU-only 算子仍在 CPU，重试遵循保存的 fallback 契约。 |
+| `--backend cpu\|gpu` | 默认 `cpu`；选择固定 CPU 或 GPU lowering 目标。Preparation 必须支持精确的 placement。 |
 | `--tile-extent N` | 128，正的二次幂。 |
 | `--outputs a,b` | 选择具名输出及依赖闭包。 |
 | `--requests FILE` | 输出/成员 tile 区间，与 `--outputs` 冲突。 |
-| `--max-instructions N` | 4194304，正静态指令上限。 |
+| `--max-tasks N` | 4194304，正物理 task 上限；metadata 和传入 tile 具有独立结构上限。 |
 | `--max-dependency-edges N` | 16777216，正静态边上限。 |
 
 `psc --list-planners` 列出注册名称、版本、说明和支持的 IR 形式。`psc --help-planner NAME` 显示指定定义及共享规划参数。这些查询无需输入文件，不加载算子库，不调用规划回调。未知帮助名称返回参数错误。`--print-pipeline` 查找所选定义并显示其名称与版本。
 
 库调用通过 `PlanningOptions::planner = "static-tiles"` 选择名称，`Compiler::plan` 和 `compile` 均使用该选项。将冻结的 `PlannerRegistry` 作为 `Compiler` 构造函数第三个参数传入即可使用自定义后端；省略时使用惰性初始化的默认目录。注册时拒绝重复名称、缺失回调和非法 IR 形式。`--backend` 独立控制 CPU/GPU placement。
 
-`PlannerDefinition` 回调接收原始 `ValidatedIR`、本次回调专用的 `PlanBuilder` 和共享 `PlanningOptions`。Builder 提供只读的链接声明，以及各 block 的可编辑指令。编译器固定 CFG、输入输出 schema、算子契约、placement 和归一化输出选择，随后校验生成的指令并发布 Plan。后端负责映射与 fallback 的语义正确性。参见[planner 构造契约](../../kernel-architecture/zh/Compiler-and-Execution.zh.md#物理-plan)。CLI 目录包含编译时注册的后端；`--load-ops` 只注册算子库。
+`PlannerDefinition` 回调接收原始 `ValidatedIR`、本次回调专用的 `PlanBuilder` 和共享 `PlanningOptions`。Builder 提供只读链接声明和可编辑的物理 Task/Tile/Call/Block 表。编译器检查 CFG、schema、算子契约、placement、归一化输出选择及生成的 task 数量后发布 Plan。后端负责映射的语义正确性。参见[planner 构造契约](../../kernel-architecture/zh/Compiler-and-Execution.zh.md#物理-plan)。CLI 目录包含编译时注册的后端；`--load-ops` 只注册算子库。
 
-输出选择保留控制流、副作用和 mandatory stage。库的 `PlanningOptions::output_names` 用 `nullopt` 表示所有输出、空 vector 表示无输出。库 `output_requests` 中未出现的已选输出表示全部 tiles。CLI 请求 manifest 显式选择其列出的名称。运行请求只能缩小已保存的覆盖。
+输出选择保留控制流和 mandatory effect task。库的 `PlanningOptions::output_names` 用 `nullopt` 表示所有输出、空 vector 表示无输出。库 `output_requests` 中未出现的已选输出表示全部 tiles。CLI 请求 manifest 显式选择其列出的名称。运行请求只能缩小已保存的覆盖。
 
 ## 执行
 
@@ -78,18 +80,17 @@ psx output.psxp --load-ops ./operations.dylib \
   --resources resources.json --bindings bindings.json -o output.results
 ```
 
-Plan 导入直接接收非空且已冻结的 `OperationRegistry` 及显式资源，不要求调用方构造 Compiler 或 optimizer registry；调用方须在 Plan 生命周期内保留算子环境。导入链接已保存的算子/资源并重建派生 metadata，校验指令和后端，不运行 optimizer、mapper、tile 展开或重新规划。执行前检查设备能力；设备不可用且已保存指令不允许 CPU fallback 时失败。
+Plan 导入接收非空且冻结的 `OperationRegistry` 和显式资源；调用方保持算子环境的寿命。导入链接保存的算子和资源，检查物理表以及保存的邻接表、存活值和预约容量，不运行 optimizer、lowerer 或 planner。`ExecutionContext::prepare` 检查精确 placement 和 kernel invocation 契约；执行使用 `submit` 和 `join`。不可用的 placement 在 Run 提交前失败。
 
-Plan 的每个输入必须恰好绑定一次，包括所选输出未使用的输入。每个静态 Tensor slot 对应一个完整 raw-le 文件，dtype、完整 sample shape（batch 轴加 cell shape）和字节长度必须精确匹配。Tensor 使用执行 context 的 ResourceBudget。`--check` 加载并检查 Plan、资源与设备要求，然后停止，不执行或导出。检查模式可不提供 bindings；一旦提供 manifest，仍须完整校验每个声明和 slot。实际执行始终要求绑定全部声明输入。
+Plan 的每个输入必须恰好绑定一次，包括所选输出未使用的输入。每个静态 Tensor slot 对应一个完整 raw-le 文件，dtype、完整 sample shape（batch 轴加 cell shape）和字节长度必须精确匹配。绑定读取器使用执行 context 的 ResourceBudget 暂存完整 raw 文件。对于 `DirectTiles`，读取器将所需区域复制到独立、对齐的 dense Host tile，其 byte offset 为零，容量与编译契约相同。对于 `DenseHost`，只要请求了某个 member 的任一 tile，就保留该 member 的一份完整稠密分配；Plan 的显式 COPY task 在执行期间物化选定 tile。其他不兼容的物理 layout 返回 `TypeMismatch`。`--check` 导入并准备 Plan，链接资源及固定 kernel，然后停止，不提交 Run 或导出。检查模式可不提供 bindings；一旦提供 manifest，仍须完整校验每个声明和 slot。实际执行始终要求绑定全部声明输入。
 
 | 参数 | 默认值/含义 |
 | --- | --- |
 | `--bindings FILE` | 实际执行有输入声明的 Plan 时必需；`--check` 可省略。 |
 | `--outputs a,b` / `--requests FILE` | 已编译覆盖内的输出子集或成员区间。 |
-| `--threads N` | CPU worker 数；省略使用 context 默认，显式值须为正。 |
-| `--parallelism N` | 执行并行度上限；省略用库默认，不改变静态 VM 指令顺序。 |
+| `--threads N` | CPU worker 数；省略使用 context 默认，显式范围为 1..4096。 |
+| `--parallelism N` | 本次 Run 的最大并发 task 数，范围 1..4096；省略时使用 context worker 数量，call 按 Plan 顺序退休。 |
 | `--max-live-bytes N` | 268435456，正的受控 Payload 容量。 |
-| `--cache-bytes N` | 0，可选结果缓存容量，不超过 live-byte 上限。 |
 | `-o DIRECTORY` | 默认当前目录 `plan-stem.results`；stdin 必须指定输出；目录必须不存在。 |
 
 `psx` 拒绝优化、backend、tile extent 参数。更大的覆盖或不同物理目标需要重新编译。输出是 manifest 和记录真实覆盖的小端二进制片段，不填补缺失区域。逻辑窗口拷贝遵循负/零 stride，保留 NaN、负零等位模式。不创建持久执行服务或恢复状态。
@@ -107,7 +108,7 @@ Plan 的每个输入必须恰好绑定一次，包括所选输出未使用的输
 | `src/lib/compiler/optimizer.cpp` | 组织变换、输出校验与公开接口保持检查。 |
 | `src/lib/compiler/optimizer_registry.cpp`、`optimizers/deduplicate.cpp` | 注册目录/参数 schema，以及独立的可选示例变换。 |
 | `src/lib/compiler/planner.cpp`、`planner_registry.cpp`、`planners/static_tiles.cpp` | 按名称分发后端、注册目录、结果校验及注册的静态 tile 规划实现。 |
-| `src/lib/compiler/plan_linking.cpp`、`plan_validation.cpp`、`plan_selection.cpp` | 已保存 Plan 的链接、指令校验与不调用 mapper 的覆盖缩小。 |
+| `src/lib/compiler/plan_linking.cpp`、`plan_validation.cpp`、`plan_selection.cpp` | 已保存 Plan 的链接、物理表校验与不调用 lowerer 的覆盖缩小。 |
 
 公共工具库不持有编译会话或执行 context。仅为绑定或规划构造库 `Compiler` 不会初始化默认 optimizer 目录；显式优化或查询目录时才需要它。
 

@@ -50,29 +50,23 @@ Let alpha occupy original slot j. If unreferenced after detaching the group,
 construct L=[0,...,j-1,j+1,...,C-1]. Output slot k copies original slot L[k]
 at the same nonchannel coordinate. For shared alpha, L is the identity list.
 Channel-bearing input lowers to mapped assembly and returns `values`. Its
-`expected_inputs` assertion covers the canonical structural schema and physical
-layout of the source. No output description is produced.
+`expected_inputs` assertion covers the canonical structural schema and spatial
+topology of the source. No output description is produced.
 
 An axis-free Gray input with `missing_alpha=identity` lowers to `core.identity`
 and returns `value`. This branch adds no `expected_inputs` or `expected_source`
-assertion and does not implement layout conversion. Its input samples and owner
-are retained through the ordinary identity path.
+assertion and does not apply the helper layout policy. core.identity emits explicit COPY tasks, preserving samples in independently owned output tiles.
 
 Finite hidden color at former alpha=0 is preserved. Callers configure downstream
-groups and alpha references explicitly. Removing a logical channel can retain
-backing through a view under normal kernel ownership.
+groups and alpha references explicitly. Mapped removal copies surviving channels into independently owned dense output tiles.
 
 Requested output samples read only their mapped original input samples. No
-removed-alpha samples or other color peers are read/validated. Dirty support
-is the inverse retained-slot map; discarded samples have no output effect.
+removed-alpha samples are numerically read or validated. Complete output tiles determine all surviving source coordinates, and source-grid closure may retain tiles containing discarded channels. Incremental dirty propagation is outside this execution contract.
 For shared alpha, that channel's own output still depends on its original samples.
 Static group/reference changes reinfer the mapping. A required upstream producer
 can still fail at its own complete-input scope; C does not cancel such work.
 
-Channel-bearing mapped assembly honors auto/view/materialize, including when
-missing_alpha=identity. Forced materialize creates requested backing; forced
-view requires a legal mapping. Axis-free identity performs no layout conversion. Use the family's transactional helper expansion, bounded
-copy resources, cancellation, cache restrictions and error attribution.
+Channel-bearing mapped assembly uses fixed ABI 8. Auto/materialize copy selected output tiles with zero scratch, including missing_alpha=identity. Every nonempty view task has only schema dependencies and fails InvalidArgument/ViewUnavailable; Empty performs static checks with no task. Axis-free identity does not apply the helper layout policy. The family defines transactional authoring, cancellation, ordered call retirement and independent output ownership.
 
 ## Independent acceptance
 
@@ -89,7 +83,7 @@ unrequested invalid color peers add no sample failure.
 
 Use an independent retained-slot oracle and exact bytes for arbitrary alpha
 positions, shared references, cell axes, batch prefixes, disjoint regions and
-tile boundaries. Check surviving source/view owners after context retirement,
+tile boundaries. Check surviving output owners after context retirement,
 final release, low budgets, cancellation and rollback of failed helper expansion.
 Create a temporary public compile/execute check for the helper expansion and
 remove it after the operation change is validated.

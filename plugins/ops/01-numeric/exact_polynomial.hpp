@@ -8,6 +8,7 @@
 
 #include "01-numeric/exact_product.hpp"
 #include "01-numeric/exact_root.hpp"
+#include "photospider/core/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Degree <=3 polynomial arithmetic for exact algebraic boundary decisions.
@@ -34,21 +35,22 @@ class ExactPolynomial final {
   std::array<Number, kSlots> numbers_{};
   unsigned used_ = 0;
   Status status_;
-  const std::function<Status(std::uint64_t)>* consume_ = nullptr;
+  core_internal::WorkConsumer consume_;
   Index allocate() {
     if (!status_.ok())
       return 0;
     status_ = (*consume_)(kWords);
-    if (used_ == kSlots)
-      capacity();
     if (!status_.ok())
       return 0;
+    if (used_ == kSlots) {
+      capacity();
+      return 0;
+    }
     numbers_[used_] = {};
     return used_++;
   }
   void capacity() {
-    status_ = {ErrorCode::ResourceExhausted, "exact polynomial capacity",
-               FailureReason::CapacityLimit};
+    status_ = {ErrorCode::ResourceExhausted, {}, FailureReason::CapacityLimit};
   }
   void copy_polynomial(const Polynomial& source, Polynomial* destination) {
     destination->degree = source.degree;
@@ -112,10 +114,10 @@ class ExactPolynomial final {
   explicit ExactPolynomial(SequenceProfile profile) : ratio_(profile) {}
   // Borrow work only within one synchronous arithmetic entry. Call end before
   // retiring the phase; no work callback is owned by the immutable program.
-  void begin(const std::function<Status(std::uint64_t)>& consume) {
+  void begin(const core_internal::WorkConsumer& consume) {
     used_ = 0;
     status_ = Status::success();
-    consume_ = &consume;
+    consume_ = consume;
   }
   void end() { consume_ = nullptr; }
   const Status& status() const { return status_; }

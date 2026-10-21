@@ -44,11 +44,17 @@ struct Node final {
 };
 // A bounded real-expression DAG, NOT NUM's stepwise-RN64 expression language.
 // Nodes preserve exact constants/intermediates until the output rounding.
+struct AlgebraicProgram final {
+  std::array<std::uint64_t, 3> numerator{};
+  std::array<bool, 3> negative{};
+  std::uint64_t denominator = 1;
+};
 struct Program final {
   static constexpr unsigned kNodes = 32;
   std::array<Node, kNodes> nodes{};
   unsigned size = 1, result = 0;
   bool rational = true, final_sqrt = false;
+  AlgebraicProgram algebraic;
   unsigned push(Node n) {
     if (size == nodes.size())
       throw std::logic_error("FMT-09 program capacity");
@@ -100,6 +106,90 @@ inline Rational rational(std::int64_t n, std::uint64_t d = 1) {
   auto r = Rational::integer(n);
   r.d = Natural(d);
   return r;
+}
+// Shipped algebraic branches are degree-at-most-two polynomials, optionally
+// followed by one square root. Resolve their exact coefficients once. The
+// 64-bit common-denominator form proves a 4352-bit execution workspace bound.
+inline void prepare_algebraic(Program* p) {
+  if (!p->rational)
+    return;
+  using Polynomial = std::array<Rational, 3>;
+  std::array<Polynomial, Program::kNodes> values;
+  for (unsigned i = 0; i < p->size; ++i) {
+    const auto& node = p->nodes[i];
+    auto& value = values[i];
+    const auto& a = values[node.a];
+    const auto& b = values[node.b];
+    switch (node.code) {
+      case Code::Input:
+        value[1] = rational(1);
+        break;
+      case Code::Rational:
+        value[0] = rational(node.numerator, node.denominator);
+        break;
+      case Code::Binary:
+        value[0] = Rational::binary(node.bits, false);
+        break;
+      case Code::Add:
+      case Code::Subtract:
+        for (unsigned k = 0; k < 3; ++k)
+          value[k] = node.code == Code::Add ? Rational::add(a[k], b[k])
+                                            : Rational::subtract(a[k], b[k]);
+        break;
+      case Code::Multiply:
+        for (unsigned j = 0; j < 3; ++j)
+          for (unsigned k = 0; k < 3; ++k) {
+            if (a[j].n.zero() || b[k].n.zero())
+              continue;
+            if (j + k > 2)
+              throw std::logic_error("FMT-09 algebraic degree");
+            value[j + k] =
+                Rational::add(value[j + k], Rational::multiply(a[j], b[k]));
+          }
+        break;
+      case Code::Divide:
+        if (!b[1].n.zero() || !b[2].n.zero() || b[0].n.zero())
+          throw std::logic_error("FMT-09 algebraic denominator");
+        for (unsigned k = 0; k < 3; ++k)
+          value[k] = Rational::divide(a[k], b[0]);
+        break;
+      case Code::Sqrt:
+        if (i != p->result || !p->final_sqrt)
+          throw std::logic_error("FMT-09 algebraic root position");
+        value = a;
+        break;
+      default:
+        throw std::logic_error("FMT-09 nonalgebraic instruction");
+    }
+    for (auto& coefficient : value) {
+      const auto divisor = Natural::gcd(coefficient.n, coefficient.d);
+      coefficient.n = Natural::divide(coefficient.n, divisor).first;
+      coefficient.d = Natural::divide(coefficient.d, divisor).first;
+    }
+  }
+  const auto& coefficients = values[p->result];
+  Natural denominator(1);
+  for (const auto& coefficient : coefficients)
+    denominator = Natural::multiply(
+        Natural::divide(denominator, Natural::gcd(denominator, coefficient.d))
+            .first,
+        coefficient.d);
+  const auto word = [](const Natural& integer) {
+    if (integer.words.size() > 2)
+      throw std::bad_alloc();
+    std::uint64_t value = 0;
+    for (unsigned i = 0; i < integer.words.size(); ++i)
+      value |= static_cast<std::uint64_t>(integer.words[i]) << (32 * i);
+    return value;
+  };
+  p->algebraic.denominator = word(denominator);
+  for (unsigned k = 0; k < 3; ++k) {
+    p->algebraic.numerator[k] = word(Natural::multiply(
+        coefficients[k].n,
+        Natural::divide(denominator, coefficients[k].d).first));
+    p->algebraic.negative[k] =
+        coefficients[k].negative && p->algebraic.numerator[k];
+  }
 }
 // First binary64 operand in the upper branch. A binary32 promoted to binary64
 // is exact, so these cuts implement the SAME exact-rational branch rule for
@@ -260,6 +350,8 @@ inline CurveProgram make_program(const TransferDefinition& d, bool encode) {
       c.branches[2].finish(c.branches[2].q(65504));
     }
   }
+  for (unsigned branch = 0; branch < c.branch_count; ++branch)
+    prepare_algebraic(&c.branches[branch]);
   return c;
 }
 }  // namespace ps::plugin_internal::transfer_ops

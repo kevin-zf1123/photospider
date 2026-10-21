@@ -1,7 +1,8 @@
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
-#include "./result_registry_fixture.hpp"
+#include "./operation_registry_fixture.hpp"
 
 #ifndef PS_BAD_PARAMETER_CASE
 #error "PS_BAD_PARAMETER_CASE must select one malformed parameter contract"
@@ -17,9 +18,14 @@ void destroy_fixture(void*) {}
  * @return Case-specific malformed parameter descriptor.
  * @throws Nothing.
  */
-ps_result_parameter_descriptor_v7 make_parameter() noexcept {
-  return {sizeof(ps_result_parameter_descriptor_v7) - 1U, "value", 5U,
-          PS_RESULT_PARAMETER_FLOAT64_V7, 1U};
+ps_parameter_spec_v8 make_parameter() noexcept {
+  return {sizeof(ps_parameter_spec_v8) - 1U,
+          {"value", 5U},
+          PS_PARAMETER_FLOAT64_V8,
+          1U,
+          0U,
+          0.,
+          0.};
 }
 #elif PS_BAD_PARAMETER_CASE == 4
 /**
@@ -27,9 +33,14 @@ ps_result_parameter_descriptor_v7 make_parameter() noexcept {
  * @return Case-specific malformed parameter descriptor.
  * @throws Nothing.
  */
-ps_result_parameter_descriptor_v7 make_parameter() noexcept {
-  return {sizeof(ps_result_parameter_descriptor_v7), "x", 1025U,
-          PS_RESULT_PARAMETER_FLOAT64_V7, 1U};
+ps_parameter_spec_v8 make_parameter() noexcept {
+  return {sizeof(ps_parameter_spec_v8),
+          {"x", 1025U},
+          PS_PARAMETER_FLOAT64_V8,
+          1U,
+          0U,
+          0.,
+          0.};
 }
 #else
 /**
@@ -37,25 +48,28 @@ ps_result_parameter_descriptor_v7 make_parameter() noexcept {
  * @return Structurally valid parameter descriptor.
  * @throws Nothing.
  */
-ps_result_parameter_descriptor_v7 make_parameter() noexcept {
-  return {sizeof(ps_result_parameter_descriptor_v7), "value", 5U,
-          PS_RESULT_PARAMETER_FLOAT64_V7, 1U};
+ps_parameter_spec_v8 make_parameter() noexcept {
+  return {sizeof(ps_parameter_spec_v8),
+          {"value", 5U},
+          PS_PARAMETER_FLOAT64_V8,
+          1U,
+          0U,
+          0.,
+          0.};
 }
 #endif
 
 /** @brief Case-specific parameter record. */
-const ps_result_parameter_descriptor_v7 parameter = make_parameter();
+[[maybe_unused]] const ps_parameter_spec_v8 parameter = make_parameter();
 
 #if PS_BAD_PARAMETER_CASE == 5
 /** @brief Exact byte count required for one deliberately misaligned record. */
 // NOLINTBEGIN(whitespace/indent_namespace)
-constexpr std::size_t kStorageSize =
-    sizeof(ps_result_parameter_descriptor_v7) + 1U;
+constexpr std::size_t kStorageSize = sizeof(ps_parameter_spec_v8) + 1U;
 // NOLINTEND
 /** @brief Byte storage used to provide a deliberately misaligned pointer. */
 // NOLINTBEGIN(whitespace/indent_namespace)
-alignas(
-    ps_result_parameter_descriptor_v7) unsigned char storage[kStorageSize]{};
+alignas(ps_parameter_spec_v8) unsigned char storage[kStorageSize]{};
 // NOLINTEND
 #endif
 
@@ -65,12 +79,12 @@ alignas(
  * @throws Nothing.
  * @note The host must validate pointer/count/alignment before dereference.
  */
-const ps_result_parameter_descriptor_v7* parameter_pointer() noexcept {
+const ps_parameter_spec_v8* parameter_pointer() noexcept {
 #if PS_BAD_PARAMETER_CASE == 1
   return nullptr;
 #elif PS_BAD_PARAMETER_CASE == 5
-  return reinterpret_cast<const ps_result_parameter_descriptor_v7*>(storage +
-                                                                    1U);
+  std::memcpy(storage + 1U, &parameter, sizeof(parameter));
+  return reinterpret_cast<const ps_parameter_spec_v8*>(storage + 1U);
 #else
   return &parameter;
 #endif
@@ -89,16 +103,16 @@ std::uint32_t parameter_count() noexcept {
 #endif
 }
 
-const auto descriptor = result_registry_fixture::make_operation(
+const auto descriptor = operation_registry_fixture::make_operation(
     "fixture.bad.parameter", 21U, parameter_pointer(), parameter_count());
 // NOLINTBEGIN(whitespace/indent_namespace)
 const auto api =
-    result_registry_fixture::make_api(&descriptor, destroy_fixture);
+    operation_registry_fixture::make_api(&descriptor, destroy_fixture);
 // NOLINTEND
 
 }  // namespace
 
-extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v7*
-ps_result_operation_plugin_get_api_v7(void) {
+extern "C" PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
+ps_operation_module_get_api_v8(void) {
   return &api;
 }

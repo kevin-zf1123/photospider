@@ -1,31 +1,41 @@
 # 计算边界
 
+[英文权威文档](../Compute-Boundaries.md)。
+
 ## 1. 模块职责与所有权
 
-| Owner | 持有 | 边界 |
+| Owner | 职责 | 生命周期边界 |
 | --- | --- | --- |
-| `GraphContext` | 复制的 workflow source、revision 和 snapshot currentness | 不持有 compiler 输出或执行 worker |
-| `Compiler` | 校验、不可变 IR 阶段、静态 mapper 调用、把 tile 展开为 plan 指令、plan 验证和阶段 identity | 不持有 runtime Tensor、运行期 callback 或 daemon state |
-| `ExecutionRun` | 单次执行的 program counter、block 值与参数、固定授权绑定、依赖证据、取消状态、work 预算和诊断 | 不拥有共享 pool、持久结果、依赖映射或指令顺序 |
-| `ExecutionContext` | CPU worker pool、可选原生 lane、冻结的 operation registry、缓存和资源 ledger | 不管理 graph mutation 或 daemon Job |
-| Operation definition | 冻结的 traits、静态依赖 mapper 和 callback 契约 | 不拥有执行容量、超出其编译期 mapping 的读取授权或发布权限 |
+| `GraphContext` | 复制的 workflow source、revision 与 snapshot currentness | 源变更使 source-bound version 失效，不改变活动 Run 的 binding |
+| `Compiler` | 静态特化、ValidatedIR、可选优化、物理 lowering 与校验 | 产生不可变表，不执行 sample payload |
+| `ExecutionPlan` | CFG、Task/Tile/Call 表、layout、placement、read、selection 与资源上界 | 共享不可变 program，与运行时 input address 分离 |
+| `PreparedPlan` | 固定 kernel 链接、具体 device 兼容性、静态 resource 与 module owner | 在原 context 的多个 Run 间共享，拓扑保持固定 |
+| Run 与 `RunHandle` | 不可变 binding、activation/task/call 状态、就绪、退休、取消与诊断 | Accepted work 在 drain 期间保留 owner；join 等待 task 与 delivery settlement |
+| `ExecutionContext` | 有界 CPU worker、GPU credit、公平准入、冻结 registry 与资源根 | 析构时关闭准入并排空已接受 Run 与 callback |
+| Operation definition | 静态契约、lowering、kernel preparation 与数值实现 | 在 unchecked invocation 前声明全部 read、write、scratch 与 completion 义务 |
 
 ## 2. 数据与内存边界
 
-`ExecutionPlan` 保留静态元数据、成员 tile 几何和完整的 tile 指令程序，不保留调用方地址。`ExecutionBindings` 为一个 Run 提供拥有型 Result 引用。每个 Result 由静态 Tensor 成员组成；返回 Result 和读窗口在 Run 完成后继续保留 backing 和租约。
+`ExecutionBindings` 提供 owning Result 引用。Submission 为单次 Run 捕获 schema、coverage 与 storage authority。调用方随后发布内容或替换 binding，不会扩大该 snapshot。每个新产生的动态 value 取得新 identity；同一完整 value 的 alias 保留 identity。返回 Result 和 owning read window 通过持有 release context，可以超过 Run 与 context 生命周期。
 
-Estimated bytes 用于规划和预留。Resource ledger 按资源类别计入已准入或已分配容量；估算值本身不是分配租约。`Region` 描述逻辑坐标，`StridedLayout` 将坐标映射到字节地址。
+物理 tile 拥有独立声明的 allocation。Region 描述逻辑坐标，affine layout 将其映射到固定 allocation view。Native preparation 解析实际 capacity 和 alignment。Block admission 在第一个 task 前预留完整 output backing、逐 lane scratch、completion 与 delivery capacity。预算拒绝返回 `ResourceExhausted`，不发射该 block。
 
-## 3. 执行边界
+Payload backing 与 managed metadata 分别观测。Context/PreparedPlan 和既有 input owner 保持原归属；Run 新增 metadata 在跨线程释放时仍归属于原资源根。Reservation 不等于实际分配，两者都不描述 RSS。参见[托管资源](Managed-Resources.zh.md)。
 
-Planner 在执行前完成全部依赖展开。每个 `ExecutionRun` 按保存的顺序一次执行一条 plan 指令，只调用每条指令所需的既定服务：授权绑定、可选缓存查找、算子 start 与 poll、发布验证和 block 转移。它不调用 mapper、不创建 producer task、不推导 tile 映射，也不重排指令。每次进入 block、每条指令、每次授权声明和证据合并都消耗 `ExecutionOptions::maximum_dependency_work`，算子 work 计费消耗 Root work 预算；两条路径都检查取消与 currentness，因此空循环和很长的指令流都保持有界。耗尽时返回 `ResourceExhausted`。CPU callback 竞争 context 的固定 CPU worker；可选原生 callback 使用配置的 backend lane。Context 级等待准入限制尚未开始的 callback；普通 callback 开始运行后释放等待名额。Staged CPU job 会持续占用名额，直到 tile callback 退役且 job 离开队列。lane 和 staged-work 契约见[并行执行](Parallel-Execution-Model.zh.md)。
+## 3. 执行与完成
 
-Public API 暴露 plan、binding、result、status 和 diagnostics。Queue entry、byte-ledger lease、native handle 和 callback owner 属于私有实现状态。Daemon 使用 public package，并自行管理 IPC 与 Job 生命周期。
+Planner 在执行前展开全部依赖。Coordinator 发射满足 dependency、lane、context-credit、effect 与 failure-cut 约束的 ready task。CPU worker 执行固定同步入口；accepted GPU submission 异步完成。Task 成功后，其输出立即可供后继 task 使用。Call 按动态 IR 顺序退休，与 task 发射/完成顺序独立。
 
-## 4. 限制与非目标
+`CpuExact` 要求 CPU placement。`NativeGpu` 是静态编译选择：支持 GPU 的 operation 收到 GPU lowering 请求，CPU-only operation 收到 CPU 请求。Traits 允许时，operation 可在同 call 内显式混合 CPU/GPU task。COPY task 实现声明的传输；Device endpoint 要求 GPU COPY。Preparation 对不可用 placement 直接拒绝，不改写 task；执行期间不切换 backend 重试。
 
-- Graph revision 表示 compiler currentness，不是 daemon session id。
-- Run 是同步 kernel 调用，不是 public scheduling object。
-- Backend label 记录放置意图或结果，不是 device handle。
-- 只有通过 cancellation 与 graph-currentness 检查后才发布结果。
-- Kernel 不负责 document persistence 或 result recovery。
+每次 block activation 消耗有界的 `maximum_block_activations` 与 `maximum_work` 预算，空 loop 同样消耗 work。Coordinator 在安全点检查取消与源 currentness。执行期间不扩展 task graph、schema 或 dependency。数值工作遵守 operation 的 prepared contract，不使用 continuation work-service 协议。
+
+拒绝提交时，invocation owner 留在 coordinator，且不产生 completion。接受后保留 input/output/scratch、参数、kernel/module owner 和预留的 completion record，直到恰好一次 terminal event 确认停止访问与可见性。取消停止新工作，并排空已接受工作。超时不能授权提前释放 buffer。
+
+有序 call delivery 在 coordinator 外运行，每个 Run 有独立串行 lane。Observer 失败会 abort Run 并停止后续交付。最终 RET publication 等待 task quiescence、delivery settlement 以及最终取消/currentness 检查；已经交付的 owning value 保持有效。失败优先级、公平性、计时和原生测量见[并行执行](Parallel-Execution-Model.zh.md)。
+
+## 4. 公共边界
+
+公共 API 暴露不可变 Plan/preparation、binding、`RunHandle`、取消、join、owning Result 与独立 observation。Queue entry、native device handle 和可变 scheduler state 保持内部实现。Handle 是进程内对象；daemon 独立负责 IPC 与 Job 生命周期。
+
+Kernel 不提供持久 Run、document persistence、result recovery、运行时依赖发现、payload cache hierarchy 或隐式迁移。Provider code 受信任，必须在报告 completion 前结束全部访问。

@@ -28,8 +28,7 @@ corresponding CRV-01 method's numerical, dtype, domain and dependency contract.
 Only naming and position export are new; no second interpolation algorithm is
 defined by the template. positions output directly forwards the requested
 new_positions bits, retaining dtype and including NaN/Inf/sNaN/negative zero;
-it has no source positions/values reads or interpolation validation. Only samples
-demand invokes CRV-01's finite query and source validation. The low-pass contracts below complete the initial scope. The maintainer requires both equally and unequally spaced
+it has no source positions/values reads or interpolation validation. Samples demand requires CRV-01's finite query and source preconditions. The low-pass contracts below complete the initial scope. The maintainer requires both equally and unequally spaced
 signals in the initial low-pass scope; uniform-sampling-only is insufficient.
 For unequal spacing, the signal reconstruction and integration measure must be
 explicit, not an implicit equal-weight sum over irregularly spaced samples.
@@ -49,7 +48,7 @@ parameters. Kernel identity is not an unspecified low-pass mode.
 
 ## Resampling template contract
 
-The four templates map positions to CRV-01 x, values to y and new_positions to query. Export the chosen interpolator's values as samples and the independent new_positions binding as positions. Single-function/multi-function shapes and all dtype/count limits match CRV-01A/B/C/D exactly. The samples node uses the existing CRV-01 interpolation operation. The positions node uses `core.identity` to expose the bound new_positions Result, retaining its descriptor, dtype and raw bits, including NaN/Inf/sNaN/negative zero. Its requested support is exactly the requested new_positions region and it has no curve-source dependency. Typed and upstream validation of the bound new_positions Result still applies. Only a samples request invokes CRV-01's finite-query and source validation.
+The four templates map positions to CRV-01 x, values to y and new_positions to query. Export the chosen interpolator's values as samples and the independent new_positions binding as positions. Single-function/multi-function shapes and all dtype/count limits match CRV-01A/B/C/D exactly. The samples node uses the existing CRV-01 interpolation operation. The positions node uses `core.identity` to expose the bound new_positions Result, retaining its descriptor, dtype and raw bits, including NaN/Inf/sNaN/negative zero. Its requested support is exactly the requested new_positions region and it has no curve-source dependency. The bound Result must satisfy the compiled structural contract. Sample requests require CRV-01's numerical preconditions.
 
 Authoring static profile=strict/apple_silicon/x86_64 defaults to strict and chooses
 the corresponding primitive key. Other static parameters are the source's dtype
@@ -58,18 +57,13 @@ defined extrapolation). No implicit low-pass, sample-rate inference, period or
 anti-alias quality claim is added. Construction is lazy and outputs remain dynamic
 with their bound source snapshots.
 
-Sample requests inherit CRV-01's complete-input validation, full output allocation/invalidation and Run numerical failures. The operation reads authorized Result windows without collecting or copying its complete tensor inputs. Mathematical stencils remain unchanged; undelivered invalid queries or columns can fail the run. A sparse sample request still publishes complete internal coverage, with public coverage restricted to requested tiles, while its recorded dependency support and dirty mapping cover the complete interpolation inputs.
-Position-only requests have only the exact requested new_positions source
-support and no source curve reads. Empty requests, arbitrary source strides, owners after context
-teardown, cache-off, budgets and cancellation follow the source/forwarding contract.
-Account bindings, source read windows, output/intermediate owners and compiled template state rather than treating export aliases as unowned pointers. Static interpolation preparation can survive binding replacement while dynamic sample Results are recomputed. Escaped Results and authorized read windows retain their owners after context retirement and handle release.
+Sample requests inherit CRV-01's fixed task execution: each selected output tile reads all source positions, its new-position rows and all source-value rows for its columns. Source-grid closure determines actual physical tile support. Only selected outputs are evaluated and allocated; fixed arithmetic scratch is private to each invocation. Position-only requests copy the exact requested query tiles independently and allocate separate output owners. The two outputs belong to different IR calls, and joint exports require a successful Run. Empty selection emits no payload tasks. Rebinding reuses immutable preparation; there is no content-cache identity promise. Escaped Results retain their owners beyond context lifetime.
 
 Conceptual fixture positions=[0,1,3], values=[0,2,4], new_positions=[2,0.5,2]
 gives linear samples=[3,1,3] and positions=[2,0.5,2]. PCHIP uses its own exact
 CRV-01 fixture; multi-function uses the corresponding per-column reference.
 Test independent positions containing nonfinite bits without running interpolation,
-then samples demand correctly rejecting those queries. Check output-specific
-dirty support, alias ownership, source error propagation and all CRV-01 numerical/
+and use valid finite queries for samples. Check output-specific static support, separate output ownership, source error propagation and all CRV-01 numerical/
 partial-request acceptance. Public runtime commands are implementation gates;
 these are Proposed templates, not new registered interpolation primitives.
 
@@ -98,6 +92,6 @@ these are Proposed templates, not new registered interpolation primitives.
 
 ## Maintained implementation and validation
 
-The four public resampling templates are maintained through the public `resampling.hpp` authoring helpers. Each helper appends a CRV-01 samples node and a `core.identity` positions node with collision-free IDs; it leaves existing workflow exports unchanged and returns both node outputs for explicit use or export. Samples and positions are Results throughout compilation, binding and execution. The identity output is a mapped view of the bound query Result, so a positions-only demand does not read curve data or allocate a copied position payload. The four helpers introduce no registered interpolation operation of their own.
+The four public resampling templates are maintained through the public `resampling.hpp` authoring helpers. Each helper appends a CRV-01 samples node and a `core.identity` positions node with collision-free IDs; it leaves existing workflow exports unchanged and returns both node outputs for explicit use or export. Samples and positions are Results throughout compilation, binding and execution. The identity output consists of explicit tile copies of the bound query Result. A positions-only selection reads only the requested query tiles and allocates separate output tiles; it does not read curve data. The four helpers introduce no registered interpolation operation of their own.
 
-It retains the existing CRV-01 exact-copy and numeric-accuracy checks and does not define an independent resampling oracle. The tests cover scalar and multi-column linear/PCHIP results, independent raw and typed position forwarding, position-only dependency support, complete complete-input sample support and dirty mapping, two fresh-content cache hits, static preparation reuse after binding replacement, upstream failure order, arbitrary source layouts, worker/caller floating-environment preservation and escaped owners. Float64 layout checks cover all four templates and eight source layouts under each caller/worker rounding mode; Float32 checks separately cover bit-preserving positions, typed validation and owner lifetime. K=65536 executes a real endpoint interpolation. At N=2^40 the positions output successfully exposes a zero-copy mapped view, while a samples request is rejected because the complete complete-input output exceeds the Root Payload budget. The latter is a capacity rejection, not a numerical run at that output size.
+Temporary public composition checks inherit CRV-01's independent exact arithmetic oracle. Cover all four templates, mixed dtypes, sparse row/column selection, positions-only raw special bits, source layouts, preparation reuse, cancellation, resource admission and escaped owners. Large logical outputs are admitted according to selected tiles and fixed scratch. Verify generated and explicit graph equivalence separately from numerical correctness; no independent resampling formula is introduced.

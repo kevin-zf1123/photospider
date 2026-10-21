@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -10,591 +12,322 @@
 
 #include "photospider/compiler/plan.hpp"
 #include "photospider/core/cancellation.hpp"
-#include "photospider/core/resource_allocator.hpp"
 #include "photospider/core/resources.hpp"
-#include "photospider/core/status.hpp"
-#include "photospider/data/input_snapshot.hpp"
-#include "photospider/data/tensor_span.hpp"
-#include "photospider/execution/dependencies.hpp"
+#include "photospider/data/result.hpp"
+#include "photospider/plugin/fixed_invocation_api.h"
 
 namespace ps {
 namespace execution_internal {
-struct DemandCoordinator;
-}
-
-/**
- * @brief Fixed local resource configuration for one ExecutionContext.
- *
- * @note Configuration has process-local meaning and contains no daemon quota or
- * remote capacity.
- */
-struct PHOTOSPIDER_API ExecutionContextConfig final {
-  /** @brief Fixed CPU worker count; zero resolves to bounded hardware count. */
+struct ContextState;
+struct PreparedState;
+struct RunState;
+struct DiagnosticsState;
+}  // namespace execution_internal
+/** @brief Fixed local resources. CPU workers are always available. */
+struct ExecutionContextConfig final {
   std::uint32_t cpu_workers = 0;
-  /** @brief Whether to create the configured native Metal or Vulkan device. */
-  bool gpu_enabled = false;
-  /**
-   * @brief Single aggregate waiting-callback limit across CPU/GPU lanes.
-   * @note A callback releases its slot when a worker starts it; running
-   * callbacks do not consume this ExecutionContext-wide bound. A staged CPU
-   * job holds one slot until its tile callbacks retire and it leaves the queue.
-   */
   std::uint32_t maximum_queued_tasks = 1024;
-  /** @brief Maximum reserved/allocated controlled computation buffer bytes. */
+  /** @brief Shared context credit for accepted asynchronous GPU submissions.
+   * Zero disables GPU issue. Credit returns only after terminal completion.
+   */
+  std::uint32_t maximum_gpu_submissions = 4;
+  std::uint32_t maximum_runs = 1024;
   std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
-  /** @brief Optional completed-result retention sublimit; zero disables it.
-   */
-  std::uint64_t result_cache_bytes = 0;
-  /** @brief Maximum live context-managed demand handles, 1..65536. */
-  std::uint32_t maximum_demands = 1024;
-  /** @brief Maximum live Result checkpoint scopes, 1..1048576.
-   */
-  std::uint64_t maximum_result_checkpoint_scopes = 65536;
-  /** @brief Retained dependency-cache proof units, 1..1048576.
-   * @note Counts actual record owners, row/tag/coordinate storage and source
-   * witnesses per manifest; shared owners in one manifest count once. Optional
-   * exhaustion skips retention. Independent from the pixel allocation limit.
-   */
-  std::uint64_t maximum_dependency_cache_metadata = 65536;
-  /** @brief Optional explicit limits for the context's managed resource root.
-   * The context creates a root with default ResourceLimits when this is unset.
-   * Existing maximum_live_bytes is also enforced as a Payload sublimit. Limits
-   * cover instrumented resources, not uninstrumented legacy metadata, external
-   * allocator/OS overhead, or RSS.
-   */
-  std::optional<ResourceLimits> managed_resources = {};
-  /** @brief Enables monotonic timing for accepted CPU/GPU FIFO callbacks.
-   * Default-off measurement reads three clocks per accepted/started callback.
-   * The fixed envelope timestamp is present in both modes. Range-block claims
-   * and work before pool submission are outside these observations.
-   */
-  bool collect_scheduler_timing = false;
+  std::optional<ResourceLimits> managed_resources;
 };
-
-/** @brief Cumulative accepted-callback observations for one backend FIFO.
- * @note Counters saturate at UINT64_MAX and set saturated. Counts and sums can
- * be differenced between unsaturated snapshots; maxima span context lifetime,
- * including warmup. These observations measure callbacks rather than range
- * blocks, requests, device commands or an execution-time decomposition.
- */
-struct PHOTOSPIDER_API CallbackQueueStatistics final {
-  std::uint64_t accepted_callbacks = 0, started_callbacks = 0;
-  /** @brief Sum from submit entry to successful publication, including mutex
-   * acquisition and queue storage. Failed submissions are excluded.
-   */
-  std::uint64_t submission_ns = 0;
-  /** @brief Sum from successful publication to worker removal from the FIFO.
-   * Admission-token retirement and callback execution follow that boundary.
-   */
-  std::uint64_t queue_wait_ns = 0;
-  std::uint64_t maximum_queue_wait_ns = 0, maximum_queued_callbacks = 0;
-  bool saturated = false;
-};
-/** @brief Context-local scheduler observations, separately synchronized per
- * lane. Disabled collection returns enabled=false and zero-valued lanes.
- */
-struct PHOTOSPIDER_API SchedulerStatistics final {
-  bool enabled = false;
-  CallbackQueueStatistics cpu, gpu;
-};
-
-/** @brief One exact-name immutable Result input supplied to a Run.
- * The Result schema must match its workflow declaration.
- */
-struct PHOTOSPIDER_API ExecutionBinding final {
-  /** @brief Case-sensitive required declaration name. */
+struct ExecutionBinding final {
   std::string name;
-  /** @brief Structured Result binding matching the declared schema. */
-  ResultRef result = {};
+  ResultRef result;
 };
-/**
- * @brief Per-call input snapshot; duplicate entries remain visible to
- * validation.
- * @note Names and Result references are copied by execute; Result storage keeps
- * shared immutable ownership. Caller containers must not be modified during
- * copying. A Run retains its binding snapshot until admitted callbacks retire.
- * Input payloads never enter compiler/cache identity.
+/** @brief Exact-name immutable input snapshot, retained through Run drain.
+ * Duplicate/missing/extra names fail preflight. Payload must already cover the
+ * compiled tile views and match their physical layout; adaptation requires
+ * explicit compiled COPY tasks. No sample validation or hidden copy occurs.
  */
-struct PHOTOSPIDER_API ExecutionBindings final {
-  /** @brief 0..4096 entries; every declaration must occur exactly once. */
+struct ExecutionBindings final {
   std::vector<ExecutionBinding> inputs;
 };
 
-/**
- * @brief Per-execution scheduling controls.
- *
- * @note A zero parallelism resolves to the ExecutionContext CPU worker count.
+enum class CallOutcome : std::uint8_t { Succeeded, Failed, Elided };
+/** @brief Owning call export, independent of final RET ownership.
+ * Values are keyed by physical value ID. A callback may copy ResultRef owners
+ * beyond Run/context lifetime. Failed and elided calls have no values.
  */
-struct PHOTOSPIDER_API ExecutionOptions final {
-  /** @brief Maximum in-flight plan steps for this Run. */
+struct CallRecord final {
+  std::uint64_t sequence = 0, activation = 0, source_call = 0;
+  physical::Id call = physical::none, failed_task = physical::none;
+  CallOutcome outcome = CallOutcome::Elided;
+  Status status;
+  std::map<physical::Id, ResultRef, std::less<physical::Id>,
+           ResourceAllocator<std::pair<const physical::Id, ResultRef>>>
+      values;
+};
+struct ExecutionOptions final {
+  /** @brief Zero uses context CPU/GPU grants. A positive value bounds this
+   * Run's lanes separately for each backend.
+   */
   std::uint32_t maximum_parallelism = 0;
-  /** @brief Per-session discovery/metadata limits for dependency plans. */
-  DependencyLimits dependencies = {};
-  /** @brief Run-wide bound on demand records and stage transitions. */
-  std::uint64_t maximum_dependency_work = 1048576;
-  /** @brief Separate optional cache-proof traversal/sample budget per Run.
-   * @note One shared budget precharges structural traversal, metadata copies,
-   * source sample/structure hashing, internal block keys and finite
-   * normalization. Optional exhaustion skips verification/retention without
-   * failing computation. Zero disables dependency cache verification and
-   * retention for that Run.
+  /** @brief Every block entry consumes one activation, including empty loops.
    */
-  std::uint64_t maximum_dependency_cache_work = 1048576;
-  /** @brief Maximum explicit Result/temporary read or write payload, positive.
-   * Internal backing windows are operation-defined and admitted against root
-   * capacity; this bound does not split those requests.
+  std::uint64_t maximum_block_activations = 1048576;
+  std::uint64_t maximum_work = 268435456;
+  /** @brief Maximum retained task records and call records, separately.
+   * Zero disables detailed tracing and native timestamp queries. Both arrays
+   * are admitted and allocated before starting the Run. Excess records are
+   * counted and discarded, including across loops; callbacks never allocate.
    */
-  std::uint64_t maximum_result_window_bytes = 4096;
-  /** @brief Per-caller notification after a structured range is certified.
-   * Each execute call has an independent subscription. Notifications are
-   * serialized for that caller. Revision watermarks are keyed by logical step
-   * and Result object identity: non-increasing revisions for the same object
-   * are suppressed, while a different object at the same step starts its own
-   * revision stream. A caller whose cancellation token is observed receives no
-   * newly admitted notifications; an already-admitted callback may finish
-   * before the call returns. The owning reference can be retained and read
-   * explicitly after callback or context retirement. A prefix is not complete
-   * execution success. `std::bad_alloc` maps to ResourceExhausted and other
-   * callback exceptions map to OperationFailed; observer failure stops this Run
-   * while prior certified ranges remain valid.
+  std::uint32_t trace_capacity = 0;
+  /** @brief Ordered per-Run delivery on a separate serial lane.
+   * Throws close the lane, discard queued exports and abort the Run after
+   * accepted work drains. join waits for delivery settlement. A callback must
+   * not join its own Run or destroy its ExecutionContext.
    */
-  std::function<Status(ValueRef, const ResultRef&)> result_publication = {};
-  /** @brief Maximum logical samples scanned for the optional Result digest.
-   * Counts certified tensor samples. Zero disables the
-   * digest; failed admission preflight omits it without failing execution.
-   */
-  std::uint64_t maximum_result_digest_samples = 65536;
+  std::function<void(const CallRecord&)> on_call_retired;
 };
-
-/**
- * @brief Raw timing and outcome for one continuation poll or rejected start.
- *
- * @note A GPU rejection is followed by separate records for the CPU polls.
- * Successful continuation construction has no separate timing record.
+/** @brief Last failed block admission, captured before any task in it issues.
+ * capacity describes an atomic budget rejection when available. Allocator or
+ * backend failures can have no exhausted dimension. Earlier blocks remain
+ * observable; this record never implies rollback of their effects.
  */
-struct PHOTOSPIDER_API OperationTiming final {
-  /** @brief Stable source node id. */
-  ValueRef output;
-  /** @brief Attempted local physical backend. */
-  Backend backend = Backend::Cpu;
-  /** @brief Monotonic callback duration in microseconds. */
-  std::uint64_t duration_us = 0;
-  /** @brief Attempt outcome category. */
-  ErrorCode outcome = ErrorCode::Ok;
-  /** @brief Poll/start attempts represented by this record; the static VM
-   * emits one per record. Consumers may aggregate by output/backend/stage. */
-  std::uint64_t invocation_count = 1;
-  /** @brief Total logical output elements computed by these attempts.
-   * Result publication counts newly certified tensor samples;
-   * cache-hit publication contributes zero. Saturates at UINT64_MAX when the
-   * cardinality or accumulated count exceeds uint64, with
-   * computed_elements_saturated set. Diagnostic overflow does not invalidate
-   * an otherwise legal Result publication.
-   */
-  std::uint64_t computed_elements = 0;
-  /** @brief Actual native work for this attempt, zero for CPU/cache hits. */
-  std::uint64_t native_dispatch_count = 0;
-  std::uint64_t native_compute_us = 0;
-  /** @brief Completed CPU computation stages and their tile callbacks. */
-  std::uint64_t cpu_stage_count = 0, cpu_tile_callback_count = 0;
-  /** @brief Owning opaque operation reports; absent for uninstrumented work. */
-  std::optional<DiagnosticAccumulator> reports = {};
-  /** @brief True when computed_elements no longer represents an exact count.
-   * False remains valid for an exact count equal to UINT64_MAX.
-   */
-  bool computed_elements_saturated = false;
-  /** @brief Run-shared stage ordinal, or UINT32_MAX for public output tiles.
-   * Stage records use output.node_id for identity; output port is routing only.
-   */
-  std::uint32_t shared_stage = UINT32_MAX;
+struct BlockAdmissionFailure final {
+  physical::Id block = physical::none;
+  std::uint64_t activation = 0;
+  ErrorCode code = ErrorCode::Ok;
+  ResourceAdmissionFailure capacity;
 };
-
-/** @brief Context-local aggregate of cache observations, synchronized on read.
+/** @brief Per-Run output and scratch backing in physical Domain index order.
+ * Host, Device and Shared are disjoint here; native bytes use actual capacity.
+ * Reserved includes unallocated and already freed block-protected capacity.
+ * Live counts committed backing, including retained exports. Excludes borrowed
+ * inputs, code/driver memory and host metadata, whose budget is separate.
  */
-struct ResultCacheStatistics final {
-  /** @brief Existing retained-result cache counters; each source keeps its
-   * own hit, miss, and eviction scope. */
-  std::uint64_t hits = 0, misses = 0, evictions = 0;
-  /** @brief Retained cache bytes and entries. */
-  std::uint64_t retained_bytes = 0, entries = 0;
-  /** @brief Unique retained native allocation capacity, included in
-   * retained_bytes. */
-  std::uint64_t native_retained_bytes = 0;
+struct ExecutionMemoryStatistics final {
+  std::array<std::uint64_t, 3> reserved_bytes_by_domain{},
+      live_bytes_by_domain{};
+  std::array<std::uint64_t, 3> peak_reserved_bytes_by_domain{},
+      peak_live_bytes_by_domain{};
 };
-
-/**
- * @brief Raw local execution diagnostics.
- *
- * @note Diagnostics are observations, not verdicts, attestations, or receipts.
+/** @brief One consumed task completion, including rejected submissions.
+ * Host times are nanoseconds from this Run's submission epoch on steady_clock.
+ * ready_ns begins actual issue eligibility, including effect/retirement gates.
+ * submit_ns precedes worker enqueue or GPU submit. cpu_start_ns is CPU-only;
+ * completion_ns is the terminal notification, consumed_ns the coordinator's
+ * observation. GPU device timing has its own explicitly named clock domain.
+ * copy_bytes counts logical bytes of a successful COPY, not staging traffic.
+ * Records are ordered by coordinator consumption, not submission or device
+ * execution. Unsubmitted/skipped tasks have no task record.
  */
-struct PHOTOSPIDER_API ExecutionDiagnostics final {
-  /** @brief Context-root model snapshot for structured execution; not RSS. */
-  std::optional<ResourceStatistics> managed_resources = {};
-  /** @brief Total execute call duration in microseconds. */
-  std::uint64_t execute_us = 0;
-  /** @brief Selected successful implementation backend per source result.
-   * @note A staged GPU path may reuse completed state or resolve a constant
-   * without new native work. Dispatch/submission fields report actual work.
+struct ExecutionTaskTiming final {
+  std::uint64_t activation = 0, submission = 0, source_call = 0;
+  physical::Id block = physical::none, task = physical::none,
+               call = physical::none;
+  physical::Backend backend = physical::Backend::Cpu;
+  ErrorCode status = ErrorCode::Ok;
+  std::uint64_t ready_ns = 0, submit_ns = 0, cpu_start_ns = 0;
+  std::uint64_t completion_ns = 0, consumed_ns = 0, copy_bytes = 0;
+  /** @brief Disjoint ready-to-submit intervals, classified at coordinator
+   * safe points. Lane includes its exclusive preallocated scratch; Context
+   * includes fair admission and CPU FIFO/GPU credit. Remaining time is host
+   * coordinator work or wakeup. These are scheduler observations, not device
+   * utilization. A full-block reservation has no dynamic scratch-capacity wait.
    */
-  std::map<ValueRef, Backend> selected_backends;
-  /** @brief Number of explicit cross-backend input transfers. */
-  std::uint64_t transfer_count = 0;
-  /** @brief Sum of copied input bytes for explicit transfers. */
-  std::uint64_t transfer_bytes = 0;
-  /** @brief Actual native dispatches/submissions, including unpublished
-   * attempts. */
-  std::uint64_t native_dispatch_count = 0;
-  std::uint64_t native_submission_count = 0;
-  /** @brief Completed computation stages, independent of delivered output
-   * tiles. */
-  std::uint64_t cpu_stage_count = 0, cpu_tile_callback_count = 0;
-  /** @brief Device command time; zero when unavailable, never host callback
-   * time. */
-  std::uint64_t native_compute_us = 0;
-  /** @brief Bytes encoded as shader constants, separate from image copies. */
-  std::uint64_t native_constant_bytes = 0;
-  /** @brief Completed input-copy cache hits that avoid another upload. */
-  std::uint64_t native_upload_hits = 0;
-  /** @brief Shared GPU storage consumed on the host, without fabricated copies.
+  std::uint64_t lane_wait_ns = 0, context_wait_ns = 0, coordinator_delay_ns = 0;
+  ps_kernel_device_timing_v8 device{};
+};
+/** @brief IR-ordered retirement time, excluding observer delivery.
+ * Join with task records by activation/call. Elided calls have no tasks.
+ * Aborted/suppressed calls have no retirement record.
+ */
+struct ExecutionCallTiming final {
+  std::uint64_t activation = 0, sequence = 0, source_call = 0, retired_ns = 0;
+  physical::Id call = physical::none;
+  CallOutcome outcome = CallOutcome::Elided;
+};
+/** @brief Per-Run submission-slot statistics, indexed by Backend.
+ * Inflight starts at issue and ends at coordinator consumption, including
+ * inline completions and locally rejected GPU submissions. CPU slots include
+ * queue wait. These are host scheduler occupancy, not device utilization.
+ * inflight_ns sums submit-to-consumption intervals and may overlap.
+ */
+struct ExecutionBackendStatistics final {
+  std::uint64_t submitted = 0, completed = 0, rejected = 0, inflight_ns = 0;
+  std::uint32_t inflight = 0, peak_inflight = 0;
+};
+/** @brief First task-coordinator abort and subsequent task drain.
+ * Host times use the task trace's Run-relative steady clock. Start records
+ * coordinator abort observation (or exceptional frame unwinding), not the
+ * caller's cancellation request. Completion means every issued task's terminal
+ * event has been consumed; observer delivery is excluded. A false finished
+ * flag denotes an ongoing drain. Ordinary call-failure cuts are not Run aborts.
+ */
+struct ExecutionDrainTiming final {
+  physical::Id block = physical::none;
+  std::uint64_t activation = 0, started_ns = 0, completed_ns = 0;
+  std::uint32_t inflight_at_abort = 0;
+  bool finished = false;
+};
+struct ExecutionDiagnostics final {
+  /** @brief Trace origin as nanoseconds from steady_clock::time_since_epoch.
+   * Add Run-relative host times to correlate observations in this process.
+   * This is not a wall clock or device timestamp. Cross-domain comparisons
+   * require an explicit clock calibration with its uncertainty.
    */
-  std::uint64_t host_access_count = 0;
-  /** @brief Actual bytes copied when assembling collected output tiles. */
-  std::uint64_t result_copy_bytes = 0;
-  /** @brief Peak committed controlled Payload bytes attributed to this Run.
-   * Includes payload allocated by parallel callbacks. Excludes existing input
-   * backing and
-   * earlier completed-cache storage. This reports controlled backing capacity,
-   * not process RSS.
+  std::uint64_t host_epoch_ns = 0;
+  ExecutionMemoryStatistics memory;
+  /** @brief New managed metadata owned by this Run, including diagnostics.
+   * Shared Context/PreparedPlan and pre-existing input owners keep their prior
+   * attribution. Export and diagnostic owners remain charged after Run/context
+   * destruction; cross-thread release updates the original observation.
    */
-  std::uint64_t peak_live_bytes = 0;
-  /** @brief Peak reserved Payload capacity attributed to this Run, including
-   * complete CPU reservations and incremental native reservations. This is an
-   * admission capacity measure and may differ from committed live bytes.
-   */
-  std::uint64_t planned_peak_bytes = 0;
-  /** @brief Caller-preexisting immutable input capacity outside the budget. */
-  std::uint64_t retained_input_bytes = 0;
-  /** @brief Maximum admitted plan callbacks, bounded by maximum_parallelism. */
+  ResourceMetadataStatistics metadata;
+  std::array<ExecutionBackendStatistics, 2> backends{};
+  std::optional<ExecutionDrainTiming> abort_drain;
+  std::uint64_t activations = 0, submitted_tasks = 0, completed_tasks = 0;
+  std::uint64_t retired_calls = 0;
   std::uint32_t peak_active_tasks = 0;
-  /** @brief Successfully delivered output tile count, across named outputs. */
-  std::uint64_t tile_count = 0;
-  /** @brief Successful completed-result cache observations reused by this Run.
+  /** @brief Successful output-tile allocations, including later rollback.
+   * Excludes scratch, commands, borrowed inputs and Result envelope aliases.
    */
-  std::uint64_t cache_hits = 0;
-  /** @brief Actual direct records visited by optional dependency cache proofs.
+  std::uint64_t allocation_count = 0, block_admission_failures = 0;
+  std::optional<BlockAdmissionFailure> last_block_admission_failure;
+  /** @brief Coordinator monotonic nanoseconds spent at an unsettled head.
+   * Completed waits exclude observer delivery. Abort-truncated waits are
+   * reported separately. current_head_wait_ns is the latest progress sample.
    */
-  std::uint64_t dependency_cache_records_visited = 0;
-  /** @brief Precharged proof, normalization, sample and internal block-key
-   * work. */
-  std::uint64_t dependency_cache_work = 0;
-  /** @brief Completed internal state transitions reused/computed after keyed
-   * lookup. */
-  std::uint64_t block_cache_hits = 0, block_cache_misses = 0;
-  /** @brief Successful source reads used to assemble Result inputs. */
-  std::uint64_t source_read_count = 0;
-  std::uint64_t source_read_bytes = 0;
-  /** @brief Human-readable CPU fallback reasons in occurrence order. */
-  std::vector<std::string> fallback_reasons;
-  /** @brief Raw physical callback attempts. */
-  std::vector<OperationTiming, ResourceAllocator<OperationTiming>>
-      operation_timings;
-  /** @brief Non-security digest of the executed physical plan. */
-  ResourceString plan_digest;
-  /** @brief Optional non-security content digest of named structured Results.
-   * Structured execution hashes canonical schemas and
-   * certified logical tensor coverage and sample bytes in ExecutionResult's
-   * results map. It excludes object identity and physical
-   * layout; it is not authentication. Fragment execution leaves it empty.
-   * Preflight omits the digest when sample, row-window, remaining-work, or
-   * coverage-count representability checks cannot admit the full scan.
-   * Failures during an admitted scan remain execution failures.
+  std::uint64_t retirement_head_wait_ns = 0, peak_retirement_head_wait_ns = 0;
+  std::uint64_t unfinished_head_wait_ns = 0, current_head_wait_ns = 0;
+  /** @brief Summed host intervals; parallel tasks can overlap.
+   * CPU queue wait ends at invoke, CPU invoke ends at completion notification.
+   * Completion delay ends when the coordinator consumes the notification.
+   * COPY bytes include only successful logical transfers, once per task.
    */
-  ResourceString result_digest;
+  std::uint64_t ready_wait_ns = 0, cpu_queue_wait_ns = 0, cpu_invoke_ns = 0;
+  std::uint64_t lane_wait_ns = 0, context_wait_ns = 0, coordinator_delay_ns = 0;
+  /** @brief Always zero with atomic full-block output/scratch admission;
+   * unavailable capacity rejects the block before any task becomes eligible.
+   */
+  std::uint64_t scratch_capacity_wait_ns = 0;
+  /** @brief Completed observer callbacks: queue time from enqueue to callback,
+   * and callback duration. Independent of task completion and retirement.
+   * Includes throwing callbacks; discarded records contribute no callback.
+   */
+  std::uint64_t observer_queue_wait_ns = 0, observer_invoke_ns = 0;
+  std::uint64_t observer_deliveries = 0;
+  std::uint64_t completion_delay_ns = 0, copy_bytes = 0;
+  std::uint64_t coordinator_waits = 0, coordinator_wakeups = 0;
+  std::uint64_t task_timing_count = 0, call_timing_count = 0;
+  std::uint64_t dropped_task_timings = 0, dropped_call_timings = 0;
 };
-
-/**
- * @brief Complete in-memory named execution result.
- *
- * @note Results have no durable identity, retention, receipt, or recovery
- * semantics.
+/** @brief Independent Run diagnostic owner, with no Run or Result ownership.
+ * snapshot is a synchronized allocation-free copy at coordinator safe points.
+ * It remains readable after failure and after Run/context destruction.
+ * Default observations return zero counters. Copies share only diagnostics.
  */
-struct PHOTOSPIDER_API ExecutionResult final {
-  /** @brief Raw compiler-independent execution diagnostics. */
-  ExecutionDiagnostics diagnostics;
-  /** @brief Direct structural evidence for a completed Result Run.
-   * @note Owns no Result tensor backing storage.
+class PHOTOSPIDER_API ExecutionObservation final {
+ public:
+  ExecutionObservation() = default;
+  bool valid() const noexcept { return state_ != nullptr; }
+  ExecutionDiagnostics snapshot() const noexcept;
+  /** @brief Copy a retained trace prefix into caller storage, without
+   * allocation. Returns the number copied, bounded by capacity. Null returns
+   * zero. Each copy is synchronized; separate calls need not see the same
+   * progress point. Trace owners never retain Results and remain usable after
+   * Run destruction.
    */
-  ExecutionDependencies dependencies;
-  /** @brief Paged named results; each retains descriptor, witness and backing.
-   */
-  ResourceMap<ResultRef> results = {};
+  std::size_t copy_task_timings(ExecutionTaskTiming* target,
+                                std::size_t capacity) const noexcept;
+  std::size_t copy_call_timings(ExecutionCallTiming* target,
+                                std::size_t capacity) const noexcept;
+
+ private:
+  friend class RunHandle;
+  std::shared_ptr<execution_internal::DiagnosticsState> state_;
 };
-
-/** @brief Named tile subsets or complete outputs of the compiled plan.
- * Empty tile sets request no computation. Each member interval is checked
- * against its compiled grid before starting any requested producer.
- */
-using DemandQuery = std::map<std::string, TileRequest>;
-/** @brief Complete sparse result; holes remain unauthorized and unallocated. */
-struct PHOTOSPIDER_API DemandResult final {
+struct ExecutionResult final {
   ResourceMap<ResultRef> results;
   ExecutionDiagnostics diagnostics;
-  ExecutionDependencies dependencies;
-  /** @brief Captured demand generation; zero for direct fragment execution. */
-  std::uint64_t generation = 0;
 };
-/** @brief Bounds the total retained structural publications for one handle. */
-struct DemandConfig final {
-  /** @brief Retained metadata units; supported range 1..1048576. */
-  std::uint64_t maximum_metadata_entries = 65536;
-};
-/** @brief Atomic binding replacement and potential change in recorded outputs.
- * @note Coverage excludes never-requested outputs. Dirty sets accumulate until
- * their units are successfully recomputed. All subscriptions share the latest
- * record of each member tile. Hints do not authorize reads;
- * byte comparisons use immutable input owners.
+/** @brief Immutable plan, direct kernels and module/resource leases.
+ * Preparation performs no payload execution. Copies share preparation and
+ * support independent concurrent Runs in their originating context.
  */
-struct PHOTOSPIDER_API DemandUpdate final {
-  std::uint64_t generation = 0;
-  std::map<std::string, TileRequest> coverage;
-  std::map<std::string, TileRequest> potential_dirty;
-};
-/** @brief Context-managed immutable binding bundle with explicit replacement.
- * @note Copies share one handle. Requests are independently cancellable and
- * keep original Q. Context destruction cancels and drains active calls; later
- * handle calls fail Cancelled. No worker or pixel cache is owned by the handle.
- */
-class PHOTOSPIDER_API DemandHandle final {
+class PHOTOSPIDER_API PreparedPlan final {
  public:
-  DemandHandle() = default;
-  bool valid() const noexcept { return impl_ != nullptr; }
-  /** @brief Executes exact original Q against the captured latest generation.
-   * @return Complete fragments/evidence, or typed failure without partial
-   * publication. Each completed unit replaces its prior dependency record.
-   * Concurrent publication/replacement can return Stale; cancellation wins.
-   * @throws std::bad_alloc For request/structural metadata.
-   */
-  Result<DemandResult> request(const DemandQuery& query,
-                               const CancellationToken& cancellation = {},
-                               const ExecutionOptions& options = {}) const;
-  /** @brief Validates immutable replacements and commits bundle/dirty together.
-   * @note Replacement Results must retain the same static schemas. Required
-   * observed producer units are compared in full under the sample limit.
-   * Concurrent request publication/replacement may return Stale for retry; no
-   * partial edit occurs.
-   * @return New generation and accumulated dirty coverage, or typed failure.
-   * @throws std::bad_alloc For immutable snapshots/metadata.
-   */
-  Result<DemandUpdate> replace_bindings(
-      ExecutionBindings bindings,
-      const SnapshotAccessOptions& options = {}) const;
-  /** @brief Removes one exact query's retained structural subscription.
-   * @note Does not cancel active requests. An already-running request for Q
-   * can publish a new subscription after this removal.
-   * @return Success, NotFound for an unregistered query, Stale on concurrent
-   * publication/replacement, or stopped status.
-   */
-  Status release(const DemandQuery& query) const;
-  /** @brief Cancels all handle requests and releases retained publications.
-   * @return True on the first cancellation; running callbacks drain normally.
-   * @throws Nothing.
-   */
-  bool cancel() const noexcept;
-  Result<std::uint64_t> generation() const;
+  PreparedPlan() = default;
+  bool valid() const noexcept { return state_ != nullptr; }
+  const ExecutionPlan& plan() const;
 
  private:
   friend class ExecutionContext;
-  friend struct execution_internal::DemandCoordinator;
-  struct Impl;
-  explicit DemandHandle(std::shared_ptr<Impl> impl);
-  std::shared_ptr<Impl> impl_;
+  std::shared_ptr<const execution_internal::PreparedState> state_;
 };
+/** @brief Shared mutable Run owner with explicit cancellation and drain.
+ * Destroying a handle releases that reference; accepted work keeps its own
+ * lifetime until completion. Context destruction cancels and drains all Runs.
+ */
+class PHOTOSPIDER_API RunHandle final {
+ public:
+  RunHandle() = default;
+  bool valid() const noexcept { return state_ != nullptr; }
+  /** @brief Idempotent stop request; false once terminal outcome is latched. */
+  bool request_cancel() const noexcept;
+  /** @brief Retain diagnostics without retaining this Run or its Results. */
+  ExecutionObservation observation() const noexcept;
+  /** @brief Wait for task quiescence and observer settlement.
+   * Concurrent joins return shared immutable Result owners. Cancellation wins
+   * over stale source state and operational failure before terminal latch.
+   * Retained failure text is bounded to 256 bytes; structured detail is kept.
+   * If copying a terminal failure's diagnostic exhausts memory, the returned
+   * status preserves its code, reason and detail with an empty message.
+   * Default handles and joining from this Run's observer fail InvalidArgument.
+   */
+  Result<ExecutionResult> join() const;
 
-/**
- * @brief Explicit owner of bounded local CPU/GPU execution resources.
- *
- * @note Independent contexts may run concurrently. Destruction requests stop,
- * rejects queued callbacks, releases their shared waiting admissions, and
- * joins every owned worker thread.
+ private:
+  friend class ExecutionContext;
+  std::shared_ptr<execution_internal::RunState> state_;
+};
+/** @brief Owner of bounded worker resources and the frozen operation registry.
+ * Direct methods must not race destruction. Destruction rejects submissions,
+ * requests cancellation and waits for every accepted Run and observer to drain.
+ * Returned Result owners retain their storage and accounting independently.
  */
 class PHOTOSPIDER_API ExecutionContext final {
  public:
-  /**
-   * @brief Creates fixed workers, per-lane FIFOs, and shared admission owners.
-   * @param operations Frozen operation registry retained for all Runs.
-   * @param config Fixed local resource configuration.
-   * @throws std::invalid_argument If registry/config is invalid.
-   * @throws std::bad_alloc If worker/queue state allocation fails.
-   * @note CPU execution is always created; GPU is optional. Both lanes consume
-   * the single `maximum_queued_tasks` waiting bound.
-   */
   explicit ExecutionContext(std::shared_ptr<OperationRegistry> operations,
                             ExecutionContextConfig config = {});
-
-  /**
-   * @brief Stops admission, joins workers, and verifies resource settlement.
-   * @throws Nothing.
-   * @note Direct execute/open calls must not race destruction. Existing
-   * demand-handle calls may race shutdown; they are cancelled and drained.
-   */
   ~ExecutionContext() noexcept;
-
-  /**
-   * @brief Forbids copying owned worker pools and resource accounting.
-   * @param other Source context that cannot be copied.
-   * @throws Nothing; the operation is deleted.
-   * @note Construct a separate context for independent resource ownership.
+  ExecutionContext(const ExecutionContext&) = delete;
+  ExecutionContext& operator=(const ExecutionContext&) = delete;
+  /** @brief Bind direct kernels to the exact compiled placement.
+   * Stale/foreign/default Plans fail Stale. Unsupported placements fail
+   * BackendUnavailable. The immutable Plan body is shared; new host tables,
+   * bridge metadata and kernel wrappers are admitted under this context root.
+   * Capacity/allocation exhaustion returns ResourceExhausted with partial
+   * preparation released. No lowering, topology change or fallback occurs.
    */
-  ExecutionContext(const ExecutionContext& other) = delete;
-  /**
-   * @brief Forbids copy assignment of active local execution resources.
-   * @param other Source context that cannot be assigned.
-   * @return No value; the operation is deleted.
-   * @throws Nothing; the operation is deleted.
-   * @note In-flight Runs and queue ownership are never rebound.
+  Result<PreparedPlan> prepare(const ExecutionPlan& plan) const;
+  /** @brief Preflight immutable bindings then start one independent Run.
+   * Context/run limits or metadata/payload admission may fail with
+   * ResourceExhausted. Callback exceptions never escape the Run boundary.
    */
-  ExecutionContext& operator=(const ExecutionContext& other) = delete;
-  /**
-   * @brief Forbids moving worker/resource ownership after construction.
-   * @param other Source context that cannot be moved.
-   * @throws Nothing; the operation is deleted.
-   * @note Stable context lifetime bounds every private ExecutionRun.
-   */
-  ExecutionContext(ExecutionContext&& other) = delete;
-  /**
-   * @brief Forbids move assignment of worker pools and registry identity.
-   * @param other Source context that cannot be assigned.
-   * @return No value; the operation is deleted.
-   * @throws Nothing; the operation is deleted.
-   * @note Destruction remains the only worker-ownership teardown path.
-   */
-  ExecutionContext& operator=(ExecutionContext&& other) = delete;
-
-  /**
-   * @brief Executes one validated plan through bounded local resources.
-   * @param plan Immutable physical plan for one graph revision.
-   * @param bindings Owned snapshot validated completely before callbacks.
-   * Missing/extra/duplicate/malformed names fail InvalidArgument; a Result
-   * schema mismatch fails TypeMismatch. Result descriptor and payload
-   * validation failures use the corresponding typed status.
-   * @param cancellation Cooperative cancellation observation.
-   * @param options Run budgets, diagnostics and intra-operation parallelism.
-   * @return Named result or typed cancellation/stale/backend/resource failure.
-   * @throws std::bad_alloc If staging/result allocation fails before a
-   * recoverable status can be built.
-   * @note Default, stale, or foreign-registry plans fail Stale before bindings
-   * or cancellation are read. After entry, observed cancellation precedes
-   * stale graph state and ordinary failure. Concurrent calls may reuse a plan
-   * with independent bindings; plan/options references must remain immutable
-   * and valid. Caller-preexisting input retention is outside
-   * maximum_live_bytes; controlled output/scratch/intermediate/transfer buffers
-   * are charged until their last owner retires. Returned Results may outlive
-   * this context. After every completion and after complete final
-   * result/digest/timing assembly, publication rechecks cancellation before
-   * plan currentness under the Run mutex. Passing that last check is the sole
-   * success-publication linearization point; rejected local output is
-   * discarded. The interpreter follows the Plan's tile instructions and CFG.
-   * It does not infer input mappings or construct producer tasks. Effect roots
-   * and their complete static publication closures are compiled into that
-   * instruction stream, including calls without a named output. Failure or
-   * cancellation of an executed mandatory root fails this Run.
-   */
-  [[nodiscard]] Result<ExecutionResult> execute(
-      const ExecutionPlan& plan, ExecutionBindings bindings = {},
-      const CancellationToken& cancellation = CancellationToken(),
-      const ExecutionOptions& options = {});
-
-  /** @brief Opens an immutable latest-demand bundle without starting callbacks.
-   * @note Requires Result bindings that match the workflow declarations. The
-   * Requests and binding replacement check the retained plan currentness.
-   * Graph replacement or destruction makes a borrowed-graph plan stale.
-   * @return Handle or Stale/typed validation/resource failure.
-   */
-  Result<DemandHandle> open_demand(const ExecutionPlan& plan,
-                                   ExecutionBindings bindings = {},
-                                   DemandConfig config = {});
-  /** @brief Executes exact subsets of a current static plan with per-call
-   * bindings.
-   * @param plan Current plan from this context's operation registry.
-   * @param bindings Immutable Result owners, validated as for execute().
-   * @param query Named subsets of the compiled output tile requests.
-   * @param cancellation Cooperative per-call cancellation.
-   * @param options Resource, work and notification controls for this Run.
-   * @return Complete fragments or typed binding, query, stale, cancellation,
-   * backend, protocol or resource failure; no partial success.
-   * @throws std::bad_alloc If call-argument allocation fails.
-   * @note The plan, query and options must remain valid and immutable until
-   * return. Bindings are copied per call; input owners survive callback
-   * retirement. Graph currentness and cancellation follow execute().
-   * Requests must be subsets of the Plan's compiled output selections.
-   * Specialization filters existing instructions before execution and never
-   * calls dependency mappers. Empty selections omit pure output work; saved
-   * CFG control and mandatory effect roots still execute on the chosen path.
-   * With a positive result cache, eligible pure ancestry may reuse completed
-   * values after comparing the fixed input grants against ready bindings.
-   * Hits install current-run dependency evidence. Optional cache limits do not
-   * change numerical results or failure isolation. CPU and native GPU callbacks
-   * use context workers; each instruction receives its precompiled grants.
-   * GPU BackendUnavailable may retry only when the instruction contains a
-   * compiled CPU fallback with sufficient grants. Retry requires an untainted
-   * attempt without input I/O, native work, publication, checkpoint or block
-   * activity. Protocol, observer, resource, cancellation and active-stop errors
-   * veto retry. Attempt limits share the Run budget. Fallback ancestry remains
-   * excluded from completed-result, checkpoint and block reuse.
-   * Diagnostics record actual backends and rejected attempts. Caller must not
-   * race execution with context destruction. Callbacks drain before return;
-   * failure or cancellation of an executed mandatory root fails this Run.
-   */
-  Result<DemandResult> execute_fragments(
-      const ExecutionPlan& plan, ExecutionBindings bindings,
-      const DemandQuery& query, const CancellationToken& cancellation = {},
-      const ExecutionOptions& options = {});
-
-  /** @brief Drops optional retained results; active readers remain valid.
-   * @note Concurrent-safe; active producers cannot refill the cleared epoch.
-   */
-  void clear_result_cache();
-  /** @brief Returns synchronized context-local cache observations.
-   */
-  ResultCacheStatistics cache_statistics() const;
-  /** @brief Returns cumulative FIFO observations when collection is enabled.
-   * @note Thread-safe. Each lane is sampled under its own mutex, so the two
-   * lane snapshots can represent different instants. Concurrent Runs share
-   * these counters; per-request subtraction does not isolate one Run.
-   */
-  SchedulerStatistics scheduler_statistics() const;
-
-  /**
-   * @brief Returns the fixed resolved CPU worker count.
-   * @return Positive worker count.
-   * @throws Nothing.
-   * @note The value never changes during context lifetime.
-   */
-  [[nodiscard]] std::uint32_t cpu_workers() const noexcept;
-
-  /**
-   * @brief Reports whether the optional local GPU lane exists.
-   * @return Configured availability.
-   * @throws Nothing.
-   * @note Availability does not imply every operation supports GPU.
-   */
-  [[nodiscard]] bool gpu_enabled() const noexcept;
-  /** @brief Shares the context's managed resource root with
-   * temporary storage clients.
-   * @return A handle to the context root.
-   * Its leases can outlive this context. Does not start or retain computation.
-   */
+  Result<RunHandle> submit(const PreparedPlan& plan,
+                           ExecutionBindings bindings = {},
+                           const CancellationToken& cancellation = {},
+                           ExecutionOptions options = {});
   Result<ResourceBudget> resource_budget() const;
+  std::uint32_t cpu_workers() const noexcept;
+  /** @brief Human-readable native device and driver description for
+   * diagnostics. Empty until successful native device creation during prepare.
+   * This query creates no device and submits no work. The owned string is safe
+   * to retain independently; its format is not a persistent identity or parsing
+   * contract. Concurrent calls with prepare/submit are synchronized;
+   * destruction must not race this method. Allocation failure throws
+   * std::bad_alloc.
+   */
+  std::string native_device_description() const;
 
  private:
-  Result<ExecutionResult> execute_regions(
-      const ExecutionPlan& plan, ExecutionBindings bindings,
-      const CancellationToken& cancellation, const ExecutionOptions& options,
-      const DemandQuery* requested = nullptr);
-  /** @brief Opaque pools, shared waiting admission, and resource ledger. */
-  struct Impl;
-  /** @brief Unique local execution ownership. */
-  std::unique_ptr<Impl> impl_;
+  std::shared_ptr<execution_internal::ContextState> state_;
 };
-
 }  // namespace ps

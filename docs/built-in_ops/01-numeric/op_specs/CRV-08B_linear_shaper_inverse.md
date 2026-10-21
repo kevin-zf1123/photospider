@@ -15,64 +15,18 @@ clarification_status: complete
 
 # CRV-08B: linear_shaper_inverse
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+The public `linear_shaper_inverse` helper expands ordinary workflow nodes; it does not register a new primitive. Ordered inputs are single-tensor Results input, lower and upper, with arbitrary schema/member names. Complete sample shapes include batch axes. Input is Float32/Float64, rank 1..8, positive extents and at most 2^40 elements. Bounds are same-dtype scalars with shape `[1]`. Output `values` uses `photospider.tensor`/`samples` with ordinary input axes and unchanged dtype.
 
-## Interface and formula
+The mathematical formula is `lower+input*(upper-lower)`, with one final rounding of the complete remap expression and no clipping. Finite ordered bounds `lower<upper` are an unchecked caller precondition. Within that domain, endpoint bits, NaN quieting/payload, signed zero and infinity extensions follow [remap_range](NUM-06B_remap_range.md). Strict results are bitwise reproducible; accelerated profiles retain the [shared floating bound](NUM_accelerated_contract.md). Invalid bound payloads have no promised runtime diagnostic.
 
-Ordered inputs are Results named input, lower and upper. Each has one tensor
-member under any schema id/version/key; use its full `sample_shape()`, including
-batch axes. `input` is Float32/64, rank 1..8, positive extents and at most 2^40
-elements. Bounds are same-dtype scalar tensors of shape [1], finite and ordered
-lower<upper. Output port `values` is an immutable Result using
-`photospider.tensor` v1/member `samples`, preserving input shape/dtype with
-no attached domain description. No implicit clipping occurs.
-The mathematical formula is lower+input*(upper-lower), with whole-expression final rounding.
-This named authoring template expands Result-based remap_range and explicit
-broadcast/constant nodes. Static profile is strict/apple_silicon/x86_64, default
-strict; it does not register a new primitive.
-The mandatory inverse lower<upper guard is the scalar remap_range composition specified in CRV-08; do not inherit permissive target-bound order unchecked.
+## Fixed composition and execution
 
-Inherit the [complete shaper contract](CRV-08_shaper.md) for exact endpoints,
-zero signs, NaN quieting/payloads, infinity/domain extensions and overflow as
-successful IEEE results. Bound validation always precedes source special values.
-Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
-These operations do not modify a color description or implement tone mapping.
+The helper constructs scalar zero/one literals, expands bounds and literals through fixed constant tasks, and applies fixed remap tasks. Each selected output tile and selected intermediate has an independent dense allocation. Empty selection emits no payload work. Source affine views may have negative/zero strides and unaligned offsets after bounds validation. All admitted intermediates count toward block capacity, and successful output owners outlive the execution context.
 
-## Execution and failures
+The inverse retains a scalar `remap(lower,lower,upper,lower,lower)` dependency before target-lower expansion. This preserves lower bits for valid bounds; it is not a runtime order validator. Shape/dtype mismatches fail before execution. Resource, backend, cancellation and upstream failures retain their operational statuses. Fixed tasks do not use the logarithmic callbacks' complete-input validation, cache or full-output publication mechanism.
 
-Nonempty complete-input requests all three inputs with payload tile coverage with explicit validation
-, including complete typed/upstream validation. The remap Result program
-reads authorized windows directly; it does not collect or copy the complete
-input through Tensor. Empty reads no payload. Inherit full-output allocation,
-full dirty scope, sparse public delivery, arbitrary input strides, ownership,
-budgets and cancellation from CRV-08.
-Account all internal guard/broadcast/remap state, not only the exported output.
-Invalid bounds use InvalidArgument/InvalidDomain; shape/dtype mismatch uses
-TypeMismatch. Numeric special results succeed. Resource, backend, stale,
-upstream and cancellation failures preserve the shared categories; numeric failures have Run scope.
+Both Float32 and Float64 compositions use fixed operations. Float32 zero/one literals use count-one linspace with direct Float32 rounding; the unused endpoint and axis output add no payload tasks. Host profile availability remains required.
 
-## Public workflow and acceptance
+## Acceptance
 
-lower=-2, upper=2, input=[0,0.5,1,1.5] -> [-2,0,2,4].
-Bind these ports through the public Compiler/ExecutionContext interface
-after template expansion and check named values.
-The maintained public workflow executes this fixture through Compiler/ExecutionContext.
-
-Apply the shared independent oracle, endpoint/extreme/subnormal/NaN fixtures,
-partial-request and dirty witnesses, strides, resource limits, cancellation,
-cache-off and lifetime checks. Use an exact rational whole-formula oracle; inverse acceptance includes lower>=upper rejection.
-The maintained target command and current validation boundary are linked below; the
-specification remains Proposed.
-
-## Maintained implementation and validation
-
-The public entry point is `linear_shaper_inverse` in
-`photospider/ops/numeric/shapers.hpp`. This linear helper expands to existing Result
-remap/constant nodes and is not a linear primitive.
-See [the CRV-08 family contract](CRV-08_shaper.md)
-for arithmetic and validation requirements. Temporary acceptance must cover public
-composition and output lifetime; report only the profiles and sizes actually exercised.
+For a valid fixture, lower=-2, upper=2, input=[0,0.5,1,1.5] gives [-2,0,2,4]. Temporary public Compiler/ExecutionContext checks compare an independent exact rational formula, including endpoints, IEEE specials, partial/empty selection, source layouts, concurrent bindings and output ownership. Check only supported execution paths and state any remaining dependency limitation. Out-of-domain bounds are not rejection tests for the unchecked fixed kernel. See the [CRV-08 linear composition](CRV-08_shaper.md#linear-composition), [fixed arrays](../arrays-execution.md) and [fixed ranges](../range-execution.md). Specification status remains Proposed.

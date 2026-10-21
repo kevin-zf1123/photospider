@@ -5,7 +5,7 @@ kind: shared_mathematical_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 ---
 
@@ -55,8 +55,7 @@ values follow the classification section below.
 Here l=L*/100 is the revised native storage coordinate; the exact multiplication
 by 100 is inside B's complete formula, not an extra rounded conversion node.
 Source support: A l uses only Y; a* uses X,Y; b* uses Y,Z. B X uses l,a*;
-Y uses l; Z uses l,b*. Outputs not requested are not evaluated. Dirty mapping
-is the forward relation of these component dependencies at the same coordinate.
+Y uses l; Z uses l,b*. Every formula in a complete retained output tile is evaluated. These same-position mathematical supports determine static source-grid closure; they do not define an incremental dirty-mapping service.
 
 Analytic acceptance anchors, before output rounding:
 
@@ -98,7 +97,7 @@ stored pi_multiple value times mathematical pi:
 a = C*cos(theta)
     b = C*sin(theta)
 
-Semantic C=0 validates finite hue and yields +0 for each requested a/b instead
+Semantic C=0 requires finite hue as a caller precondition and yields +0 for each requested a/b instead
 of retaining trigonometric product signs. Semantic C<0 is invalid. Raw uses the
 numerical products, including signed/negative C; it does not apply that semantic
 zero-chroma output override. Exact trig zero/sign rules inherit NUM, including
@@ -108,13 +107,12 @@ Strict rounds the complete C/h/a/b formula once; L stays an exact copy. Thus
 forming squares or products in machine precision and overflowing prematurely is
 not a valid reference. Finite nonzero underflow follows NUM. C/h each depend on
 both a,b; a/b each depend on C,h even at C=0; L is independent. Semantic finite
-validation follows these exact sets. No alpha or unrelated group participates.
+preconditions follow these exact sets over complete retained output tiles. No alpha or unrelated group participates.
 
 Fixtures include a=3,b=4 giving C=5; a=-1,b=+0/-0 giving pi_multiple h=+1/-1;
 all four signed-zero pairs giving C=+0,h=+0; and inverse C=2,h=5/2 in
 pi_multiple giving a=0,b=2 under NUM exact special-angle signs. That inverse
-loses its extra winding on the next forward transform. Test zero C with invalid
-hue in semantic mode and L-only requests with invalid C/h to establish support.
+loses its extra winding on the next forward transform. Test zero C with finite hue, and L-only retained tiles to establish independent support.
 
 ## E/F: fixed XYZ and OKLab transform
 
@@ -167,9 +165,9 @@ q = ((G-B)/d) mod 6    when R==M
 Ties use R, then G, then B priority; equivalent endpoint values are interpreted
 on the same exact periodic circle. mod is Euclidean. Output H=q*pi/3 in radian
 or q/3 in pi_multiple. Saturation is d/(1-abs(2*L-1)) for HSL and d/V for HSV.
-A non-gray zero denominator fails only a requested semantic S. H and L/V do not
+A non-gray zero denominator is outside the caller precondition for semantic S. H and L/V do not
 evaluate saturation. Each forward H,S,L/V still reads all RGB to resolve extrema
-and validate its consumed triple. There is no negative-saturation hue rotation.
+with semantic finiteness as a caller precondition. There is no negative-saturation hue rotation.
 
 Inverse hue evaluation uses exact q=(3*H/pi) mod 6 for radian, or (3*H) mod 6
 for pi_multiple. Let c=(1-abs(2*L-1))*S and offset=L-c/2 for HSL;
@@ -184,7 +182,7 @@ c=V*S and offset=V-c for HSV. Let v=c*(1-abs((q mod 2)-1)). Choose:
 | [4,5) | v,0,c |
 | [5,6) | c,0,v |
 
-Every requested inverse component uses the full H,S,L/V validation support even
+Every requested inverse component uses the full H,S,L/V source support even
 when c=0. Finite S/L/V extensions are not clipped. Such arbitrary inverse inputs
 need not return the original H/S on a forward round trip: sector degeneracy,
 negative c and zero denominators limit invertibility. Complete formulas round
@@ -193,7 +191,7 @@ including very large finite hues. No whole-image scan or hue unwrapping occurs.
 
 Fixtures: RGB=(1,0,0) -> HSL=(0,1,0.5), HSV=(0,1,1); RGB=(0,1,0) gives H=2/3
 in pi_multiple; gray=(2,2,2) gives H=S=0 and L/V=2. RGB=(1,0,-1) has L=0 and
-undefined finite HSL S, but H and L requests succeed. RGB=(0,-1,-2) likewise has
+undefined finite HSL S, while complete retained tiles containing only H/L remain evaluable. RGB=(0,-1,-2) likewise has
 V=0 and undefined finite HSV S. Use actual stored floating hue for inverse
 oracles; rounded 2/3 is not the exact rational 2/3 in a later call.
 
@@ -252,29 +250,27 @@ Their transport quantization and subsampling do not become operator behavior.
 
 O copies Y. For x/y, compute exact T=X+Y+Z then x=X/T,y=Y/T. In semantic mode
 only, an all-zero triple substitutes source reference-white xy; a nonzero triple
-with exact T=0 fails. Raw applies the ratios without the black substitution.
+with exact T=0 violates the caller precondition. Raw applies the ratios without the black substitution.
 P copies Y; its other outputs are X=x*Y/y and Z=(1-x-y)*Y/y. Semantic X/Z
 requests require y!=0 even at Y=0. Raw retains NUM division behavior.
 Complete finite formulas round once, avoiding intermediate overflow, underflow
 or a rounded denominator changing a branch. Copied Y preserves its zero sign.
 
 O x/y read all XYZ; P X/Z read all xyY. Y copies in either direction only read
-the corresponding Y. These supports apply to validation and forward dirty
-mapping. Scale/reference/observer survive; absolute cd/m² Y is not divided by a
+the corresponding Y. These supports determine caller preconditions and the source-grid closure of complete retained output tiles. Scale/reference/observer survive; absolute cd/m² Y is not divided by a
 reference luminance. Sample x/y need not satisfy reference-white constraints.
 
 Fixture W=(1,1,2) maps to (0.25,0.25,1), with exact inverse. Semantic XYZ black
-with that white produces (0.25,0.25,Y_signed_zero). XYZ=(1,-1,0) makes x/y fail
-but Y-only returns -1. xyY=(0.5,0,0) fails semantic X/Z even at zero Y.
+with that white produces (0.25,0.25,Y_signed_zero). XYZ=(1,-1,0) is outside semantic x/y preconditions, while a retained Y-only tile returns -1. xyY=(0.5,0,0) is outside semantic X/Z preconditions even at zero Y.
 XYZ=(1,0,1) is an admitted signed/extended XYZ and maps to (0.5,0,0); this
 demonstrates that forward success alone does not guarantee a valid inverse.
 Another loss case is valid white xy=(1/4,2^-150): Float32 semantic black output
-rounds its y to +0 (a half-minimum-subnormal tie), so subsequent P X/Z fails.
+rounds its y to +0 (a half-minimum-subnormal tie), so subsequent P X/Z falls outside its semantic preconditions.
 There is no implicit minimum-white clamp; ordinary representable D50/D65 black
 fixtures still reconstruct normally.
 
 The ratio definition follows [CIE chromaticity coordinates](https://cie.co.at/eilvterm/17-23-053).
-The black fallback, singular errors and exact request scope are explicit project
+The black fallback, singularity preconditions and exact formula support are explicit project
 choices. No physical-color membership or observer transformation is performed.
 
 ## Q/R: Gray coordinates and neutral reconstruction
@@ -313,21 +309,17 @@ uses the NUM comparison rules, including unordered NaN yielding false for >=.
 
 T reads the selected binary sample, requires exactly 0 or 1 (either zero sign
 counts as 0), then copies the selected finite same-dtype black_value/white_value
-bits. It always validates the selector, including when the two constants are
-equal, and includes that sample in exact demand/dirty support. Illegal selectors
-fail in all modes. No implicit interpolation, coverage composition, transfer or
+bits. The binary selector is a caller precondition in every mode. The task always reads that sample, including when the two constants are equal. No implicit interpolation, coverage composition, transfer or
 integer encoding occurs. S/T pass-through channels are independent.
 
 Fixture: Gray l=[0.25,0.5,0.75], threshold=0.5 -> binary=[0,1,1]. T with levels 0,1
 returns Gray l=[0,1,1], not the original samples. Reversed levels 1,0 and
-equal levels 0.5,0.5 remain legal. T selector 0.25, NaN or Inf fails even for equal
-levels. Input -0 selects the exact black constant, including its sign bit.
+equal levels 0.5,0.5 remain legal. T selector 0.25, NaN or Inf is outside the caller precondition even for equal levels. Input -0 selects the exact black constant, including its sign bit.
 
 ## Raw special values and evaluation order
 
 Copies (bypass, polar lightness, xyY Y, Q, R's reused coordinate) preserve bits;
-they do not quiet NaN. Constant R outputs do not read Gray. T always validates
-its exact binary selector; S instead performs an ordered >= comparison, so NaN
+they do not quiet NaN. Constant R outputs do not read Gray. T always reads its exact binary selector, whose validity is a caller precondition; S instead performs an ordered >= comparison, so NaN
 selects +0, +Inf selects +1 and -Inf selects +0 for its finite threshold.
 
 For other computed outputs, first inspect exactly their declared source support

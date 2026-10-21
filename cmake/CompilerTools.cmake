@@ -53,6 +53,8 @@ if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_library(cli_resource_fixture MODULE tests/fixtures/cli_resource_fixture.cpp)
   target_link_libraries(cli_resource_fixture PRIVATE Photospider::operation_sdk)
+  target_compile_features(cli_resource_fixture PRIVATE cxx_std_17)
+  target_compile_options(cli_resource_fixture PRIVATE -Wall -Wextra -Wpedantic -Werror)
   target_compile_definitions(cli_resource_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
   set_target_properties(cli_resource_fixture PROPERTIES PREFIX "")
   add_test(NAME test_compiler_tools COMMAND ${Python3_EXECUTABLE}

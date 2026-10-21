@@ -11,51 +11,13 @@
 #include <utility>
 #include <vector>
 
+#include "core/resource_observation.hpp"
+#include "data/tensor_geometry.hpp"
 #include "data/tensor_validation.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
 namespace ps {
-namespace {
-
-/** @brief Computes a checked origin-relative address without signed overflow.
- */
-Result<std::size_t> address(const StridedLayout& layout,
-                            const std::uint64_t* coordinate, std::size_t rank) {
-  std::uint64_t positive = layout.byte_offset;
-  std::uint64_t negative = 0;
-  if (positive > INT64_MAX)
-    return Result<std::size_t>(Status::failure(
-        ErrorCode::InvalidArgument, "TensorSpan byte offset exceeds int64"));
-  for (std::size_t axis = 0; axis < rank; ++axis) {
-    const auto origin = layout.origin.empty() ? 0 : layout.origin[axis];
-    const auto coord = coordinate[axis];
-    const auto stride = layout.byte_strides[axis];
-    if (coord == origin || stride == 0)
-      continue;
-    if (stride == INT64_MIN)
-      return Result<std::size_t>(Status::failure(
-          ErrorCode::InvalidArgument, "TensorSpan stride uses INT64_MIN"));
-    const auto distance = coord >= origin ? coord - origin : origin - coord;
-    const auto magnitude =
-        static_cast<std::uint64_t>(stride < 0 ? -stride : stride);
-    if (!core_internal::can_multiply(distance, magnitude, INT64_MAX))
-      return Result<std::size_t>(Status::failure(
-          ErrorCode::InvalidArgument, "TensorSpan coordinate span overflows"));
-    const auto span = distance * magnitude;
-    auto& sum = ((coord < origin) != (stride < 0)) ? negative : positive;
-    if (!core_internal::can_add(sum, span, INT64_MAX))
-      return Result<std::size_t>(Status::failure(
-          ErrorCode::InvalidArgument, "TensorSpan address sum overflows"));
-    sum += span;
-  }
-  if (negative > positive || positive - negative > SIZE_MAX)
-    return Result<std::size_t>(Status::failure(
-        ErrorCode::InvalidArgument, "TensorSpan address precedes storage"));
-  return Result<std::size_t>(static_cast<std::size_t>(positive - negative));
-}
-}  // namespace
-
 struct TensorSpan::Metadata {
   ResourceLease lease;
   TensorDescriptor descriptor;
@@ -99,53 +61,13 @@ Result<TensorSpan> TensorSpan::create(TensorDescriptor descriptor,
 Result<TensorSpan> TensorSpan::from_storage(
     const TensorDescriptor& descriptor, const Region& region,
     const StridedLayout& layout, std::shared_ptr<const CpuStorage> storage) {
-  if (!storage || descriptor.shape.empty() || descriptor.shape.size() > 8 ||
-      descriptor.shape.size() != layout.byte_strides.size() ||
-      (!layout.origin.empty() &&
-       layout.origin.size() != descriptor.shape.size()) ||
-      std::any_of(descriptor.shape.begin(), descriptor.shape.end(),
-                  [](std::uint64_t extent) { return extent == 0; })) {
+  if (!storage)
     return Result<TensorSpan>(
-        Status::failure(ErrorCode::InvalidArgument,
-                        "invalid TensorSpan storage/descriptor/layout"));
-  }
-  auto status = region.validate(descriptor.shape);
-  if (!status.ok())
-    return Result<TensorSpan>(status);
-  std::size_t width = 0;
-  try {
-    width = element_size(descriptor.element_type);
-  } catch (const std::invalid_argument& error) {
-    return Result<TensorSpan>(
-        Status::failure(ErrorCode::InvalidArgument, error.what()));
-  }
-  if (!region.empty()) {
-    std::array<std::uint64_t, 8> low{}, high{};
-    for (std::size_t axis = 0; axis < region.rank(); ++axis) {
-      auto first = region.dimensions()[axis].offset;
-      auto last = first + region.dimensions()[axis].extent - 1;
-      if (layout.byte_strides[axis] < 0)
-        std::swap(first, last);
-      low[axis] = first;
-      high[axis] = last;
-    }
-    auto minimum = address(layout, low.data(), region.rank());
-    auto maximum = address(layout, high.data(), region.rank());
-    if (!minimum.ok())
-      return Result<TensorSpan>(minimum.status());
-    if (!maximum.ok())
-      return Result<TensorSpan>(maximum.status());
-    if (maximum.value() < minimum.value() ||
-        maximum.value() > storage->bytes().size() ||
-        width > storage->bytes().size() - maximum.value()) {
-      return Result<TensorSpan>(
-          Status::failure(ErrorCode::InvalidArgument,
-                          "TensorSpan layout addresses outside storage"));
-    }
-  } else if (layout.byte_offset > storage->bytes().size()) {
-    return Result<TensorSpan>(Status::failure(
-        ErrorCode::InvalidArgument, "empty TensorSpan offset exceeds storage"));
-  }
+        {ErrorCode::InvalidArgument, "missing tensor storage"});
+  auto valid = data_internal::validate_tensor_geometry(
+      descriptor, region, layout, storage->bytes().size());
+  if (!valid.ok())
+    return Result<TensorSpan>(valid);
   ResourceLease lease;
   if (const auto* root = resource_internal::metadata_budget()) {
     const auto bytes = descriptor.shape.size() * sizeof(std::uint64_t) +
@@ -160,8 +82,22 @@ Result<TensorSpan> TensorSpan::from_storage(
   auto metadata = std::allocate_shared<Metadata>(ResourceAllocator<Metadata>{});
   metadata->lease = std::move(lease);
   metadata->descriptor = descriptor;
+  core_internal::ResourceMetadataAccess::commit(
+      metadata->lease,
+      metadata->descriptor.shape.capacity() * sizeof(std::uint64_t));
   metadata->region = region;
-  metadata->layout = layout;
+  core_internal::ResourceMetadataAccess::commit(
+      metadata->lease,
+      metadata->region.dimensions().capacity() * sizeof(RegionDimension));
+  metadata->layout.byte_offset = layout.byte_offset;
+  metadata->layout.byte_strides = layout.byte_strides;
+  core_internal::ResourceMetadataAccess::commit(
+      metadata->lease,
+      metadata->layout.byte_strides.capacity() * sizeof(std::int64_t));
+  metadata->layout.origin = layout.origin;
+  core_internal::ResourceMetadataAccess::commit(
+      metadata->lease,
+      metadata->layout.origin.capacity() * sizeof(std::uint64_t));
   TensorSpan value;
   value.metadata_ = std::move(metadata);
   value.storage_ = std::move(storage);
@@ -203,7 +139,8 @@ Result<std::size_t> TensorSpan::byte_address(const std::uint64_t* coordinate,
           Status::failure(ErrorCode::InvalidArgument,
                           "coordinate outside TensorSpan coverage"));
   }
-  return address(metadata_->layout, coordinate, rank);
+  return data_internal::tensor_byte_address(metadata_->layout, coordinate,
+                                            rank);
 }
 
 /**

@@ -9,7 +9,8 @@
 namespace ps::plugin_internal::numeric_ops {
 // Finite binary64 differences need at most 2099 bits. The smoothstep cubic
 // needs fewer than 6300 bits; division alignment plus 53 quotient bits fits
-// in 6656 bits. Every large temporary belongs to the host continuation.
+// in 6656 bits. Every large temporary belongs to the preallocated invocation
+// scratch.
 struct InterpolationWorkspace final {
   using Integer = FixedInteger<104>;
   ExactRatioWorkspace<104> ratio;
@@ -31,6 +32,13 @@ struct InterpolationWorkspace final {
       return Result<std::uint64_t>(status);
     difference(x, lower, &distance);
     difference(upper, lower, &width);
+    // The named midpoint is exact for every profile, including edge widths
+    // that overflow floating subtraction. Both integers use units of 2^-1074.
+    factor = distance;
+    factor.add(distance);
+    if (ratio.compare(factor, width) == 0)
+      return Result<std::uint64_t>(narrow ? UINT64_C(0x3f000000)
+                                          : UINT64_C(0x3fe0000000000000));
     factor = width;
     factor.add(width);
     factor.add(width);

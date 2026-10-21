@@ -6,7 +6,7 @@
 #include <optional>
 
 #include "01-numeric/directed_color_functions.hpp"
-#include "01-numeric/exact_root.hpp"
+#include "02-format-color/transfer_algebraic.hpp"
 #include "02-format-color/transfer_constants.hpp"
 #include "02-format-color/transfer_program.hpp"
 
@@ -76,7 +76,7 @@ inline std::optional<std::uint64_t> nonfinite(const CurveProgram& c,
       return bits;
   }
 }
-template <class Math = numeric_ops::DirectedInterval>
+template <class Math = numeric_ops::CheckedDirectedInterval>
 class StrictMathStorage final {
   using Interval = typename Math::Interval;
   using Frame = typename Math::Frame;
@@ -86,109 +86,42 @@ class StrictMathStorage final {
   std::array<bool, Program::kNodes> valid_{};
   const Program* cached_ = nullptr;
   unsigned cached_precision_ = 0;
-  std::array<std::optional<Rational>, Program::kNodes> algebraic_values_;
-  const Program* algebraic_program_ = nullptr;
-  struct Special {
-    std::uint64_t bits;
-  };
-
-  // Whole-program rational fallback also resolves exact midpoint ties in toes,
-  // squares and sqrt(3*x); no binary64 intermediate is introduced.
-  std::uint64_t algebraic(const Program& p, double x, bool narrow,
-                          const core_internal::WorkConsumer& consume) {
-    auto& values = algebraic_values_;
-    if (algebraic_program_ != &p) {
-      for (auto& value : values)
-        value.reset();
-      algebraic_program_ = &p;
-    }
-    for (unsigned i = 0; i < p.size; ++i) {
-      const auto& n = p.nodes[i];
-      const auto& status = consume(1);
-      if (!status.ok())
-        throw status;
-      if (!n.varying && values[i])
-        continue;
-      auto& out = values[i];
-      switch (n.code) {
-        case Code::Input:
-          // The only admitted nonfinite input here is an inactive ACEScc floor.
-          out = std::isfinite(x) ? Rational::binary(numeric_bits(x), false)
-                                 : rational(0);
-          break;
-        case Code::Rational:
-          out = rational(n.numerator, n.denominator);
-          break;
-        case Code::Binary:
-          out = Rational::binary(n.bits, false);
-          break;
-        case Code::Add:
-          out = Rational::add(*values[n.a], *values[n.b]);
-          break;
-        case Code::Subtract:
-          out = Rational::subtract(*values[n.a], *values[n.b]);
-          break;
-        case Code::Multiply:
-          out = Rational::multiply(*values[n.a], *values[n.b]);
-          break;
-        case Code::Divide:
-          out = Rational::divide(*values[n.a], *values[n.b]);
-          break;
-        case Code::MaxZero:
-          out = values[n.a]->negative ? rational(0) : *values[n.a];
-          break;
-        case Code::Sqrt: {
-          const auto& value = *values[n.a];
-          if (value.negative && !value.n.words.empty())
-            return nan_bits(narrow);
-          if (value.n.words.size() > 2 * Math::kWords ||
-              value.d.words.size() > 2 * Math::kWords)
-            Math::capacity();
-          auto& r = functions_.functions.math.rounding;
-          r.numerator.words.fill(0);
-          r.denominator.words.fill(0);
-          r.negative = false;
-          for (std::size_t j = 0; j < value.n.words.size(); ++j)
-            r.numerator.words[j / 2] |=
-                static_cast<std::uint64_t>(value.n.words[j]) << (32 * (j % 2));
-          for (std::size_t j = 0; j < value.d.words.size(); ++j)
-            r.denominator.words[j / 2] |=
-                static_cast<std::uint64_t>(value.d.words[j]) << (32 * (j % 2));
-          auto result = numeric_ops::round_sqrt_ratio(&r, narrow, 0, consume);
-          if (!result.ok())
-            throw result.status();
-          return result.value();
-        }
-        default:
-          throw std::logic_error("nonrational FMT-09 algebraic branch");
-      }
-    }
-    auto& value = *values[p.result];
-    // Formula-intrinsic exact zeros are +0, except separately restored signs.
-    if (value.n.words.empty())
-      value.negative = value.negative_zero = false;
-    return value.floating_bits(narrow);
-  }
+  static_assert(Math::kChecked);
+  using Fault = typename Math::Fault;
+  AlgebraicMath algebraic_;
+  std::optional<std::uint64_t> special_;
   void exponential(Interval out, Interval x, bool narrow) {
     auto& m = functions_.functions.math;
+    if (!m.active())
+      return;
     Frame frame(m);
     auto limit = m.interval();
     m.integer(limit, 2000);
     // All FMT-09 uses of exp/pow above this range are followed only by fixed
     // finite affine factors (<=10000 and >=1/12), never range-cancelling
     // ratios.
-    if (m.compare(x.low, limit.high) > 0)
-      throw Special{infinity_bits(narrow)};
-    if (m.compare(x.high, limit.low) > 0)
-      throw typename Math::Unresolved{};
+    if (m.compare(x.low, limit.high) > 0) {
+      special_ = infinity_bits(narrow);
+      return;
+    }
+    if (m.compare(x.high, limit.low) > 0) {
+      m.retry();
+      return;
+    }
     functions_.exponential(out, x);
   }
   void power(Interval out, Interval base, Interval exponent, bool narrow) {
     auto& m = functions_.functions.math;
-    if (base.high.negative)
-      throw Special{nan_bits(narrow)};
-    if (base.low.negative)
-      throw typename Math::Unresolved{};
+    if (!m.active())
+      return;
+    if (base.high.negative) {
+      special_ = nan_bits(narrow);
+      return;
+    }
+    if (base.low.negative) {
+      m.retry();
+      return;
+    }
     if (m.top(base.high) < 0) {
       m.integer(out, 0);
       return;
@@ -212,6 +145,8 @@ class StrictMathStorage final {
                      const std::array<unsigned, Program::kNodes>& indices,
                      double x, bool narrow) {
     auto& m = functions_.functions.math;
+    if (!m.active())
+      return;
     auto get = [&](unsigned i) -> Interval {
       return {m.pool[indices[i]], m.pool[indices[i] + 1]};
     };
@@ -264,8 +199,10 @@ class StrictMathStorage final {
         exponential(out, get(n.a), narrow);
         break;
       case Code::Log:
-        if (get(n.a).high.negative)
-          throw Special{nan_bits(narrow)};
+        if (get(n.a).high.negative) {
+          special_ = nan_bits(narrow);
+          return;
+        }
         functions_.logarithm(out, get(n.a));
         break;
       case Code::MaxZero:
@@ -276,16 +213,25 @@ class StrictMathStorage final {
           m.clear(out.high);
         break;
       case Code::Sqrt:
-        throw std::logic_error("sqrt must use exact rational branch");
+        m.fail(ErrorCode::Internal);
+        break;
     }
   }
 
  public:
   explicit StrictMathStorage(SequenceProfile profile) : functions_(profile) {}
+  // A compact capacity/rounding retry is returned separately from operational
+  // failure. Cancellation and caller resource failures are never retried.
   Result<std::uint64_t> evaluate(const Program& p, double x, bool narrow,
-                                 const core_internal::WorkConsumer& consume) {
+                                 const core_internal::WorkConsumer& consume,
+                                 bool* needs_wide = nullptr) {
     using R = Result<std::uint64_t>;
+    if (needs_wide)
+      *needs_wide = false;
+    if (p.rational)
+      return algebraic_.evaluate(p, x, narrow, consume);
     auto& m = functions_.functions.math;
+    m.reset();
     m.consume = &consume;
     struct End {
       Math& m;
@@ -294,69 +240,68 @@ class StrictMathStorage final {
         m.used = 0;
       }
     } end{m};
-    try {
-      if (p.final_sqrt || !std::isfinite(x) ||
-          (p.rational && std::abs(x) < 0x1p-128)) {
-        if constexpr (Math::kWords < 192)
-          throw numeric_ops::DirectedCapacityRetry{};
-        return R(algebraic(p, x, narrow, consume));
+    constexpr unsigned maximum = Math::kWords < 192 ? 256 : 4096;
+    for (unsigned precision = 128; precision <= maximum; precision *= 2) {
+      m.reset();
+      m.precision = precision;
+      special_.reset();
+      if (cached_ != &p || cached_precision_ != precision) {
+        valid_.fill(false);
+        cached_ = &p;
+        cached_precision_ = precision;
       }
-      constexpr unsigned maximum = Math::kWords < 192 ? 256 : 4096;
-      for (unsigned precision = 128; precision <= maximum; precision *= 2) {
-        m.precision = precision;
-        m.used = 0;
-        if (cached_ != &p || cached_precision_ != precision) {
-          valid_.fill(false);
-          cached_ = &p;
-          cached_precision_ = precision;
-        }
-        try {
-          std::array<unsigned, Program::kNodes> indices{};
-          for (unsigned i = 0; i < p.size; ++i) {
-            indices[i] = static_cast<unsigned>(m.used);
-            auto out = m.interval();
-            const auto& node = p.nodes[i];
-            if (!node.varying && valid_[i]) {
-              m.copy(out.low, cache_low_[i]);
-              m.copy(out.high, cache_high_[i]);
-            } else {
-              evaluate_node(out, node, indices, x, narrow);
-              if (!node.varying) {
-                m.copy(cache_low_[i], out.low);
-                m.copy(cache_high_[i], out.high);
-                valid_[i] = true;
-              }
-            }
+      std::array<unsigned, Program::kNodes> indices{};
+      for (unsigned i = 0; i < p.size && m.active(); ++i) {
+        indices[i] = static_cast<unsigned>(m.used);
+        auto out = m.interval();
+        if (!m.active())
+          break;
+        const auto& node = p.nodes[i];
+        if (!node.varying && valid_[i]) {
+          m.copy(out.low, cache_low_[i]);
+          m.copy(out.high, cache_high_[i]);
+        } else {
+          evaluate_node(out, node, indices, x, narrow);
+          if (special_ && m.active())
+            return R(*special_);
+          if (!node.varying && m.active()) {
+            m.copy(cache_low_[i], out.low);
+            m.copy(cache_high_[i], out.high);
+            if (m.active())
+              valid_[i] = true;
           }
-          const auto lo = m.rounded(m.pool[indices[p.result]], narrow);
-          const auto hi = m.rounded(m.pool[indices[p.result] + 1], narrow);
-          if (lo == hi)
-            return R(lo);
-        } catch (const typename Math::Unresolved&) {
-        }
-        if (p.rational) {
-          if constexpr (Math::kWords < 192)
-            throw numeric_ops::DirectedCapacityRetry{};
-          return R(algebraic(p, x, narrow, consume));
         }
       }
-      if constexpr (Math::kWords < 192)
-        throw numeric_ops::DirectedCapacityRetry{};
-      return R(Status{ErrorCode::ResourceExhausted,
-                      "FMT-09 strict rounding exceeded 4096-bit refinement",
-                      FailureReason::CapacityLimit});
-    } catch (const Special& result) {
-      return R(result.bits);
-    } catch (const Status& status) {
-      return R(status);
-    } catch (const data_internal::format_numeric::ExactWorkFailure& failure) {
-      return R(failure.status);
+      if (m.active()) {
+        const auto lo = m.rounded(m.pool[indices[p.result]], narrow);
+        const auto hi = m.rounded(m.pool[indices[p.result] + 1], narrow);
+        if (m.active() && lo == hi)
+          return R(lo);
+      }
+      if (m.fault == Fault::Failure) {
+        if constexpr (Math::kWords < 192) {
+          if (m.capacity_exceeded && needs_wide) {
+            *needs_wide = true;
+            return R(UINT64_C(0));
+          }
+        }
+        return R(m.status());
+      }
     }
+    if constexpr (Math::kWords < 192) {
+      if (needs_wide) {
+        *needs_wide = true;
+        return R(UINT64_C(0));
+      }
+    }
+    return R(
+        Status{ErrorCode::ResourceExhausted, {}, FailureReason::CapacityLimit});
   }
 };
 using StrictMath = StrictMathStorage<>;
-// 512-bit storage at 128/256-bit working precision. Exact endpoint agreement
-// is still required; only internal capacity/rounding uncertainty retries the
-// original 12288-bit storage, up to 4096-bit working precision.
-using CompactMath = StrictMathStorage<numeric_ops::DirectedIntervalStorage<8>>;
+// 512-bit compact storage at 128/256-bit working precision. Endpoint agreement
+// is mandatory; only internal precision/capacity outcomes request the wide
+// tier.
+using CompactMath = StrictMathStorage<numeric_ops::DirectedIntervalStorage<
+    8, true>>;  // NOLINT(whitespace/indent_namespace)
 }  // namespace ps::plugin_internal::transfer_ops

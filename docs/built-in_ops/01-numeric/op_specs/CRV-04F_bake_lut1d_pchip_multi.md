@@ -22,7 +22,7 @@ range/fallback rules. Discrete results, copies, selected endpoints and special
 values remain exact.
 
 Inherit the [baking template contract](CRV-04_bake_lut1d.md) in full for authoring
-profile/defaults, count/dtype, named outputs, Run-shared complete-input computation, resources, errors,
+profile/defaults, count/dtype, named outputs, fixed task execution, resources, errors,
 owner lifetime and public graph-equivalence acceptance. This is a workflow
 construction template; its name is not an OperationRegistry key.
 
@@ -39,8 +39,7 @@ default remain required. Constructors write expanded-node parameters explicitly.
 Create numeric.linspace with the selected profile suffix, start/end inputs,
 count and fixed dtype="float64". Create curve.interpolate_pchip_multi with the same profile
 suffix; connect x/y and linspace.values to query, and pass the final dtype and
-out_of_domain. Export interpolator.values and linspace.axis. Values execution materializes the complete Float64 query array and complete
-interpolation output under the inherited complete-input contract.
+out_of_domain. Export interpolator.values and linspace.axis. Values execution requests only the query tiles required by selected interpolation output tiles. Linspace generates those Float64 coordinates; curve tasks allocate only selected output tiles. Axis-only requests use the independent linspace axis task.
 
 Each exported shape/dtype is inferred by its expanded source. Scalar values
 retain [count]; multi-function values retain [count,C], including C=1. This
@@ -51,13 +50,13 @@ precision and query-support restrictions are not normalized or weakened.
 
 ## Acceptance and status
 
-Executed analytic fixture: x=[0,1,2], y=[[0,4],[1,3],[4,0]], start=[0.5], end=[1.5], count=2 -> strict values=[[0.3125,3.6875],[2.1875,1.8125]], axis=[0.5,1.5,1].
+Analytic fixture: x=[0,1,2], y=[[0,4],[1,3],[4,0]], start=[0.5], end=[1.5], count=2 -> strict values=[[0.3125,3.6875],[2.1875,1.8125]], axis=[0.5,1.5,1].
 
 Construct this template and its explicit expansion with the same bindings,
 parameters and output demands. Compare descriptors, numerical quality and exact
-read/dirty witnesses according to the source spec. Repeat each valid profile,
+static read sets according to the source spec. Repeat each valid profile,
 values-only/axis-only/joint requests, changed source bindings, singleton count,
-partial output, low shared budgets, cancellation, cache-off and exported-owner
+partial output, low shared budgets, cancellation, concurrent Runs and exported-owner
 lifetime. Templates do not compute on construction, freeze results or create files.
 Use source mathematical fixtures independently of graph equivalence, which alone
 could reproduce a shared numerical bug.

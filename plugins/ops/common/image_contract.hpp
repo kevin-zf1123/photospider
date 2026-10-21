@@ -4,7 +4,7 @@
 #include <optional>
 #include <utility>
 
-#include "common/result_support.hpp"
+#include "photospider/plugin/operation_types.hpp"
 
 namespace ps::plugin_internal::image_ops {
 inline SchemaTemplate image_schema() {

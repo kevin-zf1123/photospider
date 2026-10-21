@@ -15,9 +15,13 @@ namespace ps::format {
  * The helpers serialize these options into an invocation-local graph node and
  * perform no sample reads. Output interpretation is configured by the caller;
  * execution copies source element bits without color or numeric conversion.
- * `auto` retains a view when the complete requested mapping is representable,
- * otherwise it materializes requested samples. `view` requires a legal retained
- * view; `materialize` always copies requested samples. Profiles are `strict`,
+ * Auto/materialize copy complete selected output tiles to independent dense
+ * storage through zero-scratch fixed CPU tasks. Source reads follow the mapped
+ * source-grid tile union. Unused ports are schema-only. Nonempty view tasks
+ * fail InvalidArgument/ViewUnavailable without payload reads; Empty performs
+ * static checks and emits no task. Output owners survive source/context
+ * teardown; cancellation is polled between at most 256 samples. Profiles are
+ * `strict`,
  * `accelerated_apple_silicon`, and `accelerated_x86_64`.
  */
 struct ChannelAssemblyOptions final {

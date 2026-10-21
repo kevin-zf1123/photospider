@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - numeric.convert_format_strict
@@ -16,8 +16,8 @@ registered_operation_keys:
 # FMT-06A: convert tensor dtype and numeric interval
 
 Inherit the complete [FMT-06 contract](FMT-06_numeric_conversion_contract.md).
-The default registry provides `numeric.convert_format_strict` as a native Result
-ABI 6 operation. It takes one single-tensor Result with publishes one `values` output
+The default registry provides `numeric.convert_format_strict` as a CPU fixed invocation
+ABI 8 operation. It takes one single-tensor Result and produces one `values` output
 Result containing one tensor. Its default scales numeric intervals while converting dtype;
 explicit `rescale=false` gives a pure numerical cast. The specification remains
 Proposed.
@@ -42,30 +42,30 @@ For full sample coordinate q, determine the resolved pair from
 q[batch_prefix_length + axis] if tabulated, otherwise the shared pair. Read only
 x=input[q]. In strict, compute the exact
 affine rational value (or x for pure cast), then round once to the destination.
-Reject/clip finite output overflow after rounding. Original nonfinite input with
-integer target fails; floating NaN mapping and infinity signs follow the family.
+Clip finite output overflow after rounding; reject requires a representable
+rounded result. Integer targets require finite original source samples. Floating
+NaN mapping and infinity signs follow the family.
 The caller supplies any target encoding to later consumers explicitly.
 
 ## Mapping, resources and error specialization
 
-Data and dirty mapping are exactly q<->q. All static table entries/consumed
-metadata contribute to Descriptor checks, even if their channels are unrequested.
-No extra alpha/color peer read or global min/max scan occurs. Requested conversion
-failures stay within their inherited observation scope; required upstream complete-input
-failures retain their original broader scope. No error at an unrequested source
-sample is manufactured by this operation.
+The compiler retains complete output tiles and reads their closure in the input's
+own tile grid. Each output coordinate uses the corresponding source coordinate;
+no additional alpha/color peer or global extrema scan is needed. All static
+entries are validated, including unselected channels. Caller numerical premises
+cover every coordinate evaluated in the retained output tiles.
 
-View requires same dtype and statically identical mapping over the complete
-declared tensor, plus a legal source owner/layout. A request restricted to one
-identity channel cannot turn a generally transforming output into a forced view.
-This identity view is supported for legal generic and spatial Result storage.
-Materialization uses target-width planar storage for images and produces only
-requested coverage.
-The operation requests Data role 1 for source samples and Descriptor role 8 for
-schema; it requests no Validation or Control support. Empty demand is stateless.
-Materialization publishes transactionally under Root budgets and cancellation,
-retains normal source/output owners, and preserves source diagnostics on failure.
-Inherit exact arithmetic budget/work, backend/profile precision and error attribution.
+Auto and materialize write independent dense output tiles, including identity.
+View requires a statically identical map across the complete declared tensor;
+nonidentity view fails static preparation. A nonempty identity view has only a
+schema dependency and fails ViewUnavailable without reading input payload.
+Empty demand has no tasks. Shape, batch axes and spatial topology are preserved;
+output dtype changes and `atomic_trailing_axes` becomes zero.
+
+Nonidentity kernels use the family's fixed exact arithmetic scratch. Identity
+and view kernels declare zero scratch. Inputs and prepared maps are immutable;
+output allocations and scratch belong to the invocation. Operational failures,
+retirement, cancellation and owner lifetime follow the fixed executor contract.
 
 ## Independent numeric fixtures
 
@@ -79,16 +79,17 @@ Inherit exact arithmetic budget/work, backend/profile precision and error attrib
    Float64 produces 127.5 and the incorrect ties-even integer 128. This fixture
    detects an intermediate-double implementation and rounded Int64 endpoints.
 4. Float64 [-0.5,0.5,1.5,2.5,255.5] -> UInt8 with rescale=false:
-   reject succeeds for the first four as [0,0,2,2] and fails on the last;
+   reject has valid inputs for the first four, yielding [0,0,2,2]; the last
+   violates its representability premise;
    clip gives [0,0,2,2,255]. Negative input alone is not an overflow before rounding.
 5. With Float64 source [0,1], Float32 target [1,0], inputs [0,0.25,1,2]
    give [1,0.75,0,-1]. No clipping to target interval occurs. Target [0.5,0.5]
    fails static bounds validation even when its channel is unrequested.
 6. The next Float64 value above Float32 maximum finite converts successfully
    to Float32 maximum finite when mapping is identity. A sufficiently large
-   finite value that rounds to infinity rejects, or clips to maximum finite.
+   finite value that rounds to infinity violates the reject premise, or clips to maximum finite.
    Source +Inf remains +Inf for floating output even under clip; integer output
-   rejects source NaN/Inf under either overflow policy.
+   requires finite sources under either overflow policy.
 7. Float32 nonidentity NaN 0xffc12345 widens to Float64 0xfff82468a0000000.
    Float64 signaling NaN 0xfff0000000000001 narrows to quiet Float32 0xffc00000.
    Same-dtype static identity preserves both signaling and quiet source bits.
@@ -128,8 +129,8 @@ typed output Result`; consumers needing native color coordinates or normalized
 alpha must decode explicitly.
 
 Temporary numeric-conversion acceptance should cover all 49 dtype pairs using
-independent exact references, ROI, cold-lookup budgets, failure ordering,
-floating environments, identity views, batch/view/Empty/bit-stride cases, concurrent plan reuse and payload release. Add explicit
+independent exact references, complete/selected tiles, static lookup construction, operational failures,
+floating environments, identity copies and forced-view failure, batch/view/Empty/bit-stride cases, concurrent plan reuse and payload release. Add explicit
 alpha interoperability cases when changing inherited encoding behavior. An SME
 path requires an actual dispatch check on admitted hardware; CPU output agreement
 alone does not establish SME dispatch or performance.

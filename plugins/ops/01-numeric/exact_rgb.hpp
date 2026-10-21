@@ -1,4 +1,3 @@
-#include "photospider/ops/errors.hpp"
 #pragma once
 
 #include <array>
@@ -16,23 +15,30 @@ namespace ps::plugin_internal::numeric_ops {
 // midpoint alignment, within the shared 40960-bit polynomial integer arena.
 class ExactRgb final {
   ExactPolynomial exact_;
-  DirectedColorFunctions directed_;
+  using Math = CheckedDirectedInterval;
+  DirectedColorFunctionsStorage<Math> directed_;
   using Index = ExactPolynomial::Index;
-  using Interval = DirectedInterval::Interval;
-  using Frame = DirectedInterval::Frame;
-  void check() const {
+  using Interval = Math::Interval;
+  using Frame = Math::Frame;
+  bool check() {
     if (!exact_.status().ok())
-      throw exact_.status();
+      directed_.functions.math.fail(exact_.status().code,
+                                    exact_.status().reason);
+    return exact_.status().ok();
   }
   void import(Interval output, Index value) {
-    check();
+    if (!check())
+      return;
     auto& math = directed_.functions.math;
     const auto& words = exact_.number(value).magnitude.words;
-    math.work(ExactPolynomial::kWords + DirectedInterval::kWords);
-    for (unsigned j = DirectedInterval::kWords; j < words.size(); ++j)
-      if (words[j])
-        DirectedInterval::capacity();
-    std::copy_n(words.begin(), DirectedInterval::kWords,
+    if (!math.work(ExactPolynomial::kWords + Math::kWords))
+      return;
+    for (unsigned j = Math::kWords; j < words.size(); ++j)
+      if (words[j]) {
+        math.stop_capacity();
+        return;
+      }
+    std::copy_n(words.begin(), Math::kWords,
                 output.low.magnitude.words.begin());
     output.low.negative = false;
     math.copy(output.high, output.low);
@@ -53,6 +59,8 @@ class ExactRgb final {
     auto numerator = math.interval(), denominator = math.interval();
     import(numerator, n);
     import(denominator, d);
+    if (!math.active())
+      return 0;
     const auto ntop = math.top(numerator.low), dtop = math.top(denominator.low);
     math.scale(numerator, numerator, static_cast<int>(math.precision) - ntop);
     math.scale(denominator, denominator,
@@ -60,18 +68,21 @@ class ExactRgb final {
     math.divide(output, numerator, denominator);
     return ntop - dtop;
   }
-  std::uint64_t round_scaled(const DirectedInterval::Number& value, bool narrow,
+  std::uint64_t round_scaled(const Math::Number& value, bool narrow,
                              int scale) {
     auto& math = directed_.functions.math;
-    math.work(2 * DirectedInterval::kWords);
+    if (!math.work(2 * Math::kWords))
+      return 0;
     math.rounding.numerator = value.magnitude;
     math.rounding.denominator.words.fill(0);
     math.rounding.denominator.words[0] = 1;
     math.rounding.negative = value.negative;
     auto result = math.rounding.round(narrow, *math.consume,
                                       scale - static_cast<int>(math.precision));
-    if (!result.ok())
-      throw result.status();
+    if (!result.ok()) {
+      math.fail(result.status().code, result.status().reason);
+      return 0;
+    }
     return result.value();
   }
   void constant_ratio(Interval output, unsigned n, unsigned d) {
@@ -162,7 +173,10 @@ class ExactRgb final {
   int compare_products(Index a, Index b, Index c, Index d) {
     const auto saved = exact_.mark();
     const auto left = exact_.multiply(a, b), right = exact_.multiply(c, d);
-    check();
+    if (!check()) {
+      exact_.restore(saved);
+      return 0;
+    }
     const auto order = exact_.compare_magnitude(left, right);
     exact_.restore(saved);
     return order;
@@ -201,6 +215,8 @@ class ExactRgb final {
     }
     const auto order = compare_products(magnitude[0], denominator[1],
                                         magnitude[1], denominator[0]);
+    if (!check())
+      return Result<std::uint64_t>(exact_.status());
     const bool same = order == 0 && exact_.sign(c[0]) == exact_.sign(c[1]);
     const bool opposite = order == 0 && exact_.sign(c[0]) == -exact_.sign(c[1]);
     if (opposite && exact_.compare_magnitude(beta[0], beta[1]) == 0)
@@ -224,7 +240,8 @@ class ExactRgb final {
         const auto right = exact_.multiply(
             beta[1], integer_power(
                          exact_.multiply(magnitude[1], denominator[0]), i + 3));
-        check();
+        if (!check())
+          return Result<std::uint64_t>(exact_.status());
         const bool equal = exact_.compare_magnitude(left, right) == 0;
         exact_.restore(saved);
         if (equal)
@@ -268,7 +285,8 @@ class ExactRgb final {
       }
       return rounded(rational_n, rational_d, narrow, scale);
     }
-    check();
+    if (!check())
+      return Result<std::uint64_t>(exact_.status());
     const auto maximum = order >= 0 ? 0u : 1u;
     std::array<Index, 2> normalized_n{}, normalized_d{};
     if (!srgb) {
@@ -277,12 +295,15 @@ class ExactRgb final {
         normalized_d[i] = exact_.multiply(denominator[i], magnitude[maximum]);
       }
     }
-    check();
+    if (!check())
+      return Result<std::uint64_t>(exact_.status());
     for (unsigned precision = 128; precision <= 4096; precision *= 2) {
-      math.work(1);
+      math.reset();
+      if (!math.work(1))
+        return Result<std::uint64_t>(math.status());
       math.precision = precision;
       Frame frame(math);
-      try {
+      {
         auto contribution0 = math.interval(), contribution1 = math.interval(),
              weight = math.interval(), exponent = math.interval(),
              base = math.interval(), mixed = math.interval(),
@@ -311,47 +332,49 @@ class ExactRgb final {
             math.negate(contribution, contribution);
         }
         math.add(mixed, contribution0, contribution1);
-        if (math.includes_zero(mixed))
-          throw DirectedInterval::Unresolved{};
-        const bool negative = mixed.high.negative;
-        if (negative)
-          math.negate(mixed, mixed);
-        int output_scale = 0;
-        if (srgb) {
-          srgb_encode(encoded, mixed);
-        } else {
-          // Homogeneity removes huge intermediate powers: m*R^(1/gamma),
-          // with |R|<=1. The reciprocal remains a directed exact-real ratio.
-          if (math.compare(mixed.high, one.high) > 0)
-            math.copy(mixed.high, one.high);
-          math.divide(exponent, one, exponent);
-          directed_.power(encoded, mixed, exponent);
-          output_scale =
-              normalized_ratio(base, magnitude[maximum], denominator[maximum]);
-          math.multiply(encoded, encoded, base);
+        if (math.active() && math.includes_zero(mixed))
+          math.retry();
+        if (math.active()) {
+          const bool negative = mixed.high.negative;
+          if (negative)
+            math.negate(mixed, mixed);
+          int output_scale = 0;
+          if (srgb) {
+            srgb_encode(encoded, mixed);
+          } else {
+            // Homogeneity removes huge intermediate powers: m*R^(1/gamma),
+            // with |R|<=1. The reciprocal remains a directed exact-real ratio.
+            if (math.compare(mixed.high, one.high) > 0)
+              math.copy(mixed.high, one.high);
+            math.divide(exponent, one, exponent);
+            directed_.power(encoded, mixed, exponent);
+            output_scale = normalized_ratio(base, magnitude[maximum],
+                                            denominator[maximum]);
+            math.multiply(encoded, encoded, base);
+          }
+          if (premultiplied) {
+            // Normalize the exact alpha ratio before multiplying, and apply
+            // its power of two last. A tiny alpha must not lose all relative
+            // precision before multiplying an HDR straight encoded value.
+            const auto exponent = normalized_ratio(weight, weighted_alpha, h);
+            math.multiply(encoded, encoded, weight);
+            output_scale += exponent - 1074;
+          }
+          if (encoded.low.negative)
+            math.clear(encoded.low);
+          const auto lower = round_scaled(encoded.low, narrow, output_scale);
+          const auto upper = round_scaled(encoded.high, narrow, output_scale);
+          if (math.active() && lower == upper)
+            return Result<std::uint64_t>(
+                lower | (negative ? UINT64_C(1) << (narrow ? 31 : 63) : 0));
         }
-        if (premultiplied) {
-          // Normalize the exact alpha ratio before multiplying, and apply
-          // its power of two last. A tiny alpha must not lose all relative
-          // precision before multiplying an HDR straight encoded value.
-          const auto exponent = normalized_ratio(weight, weighted_alpha, h);
-          math.multiply(encoded, encoded, weight);
-          output_scale += exponent - 1074;
-        }
-        if (encoded.low.negative)
-          math.clear(encoded.low);
-        const auto lower = round_scaled(encoded.low, narrow, output_scale);
-        const auto upper = round_scaled(encoded.high, narrow, output_scale);
-        if (lower == upper)
-          return Result<std::uint64_t>(
-              lower | (negative ? UINT64_C(1) << (narrow ? 31 : 63) : 0));
-      } catch (const DirectedInterval::Unresolved&) {
-        // Refine the entire expression; no rounded intermediate survives.
       }
+      if (math.fault == Math::Fault::Failure)
+        return Result<std::uint64_t>(math.status());
+      // Retry refines the entire expression without retaining rounded values.
     }
-    return Result<std::uint64_t>(Status{ErrorCode::ResourceExhausted,
-                                        "RGB transfer rounding precision limit",
-                                        FailureReason::CapacityLimit});
+    return Result<std::uint64_t>(
+        Status{ErrorCode::ResourceExhausted, {}, FailureReason::CapacityLimit});
   }
 
  public:
@@ -362,88 +385,75 @@ class ExactRgb final {
       const std::array<std::array<std::uint64_t, 4>, 2>& rows,
       ColorAssociation input, ColorAssociation output, bool srgb,
       std::uint64_t gamma, bool narrow,
-      const std::function<Status(std::uint64_t)>& consume) {
+      const core_internal::WorkConsumer& consume) {
     using Answer = Result<std::array<std::uint64_t, 4>>;
     exact_.begin(consume);
     auto& math = directed_.functions.math;
-    math.used = 0;
-    math.consume = &consume;
+    math.reset();
+    math.consume = consume;
     struct End {
       ExactPolynomial& exact;
-      DirectedInterval& math;
+      Math& math;
       ~End() {
         exact.end();
         math.consume = nullptr;
       }
     } end{exact_, math};
-    try {
-      constexpr auto one_bits = UINT64_C(0x3ff0000000000000);
-      const auto one = exact_.integer(1), unit = exact_.shift(one, 1074);
-      const auto s0 = exact_.binary(stops[0], 1074),
-                 s1 = exact_.binary(stops[1], 1074);
-      const auto x = exact_.binary(query, 1074);
-      const auto u = exact_.add(s1, x, true), v = exact_.add(x, s0, true);
-      const auto h = exact_.add(u, v);
-      std::array<Index, 2> alpha{}, beta{};
-      for (unsigned i = 0; i < 2; ++i) {
-        alpha[i] = exact_.binary(
-            input == ColorAssociation::None ? one_bits : rows[i][3], 1074);
-        beta[i] = exact_.multiply(i ? v : u, alpha[i]);
-      }
-      const auto weighted_alpha = exact_.add(beta[0], beta[1]);
-      check();
-      std::array<std::uint64_t, 4> result{};
-      if (!exact_.sign(weighted_alpha))
-        return Answer(result);
-      auto a = rounded(weighted_alpha, h, narrow, -1074);
-      if (!a.ok())
-        return Answer(a.status());
-      result[3] = a.value();
-      const auto saved = exact_.mark();
-      for (unsigned channel = 0; channel < 3; ++channel) {
-        exact_.restore(saved);
-        std::array<Index, 2> c{}, denominator{};
-        for (unsigned i = 0; i < 2; ++i) {
-          c[i] = exact_.sign(alpha[i]) ? exact_.binary(rows[i][channel], 1074)
-                                       : exact_.integer(0);
-          denominator[i] =
-              input == ColorAssociation::Premultiplied && exact_.sign(alpha[i])
-                  ? alpha[i]
-                  : unit;
-        }
-        auto value = nonlinear_component(
-            c, denominator, beta, weighted_alpha, h,
-            output == ColorAssociation::Premultiplied, srgb, gamma, narrow);
-        if (!value.ok())
-          return Answer(value.status());
-        if (BinaryParts::decode(value.value(), narrow).infinite)
-          return Answer(Status{ErrorCode::OperationFailed,
-                               "RGB output overflow",
-                               FailureReason::ArithmeticOverflow});
-        result[channel] = value.value();
-      }
-      if (!BinaryParts::decode(result[3], narrow).magnitude) {
-        for (unsigned channel = 0; channel < 3; ++channel)
-          if (BinaryParts::decode(result[channel], narrow).magnitude)
-            return Answer(
-                Status{ErrorCode::OperationFailed,
-                       "positive alpha rounds to zero with nonzero RGB",
-                       ops_error::AssociationUnderflow});
-        result.fill(0);
-      }
-      return Answer(result);
-    } catch (const Status& status) {
-      return Answer(status);
+    constexpr auto one_bits = UINT64_C(0x3ff0000000000000);
+    const auto one = exact_.integer(1), unit = exact_.shift(one, 1074);
+    const auto s0 = exact_.binary(stops[0], 1074),
+               s1 = exact_.binary(stops[1], 1074);
+    const auto x = exact_.binary(query, 1074);
+    const auto u = exact_.add(s1, x, true), v = exact_.add(x, s0, true);
+    const auto h = exact_.add(u, v);
+    std::array<Index, 2> alpha{}, beta{};
+    for (unsigned i = 0; i < 2; ++i) {
+      alpha[i] = exact_.binary(
+          input == ColorAssociation::None ? one_bits : rows[i][3], 1074);
+      beta[i] = exact_.multiply(i ? v : u, alpha[i]);
     }
+    const auto weighted_alpha = exact_.add(beta[0], beta[1]);
+    if (!check())
+      return Answer(exact_.status());
+    std::array<std::uint64_t, 4> result{};
+    if (!exact_.sign(weighted_alpha))
+      return Answer(result);
+    auto a = rounded(weighted_alpha, h, narrow, -1074);
+    if (!a.ok())
+      return Answer(a.status());
+    result[3] = a.value();
+    const auto saved = exact_.mark();
+    for (unsigned channel = 0; channel < 3; ++channel) {
+      exact_.restore(saved);
+      std::array<Index, 2> c{}, denominator{};
+      for (unsigned i = 0; i < 2; ++i) {
+        c[i] = exact_.sign(alpha[i]) ? exact_.binary(rows[i][channel], 1074)
+                                     : exact_.integer(0);
+        denominator[i] =
+            input == ColorAssociation::Premultiplied && exact_.sign(alpha[i])
+                ? alpha[i]
+                : unit;
+      }
+      auto value = nonlinear_component(
+          c, denominator, beta, weighted_alpha, h,
+          output == ColorAssociation::Premultiplied, srgb, gamma, narrow);
+      if (!value.ok())
+        return Answer(value.status());
+      result[channel] = value.value();
+    }
+    if (!BinaryParts::decode(result[3], narrow).magnitude)
+      result.fill(0);
+    return Answer(result);
   }
-  // Caller validates complete rows and association, and selects this entry only
-  // for direct, linear/gamma=1, or gamma=2. A four-word result has alpha at [3]
-  // even for RGB; the caller publishes only its declared three/four channels.
+  // Caller guarantees complete valid rows and association, and selects this
+  // entry only for direct, linear/gamma=1, or gamma=2. A four-word result has
+  // alpha at [3] even for RGB; the caller publishes only its declared
+  // three/four channels.
   Result<std::array<std::uint64_t, 4>> algebraic(
       const std::array<std::uint64_t, 2>& stops, std::uint64_t query,
       const std::array<std::array<std::uint64_t, 4>, 2>& rows,
       ColorAssociation input, ColorAssociation output, bool direct, bool square,
-      bool narrow, const std::function<Status(std::uint64_t)>& consume) {
+      bool narrow, const core_internal::WorkConsumer& consume) {
     using Answer = Result<std::array<std::uint64_t, 4>>;
     exact_.begin(consume);
     struct End {
@@ -506,8 +516,9 @@ class ExactRgb final {
         root = true;
         const auto square0 = signed_square(c0), square1 = signed_square(c1);
         if (premultiplied) {
-          // Zero-alpha premultiplied sources are validated black. Replacing
-          // their otherwise-zero denominator by 1 preserves their zero term.
+          // Zero-alpha premultiplied sources are black by precondition.
+          // Replacing their otherwise-zero denominator by 1 preserves their
+          // zero term.
           const auto denominator0 = exact_.sign(a0) ? a0 : one;
           const auto denominator1 = exact_.sign(a1) ? a1 : one;
           n = exact_.add(
@@ -541,19 +552,12 @@ class ExactRgb final {
                          direct && rows[0][channel] == (UINT64_C(1) << 63));
       if (!value.ok())
         return Answer(value.status());
-      if (BinaryParts::decode(value.value(), narrow).infinite)
-        return Answer(Status{ErrorCode::OperationFailed, "RGB output overflow",
-                             FailureReason::ArithmeticOverflow});
       result[channel] = value.value();
     }
-    if (!BinaryParts::decode(result[3], narrow).magnitude) {
-      for (unsigned channel = 0; channel < 3; ++channel)
-        if (BinaryParts::decode(result[channel], narrow).magnitude)
-          return Answer(Status{ErrorCode::OperationFailed,
-                               "positive alpha rounds to zero with nonzero RGB",
-                               ops_error::AssociationUnderflow});
+    // A rounded zero alpha with zero RGB canonicalizes the complete tuple.
+    // Nonzero RGB with rounded zero alpha violates the caller precondition.
+    if (!BinaryParts::decode(result[3], narrow).magnitude)
       result.fill(0);
-    }
     return Answer(result);
   }
 };

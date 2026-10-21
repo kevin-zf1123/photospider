@@ -31,15 +31,17 @@ inline int uniform_tap_sign(const LowpassParameters& p, unsigned radius,
   return (integer & 1) ? -1 : 1;
 }
 struct UniformLowpassMath {
-  DirectedLowpassKernel kernel;
-  using Frame = DirectedInterval::Frame;
+  CheckedLowpassKernel kernel;
+  using Math = CheckedDirectedInterval;
+  using Frame = Math::Frame;
   Result<bool> prepare(const LowpassParameters& parameters, unsigned radius,
                        FastInterval* coefficients, FastInterval* normalizer,
-                       const std::function<Status(std::uint64_t)>& consume) {
+                       const core_internal::WorkConsumer& consume) {
     auto& m = kernel.functions.math;
-    m.consume = &consume;
+    m.reset();
+    m.consume = consume;
     struct End {
-      DirectedInterval& m;
+      Math& m;
       ~End() {
         m.consume = nullptr;
         m.used = 0;
@@ -48,7 +50,7 @@ struct UniformLowpassMath {
     plugin_internal::FloatingEnvironment environment;
     if (!environment.active())
       return Result<bool>(false);
-    try {
+    {
       m.precision = 128;
       *normalizer = FastInterval::point(0);
       for (unsigned j = 0; j <= radius; ++j) {
@@ -63,32 +65,37 @@ struct UniformLowpassMath {
         coefficients[j] = {
             numeric_down(numeric_double(m.rounded(coefficient.low, false))),
             numeric_up(numeric_double(m.rounded(coefficient.high, false)))};
-        if (!coefficients[j].finite())
+        if (m.fault == Math::Fault::Failure)
+          return Result<bool>(m.status());
+        if (!m.active() || !coefficients[j].finite())
           return Result<bool>(false);
         *normalizer =
             *normalizer + coefficients[j] * FastInterval::point(j ? 2 : 1);
       }
       return Result<bool>(normalizer->finite() && normalizer->low > 0);
-    } catch (const DirectedInterval::Unresolved&) {
-      return Result<bool>(false);
-    } catch (const Status& status) {
-      return Result<bool>(status);
     }
   }
-  static std::optional<std::uint64_t> fast(
+  static Result<std::optional<std::uint64_t>> fast(
       const LowpassParameters& parameters, unsigned radius,
       const std::uint64_t* samples, bool narrow,
       const FastInterval* coefficients, FastInterval normalizer,
+      const core_internal::WorkConsumer& consume,
       bool normalized_environment = false) {
+    using Answer = Result<std::optional<std::uint64_t>>;
     std::optional<plugin_internal::FloatingEnvironment> environment;
     if (!normalized_environment)
       environment.emplace();
     if (!normalized_environment && !environment->active())
-      return {};
+      return Answer(std::optional<std::uint64_t>{});
     FastInterval numerator = FastInterval::point(0);
     double candidate = 0, divisor = 0;
     bool constant = true;
     for (unsigned j = 0; j <= radius; ++j) {
+      if (!(j % 32)) {
+        const auto& status = consume(1);
+        if (!status.ok())
+          return Answer(status);
+      }
       if (!uniform_tap_sign(parameters, radius, j))
         continue;
       const double weight = coefficients[j].low +
@@ -98,7 +105,7 @@ struct UniformLowpassMath {
         const auto bits = samples[side ? radius - j : radius + j];
         const double value = numeric_double(bits, narrow);
         if (!std::isfinite(value))
-          return {};
+          return Answer(std::optional<std::uint64_t>{});
         constant = constant && bits == samples[radius];
         candidate += weight * value;
         numerator = numerator + coefficients[j] * FastInterval::point(value);
@@ -106,19 +113,21 @@ struct UniformLowpassMath {
     }
     if (constant) {
       const double value = numeric_double(samples[radius], narrow);
-      return FastInterval::point(value).accepted(value, narrow);
+      return Answer(FastInterval::point(value).accepted(value, narrow));
     }
-    return (numerator / normalizer).accepted(candidate / divisor, narrow);
+    return Answer(
+        (numerator / normalizer).accepted(candidate / divisor, narrow));
   }
-  Result<std::uint64_t> evaluate(
-      const LowpassParameters& parameters, unsigned radius,
-      const std::uint64_t* samples, bool narrow,
-      const std::function<Status(std::uint64_t)>& consume) {
+  Result<std::uint64_t> evaluate(const LowpassParameters& parameters,
+                                 unsigned radius, const std::uint64_t* samples,
+                                 bool narrow,
+                                 const core_internal::WorkConsumer& consume) {
     using Answer = Result<std::uint64_t>;
     auto& m = kernel.functions.math;
-    m.consume = &consume;
+    m.reset();
+    m.consume = consume;
     struct End {
-      DirectedInterval& m;
+      Math& m;
       ~End() {
         m.consume = nullptr;
         m.used = 0;
@@ -132,9 +141,10 @@ struct UniformLowpassMath {
     unsigned infinities = 0;
     bool constant = true;
     const auto center = samples[radius];
-    try {
+    {
       for (unsigned i = 0; i <= 2 * radius; ++i) {
-        m.work(1);
+        if (!m.work(1))
+          return Answer(m.status());
         const auto distance = i < radius ? radius - i : i - radius;
         const auto sign = uniform_tap_sign(parameters, radius, distance);
         if (!sign)
@@ -174,20 +184,22 @@ struct UniformLowpassMath {
           paired = m.compare(sum.low, target.low) == 0 &&
                    m.compare(sum.high, target.high) == 0;
         }
-        if (paired)
+        if (m.fault == Math::Fault::Failure)
+          return Answer(m.status());
+        if (m.active() && paired)
           shortcut = center & (signbit - 1) ? center : UINT64_C(0);
       }
       for (unsigned precision = 128; precision <= 4096; precision *= 2) {
-        m.used = 0;
+        m.reset();
         m.precision = precision;
-        try {
+        {
           Frame frame(m);
           auto numerator = m.interval(), denominator = m.interval(),
                coefficient = m.interval(), source = m.interval(),
                temp = m.interval(), u = m.interval(), quotient = m.interval();
           m.integer(numerator, 0);
           m.integer(denominator, 0);
-          for (unsigned j = 0; j <= radius; ++j) {
+          for (unsigned j = 0; j <= radius && m.active(); ++j) {
             if (!uniform_tap_sign(parameters, radius, j))
               continue;
             m.integer(u, j);
@@ -208,9 +220,13 @@ struct UniformLowpassMath {
               m.add(numerator, numerator, temp);
             }
           }
+          if (m.fault == Math::Fault::Failure)
+            return Answer(m.status());
+          if (!m.active())
+            continue;
           if (denominator.high.negative || m.top(denominator.high) < 0)
             return Answer(Status{ErrorCode::InvalidArgument,
-                                 "nonpositive lowpass normalizer",
+                                 {},
                                  FailureReason::InvalidDomain});
           if (denominator.low.negative || m.top(denominator.low) < 0)
             continue;
@@ -219,17 +235,15 @@ struct UniformLowpassMath {
           m.divide(quotient, numerator, denominator);
           const auto low = m.rounded(quotient.low, narrow),
                      high = m.rounded(quotient.high, narrow);
-          if (low == high)
+          if (m.fault == Math::Fault::Failure)
+            return Answer(m.status());
+          if (m.active() && low == high)
             return Answer(low);
-        } catch (const DirectedInterval::Unresolved&) {
-          // Retry complete coefficients and sum at higher precision.
         }
       }
       return Answer(Status{ErrorCode::ResourceExhausted,
-                           "uniform lowpass rounding could not be certified",
+                           {},
                            FailureReason::CapacityLimit});
-    } catch (const Status& status) {
-      return Answer(status);
     }
   }
 };

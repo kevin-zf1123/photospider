@@ -19,8 +19,86 @@ namespace {
 thread_local const ResourceBudget* metadata_root = nullptr;
 thread_local ErrorCode* metadata_error = nullptr;
 thread_local core_internal::ResourcePayloadScope* payload_scope = nullptr;
+thread_local core_internal::ResourceMetadataScope* metadata_scope = nullptr;
+thread_local core_internal::ResourceAdmissionScope* admission_scope = nullptr;
 }  // namespace
 namespace core_internal {
+ResourceAdmissionScope::ResourceAdmissionScope(
+    const ResourceBudget& root, ResourceAdmissionFailure* failure,
+    bool* recorded) noexcept
+    : root_(root),
+      failure_(failure),
+      recorded_(recorded),
+      previous_(admission_scope) {
+  *recorded_ = false;
+  admission_scope = this;
+}
+ResourceAdmissionScope::~ResourceAdmissionScope() noexcept {
+  admission_scope = previous_;
+}
+void ResourceAdmissionScope::record(
+    const ResourceBudget& root,
+    const ResourceAdmissionFailure& failure) noexcept {
+  for (auto* scope = admission_scope; scope; scope = scope->previous_)
+    if (scope->root_.same_owner(root)) {
+      if (!*scope->recorded_) {
+        *scope->failure_ = failure;
+        *scope->recorded_ = true;
+      }
+      return;
+    }
+}
+ResourceMetadataStatistics MetadataObservation::snapshot() const noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return statistics_;
+}
+ResourceMetadataScope::ResourceMetadataScope(
+    const ResourceBudget& root,
+    std::weak_ptr<MetadataObservation> observation) noexcept
+    : root_(root),
+      observation_(std::move(observation)),
+      previous_(metadata_scope) {
+  metadata_scope = this;
+}
+ResourceMetadataScope::~ResourceMetadataScope() noexcept {
+  metadata_scope = previous_;
+}
+std::weak_ptr<MetadataObservation> ResourceMetadataScope::capture(
+    const ResourceBudget& root) noexcept {
+  for (auto* scope = metadata_scope; scope; scope = scope->previous_)
+    if (scope->root_.same_owner(root))
+      return scope->observation_;
+  return {};
+}
+void ResourceMetadataAccess::update(
+    const std::weak_ptr<MetadataObservation>& weak, std::uint64_t reserved_add,
+    std::uint64_t reserved_remove, std::uint64_t actual_add,
+    std::uint64_t actual_remove) noexcept {
+  auto observation = weak.lock();
+  if (!observation)
+    return;
+  std::lock_guard<std::mutex> lock(observation->mutex_);
+  auto& s = observation->statistics_;
+  s.reserved_bytes += reserved_add;
+  s.reserved_bytes -= reserved_remove;
+  s.allocated_bytes += actual_add;
+  s.allocated_bytes -= actual_remove;
+  s.peak_reserved_bytes = std::max(s.peak_reserved_bytes, s.reserved_bytes);
+  s.peak_allocated_bytes = std::max(s.peak_allocated_bytes, s.allocated_bytes);
+}
+void ResourceMetadataAccess::attribute(
+    ResourceLease& lease,
+    const std::shared_ptr<MetadataObservation>& observation) noexcept {
+  if (!lease.impl_ || !observation)
+    return;
+  auto& impl = *lease.impl_;
+  std::lock_guard<std::mutex> lock(impl.root->mutex);
+  if (!impl.metadata_observation.expired())
+    return;
+  impl.metadata_observation = observation;
+  update(impl.metadata_observation, impl.amount[ResourceKind::Metadata], 0,
+         sizeof(ResourceLease::Impl) + impl.committed_metadata, 0);
+}
 PayloadObservation::Snapshot PayloadObservation::peaks() const noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   return {peak_, peak_reserved_};
@@ -113,6 +191,36 @@ ResourceLimits::ResourceLimits() {
   capacity[ResourceKind::Queue] = 1024;
 }
 namespace core_internal {
+void ResourceMetadataAccess::commit(ResourceLease& lease,
+                                    std::uint64_t bytes) noexcept {
+  if (!lease.impl_ || !bytes)
+    return;
+  auto& impl = *lease.impl_;
+  std::lock_guard<std::mutex> lock(impl.root->mutex);
+  if (impl.quarantined)
+    return;
+  impl.committed_metadata += bytes;
+  impl.root->commit_metadata(bytes);
+  update(impl.metadata_observation, 0, 0, bytes, 0);
+}
+void ResourceMetadataAccess::withdraw(ResourceLease& lease,
+                                      std::uint64_t bytes) noexcept {
+  if (!lease.impl_ || !bytes)
+    return;
+  auto& impl = *lease.impl_;
+  std::lock_guard<std::mutex> lock(impl.root->mutex);
+  if (impl.quarantined || bytes > impl.committed_metadata)
+    return;
+  impl.committed_metadata -= bytes;
+  impl.root->stats.allocated_metadata_bytes -= bytes;
+  update(impl.metadata_observation, 0, 0, 0, bytes);
+}
+void ResourceMetadataAccess::commit_owner(const std::shared_ptr<void>& owner,
+                                          std::uint64_t bytes) noexcept {
+  ResourceLease lease;
+  lease.impl_ = std::static_pointer_cast<ResourceLease::Impl>(owner);
+  commit(lease, bytes);
+}
 void ResourcePayloadAccess::commit(ResourceLease& lease,
                                    std::uint64_t bytes) noexcept {
   if (!lease.impl_ || !bytes)
@@ -148,6 +256,9 @@ namespace resource_internal {
 void commit_payload(ResourceLease& lease, std::uint64_t bytes) noexcept {
   core_internal::ResourcePayloadAccess::commit(lease, bytes);
 }
+void commit_metadata(ResourceLease& lease, std::uint64_t bytes) noexcept {
+  core_internal::ResourceMetadataAccess::commit(lease, bytes);
+}
 }  // namespace resource_internal
 ResourceBudget::ResourceBudget(ResourceLimits limits) {
   if (!coherent(limits.cleanup))
@@ -160,7 +271,12 @@ ResourceBudget::ResourceBudget(ResourceLimits limits) {
 std::uint64_t ResourceBudget::lease_metadata_bytes() noexcept {
   return sizeof(ResourceLease::Impl);
 }
-Result<ResourceLease> ResourceBudget::reserve(ResourceCapacity capacity) const {
+Result<ResourceLease> ResourceBudget::reserve(
+    ResourceCapacity capacity, ResourceAdmissionFailure* rejection) const {
+  if (rejection) {
+    *rejection = {};
+    rejection->requested = capacity;
+  }
   if (!coherent(capacity)) {
     resource_internal::metadata_failure(*this, ErrorCode::InvalidArgument);
     return Result<ResourceLease>(Status::failure(
@@ -177,12 +293,29 @@ Result<ResourceLease> ResourceBudget::reserve(ResourceCapacity capacity) const {
   capacity[ResourceKind::Host] += overhead;
   capacity[ResourceKind::Metadata] += overhead;
   std::unique_lock<std::mutex> lock(impl_->mutex);
+  const auto describe_rejection = [&] {
+    ResourceAdmissionFailure detail;
+    detail.requested = capacity;
+    for (std::size_t i = 0; i < capacity.values.size(); ++i) {
+      auto available = impl_->limits.capacity.values[i] -
+                       impl_->stats.protected_cleanup.values[i] -
+                       impl_->stats.live.values[i];
+      detail.available.values[i] = available;
+      if (!detail.exhausted && capacity.values[i] > available)
+        detail.exhausted = static_cast<ResourceKind>(i);
+    }
+    if (rejection)
+      *rejection = detail;
+    core_internal::ResourceAdmissionScope::record(*this, detail);
+  };
   if (!impl_->fits(capacity)) {
     lock.unlock();
     impl_->reclaim(capacity);
     lock.lock();
-    if (!impl_->fits(capacity))
+    if (!impl_->fits(capacity)) {
+      describe_rejection();
       return failure();
+    }
   }
   // Admission and fallible owner construction are one serialized transaction.
   // No resource can be published until construction succeeds.
@@ -191,6 +324,12 @@ Result<ResourceLease> ResourceBudget::reserve(ResourceCapacity capacity) const {
     impl_->add(capacity);
     owner->root = impl_;
     owner->amount = capacity;
+    impl_->commit_metadata(sizeof(ResourceLease::Impl));
+    owner->metadata_observation =
+        core_internal::ResourceMetadataScope::capture(*this);
+    core_internal::ResourceMetadataAccess::update(
+        owner->metadata_observation, capacity[ResourceKind::Metadata], 0,
+        sizeof(ResourceLease::Impl), 0);
     if (capacity[ResourceKind::Payload]) {
       owner->observation = core_internal::ResourcePayloadScope::capture(*this);
       core_internal::ResourcePayloadAccess::update(
@@ -200,6 +339,7 @@ Result<ResourceLease> ResourceBudget::reserve(ResourceCapacity capacity) const {
     lease.impl_ = std::move(owner);
     return Result<ResourceLease>(std::move(lease));
   } catch (const std::bad_alloc&) {
+    describe_rejection();
     return failure();
   }
 }
@@ -235,6 +375,8 @@ Status ResourceLease::grow(ResourceCapacity additional) {
       return core_internal::capacity_exhausted();
   }
   impl_->root->add(additional);
+  core_internal::ResourceMetadataAccess::update(
+      impl_->metadata_observation, additional[ResourceKind::Metadata], 0, 0, 0);
   if (!impl_->amount[ResourceKind::Payload] &&
       additional[ResourceKind::Payload] && !impl_->observation.run)
     impl_->observation =
@@ -260,12 +402,16 @@ Status ResourceLease::shrink(ResourceCapacity released) {
   }
   if (!coherent(remaining) || remaining[ResourceKind::Host] < sizeof(Impl) ||
       remaining[ResourceKind::Metadata] < sizeof(Impl) ||
+      remaining[ResourceKind::Metadata] - sizeof(Impl) <
+          impl_->committed_metadata ||
       remaining[ResourceKind::Payload] < impl_->committed_payload)
     return Status::failure(ErrorCode::InvalidArgument,
                            "inconsistent lease shrink");
   for (std::size_t i = 0; i < released.values.size(); ++i)
     impl_->root->stats.live.values[i] -= released.values[i];
   impl_->amount = remaining;
+  core_internal::ResourceMetadataAccess::update(
+      impl_->metadata_observation, 0, released[ResourceKind::Metadata], 0, 0);
   core_internal::ResourcePayloadAccess::update(
       impl_->observation, 0, released[ResourceKind::Payload], 0, 0);
   return Status::success();

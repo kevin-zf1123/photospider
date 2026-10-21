@@ -26,16 +26,14 @@ Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
-For each full logical coordinate of a nonempty request, return UInt8 1 when `a != b` is true, otherwise
+For each coordinate in a requested output tile, return UInt8 1 when `a != b` is true, otherwise
 UInt8 0. Inputs `a` and `b` have identical shape and dtype (UInt8, Int64, Float32
 or Float64). Output `values` has that shape and no attached domain description. No static numeric
 parameters or implicit cast/broadcast is provided.
 
 Inherit the [exact comparison contract](NUM-07_comparison_contract.md) in full:
 floating numeric relations, NaN behavior, signed-zero equality, exact integer
-comparison, bitwise equivalence of the three CPU profiles, two-port complete-input support,
-typed validation, invalidation, returned storage, resource/error and lifetime
-requirements. This is numerical comparison, not bit-pattern comparison.
+comparison, bitwise equivalence of the three CPU profiles, fixed two-port tile support, structural preparation, returned storage, resources, errors and lifetime requirements. This is numerical comparison, not bit-pattern comparison.
 
 ## Acceptance and implementation status
 
@@ -45,10 +43,8 @@ through ExecutionContext. Repeat all supported dtypes and valid platform keys.
 Use independent exact relation/bit classification rather than the production
 comparison helper. Include Int64 extrema and values above 2^53, signed zeros,
 subnormal neighbors, infinities, signaling/quiet NaNs in either input position
-and the shared disjoint/strided/resource/typed-validation acceptance cases.
+and the shared disjoint/strided/resource/structural-validation acceptance cases.
 
-The default registry implements all three complete-input profile keys. Temporary acceptance should check source
-support, special bits, typed validation, strided inputs, cancellation/resources
-and composition with select. The specification remains Proposed; these requirements do not report a test or performance result.
+All three profile definitions lower to fixed tile tasks. Temporary acceptance should check declared input support, special bits, signed strides, cancellation/resources and composition with select. The specification remains Proposed; these requirements do not report a test or performance result.
 
-Current Run-shared complete-input computation, capacity and validation: [NUM-07 measurements](../comparison-whole.md).
+See [NUM-07 fixed execution](../comparison-execution.md) for invocation, capacity and validation boundaries.

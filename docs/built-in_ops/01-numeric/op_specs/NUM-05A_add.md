@@ -49,29 +49,23 @@ Exact cancellation produces +0. Adding -0 to -0 produces -0; other sums
 of signed zeros produce +0. A nonzero exact result rounding to zero retains
 its mathematical sign.
 
-For UInt8/Int64, compute the exact integer result and reject only when that
-result is outside the destination range. Overflow fails the complete complete-input invocation
-without wrapping, saturation or promotion. No floating conversion is permitted.
+For UInt8/Int64, the caller supplies operands whose exact result fits the destination dtype. This is an unchecked precondition. Valid results are computed exactly without floating conversion, wrapping, saturation or promotion.
 
-## Acceptance and legacy comparison
+## Acceptance and unsuffixed contract
 
 Conceptual public fixture: `[1,2,3] + [4,5,6] -> [5,7,9]`, repeated for supported dtypes.
 Include signed-zero operand combinations, extrema, subnormal/normal boundaries,
 all infinity combinations and NaNs with distinct payloads in both input orders.
 Use exact rational rounding as the floating oracle and arbitrary-precision
-integers for integer cases; verify that overflow both inside and outside the consumer projection
-fails the complete invocation. Apply all shared public execution and resource cases.
+integers for representable integer cases. Overflow violates the caller precondition and has no promised diagnostic outcome. Apply all shared public execution and resource cases.
 
-The current legacy operation uses finite-only Float32/Float64 arithmetic and
-Run-shared complete-input computation. It does not implement this versioned IEEE-like contract or
-establish the full-input typed and numeric semantics. The maintained versioned implementation and public example are described below.
+The unsuffixed `numeric.add` key uses fixed CPU tile tasks and an unchecked finite Float32/Float64 domain. Its preconditions and output selection are described in [Numeric operations](../../../kernel-architecture/Numeric-Operations.md); the suffixed keys below have this separate IEEE contract.
 
 ## Maintained implementation
 
 The three keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/ops/numeric/binary.hpp`.
-The shared Run-shared adapter retains and validates both complete inputs, including
-when a numeric identity determines a result.
+The fixed adapter declares both intersecting input tile sets, including when a numeric identity determines a result.
 Floating elementary operations use controlled correctly rounded hardware
 arithmetic after exact special-value classification, with exact fallback; integer
 operations retain checked exact arithmetic. Accelerated ordinary positive-base

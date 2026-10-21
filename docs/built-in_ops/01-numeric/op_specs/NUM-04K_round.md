@@ -56,7 +56,7 @@ Check the explicit halfway vector above, neighbors on both sides of each
 halfway point, all integer types/extrema, Float32/Float64 subnormals and large
 integral values, signed NaNs and infinities. Use an independent exact-rational
 distance/tie oracle plus explicit signed-zero/NaN bit rules. Inherited public
-regional/witness/cache/resource/ownership tests apply to all three keys.
+selected-tile/fixed-read/resource/ownership tests apply to all three keys.
 
 The target public fixture binds the halfway vector, compiles a selected round
 key and inspects the result bits and dtype through ExecutionContext. These keys
@@ -65,6 +65,5 @@ The maintained executable and current validation boundary are documented below.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
-atomic failure for the complete invocation. Its numerical path follows
+exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

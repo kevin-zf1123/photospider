@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/resource_observation.hpp"
 #include "data/fragment_atlas_work.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
@@ -54,6 +55,37 @@ Result<TensorWriter> allocate(std::uint64_t bytes,
                                 Region::whole({bytes}), allocator);
 }
 }  // namespace
+FragmentAtlas::FragmentAtlas(const FragmentAtlas& other)
+    : descriptor(other.descriptor),
+      tile_shape(other.tile_shape),
+      slot_count(other.slot_count),
+      payload_bytes(other.payload_bytes),
+      payload(other.payload),
+      directory(other.directory) {}  // NOLINT(whitespace/indent_namespace)
+void FragmentAtlas::swap(FragmentAtlas& other) noexcept {
+  using std::swap;
+  swap(metadata_, other.metadata_);
+  swap(descriptor, other.descriptor);
+  tile_shape.swap(other.tile_shape);
+  swap(slot_count, other.slot_count);
+  swap(payload_bytes, other.payload_bytes);
+  swap(payload, other.payload);
+  swap(directory, other.directory);
+}
+FragmentAtlas& FragmentAtlas::operator=(const FragmentAtlas& other) {
+  if (this != &other) {
+    FragmentAtlas replaced(other);
+    swap(replaced);
+  }
+  return *this;
+}
+FragmentAtlas& FragmentAtlas::operator=(FragmentAtlas&& other) noexcept {
+  if (this != &other) {
+    FragmentAtlas replaced(std::move(other));
+    swap(replaced);
+  }
+  return *this;
+}
 struct FragmentAtlasPlan::Impl {
   ResourceLease metadata;
   TensorDescriptor descriptor;
@@ -101,6 +133,7 @@ Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare_regions(
   }
   const auto& shape = descriptor.shape;
   if (geometry.empty()) {
+    geometry.reserve(shape.size());
     geometry.resize(shape.size(), 1);
     std::uint64_t remaining = 64;
     for (std::size_t axis = shape.size(); axis; --axis) {
@@ -152,8 +185,13 @@ Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare_regions(
   auto plan = std::allocate_shared<Impl>(ResourceAllocator<Impl>{});
   plan->metadata = std::move(metadata);
   plan->descriptor = descriptor;
+  core_internal::ResourceMetadataAccess::commit(
+      plan->metadata,
+      plan->descriptor.shape.capacity() * sizeof(std::uint64_t));
   plan->coverage = coverage;
   plan->tile_shape = std::move(geometry);
+  core_internal::ResourceMetadataAccess::commit(
+      plan->metadata, plan->tile_shape.capacity() * sizeof(std::uint64_t));
   plan->bytes = count.value() * width;
   if (!core_internal::can_multiply(masks.size(), 2))
     return Result<FragmentAtlasPlan>(core_internal::resource_exhausted());
@@ -232,7 +270,7 @@ std::uint64_t FragmentAtlasPlan::materialization_work() const {
 }
 Result<FragmentAtlas> FragmentAtlasPlan::materialize(
     const Tensor& input, const BufferAllocator& allocator,
-    const FootprintLimits& limits) const {
+    const FootprintLimits& limits) const try {
   if (!input.valid())
     return Result<FragmentAtlas>(data_internal::invalid_fragment_atlas());
   auto local = limits;
@@ -243,12 +281,14 @@ Result<FragmentAtlas> FragmentAtlasPlan::materialize(
         return input.read(at, destination, bytes);
       },
       allocator, local);
+} catch (const std::bad_alloc&) {
+  return Result<FragmentAtlas>(Status{ErrorCode::ResourceExhausted, {}});
 }
 Result<FragmentAtlas> FragmentAtlasPlan::materialize_regions(
     const TensorDescriptor& descriptor, const Footprint& coverage,
     const std::function<Status(const std::vector<std::uint64_t>&, void*,
                                std::size_t)>& read,
-    const BufferAllocator& allocator, const FootprintLimits& limits) const {
+    const BufferAllocator& allocator, const FootprintLimits& limits) const try {
   Work work{limits.maximum_work, limits.cancellation, limits.consume_work};
   auto status = work.consume(0);
   if (!status.ok())
@@ -289,7 +329,17 @@ Result<FragmentAtlas> FragmentAtlasPlan::materialize_regions(
   auto data = payload.take_value(), index = directory.take_value();
   std::memset(index.data(), 0, index.size());
   data.data()[0] = 0;
+  ResourceLease coordinates;
+  if (auto* root = resource_internal::metadata_budget()) {
+    const auto bytes = rank * sizeof(std::uint64_t);
+    auto admitted = root->reserve(ResourceCapacity::host(bytes, bytes));
+    if (!admitted.ok())
+      return Result<FragmentAtlas>(admitted.status());
+    coordinates = admitted.take_value();
+  }
   std::vector<std::uint64_t> at(impl_->descriptor.shape.size());
+  core_internal::ResourceMetadataAccess::commit(
+      coordinates, at.capacity() * sizeof(std::uint64_t));
   for (const auto& tile : impl_->tiles) {
     auto* slot = index.data() + tile.slot * kFragmentAtlasSlotBytes;
     for (std::size_t axis = 0; axis < 8; ++axis)
@@ -322,13 +372,32 @@ Result<FragmentAtlas> FragmentAtlasPlan::materialize_regions(
   if (!packed.ok() || !lookup.ok())
     return Result<FragmentAtlas>(packed.ok() ? lookup.status()
                                              : packed.status());
-  FragmentAtlas result{impl_->descriptor,   impl_->tile_shape,
-                       impl_->slots,        impl_->bytes,
-                       packed.take_value(), lookup.take_value()};
+  FragmentAtlas result;
+  if (auto* root = resource_internal::metadata_budget()) {
+    const auto bytes =
+        (rank + impl_->tile_shape.size()) * sizeof(std::uint64_t);
+    auto admitted = root->reserve(ResourceCapacity::host(bytes, bytes));
+    if (!admitted.ok())
+      return Result<FragmentAtlas>(admitted.status());
+    result.metadata_ = admitted.take_value();
+  }
+  result.descriptor = impl_->descriptor;
+  core_internal::ResourceMetadataAccess::commit(
+      result.metadata_,
+      result.descriptor.shape.capacity() * sizeof(std::uint64_t));
+  result.tile_shape = impl_->tile_shape;
+  core_internal::ResourceMetadataAccess::commit(
+      result.metadata_, result.tile_shape.capacity() * sizeof(std::uint64_t));
+  result.slot_count = impl_->slots;
+  result.payload_bytes = impl_->bytes;
+  result.payload = packed.take_value();
+  result.directory = lookup.take_value();
   status = work.consume(0);
   if (!status.ok())
     return Result<FragmentAtlas>(status);
   return Result<FragmentAtlas>(std::move(result));
+} catch (const std::bad_alloc&) {
+  return Result<FragmentAtlas>(Status{ErrorCode::ResourceExhausted, {}});
 }
 Result<std::uint64_t> FragmentAtlas::address(
     const std::vector<std::uint64_t>& at) const {

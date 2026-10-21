@@ -8,8 +8,18 @@
 #include <utility>
 
 #include "photospider/core/checked_math.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps {
+namespace data_internal {
+// Immutable provenance links are shared by allocator copies and buffers. The
+// quota counter is separately synchronized; parent links never change.
+struct AllocationScope final {
+  std::shared_ptr<const AllocationScope> parent;
+  std::mutex mutex;
+  std::uint64_t live = 0;
+};
+}  // namespace data_internal
 namespace {
 void notify_failure(const BufferAllocator::FailureObserver& observer,
                     const Status& status) noexcept {
@@ -27,6 +37,10 @@ ByteView CpuStorage::bytes() const noexcept {
   if (adopted_)
     return ByteView(adopted_->data(), adopted_->size());
   return ByteView(allocated_.get(), static_cast<std::size_t>(capacity_));
+}
+void CpuStorage::AlignedDelete::operator()(
+    std::uint8_t* pointer) const noexcept {
+  ::operator delete(pointer, std::align_val_t(alignment));
 }
 CpuStorage::~CpuStorage() noexcept = default;
 std::uint8_t* MutableBuffer::data() noexcept {
@@ -66,10 +80,7 @@ BufferAllocator BufferAllocator::limited_impl(std::uint64_t maximum_bytes,
                                               FailureObserver failure,
                                               bool requested) const {
   try {
-    struct State {
-      std::mutex mutex;
-      std::uint64_t live = 0;
-    };
+    using State = data_internal::AllocationScope;
     struct Lease {
       std::shared_ptr<State> state;
       std::uint64_t bytes = 0;
@@ -81,11 +92,19 @@ BufferAllocator BufferAllocator::limited_impl(std::uint64_t maximum_bytes,
         }
       }
     };
-    auto state = std::make_shared<State>();
-    const auto limited_reserve = [state, maximum_bytes](Reserve parent) {
-      return Reserve([parent = std::move(parent), state,
+    auto state = metadata_budget_
+                     ? std::allocate_shared<State>(
+                           ResourceAllocator<State>(*metadata_budget_))
+                     : std::make_shared<State>();
+    state->parent = allocation_scope_;
+    const auto limited_reserve = [state, maximum_bytes,
+                                  budget = metadata_budget_](Reserve parent) {
+      return Reserve([parent = std::move(parent), state, budget,
                       maximum_bytes](std::uint64_t bytes) {
-        auto lease = std::make_shared<Lease>();
+        auto lease =
+            budget
+                ? std::allocate_shared<Lease>(ResourceAllocator<Lease>(*budget))
+                : std::make_shared<Lease>();
         lease->state = state;
         {
           std::lock_guard<std::mutex> lock(state->mutex);
@@ -116,13 +135,14 @@ BufferAllocator BufferAllocator::limited_impl(std::uint64_t maximum_bytes,
       if (allocation_committed_) {
         result.allocation_committed_ = [parent = allocation_committed_](
                                            const std::shared_ptr<void>& owner,
-                                           std::uint64_t bytes) {
+                                           std::uint64_t bytes,
+                                           std::uint64_t metadata) {
           const auto lease = std::static_pointer_cast<Lease>(owner);
-          parent(lease->parent, bytes);
+          parent(lease->parent, bytes, metadata);
         };
       }
     }
-    result.allocation_scopes_.push_back(state);
+    result.allocation_scope_ = state;
     result.failure_ = [parent = failure_,
                        observer = failure](const Status& status) {
       if (parent) {
@@ -164,14 +184,29 @@ bool BufferAllocator::owns_allocation(
 }
 bool BufferAllocator::owns_allocation(
     const CpuStorage& storage) const noexcept {
-  if (allocation_scopes_.empty())
+  if (!allocation_scope_)
     return false;
-  const auto& scope = allocation_scopes_.back();
-  return std::find(storage.allocation_scopes_.begin(),
-                   storage.allocation_scopes_.end(),
-                   scope) != storage.allocation_scopes_.end();
+  for (auto scope = storage.allocation_scope_; scope; scope = scope->parent)
+    if (scope == allocation_scope_)
+      return true;
+  return false;
 }
 Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
+  return allocate_impl(size, alignof(std::max_align_t));
+}
+Result<MutableBuffer> BufferAllocator::allocate_aligned(
+    std::uint64_t size, std::uint64_t alignment) const {
+  if (!alignment || (alignment & (alignment - 1)) || alignment > SIZE_MAX)
+    return Result<MutableBuffer>(
+        {ErrorCode::InvalidArgument, "invalid host allocation alignment"});
+  if (native_allocate_)
+    return Result<MutableBuffer>({ErrorCode::BackendUnavailable,
+                                  "native alignment requires preparation"});
+  return allocate_impl(
+      size, std::max<std::uint64_t>(alignment, alignof(std::max_align_t)));
+}
+Result<MutableBuffer> BufferAllocator::allocate_impl(
+    std::uint64_t size, std::uint64_t alignment) const {
   const auto reject = [&](Status status) {
     if (failure_) {
       try {
@@ -194,7 +229,7 @@ Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
           native_allocate_(size, reserve_, domain_, allocation_committed_);
       if (!result.ok())
         return reject(result.status());
-      result.value().storage_->allocation_scopes_ = allocation_scopes_;
+      result.value().storage_->allocation_scope_ = allocation_scope_;
       result.value().storage_->requested_lease_ = std::move(requested_lease);
       return result;
     }
@@ -204,22 +239,32 @@ Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
                            "CPU allocation size is not addressable",
                            FailureReason::CapacityLimit});
     }
-    MutableBuffer result;
-    result.storage_ = std::shared_ptr<CpuStorage>(new CpuStorage());
-    result.storage_->domain_ = domain_;
-    result.storage_->allocation_scopes_ = allocation_scopes_;
-    result.storage_->requested_lease_ = std::move(requested_lease);
+    std::shared_ptr<void> storage_lease;
     if (reserve_) {
       auto lease = reserve_(size);
       if (!lease.ok())
         return reject(lease.status());
-      result.storage_->lease_ = lease.take_value();
+      storage_lease = lease.take_value();
     }
-    result.storage_->allocated_ =
-        std::make_unique<std::uint8_t[]>(static_cast<std::size_t>(size));
+    MutableBuffer result;
+    auto owner = std::unique_ptr<CpuStorage>(new CpuStorage());
+    owner->lease_ = std::move(storage_lease);
+    if (allocation_committed_)
+      allocation_committed_(owner->lease_, 0, sizeof(CpuStorage));
+    result.storage_ = std::shared_ptr<CpuStorage>(std::move(owner));
+    result.storage_->domain_ = domain_;
+    result.storage_->allocation_scope_ = allocation_scope_;
+    result.storage_->requested_lease_ = std::move(requested_lease);
+    result.storage_->allocated_ = {
+        static_cast<std::uint8_t*>(::operator new(
+            static_cast<std::size_t>(size),
+            std::align_val_t(static_cast<std::size_t>(alignment)))),
+        CpuStorage::AlignedDelete{static_cast<std::size_t>(alignment)}};
+    std::fill_n(result.storage_->allocated_.get(),
+                static_cast<std::size_t>(size), std::uint8_t{0});
     result.storage_->capacity_ = size;
     if (allocation_committed_)
-      allocation_committed_(result.storage_->lease_, size);
+      allocation_committed_(result.storage_->lease_, size, 0);
     return Result<MutableBuffer>(std::move(result));
   } catch (const std::bad_alloc&) {
     return reject(

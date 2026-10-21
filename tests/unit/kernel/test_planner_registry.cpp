@@ -5,56 +5,63 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "photospider/compiler/planner.hpp"
 #include "support/kernel_registry_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
-// Independent backend for the scalar fixture. Uses only installed public types,
-// emits full scalar grants, and never calls the built-in planner or mapper.
+// Independent backend for the scalar fixture using public physical tables.
+// It constructs tasks directly and never invokes operation lowering.
 ps::Status scalar_plan(const ps::ValidatedIR&, ps::PlanBuilder& builder,
-                       const ps::PlanningOptions&) {
-  std::map<std::size_t, std::pair<std::size_t, std::size_t>> locations;
-  for (std::size_t bi = 0; bi < builder.blocks().size(); ++bi) {
-    auto& code = builder.instructions(bi);
-    for (auto si : builder.blocks()[bi].calls) {
-      const auto& step = builder.steps()[si];
-      if (!step.shared_stages.empty() || step.tile_grids.size() != 1 ||
-          step.tile_grids[0].tile_count() != 1)
-        return {ps::ErrorCode::InvalidArgument, "scalar fixture required"};
-      ps::PlanTileInstruction instruction;
-      instruction.step_index = si;
-      auto tile = ps::TileSet::range(ps::ResourceBudget{}, 0, 1);
-      if (!tile.ok())
-        return tile.status();
-      instruction.publication.members.emplace(0, tile.value());
-      auto samples = step.tile_grids[0].coverage(tile.value());
-      if (!samples.ok())
-        return samples.status();
-      instruction.tensor_outputs = samples.value();
-      instruction.publication_samples = {samples.value()};
-      for (std::uint32_t port = 0; port < step.inputs.size(); ++port) {
-        const auto& input = step.inputs[port];
-        auto input_samples =
-            builder.input_grids(input).at(0).coverage(tile.value());
-        if (!input_samples.ok())
-          return input_samples.status();
-        instruction.inputs.push_back(
-            {port, 0, false, tile.value(), input_samples.take_value()});
-        if (const auto* source = std::get_if<ps::PlanStepInput>(&input)) {
-          const auto location = locations.at(source->step_index);
-          if (location.first == bi)
-            instruction.dependencies.push_back(location.second);
-        }
-      }
-      std::sort(instruction.dependencies.begin(),
-                instruction.dependencies.end());
-      locations.emplace(si, std::make_pair(bi, code.size()));
-      code.push_back(std::move(instruction));
-    }
+                       const ps::PlanningOptions& options) {
+  using namespace ps::physical;  // NOLINT(build/namespaces)
+  auto& p = builder.program();
+  Layout layout;
+  layout.element_type = ps::ElementType::Float64;
+  layout.strides[0] = 8;
+  p.layouts.push_back(layout);
+  p.placements.push_back({});
+  for (Id vi = 0; vi < p.values.size(); ++vi) {
+    auto& value = p.values[vi];
+    const auto& schema = *p.schemas[value.schema];
+    if (schema.tensors.size() != 1 ||
+        schema.tensors[0].descriptor.element_type != ps::ElementType::Float64 ||
+        schema.tensors[0].sample_shape() != std::vector<std::uint64_t>{1})
+      return {ps::ErrorCode::InvalidArgument, "scalar fixture required"};
+    value.tiles = {static_cast<Id>(p.tiles.size())};
+    TileDesc tile;
+    tile.value = vi;
+    tile.layout = 0;
+    tile.bytes = 8;
+    p.tiles.push_back(tile);
   }
-  return ps::Status::success();
+  for (Id ci = 0; ci < p.calls.size(); ++ci) {
+    const auto& binding = builder.calls()[ci];
+    TaskDesc task;
+    task.call = ci;
+    task.placement = 0;
+    task.kernel = static_cast<Id>(p.kernels.size());
+    p.kernels.push_back({binding.operation,
+                         binding.inputs.empty() ? "constant" : "sum",
+                         "scalar-v1"});
+    for (Id port = 0; port < binding.inputs.size(); ++port)
+      task.reads.push_back({port, p.values[binding.inputs[port]].tiles[0], 0});
+    const auto ti = static_cast<Id>(p.tasks.size());
+    for (auto output : binding.outputs) {
+      auto tile = p.values[output].tiles[0];
+      p.tiles[tile].producer = ti;
+      task.writes.push_back(tile);
+    }
+    p.tasks.push_back(std::move(task));
+    p.calls[ci].tasks.push_back(ti);
+    p.blocks[p.calls[ci].block].tasks.push_back(ti);
+  }
+  ValidationLimits limits;
+  limits.maximum_edges = options.maximum_dependency_edges;
+  limits.maximum_work = options.maximum_work;
+  return finalize_program(&p, limits);
 }
 }  // namespace
 
@@ -105,9 +112,10 @@ int main() {
   cfg_only.name = "cfg-only";
   cfg_only.supported_ir_forms = {ps::IRForm::ControlFlow};
   PS_REQUIRE_OK(registry->add(cfg_only));
-  for (const auto& name : {"missing-output", "bad-step", "bad-dependency",
-                           "bad-publication", "bad-read", "descriptor-samples",
-                           "over-budget", "throws", "allocates", "fails"}) {
+  for (const auto& name :
+       {"missing-output", "bad-task", "bad-dependency", "bad-write", "bad-read",
+        "bad-schema-read", "over-budget", "outer-budget", "throws", "allocates",
+        "fails"}) {
     PS_REQUIRE_OK(registry->add(
         {name, "1", "Failure fixture",
          [name](const auto& input, auto& builder, const auto& options) {
@@ -119,37 +127,24 @@ int main() {
            if (mode == "fails")
              return ps::Status{ps::ErrorCode::BackendUnavailable,
                                "fixture failure"};
-           auto status = scalar_plan(input, builder, options);
+           auto status = scalar_plan(
+               input, builder,
+               mode == "outer-budget" ? ps::PlanningOptions{} : options);
            if (!status.ok())
              return status;
-           for (std::size_t bi = 0; bi < builder.blocks().size(); ++bi) {
-             auto& code = builder.instructions(bi);
-             if (mode == "missing-output") {
-               code.clear();
-               continue;
-             }
-             if (code.empty())
-               continue;
-             auto& instruction = code.front();
-             if (mode == "bad-step")
-               instruction.step_index = SIZE_MAX;
-             if (mode == "bad-dependency")
-               instruction.dependencies = {SIZE_MAX};
-             if (mode == "bad-publication")
-               instruction.publication.members.clear();
-             if (mode == "over-budget")
-               instruction.dependencies = {0, 1, 2};
-             for (auto& item : code) {
-               if (item.inputs.empty())
-                 continue;
-               if (mode == "bad-read")
-                 item.inputs.front().tensor_slot = UINT32_MAX;
-               if (mode == "descriptor-samples") {
-                 item.inputs.front().descriptor_only = true;
-                 item.inputs.front().tiles = {};
-               }
-             }
-           }
+           auto& p = builder.program();
+           if (mode == "missing-output")
+             p.tasks.clear();
+           else if (mode == "bad-task")
+             p.tasks.front().call = ps::physical::none;
+           else if (mode == "bad-dependency")
+             p.tasks.front().predecessors = {ps::physical::none};
+           else if (mode == "bad-write")
+             p.tasks.front().writes.clear();
+           else if (mode == "bad-read")
+             p.tasks.back().reads.front().tile = ps::physical::none;
+           else if (mode == "bad-schema-read")
+             p.tasks.back().schema_reads = {ps::physical::none};
            return ps::Status::success();
          }}));
   }
@@ -169,7 +164,7 @@ int main() {
   PS_REQUIRE_OK(plan);
   PS_CHECK(calls == 1);
   ps::ExecutionContext execution(operations);
-  auto result = execution.execute(plan.value());
+  auto result = multi_result::run(execution, plan.value());
   PS_REQUIRE_OK(result);
   PS_CHECK(ps::test::named_scalar(result.value(), "sum") == 9);
   auto encoded = ps::CompilerArtifact::export_plan(plan.value());
@@ -179,7 +174,7 @@ int main() {
   auto narrowed =
       loaded.value().select_outputs(loaded.value().output_requests());
   PS_REQUIRE_OK(narrowed);
-  auto replay = execution.execute(narrowed.value());
+  auto replay = multi_result::run(execution, narrowed.value());
   PS_REQUIRE_OK(replay);
   PS_CHECK(ps::test::named_scalar(replay.value(), "sum") == 9);
   PS_CHECK(calls == 1);
@@ -204,23 +199,27 @@ int main() {
   PS_CHECK(!wrong_owner.ok() &&
            wrong_owner.status().code == ps::ErrorCode::Stale);
   PS_CHECK(calls == 3);
-  options.maximum_instructions = 1;
+  options.maximum_tasks = 1;
   auto limit = compiler.plan(ir.value(), options);
   PS_CHECK(!limit.ok() &&
            limit.status().code == ps::ErrorCode::ResourceExhausted);
-  options.maximum_instructions = 4194304;
-  for (const auto& name : {"missing-output", "bad-step", "bad-dependency",
-                           "bad-publication", "bad-read", "descriptor-samples",
-                           "throws", "allocates", "fails", "over-budget"}) {
+  options.maximum_tasks = 4194304;
+  for (const auto& name :
+       {"missing-output", "bad-task", "bad-dependency", "bad-write", "bad-read",
+        "bad-schema-read", "throws", "allocates", "fails", "over-budget",
+        "outer-budget"}) {
     options.planner = name;
-    options.maximum_dependency_edges =
-        std::string(name) == "over-budget" ? 1 : 16777216;
+    options.maximum_dependency_edges = (std::string(name) == "over-budget" ||
+                                        std::string(name) == "outer-budget")
+                                           ? 1
+                                           : 16777216;
     auto failed = compiler.plan(ir.value(), options);
     const std::string mode = name;
-    const auto expected = mode == "allocates" || mode == "over-budget"
-                              ? ps::ErrorCode::ResourceExhausted
-                          : mode == "fails" ? ps::ErrorCode::BackendUnavailable
-                                            : ps::ErrorCode::Internal;
+    const auto expected =
+        mode == "allocates" || mode == "over-budget" || mode == "outer-budget"
+            ? ps::ErrorCode::ResourceExhausted
+        : mode == "fails" ? ps::ErrorCode::BackendUnavailable
+                          : ps::ErrorCode::Internal;
     if (failed.ok() || failed.status().code != expected)
       std::cerr << mode << ": code=" << static_cast<int>(failed.status().code)
                 << " " << failed.status().message << '\n';

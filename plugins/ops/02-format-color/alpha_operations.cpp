@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <optional>
 #include <set>
 #include <string>
@@ -12,8 +13,8 @@
 #include "02-format-color/alpha_common.hpp"
 #include "02-format-color/alpha_math.hpp"
 #include "02-format-color/alpha_numeric_metadata.hpp"
-#include "photospider/data/region_runs.hpp"
-#include "photospider/plugin/tile_helpers.hpp"
+#include "common/fixed_point_inputs.hpp"
+#include "photospider/plugin/tile_geometry.hpp"
 
 namespace ps::plugin_internal {
 namespace alpha_ops {
@@ -30,6 +31,29 @@ struct Span final {
   std::uint64_t first = 0, count = 1;
   Map map;
 };
+struct RuntimeMap final {
+  unsigned port = 0, rank = 0;
+  std::array<std::int8_t, 8> axes{};
+  std::array<std::uint64_t, 8> origins{};
+};
+struct RuntimeSlot final {
+  RuntimeMap data;
+  bool color = false;
+};
+struct RuntimeMaps final {
+  std::vector<RuntimeSlot> slots;
+  RuntimeMap alpha;
+};
+RuntimeMap runtime_map(const Map& map) {
+  RuntimeMap result;
+  result.port = map.port;
+  result.rank = map.axes.size();
+  for (unsigned axis = 0; axis < result.rank; ++axis) {
+    result.axes[axis] = map.axes[axis].output_axis;
+    result.origins[axis] = map.axes[axis].source_origin;
+  }
+  return result;
+}
 struct Preparation final {
   Action action = Action::Associate;
   bool raw = false, narrow = true, simd = false, reference = false;
@@ -41,7 +65,8 @@ struct Preparation final {
   std::vector<Map> data_maps;
   Map alpha_map;
   std::vector<Span> spans;
-  bool view_legal = false;
+  std::shared_ptr<const RuntimeMaps> runtime;
+  std::shared_ptr<const SchemaTemplate> output_schema;
 };
 Map mapping(const Preparation& state,
             const std::vector<OperationMetadata>& inputs, bool alpha,
@@ -138,6 +163,8 @@ void prepare_spans(Preparation* s, std::size_t batches) {
     s->spans.push_back({first, end - first, std::move(map)});
     first = end;
   }
+  if (s->action == Action::Set)
+    return;
   for (std::size_t first = 0; first < s->slots.size();) {
     if (!s->slots[first].color) {
       ++first;
@@ -541,13 +568,12 @@ Result<OperationPreparation> prepare_alpha(
   }
   output.metadata.result_schema =
       std::make_shared<const SchemaTemplate>(std::move(schema));
+  s.output_schema = output.metadata.result_schema;
   auto valid_shape = shape_valid(output.metadata);
   if (!valid_shape.ok()) {
     return Answer(valid_shape);
   }
   s.alpha_map = mapping(s, inputs, true, s.alpha_index);
-  bool identity_view =
-      action == Action::Set && !s.external && s.input_axis == s.output_axis;
   for (std::size_t k = 0; k < source_map.size(); ++k) {
     const auto original = source_map[k];
     Slot slot{original,
@@ -559,11 +585,12 @@ Result<OperationPreparation> prepare_alpha(
         s, inputs, slot.alpha,
         slot.alpha ? s.alpha_index : static_cast<std::uint64_t>(original));
     s.data_maps.push_back(std::move(data));
-    const auto actual =
-        slot.alpha ? s.alpha_index : static_cast<std::uint64_t>(original);
-    identity_view = identity_view && actual == k;
   }
-  s.view_legal = identity_view;
+  auto runtime = std::make_shared<RuntimeMaps>();
+  runtime->alpha = runtime_map(s.alpha_map);
+  for (std::size_t i = 0; i < s.slots.size(); ++i)
+    runtime->slots.push_back({runtime_map(s.data_maps[i]), s.slots[i].color});
+  s.runtime = std::move(runtime);
   prepare_spans(&s, main.batch_axes.size());
   OperationPreparation result;
   result.outputs.push_back(std::move(output));
@@ -572,51 +599,6 @@ Result<OperationPreparation> prepare_alpha(
 } catch (const Status& status) {
   return Result<OperationPreparation>(status);
 }
-void source_at(const Map& map, const std::vector<std::uint64_t>& at,
-               std::vector<std::uint64_t>* source) {
-  source->resize(map.axes.size());
-  for (std::size_t i = 0; i < map.axes.size(); ++i) {
-    const auto& axis = map.axes[i];
-    (*source)[i] = tensor_ops::take(axis.source_coordinate(
-        axis.output_axis < 0 ? 0 : at[axis.output_axis]));
-  }
-}
-Status sample_failure(const Preparation& s, const MathFailure& failure,
-                      const std::vector<std::uint64_t>& at) {
-  std::string message =
-      "alpha." +
-      std::string(s.action == Action::Set         ? "set"
-                  : s.action == Action::Associate ? "associate"
-                                                  : "unassociate") +
-      " group=" + s.group + " " + failure.operand + " at [";
-  for (std::size_t i = 0; i < at.size(); ++i) {
-    message += (i ? "," : "") + std::to_string(at[i]);
-  }
-  message += "] alpha_source=";
-  message += s.scalar ? "scalar" : s.external ? "external_plane" : "internal";
-  message += " alpha_port=" + std::to_string(s.alpha_map.port);
-  if (!s.external) {
-    message += " alpha_channel=" + std::to_string(s.alpha_index);
-  }
-  std::vector<std::uint64_t> alpha_at;
-  source_at(s.alpha_map, at, &alpha_at);
-  message += " alpha_at=[";
-  for (std::size_t i = 0; i < alpha_at.size(); ++i) {
-    message += (i ? "," : "") + std::to_string(alpha_at[i]);
-  }
-  message += "]";
-  return {ErrorCode::OperationFailed,
-          std::move(message),
-          failure.reason,
-          {FailureOrigin::Domain, FailureScope::Atom}};
-}
-using tensor_ops::require;
-using tensor_ops::take;
-using Poll = Result<ResultProgramPoll>;
-Status unavailable_view() {
-  return {ErrorCode::InvalidArgument, "no common affine owner mapping",
-          FailureReason::ViewUnavailable};
-}
 std::optional<std::uint32_t> output_axis(const Preparation& s,
                                          const ResultTensorSpec& spec) {
   return s.output_axis
@@ -624,365 +606,340 @@ std::optional<std::uint32_t> output_axis(const Preparation& s,
                    spec.batch_axes.size() + *s.output_axis)}
              : std::nullopt;
 }
-ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
-  auto result = take(ResultBuilder::start(
-      phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {}, phase.query.tile_extent));
+struct SampleBlock final {
+  std::array<std::uint64_t, 128> colors{}, alpha{}, output{}, offsets{};
+};
+struct ReferenceScratch final {
+  numeric_ops::RatioWorkspace arithmetic{numeric_ops::SequenceProfile::Strict};
+  SampleBlock block;
+};
+bool calculates(const Preparation& state, const Region& output,
+                std::optional<std::uint32_t> axis) {
+  if (state.action == Action::Set || state.layout == "view")
+    return false;
+  const auto channels =
+      axis ? output.dimensions()[*axis] : RegionDimension{0, 1};
+  for (auto k = channels.offset; k < channels.offset + channels.extent; ++k)
+    if (state.slots[k].color)
+      return true;
+  return false;
+}
+std::uint64_t scratch_bytes(const Preparation& state, const Region& output,
+                            std::optional<std::uint32_t> axis) {
+  return !calculates(state, output, axis) ? 0
+         : state.reference                ? sizeof(ReferenceScratch)
+                                          : sizeof(SampleBlock);
+}
+Result<std::set<TileIndex>> required_tiles(
+    const Preparation& state, const Region& output,
+    std::optional<std::uint32_t> channel_axis, const TileGrid& grid,
+    unsigned port, const ResourceBudget& budget, std::uint64_t maximum_tiles) {
+  using Answer = Result<std::set<TileIndex>>;
+  std::set<TileIndex> result;
+  if (state.layout == "view")
+    return Answer(std::move(result));
+  for (const auto& span : state.spans) {
+    auto charged = budget.consume({1});
+    if (!charged.ok())
+      return Answer(charged);
+    if (span.map.port != port)
+      continue;
+    auto dimensions = output.dimensions();
+    if (channel_axis) {
+      auto& c = dimensions[*channel_axis];
+      const auto first = std::max(c.offset, span.first);
+      const auto end = std::min(c.offset + c.extent, span.first + span.count);
+      if (first >= end)
+        continue;
+      c = {first, end - first};
+    }
+    auto region = format_result::mapped_region(Region(std::move(dimensions)),
+                                               span.map.axes);
+    // Bound each rectangular closure before constructing a TileSet, including
+    // malformed imported tasks that supplied fewer read slots than required.
+    std::uint64_t count = 1;
+    for (unsigned axis = 0; axis < grid.rank(); ++axis) {
+      const auto d = region.dimensions()[axis];
+      std::uint64_t extent = 1;
+      if (grid.batch_axis_mask() & (1U << axis))
+        extent = d.extent;
+      else if (axis == grid.height_axis() || axis == grid.width_axis())
+        extent = (d.offset + d.extent - 1) / grid.tile_extent() -
+                 d.offset / grid.tile_extent() + 1;
+      if (extent > maximum_tiles / count)
+        return Answer({ErrorCode::ResourceExhausted, "alpha read tile limit"});
+      count *= extent;
+    }
+    auto tiles = sdk::tiles_for_region(budget, grid, region);
+    if (!tiles.ok())
+      return Answer(tiles.status());
+    for (auto index : tiles.value()) {
+      auto status = budget.consume({1});
+      if (!status.ok())
+        return Answer(status);
+      result.insert(index);
+      if (result.size() > maximum_tiles)
+        return Answer({ErrorCode::ResourceExhausted, "alpha read union limit"});
+    }
+  }
+  return Answer(std::move(result));
+}
+constexpr const char* alpha_contract = "alpha-fixed-v1";
+Result<OperationProgram> lower(const OperationLowering& query) {
+  using Answer = Result<OperationProgram>;
+  const auto& state = *static_cast<const Preparation*>(query.static_state);
+  const auto axis =
+      output_axis(state, query.outputs[0].result_schema->tensors[0]);
+  auto output =
+      TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  std::array<TileGrid, 2> grids;
+  for (unsigned port = 0; port < query.inputs.size(); ++port) {
+    auto grid = TileGrid::from_schema(*query.inputs[port].result_schema,
+                                      query.tile_extent);
+    if (!grid.ok())
+      return Answer(grid.status());
+    grids[port] = grid.take_value();
+  }
+  ResourceLimits limits;
+  limits.maximum_work = query.limits.maximum_work;
+  ResourceBudget budget(limits);
+  OperationProgramBuilder builder(query);
+  for (const auto& member : query.requests[0].members)
+    for (auto tile : member.second) {
+      auto region = output.value().region(tile);
+      if (!region.ok())
+        return Answer(region.status());
+      auto task =
+          builder.add_task("alpha", alpha_contract, {},
+                           {scratch_bytes(state, region.value(), axis), 0, 0});
+      if (!task.ok())
+        return Answer(task.status());
+      for (unsigned port = 0; port < query.inputs.size(); ++port) {
+        auto reads = required_tiles(state, region.value(), axis, grids[port],
+                                    port, budget, query.limits.maximum_records);
+        if (!reads.ok())
+          return Answer(reads.status());
+        if (reads.value().empty()) {
+          auto status = builder.read_input_schema(task.value(), port);
+          if (!status.ok())
+            return Answer(status);
+        }
+        for (auto index : reads.value()) {
+          auto status = builder.read_input(task.value(), port, 0, index);
+          if (!status.ok())
+            return Answer(status);
+        }
+      }
+      auto status = builder.write_output(task.value(), 0, member.first, tile);
+      if (!status.ok())
+        return Answer(status);
+    }
+  return builder.finish();
+}
+struct PreparedAlpha final {
+  Action action;
+  bool narrow, raw, simd, reference, view, calculates;
+  std::optional<std::uint32_t> axis;
+  std::shared_ptr<const RuntimeMaps> maps;
+  fixed_tensor::PointInputs<2> inputs;
+};
+std::array<std::uint64_t, 8> source_at(
+    const RuntimeMap& map, const std::array<std::uint64_t, 8>& at) noexcept {
+  std::array<std::uint64_t, 8> result{};
+  for (unsigned axis = 0; axis < map.rank; ++axis)
+    result[axis] = map.axes[axis] < 0 ? map.origins[axis] : at[map.axes[axis]];
   return result;
 }
-Poll empty_result(const ResultProgramPhase& phase) try {
-  auto result = builder(phase, true);
-  return Poll(ResultPublication{take(result.seal()), true});
-} catch (const Status& status) {
-  return Poll(status);
-}
-Region channel_region(const Region& box, std::optional<std::uint32_t> axis,
-                      std::uint64_t channel) {
-  auto dims = box.dimensions();
-  if (axis)
-    dims[*axis] = {channel, 1};
-  return Region(std::move(dims));
-}
-// Inspect only authorized backing metadata. This proves the full declared map
-// but does not grant any additional sample authorization or output coverage.
-struct GenericView final {
-  std::shared_ptr<const CpuStorage> owner;
-  std::uint64_t base = 0;
-  std::vector<std::int64_t> strides;
-};
-Status generic_view(const ResultProgramPhase& phase, const Preparation& s,
-                    GenericView* proof) {
-  const auto& spec = phase.query.output.result_schema->tensors[0];
-  const auto shape = spec.sample_shape();
-  const auto rank = shape.size();
-  std::array<TensorSpan, 2> sources;
-  std::array<__int128, 2> bases{};
-  const CpuStorage* owner = nullptr;
-  for (const auto& map : s.data_maps) {
-    if (sources[map.port].valid())
-      continue;
-    const auto& input = phase.tensors->at({map.port, 0});
-    std::function<Status(const Region&)> inspect;
-    inspect = [&](const Region& region) {
-      require(phase.consume_work(1 + rank));
-      auto window = take(input.acquire(region, phase.query.cancellation));
-      auto value = window.affine_view();
-      if (!value.ok()) {
-        if (value.status().code != ErrorCode::NotFound)
-          return value.status();
-        auto split = window.visit_backing_regions(phase.resources, inspect);
-        if (!split.ok())
-          return split.status();
-        return split.value() ? Status::success() : unavailable_view();
-      }
-      const auto& v = value.value();
-      auto base = static_cast<__int128>(v.layout().byte_offset);
-      for (std::size_t i = 0; i < v.layout().origin.size(); ++i)
-        base -= static_cast<__int128>(v.layout().origin[i]) *
-                v.layout().byte_strides[i];
-      if (owner && owner != v.storage().get())
-        return unavailable_view();
-      const auto& previous = sources[map.port];
-      if (previous.valid() &&
-          (base != bases[map.port] ||
-           previous.layout().byte_strides != v.layout().byte_strides))
-        return unavailable_view();
-      owner = v.storage().get();
-      sources[map.port] = value.take_value();
-      bases[map.port] = base;
-      return Status::success();
-    };
-    for (const auto& box : input.coverage().boxes()) {
-      auto inspected = inspect(box);
-      if (!inspected.ok())
-        return inspected;
-    }
-    if (!sources[map.port].valid())
-      return unavailable_view();
-  }
-  std::array<std::int64_t, 8> strides{};
-  __int128 first = 0, channel_stride = 0;
-  for (std::size_t k = 0; k < s.data_maps.size(); ++k) {
-    require(phase.consume_work(rank + 1));
-    const auto& map = s.data_maps[k];
-    const auto& source = sources[map.port];
-    auto base = bases[map.port];
-    std::array<std::int64_t, 8> projected{};
-    for (std::size_t i = 0; i < map.axes.size(); ++i) {
-      const auto& axis = map.axes[i];
-      const auto stride = source.layout().byte_strides[i];
-      base += static_cast<__int128>(axis.source_origin) * stride;
-      if (axis.output_axis >= 0)
-        projected[axis.output_axis] = stride;
-    }
-    if (!k) {
-      strides = projected;
-      first = base;
-    } else {
-      if (strides != projected)
-        return unavailable_view();
-      if (k == 1)
-        channel_stride = base - first;
-      if (base != first + static_cast<__int128>(k) * channel_stride)
-        return unavailable_view();
-    }
-  }
-  const auto axis = output_axis(s, spec);
-  if (!axis || channel_stride < INT64_MIN || channel_stride > INT64_MAX)
-    return unavailable_view();
-  strides[*axis] = static_cast<std::int64_t>(channel_stride);
-  auto low = first, high = first;
-  for (std::size_t i = 0; i < rank; ++i) {
-    const auto delta = static_cast<__int128>(shape[i] - 1) * strides[i];
-    (delta < 0 ? low : high) += delta;
-  }
-  if (low < 0 ||
-      high + (s.narrow ? 4 : 8) > static_cast<__int128>(owner->bytes().size()))
-    return unavailable_view();
-  proof->owner = sources[s.data_maps.front().port].storage();
-  proof->base = static_cast<std::uint64_t>(first);
-  proof->strides.assign(strides.begin(), strides.begin() + rank);
-  return Status::success();
-}
-struct ReadSpan final {
-  const std::uint8_t* data;
-  std::uint64_t count;
-  std::int64_t stride;
-};
-ReadSpan read_span(const ResultTensorReadWindow& window, const Map& map,
-                   const std::vector<std::uint64_t>& at,
-                   std::vector<std::uint64_t>* source, std::uint32_t row_axis,
-                   std::uint64_t limit) {
-  source_at(map, at, source);
-  const auto run = take(window.row_run(*source));
-  if (map.axes[window.sample_axis()].output_axis ==
-      static_cast<std::int32_t>(row_axis))
-    return {run.data, std::min(limit, run.samples), run.sample_stride_bytes};
-  const bool repeat =
-      std::none_of(map.axes.begin(), map.axes.end(), [&](const auto& axis) {
-        return axis.output_axis == static_cast<std::int32_t>(row_axis);
-      });
-  return {run.data, repeat ? limit : 1, 0};
-}
-Status evaluate(const ResultProgramPhase& phase, const Preparation& s,
-                const Region& box, const ResultTensorWriteWindow* writer) {
-  const auto& spec = phase.query.output.result_schema->tensors[0];
-  const auto axis = output_axis(s, spec);
-  const auto channels = axis ? box.dimensions()[*axis] : RegionDimension{0, 1};
-  const std::size_t width = s.narrow ? 4 : 8;
-  plugin_internal::FloatingEnvironment environment;
-  const std::function<Status(std::uint64_t)> consume = [&](std::uint64_t n) {
-    if (phase.query.cancellation.cancelled())
-      return Status{ErrorCode::Cancelled, "alpha exact arithmetic cancelled"};
-    return phase.consume_work(n);
+void invoke(const ps_kernel_invocation_v8* invocation,
+            ps_kernel_status_v8* status) noexcept {
+  const auto& state =
+      *static_cast<const PreparedAlpha*>(invocation->prepared_context);
+  const auto consume = [invocation](std::uint64_t) {
+    return invocation->cancellation.is_cancelled &&
+                   invocation->cancellation.is_cancelled(
+                       invocation->cancellation.context)
+               ? Status{ErrorCode::Cancelled, {}}
+               : Status::success();
   };
-  constexpr std::uint64_t block = 128;
-  std::array<std::uint8_t, block * 8> x{}, a{}, y{};
-  std::vector<std::uint64_t> at, source;
-  for (auto k = channels.offset; k < channels.offset + channels.extent; ++k) {
-    const auto selected = channel_region(box, axis, k);
-    const auto& slot = s.slots[k];
-    const auto& map = s.data_maps[k];
-    auto color =
-        take(phase.tensors->at({map.port, 0})
-                 .acquire(format_result::mapped_region(selected, map.axes),
-                          phase.query.cancellation));
-    std::optional<ResultTensorReadWindow> alpha;
-    if (slot.color)
-      alpha.emplace(take(
-          phase.tensors->at({s.alpha_map.port, 0})
-              .acquire(format_result::mapped_region(selected, s.alpha_map.axes),
-                       phase.query.cancellation)));
-    const auto work =
-        take(color.read_work()) + (alpha ? take(alpha->read_work()) : 0);
-    const auto calculate = [&](const std::uint8_t* colors,
-                               const std::uint8_t* weights, std::uint64_t n) {
-      if (!slot.color && !slot.alpha) {
-        std::memcpy(y.data(), colors, n * width);
-        return MathFailure{};
-      }
-      return math_span(colors, weights, y.data(), n, s.narrow,
-                       slot.alpha ? Action::Set : s.action, s.raw, s.simd,
-                       s.reference, environment, consume);
-    };
-    if (!spec.layout.spatial) {
-      const auto count = take(selected.element_count());
-      for (std::uint64_t begin = 0; begin < count; begin += block) {
-        const auto n = std::min(block, count - begin);
-        require(consume(n * (64 + 2 * selected.rank() + work)));
-        for (std::uint64_t lane = 0; lane < n; ++lane) {
-          region_run_coordinate(selected, begin + lane, &at);
-          source_at(map, at, &source);
-          const auto run = take(color.row_run(source));
-          std::memcpy(x.data() + lane * width, run.data, width);
-          if (alpha) {
-            source_at(s.alpha_map, at, &source);
-            const auto weight = take(alpha->row_run(source));
-            std::memcpy(a.data() + lane * width, weight.data, width);
-          }
-        }
-        const auto failed =
-            calculate(x.data(), slot.alpha ? x.data() : a.data(), n);
-        if (!failed.status.ok())
-          return failed.status;
-        if (failed.reason != FailureReason::None) {
-          region_run_coordinate(selected, begin + failed.lane, &at);
-          auto failure = failed;
-          if (slot.alpha)
-            failure.operand = "alpha";
-          return sample_failure(s, failure, at);
-        }
-        if (writer) {
-          for (std::uint64_t lane = 0; lane < n; ++lane) {
-            region_run_coordinate(selected, begin + lane, &at);
-            const auto run = take(writer->row_run(at));
-            std::memcpy(run.data, y.data() + lane * width, width);
-          }
-        }
-      }
-      continue;
+  const auto accept = [status](const Status& result) {
+    if (!result.ok())
+      *status =
+          kernel_failure(result.code, result.message.c_str(), result.reason);
+    return result.ok();
+  };
+  if (!accept(consume(0)))
+    return;
+  if (state.view) {
+    *status = kernel_failure(ErrorCode::InvalidArgument, "ViewUnavailable",
+                             FailureReason::ViewUnavailable);
+    return;
+  }
+  FloatingEnvironment environment;
+  if (state.calculates && !environment.active()) {
+    *status =
+        kernel_failure(ErrorCode::OperationFailed, "alpha numeric environment");
+    return;
+  }
+  SampleBlock* block = nullptr;
+  numeric_ops::RatioWorkspace* arithmetic = nullptr;
+  if (state.calculates) {
+    if (state.reference) {
+      auto* scratch = new (invocation->scratch[0].allocation) ReferenceScratch;
+      block = &scratch->block;
+      arithmetic = &scratch->arithmetic;
+    } else {
+      block = new (invocation->scratch[0].allocation) SampleBlock;
     }
-    const auto h = spec.batch_axes.size() + spec.layout.height_axis;
-    const auto w = spec.batch_axes.size() + spec.layout.width_axis;
-    const auto& dims = selected.dimensions();
-    at.clear();
-    for (const auto& d : dims)
-      at.push_back(d.offset);
-    for (auto row = dims[h].offset; row < dims[h].offset + dims[h].extent;
-         ++row) {
-      at[h] = row;
-      for (auto col = dims[w].offset; col < dims[w].offset + dims[w].extent;) {
-        at[w] = col;
-        auto n = std::min(block, dims[w].offset + dims[w].extent - col);
-        require(consume(n * (64 + 2 * selected.rank() + work)));
-        auto colors = read_span(color, map, at, &source, w, n);
-        n = std::min(n, colors.count);
-        auto weights = slot.alpha ? colors : ReadSpan{nullptr, n, 0};
-        if (alpha) {
-          weights = read_span(*alpha, s.alpha_map, at, &source, w, n);
-          n = std::min(n, weights.count);
+  }
+  fixed_tensor::PointReader<2> reader{state.inputs, *invocation};
+  const auto& output = invocation->outputs[0];
+  const auto& layout = *output.layout;
+  const unsigned width = state.narrow ? 4 : 8;
+  auto* destination = static_cast<std::uint8_t*>(output.allocation);
+  const auto first = state.axis ? layout.origin[*state.axis] : 0;
+  const auto channels = state.axis ? layout.shape[*state.axis] : 1;
+  std::uint64_t points = 1;
+  for (unsigned a = 0; a < layout.rank; ++a)
+    if (!state.axis || a != *state.axis)
+      points *= layout.shape[a];
+  for (auto channel = first; channel < first + channels; ++channel) {
+    const auto& slot = state.maps->slots[channel];
+    for (std::uint64_t begin = 0; begin < points; begin += 128) {
+      if (!accept(consume(0)))
+        return;
+      const auto count = std::min<std::uint64_t>(128, points - begin);
+      const bool calculate = state.action != Action::Set && slot.color;
+      for (std::uint64_t lane = 0; lane < count; ++lane) {
+        auto index = begin + lane;
+        std::array<std::uint64_t, 8> at{};
+        std::uint64_t offset = output.byte_offset;
+        for (unsigned a = layout.rank; a-- > 0;) {
+          if (state.axis && a == *state.axis) {
+            at[a] = channel;
+          } else {
+            at[a] = layout.origin[a] + index % layout.shape[a];
+            index /= layout.shape[a];
+          }
+          offset += (at[a] - layout.origin[a]) * layout.strides[a];
         }
-        std::optional<ResultTensorMutableRun> target;
-        if (writer) {
-          target = take(writer->row_run(at));
-          n = std::min(n, target->samples);
+        const auto bits =
+            reader.bits(slot.data.port, source_at(slot.data, at), width);
+        if (!calculate) {
+          std::memcpy(destination + offset, &bits, width);
+          continue;
         }
-        if (!n)
-          return {ErrorCode::Internal, "empty alpha row span"};
-        const auto gather = [n, width](ReadSpan span, std::uint8_t* buffer) {
-          if (!span.data || span.stride == static_cast<std::int64_t>(width))
-            return span.data;
-          for (std::uint64_t i = 0; i < n; ++i)
-            std::memcpy(buffer + i * width,
-                        span.data + static_cast<std::int64_t>(i) * span.stride,
-                        width);
-          return static_cast<const std::uint8_t*>(buffer);
-        };
-        auto failed =
-            calculate(gather(colors, x.data()), gather(weights, a.data()), n);
-        if (!failed.status.ok())
-          return failed.status;
-        if (failed.reason != FailureReason::None) {
-          at[w] += failed.lane;
-          if (slot.alpha)
-            failed.operand = "alpha";
-          return sample_failure(s, failed, at);
-        }
-        if (target) {
-          for (std::uint64_t i = 0; i < n; ++i)
-            std::memcpy(target->data + static_cast<std::int64_t>(i) *
-                                           target->sample_stride_bytes,
-                        y.data() + i * width, width);
-        }
-        col += n;
+        std::memcpy(reinterpret_cast<std::uint8_t*>(block->colors.data()) +
+                        lane * width,
+                    &bits, width);
+        const auto alpha = reader.bits(state.maps->alpha.port,
+                                       source_at(state.maps->alpha, at), width);
+        std::memcpy(
+            reinterpret_cast<std::uint8_t*>(block->alpha.data()) + lane * width,
+            &alpha, width);
+        block->offsets[lane] = offset;
+      }
+      if (calculate) {
+        auto converted = math_span(
+            reinterpret_cast<const std::uint8_t*>(block->colors.data()),
+            reinterpret_cast<const std::uint8_t*>(block->alpha.data()),
+            reinterpret_cast<std::uint8_t*>(block->output.data()), count,
+            state.narrow, state.action, state.raw, state.simd, state.reference,
+            environment, consume, arithmetic);
+        if (!accept(converted))
+          return;
+        for (std::uint64_t lane = 0; lane < count; ++lane)
+          std::memcpy(
+              destination + block->offsets[lane],
+              reinterpret_cast<const std::uint8_t*>(block->output.data()) +
+                  lane * width,
+              width);
       }
     }
   }
-  return Status::success();
+  *status = {};
 }
-struct State final {
-  const Preparation* state;
-  Footprint output;
-  explicit State(const Preparation* prepared) : state(prepared) {}
-  Poll poll(const ResultProgramPhase& phase) try {
-    auto scratch =
-        take(phase.resources.reserve(ResourceCapacity::host(16384, 16384)));
-    const auto& spec = phase.query.output.result_schema->tensors[0];
-    const auto& s = *state;
-    output = phase.query.tensor_outputs
-                 ? *phase.query.tensor_outputs
-                 : take(Footprint::all(spec.sample_shape()));
-
-    auto result = builder(phase, false);
-    std::string policy = s.layout;
-    GenericView proof;
-    if (policy != "materialize") {
-      const auto available =
-          spec.layout.spatial
-              ? (s.view_legal ? Status::success() : unavailable_view())
-              : generic_view(phase, s, &proof);
-      if (!available.ok()) {
-        if (policy == "view" || !format_result::view_unavailable(available))
-          return Poll(available);
-        policy = "materialize";
-      }
+Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
+  using Answer = Result<ps_prepared_kernel_v8>;
+  const auto invalid = [] {
+    return Answer({ErrorCode::TypeMismatch, "invalid alpha signature"});
+  };
+  const auto* state = static_cast<const Preparation*>(query.static_state);
+  if (!state || query.inputs.empty() || query.inputs.size() > 2 ||
+      query.outputs.size() != 1 || query.writes.size() != 1 ||
+      !query.task_parameters.empty() || !query.outputs[0].result_schema ||
+      !query.outputs[0].result_schema->same_schema(*state->output_schema))
+    return invalid();
+  const auto& write = query.writes[0];
+  const auto axis =
+      output_axis(*state, query.outputs[0].result_schema->tensors[0]);
+  auto grid =
+      TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
+  if (!grid.ok())
+    return Answer(grid.status());
+  auto region = grid.value().region(write.tile_index);
+  if (!region.ok())
+    return Answer(region.status());
+  if (query.scratch !=
+          std::array<std::uint64_t, 3>{
+              scratch_bytes(*state, region.value(), axis), 0, 0} ||
+      write.port || write.member || write.domain != physical::Domain::Host ||
+      write.layout.element_type !=
+          (state->narrow ? ElementType::Float32 : ElementType::Float64) ||
+      !fixed_tensor::matches_region(write.layout, region.value()))
+    return invalid();
+  auto prepared = std::make_unique<PreparedAlpha>();
+  prepared->action = state->action;
+  prepared->narrow = state->narrow;
+  prepared->raw = state->raw;
+  prepared->simd = state->simd;
+  prepared->reference = state->reference;
+  prepared->view = state->layout == "view";
+  prepared->calculates = calculates(*state, region.value(), axis);
+  prepared->axis = axis;
+  prepared->maps = state->runtime;
+  ResourceLimits limits;
+  limits.maximum_work = physical::ValidationLimits{}.maximum_work;
+  ResourceBudget budget(limits);
+  std::size_t slot = 0;
+  for (unsigned port = 0; port < query.inputs.size(); ++port) {
+    auto input = TileGrid::from_schema(*query.inputs[port].result_schema,
+                                       query.tile_extent);
+    if (!input.ok())
+      return Answer(input.status());
+    prepared->inputs.grids[port] = input.take_value();
+    auto reads = required_tiles(*state, region.value(), axis,
+                                prepared->inputs.grids[port], port, budget,
+                                query.reads.size() - slot);
+    if (!reads.ok())
+      return Answer(reads.status());
+    for (auto index : reads.value()) {
+      const auto& read = query.reads[slot];
+      auto expected = prepared->inputs.grids[port].region(index);
+      if (!expected.ok())
+        return Answer(expected.status());
+      if (read.port != port || read.member || read.tile_index != index ||
+          read.domain != physical::Domain::Host ||
+          read.layout.element_type != write.layout.element_type ||
+          !fixed_tensor::matches_region(read.layout, expected.value()))
+        return invalid();
+      prepared->inputs.slots[port].push_back(
+          {index, static_cast<std::uint32_t>(slot++)});
     }
-    require(format_result::planes(spec, output, [&](const Region& box) {
-      if (policy != "materialize") {
-        require(evaluate(phase, s, box, nullptr));
-        if (!spec.layout.spatial) {
-          StridedLayout layout;
-          layout.byte_strides = proof.strides;
-          __int128 address = proof.base;
-          for (std::size_t i = 0; i < box.rank(); ++i) {
-            layout.origin.push_back(box.dimensions()[i].offset);
-            address +=
-                static_cast<__int128>(layout.origin.back()) * proof.strides[i];
-          }
-          if (address < 0 || address > UINT64_MAX)
-            return invalid("view address overflow");
-          layout.byte_offset = static_cast<std::uint64_t>(address);
-          return result.publish_tensor(0, box, layout, proof.owner,
-                                       phase.query.cancellation);
-        }
-        const auto axis = output_axis(s, spec);
-        const auto channels =
-            axis ? box.dimensions()[*axis] : RegionDimension{0, 1};
-        for (auto k = channels.offset; k < channels.offset + channels.extent;
-             ++k) {
-          const auto part = channel_region(box, axis, k);
-          const auto& map = s.data_maps[k];
-          auto source =
-              take(phase.tensors->at({map.port, 0})
-                       .acquire(format_result::mapped_region(part, map.axes),
-                                phase.query.cancellation));
-          require(format_result::publish(phase, &result, part, source, map.axes,
-                                         policy, map.port));
-        }
-        return Status::success();
-      }
-      return result.publish_tensor_kernel(
-          0, box,
-          [&](const auto& writers) {
-            try {
-              for (const auto& writer : writers)
-                require(evaluate(phase, s, writer.region(), &writer));
-              return Status::success();
-            } catch (const Status& status) {
-              return status;
-            }
-          },
-          phase.query.cancellation);
-    }));
-    require(phase.consume_work(1));
-    if (phase.query.cancellation.cancelled())
-      return Poll(
-          Status{ErrorCode::Cancelled, "alpha cancelled before publication"});
-    return Poll(ResultPublication{take(result.seal()), true});
-  } catch (const Status& status) {
-    return Poll(status);
   }
-};
+  if (slot != query.reads.size())
+    return invalid();
+  ps_prepared_kernel_v8 kernel{};
+  kernel.struct_size = sizeof(kernel);
+  kernel.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  kernel.context = prepared.release();
+  kernel.invoke_cpu = invoke;
+  kernel.release = [](const void* context) {
+    delete static_cast<const PreparedAlpha*>(context);
+  };
+  return Answer(kernel);
+}
 
 OperationDefinition alpha_definition(const std::string& key, Action action,
                                      numeric_ops::SequenceProfile profile) {
@@ -996,9 +953,7 @@ OperationDefinition alpha_definition(const std::string& key, Action action,
   t.repeated_minimum = 1;
   t.repeated_maximum = 2;
   t.repeated_match = false;
-  t.cacheable = false;
   t.requires_metadata_specialization = true;
-  t.workspace_bytes = 16384;
   t.parameter_schema = {
       {"input_description", OperationParameterType::String, false},
       {"group", OperationParameterType::String, false},
@@ -1027,54 +982,23 @@ OperationDefinition alpha_definition(const std::string& key, Action action,
   out.key = "values";
   out.output_schema = port;
   out.result_schema = tensor_ops::scalar_schema();
-  out.continuation_bytes = sizeof(State);
-  out.maximum_dependency_stages = 2;
   d.prepare_static = [action, profile](const auto& inputs, const auto& params) {
     return prepare_alpha(inputs, params, action, profile);
   };
-  d.map_dependencies =
-      [](const ResultStaticQuery& compiled) -> Result<ResultStaticMapping> {
-    try {
-      const auto query = sdk::static_query_view(compiled);
-      const auto& s =
-          *static_cast<const Preparation*>(compiled.prepared.state());
-      const auto& spec = query.output.result_schema->tensors[0];
-      const auto output = query.tensor_outputs
-                              ? *query.tensor_outputs
-                              : take(Footprint::all(spec.sample_shape()));
-      ResultStaticMapping result;
-      for (std::uint32_t port = 0; port < query.inputs.size(); ++port) {
-        auto samples = take(Footprint::none(
-            query.inputs[port].result_schema->tensors[0].sample_shape()));
-        for (const auto& span : s.spans) {
-          if (span.map.port != port)
-            continue;
-          auto dims = Region::whole(spec.sample_shape()).dimensions();
-          const auto axis = output_axis(s, spec);
-          if (axis)
-            dims[*axis] = {span.first, span.count};
-          const auto selected =
-              take(output.intersect(take(Footprint::from_regions(
-                  spec.sample_shape(), {Region(std::move(dims))}))));
-          for (const auto& box : selected.boxes())
-            samples = take(samples.unite(take(Footprint::from_regions(
-                samples.shape(),
-                {format_result::mapped_region(box, span.map.axes)}))));
-        }
-        result.inputs.push_back(take(sdk::tile_need_for_samples(
-            compiled, port, 0, samples, samples.empty())));
-      }
-      return Result<ResultStaticMapping>(std::move(result));
-    } catch (const Status& status) {
-      return Result<ResultStaticMapping>(status);
-    }
-  };
-  d.start_result = [](const ResultProgramQuery& query,
-                      const BufferAllocator& allocator) {
-    if (query.tensor_outputs && query.tensor_outputs->empty())
-      return ResultContinuation::stateless<empty_result>();
-    return ResultContinuation::make<State>(
-        allocator, static_cast<const Preparation*>(query.prepared->state()));
+  d.lower = lower;
+  d.prepare_kernel =
+      [](const physical::KernelDesc& kernel,
+         const physical::Placement& placement, const KernelPreparation& query,
+         const ResourceSet&,
+         const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    if (kernel.symbol != "alpha" || kernel.contract != alpha_contract)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::TypeMismatch, "invalid alpha kernel"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::BackendUnavailable, "alpha requires CPU Host"});
+    return prepare_kernel(query);
   };
   return d;
 }

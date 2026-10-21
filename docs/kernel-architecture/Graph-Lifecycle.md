@@ -37,7 +37,7 @@ Compiler stages retain currentness identity but do not retain mutable access to 
 
 `Compiler::bind_ir` and the `CompilerArtifact` importers produce stages that have no `GraphContext`. Their `revision()` is 1, and their `current()` reports whether the frozen `OperationRegistry` they were linked against is still alive. Replacing or destroying any `GraphContext` does not affect them. A saved `.psir` or `.psxp` file carries no snapshot, revision or source liveness; saving a snapshot-bound stage and loading it again yields a standalone stage at revision 1.
 
-Every stage, standalone or snapshot-bound, keeps a weak reference to its registry. `optimize` and `plan` reject a stage linked to another registry with `Stale`, and `ExecutionContext::execute`, `freeze` and `open_demand` reject a plan whose registry differs from the context's registry with `Stale`. A host that loads an artifact therefore registers or loads the required operations, freezes the registry, builds both the `Compiler` and the `ExecutionContext` over that same registry, and keeps it alive while the stages are in use.
+Every stage, standalone or snapshot-bound, keeps a weak reference to its registry. `optimize` and `plan` reject a stage linked to another registry with `Stale`, and `ExecutionContext::prepare` rejects a Plan whose registry differs from the context's registry with `Stale`. `submit` requires a PreparedPlan originating from that context and rechecks source currentness. A host that loads an artifact therefore registers or loads the required operations, freezes the registry, builds both the `Compiler` and the `ExecutionContext` over that same registry, and keeps it alive while the stages are in use.
 
 ## 5. Failure and lifetime
 

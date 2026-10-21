@@ -57,9 +57,9 @@ inline Result<WorkflowNode> rational(std::uint64_t id, const char* name,
  * Each helper returns an owned WorkflowNode; invalid IDs, profiles or rational
  * output dtypes return InvalidArgument/InvalidDomain/Schema, and allocation may
  * throw std::bad_alloc. Each input Result must have exactly one tensor member,
- * a supported numeric tensor in slot 0; its schema may also contain fields.
- * No fixed input schema ID is required. Numeric values are validated by the
- * operation's explicitly declared contracts.
+ * a supported numeric tensor in slot 0.
+ * No fixed input schema ID is required. Numerical preconditions belong to the
+ * caller; structural metadata and fixed views are checked before issue.
  * Metadata specialization requires all input sample shapes and dtypes to
  * match, with rank 1..8, positive extents and at most 2^40 samples.
  * Unary output schema is `photospider.tensor` with a `samples` tensor of the
@@ -67,20 +67,16 @@ inline Result<WorkflowNode> rational(std::uint64_t id, const char* name,
  * support is stated by each helper. Rational helpers take matching Int64 input
  * tensors and use an explicit Float32/Float64 output dtype.
  *
- * A nonempty Whole request needs the complete input tensor with Data,
- * Validation and Descriptor roles (mask 13). The coordinator provides
- * authorized Result tensor windows, preserving compatible signed or zero
- * strides without requiring packed input collection. The operation validates
- * and computes the complete packed output; the executor projects requested
- * coordinates afterward. Empty Result requests retain static admission and
- * validation but skip payload reads and computation, returning empty tensor
- * coverage. Any input change can invalidate all observed output coordinates.
- * Integer overflow or an invalid rational denominator anywhere fails the
- * invocation at Run scope without an Atom key. Shape or dtype mismatch returns
- * TypeMismatch/Schema. IEEE nonfinite results succeed; source, work, capacity
- * and cancellation errors retain their categories. Full output and fixed
- * scratch consume managed resources even for sparse output requests. Published
- * Results retain immutable storage beyond context lifetime.
+ * Each selected output tile generates one fixed CPU invocation with declared
+ * intersecting input tiles, preallocated output and per-lane arithmetic/batch
+ * scratch. Empty selection emits no tasks or payload reads. Inputs use the
+ * Plan's admitted affine views, including compatible signed/zero strides.
+ * Integer results must be representable and rational denominators positive;
+ * these are unchecked caller preconditions without a promised error outcome.
+ * Shape/dtype mismatch returns TypeMismatch/Schema. IEEE special values follow
+ * each operation's numerical rules. Resource, upstream and cancellation errors
+ * retain their categories. Accepted callbacks retain borrowed owners until
+ * return; successful Results own storage beyond context lifetime.
  *
  * Strict math uses round-to-nearest-even with gradual underflow. Arithmetic
  * preserves the CPU worker's floating environment, and the execution call
@@ -90,11 +86,11 @@ inline Result<WorkflowNode> rational(std::uint64_t id, const char* name,
  * arithmetic follows CpuNumericProfile's final FP32 error bound; bounded
  * binary64 SIMD kernels handle admitted ordinary ranges, with strict fallback
  * for unresolved cases. Special and algebraic paths keep their exact rules.
- * The execution layer reports computed output elements separately from
- * per-value fallback counters, which this Whole callback does not emit. Named
+ * This fixed invocation path does not emit per-value fallback counters. Named
  * profiles require their corresponding CPU target.
  */
-/** @brief Absolute value; UInt8/Int64/Float32/64, Int64 minimum overflows.
+/** @brief Absolute value; UInt8/Int64/Float32/64, caller excludes Int64
+ * minimum.
  * @note Uses the shared unary helper execution/ownership/error contract above.
  */
 inline Result<WorkflowNode> abs_node(
@@ -102,7 +98,8 @@ inline Result<WorkflowNode> abs_node(
     CpuNumericProfile profile = CpuNumericProfile::Strict) {
   return unary_detail::node(id, "abs", {std::move(input)}, profile);
 }
-/** @brief Negation; Int64/Float32/64, Int64 minimum overflows; UInt8 rejects.
+/** @brief Negation; Int64/Float32/64, caller excludes Int64 minimum; UInt8
+ * rejects.
  * @note Uses the shared unary helper execution/ownership/error contract above.
  */
 inline Result<WorkflowNode> neg_node(
@@ -242,8 +239,8 @@ inline Result<WorkflowNode> sincpi_node(
 }
 /** @brief Authors sinpi of the exact Int64 numerator/denominator ratio.
  * Inputs have identical shape. Positive denominator is required even at zero
- * numerator; invalid denominator is InvalidArgument/InvalidDomain/Run. Both
- * complete inputs are collected and validated. Output dtype is explicit/default
+ * numerator, as an unchecked caller precondition. Both intersecting input tile
+ * sets remain fixed dependencies. Output dtype is explicit/default
  * Float64. Exact common-angle and pole/zero rules are documented in NUM-04S..V;
  * the complete quotient is used for sincpi, including its unreduced magnitude.
  * Other execution/ownership/resource rules match the shared unary contract.
@@ -257,8 +254,8 @@ inline Result<WorkflowNode> sinpi_rational_node(
 }
 /** @brief Authors cospi of the exact Int64 numerator/denominator ratio.
  * Inputs have identical shape. Positive denominator is required even at zero
- * numerator; invalid denominator is InvalidArgument/InvalidDomain/Run. Both
- * complete inputs are collected and validated. Output dtype is explicit/default
+ * numerator, as an unchecked caller precondition. Both intersecting input tile
+ * sets remain fixed dependencies. Output dtype is explicit/default
  * Float64. Exact common-angle and pole/zero rules are documented in NUM-04S..V;
  * the complete quotient is used for sincpi, including its unreduced magnitude.
  * Other execution/ownership/resource rules match the shared unary contract.
@@ -272,8 +269,8 @@ inline Result<WorkflowNode> cospi_rational_node(
 }
 /** @brief Authors tanpi of the exact Int64 numerator/denominator ratio.
  * Inputs have identical shape. Positive denominator is required even at zero
- * numerator; invalid denominator is InvalidArgument/InvalidDomain/Run. Both
- * complete inputs are collected and validated. Output dtype is explicit/default
+ * numerator, as an unchecked caller precondition. Both intersecting input tile
+ * sets remain fixed dependencies. Output dtype is explicit/default
  * Float64. Exact common-angle and pole/zero rules are documented in NUM-04S..V;
  * the complete quotient is used for sincpi, including its unreduced magnitude.
  * Other execution/ownership/resource rules match the shared unary contract.
@@ -287,8 +284,8 @@ inline Result<WorkflowNode> tanpi_rational_node(
 }
 /** @brief Authors sincpi of the exact Int64 numerator/denominator ratio.
  * Inputs have identical shape. Positive denominator is required even at zero
- * numerator; invalid denominator is InvalidArgument/InvalidDomain/Run. Both
- * complete inputs are collected and validated. Output dtype is explicit/default
+ * numerator, as an unchecked caller precondition. Both intersecting input tile
+ * sets remain fixed dependencies. Output dtype is explicit/default
  * Float64. Exact common-angle and pole/zero rules are documented in NUM-04S..V;
  * the complete quotient is used for sincpi, including its unreduced magnitude.
  * Other execution/ownership/resource rules match the shared unary contract.

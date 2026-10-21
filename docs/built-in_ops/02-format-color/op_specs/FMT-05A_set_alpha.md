@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - alpha.set_strict
@@ -18,12 +18,12 @@ registered_operation_keys:
 # FMT-05A: set or add an internal alpha plane
 
 The default registry provides `alpha.set_<profile>` for the three CPU profiles.
-The operation uses Result ABI 6; the specification remains Proposed. It preserves
+The operation uses fixed invocation ABI 8; the specification remains Proposed. It preserves
 straight color samples while assigning or inserting the selected group's alpha
 channel.
 
 Inherit the complete [FMT-05 contract](FMT-05_alpha_editing_contract.md).
-The key takes one or two single-tensor Results . It preserves straight
+The key takes one or two single-tensor Results. It preserves straight
 color bytes and establishes the selected group's alpha at a declared channel
 inside the result tensor. Nonscalar batch prefixes must match exactly; scalar
 alpha is unbatched `[1]`. The complete sample rank, including batch and cell axes,
@@ -72,7 +72,7 @@ Y[u,j] = a(u)
 Y[u,k] = original input[u,L[k - (k>j)]]   for k != j
 ```
 
-The notation uses logical channel slots; actual channel axis and planar addresses
+The notation uses logical channel slots; actual channel axis and fixed physical strides
 follow the family. Preserve is the corresponding identity map with its alpha
 slot replaced. Reads always use the original immutable source, including when
 an original channel supplies new alpha and channel indices shift in the result.
@@ -82,32 +82,32 @@ alpha-role or group metadata. Callers construct the resulting straight-image
 configuration for downstream operations, with the new alpha at slot j and any
 surviving indices remapped. Other groups' sample bits remain unchanged.
 
-## Demand, layout and validation
+## Fixed reads, layout and caller preconditions
 
-Requested new alpha reads only a(u), requiring finite [0,1]. Requested selected
-color reads that original color and a(u), requiring finite color and valid alpha;
-then copies the color bits, including nonzero hidden color at a=0. Unrelated
-channels read only their original mapped samples. No old-alpha read is required
-unless it is explicitly selected as a source or retained/requested elsewhere.
-A's new-alpha dirty map includes the validation dependency of selected colors.
+Each complete retained output tile declares only the original source for each
+mapped output slot. New alpha slots read the declared internal/plane/scalar alpha;
+color and unrelated slots read their original samples. Set adds no alpha read
+solely to validate a copied color. Static descriptions and all input schemas are
+still checked, while payload-unused ports retain only schema dependencies.
 
-Auto/view/materialize obey the family. A generic view requires the complete
-declared map to have one `CpuStorage` owner, one affine address expression and
-in-bounds spans. Spatial views are limited to an internal identity map. A view
-still performs required sample validation before success. Auto copies only after
-physical `ViewUnavailable`; validation failures retain their status and diagnostic. Only
-requested output coverage is published; alpha read for R validation does not by
-itself publish the output alpha plane. Materialization publishes transactionally under Root budgets and cancellation;
-Empty observations retain no run payload state. Use the family's diagnostic rules; arithmetic profiles do not relax copies
-or finite/range predicates.
+The caller supplies finite selected colors and normalized finite alpha for the
+semantic values being represented; these obligations do not introduce runtime
+validation tasks. Producing a color-only tile does not certify a new alpha source.
+An output tile that also contains the alpha slot still requires its payload.
+
+Auto and materialize copy to independent dense output tiles with zero scratch.
+Every nonempty view task has schema-only dependencies and returns
+`InvalidArgument / ViewUnavailable`. Empty has no task and retains static checks.
+Public Results appear after successful ordered call retirement and retain their
+allocations independently of the input and context.
 
 ## Independent acceptance
 
 For RGBA [0.5,-2,4,0.5], scalar alpha=0.25 and preserve, expect
 [0.5,-2,4,0.25]. With alpha=0, expect [0.5,-2,4,0], retaining hidden colors.
 No division by the old alpha occurs, even if that discarded old sample is invalid.
-A requested invalid new alpha fails; requesting only an unrelated AOV succeeds
-without accessing the new alpha. Requested NaN color fails even at new alpha=0.
+Invalid represented alpha or selected color violates the caller premises.
+A tile containing only copied colors/AOVs has no new-alpha payload dependency.
 
 For old [R,A,G,B] with private A, placement=channel and channel_index=3 gives
 [R,G,B,newA]. If old A is shared, the same final index gives [R,A,G,newA,B],
@@ -116,9 +116,9 @@ fails. Recompute every group index using an independent slot-list oracle.
 For component Gray [7,9], inserting axis=1 and scalar 0.5 at channel_index=1
 gives shape [2,2] with rows [7,0.5] and [9,0.5].
 
-Request only a selected color and change scalar alpha from valid to invalid:
-color bytes are unchanged but the observation must fail revalidation. Test view
-and materialize equivalence, ViewUnavailable, source failure and cancellation.
+Select a color-only tile and verify that the alpha producer is omitted. Select
+a tile containing the new alpha and verify that its producer is required. Check
+exact copies, schema-only view failure, Empty, source failure and cancellation.
 Conceptual workflow: image + explicit alpha source -> A -> image with the
 selected alpha relationship. The registered key is `alpha.set_<profile>`; the
 specification remains Proposed.

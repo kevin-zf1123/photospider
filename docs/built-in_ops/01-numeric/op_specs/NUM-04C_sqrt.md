@@ -28,7 +28,7 @@ and in the named family contract take precedence.
 
 Compute the nonnegative square root for each observed Float32/Float64 value,
 preserving shape and dtype. Inherit the [NUM-04 common contract](NUM-04_unary_contract.md)
-for the parameter-free input/values interface, complete-input/typed-validation demand,
+for the parameter-free input/values interface, fixed tile reads and structural preparation,
 NaN propagation, generic output, lifetime and resource/public acceptance rules.
 Integer input is TypeMismatch; conversion must be explicit.
 
@@ -62,14 +62,14 @@ rounding uses an exact path; no weaker approximate result is published.
 Finite input/output formats bound the reference arithmetic sizes. Cost is O(M)
 primitive roots with implementation-specific constant/exact-rounding work and
 O(1) element scratch, plus inherited input/output and validation resources.
-Report and charge actual exact fallback work; poll long refinement if used.
+Keep exact refinement in preallocated scratch and query cancellation during long arithmetic.
 
 Required checks: sqrt(0)=+0, sqrt(-0)=-0, sqrt(1)=1, sqrt(4)=2, correctly rounded
 sqrt(2), negative inputs and -Inf canonical NaN, +Inf unchanged, payload-preserving
 quieting of signed NaNs, smallest positive subnormal and largest finite input,
 and destination rounding boundaries. Compare strict bits and accelerated final FP32-scaled accuracy to an
 independent oracle. Include caller rounding-mode/underflow settings, disjoint
-ROI without reading remote samples, source mutations, cache-off, and common
+ROI without reading remote samples, new bindings, concurrent Runs, and common
 ownership/cancellation/budget tests.
 
 Conceptual public fixture: input `[-1,-0,0,4,+Inf]` produces
@@ -79,6 +79,5 @@ expression sqrt has a different input/output/error contract.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
-atomic failure for the complete invocation. Its numerical path follows
+exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

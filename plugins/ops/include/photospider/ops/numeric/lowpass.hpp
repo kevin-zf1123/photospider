@@ -92,20 +92,18 @@ inline Result<WorkflowNode> uniform(std::uint64_t id, const char* kernel,
  * `photospider.tensor` v1/member `samples` Result with the same shape/dtype and
  * ordinary data. Results retain their sample storage owners.
  *
- * All formal profiles use a Run-shared stage. A nonempty request acquires
- * the complete input tensor. Typed/upstream
- * validation can fail outside requested delivery. The callback reads
- * authorized windows without collecting or copying the complete input. Empty
- * reads no sample payload after static preflight. Any input edit invalidates
- * the complete recorded output demand. The Result writer publishes the full
- * same-shape output transactionally with full coverage and global coordinates.
- * Legal source strides remain supported; the owner survives context teardown.
- * Source windows, full output, fixed math state and coefficient/tap vectors
- * consume managed capacity, so sparse requests can exhaust full-output
- * capacity. Failure/cancellation publishes no partial output and releases
- * temporary state.
- * Whole fallback counters are unavailable. An unresolved
- * normalizer or final rounding returns ResourceExhausted; no unconverged
+ * Each selected output tile uses one fixed CPU task. Reads cover exactly the
+ * nonzero taps after boundary mapping, closed on the source tile grid. Extra
+ * physical samples are not numerical operands. Output shape uses ordinary
+ * axes, with no input batch/atomic grouping. Only selected outputs are
+ * allocated. Empty selection emits no task after static preparation. Affine
+ * source views are borrowed; output storage owners survive context teardown.
+ * Each invocation owns preallocated math state, 8*(2R+1) sample bytes and,
+ * for accelerated profiles, 16*(R+1) coefficient bytes. Prepared state is
+ * immutable; concurrent Runs own separate output/scratch. Cancellation and
+ * resource failures return directly. A call publishes after all writes succeed
+ * and retire. An unresolved normalizer or final rounding returns
+ * ResourceExhausted; no unconverged
  * approximation is published. Finite radius has transition/stopband leakage;
  * choose and verify downsampling quality separately using the public examples.
  */
@@ -224,26 +222,26 @@ inline Result<WorkflowNode> nonuniform(std::uint64_t id, const char* kernel,
  * affine/constant/halfway cases; other results use certified polynomial moments
  * and explicit remainder bounds. All participating finite constant bits are
  * retained, including -0; other exact zero is +0, and nonzero underflow keeps
- * its sign. Unlike uniform filtering, nonfinite samples fail
- * OperationFailed/InvalidDomain; final overflow fails ArithmeticOverflow.
+ * its sign. Finite strictly increasing positions, finite contributing endpoint
+ * values and finite representable selected outputs are caller preconditions.
  * Caller floating state is preserved.
  *
- * All formal profiles use a Run-shared stage. A nonempty request acquires
- * both complete input tensors. Typed/upstream
- * validation covers every input element. The callback reads positions through
- * authorized windows into Root-owned promoted geometry state. It reads values
- * through authorized windows without collecting or copying the complete values
- * tensor. It computes every center and
- * column with the exact positive-length support and endpoint rules. Input edits
- * invalidate complete recorded output demand; invalid or overflowing
- * undelivered positions fail Domain/Run. Empty reads no sample payload after
- * static preflight. The Result writer publishes the complete output
- * transactionally with full coverage and global coordinates. Root charges
- * promoted positions, source windows, the full output, fixed math state and the
- * reused piece vector. Arbitrary strides and output ownership survive context
- * teardown. Failure or cancellation publishes no partial output and releases
- * temporary state. Whole numerical/fallback counters are N/A. Huge period
- * counts or unresolved precision/order fail ResourceExhausted.
+ * Each selected output tile uses one ABI 8 CPU task. Reads cover complete
+ * positions and the full filtered values axis for selected other-axis
+ * coordinates, closed on source grids. The kernel searches affine views
+ * directly and streams positive-length segments using exact integer geometry.
+ * It retains two pieces and fixed arithmetic/polynomial scratch; source
+ * coordinates and partitions are not copied into growing containers. Output
+ * uses ordinary axes and zero atomic trailing axes. Only selected tiles are
+ * allocated. Empty selection emits no task after static preparation.
+ *
+ * Immutable preparation supports concurrent Runs with independent scratch.
+ * Cancellation/resource failures return before shortcuts or precision retries.
+ * The call publishes after all declared writes succeed and retire; escaped
+ * output storage remains valid beyond context lifetime. Precision 128..4096
+ * and Taylor order <=512 bound refinement. Uncertified rounding/capacity
+ * returns ResourceExhausted. Large support can traverse many periods with
+ * fixed storage; each piece and arithmetic loop polls cancellation.
  * Reconstruction/filter/resampling quality must be measured for the caller's
  * downsampling task; there is no universal Nyquist inferred from nonuniform
  * positions or promise of zero aliasing.

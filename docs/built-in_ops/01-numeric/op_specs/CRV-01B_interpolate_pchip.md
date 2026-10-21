@@ -42,8 +42,7 @@ each independently Float32/Float64; output values[N] selects Float32/Float64,
 default Float64. Knot x values are finite and strictly increasing. Query order
 and repetition are unrestricted; preserve query order in output.
 
-For every nonempty output request, request complete x, y and query Results with ordinary payload tile Needs, validate the complete x array and evaluate every query entry. The PCHIP-specific y support and numerical
-profile below replace linear's two-endpoint support and accelerated bit equality.
+Each selected output tile uses the family fixed execution contract. The PCHIP-specific mathematical y stencil and numerical profile below replace linear's two-endpoint formula.
 Output carries no domain description, no axis output is added and no units are inferred.
 All inputs support the same legal immutable stride/offset layouts as linear.
 Required static String parameters dtype and out_of_domain are supplied explicitly
@@ -53,7 +52,7 @@ derivative-order, tension or supplied-tangent parameter is provided.
 ## Confirmed domain policies
 
 Static out_of_domain is reject, clamp or linear_extrapolate, default reject.
-Reject fails an out-of-domain observation. Clamp returns the selected endpoint y.
+Reject makes the closed query domain a caller precondition. Clamp returns the selected endpoint y.
 Linear extrapolation uses the corresponding PCHIP endpoint derivative m:
 
 left:  y[0]   + (query-x[0])*m[0]
@@ -85,18 +84,11 @@ in segment j, read y[max(0,j-1):min(K,j+3)], sufficient to construct its two
 endpoint derivatives. At the left or right exterior tangent, read the first or
 last min(K,3) y values respectively. K=2 reduces to a straight line.
 
-Do not include other y entries in the mathematical formula or its finite checks.
-complete-input input collection and typed validation remain complete. This local stencil is retained
-even when a slope branch returns zero; input-value shortcuts do not remove its
-declared contributing y dependencies. Precise numeric validation is separate.
+Only this stencil participates in the formula. The Plan declares all y rows of the selected columns as a conservative address superset. The numerical stencil is retained even when a slope branch returns zero; there is no extra finite-value scan of unused y.
 
 ## Confirmed finite-value and zero rules
 
-All mathematically used y and all query values and the final output must be finite. Negative
-and greater-than-one finite values are allowed. Nonfinite demanded input and
-output overflow fail the run. All query rows are evaluated; generic y values
-outside every mathematical stencil remain numerically unused. Exact node hits and clamp correctly convert that y to output
-dtype and retain its zero sign in every profile.
+Finite consumed x/y/query values, strictly increasing x and finite representable final outputs are unchecked caller preconditions. Negative and greater-than-one finite values are allowed. Only selected query rows and columns execute; y outside their mathematical stencils remains unused. Exact node hits and clamp correctly convert the selected y and retain its zero sign in every profile.
 
 Otherwise, if the exact curve result is zero, return -0 only when both endpoint
 y values of the selected segment are -0; return +0 for other exact zeros. The
@@ -153,14 +145,11 @@ bounded by the minimum/maximum of its two correctly converted output-dtype
 endpoints. These comparisons are numerical; explicit signed-zero rules prevail.
 
 An endpoint conversion that would overflow is used only as an extended bound,
-not as a reason to reject another finite requested value. Only actual output
-conversion/classification decides numerical overflow. At identical source/query
-values, strict and accelerated agree on success versus numerical failure and on
-zero classification/sign. Accelerated outputs obey the shared final FP32-scaled bound, with strict
+not as a reason to reject another finite requested value. Final representability is a caller precondition for selected outputs. For valid source/query values, strict and accelerated agree on zero classification/sign. Accelerated outputs obey the shared final FP32-scaled bound, with strict
 evaluation for zero, FP32-subnormal-range or out-of-FP32-range references. Exact knot and clamp conversions match strict bits.
 
 If a fast path cannot guarantee quality, shape and special-value rules together,
-fall back to strict. Run-shared complete-input computation does not expose per-value fallback counters;
+fall back to strict. Fixed invocations do not expose per-value fallback counters;
 zero diagnostic counters must not be interpreted as zero fallbacks. The combined
 fast/fallback function must itself meet the cross-query monotonicity contract;
 checking a single approximate value against endpoints is insufficient. Do not
@@ -170,38 +159,11 @@ Exterior tangent extrapolation has no interior endpoint-range bound.
 
 ## Demand, invalidation and ownership
 
-For every nonempty request, the Run-shared Result program requests complete x, y and query inputs with ordinary payload tile Needs, including typed validation and upstream failures. It validates all x knots and query controls before y arithmetic, evaluates every query and output column, and publishes a complete dense Result of shape [N] or [N,C]. Empty reads no payload; static metadata validation still applies. A nonempty local request still computes and stores the complete output. Output tile actors retain the shared backing but expose only the requested complete member tiles, and sample coordinates remain global rather than being rebased to the request.
-
-The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
-linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
-outside every evaluated stencil do not undergo an additional finite scan. Typed
-validation and upstream execution cover complete inputs, including unused values.
-All query rows and output columns are evaluated, so errors in unrequested rows
-or columns can fail the run. Reject still performs full upstream collection.
-
-Any input change invalidates the recorded output demand. Cache identity includes
-complete input versions, profile, metadata and parameters. Numerical failures
-have Run scope and publish no partial successful output; they do not provide
-independent per-column Atom success. Input strides, offsets, zero strides and
-negative strides remain legal. Packed output storage outlives the context.
+Execution, physical read closure, caller preconditions, resource admission and ownership follow the [family fixed execution contract](CRV-01_interpolate.md#fixed-execution-resources-and-caller-preconditions). Each selected output tile reads all x, all y rows for its selected columns, and its query row range through the corresponding input grids. Only the tile's global output coordinates are evaluated. Mathematical stencil selection remains defined by this member specification.
 
 ## Algorithms, resources and errors
 
-Search/classification costs O(K+N log K), followed by N scalar evaluations
-(or N*C for multi). Classification is shared across columns. The complete dense
-output costs b*N (or b*N*C) bytes; reserve it even for one requested cell. Input
-collection and retained owners also require admission. The callback declares its
-fixed exact arithmetic workspace, and the host-accounted knot vector has 8*K
-element bytes plus allocator/metadata overhead. K<=65536 bounds its elements at
-524288 bytes. No full slope table is required.
-
-Poll work/cancellation during reads, binary search, exact arithmetic and before
-publication. Capacity and work exhaustion return ResourceExhausted, with failed
-output/workspace released. A giant logical broadcast can therefore fail a small
-payload budget even for sparse demand. Resource limits do not authorize weaker
-arithmetic. Backend, typed, upstream, stale and cancellation failures retain their
-categories. Numeric failures are OperationFailed/InvalidDomain or final-output
-ArithmeticOverflow, with Run scope and offending port/index where available.
+The [family resource contract](CRV-01_interpolate.md#fixed-execution-resources-and-caller-preconditions) applies. Each task has one preallocated `ExactCurve` arena and selected output storage. Direct binary search replaces a copied knot array; classification is shared by columns within the task. Resources scale with declared input tiles, selected outputs and granted-lane scratch, rather than the complete logical output. Capacity checks and cancellation preserve their operational categories.
 
 ## Acceptance and verification scope
 
@@ -216,7 +178,7 @@ Use an independent exact rational implementation of the formulas and direct
 destination rounding. Include irregular x spacing, increasing/decreasing y,
 turns, plateaus, exact knots, endpoint-limiter sign/cap branches, K=2, both
 output dtypes and mixed source dtypes. Test huge/small secants with finite final
-results, cancellation, signed zeros, subnormal boundaries and actual overflow.
+results, cancellation, signed zeros, subnormal boundaries and representable extreme outputs.
 Verify endpoint conversion overflow does not reject a finite interior result.
 
 Strict compares bits; accelerated checks final ULP, exact node/zero outcomes and
@@ -225,9 +187,7 @@ knots and extrema, both independently and in changed request partitions. Exercis
 the actual fast/strict boundary, rather than assuming
 a sampled numerical test alone proves all-input shape preservation.
 
-Read logs must show complete x/y/query collection. Separately verify mathematical
-single-y node/clamp selection and unused generic nonfinite y. Test source invalidation,
-strides, low budgets, cancellation, cache-off and owner lifetime. These are target
+Inspect Plan read sets for complete x, corresponding y columns and selected query rows. Separately verify mathematical single-y node/clamp selection and unused generic nonfinite y. Test rebinding, strides, low budgets, cancellation, concurrent Runs and owner lifetime. These are target
 acceptance requirements, not executed product/platform performance claims.
 
 ## Source and implementation distinction
@@ -238,7 +198,7 @@ harmonic-mean rule for interior derivatives. It is an algorithm reference, not
 a claim of bitwise compatibility or adoption of its extrapolation defaults.
 
 Current curve.sample_monotone instead uses controls[K,2], a static uniform
-domain/count and complete-input evaluation. Its rounded-slope computation and y clipping
+domain/count and one fixed task for selected output tiles. Its rounded-slope computation and y clipping
 are recorded in the [family implementation comparison](CRV-01_interpolate.md).
 This explicit-query target remains Proposed; its maintained implementation is recorded below.
 
@@ -250,8 +210,7 @@ keys. The public `photospider/ops/numeric/curves.hpp` constructor is
 destination rounding. Accelerated Float32 evaluation accepts only enclosures
 whose endpoints round to the same Float32 result, preserving monotonicity;
 unresolved cases use exact fallback. Exact cross products identify collinear
-PCHIP stencils and reduce them to the linear formula. Complete input collection, Run failures and complete-output allocation follow
-the complete-input contract above; mathematical y stencils remain unchanged.
+PCHIP stencils and reduce them to the linear formula. Fixed task reads, selected output allocation and caller preconditions follow the family execution contract; mathematical y stencils remain unchanged.
 
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
 contains the shared arithmetic/resource details and current validation boundary.

@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -80,6 +81,99 @@ int exact_bytes() {
     auto changed = plan.materialize(scattered(type, 5), BufferAllocator{});
     PS_CHECK(changed.ok() && changed.value().payload.bytes().data()[0] == 6);
   }
+  return 0;
+}
+int metadata_lifetime() {
+  const auto input = scattered(ElementType::UInt8);
+  TensorDescriptor rank8{ElementType::UInt8, {1, 1, 1, 1, 1, 1, 1, 2}};
+  auto empty_coverage = Footprint::none(rank8.shape);
+  PS_REQUIRE_OK(empty_coverage);
+  auto empty = Tensor::create(rank8, empty_coverage.value(), {});
+  PS_REQUIRE_OK(empty);
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    ResourceBudget root;
+    FragmentAtlasPlan retained;
+    std::uint64_t bytes = 0;
+    {
+      ResourceAllocationScope scope(root);
+      std::vector<std::uint64_t> geometry;
+      if (mode == 1) {
+        geometry.reserve(8);
+        geometry.push_back(64);
+      } else if (mode == 2) {
+        // Empty capacity below rank must not trigger geometric growth beyond
+        // the admitted retained array size when automatic geometry is filled.
+        geometry.reserve(5);
+      }
+      auto made = FragmentAtlasPlan::prepare(mode == 2 ? empty.value() : input,
+                                             std::move(geometry));
+      PS_REQUIRE_OK(made);
+      retained = made.take_value();
+      bytes = root.statistics().allocated_metadata_bytes;
+      PS_CHECK(bytes > ResourceBudget::lease_metadata_bytes());
+      PS_CHECK(bytes == root.statistics().live[ResourceKind::Metadata]);
+      auto alias = retained;
+      PS_CHECK(root.statistics().allocated_metadata_bytes == bytes);
+    }
+    PS_CHECK(root.statistics().allocated_metadata_bytes == bytes);
+    std::thread release([plan = std::move(retained)]() mutable { plan = {}; });
+    release.join();
+    PS_CHECK(root.statistics().allocated_metadata_bytes == 0);
+    for (auto live : root.statistics().live.values)
+      PS_CHECK(live == 0);
+  }
+  return 0;
+}
+int materialized_metadata_lifetime() {
+  const auto input = scattered(ElementType::UInt8);
+  auto plan = FragmentAtlasPlan::prepare(input, {64});
+  PS_REQUIRE_OK(plan);
+  ResourceBudget first, second;
+  const auto make = [&](const ResourceBudget& root) {
+    ResourceAllocationScope scope(root);
+    return plan.value().materialize(input, root.allocator());
+  };
+  FragmentAtlas a, b;
+  {
+    auto one = make(first), two = make(second);
+    PS_REQUIRE_OK(one);
+    PS_REQUIRE_OK(two);
+    a = one.take_value();
+    b = two.take_value();
+  }
+  const auto retained = second.statistics().allocated_metadata_bytes;
+  PS_CHECK(retained == second.statistics().live[ResourceKind::Metadata]);
+  a = b;
+  PS_CHECK(first.statistics().allocated_metadata_bytes == 0);
+  PS_CHECK(second.statistics().allocated_metadata_bytes == retained);
+  a.descriptor.shape[0] = 999;
+  a.tile_shape[0] = 32;
+  PS_CHECK(b.descriptor.shape[0] == 1000 && b.tile_shape[0] == 64);
+  a = {};
+  {
+    auto one = make(first);
+    PS_REQUIRE_OK(one);
+    a = one.take_value();
+  }
+  a = std::move(b);
+  PS_CHECK(first.statistics().allocated_metadata_bytes == 0);
+  PS_CHECK(second.statistics().allocated_metadata_bytes == retained);
+  {
+    auto copy = a;
+    a = {};
+    const auto geometry =
+        ResourceBudget::lease_metadata_bytes() + 2 * sizeof(std::uint64_t);
+    PS_CHECK(second.statistics().allocated_metadata_bytes ==
+             retained - geometry);
+    PS_CHECK(copy.address({999}).value() == 4);
+    PS_CHECK(copy.payload.bytes().data()[4] == static_cast<std::uint8_t>(1000));
+    a = std::move(copy);
+  }
+  std::thread release([value = std::move(a)]() mutable { value = {}; });
+  release.join();
+  PS_CHECK(second.statistics().allocated_metadata_bytes == 0);
+  for (auto live : second.statistics().live.values)
+    PS_CHECK(live == 0);
   return 0;
 }
 int strided_and_huge() {
@@ -213,6 +307,8 @@ int limits_and_owners() {
 }
 }  // namespace
 int main() {
+  PS_CHECK(metadata_lifetime() == 0);
+  PS_CHECK(materialized_metadata_lifetime() == 0);
   PS_CHECK(exact_bytes() == 0);
   PS_CHECK(strided_and_huge() == 0);
   PS_CHECK(limits_and_owners() == 0);

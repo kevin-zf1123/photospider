@@ -12,175 +12,31 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_manual_acceptance
+implementation_status: implemented
 ---
 
 # NUM-03B: broadcast
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Broadcast expands a single-tensor Result through an explicit injective mapping from every complete source axis to a distinct target axis. The complete source `sample_shape()` includes batch axes and has rank 1..8. Required static String `shape` lists positive target extents with rank 1..8 and product at most 2^40. Required static String `axis_map` lists one canonical nonnegative target-axis index per source axis. Output rank cannot be smaller than source rank. Each source extent must be one or equal its mapped target extent.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
-
-The maintainer selected a separate broadcast operator that expands an array to
-a target shape through an explicit axis mapping. Constant scalar filling has
-its own NUM-03A specification. This draft records only that selected boundary;
-shape/mapping constraints, storage, metadata, demand and error requirements.
-Follow the common three-version NUM rule; copying must preserve
-the strict logical output bits.
-
-The selected axis map has one entry for each input axis, specifying a distinct
-output axis. Arbitrary axis order is allowed, so a map can combine permutation
-and expansion. It is injective and never merges two input axes into one output
-axis. For example, input shape `[3]` maps to output `[2,3,4]` with axis map `[1]`.
-
-Each mapped input extent must equal its target extent or be one. Length-one
-axes expand; equal non-singleton axes preserve their coordinate. Periodic tiling,
-merging/dropping axes and implicit alignment are excluded. The target inherits
-constant's static positive rank-1..8 shape, total elements <=2^40, all-four-dtype
-bit preservation, and static view/dense layout with view default.
-
-## Interface and exact mapping
-
-One input `input` is a UInt8/Int64/Float32/Float64 array of rank 1..8. One output
-`values` has the requested static shape and exactly the input dtype. Both ranks
-and shapes are known at compilation; output rank cannot be smaller than input
-rank because the map is injective and includes every input axis.
-
-Required static String parameters are `shape`, `axis_map`, and `layout`.
-Shape uses NUM-03A's canonical comma-separated positive decimal extents. Axis
-map uses one comma-separated nonnegative output-axis index per input axis,
-without duplicates, negative indices, omitted axes or implicit inference. Layout
-is view/dense; the constructor writes view by default. Direct nodes provide all
-parameters. For input shape I, output shape O and map a, output coordinate o
-reads source coordinate s:
+For source shape I, target shape O, map a and global output coordinate o:
 
 ```text
-s[j] = 0            if I[j] == 1
-s[j] = o[a[j]]      otherwise
+s[j] = 0        when I[j] == 1
+s[j] = o[a[j]]  otherwise
 values[o] = bitcopy(input[s])
 ```
 
-Unmapped output axes replicate the same source. Static validation checks every
-`0<=a[j]<rank(O)`, injectivity and `I[j]==1 || I[j]==O[a[j]]` before reading data.
-No multiplication/expansion arithmetic is applied to the stored values. Generic
-NaN payloads, infinities, signed zeros and integer extrema are preserved exactly.
+Unmapped target axes replicate source values. Permutation and singleton expansion may occur together. No periodic tiling, axis merging, implicit alignment or numeric conversion is provided. All seven numeric dtypes preserve their raw bits, including signaling NaNs and integer extrema. Output `values` uses `photospider.tensor`/`samples` with ordinary target axes and unchanged dtype. The layout parameter and `ArrayLayout` enum are removed; the helper accepts profile after axis_map.
 
-The output has no attached domain description. Input structure and authorized
-coverage remain checked. Tuple closure is expressed by atomic_trailing_axes;
-a shape or channel count does not trigger an image/color domain validator.
-Any required operation validation support must be explicitly declared and
-retained in the dependency witness.
+## Fixed source mapping and execution
 
-## complete-input demand, dirty mapping and representation
+Each selected output tile has one CPU task and a separate dense allocation. Its source rectangle has `[0,1)` on singleton source axes and the output tile's mapped interval on other axes. The task declares all input tiles intersecting that rectangle, using the source's batch/atomic grid. This tile granularity may admit neighboring samples. Empty selection creates no task or payload reads.
 
-Every nonempty request reads and validates the complete input, then publishes
-the complete selected representation before projection. Any source change
-invalidates all output observations; returned dirty coverage is restricted to
-the consumer's actual Region. Empty reads no payload. Parameters and complete
-input metadata still validate before execution. Full typed validation may fail
-because of data outside the mapped coordinates of a partial consumer request.
+Prepare checks metadata, derives the source rectangle from the canonical output tile and validates the actual write plus all required reads. Runtime uses fixed affine input views, bounded stack coordinates and a 32-byte byte-copy buffer, with no scratch payload or runtime allocation. Negative/zero source strides and unaligned offsets are supported. Cancellation is sampled at entry and every 64 copied samples. Output owners are independent of source owners and outlive context destruction; operational failures prevent successful call publication.
 
-View requires one original Tensor covering the full input demand. Mapped
-non-singleton axes retain its byte strides; expanded singleton/unmapped axes
-have zero stride. Source offset, unaligned and negative/zero strides remain
-valid. The output retains the source owner with no new payload, and does not
-expand a zero-stride source before the callback. If no covering input Tensor
-exists, explicit View returns InvalidArgument/InvalidDomain ViewUnavailable with
-Domain/Run scope before the callback. It does not synthesize a multi-owner output.
+Static validation rejects malformed shapes/maps, rank reduction, duplicate/out-of-range mapping axes and incompatible mapped extents. Unsupported profiles fail before invocation. No per-sample diagnostics, work counters, owner-dependent view path or completed-result cache is used.
 
-Dense may collect multiple input owners, then packs all target elements in
-row-major order. Partial consumers still retain full output capacity. Neither
-mode changes raw bits, dtype or generic output identity. Outputs have no attached domain description; retained upstream/resource owners remain accounted. Published owners
-survive context destruction, and failure/cancellation releases unpublished work.
+## Acceptance
 
-## Work, resources and numerical profiles
-
-For N total outputs and rank r<=8, dense copying uses O(N*r) coordinate work
-and N*b output bytes. View uses O(r) layout work and retains actual source
-backing, independently of the target logical count. Complete input collection
-and typed validation are additional work. A valid view does not reserve N*b.
-
-All three keys preserve identical logical element bits. Permuted/view strides
-follow the same selected layout contract; no approximate math, NaN conversion
-or numeric tolerance is needed. SIMD is a byte-copy optimization and must not
-change payload bits or read bounds. Unsupported platform keys return
-BackendUnavailable instead of silently selecting another operator.
-
-Use host workers, allocator/admission and work/stage budgets. Reserve dense
-bytes before allocation, and account referenced owners and metadata separately
-from new payload. Do not reserve M*b merely to construct a valid view. Poll
-cancellation before reads, between mapping/refinement blocks, at least every
-4096 dense elements and before publishing. Sticky host failures cannot turn
-into success via a different layout or fallback. Cache keys include operation/
-profile, shape, axis map, layout and exact witnessed input data/metadata. Cache-off
-does not alter ownership, values or validation. No disk backing or private pool
-is required and no RSS bound is claimed.
-
-## Errors and acceptance
-
-Malformed/missing shape, layout or axis map and total shape size above 2^40
-use InvalidArgument at compile/direct preflight. Input dtype/rank, map length,
-incompatible extents or a source dimension that would need dropping use
-TypeMismatch. Duplicate/out-of-range map indices are InvalidArgument. Preserve
-recognized semantic validation, upstream identity, cancellation/stale and
-ResourceExhausted code/reason/scope. Generic floating NaN/Inf is not an error.
-
-| Test | Independent expected behavior |
-| --- | --- |
-| B01 | `[10,20,30]` shape `[3]` -> `[2,3,4]`, map `[1]`: output `[i,j,k]` equals source[j]; only 3 unique source values are needed for the full result |
-| B02 | Input `[2,3]` -> output `[3,4,2]`, map `[2,0]`: output `[j,k,i]` equals input[i,j] |
-| B03 | Input `[1,3]` -> `[4,3]` succeeds; `[2,3]` -> `[4,3]` under the same map fails without tiling |
-| B04 | Duplicate map, map length/range errors, rank shrink, empty/invalid shapes and product limits reject before data reads |
-| B05 | Four dtypes, arbitrary NaN payloads, infinities, signed zeros and integer extrema match bitwise across view/dense and platform profiles |
-| B06 | Negative/zero source strides, offset origin, unaligned storage retain a single source owner; multiple owners reject View |
-| B07 | Nonzero/disjoint Q still requires complete input and typed validation |
-| B08 | Any changed source element invalidates all selected output observations |
-| B09 | Empty request reads nothing; warm/cache-off, cancellation and failed allocation/work paths retain correct witnesses and release unpublished owners |
-| B10 | View retains source bytes after original/context destruction; final owner releases them; dense has correct independent packed payload |
-| B11 | Large view versus insufficient dense budget, fragmented source/set budget exhaustion, and unsupported accelerated-platform behavior |
-
-The public target workflow binds a small indexed integer matrix, creates the
-selected broadcast key with shape/map/layout, compiles and requests full plus
-nonzero/disjoint outputs. Check logical indices, strides/owners, actual source
-reads and dirty support. Use the explicit coordinate formula as an independent
-oracle. Create this public-path check for the current change and remove it after validation.
-
-## Current implementation status
-
-The three keys are registered with per-node metadata specialization. The
-specializer validates `shape`, the explicit injective `axis_map`, extent
-compatibility, layout and source dtype, then produces a compact static
-dependency mapping. `broadcast_node` in `photospider/ops/numeric/arrays.hpp` is the
-public authoring helper and emits these parameters without implicit alignment.
-
-The implementation preserves source owners for view output, uses zero strides
-for expanded axes and inherited strides for mapped axes, and packs only the
-requested region for dense output. Local Clang execution checked `[3]` to
-`[2,3,4]` with `axis_map=[1]`, exact sparse source support and dirty
-replication, a `[274877906944,3]` view backed by three Int64 samples, and a
-structured consumer reading the giant view through an 8-byte result view.
-
-The following dated implementation/acceptance record predates complete-input.
-It includes negative-stride unaligned permutation, independent owners, image Data
-versus complete-pixel Validation, invalid unselected alpha, bit patterns, Empty,
-collector cancellation, StageLimit, capacity/schema/profile failures, final source
-owner release after context destruction, and warm
-cache reuse after an unobserved edit versus refresh after an observed edit.
-Dense execution gathers at most 32 bytes into charged continuation scratch,
-then uses the selected memcpy/NEON/AVX2 copy path with exact bounded tails.
-Diagnostics identify the concrete ISA path. Independent mapped/row set comparison
-includes bounded canonical box expansion.
-No performance benchmark or new integration-test registration is included. This
-does not change the Proposed status of this specification.
-
-- [NUM-03 category](../core.md).
-- [NUM-03A constant](NUM-03A_constant.md).
-- [Existing shape/region traits](../../../../include/photospider/plugin/operation_registry.hpp).
-
-Current complete-input validation and timing: [array complete-input](../arrays-whole.md).
+For source `[10,20,30]`, target `[2,3,4]` and map `[1]`, output `[i,j,k]` equals source[j]. For source `[2,3]`, target `[3,4,2]` and map `[2,0]`, output `[j,k,i]` equals source `[i,j]`. Temporary checks compare an independent coordinate map and exact source tile union, covering seven dtypes, batch/atomic grids, singleton expansion, rank eight, sparse/empty requests, source layouts, artifacts and concurrent Runs. Include a sparse huge target whose source remains small. See [fixed array execution](../arrays-execution.md). This execution contract overrides the [NUM baseline](NUM_common_contract.md); specification status remains Proposed.

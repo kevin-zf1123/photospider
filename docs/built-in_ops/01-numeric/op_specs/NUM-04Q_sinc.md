@@ -37,8 +37,7 @@ or angle-unit parameter.
 
 One input `input` and output `values` have identical shape and dtype, Float32 or
 Float64. Integer inputs require explicit cast. Output carries no domain description. Inherit
-all [unary contract](NUM-04_unary_contract.md) requirements for complete-input
-demand, typed validation, ownership, invalidation, errors, cache, resources and
+all [unary contract](NUM-04_unary_contract.md) requirements for fixed tile reads, structural validation, ownership, errors, resources and
 cancellation. Both platform accelerated keys reject incompatible platforms.
 
 Strict correctly rounds the entire mathematical quotient directly to the output
@@ -66,7 +65,7 @@ refining until destination rounding is resolved. Test ±0 -> +1, ±Inf -> +0,
 NaN payloads, tiny subnormals, the transition away from the flat region around
 one, largest finite inputs, oscillatory sign changes and hard rounding cases.
 Verify exact special bits and accelerated final error, not just an internal
-sine error. Apply shared strided/disjoint demand, resource, typed-validation,
+sine error. Apply shared strided/disjoint demand, resource, structural-validation,
 lifetime and cancellation tests through actual public WorkflowDocument execution
 through the maintained public workflow; local timing is recorded in the implementation notes.
 
@@ -79,8 +78,7 @@ NaN fixtures checked separately using exact input payload bits.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
-atomic failure for the complete invocation. Its numerical path follows
+exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 Float32 accelerated sinc uses a direct even polynomial for `|x| <= 1`, including both zeros. It does not compute a sine followed by division.

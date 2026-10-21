@@ -3,15 +3,11 @@
 #include <memory>
 #include <stdexcept>
 
-#include "photospider/ops/contracts.hpp"
 #include "photospider/ops/numeric/diagnostics.hpp"
 #include "photospider/ops/registry.hpp"
 
 namespace ps::plugin_internal {
 Status register_builtin_operations(OperationRegistry* registry) {
-  auto contracts = register_ops_contracts(*registry);
-  if (!contracts.ok())
-    return contracts;
   auto diagnostics = register_numeric_diagnostics(*registry);
   if (!diagnostics.ok())
     return diagnostics;

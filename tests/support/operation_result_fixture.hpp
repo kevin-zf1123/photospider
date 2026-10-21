@@ -40,23 +40,6 @@ inline ps::Result<ps::ExecutionResult> execute(
   ps::ExecutionContext context(borrowed, config);
   auto input = multi_result::binding(context.resource_budget().take_value(),
                                      "input", 3, schema(atomic));
-  return context.execute(compiled.value().plan.value(), {{input}});
-}
-inline ps::Result<ps::ResultContinuation> start(
-    ps::OperationRegistry& registry, const std::string& key,
-    const std::map<std::string, ps::ParameterValue>& parameters,
-    ps::Backend backend, bool invalid_input = false) {
-  ps::ResultProgramMetadata metadata;
-  metadata.inputs.resize(1);
-  if (!invalid_input)
-    metadata.inputs[0].result_schema =
-        std::make_shared<const ps::SchemaTemplate>(schema(true));
-  metadata.output.result_schema =
-      std::make_shared<const ps::SchemaTemplate>(schema(true));
-  ps::ResultProgramQuery query(metadata, parameters);
-  query.backend = backend;
-  query.semantic_key = key;
-  ps::ResourceBudget root;
-  return registry.start_result(key, query, root.allocator());
+  return multi_result::run(context, compiled.value().plan.value(), {{input}});
 }
 }  // namespace operation_result

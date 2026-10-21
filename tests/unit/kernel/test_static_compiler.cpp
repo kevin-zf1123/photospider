@@ -10,6 +10,8 @@
 #include "photospider/compiler/artifact.hpp"
 #include "photospider/compiler/compiler.hpp"
 #include "photospider/execution/execution.hpp"
+#include "photospider/plugin/fixed_invocation.hpp"
+#include "photospider/plugin/operation_program.hpp"
 
 namespace {
 template <class T>
@@ -38,40 +40,53 @@ std::shared_ptr<const ps::SchemaTemplate> schema() {
   require(result->validate());
   return result;
 }
-struct Program {
+ps::Result<ps::ExecutionResult> run(ps::ExecutionContext& context,
+                                    const ps::ExecutionPlan& plan,
+                                    ps::ExecutionOptions options = {}) {
+  auto prepared = context.prepare(plan);
+  if (!prepared.ok())
+    return ps::Result<ps::ExecutionResult>(prepared.status());
+  auto submitted = context.submit(prepared.value(), {}, {}, std::move(options));
+  if (!submitted.ok())
+    return ps::Result<ps::ExecutionResult>(submitted.status());
+  return submitted.value().join();
+}
+struct ByteKernel {
   bool decrement;
   std::uint8_t literal;
   std::shared_ptr<std::atomic<std::uint64_t>> calls;
-  Program(bool dec, std::uint8_t value,
-          std::shared_ptr<std::atomic<std::uint64_t>> count)
-      : decrement(dec), literal(value), calls(std::move(count)) {}
-  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
-    using Answer = ps::Result<ps::ResultProgramPoll>;
-    ++*calls;
-    auto value = literal;
-    if (decrement) {
-      auto status = phase.read_tensor(0, 0, {0}, &value, sizeof(value));
-      if (!status.ok())
-        return Answer(status);
-      --value;
-    }
-    auto made = ps::ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, phase.query.tile_extent);
-    if (!made.ok())
-      return Answer(made.status());
-    auto builder = made.take_value();
-    auto status = builder.publish_tensor(0, ps::Region::whole({1}),
-                                         {&value, sizeof(value)},
-                                         phase.query.cancellation);
-    if (!status.ok())
-      return Answer(status);
-    auto sealed = builder.seal();
-    if (!sealed.ok())
-      return Answer(sealed.status());
-    return Answer(ps::ResultPublication{sealed.take_value(), true});
-  }
 };
+ps::Result<ps_prepared_kernel_v8> prepare_byte(
+    const ps::KernelPreparation& query, bool decrement, std::uint8_t literal,
+    std::shared_ptr<std::atomic<std::uint64_t>> count) {
+  if (query.writes.size() != 1 || query.writes[0].bytes != 1 ||
+      query.reads.size() != (decrement ? 1U : 0U))
+    return ps::Result<ps_prepared_kernel_v8>(
+        {ps::ErrorCode::InvalidArgument, "byte fixture signature"});
+  auto state = std::make_unique<ByteKernel>(
+      ByteKernel{decrement, literal, std::move(count)});
+  ps_prepared_kernel_v8 kernel{};
+  kernel.struct_size = sizeof(kernel);
+  kernel.abi_version = 8;
+  kernel.context = state.release();
+  kernel.release = [](const void* raw) {
+    delete static_cast<const ByteKernel*>(raw);
+  };
+  kernel.invoke_cpu = [](const ps_kernel_invocation_v8* invocation,
+                         ps_kernel_status_v8* status) {
+    const auto& state =
+        *static_cast<const ByteKernel*>(invocation->prepared_context);
+    ++*state.calls;
+    auto value = state.literal;
+    if (state.decrement)
+      value =
+          *static_cast<const std::uint8_t*>(invocation->inputs[0].allocation) -
+          1;
+    *static_cast<std::uint8_t*>(invocation->outputs[0].allocation) = value;
+    *status = {};
+  };
+  return ps::Result<ps_prepared_kernel_v8>(kernel);
+}
 struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry =
       std::make_shared<ps::OperationRegistry>();
@@ -85,31 +100,37 @@ struct Fixture {
     ps::OperationDefinition definition;
     definition.key = key;
     definition.traits.input_count = decrement ? 1 : 0;
-    definition.traits.workspace_bytes = 4096;
     auto& output = definition.traits.outputs[0];
     output.key = "value";
     output.result_schema = *type;
     output.output_schema.result_schema_id = type->id;
     output.output_schema.result_schema_version = type->version;
-    output.continuation_bytes = 1024;
-    output.maximum_dependency_stages = 8;
     if (decrement) {
       ps::OperationPortConstraint input;
       input.result_schema_id = type->id;
       input.result_schema_version = type->version;
       definition.traits.input_schema = {input};
     }
-    definition.map_dependencies =
-        [counter = mappings](const ps::ResultStaticQuery& query) {
+    definition.lower =
+        [decrement, counter = mappings](const ps::OperationLowering& query) {
           ++*counter;
-          return ps::complete_input_dependencies(query);
+          ps::OperationProgramBuilder builder(query);
+          if (!query.requests[0].empty()) {
+            auto task = take(builder.add_task(
+                decrement ? "decrement" : "constant", "byte-v1"));
+            if (decrement)
+              require(builder.read_input(task, 0, 0, 0));
+            require(builder.write_output(task, 0, 0, 0));
+          }
+          return builder.finish();
         };
-    definition.start_result = [decrement, literal, count](
-                                  const ps::ResultProgramQuery&,
-                                  const ps::BufferAllocator& allocator) {
-      return ps::ResultContinuation::make<Program>(allocator, decrement,
-                                                   literal, count);
-    };
+    definition.prepare_kernel =
+        [decrement, literal, count](
+            const ps::physical::KernelDesc&, const ps::physical::Placement&,
+            const ps::KernelPreparation& query, const ps::ResourceSet&,
+            const ps_native_gpu_service_v2*) {
+          return prepare_byte(query, decrement, literal, count);
+        };
     require(registry->register_operation(std::move(definition)));
   }
   ps::SemanticNode call(ps::IRCallId id, std::string key,
@@ -152,14 +173,14 @@ void branch(bool condition) {
   auto plan = take(compiler.plan(semantic));
   const auto mappings = f.mappings->load();
   ps::ExecutionContext execution(f.registry);
-  check(read(take(execution.execute(plan))) == (condition ? 11 : 22),
+  check(read(take(run(execution, plan))) == (condition ? 11 : 22),
         "branch selected wrong value");
   check(f.calls[1]->load() == static_cast<std::uint64_t>(condition),
         "then branch execution mismatch");
   check(f.calls[2]->load() == static_cast<std::uint64_t>(!condition),
         "else branch execution mismatch");
   check(f.mappings->load() == mappings,
-        "mapping callback ran during branch execution");
+        "lowering callback ran during branch execution");
 }
 ps::IRProgram loop_program(const Fixture& f) {
   ps::IRProgram program;
@@ -186,55 +207,131 @@ void loop() {
   auto plan = take(compiler.plan(semantic));
   const auto mappings = f.mappings->load();
   ps::ExecutionContext execution(f.registry);
-  check(read(take(execution.execute(plan))) == 0,
+  check(read(take(run(execution, plan))) == 0,
         "loop returned stale activation");
   check(f.calls[0]->load() == 1 && f.calls[1]->load() == 3,
         "loop activation count mismatch");
-  check(f.mappings->load() == mappings, "loop executed mapper");
+  check(f.mappings->load() == mappings, "loop executed lowering");
   ps::IRProgram forever;
   forever.entry = 1;
   forever.blocks = {{1, {}, {}, ps::IRJump{{1, {}}}}};
   auto endless = take(
       compiler.plan(take(compiler.optimize(take(compiler.bind_ir(forever))))));
   ps::ExecutionOptions options;
-  options.maximum_dependency_work = 32;
-  auto bounded = execution.execute(endless, {}, {}, options);
+  options.maximum_work = 32;
+  auto bounded = run(execution, endless, options);
   check(!bounded.ok() &&
             bounded.status().code == ps::ErrorCode::ResourceExhausted,
         "empty loop ignored run budget");
 }
-struct TileProgram {
-  bool shifted;
-  std::shared_ptr<std::atomic<std::uint64_t>> calls;
-  TileProgram(bool shift, std::shared_ptr<std::atomic<std::uint64_t>> count)
-      : shifted(shift), calls(std::move(count)) {}
-  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
-    ++*calls;
-    auto builder = take(ps::ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, phase.query.tile_extent));
-    for (const auto& box : phase.query.tensor_outputs->boxes()) {
-      const auto& dims = box.dimensions();
-      std::vector<std::uint8_t> bytes;
-      for (auto y = dims[0].offset; y < dims[0].offset + dims[0].extent; ++y)
-        for (auto x = dims[1].offset; x < dims[1].offset + dims[1].extent;
-             ++x) {
-          std::uint8_t value = static_cast<std::uint8_t>(y * 4 + x);
-          if (shifted) {
-            std::uint8_t other = 0;
-            require(phase.read_tensor(0, 0, {y, (x + 2) % 4}, &value, 1));
-            require(phase.read_tensor(1, 0, {y, (x + 2) % 4}, &other, 1));
-            value += other;
-          }
-          bytes.push_back(value);
+void shrinking_lowering_admission() {
+  auto source = std::make_shared<ps::SchemaTemplate>(*schema());
+  source->tensors[0].descriptor.shape = {2};
+  auto scalar = schema();
+  auto registry = std::make_shared<ps::OperationRegistry>();
+  for (bool consumer : {false, true}) {
+    ps::OperationDefinition op;
+    op.key = consumer ? "fx.consumer" : "fx.variable";
+    op.traits.input_count = 1;
+    ps::OperationPortConstraint port;
+    port.result_schema_id = source->id;
+    port.result_schema_version = source->version;
+    op.traits.input_schema = {port};
+    op.traits.outputs[0].key = "value";
+    op.traits.outputs[0].result_schema = consumer ? *scalar : *source;
+    op.traits.outputs[0].output_schema = port;
+    op.lower = [consumer](const ps::OperationLowering& query) {
+      ps::OperationProgramBuilder builder(query);
+      if (consumer) {
+        auto task = take(builder.add_task("consume", "v1"));
+        require(builder.read_input(task, 0, 0, 1));
+        require(builder.write_output(task, 0, 0, 0));
+      } else if (query.requests[0].size() == 1) {
+        auto first = take(builder.add_task("first", "v1"));
+        require(builder.read_input(first, 0, 0, 0));
+        auto value =
+            take(builder.add_temporary(query.outputs[0].result_schema));
+        auto tile = take(builder.write_temporary(first, value, 0, 0));
+        auto second = take(builder.add_task("second", "v1"));
+        require(builder.read_tile(second, tile));
+        require(builder.write_output(second, 0, 0, 0));
+      } else {
+        auto task = take(builder.add_task("combined", "v1"));
+        for (unsigned tile : {0, 1}) {
+          require(builder.read_input(task, 0, 0, tile));
+          require(builder.write_output(task, 0, 0, tile));
         }
-      require(builder.publish_tensor(0, box, {bytes.data(), bytes.size()},
-                                     phase.query.cancellation));
-    }
-    return ps::Result<ps::ResultProgramPoll>(
-        ps::ResultPublication{take(builder.seal()), true});
+      }
+      return builder.finish();
+    };
+    op.prepare_kernel = [](const auto&, const auto&, const auto&, const auto&,
+                           const auto*) {
+      return ps::Result<ps_prepared_kernel_v8>(
+          {ps::ErrorCode::BackendUnavailable, "planning fixture"});
+    };
+    require(registry->register_operation(std::move(op)));
   }
-};
+  require(registry->freeze());
+  ps::WorkflowDocument document;
+  document.inputs = {{1, "source", source}};
+  document.nodes = {
+      {1, "fx.variable", {ps::WorkflowInputReference{1}}, {}},
+      {2, "fx.consumer", {ps::WorkflowNodeOutput{1, "value"}}, {}}};
+  document.outputs = {{"a", 1, "value"}, {"b", 2, "value"}};
+  ps::GraphContext graph(document);
+  ps::Compiler compiler(registry);
+  auto ir = take(compiler.analyze(graph.snapshot()));
+  ps::PlanningOptions options;
+  options.tile_extent = 1;
+  options.output_requests["a"].members[0] =
+      take(ps::TileSet::range(ps::ResourceBudget{}, 0, 1));
+  auto full = take(compiler.plan(ir, options));
+  const auto& p = full.program();
+  check(p.tasks.size() == 2, "expanded request did not replace earlier graph");
+  options.maximum_records = p.schemas.size() + p.layouts.size() +
+                            p.tiles.size() + p.values.size() +
+                            p.placements.size() + p.kernels.size() +
+                            p.tasks.size() + p.calls.size() + p.blocks.size();
+  auto tight = take(compiler.plan(ir, options));
+  check(tight.digest().value == full.digest().value,
+        "tight budget retained obsolete lowering records");
+}
+void aggregate_record_admission() {
+  Fixture f;
+  f.operation("fx.byte", false, 7);
+  require(f.registry->freeze());
+  ps::IRProgram program;
+  program.entry = 1;
+  ps::IRBlock block;
+  block.id = 1;
+  ps::IRReturn returned;
+  for (unsigned i = 1; i <= 10; ++i) {
+    program.calls.push_back(f.call(i, "fx.byte", {}, 100 + i));
+    program.returns.push_back({"out" + std::to_string(i), f.type});
+    block.calls.push_back(i);
+    returned.values.push_back(100 + i);
+  }
+  block.terminator = returned;
+  program.blocks.push_back(std::move(block));
+  ps::Compiler compiler(f.registry);
+  auto ir = take(compiler.bind_ir(program));
+  auto full = take(compiler.plan(ir));
+  const auto& p = full.program();
+  const auto exact = p.schemas.size() + p.layouts.size() + p.tiles.size() +
+                     p.values.size() + p.placements.size() + p.kernels.size() +
+                     p.tasks.size() + p.calls.size() + p.blocks.size();
+  ps::PlanningOptions options;
+  options.maximum_records = exact;
+  check(compiler.plan(ir, options).ok(), "exact aggregate limit rejected");
+  options.maximum_records = exact - 6;
+  *f.mappings = 0;
+  auto failed = compiler.plan(ir, options);
+  check(
+      !failed.ok() && failed.status().code == ps::ErrorCode::ResourceExhausted,
+      "aggregate physical records ignored");
+  check(f.mappings->load() < program.calls.size(),
+        "record admission retained every lowering before rejection");
+}
 void static_tiles() {
   Fixture f;
   auto type = std::make_shared<ps::SchemaTemplate>(*f.type);
@@ -248,37 +345,80 @@ void static_tiles() {
     ps::OperationDefinition definition;
     definition.key = shifted ? "fx.shift" : "fx.tiles";
     definition.traits.input_count = shifted ? 2 : 0;
-    definition.traits.workspace_bytes = 4096;
     auto& output = definition.traits.outputs[0];
     output.key = "value";
     output.result_schema = *type;
     output.output_schema.result_schema_id = type->id;
     output.output_schema.result_schema_version = type->version;
-    output.continuation_bytes = 1024;
-    output.maximum_dependency_stages = 4;
     ps::OperationPortConstraint port;
     port.result_schema_id = type->id;
     port.result_schema_version = type->version;
     definition.traits.input_schema.assign(definition.traits.input_count, port);
-    definition.map_dependencies =
-        [shifted, count = f.mappings](const ps::ResultStaticQuery& query) {
-          ++*count;
-          ps::ResultStaticMapping result;
+    definition.lower = [shifted, counter = f.mappings](
+                           const ps::OperationLowering& query) {
+      ++*counter;
+      ps::OperationProgramBuilder builder(query);
+      for (const auto& member : query.requests[0].members)
+        for (auto tile : member.second) {
+          auto task =
+              take(builder.add_task(shifted ? "shift" : "tiles", "tiles-v1"));
           if (shifted) {
-            const auto source = query.tile_unit ^ 1;
-            for (std::uint32_t input = 0; input < 2; ++input)
-              result.inputs.push_back(
-                  {input, 0, false,
-                   take(ps::TileSet::range(ps::ResourceBudget{}, source,
-                                           source + 1))});
+            for (std::uint32_t port = 0; port < 2; ++port)
+              require(builder.read_input(task, port, member.first, tile ^ 1));
           }
-          return ps::Result<ps::ResultStaticMapping>(std::move(result));
-        };
-    definition.start_result = [shifted, count](
-                                  const ps::ResultProgramQuery&,
-                                  const ps::BufferAllocator& allocator) {
-      return ps::ResultContinuation::make<TileProgram>(allocator, shifted,
-                                                       count);
+          require(builder.write_output(task, 0, member.first, tile));
+        }
+      return builder.finish();
+    };
+    definition.prepare_kernel =
+        [shifted, count](
+            const ps::physical::KernelDesc&, const ps::physical::Placement&,
+            const ps::KernelPreparation& query, const ps::ResourceSet&,
+            const ps_native_gpu_service_v2*)
+        -> ps::Result<ps_prepared_kernel_v8> {
+      if (query.writes.size() != 1 || query.writes[0].layout.rank != 2 ||
+          query.reads.size() != (shifted ? 2U : 0U))
+        return ps::Result<ps_prepared_kernel_v8>(
+            {ps::ErrorCode::InvalidArgument, "tile fixture signature"});
+      struct State {
+        bool shifted;
+        std::shared_ptr<std::atomic<std::uint64_t>> count;
+      };
+      auto state = std::make_unique<State>(State{shifted, count});
+      ps_prepared_kernel_v8 kernel{};
+      kernel.struct_size = sizeof(kernel);
+      kernel.abi_version = 8;
+      kernel.context = state.release();
+      kernel.release = [](const void* raw) {
+        delete static_cast<const State*>(raw);
+      };
+      kernel.invoke_cpu = [](const ps_kernel_invocation_v8* invocation,
+                             ps_kernel_status_v8* status) {
+        const auto& state =
+            *static_cast<const State*>(invocation->prepared_context);
+        ++*state.count;
+        const auto& output = invocation->outputs[0];
+        const auto& layout = *output.layout;
+        auto* bytes = static_cast<std::uint8_t*>(output.allocation);
+        for (std::uint64_t y = 0; y < layout.shape[0]; ++y)
+          for (std::uint64_t x = 0; x < layout.shape[1]; ++x) {
+            auto value = static_cast<std::uint8_t>((layout.origin[0] + y) * 4 +
+                                                   layout.origin[1] + x);
+            if (state.shifted) {
+              value = 0;
+              for (unsigned port = 0; port < 2; ++port) {
+                const auto& input = invocation->inputs[port];
+                value += static_cast<const std::uint8_t*>(
+                    input.allocation)[input.byte_offset +
+                                      y * input.layout->strides[0] +
+                                      x * input.layout->strides[1]];
+              }
+            }
+            bytes[y * layout.strides[0] + x * layout.strides[1]] = value;
+          }
+        *status = {};
+      };
+      return ps::Result<ps_prepared_kernel_v8>(kernel);
     };
     require(f.registry->register_operation(std::move(definition)));
   }
@@ -297,7 +437,7 @@ void static_tiles() {
   const auto mappings = f.mappings->load();
   ps::ExecutionContext execution(f.registry);
   {
-    auto result = take(execution.execute(plan));
+    auto result = take(run(execution, plan));
     const auto& value = result.results.at("result");
     auto facts = take(value.descriptor());
     for (std::uint64_t y = 0; y < 4; ++y)
@@ -313,13 +453,13 @@ void static_tiles() {
   ps::TileRequest request;
   request.members.emplace(0,
                           take(ps::TileSet::range(ps::ResourceBudget{}, 0, 1)));
-  auto selected = take(plan.tile_plan("result", request));
+  auto selected = take(plan.select_outputs({{"result", request}}));
   auto encoded = take(ps::CompilerArtifact::export_plan(selected));
   auto loaded =
       take(ps::CompilerArtifact::import_plan(compiler.operations(), encoded));
   check(take(ps::CompilerArtifact::export_plan(loaded)) == encoded,
         "filtered plan text changed");
-  auto result = take(execution.execute(loaded));
+  auto result = take(run(execution, loaded));
   check(take(result.results.at("result").descriptor())
                 .tensor_coverage(0)
                 .element_count()
@@ -331,246 +471,7 @@ void static_tiles() {
       returned.read_tensor(take(returned.descriptor()), 0, {0, 0}, &byte, 1));
   check(byte == 4, "loaded filtered plan changed coordinates");
   check(f.mappings->load() == mappings,
-        "map callback ran during filtering, loading or execution");
-}
-struct DescriptorProgram {
-  std::shared_ptr<std::atomic<std::uint64_t>> calls;
-  explicit DescriptorProgram(std::shared_ptr<std::atomic<std::uint64_t>> count)
-      : calls(std::move(count)) {}
-  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
-    ++*calls;
-    check(phase.tensors && phase.tensors->empty() && phase.descriptors &&
-              phase.descriptors->size() == 1,
-          "descriptor grant exposed payload or another input");
-    const auto& facts = phase.descriptors->begin()->second;
-    check(facts.object_id() == 0, "static descriptor acquired an object");
-    const auto value = static_cast<std::uint8_t>(facts.tensor_count());
-    auto builder = take(ps::ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, phase.query.tile_extent));
-    require(builder.publish_tensor(0, ps::Region::whole({1}), {&value, 1}));
-    return ps::Result<ps::ResultProgramPoll>(
-        ps::ResultPublication{take(builder.seal()), true});
-  }
-};
-void descriptor_cache() {
-  Fixture f;
-  auto count = std::make_shared<std::atomic<std::uint64_t>>(0);
-  ps::OperationDefinition definition;
-  definition.key = "fx.descriptor";
-  definition.traits.input_count = 2;
-  definition.traits.input_schema.resize(2);
-  definition.traits.workspace_bytes = 4096;
-  for (auto& input : definition.traits.input_schema) {
-    input.result_schema_id = f.type->id;
-    input.result_schema_version = f.type->version;
-  }
-  auto& output = definition.traits.outputs[0];
-  output.key = "value";
-  output.result_schema = *f.type;
-  output.output_schema.result_schema_id = f.type->id;
-  output.output_schema.result_schema_version = f.type->version;
-  output.continuation_bytes = sizeof(DescriptorProgram);
-  output.maximum_dependency_stages = 1;
-  definition.map_dependencies = [counter = f.mappings](const auto&) {
-    ++*counter;
-    ps::ResultStaticMapping mapping;
-    mapping.inputs.push_back({0, 0, true, {}});
-    return ps::Result<ps::ResultStaticMapping>(std::move(mapping));
-  };
-  definition.start_result = [count](const auto&, const auto& allocator) {
-    return ps::ResultContinuation::make<DescriptorProgram>(allocator, count);
-  };
-  require(f.registry->register_operation(std::move(definition)));
-  require(f.registry->freeze());
-  auto pair = std::make_shared<ps::SchemaTemplate>(*f.type);
-  pair->tensors.push_back(pair->tensors.front());
-  pair->tensors[1].key = "second";
-  require(pair->validate());
-  ps::IRProgram program;
-  for (unsigned port = 0; port < 2; ++port) {
-    ps::WorkflowInputDeclaration input;
-    input.id = port + 1;
-    input.name = port ? "two" : "one";
-    input.result_schema = port ? pair : f.type;
-    program.input_declarations.push_back(std::move(input));
-  }
-  program.input_bindings = {{1, 11}, {2, 12}};
-  program.calls = {f.call(1, "fx.descriptor", {11, 12}, 13)};
-  program.entry = 1;
-  program.blocks = {{1, {}, {1}, ps::IRReturn{{13}}}};
-  program.returns = {{"result", f.type}};
-  ps::Compiler compiler(f.registry);
-  auto first = take(
-      compiler.plan(take(compiler.optimize(take(compiler.bind_ir(program))))));
-  auto text = take(ps::CompilerArtifact::export_plan(first));
-  const std::string original = "input 0 member 0 descriptor true";
-  const auto where = text.find(original);
-  check(where != std::string::npos, "missing editable descriptor instruction");
-  text.replace(where, original.size(), "input 1 member 0 descriptor true");
-  auto second =
-      take(ps::CompilerArtifact::import_plan(compiler.operations(), text));
-  check(f.mappings->load() == 1, "descriptor plan import reran mapper");
-  ps::ExecutionContextConfig config;
-  config.result_cache_bytes = 1024 * 1024;
-  ps::ExecutionContext execution(f.registry, config);
-  const auto root = take(execution.resource_budget());
-  ps::ExecutionBindings bindings;
-  for (const auto& input : program.input_declarations) {
-    auto builder =
-        take(ps::ResultBuilder::start(root, *input.result_schema, input.name));
-    const std::uint8_t value = 0;
-    for (unsigned member = 0; member < input.result_schema->tensors.size();
-         ++member)
-      require(
-          builder.publish_tensor(member, ps::Region::whole({1}), {&value, 1}));
-    bindings.inputs.push_back({input.name, take(builder.seal())});
-  }
-  for (unsigned round = 0; round < 2; ++round) {
-    check(read(take(execution.execute(first, bindings))) == 1,
-          "first descriptor plan changed meaning");
-    check(read(take(execution.execute(second, bindings))) == 2,
-          "edited descriptor grant reused another port's cached value");
-    check(count->load() == 2, "matching descriptor grants did not reuse cache");
-  }
-  check(f.mappings->load() == 1, "descriptor execution reran mapper");
-}
-struct CheckpointProgram {
-  std::shared_ptr<std::atomic<std::uint64_t>> polls, hits;
-  CheckpointProgram(std::shared_ptr<std::atomic<std::uint64_t>> calls,
-                    std::shared_ptr<std::atomic<std::uint64_t>> restored)
-      : polls(std::move(calls)), hits(std::move(restored)) {}
-  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
-    ++*polls;
-    auto prior = take(phase.checkpoint_before(1, 1));
-    std::uint8_t value = 7;
-    if (prior) {
-      ++*hits;
-      const auto& state = prior->state();
-      require(state.read_tensor(take(state.descriptor()), 0, {0}, &value, 1));
-    }
-    auto builder = take(ps::ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, phase.query.tile_extent));
-    require(builder.publish_tensor(0, ps::Region::whole({1}), {&value, 1}));
-    auto state = take(builder.seal());
-    if (!prior)
-      require(phase.checkpoint_publish(1, 1, state));
-    return ps::Result<ps::ResultProgramPoll>(
-        ps::ResultPublication{std::move(state), true});
-  }
-};
-void optional_fallback() {
-  // No GPU device or Run is needed to decide whether a fixed retry is safe.
-  for (unsigned mode : {0U, 1U}) {
-    Fixture f;
-    auto type = std::make_shared<ps::SchemaTemplate>(*f.type);
-    type->tensors[0].descriptor.shape = {3};
-    require(type->validate());
-    f.type = type;
-    ps::OperationDefinition definition;
-    definition.key = "fx.optional_fallback";
-    definition.traits.input_count = 1;
-    definition.traits.supports_gpu = true;
-    definition.traits.allows_cpu_fallback = true;
-    ps::OperationPortConstraint port;
-    port.result_schema_id = type->id;
-    port.result_schema_version = type->version;
-    definition.traits.input_schema = {port};
-    auto& output = definition.traits.outputs[0];
-    output.result_schema = *type;
-    output.output_schema.result_schema_id = type->id;
-    output.output_schema.result_schema_version = type->version;
-    output.continuation_bytes = sizeof(Program);
-    output.maximum_dependency_stages = 1;
-    definition.map_dependencies = [mode](const ps::ResultStaticQuery& query) {
-      const bool cpu = query.backend == ps::Backend::Cpu;
-      const auto tile = cpu && mode == 1 ? 1U : 0U;
-      ps::ResultStaticMapping mapping;
-      mapping.inputs.push_back(
-          {0, 0, false,
-           take(ps::TileSet::range(ps::ResourceBudget{}, tile, tile + 1))});
-      return ps::Result<ps::ResultStaticMapping>(std::move(mapping));
-    };
-    auto polls = std::make_shared<std::atomic<std::uint64_t>>(0);
-    definition.start_result = [polls](const auto&, const auto& allocator) {
-      return ps::ResultContinuation::make<Program>(allocator, false, 0, polls);
-    };
-    require(f.registry->register_operation(std::move(definition)));
-    require(f.registry->freeze());
-    ps::IRProgram program;
-    program.input_declarations = {{1, "input", type}};
-    program.input_bindings = {{1, 101}};
-    program.calls = {f.call(1, "fx.optional_fallback", {101}, 102)};
-    program.entry = 1;
-    program.blocks = {{1, {}, {1}, ps::IRReturn{{102}}}};
-    program.returns = {{"result", type}};
-    ps::Compiler compiler(f.registry);
-    auto ir = take(compiler.bind_ir(program));
-    ps::PlanningOptions options;
-    options.execution_mode = ps::ExecutionMode::NativeGpu;
-    options.tile_extent = 1;
-    auto planned = compiler.plan(ir, options);
-    auto plan = take(std::move(planned));
-    check(plan.steps()[0].backend == ps::Backend::Gpu,
-          "incompatible retry changed primary backend");
-    for (const auto& block : plan.blocks())
-      for (const auto& instruction : block.instructions) {
-        check(instruction.cpu_fallback == (mode == 0),
-              "CPU fallback coverage proof mismatch");
-        check(instruction.inputs.size() == 1 &&
-                  instruction.inputs[0].tiles.size() == 1 &&
-                  instruction.inputs[0].tiles.contains(0),
-              "optional retry enlarged the primary GPU grants");
-      }
-    auto restored = take(ps::CompilerArtifact::import_plan(
-        f.registry, take(ps::CompilerArtifact::export_plan(plan))));
-    check(restored.blocks()[0].instructions[0].cpu_fallback == (mode == 0),
-          "Plan import changed saved fallback");
-    check(polls->load() == 0, "planning invoked an execution callback");
-  }
-}
-void checkpoint_identity() {
-  Fixture f;
-  auto polls = std::make_shared<std::atomic<std::uint64_t>>(0);
-  auto hits = std::make_shared<std::atomic<std::uint64_t>>(0);
-  ps::OperationDefinition definition;
-  definition.key = "fx.checkpoint";
-  definition.traits.cacheable = false;
-  definition.traits.workspace_bytes = 4096;
-  auto& output = definition.traits.outputs[0];
-  output.result_schema = *f.type;
-  output.output_schema.result_schema_id = f.type->id;
-  output.output_schema.result_schema_version = f.type->version;
-  output.continuation_bytes = sizeof(CheckpointProgram);
-  output.maximum_dependency_stages = 1;
-  definition.start_result = [polls, hits](const auto&, const auto& allocator) {
-    return ps::ResultContinuation::make<CheckpointProgram>(allocator, polls,
-                                                           hits);
-  };
-  require(f.registry->register_operation(std::move(definition)));
-  require(f.registry->freeze());
-  ps::IRProgram program;
-  program.calls = {f.call(1, "fx.checkpoint", {}, 11),
-                   f.call(2, "fx.checkpoint", {}, 12)};
-  program.entry = 1;
-  program.blocks = {{1, {}, {1, 2}, ps::IRReturn{{11, 12}}}};
-  program.returns = {{"result", f.type}, {"other", f.type}};
-  ps::Compiler compiler(f.registry);
-  auto plan = take(
-      compiler.plan(take(compiler.optimize(take(compiler.bind_ir(program))))));
-  plan = take(ps::CompilerArtifact::import_plan(
-      compiler.operations(), take(ps::CompilerArtifact::export_plan(plan))));
-  ps::ExecutionContext execution(f.registry);
-  const auto result = take(execution.execute(plan));
-  check(read(result) == 7, "first checkpoint result changed");
-  const auto& other = result.results.at("other");
-  std::uint8_t value = 0;
-  require(other.read_tensor(take(other.descriptor()), 0, {0}, &value, 1));
-  check(value == 7 && polls->load() == 2 && hits->load() == 1 &&
-            result.diagnostics.cache_hits == 0,
-        "equivalent pure calls did not share checkpoint state independently "
-        "of their physical step IDs");
+        "lowering callback ran during filtering, loading or execution");
 }
 }  // namespace
 int main() try {
@@ -578,9 +479,8 @@ int main() try {
   branch(false);
   loop();
   static_tiles();
-  descriptor_cache();
-  checkpoint_identity();
-  optional_fallback();
+  aggregate_record_admission();
+  shrinking_lowering_admission();
   return 0;
 } catch (const std::exception& error) {
   std::cerr << error.what() << '\n';

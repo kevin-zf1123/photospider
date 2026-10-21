@@ -337,9 +337,11 @@ int main() {
     PS_REQUIRE_OK(made);
     auto builder = made.take_value();
 
+    const auto bytes = region.element_count().value() * sizeof(float);
     PS_CHECK(
-        !builder.publish_tensor(0, region, ByteView(generic.bytes().data(), 16))
-             .ok());
+        builder
+            .publish_tensor(0, region, ByteView(generic.bytes().data(), bytes))
+            .code == ErrorCode::TypeMismatch);
   }
   auto made = ResultBuilder::start(root, typed_schema, "complete.image");
   PS_REQUIRE_OK(made);

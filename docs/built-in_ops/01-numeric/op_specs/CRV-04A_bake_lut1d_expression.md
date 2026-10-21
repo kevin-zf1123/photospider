@@ -22,7 +22,7 @@ range/fallback rules. Discrete results, copies, selected endpoints and special
 values remain exact.
 
 Inherit the [baking template contract](CRV-04_bake_lut1d.md) in full for authoring
-profile/defaults, count/dtype, named outputs, Run-shared complete-input computation, resources, errors,
+profile/defaults, count/dtype, named outputs, fixed execution, resources, errors,
 owner lifetime and public graph-equivalence acceptance. This is a workflow
 construction template; its name is not an OperationRegistry key.
 
@@ -52,13 +52,13 @@ precision and query-support restrictions are not normalized or weakened.
 
 ## Acceptance and status
 
-Executed analytic fixture: expression="x^2", start=[0], end=[1], count=3 -> values=[0,0.25,1], axis=[0,1,0.5].
+Analytic fixture: expression="x^2", start=[0], end=[1], count=3 -> values=[0,0.25,1], axis=[0,1,0.5].
 
 Construct this template and its explicit expansion with the same bindings,
 parameters and output demands. Compare descriptors, numerical quality and exact
-read/dirty witnesses according to the source spec. Repeat each valid profile,
+active input dependencies according to the source spec. Repeat each valid profile,
 values-only/axis-only/joint requests, changed source bindings, singleton count,
-partial output, low shared budgets, cancellation, cache-off and exported-owner
+partial output, resource admission, cancellation and exported-owner
 lifetime. Templates do not compute on construction, freeze results or create files.
 Use source mathematical fixtures independently of graph equivalence, which alone
 could reproduce a shared numerical bug.

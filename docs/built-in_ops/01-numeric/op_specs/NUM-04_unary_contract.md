@@ -79,34 +79,17 @@ all profiles; native platform NaN propagation is not the specification.
 
 Each node consumes numeric tensor data from a Result input and publishes a
 Result on output port `values`. Each input Result contains exactly one tensor
-member in slot 0 and may also contain fields. Its schema ID may vary.
-Input structure and explicitly bound validators retain their declared scope;
-there is no label-triggered alpha or color scan. The tensor sample shape has rank 1..8, positive extents, and at
+member in slot 0. Its schema ID may vary.
+Structural input validation occurs before issue. The tensor sample shape has rank 1..8, positive extents, and at
 most 2^40 elements. The
 individual operation declares its accepted dtypes and output mapping. No
 implicit integer/float conversion, shape change, physical units or color/alpha
 inference is introduced. The output schema is `photospider.tensor`, with tensor
 key `samples`, the preserved shape, and no attached domain description.
 
-Metadata specialization checks the input tensor dtype and shape. A nonempty
-request uses Run-shared complete-input computation and requires payload tile coverage with explicit validation
-support for every input sample, including samples outside the consumer's
-projection. The coordinator supplies authorized tensor windows; compatible
-strided storage remains usable without requiring a full packed input copy. The
-operation writes a complete packed Result, then the executor projects the
-requested coordinates. Empty Result queries still undergo static validation and
-resource admission, then return empty tensor coverage without reading input
-payload or running arithmetic. Any changed input coordinate invalidates all
-observed output coordinates. Metadata inference depends only on schema metadata
-and the static profile.
+Metadata specialization checks dtype, complete shape and static parameters. Each requested output tile lowers to one fixed CPU task with its intersecting input tiles. Prepare checks the exact views and scratch contract. Empty selection emits no task and produces empty coverage. Sparse selection computes only selected tiles, using admitted affine inputs and separate preallocated dense outputs. Output owners may outlive the context; accepted callbacks retain every borrowed owner until return.
 
-Integer overflow and invalid rational denominators fail the complete invocation
-with Run scope and no Atom key, including when outside the consumer projection.
-No partial output is published. Already terminal results retain their lifetime.
-Read legal immutable strided/offset/unaligned inputs, including zero/negative
-strides and shifted origins. Allocate one complete packed owned output and let
-the executor project it onto requested global coordinates. Owners may outlive
-the context; release unpublished output and scratch on every failure.
+The caller supplies representable integer results and positive rational denominators. These are unchecked numerical preconditions, without a promised error outcome when violated. Floating special-value semantics remain as specified. See [fixed mathematical execution](../point-math-execution.md) for invocation and resource details.
 
 ## Rounding, versions and resources
 
@@ -125,30 +108,14 @@ IEEE classifications, signed-zero rules and NaN payload handling remain exact
 even if finite numeric results permit a tolerance. Platform-specific keys on
 unsupported hosts return BackendUnavailable, without silent key replacement.
 
-For N full logical elements and destination size b, the complete output backing
-uses N*b bytes, even for a one-element consumer. Authorized input windows retain
-or read the source Result backing; the operation does not first collect every
-input into a packed array. The complete output and fixed arithmetic workspace
-still use the worker's managed resources. Account output, scratch and all
-refinement work through the worker resource scope. Managed limits account
-capacities, not RSS. Simple transforms cost O(N). Poll cancellation before
-reads, within long refinement and before publication. Sparse requests may
-therefore use substantially more memory and work.
-
-Cache identities include operation/profile version, input metadata and exact
-observed bits, including NaN payload/sign. Required validation and upstream
-identities survive reuse; changed inputs with numerically equal outputs do not
-erase witnesses. Cache-off preserves active ownership and execution semantics.
-No private worker pool, implicit disk backing or persistent mutable numeric state
-is required. Managed payload/scratch limits are not an RSS guarantee.
+For selected tiles, output payload is the sum of their dense byte capacities. A fixed aggregate contains exact/certified arithmetic state and bounded batch buffers, reserved as Host scratch per active worker lane. Inputs retain their original immutable owners. Work is proportional to selected samples and their numerical refinement. Cancellation is queried before each batch of at most 64 samples and inside long arithmetic; checkpoints do not charge a dynamic sample-work budget. Bounded unresolved refinement may fail with `ResourceExhausted`. Managed capacity is not an RSS bound.
 
 ## Common acceptance obligations
 
 Each function has its own analytic/special-value oracle and integer boundary
 cases where relevant. Its public WorkflowDocument test must run through Compiler
 and ExecutionContext with actual bindings and named output, including nonzero/
-disjoint requests, input read witnesses, cache-off/warm runs, altered input bits,
-strided inputs, cancellation and allocation/work/stage failure. Check NaN results
+disjoint requests, exact fixed reads, altered input bits, strided inputs, concurrent Runs, cancellation and allocation failure. Check NaN results
 by bits, not numeric equality; check infinities and zero signs explicitly.
 Strict/accelerated identity or finite tolerance must be tested separately from
 classification/payload rules and exact dependency mapping.
@@ -177,27 +144,6 @@ and exposed through `photospider/ops/numeric/unary.hpp`. The helpers author Resu
 workflows. Each input port accepts a Result with a supported numeric tensor in
 slot 0; metadata specialization requires matching input dtype and complete
 sample shape. It does not require a particular input schema ID.
-Every nonempty request uses a complete-input continuation, requests the complete input
-with ordinary member tile Needs with explicitly bound validators, and reads through authorized tensor
-windows. Compatible signed and zero strides remain readable without requiring
-input packing. The operation validates all samples and writes one complete
-packed Result output; the executor applies the requested projection afterward.
-The output schema is `photospider.tensor` with tensor key `samples` and no attached domain description. Ordinary unary operations preserve dtype; rational pi helpers use their
-explicit Float32/Float64 output selection.
+Each requested output tile uses a fixed ABI 8 invocation with complete declared read views and preallocated output/scratch. Ordinary unary operations preserve dtype; rational-pi helpers use explicit Float32/Float64 output selection. Metadata specialization and prepare validate static contracts before issue. Numerical integer/rational preconditions belong to the caller. IEEE nonfinite results follow the member rules and succeed. Results retain immutable backing beyond context lifetime.
 
-Metadata specialization requires rank 1..8, positive extents, matching sample
-shapes and at most 2^40 samples. Shape and dtype mismatch return
-`TypeMismatch/Schema`. Arithmetic overflow or an invalid rational denominator
-anywhere fails the complete-input invocation with Run scope and no Atom key. IEEE
-nonfinite results succeed. Empty requests still undergo static validation and
-resource admission, then return empty tensor coverage without payload reads or
-computation. Results retain immutable backing beyond context lifetime.
-
-Bit-level special cases precede controlled hardware elementary arithmetic.
-Strict transcendental results use directed Q128..Q4096 enclosures. Accelerated
-ordinary results use private SLEEF binary64 kernels and conservative final-error
-checks within the [admitted ranges](NUM_accelerated_contract.md#image-budget-and-extended-domains).
-Pi and rational-pi arguments undergo exact quadrant reduction before
-approximation. Rejected candidates use strict evaluation; unresolved rounding
-may return `ResourceExhausted`. Per-value fallback counters are not emitted by
-this complete-input callback; execution-level computed-element diagnostics are separate.
+Bit-level special cases precede controlled elementary arithmetic. Strict transcendental results use directed Q128..Q4096 enclosures. Accelerated results use private SIMD kernels or conservative enclosures within the admitted ranges. Pi and rational-pi arguments undergo exact quadrant reduction before approximation. Rejected candidates use exact evaluation; unresolved rounding may return `ResourceExhausted`. See [fixed mathematical execution](../point-math-execution.md).

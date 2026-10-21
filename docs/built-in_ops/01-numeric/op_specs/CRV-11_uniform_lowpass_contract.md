@@ -62,7 +62,7 @@ exactly under non-zero-padding boundaries; approximate kernel normalization
 cannot introduce DC drift. Host budget exhaustion remains explicit failure.
 
 Skip exact mathematical zero coefficients entirely. Numerical operands are samples reached by
-nonzero taps after boundary mapping; complete-input ordinary tile Needs validation still covers the complete Result input. Input NaN propagates by the first tap in
+nonzero taps after boundary mapping. Lowering closes their union on the source tile grid; extra samples within those physical tiles are not numerical operands. Input NaN propagates by the first tap in
 offset order -R..R, preserving payload/sign and quieting sNaN. Otherwise combine
 infinite contributions with coefficient signs: both signs yield canonical quiet
 NaN, one sign yields that infinity. Generated canonical NaN is positive quiet
@@ -72,7 +72,7 @@ These are successful IEEE results. Do not
 merge reflected duplicate taps in a way that changes specified NaN/Inf behavior.
 
 When all finite contributing extended samples have identical bits, return that
-constant including -0; all required samples are still read/validated. Virtual
+constant including -0; all contributing samples are still read. Virtual
 zero padding has +0 bits. Otherwise an exact zero result is +0 and nonzero
 underflow retains sign. Infinite/NaN inputs use the explicit aggregation rules,
 not the finite-constant shortcut.
@@ -106,7 +106,7 @@ accepted. The only dynamic input is input; the named output is values.
 
 The dynamic port `input` is a Result containing exactly one tensor member and no fields. Any structurally valid schema id/version/member key is accepted. Use its complete `sample_shape()`, including batch axes, for rank, axis and extent checks. Input rank is 1..8, Float32/64, positive extents and a product at most 2^40.
 
-The `values` output port is an immutable Result using `photospider.tensor` v1/member `samples`, with the same full shape and dtype and no attached domain description. The output retains its backing owners; the schema carries no operation resource configuration. Every nonempty complete-input output has full certified coverage and retains global coordinates.
+The `values` output port is an immutable Result using `photospider.tensor` v1/member `samples`, with the same full shape and dtype and no attached domain description. The output retains its backing owners; the schema carries no operation resource configuration. Its full shape consists of ordinary axes with zero atomic trailing axes; input batch/atomic grouping is not retained. Only selected output tiles are allocated and published, with global coordinates.
 
 Input rank is 1..8 with positive extents and count <=2^40; axis is a nonnegative
 index below rank. Axis length may be one or smaller than the kernel. For N=1,
@@ -121,39 +121,15 @@ does not define an invalid kernel. Avoid it or refine at adequate precision.
 
 ## Demand, mapping, resources and error contract
 
-All 15 formal profile keys use Run-shared Result programs. A nonempty request declares
-ordinary payload tile Needs  for the complete input tensor.
-Typed/upstream validation therefore covers the full member, while the callback
-reads authorized Root windows directly without collecting or copying the input.
-The callback computes every output position and preserves the exact zero-tap
-omission, logical tap order and IEEE rules. Empty demand completes static
-preflight without reading sample payload.
+All 15 profile keys lower to one ABI 8 CPU task per selected output tile. Each task declares the union of source tiles reached by its exact nonzero taps. Lowering maps the selected axis interval through the static boundary rule: zero clips it, replicate clamps it, wrap can split it across the seam, and reflect folds it at turning points. Each mapped interval closes on the source's own spatial/atomic tile grid; batch coordinates remain explicit. Overlapping closures merge before enumeration. Logical tap order and repeated reflected samples remain unchanged during arithmetic.
 
-The Result writer publishes the complete same-shape/dtype `samples` tensor in one
-transaction, with complete internal coverage, with public coverage restricted to requested tiles and global coordinates. Any input edit
-invalidates the complete recorded output demand. Arbitrary strides, offsets and
-unaligned source access remain supported; the Result retains its owner after
-context teardown. Cache-off and request partitioning do not alter mathematical
-values.
+Preparation verifies the canonical output region, complete ordered read set, dtype, empty task parameters and exact scratch size. The invocation borrows affine source views, including negative/zero strides and unaligned addresses, and writes its preallocated dense output tile. Output axes use the complete input sample shape as ordinary axes. Empty selection performs static preparation and emits no task or payload read; it does not evaluate the numerical normalizer.
 
-For N total elements, work is O(N*(2R+1)) plus certified arithmetic. The complete
-output requires N*sizeof(dtype); Root source windows, fixed arithmetic workspace,
-2R+1 sample bits, accelerated R+1 coefficient enclosures, and allocator metadata
-are budgeted. No per-output dependency records are retained. Coefficients are
-prepared once per complete-input invocation. Sparse requests still require the full output
-and can exhaust capacity. complete-input numerical/fallback counters are unavailable.
+For M selected output elements, work is O(M*(2R+1)) plus certified arithmetic. Each invocation owns fixed arithmetic state, 8*(2R+1) bytes of sample words and, for accelerated profiles, 16*(R+1) bytes of coefficient enclosures. Coefficients are prepared once per selected output tile invocation. Output storage scales with selected tiles; source-grid closure can require extra physical samples. Lowering counts source tile records before enumeration and rejects a closure exceeding its record budget. Immutable preparation can be reused by concurrent Runs, each with private output and scratch storage. Escaped Results retain their storage owners.
 
-Poll cancellation during coefficient/refinement work and at least every 64 tap
-contributions or simpler outputs. Terminal work/capacity/cancellation failures
-release temporary state; the Result transaction publishes no partial output.
-Invalid shape/axis/radius/parameters fail compile/preflight with
-InvalidArgument/InvalidDomain, and incompatible dtype uses TypeMismatch. A zero
-or nonpositive exact normalizer is InvalidArgument/InvalidDomain; inability to
-decide under available work is ResourceExhausted, not the same error. Source
-NaN/Inf and final arithmetic overflow are successful numeric values as specified.
-BackendUnavailable, stale, upstream/typed, cancellation and budget failures retain
-the NUM common categories; the complete-input invocation publishes no partial output
-on failure. Dynamic numerical failures have Run scope.
+Cancellation is checked during coefficient/refinement work and at least every 64 tap contributions or simpler outputs. Operational cancellation/resource failures propagate directly before accepting a shortcut or retrying strict arithmetic. Numerical uncertainty alone can trigger strict refinement. The executor publishes a successful call only after all its declared writes succeed and the call retires; a failed call publishes no partial Result.
+
+Invalid shape/axis/radius/parameters fail preparation with InvalidArgument/InvalidDomain, and incompatible dtype uses TypeMismatch. A certified nonpositive normalizer is InvalidArgument/InvalidDomain; inability to certify a positive denominator or unique final rounding within arithmetic capacity is ResourceExhausted. Source NaN/Inf and final arithmetic overflow are successful IEEE values under the rules above. Source binding, upstream, cancellation and resource failures retain the common execution categories.
 
 ## Numerical and antialias acceptance
 
@@ -192,9 +168,7 @@ has no brick-wall stopband. A downsampling workflow must separately select radiu
 kernel parameters and verify attenuation above its target Nyquist for its quality
 requirement; this primitive does not infer that target or guarantee zero aliasing.
 
-Verify whole/ROI/disjoint numerical equivalence, exact boundary mathematics,
-zero-tap operand omission, complete dirty support and typed validation, N=1, short signals, strides, source/result lifetime, low budgets,
-cancellation and cache-off. Use a temporary public workflow with the input and required statics, request
+Verify full/ROI/disjoint numerical equivalence, exact boundary mathematics, zero-tap omission, source-grid closures, N=1, short signals, affine views, source/result lifetime, low budgets and cancellation. Exercise sparse large logical tensors, concurrent Runs, floating environment restoration, fixed scratch bounds and allocation-free invocation. Use a temporary public workflow with the input and required statics, request
 values through Compiler/ExecutionContext, and check independent expected outputs.
 
 Primary method references: [SciPy firwin](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.firwin.html),
@@ -209,13 +183,6 @@ this implementation and do not claim SciPy floating-point parity.
 
 ## Maintained implementation and validation
 
-This shared contract covers five uniform kernels and 15 profile keys; it is not
-itself a registered operation. Static preparation stores immutable kernel,
-boundary, axis, radius and profile state. The public low-pass helpers and
-implementation use exact tap support and certified whole sums. Accelerated keys
-prepare 128-bit coefficient enclosures in managed per-complete-input callback state, then
-bound the complete hardware convolution and normalization before final-error
-acceptance. Unresolved coefficients or outputs dispatch strict convolution.
-Certified strict precision is 128..4096 bits and may fail `ResourceExhausted`. Use an independent directed-MPFR reference for temporary numerical checks.
-Strict matches exact reference bits; accelerated profiles use the shared final
-FP32 bound. complete-input numerical/fallback counters are unavailable. See [CRV-11 umbrella](CRV-11_resample_signal.md).
+This shared contract covers five uniform kernels and 15 profile keys. `lowpass_uniform.cpp` stores immutable parameters and emits `uniform-lowpass-fixed-v1` tasks. `UniformLowpassMath` uses `CheckedLowpassKernel` and explicit failure state for certified sums. Accelerated profiles prepare 128-bit coefficient enclosures in invocation scratch, then bound the complete hardware convolution and normalization before final-error acceptance. Numerical uncertainty dispatches strict convolution; cancellation/resource failures return directly. Certified strict precision is 128..4096 bits and may fail `ResourceExhausted`.
+
+The independent directed-MPFR reference in `oracle/ops/numeric/crv11/uniform.py` imports wide rational numerators and denominators with outward rounding. Temporary public and direct invocation checks compare strict bits and accelerated final FP32 bounds independently. See [CRV-11 umbrella](CRV-11_resample_signal.md).

@@ -47,8 +47,7 @@ and logical product <=2^40. Table is Float32/Float64 [N0,N1,N2,3], each Ni=2..25
 axis is Float64 [3,3], with rows [start,end,step]. Input/table dtypes may differ.
 Output port `values` is an immutable packed Result using `photospider.tensor`
 v1/member `samples`, with the complete input shape, selected Float32/Float64 dtype,
-`atomic_trailing_axes=1`. Output retains the declared
-ColorArray description. The default output dtype follows the authoring `input_type`
+`atomic_trailing_axes=1`. Output carries no ColorArray description; its descriptor contains the full input sample shape without preserving the input batch-axis partition. The default output dtype follows the authoring `input_type`
 hint; the compiler independently validates bound input metadata.
 
 Required static parameters are String `input_color_description`,
@@ -65,24 +64,13 @@ The tetrahedral vertices are `000`, `e_a`, `e_a+e_b`, `111`; weights are
 exact positive-weight vertices, at most 4 complete colors. Weights and
 complete weighted sums are exact before one final destination-type rounding.
 Strict is correctly rounded; accelerated profiles follow the shared FP32-scaled
-final-result bound. CRV-07 defines signed-zero and chroma legality. Generic
-zero-weight vertices are numerically unused, but complete typed/upstream
-validation still applies.
+final-result bound. CRV-07 defines signed-zero and chroma legality. Generic zero-weight vertices are numerically unused. Upstream failures still propagate through the complete-table dependency closure.
 
 ## Execution, resources and errors
 
-The Run-shared Result program requests input, table and axis with Data, Validation and Descriptor. Callback numeric checks validate all axes, every original input color and query before applying clamp, then perform selected vertex mathematics. Typed/upstream errors may precede callback validation and cover complete inputs.
+Each selected output tile emits one fixed CPU task using invocation ABI 8. Reads cover that tile's query region, the complete table, and axis endpoints [0:3,0:2], closed on each source's own grid. Preparation validates the fixed signature. Numerical axis, model, domain and finite-output conditions are unchecked caller preconditions, as specified by CRV-07.
 
-Requested fragments close to complete three-component colors. Output carries ColorArray v1, publishes complete internal coverage, with public coverage restricted to requested tiles with global sample coordinates, and has one all-or-nothing Result transaction. Dirty mapping follows recorded output demand; Empty reads no payload. Result owners survive context teardown.
-
-Work and resource limits, authorized Root windows, Root-owned 8*sum(Ni)-byte
-grid storage, full packed output allocation, cancellation and error categories
-are inherited from the [CRV-07 contract](CRV-07_apply_lut3d.md). Table samples
-are accessed through authorized zero-copy Root windows; the operation does not
-make a dense copy of the entire source table. Numeric failures have Run scope;
-unpublished output is released on failure. Unsupported platform keys return
-BackendUnavailable, and capacity/work limits fail explicitly without approximate
-results.
+The kernel writes preallocated dense complete-color tiles with global coordinates and owns fixed arithmetic/knots scratch for the invocation. Empty requests emit no tasks. The executor retires the call's selected Results after successful task completion; retained owners survive context teardown. Static/resource failures and cancellation remain operational errors. The [CRV-07 contract](CRV-07_apply_lut3d.md#resource-and-failure-contract) defines scratch, dependency and lifetime requirements.
 
 ## Workflow and acceptance
 
@@ -94,20 +82,13 @@ Expect values=[[0.25,0.25,0.5]] for this method. The public
 Use CRV-07's independent rational oracle, identity/affine/cross-component tests,
 all supported models and mixed dtypes, grid boundaries, tetrahedral split ties
 where applicable, axis directions, finite extensions, hue winding, zero signs,
-partial-channel/full-color requests, zero-weight invalid rows, complete-input dirty support,
+complete-color tile requests, zero-weight invalid rows, source-grid dependency closure,
 strides, budgets, cancellation and lifetime tests. Full CLF compatibility is
 outside this Proposed specification.
 
 ## Maintained implementation
 
 [`apply_lut3d_tetrahedral_node`](../../../../plugins/ops/include/photospider/ops/numeric/lut3d.hpp)
-constructs this complete-input Result primitive in
+constructs this fixed Result primitive in
 [`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp).
-All profiles use exact stable rational ordering, exact weight differences and
-a single final rounding. Generic zero-weight split vertices are excluded from
-numerical evaluation; complete-input typed validation/upstream failures still cover them.
-See the [shared implementation](CRV-07_apply_lut3d.md#maintained-implementation-and-validation)
-for current Result coverage, source-owner and read-window lifetime, focused
-acceptance evidence. The maximum 256^3 table-shape check uses an 8-byte
-zero-stride backing view; it does not execute a maximum-sized output. The shared math integration timing is
-reported separately in the [family implementation record](../math-implementation.md#crv-07-joint-three-dimensional-lut-application).
+Only positive-weight complete vertices enter exact arithmetic. See the [shared implementation](CRV-07_apply_lut3d.md#maintained-implementation-and-validation) and [mathematical implementation](../math-implementation.md#crv-07-joint-three-dimensional-lut-application) for current execution and independent acceptance requirements.

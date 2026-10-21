@@ -1,4 +1,3 @@
-#include "photospider/ops/numeric/diagnostics.hpp"
 #pragma once
 
 #include <cstdint>
@@ -88,7 +87,7 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* method,
  * Compiler independently validates actual Result edge metadata.
  * @param input_description Interpretation of lookup coordinates.
  * @param output_description Same supported model; no alpha/CMYK. Table and
- * output use this explicit description for numerical validation.
+ * output use this explicit description for caller numerical preconditions.
  * The descriptions may differ within the same model.
  * @param options Explicit output dtype, Reject/Clamp policy and CPU profile.
  * @return Owned node metadata or InvalidArgument/InvalidDomain/Schema for
@@ -96,21 +95,23 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* method,
  * @note Pure/concurrent-safe helper. Output `values` is an immutable packed
  * Result using `photospider.tensor` v1/member `samples`, complete input shape,
  * selected Float32/64 dtype, atomic_trailing_axes=1.
- * A Run-shared stage acquires complete input/table/axis tensors. Callback
- * validates all axes, then original query colors before clamp, then table
- * mathematics. Exact positive-weight full-color vertices alone enter the
- * formula, at most eight; typed/upstream validation still covers zero-weight
- * values. The output carries source ObjectId association and requested tile
- * coverage in global coordinates. Dirty mapping follows recorded demand; Empty
- * reads no payload. The output transaction is all-or-nothing.
+ * Each selected output tile has one fixed CPU invocation. Reads close its query
+ * region, complete table and six axis endpoints on each source's own grid.
+ * Exact positive-weight complete vertices alone enter arithmetic, at most
+ * eight. Upstream failures propagate through the full table dependency.
+ * The output carries no ColorArray description or input batch partition.
+ * Empty emits no tasks. Each invocation owns preallocated arithmetic/knots
+ * scratch and borrows affine inputs; retained output survives context teardown.
+ * Preparation is immutable and shareable across concurrent Runs.
  *
- * `UniformAxis` stores Root-owned Float64 grids costing 8*sum(Ni) bytes.
- * Input/table access uses authorized zero-copy Root windows; no dense table
- * copy is required. Full packed output and exact workspace use managed budgets.
- * Cancellation/resource failure releases unpublished state; output ownership
- * survives context teardown. Numeric failures have Run scope. No implicit color
- * conversion or lightness-unit conversion is performed; ColorArray v1 retains
- * its existing CIELAB lightness interpretation.
+ * Axis finiteness, step consistency, strict reconstructed order, original query
+ * legality, contributing table color legality, reject-domain membership and
+ * finite output are unchecked caller preconditions. Clamp acts on valid colors.
+ * Structural signature checks occur before invocation. Cancellation,
+ * capacity and upstream failures retain operational errors; successful call
+ * publication follows all required task completions in retirement order.
+ * No implicit color or lightness-unit conversion occurs; ColorArray v1 retains
+ * its existing CIELAB interpretation.
  */
 inline Result<WorkflowNode> apply_lut3d_trilinear_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput table,
@@ -123,11 +124,12 @@ inline Result<WorkflowNode> apply_lut3d_trilinear_node(
 }
 /** @brief Main-diagonal tetrahedral LUT3D interpolation, at most four vertices.
  * Shares apply_lut3d_trilinear_node's Result inputs, schema, descriptions,
- * explicit configuration, validation order, ownership, errors and resource
+ * explicit configuration, caller preconditions, ownership, errors and resource
  * contract. Exact local coordinates sort descending, with axis 0/1/2 breaking
  * ties; the four vertices are 000, e_a, e_a+e_b and 111. Exact positive weights
  * determine mathematical participation; zero-weight split vertices remain
- * covered by typed/upstream validation. No method parameter/default is implied.
+ * covered by the upstream table dependency. No method parameter/default is
+ * implied.
  */
 inline Result<WorkflowNode> apply_lut3d_tetrahedral_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput table,

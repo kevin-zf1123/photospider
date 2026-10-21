@@ -81,8 +81,8 @@ class Reader final {
     const bool physical = take("psxp");
     if (!physical)
       expect("psir");
-    if (number() != 4)
-      fail("unsupported compiler artifact version; re-export using format v4");
+    if (number() != 5)
+      fail("unsupported compiler artifact version; re-export using format v5");
     if (physical) {
       data.manifest.kind = ArtifactKind::ExecutionPlan;
     } else {
@@ -467,7 +467,8 @@ class Reader final {
     }
     return result;
   }
-  std::vector<std::uint64_t> ids(std::size_t maximum = kMaximumPlanSteps) {
+  std::vector<std::uint64_t> ids(
+      std::size_t maximum = kMaximumPhysicalRecords) {
     expect("[");
     std::vector<std::uint64_t> result;
     while (!take("]")) {
@@ -510,41 +511,6 @@ class Reader final {
         fail("duplicate tile member");
     }
     return value;
-  }
-  Footprint samples() {
-    expect("samples");
-    auto shape = dimensions();
-    expect("{");
-    std::vector<Region> boxes;
-    while (!take("}")) {
-      bound(boxes.size(), kMaximumPlanSteps, "sample boxes");
-      expect("box");
-      auto origin = dimensions();
-      auto extent = dimensions();
-      if (origin.size() != extent.size())
-        fail("box rank mismatch");
-      std::vector<RegionDimension> dimensions;
-      for (std::size_t i = 0; i < origin.size(); ++i) {
-        if (extent[i] > UINT64_MAX - origin[i])
-          fail("box overflow");
-        dimensions.push_back({origin[i], extent[i]});
-      }
-      boxes.emplace_back(std::move(dimensions));
-    }
-    auto result =
-        Footprint::from_regions(std::move(shape), boxes, static_set_limits());
-    if (!result.ok())
-      throw TextFailure{result.status()};
-    return result.take_value();
-  }
-  std::vector<Footprint> sample_members() {
-    expect("{");
-    std::vector<Footprint> result;
-    while (!take("}")) {
-      bound(result.size(), 16, "sample members");
-      result.push_back(samples());
-    }
-    return result;
   }
   void ir_body(ArtifactData* data) {
     expect("bindings");
@@ -641,31 +607,56 @@ class Reader final {
       data->blocks.push_back(std::move(block));
     }
   }
-  void plan_body(ArtifactData* data) {
-    expect("placements");
-    expect("{");
-    while (!take("}")) {
-      bound(data->steps.size(), kMaximumPlanSteps, "plan placements");
-      expect("step");
-      if (index() != data->steps.size())
-        fail("nonconsecutive placement index");
-      PlanRecord record;
-      expect("call");
-      record.step.node_id = number();
-      expect("output");
-      record.step.output_index = number32();
-      expect("backend");
-      if (take("cpu"))
-        record.step.backend = Backend::Cpu;
-      else if (take("gpu"))
-        record.step.backend = Backend::Gpu;
-      else
-        fail("invalid placement backend");
-      data->steps.push_back(std::move(record));
+  std::int64_t signed_number() {
+    std::int64_t value = 0;
+    const auto converted =
+        std::from_chars(token_.data(), token_.data() + token_.size(), value);
+    if (token_quoted_ || token_.empty() || converted.ec != std::errc{} ||
+        converted.ptr != token_.data() + token_.size())
+      fail("expected signed 64-bit integer");
+    next();
+    return value;
+  }
+  void record(std::size_t index, const char* name) {
+    if (++physical_records_ > kMaximumPhysicalRecords)
+      fail("physical table record limit");
+    expect(name);
+    if (number() != index)
+      fail("nonconsecutive physical table index");
+  }
+  void reference() {
+    if (++physical_references_ > 16777216)
+      fail("physical reference limit");
+  }
+  template <class Enum>
+  Enum enumeration(std::uint32_t maximum) {
+    auto value = number32();
+    if (value > maximum)
+      fail("invalid physical enum");
+    return static_cast<Enum>(value);
+  }
+  std::vector<physical::Id> physical_ids(bool count_edges = true) {
+    expect("[");
+    std::vector<physical::Id> result;
+    while (!take("]")) {
+      if (count_edges)
+        reference();
+      result.push_back(number32());
     }
+    return result;
+  }
+  template <class Array>
+  void unsigned_array(Array* target) {
+    expect("[");
+    for (auto& value : *target)
+      value = number();
+    expect("]");
+  }
+  void plan_body(ArtifactData* data) {
     expect("outputs");
     expect("{");
     while (!take("}")) {
+      bound(data->plan_outputs.size(), 4096, "plan outputs");
       expect("output");
       auto name = quoted(1024);
       expect("return");
@@ -675,84 +666,197 @@ class Reader final {
       expect("request");
       data->options.output_requests.emplace(name, request());
     }
-    expect("code");
+    auto& p = data->physical;
+    p.tile_extent = data->options.tile_extent;
+    expect("physical");
     expect("{");
-    std::size_t total = 0;
+    expect("entry");
+    p.entry = number32();
+    expect("inputs");
+    p.inputs = physical_ids();
+    expect("returns");
+    p.return_schemas = physical_ids();
+    expect("schemas");
+    expect("{");
     while (!take("}")) {
-      expect("block");
-      auto block = number();
-      expect("{");
-      std::vector<PlanTileInstruction> instructions;
-      while (!take("}")) {
-        bound(total++, kMaximumPlanSteps, "tile instructions");
-        expect("unit");
-        if (index() != instructions.size())
-          fail("nonconsecutive instruction index");
-        PlanTileInstruction instruction;
-        expect("step");
-        instruction.step_index = index();
-        expect("stage");
-        instruction.shared_stage = take("none") ? UINT32_MAX : number32();
-        expect("member");
-        instruction.tensor_slot = number32();
-        expect("tile");
-        instruction.tile_unit = number();
-        expect("cpu_fallback");
-        const auto fallback = number32();
-        if (fallback > 1)
-          fail("invalid CPU fallback flag");
-        instruction.cpu_fallback = fallback != 0;
-        expect("{");
-        expect("dependencies");
-        for (auto item : ids()) {
-          if (item >= instructions.size())
-            fail("dependency must precede instruction");
-          instruction.dependencies.push_back(static_cast<std::size_t>(item));
-        }
-        expect("publication");
-        instruction.publication = request();
-        expect("published_samples");
-        instruction.publication_samples = sample_members();
-        expect("tensor_output");
-        if (!take("none"))
-          instruction.tensor_outputs = samples();
-        expect("reads");
-        expect("{");
-        while (!take("}")) {
-          expect("input");
-          PlanTensorRead read;
-          read.input = number32();
-          expect("member");
-          read.tensor_slot = number32();
-          expect("descriptor");
-          if (take("true"))
-            read.descriptor_only = true;
-          else if (take("false"))
-            read.descriptor_only = false;
-          else
-            fail("invalid descriptor flag");
-          expect("tiles");
-          read.tiles = tile_set();
-          read.samples = samples();
-          instruction.inputs.push_back(std::move(read));
-        }
-        expect("shared");
-        expect("{");
-        while (!take("}")) {
-          expect("stage");
-          PlanSharedRead read;
-          read.stage = number32();
-          read.tiles = request();
-          read.samples = sample_members();
-          instruction.shared_inputs.push_back(std::move(read));
-        }
-        expect("}");
-        instructions.push_back(std::move(instruction));
-      }
-      if (!data->code.emplace(block, std::move(instructions)).second)
-        fail("duplicate code block");
+      record(p.schemas.size(), "type");
+      p.schemas.push_back(schema());
     }
+    expect("layouts");
+    expect("{");
+    while (!take("}")) {
+      record(p.layouts.size(), "layout");
+      physical::Layout value;
+      value.element_type = dtype();
+      value.rank = number32();
+      value.byte_offset = number();
+      unsigned_array(&value.shape);
+      unsigned_array(&value.origin);
+      expect("[");
+      for (auto& stride : value.strides)
+        stride = signed_number();
+      expect("]");
+      p.layouts.push_back(value);
+    }
+    expect("tiles");
+    expect("{");
+    while (!take("}")) {
+      record(p.tiles.size(), "tile");
+      physical::TileDesc value;
+      value.value = number32();
+      value.member = number32();
+      value.layout = number32();
+      value.producer = number32();
+      value.domain = enumeration<physical::Domain>(2);
+      value.tile_index = number();
+      value.bytes = number();
+      value.alignment = number();
+      p.tiles.push_back(value);
+    }
+    expect("values");
+    expect("{");
+    while (!take("}")) {
+      record(p.values.size(), "value");
+      physical::ValueDesc value;
+      value.source_value = number();
+      value.schema = number32();
+      value.owner = number32();
+      value.kind = enumeration<physical::ValueKind>(3);
+      value.import_source = number32();
+      value.input_layout = enumeration<physical::InputLayout>(1);
+      value.tiles = physical_ids();
+      p.values.push_back(std::move(value));
+    }
+    expect("placements");
+    expect("{");
+    while (!take("}")) {
+      record(p.placements.size(), "placement");
+      physical::Placement value;
+      value.backend = enumeration<physical::Backend>(1);
+      value.domain = enumeration<physical::Domain>(2);
+      value.profile = quoted(1024);
+      value.queue = quoted(1024);
+      p.placements.push_back(std::move(value));
+    }
+    expect("kernels");
+    expect("{");
+    while (!take("}")) {
+      record(p.kernels.size(), "kernel");
+      physical::KernelDesc value;
+      value.operation = quoted(1024);
+      value.symbol = quoted(1024);
+      value.contract = quoted(1024);
+      value.abi_version = number32();
+      p.kernels.push_back(std::move(value));
+    }
+    expect("tasks");
+    expect("{");
+    while (!take("}")) {
+      record(p.tasks.size(), "task");
+      physical::TaskDesc value;
+      value.kind = enumeration<physical::TaskKind>(2);
+      value.call = number32();
+      value.kernel = number32();
+      value.placement = number32();
+      expect("{");
+      expect("reads");
+      expect("[");
+      while (!take("]")) {
+        reference();
+        physical::ReadDesc read;
+        read.port = number32();
+        read.tile = number32();
+        read.layout = number32();
+        value.reads.push_back(read);
+      }
+      expect("writes");
+      value.writes = physical_ids();
+      expect("schemas");
+      value.schema_reads = physical_ids();
+      expect("parameters");
+      expect("[");
+      while (!take("]")) {
+        if (++parameter_bytes_ > physical::ValidationLimits{}.maximum_work)
+          fail("task parameter work limit");
+        auto byte = number32();
+        if (byte > 255)
+          fail("invalid task parameter byte");
+        value.parameters.push_back(static_cast<std::uint8_t>(byte));
+      }
+      expect("dependencies");
+      value.explicit_dependencies = physical_ids();
+      expect("predecessors");
+      value.predecessors = physical_ids();
+      expect("successors");
+      value.successors = physical_ids();
+      expect("scratch");
+      unsigned_array(&value.scratch);
+      expect("}");
+      p.tasks.push_back(std::move(value));
+    }
+    expect("calls");
+    expect("{");
+    while (!take("}")) {
+      record(p.calls.size(), "call");
+      physical::CallDesc value;
+      value.source_call = number();
+      value.block = number32();
+      value.ordinal = number32();
+      value.effect_task = number32();
+      expect("tasks");
+      value.tasks = physical_ids();
+      expect("exports");
+      value.returns = physical_ids();
+      PlanCallBinding binding;
+      expect("inputs");
+      binding.inputs = physical_ids(false);
+      expect("outputs");
+      binding.outputs = physical_ids(false);
+      p.calls.push_back(std::move(value));
+      data->bindings.push_back(std::move(binding));
+    }
+    expect("blocks");
+    expect("{");
+    while (!take("}")) {
+      record(p.blocks.size(), "block");
+      physical::BlockDesc value;
+      value.source_block = number();
+      value.end = enumeration<physical::EndKind>(2);
+      value.condition = number32();
+      expect("{");
+      expect("tasks");
+      value.tasks = physical_ids();
+      expect("calls");
+      value.calls = physical_ids();
+      expect("arguments");
+      value.arguments = physical_ids();
+      expect("live_ins");
+      value.live_ins = physical_ids();
+      expect("returns");
+      value.return_values = physical_ids();
+      expect("edges");
+      expect("{");
+      while (!take("}")) {
+        bound(value.edges.size(), 2, "block edges");
+        expect("edge");
+        reference();
+        physical::EdgeDesc edge;
+        edge.target = number32();
+        edge.arguments = physical_ids();
+        edge.live_values = physical_ids();
+        value.edges.push_back(std::move(edge));
+      }
+      expect("reservation");
+      unsigned_array(&value.reservation.outputs);
+      for (auto& backend : value.reservation.scratch)
+        unsigned_array(&backend);
+      expect("}");
+      p.blocks.push_back(std::move(value));
+    }
+    expect("}");
   }
+  std::size_t physical_records_ = 0, physical_references_ = 0;
+  std::uint64_t parameter_bytes_ = 0;
 
   std::string_view text_;
   std::size_t cursor_ = 0, token_offset_ = 0;
@@ -943,43 +1047,196 @@ void write_request(Writer* w, const TileRequest& request) {
   }
   w->text(" }");
 }
-void write_samples(Writer* w, const Footprint& samples) {
-  w->text("samples ");
-  write_numbers(w, samples.shape());
-  w->text(" {");
-  for (const auto& box : samples.boxes()) {
-    w->text(" box ");
-    std::vector<std::uint64_t> offsets, extents;
-    for (const auto& dimension : box.dimensions()) {
-      offsets.push_back(dimension.offset);
-      extents.push_back(dimension.extent);
-    }
-    write_numbers(w, offsets);
-    w->text(" ");
-    write_numbers(w, extents);
-  }
-  w->text(" }");
-}
-void write_sample_members(Writer* w, const std::vector<Footprint>& members) {
-  w->text("{ ");
-  for (const auto& samples : members) {
-    write_samples(w, samples);
-    w->text(" ");
-  }
-  w->text("}");
-}
 void write_edge(Writer* w, const IREdge& edge) {
   w->number(edge.target).text(" ");
   write_numbers(w, edge.arguments);
+}
+
+void write_physical(Writer* writer, const ArtifactData& data) {
+  auto& w = *writer;
+  const auto& p = data.physical;
+  auto numbers = [&](const char* label, const auto& values) {
+    w.text(label);
+    write_numbers(&w, values);
+    w.text("\n");
+  };
+  auto record = [&](const char* label, std::size_t id) {
+    w.text("  ").text(label).text(" ").number(id).text(" ");
+  };
+  w.text("physical {\nentry ").number(p.entry).text("\n");
+  numbers("inputs ", p.inputs);
+  numbers("returns ", p.return_schemas);
+  w.text("schemas {\n");
+  for (std::size_t i = 0; i < p.schemas.size(); ++i) {
+    record("type", i);
+    write_schema(&w, *p.schemas[i], "  ");
+    w.text("\n");
+  }
+  w.text("}\nlayouts {\n");
+  for (std::size_t i = 0; i < p.layouts.size(); ++i) {
+    const auto& value = p.layouts[i];
+    record("layout", i);
+    w.text(dtype_name(value.element_type))
+        .text(" ")
+        .number(value.rank)
+        .text(" ")
+        .number(value.byte_offset)
+        .text(" ");
+    numbers("", value.shape);
+    numbers("", value.origin);
+    w.text("[");
+    for (auto stride : value.strides)
+      w.text(" ").text(std::to_string(stride));
+    w.text(" ]\n");
+  }
+  w.text("}\ntiles {\n");
+  for (std::size_t i = 0; i < p.tiles.size(); ++i) {
+    const auto& value = p.tiles[i];
+    record("tile", i);
+    w.number(value.value)
+        .text(" ")
+        .number(value.member)
+        .text(" ")
+        .number(value.layout)
+        .text(" ")
+        .number(value.producer)
+        .text(" ")
+        .number(static_cast<unsigned>(value.domain))
+        .text(" ")
+        .number(value.tile_index)
+        .text(" ")
+        .number(value.bytes)
+        .text(" ")
+        .number(value.alignment)
+        .text("\n");
+  }
+  w.text("}\nvalues {\n");
+  for (std::size_t i = 0; i < p.values.size(); ++i) {
+    const auto& value = p.values[i];
+    record("value", i);
+    w.number(value.source_value)
+        .text(" ")
+        .number(value.schema)
+        .text(" ")
+        .number(value.owner)
+        .text(" ")
+        .number(static_cast<unsigned>(value.kind))
+        .text(" ")
+        .number(value.import_source)
+        .text(" ")
+        .number(static_cast<unsigned>(value.input_layout))
+        .text(" ");
+    numbers("", value.tiles);
+  }
+  w.text("}\nplacements {\n");
+  for (std::size_t i = 0; i < p.placements.size(); ++i) {
+    const auto& value = p.placements[i];
+    record("placement", i);
+    w.number(static_cast<unsigned>(value.backend))
+        .text(" ")
+        .number(static_cast<unsigned>(value.domain))
+        .text(" ")
+        .quoted(value.profile)
+        .text(" ")
+        .quoted(value.queue)
+        .text("\n");
+  }
+  w.text("}\nkernels {\n");
+  for (std::size_t i = 0; i < p.kernels.size(); ++i) {
+    const auto& value = p.kernels[i];
+    record("kernel", i);
+    w.quoted(value.operation)
+        .text(" ")
+        .quoted(value.symbol)
+        .text(" ")
+        .quoted(value.contract)
+        .text(" ")
+        .number(value.abi_version)
+        .text("\n");
+  }
+  w.text("}\ntasks {\n");
+  for (std::size_t i = 0; i < p.tasks.size(); ++i) {
+    const auto& value = p.tasks[i];
+    record("task", i);
+    w.number(static_cast<unsigned>(value.kind))
+        .text(" ")
+        .number(value.call)
+        .text(" ")
+        .number(value.kernel)
+        .text(" ")
+        .number(value.placement)
+        .text(" {\nreads [");
+    for (const auto& read : value.reads)
+      w.text(" ")
+          .number(read.port)
+          .text(" ")
+          .number(read.tile)
+          .text(" ")
+          .number(read.layout);
+    w.text(" ]\n");
+    numbers("writes ", value.writes);
+    numbers("schemas ", value.schema_reads);
+    numbers("parameters ", value.parameters);
+    numbers("dependencies ", value.explicit_dependencies);
+    numbers("predecessors ", value.predecessors);
+    numbers("successors ", value.successors);
+    numbers("scratch ", value.scratch);
+    w.text("}\n");
+  }
+  w.text("}\ncalls {\n");
+  for (std::size_t i = 0; i < p.calls.size(); ++i) {
+    const auto& value = p.calls[i];
+    record("call", i);
+    w.number(value.source_call)
+        .text(" ")
+        .number(value.block)
+        .text(" ")
+        .number(value.ordinal)
+        .text(" ")
+        .number(value.effect_task)
+        .text("\n");
+    numbers("tasks ", value.tasks);
+    numbers("exports ", value.returns);
+    numbers("inputs ", data.bindings.at(i).inputs);
+    numbers("outputs ", data.bindings.at(i).outputs);
+  }
+  w.text("}\nblocks {\n");
+  for (std::size_t i = 0; i < p.blocks.size(); ++i) {
+    const auto& value = p.blocks[i];
+    record("block", i);
+    w.number(value.source_block)
+        .text(" ")
+        .number(static_cast<unsigned>(value.end))
+        .text(" ")
+        .number(value.condition)
+        .text(" {\n");
+    numbers("tasks ", value.tasks);
+    numbers("calls ", value.calls);
+    numbers("arguments ", value.arguments);
+    numbers("live_ins ", value.live_ins);
+    numbers("returns ", value.return_values);
+    w.text("edges {\n");
+    for (const auto& edge : value.edges) {
+      w.text("edge ").number(edge.target).text(" ");
+      numbers("", edge.arguments);
+      numbers("", edge.live_values);
+    }
+    w.text("}\nreservation ");
+    numbers("", value.reservation.outputs);
+    for (const auto& backend : value.reservation.scratch)
+      numbers("", backend);
+    w.text("}\n");
+  }
+  w.text("}\n}\n");
 }
 
 std::string write_data(const ArtifactData& data) {
   Writer w;
   const bool physical = data.manifest.kind == ArtifactKind::ExecutionPlan;
   if (physical) {
-    w.text("psxp 4\n");
+    w.text("psxp 5\n");
   } else {
-    w.text("psir 4\nstage ir\n");
+    w.text("psir 5\nstage ir\n");
   }
   w.text("parent ").quoted(data.parent_digest).text("\n");
   if (!physical) {
@@ -1099,19 +1356,7 @@ std::string write_data(const ArtifactData& data) {
   }
   w.text("}\n");
   if (physical) {
-    w.text("placements {\n");
-    for (std::size_t i = 0; i < data.steps.size(); ++i) {
-      const auto& step = data.steps[i].step;
-      w.text("  step ")
-          .number(i)
-          .text(" call ")
-          .number(step.node_id)
-          .text(" output ")
-          .number(step.output_index)
-          .text(" backend ")
-          .text(step.backend == Backend::Cpu ? "cpu\n" : "gpu\n");
-    }
-    w.text("}\noutputs {\n");
+    w.text("outputs {\n");
     for (const auto& output : data.plan_outputs) {
       w.text("  output ")
           .quoted(output.first)
@@ -1121,65 +1366,8 @@ std::string write_data(const ArtifactData& data) {
       write_request(&w, data.options.output_requests.at(output.first));
       w.text("\n");
     }
-    w.text("}\ncode {\n");
-    for (const auto& entry : data.code) {
-      w.text("  block ").number(entry.first).text(" {\n");
-      for (std::size_t i = 0; i < entry.second.size(); ++i) {
-        const auto& instruction = entry.second[i];
-        w.text("    unit ")
-            .number(i)
-            .text(" step ")
-            .number(instruction.step_index)
-            .text(" stage ");
-        if (instruction.shared_stage == UINT32_MAX)
-          w.text("none");
-        else
-          w.number(instruction.shared_stage);
-        w.text(" member ")
-            .number(instruction.tensor_slot)
-            .text(" tile ")
-            .number(instruction.tile_unit)
-            .text(" cpu_fallback ")
-            .number(instruction.cpu_fallback)
-            .text(" {\n      dependencies ");
-        write_numbers(&w, instruction.dependencies);
-        w.text("\n      publication ");
-        write_request(&w, instruction.publication);
-        w.text("\n      published_samples ");
-        write_sample_members(&w, instruction.publication_samples);
-        w.text("\n      tensor_output ");
-        if (instruction.tensor_outputs)
-          write_samples(&w, *instruction.tensor_outputs);
-        else
-          w.text("none");
-        w.text("\n      reads {\n");
-        for (const auto& read : instruction.inputs) {
-          w.text("        input ")
-              .number(read.input)
-              .text(" member ")
-              .number(read.tensor_slot)
-              .text(" descriptor ")
-              .text(read.descriptor_only ? "true" : "false")
-              .text(" tiles [");
-          for (auto interval : read.tiles.intervals())
-            w.text(" ").number(interval.begin).text(" ").number(interval.end);
-          w.text(" ] ");
-          write_samples(&w, read.samples);
-          w.text("\n");
-        }
-        w.text("      }\n      shared {\n");
-        for (const auto& read : instruction.shared_inputs) {
-          w.text("        stage ").number(read.stage).text(" ");
-          write_request(&w, read.tiles);
-          w.text(" ");
-          write_sample_members(&w, read.samples);
-          w.text("\n");
-        }
-        w.text("      }\n    }\n");
-      }
-      w.text("  }\n");
-    }
     w.text("}\n");
+    write_physical(&w, data);
   }
   return w.finish();
 }

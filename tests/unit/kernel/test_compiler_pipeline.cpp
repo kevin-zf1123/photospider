@@ -185,7 +185,7 @@ int main() {
       !compiler.optimize(initial, {"a", {{"label", std::string(8193, 'x')}}})
            .ok());
   ps::ExecutionContext execution(operations);
-  auto result = execution.execute(*plain.value().plan);
+  auto result = multi_result::run(execution, *plain.value().plan);
   PS_REQUIRE_OK(result);
   PS_CHECK(ps::test::named_scalar(result.value(), "sum") == 9.0);
   return 0;

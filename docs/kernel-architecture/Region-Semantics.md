@@ -12,22 +12,20 @@
 
 All logical extents are positive. An empty Footprint selects no samples without changing schema. Data-dependent active counts are ordinary payload members inside a static-capacity schema. Padding, holes and uncommitted samples do not become readable. Owning read windows preserve actual negative, zero or positive strides and stop runs at physical and authorization boundaries.
 
-## Demand, Execution & State
+## Selection and execution
 
-Payload requests name a member slot and compact tile intervals. Algorithms may first read control values through ordinary Needs and use them to choose later tile Needs. The kernel records all these payload dependencies without data/control role tags. Descriptor-only requests are explicit, grant no samples and do not start a payload producer. Empty payload sets create no dependency or grant.
+Output selections name member slots and compact tile intervals. During compilation, an operation lowers the selected output tiles into a fixed graph of tasks with declared reads, writes and scratch. Complete-input algorithms declare every required input tile. Metadata-only reads require input schema without executing a payload producer. Empty payload selections omit pure output tasks; control-flow conditions and mandatory effects remain roots.
 
-An input validator requiring complete coverage runs only after the operation has requested the full authorized scope. It does not widen Needs. Complete-input algorithms use `sdk::to_whole`; global work can run once in a Run-shared stage. There is no second execution mode for complete coverage.
-
-Dirty means potentially affected, not numerically different. Member tile records and frozen shared evidence determine invalidation. Additional committed production coverage is progress, not a content edit. Exact sample Footprints remain useful for windows and views, but dependency and invalidation granularity is a member tile.
+The Plan records physical dependencies before execution. Runtime control flow selects a compiled branch or repeats a compiled block. Numerical callbacks receive fixed views and cannot request additional producer work. Exact sample Footprints describe the coverage of external Results and read windows; task scheduling uses the Plan's tile and dependency tables.
 
 ## Tile projection arithmetic
 
-For positive tile extent `T` and logical extent `E`, the tile count is `E / T + (E % T != 0)`. This avoids overflowing `E + T - 1`. The plan requires a power-of-two T, default 128. Products, tile indices and interval endpoints are checked. Complete coverage stays a compact interval; actual tasks expand in bounded batches.
+For positive tile extent `T` and logical extent `E`, the tile count is `E / T + (E % T != 0)`. This avoids overflowing `E + T - 1`. The plan requires a power-of-two T, default 128. Products, tile indices and interval endpoints are checked. Selections keep complete tile ranges compact; lowering expands physical tasks under explicit compilation limits.
 
-Logical grids are independent of backing geometry. Reusing one backing in plans with different T values changes logical authorization without requiring repacking solely to match tile boundaries.
+Logical grids are independent of backing geometry. Execution preflight requires each selected physical tile to fit its declared layout and allocation. A different tile grid can therefore require explicit COPY tasks to adapt existing backing.
 
 ## Limits & Error Handling
 
-Out-of-domain indices, unauthorized reads, overlapping incompatible writes and incomplete ordinary tile publications fail. An ordinary publication must be complete, exactly cover its selected member tile and leave other members empty. Shared stages may publish several complete tiles over time. Fixed bundle visibility can delay exposure and proactively schedule siblings; see [Global Results](Global-Results.md#publication-scopes).
+The data layer checks published regions, overlapping writes, affine address bounds and read-window authorization. Compilation and Run preflight check declared schemas, layouts and storage bounds. A trusted numerical kernel must honor every declared read and initialize every declared output sample before success; the executor does not inspect its sample accesses or numerical values. See [Global Results](Global-Results.md#execution-publication-and-lifetime) for Result ownership and ordered call exports.
 
-Cancellation, resource exhaustion and stale generations preserve their error status. Failed transactions install neither partial payload nor incomplete dependency evidence. Earlier committed tiles remain immutable. Explicit empty output demand performs no payload work; mandatory effects follow the ordinary-execution versus explicit-DemandQuery rules in [Global Results](Global-Results.md#mandatory-effects-and-repeated-inputs).
+A failed ResultBuilder transaction adds no coverage, while earlier published regions remain immutable. Cancellation drains accepted execution tasks before releasing their borrowed storage. Empty output selection preserves compiled control flow and mandatory effects on the executed path, as defined by [Compiler and execution](Compiler-and-Execution.md).

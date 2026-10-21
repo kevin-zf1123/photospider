@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 ---
 
@@ -18,7 +18,7 @@ The family contains registered [A RGB->XYZ](FMT-10A_rgb_to_xyz.md),
 [B XYZ->RGB](FMT-10B_xyz_to_rgb.md) and [C adapt XYZ white](FMT-10C_adapt_xyz_white.md)
 operations, plus the compile-time [D RGB->RGB](FMT-10D_convert_linear_rgb.md)
 helper. Each native member has strict, accelerated Apple Silicon and accelerated
-x86-64 CPU keys under Result ABI 6. [Exact matrix definitions](FMT-10_basis_math.md)
+x86-64 CPU keys under fixed invocation ABI 8. [Exact matrix definitions](FMT-10_basis_math.md)
 remain normative. The specifications remain Proposed; runtime implementation
 status is separate.
 
@@ -92,8 +92,8 @@ Primary coordinates may be virtual, negative or have y=0. White xy must be
 finite with x>0,y>0,x+y<1. Both homogeneous primary basis and white-normalized
 RGB matrix must be exactly nonsingular. Negative normalization scales are not
 inherently invalid. Near-singular exact invertibility is not rejected by a
-condition-number threshold; actual resource or numerical overflow remains a
-normal possible failure. Geometry validity is static in all modes.
+condition-number threshold; actual static resource exhaustion remains a
+possible failure. Geometry validity is static in all modes.
 
 Relative RGB [1,1,1] corresponds to XYZ white with Y=1. Absolute display-linear
 RGB uses the FMT-09 cd/m² component scale, and XYZ Y is luminance in cd/m².
@@ -158,24 +158,11 @@ are not rejected through a new conditioning threshold.
 A/B/C strict rows use the exact coefficients derived by the math contract,
 three exact products plus implicit +0 bias, and one final rounding to the
 unchanged dtype. Do not round the derived matrix to Float64 or the sample dtype
-before defining strict results. The mathematical coefficients are finite
-rationals but may exceed finite machine coefficient storage; only actual
-resource limits or the final result determine those failures. Accelerated
-precision, diagnostics and fallback inherit NUM.
+before defining strict results. The mathematical coefficients are finite rationals; static coefficient construction is bounded by the admitted exact-integer capacity. Accelerated numerical bounds inherit NUM. Candidate acceptance uses an internal rounding proof; an unresolved candidate is evaluated with fixed exact arithmetic.
 
-Semantic nonidentity evaluation validates the full consumed source triple as
-finite and only the requested output rows as finite after rounding. Do not
-reject a negative XYZ coordinate, RGB outside [0,1], or negative cone response
-of a color sample merely by sign. No output clipping is introduced. Unrequested
-output overflow is not evaluated. Raw nonfinite and signed-zero behavior follows
-NUM-14, with the specified implicit +0 bias, even for zero matrix coefficients.
+For semantic nonidentity evaluation, the caller guarantees that every consumed source triple and every rounded output row in the complete retained output tiles is finite. Negative XYZ, RGB outside [0,1], HDR and negative color responses remain valid. These are sample-domain preconditions of the unchecked fixed invocation, with no promised error for violations. Source tiles may grant additional samples; only samples actually used to compute retained output tiles are subject to these preconditions. Raw retains the NUM-14 nonfinite and signed-zero behavior, including zero matrix coefficients and implicit +0 bias.
 
-D preserves every A/C/B output rounding and required validation. Intermediate
-failure remains observable even when a hypothetical fused product would produce
-a finite answer. Equal source/target bases do not eliminate A->B. Optimizer
-fusion/removal must prove equal sample bits, metadata, support and failures;
-mathematical equality of matrix products alone is insufficient. D is not a
-once-rounded RGB matrix primitive or an exact round-trip promise.
+D preserves every A/C/B rounding and each node's sample-domain preconditions. Equal source/target bases retain A->B. Real producer, resource, cancellation and backend failures retain their constituent attribution. Mathematical equality of a fused matrix does not establish equal intermediate rounding, raw IEEE results or physical dependencies.
 
 ## Explicit interpretation and composition
 
@@ -188,7 +175,7 @@ Neither path reads labels from a Result or writes labels to an output.
 A computes XYZ on the source scale; B computes target-basis linear RGB; C applies
 the selected white adaptation. Callers supply the resulting interpretation to
 later operations. No observer, transfer, exposure or rendering conversion is
-implied. Static checks and requested-sample domain validation remain active.
+implied. Static checks remain active; semantic sample validity is the caller's obligation.
 
 D computes intermediate descriptions from its explicit source configuration
 and the chosen transforms, then serializes them into the generated A/C/B node
@@ -196,88 +183,35 @@ parameters. Those configuration values are private authoring state. Structural
 inference still follows the real graph edges, and no hidden edge-description
 map or runtime Result propagation is used.
 
-## Exact requests, dirty mapping and identity
+## Output tiles, source closure and identity
 
-For a nonidentity native node, every requested participating output component at
-spatial coordinate p requires all three selected source components at p as Data
-and, in semantic mode, Validation. This includes zero coefficients. Requested
-bypass alpha/AOV/other-group samples read only their matching input sample and
-are not color-validated. There is no data-dependent Control read or halo.
-Static Descriptor checks cover all required group/geometry/method information
-for every request, including Empty. Empty requests acquire no pixel windows.
+The compiler retains complete output tiles. Lowering intersects each output tile with at most seven channel spans. Each nonidentity participating component requires all three selected source coordinates at the same point, including zero-coefficient terms. Bypass alpha/AOV/other-group coordinates require only the matching input coordinate. Each mapped region is closed over the input's own TileGrid; the input may have different atomic trailing axes from the output. The fixed read slots are the deduplicated union of those tiles. Rectangle and union sizes are bounded before enumeration. There is no sample-dependent dependency discovery.
 
-Dirty changes to any selected source component at p affect all observed selected
-output components at p for nonidentity nodes, even for exact zero coefficients.
-Bypass dirty maps are identity. D composes actual per-node support; a requested
-RGB component usually needs all intermediate XYZ components, so required A/C
-rows cannot be pruned because the final product has zero entries. Required
-upstream complete-input work and its failures retain their original scope.
+Static descriptor, group, geometry and method checks apply to every compilation, including Empty. An Empty output request produces no payload task. D composes the real A/C/B tile closures. A retained B row can require three intermediate XYZ components and therefore retain A/C rows that would disappear under a fused symbolic matrix.
 
-If one native node's exact matrix is I, the selected contract is a bit-copy
-identity before dot/nonfinite classification. It reads only the requested source
-components; semantic mode validates those finite values, while raw copies every
-bit including signaling NaNs and signed zeros. Still perform all static checks
-and publish the correct metadata. Same-white C is the common case; approximate
-I is not sufficient. A product of separate matrices equaling I does not make
-each constituent identity or erase D's intermediate effects.
+Only a complete native matrix exactly equal to I selects bit-copy behavior before dot/nonfinite classification. Each retained output coordinate then reads its corresponding source coordinate. Raw preserves every bit, including signaling NaNs and signed zeros. For semantic identity, the caller guarantees finite selected samples actually copied into retained tiles; bypass samples have no additional finite requirement. A single identity-looking row in a nonidentity matrix does not select this exception.
 
-Identity dirty support is pointwise. Auto may share a legal read-only backing for
-that native identity; materialize forces requested copies. Legal identity views
-may use generic or spatial Result storage. Forced view rejects a statically
-nonidentity native transform during compile/direct preflight. A physical mapping
-that cannot be represented as a view fails during observation evaluation. D
-forwards layout to its expansion; every required constituent must meet its own
-identity and backing rule. A nonidentity diagonal XYZ Scaling still reads all
-three source components and cannot use this identity exception.
+`auto` and `materialize` write independent dense output tiles for both identity and arithmetic. `view` rejects a statically nonidentity transform during preparation. For exact-I, a nonempty forced-view task reads only the input schema and returns `InvalidArgument/ViewUnavailable`; it neither acquires source pixels nor publishes a result. D applies these rules to every generated node. Equal-white C still checks its selected method and all white responses before selecting identity.
 
 ## Storage, resources, errors and lifetime
 
-Output coordinates match the input and publication covers exactly the requested
-footprint. Missing/unproduced samples remain missing; padding or unsupplied
-channels are not implicit zeros. A shared view publishes distinct structural coverage and scoped validation;
-it carries no domain description or blanket validity of its owner's bytes.
-Materialized spatial Results use the declared Result layout and prepared coverage;
-generic Results use their admitted tensor storage. Raw configuration does not override
-the physical storage contract.
+The Plan fixes each task's source views, independent output allocation and scratch size. Preparation verifies the exact output schema, member/tile coordinates, dtype, Host domain, read slots and scratch declaration. Runtime uses the prepared signed/zero-stride input views and writes every sample of the dense row-major output tile. The invocation borrows these allocations until completion; a successful call publishes its retained Result values at ordered retirement. Missing payload coverage is not implicit zero.
 
-Resolve/validate static descriptors and exact matrices first; map and acquire
-retained exact source windows; admit output/pages/scratch; copy or evaluate
-requested rows; check cancellation/currentness before publishing success.
-Charge exact coefficient construction, retained rational data, address metadata,
-all simultaneous owners/pages/windows and numerical scratch. Virtual reservation,
-logical bytes and resident backing are distinct. D includes live intermediate
-owners and their true production support, not only final result bytes.
+Arithmetic scratch contains a 64-lane candidate/gather block and six 10496-bit mutable integers used by exact multiplication, accumulation and rounding. Static rows own three immutable integer numerators and one positive common denominator, each bounded to 8192 bits. With binary64 inputs expressed in units of 2^-1074, the absolute sum of three products is below 2^10292; division alignment and doubled remainder fit within 10496 bits. Copy-only tiles and forced-view tasks declare zero scratch. Coefficients are shared immutably across preparations and Runs. Runtime allocates no per-sample storage and has no dynamic Result builder or publication callback.
 
-For N requested participating rows, B bypass samples, rank r and F windows,
-addressing/row work is O((3N+B)*r+F*r), plus fixed-size exact matrix preparation
-and bounded rational arithmetic. Identity reduces source work to requested
-samples. No eager full-image scan or per-reserved-page directory is added.
-NUM work/capacity exhaustion fails explicitly; it does not authorize machine
-coefficient truncation, hidden approximation or a new condition threshold.
-Poll cancellation/currentness at most every 1024 visited entries and during
-bounded exact arithmetic, and before publication. SIMD cannot access padding,
-unprepared pages or undeclared peers. Release unpublished resources on failure.
-Normal retained owners/read windows outlive producer/context as required; no
-replay, eviction or hidden source reconstruction is introduced.
-
-Result caching is disabled. D must retain its generated stage boundaries and
-failures; a fused product cannot replace the observable A/C/B sequence.
+For N participating output samples, B bypass samples and rank r, gathering and addressing cost O((3N+B)*r), plus bounded integer arithmetic and source tile lookup. Cancellation is polled at most every 64 visited points and within exact multiplication/division. The floating environment is restored on every return. Source views, outputs and scratch remain owned through completion; D also retains its actual intermediate values. Execution currentness and ordered failure retirement follow the physical Plan contract.
 
 | Condition | Phase | Outcome |
 | --- | --- | --- |
-| Missing/malformed/irrelevant field, ambiguous selector, invalid xy, singular basis, nonpositive white response, source assertion conflict | Compile/direct preflight | InvalidArgument / InvalidDomain. |
-| Wrong model, dtype, transfer state, unit/reference, axis/shape/layout, default white mismatch | Static preflight | TypeMismatch / None. |
-| Required semantic input NaN/Inf | Requested evaluation | OperationFailed / InvalidDomain. |
-| Requested semantic row rounds to nonfinite | Requested evaluation | OperationFailed / ArithmeticOverflow. |
-| Raw nonfinite/sample overflow | Raw evaluation | NUM-defined result. |
-| Forced view of a statically nonidentity mapping | Compile/direct preflight | InvalidArgument / InvalidDomain; ViewUnavailable. |
-| Identity view whose requested physical mapping cannot be proven | Observation evaluation | InvalidArgument / InvalidDomain; ViewUnavailable. |
-| Budget/work, missing coverage, cancellation/currentness or backend failure | Inherited phase | Preserve status and normal observation attribution. |
+| Missing/malformed/irrelevant field, ambiguous selector, invalid xy, singular basis, nonpositive white response, source assertion conflict | Static preparation | InvalidArgument / InvalidDomain. |
+| Wrong model, dtype, transfer, units/reference, axis/shape, default white mismatch | Static preparation | TypeMismatch. |
+| Semantic consumed nonfinite input or nonfinite rounded output | Caller sample-domain precondition | Outside the fixed invocation contract; no sample diagnostic guaranteed. |
+| Raw nonfinite or sample overflow | Evaluation | NUM-defined IEEE result. |
+| Forced view of a statically nonidentity matrix | Static preparation | InvalidArgument / InvalidDomain, ViewUnavailable message. |
+| Nonempty exact-I forced view | Fixed invocation | InvalidArgument / ViewUnavailable. |
+| Static work/capacity, allocation admission, missing coverage, cancellation/currentness or backend failure | Corresponding host/kernel phase | Preserve the operational status. |
 
-Failures publish no success for the affected observation, without revoking
-unrelated completed output. D propagates the actual constituent's error and
-node/port/sample attribution. Resource or upstream failure is never hidden by
-raw mode, same-white handling or a supposed inverse round trip.
+Failed calls publish no successful Result. Unrelated calls that have already retired remain observable. D preserves actual constituent operational failures. The family provides no runtime numerical diagnostic stream or result cache.
 
 ## Support and acceptance
 
@@ -285,7 +219,7 @@ Three registered default-registry CPU entries per native member use strict,
 accelerated Apple Silicon and accelerated x86-64 profiles. There is no GPU,
 unsuffixed alias or automatic dispatcher. D chooses one explicit profile for its
 generated native nodes, defaulting to strict at construction. Backend
-availability, precision and fallback reporting inherit NUM. Non-image raw
+availability and numerical bounds inherit NUM. Non-image raw
 Results use valid generic layouts; spatial Results use their declared spatial
 layout. Rank, extent and dtype bounds apply to the complete sample shape.
 
@@ -297,14 +231,6 @@ white mapping before rounding with each dtype's actual rounded input cases.
 Do not claim exact white or inverse sample results by treating a nonrepresentable
 rational XYZ white as a floating input.
 
-Native/composite tests cover full, single-row, disjoint/offset and cross-tile
-requests, alpha-only, hidden colors at alpha=0, invalid selected peers, irrelevant
-AOV values, Empty and dirty support. Exercise identity/raw payload copies,
-nonidentity zero-coefficient dependencies, D intermediate failure, source
-immutability, retained owner lifetime, low budgets, cancellation, cache-off and
-floating-environment restoration. Members supply concrete analytic fixtures.
+Native/composite acceptance covers complete, partial and disjoint output tile requests, nonzero origins, differing input/output grids, bypass-only and Empty requests. Check raw NaN order, zero-coefficient peers, whole-I bit copies, negative/zero/unaligned input strides, static rejection, schema-only view failure, allocation-free invocation, scratch bounds, cancellation, retained owners, concurrent Runs and floating-environment restoration. Semantic fixtures satisfy the finite caller preconditions; no sample-error behavior is asserted outside them.
 
-Exercise the registered operations through public Result workflows and independent
-coefficient/sample oracles. Preserve coverage for full, partial, disjoint and
-cross-tile requests, Empty demand, identity and materialized paths, D stage
-failures, cancellation, owner release and floating-environment restoration.
+Exercise the registered operations through public Result workflows and independent coefficient/sample oracles. Verify D against independently rounded A/C/B stages, including raw intermediate infinity consumed by a zero coefficient. Keep the independent oracle; remove temporary built-in execution checkers after validation.

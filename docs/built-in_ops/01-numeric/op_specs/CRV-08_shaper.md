@@ -17,189 +17,72 @@ arithmetic in accelerated profiles follows the shared
 range/fallback rules. Discrete results, copies, selected endpoints and special
 values remain exact.
 
-Inherit the [NUM execution baseline](NUM_common_contract.md) for specification/
-registration status, CPU target identity, floating environment, diagnostic provenance,
-host observation isolation, resource accounting and public/performance acceptance.
-In particular, rounding is nearest/ties-to-even with gradual underflow and the
-caller floating environment is preserved. This is limited inheritance: the ports,
-output structures, observation units, mathematical rounding boundaries and
-explicit numerical/error rules in this specification take precedence. It does not
-turn a composite template or structured Result into a generic NUM Tensor primitive.
-A stated four-ULP final bound uses the shared FP32-scaled contract for both
-Float32 and Float64 outputs.
-Classification, exact landmarks and signed-zero rules are checked separately.
+## Scope and interface
 
-The initial scope has separately named linear_shaper, log2_shaper and their
-inverse forms. These are explicit numerical domain transforms: ordinary
-Float32/Float64 input arrays produce same-shape generic numerical arrays for LUT
-coordinates. They do not perform tone mapping or silently change a color-array
-transfer description.
+Coordinate shapers map generic Float32/Float64 arrays to LUT coordinates or back to an explicit interval. The linear pair are authoring templates built from fixed NUM-06 remap and constant operations. The log2 pair are six independently named CPU primitive keys. No tone mapping or color-description conversion is inferred.
 
-The linear pair are independent named composite workflow templates reusing
-NUM-06B remap_range. Forward maps dynamic [lower,upper] to [0,1], inverse maps
-[0,1] back to that interval. Preserve the whole-formula correct rounding of the
-underlying primitive. The logarithmic pair need their own nonlinear contracts.
+All four interfaces take Result inputs `input`, `lower` and `upper`. Each has one tensor member under any schema id/version/key. Full `sample_shape()` includes batch axes. Input has rank 1..8, positive extents and at most 2^40 elements; bounds have shape [1] and the same dtype as input. Output `values` uses `photospider.tensor` v1/member `samples`, preserves complete input shape and dtype as ordinary axes, and carries no domain description. The compiler validates these static requirements, including Empty requests.
 
-The following numerical and execution clauses complete this initial clarification.
+Linear bounds must be finite and satisfy lower<upper. Log bounds must be finite and satisfy 0<lower<upper. These are unchecked caller preconditions, including when the input contains IEEE special values. Invalid-bound diagnostics and error precedence are outside the contract. Log bit decomposition retains a nonzero-significand guard for safe ctz/clz and integer division; internal divisor/capacity guards also remain. These guards do not validate the complete numerical bound condition.
 
-All four interfaces expose Result inputs `input`, `lower` and `upper`. Each input
-has one tensor member under any schema id/version/key; use the full
-`sample_shape()`, including batch axes. `input` has Float32/Float64 dtype, rank
-1..8, positive extents and at most 2^40 elements. Bounds are same-dtype scalar
-tensors of shape [1]. The output port `values` is an immutable Result using
-`photospider.tensor` v1/member `samples`, with input shape/dtype and no attached domain description.
-Bounds are finite, shared across the input and strictly ordered lower<upper.
-Linear templates explicitly broadcast scalar boundaries. The inverse linear
-template enforces bound order rather than inheriting remap_range's more
-permissive target-bound behavior.
+The log primitives accept no static mode, clipping or dtype parameter. Their exact keys select direction and CPU profile. Linear templates accept an authoring profile (strict by default) and author the corresponding ordinary graph nodes. Construction performs no payload computation.
 
-The log2 pair requires 0<lower<upper. Forward is
-(log2(x)-log2(lower))/(log2(upper)-log2(lower)); inverse is
-lower*(upper/lower)^t. These are exact mathematical formulas, not sequential
-rounded logarithms/division. Do not form an overflowing rounded upper/lower or
-silently shift/abs nonpositive x. Special-value behavior is specified below.
+## Mathematical formulas and IEEE results
 
-All four forms extend beyond their nominal intervals without implicit clipping.
-Finite linear inputs and finite inverse coordinates may be outside [lower,upper]
-or [0,1]. Positive finite log2 inputs may lie outside [lower,upper]. Explicit
-clamp is the composition point for callers requiring range limitation; no
-out_of_domain mode is introduced here.
+Forward linear is (x-L)/(U-L); inverse linear is L+t*(U-L). Log forward is (log2(x)-log2(L))/(log2(U)-log2(L)); log inverse is L*(U/L)^t. Each strict operation correctly rounds its complete mathematical formula once to the output dtype. Separately rounded logarithms, quotients or powers do not define the log reference. In particular, an overflowing rounded U/L must not change the inverse result.
 
-Adopt NUM's IEEE-style numerical values after mandatory bound validation. Input
-NaN propagates with payload/sign preserved and signaling NaN quieted. Linear
-forms preserve their remap_range infinity/overflow behavior. Log2 forward maps
-either signed zero to -Inf, negative finite values and -Inf to canonical quiet
-NaN, and +Inf to +Inf. Log2 inverse maps +Inf to +Inf and -Inf to +0. Numerical
-overflow/underflow returns the correctly classified floating value, not a
-curve-style finite-value failure. Invalid bounds still fail and take precedence
-over input NaN. Linear inverse maps signed infinities to like-signed infinities;
-the +0 negative-infinity extension belongs only to the log2 inverse.
+All forms extend beyond their nominal intervals without implicit clipping. Positive log inputs may lie outside [L,U]; inverse finite coordinates may lie outside [0,1]. Callers requiring clipping compose an explicit clamp.
 
-Linear and log2 forward/inverse strict correctly round their whole formulas.
-Accelerated Apple Silicon and x86-64 versions obey the shared final FP32 4 ULP
-contract, including its strict fallback range, while matching
-strict NaN/Inf/zero classification and signs. Exact source endpoints return
-0/1, and inverse t=0/1 returns lower/upper exactly, on every profile. Use the strict path
-when the bound cannot be guaranteed; complete-input counters are unavailable and host
-budget exhaustion remains an explicit failure.
+For valid bounds, input NaNs retain sign and payload and signaling NaNs are quieted. Linear forms inherit remap_range's IEEE infinity, overflow and zero semantics. The log pair specifies:
 
-Accelerated log2 forward and inverse must also be monotone nondecreasing in
-their ordered real input domains for fixed valid bounds. Results are independent
-of request partition/order. Prove monotonicity for the combined fast/strict
-fallback mapping; per-value 4-ULP checks alone are insufficient. Do not sort a
-requested output batch to repair an invalid implementation.
+| Input | Forward | Inverse |
+| --- | --- | --- |
+| +0 or -0 | -Inf | exact L bits |
+| 1 | formula, or exact endpoint if applicable | exact U bits |
+| negative finite | canonical quiet NaN | positive mathematical result, possibly rounded to +0/Inf |
+| -Inf | canonical quiet NaN | +0 |
+| +Inf | +Inf | +Inf |
+| x=L or x=U | exact +0 or 1 | formula unless t=0/1 |
 
-## Shared execution contract
+Numerical overflow and underflow are successful IEEE results. Log inverse's finite exact value is positive, so underflow zero is +0. The linear inverse preserves like-signed infinities; its negative-infinity result is independent of the log inverse's +0 extension.
 
-Each Result input has one tensor under an arbitrary schema id/version/key.
-`sample_shape()` includes all batch and cell axes. Bounds have shape [1] and the
-same dtype as `input`; output port `values` uses `photospider.tensor` v1/member
-`samples`, preserving input shape and dtype with no attached domain description. There is no output
-dtype conversion parameter. All six log primitive keys execute with complete-input Result
-programs. The linear templates expand to the existing complete-input Result remap and
-constant nodes, including the inverse scalar order guard.
+Apple Silicon and x86 accelerated profiles follow the [final FP32 four-ULP contract](NUM_accelerated_contract.md), retaining strict endpoint, NaN/Inf/zero classifications and signs. For fixed valid bounds the complete fast/certified mapping must remain monotone nondecreasing over its ordered real domain and independent of request partition/order. Per-point ULP checks alone do not prove that property. Current log profiles all correctly round the same exact/certified reference and therefore preserve monotonicity without batch sorting. Unsupported CPU profiles fail during preparation; these keys do not promise GPU execution.
 
-A nonempty request requires ordinary payload tile Needs for all
-three inputs, including complete typed/upstream validation. The log Result
-program reads authorized windows directly; it does not collect the full input
-through a Tensor or make a copy of that input. Bounds are checked before input
-IEEE handling inside the callback; typed/upstream failures can occur first.
-Empty reads no payload. Any input or bound change dirties the complete recorded
-output demand. Numeric bound errors have Run scope and publish no output.
+## Fixed log execution
 
-Static log2 primitive keys select strict/apple_silicon/x86_64 independently;
-there is no runtime mode parameter. Linear authoring templates take static
-profile=strict/apple_silicon/x86_64, default strict, and expand the corresponding
-NUM operation keys. Log `prepare_static` records the direction and profile in
-immutable state, which the complete-input callback reuses. No template computation occurs
-at construction and no result is automatically materialized or persisted.
+Each selected output tile is one fixed CPU Host task. It reads the matching input region and both scalar bounds, closed through each source's own grid. Atomic or batch source axes may enlarge physical coverage. The task uses global coordinates, evaluates only selected cells and writes a preallocated output tile. Bounds remain payload dependencies for endpoint and special-value queries because selection is data-dependent. Required upstream producers must meet their own contracts for their declared output tiles.
 
-Log forward checks bounds before source special values; NaN quieting and generated
-canonical NaN bits follow NUM-04. Forward x=lower gives +0 and x=upper gives 1.
-Negative zero source follows log(0) and yields -Inf. Inverse t=+0/-0 gives lower
-bits, t=1 gives upper bits; other finite t yields a positive exact result, rounded
-with gradual underflow. Linear zero/endpoint/payload semantics are exactly those
-of remap_range, not newly redefined by the template.
+Preparation verifies all metadata, direction symbol and kernel contract, empty static/task parameter sets, exact scratch size, canonical output geometry and exact input tile slots. Prepared views support legal signed/zero strides and unaligned offsets. DirectTiles retains matching source views; DenseHost imports have explicit Plan COPY tasks and their storage. Empty selection emits no payload task or read.
 
-The Result program publishes a complete immutable `samples` tensor; public
-fragments expose requested regions while retaining the Result owner beyond
-context teardown. Authorized windows support legal offsets, unaligned access and
-negative/zero strides. Cache identity includes source/bound witnesses, profile
-and template expansion identity. Cache-off and fragmented requests have the
-same values, metadata and failure scope as joint requests.
+Each invocation owns one preallocated ExactShaper state and O(rank) coordinate state; scratch is independent of the complete logical shape. Output storage covers selected tiles. Physical input descriptors and retained views scale with the declared closure. Work is O(selected cells) plus bounded exact/certified refinement. Runs share immutable preparation and have separate arithmetic/output storage; compatible source/bound replacements reuse preparation.
 
-For M=product(input.sample_shape()), output payload is M*sizeof(dtype); basic
-work is O(M) plus certified numerical refinement for log functions. Account
-authorized input windows, owners, broadcast views, template intermediates, full
-output capacity, exact arithmetic and overlapping scratch growth under host
-capacity/work limits. Even a small public request requires the full complete-input output.
-Log callbacks retain fixed admitted exact state plus an O(rank) coordinate
-counter, with no per-output point or dependency records. Poll cancellation at
-least every 64 simple samples and during each extended arithmetic refinement.
-Release temporary state on all terminal paths and publish no partial failed run.
+## Arithmetic state and operational failures
 
-Invalid bound values/order/positivity fail InvalidArgument/InvalidDomain with
-offending port/value and Run scope; bounds take precedence over
-input NaN. Compile/preflight checks shape/dtype/static profile, using TypeMismatch
-for port incompatibility and InvalidArgument/InvalidDomain for malformed statics.
-Numerical domain/overflow outcomes described above are successful IEEE values.
-ResourceExhausted, BackendUnavailable, cancellation, stale and upstream failures
-retain the NUM shared error categories and provenance. complete-input callbacks do not expose DependencySession fallback counters.
+The log engine retains dyadic exact branches and directed logarithm/exponential enclosures at 128,256,...,4096 fractional bits. Forward divides complete log differences. Inverse encloses ln(L)+t*(ln(U)-ln(L)), range-classifies that complete value and carries the power-of-two scale through final rounding. Both enclosure endpoints must round to the same output bits. Unresolved precision or arena capacity returns ResourceExhausted/CapacityLimit.
 
-## Linear composition and order guard
+This engine uses a checked control-flow instantiation of the shared interval algorithms. Retry, overflow, underflow and terminal failure are fixed state fields, independent of numerical sample validation. A precision retry cannot overwrite cancellation or another terminal failure. Overflow/underflow yield the specified successful IEEE values. Scratch includes the arithmetic pool and failure-propagation slots; range results, refinement and cancellation do not allocate exception objects. Other instantiations of the shared interval algorithms retain their own error protocol.
 
-Forward expands broadcast lower/upper plus constant 0/1 views into remap_range:
-source=[lower,upper], target=[0,1]. Inverse uses source=[0,1], target=[lower,upper].
-Since remap_range permits unordered target bounds, inverse must guard lower<upper.
-A composition using existing primitives computes scalar checked_lower with
-remap_range(input=lower,source_lower=lower,source_upper=upper,
-target_lower=lower,target_upper=lower), then broadcasts checked_lower into the
-inverse target_lower port. This reads both bounds and validates order before a
-result can be produced while preserving lower bits. No new assertion primitive
-or observable guard output is introduced. Constant views and broadcasts use the
-same static profile and input dtype, and internal shapes are known at construction.
+FloatingEnvironment preserves caller state and establishes RN/gradual underflow. Cancellation is checked per output and in extended arithmetic. Static/schema, binding/layout, backend, resource and cancellation failures retain their operational categories. Successful tile writes become internal dependencies; public call Results appear after all required tasks succeed and the call retires in order. A failed call cannot publish successful partial outputs. Retained output owners survive source/context teardown. Content caching, repeated Result identity and per-value fallback counters are outside this contract.
 
-## Acceptance and current status
+## Linear composition
 
-With lower=1, upper=16, log forward x=[1,2,4,16] gives [0,0.25,0.5,1]; inverse
-reconstructs [1,2,4,16]. Outside-range x=0.5 and 32 map to -0.25 and 1.25;
-inverse agrees at those exact powers. General rounded forward/inverse composition
-is not guaranteed to recover the original input bits. Linear lower=-2,upper=2,
-x=[-2,0,2,4] gives [0,0.5,1,1.5] and inverse recovers these exact inputs.
+The linear helper expands lower/upper and scalar 0/1 into fixed constant output tiles consumed by remap_range: forward source=[lower,upper], target=[0,1]; inverse source=[0,1], target=[lower,upper]. Finite ordered bounds are caller preconditions. Both forms compute selected dense tiles and admit their selected intermediates.
 
-Use an independent exact rational oracle for linear and certified whole-expression
-logarithm/exponent enclosures for log2, not rounded calls to individual log2/pow.
-Exercise near-equal positive bounds, extreme finite bounds, exact endpoint bits,
-NaN payloads/signaling, signed zero, infinities, subnormals and output overflow.
-Accelerated acceptance verifies per-result 4 ULP, classifications, monotonicity
-and cross-fallback/request-partition consistency. Test invalid bound precedence,
-partial delivery, complete reads, shape/strides, complete-input dirty support, cache-off, resource cancellation
-and owners after context destruction.
+The inverse retains a scalar remap `remap_range(input=lower,source_lower=lower,source_upper=upper,target_lower=lower,target_upper=lower)` before expanding target_lower. This preserves bound dependencies and lower bits under the valid-domain precondition, without a runtime order assertion. Float32 literal creation uses fixed count-one linspace. No separate linear primitive is registered.
 
-The public workflow and oracle exercise these Proposed interfaces through
-Compiler/ExecutionContext; the maintained command and current validation boundary
-are linked below.
+## Acceptance and implementation
+
+With L=1,U=16, log forward [0.5,1,2,4,16,32] gives [-0.25,0,0.25,0.5,1,1.25], and inverse recovers those exact powers. General rounded forward/inverse composition is not a bitwise identity. Linear L=-2,U=2 maps [-2,0,2,4] to [0,0.5,1,1.5].
+
+Use the retained [Fraction and directed-MPFR reference](../../../../oracle/ops/numeric/crv08/reference.py). Log reference methods are 2 and 3; filter invalid bounds for valid numerical checks, but retain query NaN/Inf/negative/zero and successful output Inf/zero. Do not substitute individually rounded host log/pow calls. Cover near-equal/extreme bounds, exact root/midpoint branches, endpoints, payload-preserving NaN quieting, subnormals and complete-expression overflow/underflow. Verify monotonicity by fixed-bound groups across exact/certified branches and request partitions.
+
+Temporary public tests must separately exercise selected tile support, both scalar dependencies, ordinary/batch/atomic schemas, affine layouts, Empty, malformed static/prepare descriptions, compatible rebinding, concurrent Runs, fenv, cancellation inside refinement, scratch/output admission and retained owners. Check huge sparse logical input by actual execution. Direct arithmetic probes should verify successful range, retry/capacity and cancellation transitions without exception allocation, while maintaining the default interval instantiation's behavior. Remove temporary checkers after validation; retain independent oracles. Report only CPU profiles and cases actually executed.
+
+`log2_shaper_node` and `log2_shaper_inverse_node` author the primitive nodes. `log_shaper.cpp` provides fixed lowering/preparation/invocation; `exact_shaper.hpp` owns complete-expression arithmetic. The separate `linear_shaper` and `linear_shaper_inverse` helpers author ordinary fixed graph compositions.
 
 - [Linear template](CRV-08A_linear_shaper.md).
 - [Inverse linear template](CRV-08B_linear_shaper_inverse.md).
 - [Log2 primitive](CRV-08C_log2_shaper.md).
 - [Inverse log2 primitive](CRV-08D_log2_shaper_inverse.md).
-
 - [Curve category](../curves.md).
 - [NUM-06 remap_range](NUM-06B_remap_range.md).
-
-## Maintained implementation and validation
-
-The two linear authoring helpers are `linear_shaper` and `linear_shaper_inverse`
-in `photospider/ops/numeric/shapers.hpp`; they expand to existing remap/constant
-workflow nodes and are not separate linear primitive registrations. The six log
-primitive keys are exposed by `log2_shaper_node` and `log2_shaper_inverse_node`
-across strict, Apple and x86 profiles. Log evaluation uses a certified whole
-expression with a strict certified scalar fallback and preserves monotonicity and partition
-independence. Refinement precision is bounded to 128..4096; unresolved capacity or
-rounding returns `ResourceExhausted`.
-
-Create temporary public Result checks for formulas, boundaries, prepared-state
-rebinding, cancellation and authoring validation. Report numeric execution for
-each tested profile separately; these cases do not establish untested backends,
-maximum-size behavior or performance.

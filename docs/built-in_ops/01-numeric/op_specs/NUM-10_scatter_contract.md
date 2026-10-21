@@ -6,100 +6,38 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_manual_acceptance
+implementation_status: implemented
 ---
 
 # NUM-10: scatter into a base tensor
 
-The strict key follows its exact numeric reference. Accelerated floating
-results follow the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md)
-where arithmetic applies; raw copies and discrete results remain exact.
+The four operations `scatter_replace`, `scatter_sum`, `scatter_minimum` and `scatter_maximum` have strict and two CPU accelerated profiles. Inputs are base, Int64 indices `[M]`, and updates. Every Result contains one tensor under any schema/member key; complete sample shapes include batch axes and have rank 1..8, positive extents and at most 2^40 elements. Base/updates share UInt8, Int64, Float32 or Float64 dtype. Required static Int64 `axis` is in range. Updates match base except axis length M. Output `values` uses `photospider.tensor`/`samples` with ordinary base axes and unchanged dtype. Base is immutable.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements. The rules below
-specify the NUM-10 behavior.
+## Indices, contributors and selected outputs
 
-The four operations `scatter_replace`, `scatter_sum`, `scatter_minimum` and
-`scatter_maximum` each have strict and two CPU accelerated formal keys. Their
-public ports use `Result`. Each input `Result` contains exactly one tensor
-member, whose key is unrestricted. The kernel reads that member's complete
-`sample_shape()`, including any batch prefix. Shapes have rank 1..8 and at most
-2^40 elements. The numeric schema does not require frame or layer facets.
+Every nonempty selection creates one fixed task that validates all indices against the base axis. Invalid indices, including any unrelated to selected output, return `InvalidArgument` with `FailureReason::InvalidDomain`. Negative indices are invalid. The task stably groups `{target_index,original_position}` pairs with eight radix passes and publishes one private dense Int64 `[M,2]` tile. Original positions remain increasing within each target group.
 
-Inputs are ordered `base`, `indices`, `updates`. `indices` is a dynamic Int64
-rank-one tensor `[M]`; `axis` is a required static Int64 parameter in
-`[0, rank)`. `updates` has the base dtype and rank, the same non-axis extents,
-and extent `M` on the selected axis. Dtypes are UInt8, Int64, Float32 and
-Float64. The output port `values` is a Result with schema `photospider.tensor`
-and one `samples` member. It contains the full base shape as ordinary axes,
-with batch topology removed. The operation never mutates `base`.
+Each selected output tile has a consumer task. It reads base tiles intersecting that output region, update tiles with the same non-axis region and the complete M axis, and the shared private table. Bounded searches find contributor ranges. Runtime checks used normalized update positions below M before addressing updates. Preparation checks complete read sets and exact dense private views; a private port alone is not producer provenance. Empty selection emits no tasks or payload reads.
 
-For update position `j`, `indices[j]` selects the base coordinate along `axis`.
-Repeated targets are valid. `scatter_replace` selects the greatest matching
-`j`. The aggregate operations include `base` first and then matching updates in
-increasing `j`; that order defines exceptional-value priority, not a sequence of
-rounded additions. A coordinate with no matching update copies the base bits.
+A no-hit coordinate copies base bits exactly, including signaling NaNs. Replace selects the greatest matching original position and copies that update without arithmetic. Aggregate variants start with base and then process matching updates in original position order. The first source NaN wins, with preserved sign/payload and a set quiet bit, before generated exceptional results.
 
-Every nonempty complete-input request asks for complete data, validation and descriptor
-support  from all three inputs. It validates every index against the
-base axis and computes the complete output before consumer projection. Thus an
-invalid index or an upstream/typed failure outside the requested output region
-can fail the run. Empty demand requests no input payload and performs no sample
-arithmetic. Edits to any active input invalidate the complete output.
+For Sum, mixed positive and negative infinities produce the fixed positive quiet NaN; otherwise infinity sets the result sign. Finite contributors sum exactly with one final floating conversion. Integer final representability is an unchecked caller precondition; no diagnostic is promised outside that domain. Intermediate exact totals can exceed destination range. Exact zero is negative only when every contributor is negative zero; underflow preserves the exact sign. Strict conversion is correctly rounded; accelerated profiles retain the [shared floating bound](NUM_accelerated_contract.md).
 
-## Types, storage and resource contract
+Minimum/maximum use NUM-05 numerical ordering with exact integer comparisons. Mixed zero signs yield -0 for minimum and +0 for maximum; equal zero signs remain unchanged. These aggregate rules apply only to hit coordinates. Unselected outputs are not evaluated; no-hit and Replace paths never quiet NaNs.
 
-Outputs use complete packed storage. Immutable inputs may have negative or zero
-strides and unaligned elements. No writable alias is published. The stable
-eight-pass radix grouping costs O(M); output coordinates locate contributors by
-binary search in O(log M), followed by the required arithmetic. The plan and
-sorting vector each hold M pairs of two uint64 values, for a peak of 32*M
-metadata bytes; the sorting vector is released after grouping. The exact sum
-accumulator and fixed kernel state are admitted through the host resource
-ledger. Coordinate vectors are bounded by rank eight.
+## Storage, preparation and lifetime
 
-The kernel charges work during index scan, sorting, contributor lookup and
-output writing. Cancellation, work or capacity failure releases unpublished
-output and temporary state. A failure does not certify a new output region.
+The normalized table occupies `16*M` bytes. Scatter uses that output as one radix buffer and a second `16*M`-byte scratch buffer, with the final eight-pass result in the table. Consumer aggregate tasks use private preallocated ExactAggregate scratch; Replace needs no consumer scratch. The executor reserves maximum block scratch per CPU lane, so capacity can exceed one task's scratch demand. Output storage consists only of declared independent dense tiles.
 
-## Errors and numerical rules
+Prepared state owns immutable metadata and read-slot maps. Runtime mutable state is stack storage, the private tile or admitted lane scratch; no runtime payload allocation is used. Negative/zero input strides and unaligned elements are supported after physical bounds checks. Index work checks cancellation every 256 entries, output copying every 64 samples, and aggregate arithmetic through cancellation callbacks. Operational failures prevent successful call retirement. Successful output owners outlive context destruction. Per-sample work counters, NumericDiagnostics and completed-result caches are unavailable.
 
-Preflight rejects unsupported dtype, wrong rank or extents, wrong index dtype or
-rank, invalid axis and logical element counts above 2^40. Runtime invalid
-indices return `InvalidArgument`, `FailureReason::InvalidDomain` and the
-`IndexOutOfBounds` diagnostic with position, value and destination extent.
-Integer sum overflow returns `OperationFailed` with
-`FailureReason::ArithmeticOverflow`, attributed to the complete output
-coordinate as Domain/Run. Other source, typed-validation, resource and
-cancellation failures keep their established categories.
-
-For a no-hit coordinate, every operation copies base bits exactly, including a
-signaling NaN. Replacement also copies the chosen update bits without arithmetic.
-For a hit in an aggregate operation, values are classified in base-then-update
-order. The first NaN wins; its sign and payload are preserved and its quiet bit
-is set before generated exceptional results are considered.
-
-For sum without NaNs, simultaneous positive and negative infinities produce the
-fixed positive quiet NaN. Otherwise infinity determines its signed result.
-Finite contributors are summed exactly and rounded once at the end for floating
-output; integer output is range-checked only after exact accumulation. Exact zero
-is negative zero only when every contributor is negative zero. Nonzero exact
-underflow retains its sign. Strict results are reproducible; accelerated
-floating results follow the shared FP32-scaled bound.
-
-Minimum and maximum use the NUM-05 numeric ordering. For mixed signed zeros,
-minimum selects -0 and maximum selects +0; same-sign zeros retain their sign.
-Integer comparisons remain integer comparisons. These rules apply only when an
-update hits the coordinate.
+Static validation rejects incompatible types, ranks, shapes, axis and logical counts. Prepare rejects missing/extra reads, incorrect private views, task parameters or scratch. See [fixed indexing execution](../indexing-execution.md) for validation and runtime boundaries. This contract overrides the [NUM baseline](NUM_common_contract.md); specification status remains Proposed.
 
 ## Individual specifications
 
 | Spec | Duplicate target behavior |
 | --- | --- |
-| [NUM-10C scatter_replace](NUM-10C_scatter_replace.md) | Last matching update wins |
-| [NUM-10D scatter_sum](NUM-10D_scatter_sum.md) | Exact sum including base |
-| [NUM-10E scatter_minimum](NUM-10E_scatter_minimum.md) | Minimum including base, NaN propagating |
-| [NUM-10F scatter_maximum](NUM-10F_scatter_maximum.md) | Maximum including base, NaN propagating |
-
-The shared execution and current behavior evidence are summarized in
-[NUM-10 Run-shared complete-input computation](../indexing-whole.md).
+| [scatter_replace](NUM-10C_scatter_replace.md) | Last original position wins |
+| [scatter_sum](NUM-10D_scatter_sum.md) | Exact sum including base |
+| [scatter_minimum](NUM-10E_scatter_minimum.md) | Minimum including base, first NaN wins |
+| [scatter_maximum](NUM-10F_scatter_maximum.md) | Maximum including base, first NaN wins |

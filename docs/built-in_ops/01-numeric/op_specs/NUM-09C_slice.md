@@ -11,96 +11,27 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_manual_acceptance
+implementation_status: implemented
 ---
 
 # NUM-09C: slice
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Slice preserves rank and selects `s[j]=starts[j]+o[j]*steps[j]` from one source Result. The source has one tensor under any schema/member key; its complete `sample_shape()` includes batch axes. Dynamic `starts` and `steps` are Int64 `[rank]` Result inputs. Required static String `counts` is a canonical comma-separated list of positive output extents. Rank is 1..8 and both logical counts are at most 2^40. Each output extent must not exceed its source extent, since larger counts have no valid nonzero-step controls.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Output port `values` uses `photospider.tensor` v1/member `samples`, with ordinary axes and unchanged dtype. UInt8, Int8, UInt16, Int16, Int64, Float32 and Float64 are copied bit-for-bit, including signaling NaNs. No implicit cast, rank squeezing, negative-index reinterpretation or empty slice is provided. All three CPU profiles preserve identical bits.
 
-Slice input `input` without changing rank, using dynamic Int64[rank] Result
-inputs `starts` and `steps`. The source is a single-tensor Result with any schema
-id/member key; its complete `sample_shape()` includes batch axes. Required
-static String `counts` is a canonical list of positive per-axis output extents,
-fixing output `values` shape at compilation.
-For output coordinate o, read source s[j]=starts[j]+o[j]*steps[j]. Negative
-steps support reverse traversal. Starts/steps numeric values can change between
-executions while counts remains static.
+## Dynamic domain and fixed source set
 
-Support UInt8, Int8, UInt16, Int16, Int64, Float32 and Float64, with identical
-output dtype and bit-preserved elements including signaling NaNs. Input/output
-shapes have rank 1..8, positive extents and logical element count <=2^40. The
-output is a `photospider.tensor`/`samples` Result whose full shape is ordinary
-axes; batch-axis metadata is empty and there is no domain description. Structural
-and explicitly declared port validation remains required. No implicit cast,
-rank squeezing, omitted axes, Python end-index interpretation or empty slice is
-provided. All three CPU profiles preserve identical values.
+Every nonempty task checks the complete slice domain before source sample access. Starts must be nonnegative absolute indices below each source extent. For counts greater than one, steps must be nonzero and `start+(count-1)*step` must remain in bounds, computed with widened exact integer arithmetic. This check uses full counts even if the selected output tile would itself be in bounds. Invalid controls return `InvalidArgument` with `FailureReason::InvalidDomain` and prevent successful call publication.
 
-For every nonempty output request, validate the whole slice domain rather than
-just requested coordinates. Starts are nonnegative absolute indices. Steps must
-be nonzero, with no wrap, clipping or negative-index reinterpretation. Compute
-last[j]=starts[j]+(counts[j]-1)*steps[j] by exact widened integer arithmetic;
-require both starts[j] and last[j] within input axis bounds. Monotonic stepping
-then proves the entire axis valid. Invalid parameters fail the observation even
-when the actual requested output subset would have valid source coordinates.
+A singleton axis ignores its step numerically. If every count is one, specialization excludes the step payload and producer; its declared static schema is still checked. Otherwise each task declares the complete steps vector, including entries belonging to singleton axes. Every nonempty task declares the complete starts vector. Empty output selection emits no task and reads no controls or source payload.
 
-## Single-sample axes and complete-input input support
+The Plan's source set covers all coordinates reachable by legal controls. For input extent I, count N and selected output interval `[u,u+e)`, a singleton requires `[0,I)`. Otherwise the possible source set is `[u,I-N+u+e) union [N-u-e,I-u)`. Positive-step possibilities are contained in step +1, and negative-step possibilities in step -1; those steps realize each respective interval. The multi-axis Cartesian product gives at most 256 boxes at rank eight. Declare all source tiles intersecting their union. This fixed set can exceed the source accessed by one Run, while excluding coordinates unreachable by any legal control binding.
 
-A singleton count ignores that axis's step numerically. If all counts are one,
-static projection excludes the complete step port, including a failing producer;
-static schema and parameter checks still run. Otherwise the complete-input program
-requests the active source, starts and steps through full Tensor Needs using
-ordinary member tile Needs with explicitly bound validators , which trigger typed-payload
-validation. An unused step entry can then cause an upstream/typed failure.
-Source gaps and unselected coordinates remain part of the complete input
-preparation. The program publishes a complete Result with global output coordinates; `Q` limits
-observed dependencies and downstream reads, not publication shape. Empty output
-has empty coverage and support. Edits to observed input support invalidate the
-recorded dependency. Endpoint validation still uses widened arithmetic and
-covers the full slice.
+## Allocation, preparation and acceptance
 
-## Layout, resources and errors
+Each selected output tile has one fixed CPU gather task and a separate dense allocation. The old `layout` parameter and SDK `TransformLayout` enum are removed; the helper accepts the profile after `counts`. Physical source strides may be negative, zero or unaligned after bounds validation. Runtime controls select coordinates within declared reads and cannot change topology or ownership.
 
-Required String layout is auto/view/dense, default auto in the helper. Inherit
-[reshape's complete-output policy](NUM-09A_reshape.md). View requires one affine
-input/output owner; same-owner compatible fragments may join after address-map
-proof. Multiple owners make explicit View unavailable. Auto materializes a
-complete packed output only for an unavailable view; Dense always materializes
-it. Slice strides equal `source_stride[j] * steps[j]` for counts greater
-than one and zero for singleton outputs. Widened stride overflow makes a view
-unavailable; Dense can still copy valid logical coordinates. Auto never hides
-upstream, validation, resource or cancellation errors. Dense allocates
-`N * dtype_size` output bytes. The program reads source and control data through
-authorized windows rather than collecting complete input payloads into second
-buffers. Mapping costs O(N*rank), with cancellation and work checks during
-computation and publication.
+Prepare recomputes the possible-source tile set and verifies every read/write slot, schema and zero scratch. Runtime uses bounded stack coordinates, controls and a 32-byte buffer. Cancellation is sampled at entry and every 64 copied samples. Operational failures prevent successful call retirement. Output owners survive execution context destruction. No per-sample diagnostics, payload allocations or runtime view fallback are used.
 
-Invalid counts/rank/type/layout is a compile/preflight error. Invalid dynamic
-starts/used steps or any full-domain endpoint outside the source axis fails with
-InvalidArgument, FailureReason::InvalidDomain and diagnostic InvalidSlice,
-including axis and offending integer values. Mathematical index arithmetic must
-not wrap. Resource/upstream/typed/cancellation errors remain separate. Publish
-no partial failed observation and check cancellation as required by reshape.
-
-## Acceptance and implementation status
-
-Conceptual fixture: input=[0,1,2,3,4,5], starts=[4], steps=[-2], counts="3"
-yields [4,2,0]. Independent exact integer coordinate mapping and raw-bit reads
-are the oracle. Verify a partial output request still rejects a full slice that
-would run out of bounds. For counts="1", prove steps is never requested even if
-its upstream would fail; numerical selection is starts while complete-input reads the source. Include multi-axis mixed
-positive/negative steps, signed-zero/sNaN data, dynamic control changes, singleton
-axes, metadata limits, source strides/owners, auto/view/dense and disjoint reads.
-
-All formal profiles use complete-input and disable cross-run content caching because
-content does not prove physical owner/stride identity; same-Run sharing remains
-available. Execution behavior and temporary acceptance cases are described in
-[NUM-09 Run-shared complete-input computation](../layouts-whole.md).
+For input `[0,1,2,3,4,5]`, starts `[4]`, steps `[-2]` and counts `"3"`, expect `[4,2,0]`. Temporary checks use independent signed integer coordinate enumeration. Verify complete-domain rejection for partial output, all-singleton step elision, dynamic control changes on one PreparedPlan, extreme ignored steps, all seven raw dtypes, sparse requests, possible-source tile equality, concurrent Runs and source stride cases. See [fixed layout transforms](../layouts-execution.md). This contract overrides the [NUM baseline](NUM_common_contract.md); specification status remains Proposed.

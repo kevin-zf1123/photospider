@@ -13,12 +13,13 @@
 
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_lut3d.hpp"
-#include "01-numeric/numeric_tensor_program.hpp"
-#include "01-numeric/uniform_axis.hpp"
+#include "01-numeric/exact_sampling.hpp"
+#include "common/fixed_point_inputs.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
+#include "common/tensor_program.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/ops/color_array.hpp"
-#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -31,9 +32,10 @@ Status type_error(const char* message) {
           {FailureOrigin::Schema, FailureScope::Unspecified}};
 }
 struct Lut3dProgram {
-  ColorModel model;
   SequenceProfile profile;
   bool tetrahedral = false, clamp = false;
+  std::array<unsigned, 3> extents{};
+  std::shared_ptr<const SchemaTemplate> output_schema;
 };
 Result<OperationPreparation> prepare(
     bool tetrahedral, SequenceProfile profile,
@@ -66,6 +68,9 @@ Result<OperationPreparation> prepare(
   if (inputs.size() != 3)
     return Answer(type_error("LUT3D requires input, table, axis"));
   for (unsigned port = 0; port < 3; ++port) {
+    auto valid = tensor_ops::check_tensor(inputs[port]);
+    if (!valid.ok())
+      return Answer(valid);
     const auto& tensor = inputs[port].result_schema->tensors[0];
     const TensorDescriptor descriptor{tensor.descriptor.element_type,
                                       tensor.sample_shape()};
@@ -95,255 +100,330 @@ Result<OperationPreparation> prepare(
   if (!available.ok())
     return Answer(available);
   OperationPreparation prepared;
-  prepared.state = std::make_shared<Lut3dProgram>(
-      Lut3dProgram{a.model, profile, tetrahedral, domain == "clamp"});
+  auto state = std::make_shared<Lut3dProgram>();
+  state->profile = profile;
+  state->tetrahedral = tetrahedral;
+  state->clamp = domain == "clamp";
+  for (unsigned axis = 0; axis < 3; ++axis)
+    state->extents[axis] =
+        inputs[1].result_schema->tensors[0].sample_shape()[axis];
   prepared.outputs.resize(1);
   auto& output = prepared.outputs[0];
-  auto schema = numeric_ops::numeric_tensor_schema(
+  auto schema = tensor_ops::scalar_schema();
+  schema.tensors[0].descriptor = {
       dtype == "float32" ? ElementType::Float32 : ElementType::Float64,
-      inputs[0].result_schema->tensors[0].sample_shape());
+      inputs[0].result_schema->tensors[0].sample_shape()};
   schema.tensors[0].atomic_trailing_axes = 1;
   output.metadata.result_schema =
       std::make_shared<const SchemaTemplate>(std::move(schema));
+  state->output_schema = output.metadata.result_schema;
+  prepared.state = std::move(state);
   return Answer(std::move(prepared));
 }
-struct Lut3dPoint {
+struct Lut3dScratch final {
+  numeric_ops::ExactSampling sampling;
+  numeric_ops::ExactLut3d arithmetic;
+  std::array<std::array<std::uint64_t, 256>, 3> knots{};
+  std::array<bool, 3> descending{};
   std::array<std::uint64_t, 3> query{};
   std::array<unsigned, 3> cell{};
-  numeric_ops::ExactLut3d::Support support;
+  numeric_ops::ExactLut3d::Cell bounds{};
+  std::array<std::array<std::uint64_t, 3>, 8> colors{};
+  explicit Lut3dScratch(SequenceProfile profile)
+      : sampling(profile, true), arithmetic(profile) {}
 };
-struct Lut3dState {
-  const Lut3dProgram* program;
-  std::array<numeric_ops::UniformAxis, 3> axes;
-  numeric_ops::ExactLut3d arithmetic;
-  const ResultProgramPhase& phase;
-  std::array<std::optional<numeric_ops::MathTensorReader>, 3> readers;
-  std::function<Status(std::uint64_t)> consume;
-  std::vector<std::uint64_t> shape, position;
-  Lut3dState(const Lut3dProgram* value, const ResultProgramPhase& invocation)
-      : program(value),
-        axes{numeric_ops::UniformAxis(value->profile),
-             numeric_ops::UniformAxis(value->profile),
-             numeric_ops::UniformAxis(value->profile)},
-        arithmetic(value->profile),
-        phase(invocation),
-        consume([this](auto amount) { return work(amount); }),
-        shape(invocation.query.inputs[0]
-                  .result_schema->tensors[0]
-                  .sample_shape()),
-        position(shape.size() - 1, 0) {
-    for (auto& axis : axes)
-      axis.knots = ResourceVector<std::uint64_t>(
-          ResourceAllocator<std::uint64_t>(phase.resources));
-    for (unsigned port = 0; port < readers.size(); ++port)
-      readers[port].emplace(phase.tensors->at({port, 0}),
-                            phase.query.cancellation);
+std::array<Region, 3> input_regions(const Lut3dProgram& state,
+                                    const Region& output) {
+  return {
+      output,
+      Region::whole({state.extents[0], state.extents[1], state.extents[2], 3}),
+      Region({{0, 3}, {0, 2}})};
+}
+Result<TileSet> required_tiles(const Region& region, const TileGrid& grid,
+                               const ResourceBudget& budget,
+                               std::uint64_t maximum) {
+  std::uint64_t count = 1;
+  for (unsigned axis = 0; axis < grid.rank(); ++axis) {
+    auto d = region.dimensions()[axis];
+    std::uint64_t extent = 1;
+    if (grid.batch_axis_mask() & (1U << axis))
+      extent = d.extent;
+    else if (axis == grid.width_axis() || axis == grid.height_axis())
+      extent = (d.offset + d.extent - 1) / grid.tile_extent() -
+               d.offset / grid.tile_extent() + 1;
+    if (extent > maximum / count)
+      return Result<TileSet>(
+          {ErrorCode::ResourceExhausted, "LUT3D read tile limit"});
+    count *= extent;
   }
-  Status work(std::uint64_t amount) const { return phase.consume_work(amount); }
-  void advance() {
-    for (auto i = position.size(); i; --i) {
-      if (++position[i - 1] < shape[i - 1])
-        break;
-      position[i - 1] = 0;
-    }
+  return sdk::tiles_for_region(budget, grid, region);
+}
+constexpr const char* lut_contract = "lut3d-fixed-v1";
+Result<OperationProgram> lower(const OperationLowering& query) {
+  using Answer = Result<OperationProgram>;
+  const auto& state = *static_cast<const Lut3dProgram*>(query.static_state);
+  auto output = TileGrid::from_schema(*state.output_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  std::array<TileGrid, 3> grids;
+  for (unsigned port = 0; port < 3; ++port) {
+    auto grid = TileGrid::from_schema(*query.inputs[port].result_schema,
+                                      query.tile_extent);
+    if (!grid.ok())
+      return Answer(grid.status());
+    grids[port] = grid.take_value();
   }
-  Status failure(const std::string& message,
-                 FailureReason reason = FailureReason::InvalidDomain) const {
-    return {ErrorCode::OperationFailed,
-            message,
-            reason,
-            {FailureOrigin::Domain, FailureScope::Run}};
-  }
-  Result<std::uint64_t> read(unsigned port,
-                             const std::vector<std::uint64_t>& at) {
-    auto charged = work(at.size() + 1);
-    if (!charged.ok())
-      return Result<std::uint64_t>(charged);
-    const auto& input = phase.tensors->at({port, 0});
-    const bool narrow =
-        input.spec().descriptor.element_type == ElementType::Float32;
-    auto bits = readers[port]->bits(at);
-    const auto parts = BinaryParts::decode(bits, narrow);
-    if (parts.nan || parts.infinite)
-      return Result<std::uint64_t>(
-          failure("nonfinite LUT3D input; port=" + std::to_string(port)));
-    if (narrow) {
-      const auto sign = (bits >> 31) << 63;
-      if (!parts.magnitude) {
-        bits = sign;
-      } else {
-        const auto top = 63 - __builtin_clzll(parts.significand);
-        bits = sign |
-               (static_cast<std::uint64_t>(parts.exponent + top + 1023) << 52) |
-               ((parts.significand << (52 - top)) & UINT64_C(0xfffffffffffff));
-      }
-    }
-    return Result<std::uint64_t>(bits);
-  }
-  Status validate_color(const std::array<std::uint64_t, 3>& color,
-                        unsigned port) const {
-    if (program->model == ColorModel::Cielch ||
-        program->model == ColorModel::Oklch) {
-      const auto chroma = BinaryParts::decode(color[1], false);
-      if (chroma.negative && chroma.magnitude)
-        return failure("negative LUT3D chroma; port=" + std::to_string(port));
-    }
-    return Status::success();
-  }
-  std::vector<std::uint64_t> vertex(const Lut3dPoint& point,
-                                    unsigned index) const {
-    const auto bits = point.support.vertices[index];
-    return {point.cell[0] + (bits & 1), point.cell[1] + ((bits >> 1) & 1),
-            point.cell[2] + ((bits >> 2) & 1)};
-  }
-  numeric_ops::ExactLut3d::Cell cell(const Lut3dPoint& point) const {
-    numeric_ops::ExactLut3d::Cell result;
-    for (unsigned i = 0; i < 3; ++i)
-      result[i] = {axes[i].knots[point.cell[i]],
-                   axes[i].knots[point.cell[i] + 1]};
-    return result;
-  }
-  Status classify(Lut3dPoint* point, bool weights = true) {
-    auto at = position;
-    at.push_back(0);
-    // Validate every original component before any domain clamp can hide it.
-    for (unsigned i = 0; i < 3; ++i) {
-      at.back() = i;
-      auto read_value = read(0, at);
-      if (!read_value.ok())
-        return read_value.status();
-      point->query[i] = read_value.value();
-    }
-    auto valid = validate_color(point->query, 0);
-    if (!valid.ok())
-      return valid;
-    for (unsigned i = 0; i < 3; ++i) {
-      const auto& axis = axes[i];
-      const auto key = axis.key(point->query[i]);
-      unsigned lo = 0, hi = axis.knots.size();
-      while (lo < hi) {
-        auto work = consume(1);
-        if (!work.ok())
-          return work;
-        const auto mid = lo + (hi - lo) / 2;
-        if (axis.key(axis.knots[mid]) < key)
-          lo = mid + 1;
-        else
-          hi = mid;
-      }
-      const auto size = static_cast<unsigned>(axis.knots.size());
-      if (lo < size && axis.key(axis.knots[lo]) == key) {
-        point->cell[i] = std::min(lo, size - 2);
-      } else if (!lo || lo == size) {
-        if (!program->clamp)
-          return failure("LUT3D query outside axis=" + std::to_string(i));
-        point->cell[i] = lo ? size - 2 : 0;
-        point->query[i] = axis.knots[lo ? size - 1 : 0];
-      } else {
-        point->cell[i] = lo - 1;
-      }
-    }
-    if (!weights)
-      return Status::success();
-    auto support = arithmetic.support(cell(*point), point->query,
-                                      program->tetrahedral, consume);
-    if (!support.ok())
-      return support.status();
-    point->support = support.take_value();
-    return Status::success();
-  }
-  Status execute(const ResourceVector<ResultTensorWriteWindow>& writers) {
-    for (unsigned axis = 0; axis < 3; ++axis) {
-      std::array<std::uint64_t, 3> values{};
-      for (unsigned j = 0; j < 3; ++j) {
-        auto value = read(2, {axis, j});
-        if (!value.ok())
-          return value.status();
-        values[j] = value.value();
-      }
-      auto status = axes[axis].validate(
-          values,
-          phase.query.inputs[1].result_schema->tensors[0].sample_shape()[axis],
-          consume);
-      if (!status.ok())
-        return status.code == ErrorCode::OperationFailed
-                   ? failure(status.message, status.reason)
-                   : status;
-    }
-    const auto count =
-        phase.query.output.result_schema->tensors[0].sample_count().value() / 3;
-    // Preserve complete query/domain validation before selected table
-    // arithmetic.
-    for (std::uint64_t i = 0; i < count; ++i, advance()) {
-      Lut3dPoint point;
-      auto status = classify(&point, false);
-      if (!status.ok())
-        return status;
-    }
-    numeric_ops::MathTensorWriter output(writers[0]);
-    const bool narrow =
-        phase.query.output.result_schema->tensors[0].descriptor.element_type ==
-        ElementType::Float32;
-    const unsigned width = narrow ? 4 : 8;
-    for (std::uint64_t row = 0; row < count; ++row, advance()) {
-      Lut3dPoint point;
-      auto status = classify(&point);
-      if (!status.ok())
-        return status;
-      std::array<std::array<std::uint64_t, 3>, 8> colors{};
-      for (unsigned i = 0; i < point.support.count; ++i) {
-        auto at = vertex(point, i);
-        at.push_back(0);
-        for (unsigned channel = 0; channel < 3; ++channel) {
-          at.back() = channel;
-          auto value = read(1, at);
-          if (!value.ok())
-            return value.status();
-          colors[i][channel] = value.value();
+  ResourceLimits limits;
+  limits.maximum_work = query.limits.maximum_work;
+  ResourceBudget budget(limits);
+  OperationProgramBuilder builder(query);
+  for (const auto& member : query.requests[0].members)
+    for (auto index : member.second) {
+      auto region = output.value().region(index);
+      if (!region.ok())
+        return Answer(region.status());
+      auto task = builder.add_task("lut3d", lut_contract, {},
+                                   {sizeof(Lut3dScratch), 0, 0});
+      if (!task.ok())
+        return Answer(task.status());
+      const auto regions = input_regions(state, region.value());
+      for (unsigned port = 0; port < 3; ++port) {
+        auto tiles = required_tiles(regions[port], grids[port], budget,
+                                    query.limits.maximum_records);
+        if (!tiles.ok())
+          return Answer(tiles.status());
+        for (auto tile : tiles.value()) {
+          auto status = budget.consume({1});
+          if (status.ok())
+            status = builder.read_input(task.value(), port, 0, tile);
+          if (!status.ok())
+            return Answer(status);
         }
-        auto valid = validate_color(colors[i], 1);
-        if (!valid.ok())
-          return valid;
       }
-      auto values =
-          arithmetic.evaluate(cell(point), point.query, program->tetrahedral,
-                              colors, narrow, consume);
-      if (!values.ok())
-        return values.status();
-      auto output_at = position;
-      output_at.push_back(0);
+      auto status = builder.write_output(task.value(), 0, member.first, index);
+      if (!status.ok())
+        return Answer(status);
+    }
+  return builder.finish();
+}
+struct PreparedLut3d final {
+  SequenceProfile profile;
+  bool tetrahedral, clamp, narrow;
+  std::array<unsigned, 3> extents;
+  std::array<bool, 3> input_narrow{};
+  fixed_tensor::PointInputs<3> inputs;
+};
+void invoke(const ps_kernel_invocation_v8* invocation,
+            ps_kernel_status_v8* status) noexcept {
+  const auto& state =
+      *static_cast<const PreparedLut3d*>(invocation->prepared_context);
+  const auto consume = [invocation](std::uint64_t) {
+    return invocation->cancellation.is_cancelled &&
+                   invocation->cancellation.is_cancelled(
+                       invocation->cancellation.context)
+               ? Status{ErrorCode::Cancelled, {}}
+               : Status::success();
+  };
+  const auto accept = [status](const Status& result) {
+    if (!result.ok())
+      *status =
+          kernel_failure(result.code, result.message.c_str(), result.reason);
+    return result.ok();
+  };
+  if (!accept(consume(0)))
+    return;
+  FloatingEnvironment environment;
+  if (!environment.active()) {
+    *status =
+        kernel_failure(ErrorCode::OperationFailed, "LUT3D numeric environment");
+    return;
+  }
+  auto* work =
+      new (invocation->scratch[0].allocation) Lut3dScratch(state.profile);
+  struct Lifetime final {
+    Lut3dScratch* scratch;
+    ~Lifetime() { scratch->~Lut3dScratch(); }
+  } lifetime{work};
+  fixed_tensor::PointReader<3> reader{state.inputs, *invocation};
+  const auto read = [&](unsigned port, const std::array<std::uint64_t, 8>& at) {
+    auto bits = reader.bits(port, at, state.input_narrow[port] ? 4 : 8);
+    if (state.input_narrow[port]) {
+      const auto raw = static_cast<std::uint32_t>(bits);
+      float f;
+      std::memcpy(&f, &raw, 4);
+      const double wide = f;
+      std::memcpy(&bits, &wide, 8);
+    }
+    return bits;
+  };
+  const auto key = [work](unsigned axis, std::uint64_t bits) {
+    const auto ordered = BinaryParts::decode(bits, false).order_key();
+    return work->descending[axis] ? UINT64_MAX - ordered : ordered;
+  };
+  for (unsigned axis = 0; axis < 3; ++axis) {
+    const std::array<std::uint64_t, 2> endpoints{read(2, {axis, 0}),
+                                                 read(2, {axis, 1})};
+    work->descending[axis] =
+        BinaryParts::decode(endpoints[1], false).order_key() <
+        BinaryParts::decode(endpoints[0], false).order_key();
+    for (unsigned i = 0; i < state.extents[axis]; ++i) {
+      if (!accept(consume(1)))
+        return;
+      auto coordinate =
+          work->sampling.coordinate(i, state.extents[axis], endpoints, consume);
+      if (!accept(coordinate.status()))
+        return;
+      work->knots[axis][i] = coordinate.value();
+    }
+  }
+  const auto& output = invocation->outputs[0];
+  const auto& layout = *output.layout;
+  const unsigned width = state.narrow ? 4 : 8;
+  std::uint64_t points = 1;
+  for (unsigned axis = 0; axis + 1 < layout.rank; ++axis)
+    points *= layout.shape[axis];
+  for (std::uint64_t point = 0; point < points; ++point) {
+    if (!accept(consume(1)))
+      return;
+    auto index = point;
+    std::array<std::uint64_t, 8> at{};
+    for (unsigned axis = layout.rank - 1; axis-- > 0;) {
+      at[axis] = layout.origin[axis] + index % layout.shape[axis];
+      index /= layout.shape[axis];
+    }
+    for (unsigned axis = 0; axis < 3; ++axis) {
+      at[layout.rank - 1] = axis;
+      work->query[axis] = read(0, at);
+      const auto wanted = key(axis, work->query[axis]);
+      unsigned lo = 0, hi = state.extents[axis];
+      while (lo < hi) {
+        const auto middle = lo + (hi - lo) / 2;
+        if (key(axis, work->knots[axis][middle]) < wanted)
+          lo = middle + 1;
+        else
+          hi = middle;
+      }
+      if (lo < state.extents[axis] &&
+          key(axis, work->knots[axis][lo]) == wanted) {
+        work->cell[axis] = std::min(lo, state.extents[axis] - 2);
+      } else if (!lo || lo == state.extents[axis]) {
+        // Reject's closed domain is a caller precondition. Cell indices stay
+        // bounded independently of it; only Clamp changes valid query values.
+        work->cell[axis] = lo ? state.extents[axis] - 2 : 0;
+        if (state.clamp)
+          work->query[axis] =
+              work->knots[axis][lo ? state.extents[axis] - 1 : 0];
+      } else {
+        work->cell[axis] = lo - 1;
+      }
+      work->bounds[axis] = {work->knots[axis][work->cell[axis]],
+                            work->knots[axis][work->cell[axis] + 1]};
+    }
+    auto support = work->arithmetic.support(work->bounds, work->query,
+                                            state.tetrahedral, consume);
+    if (!accept(support.status()))
+      return;
+    for (unsigned i = 0; i < support.value().count; ++i) {
+      const auto bits = support.value().vertices[i];
+      std::array<std::uint64_t, 8> vertex{work->cell[0] + (bits & 1U),
+                                          work->cell[1] + ((bits >> 1) & 1U),
+                                          work->cell[2] + ((bits >> 2) & 1U)};
       for (unsigned channel = 0; channel < 3; ++channel) {
-        output_at.back() = channel;
-        if (BinaryParts::decode(values.value()[channel], narrow).infinite)
-          return failure("LUT3D output overflow",
-                         FailureReason::ArithmeticOverflow);
-        std::memcpy(output.address(output_at), &values.value()[channel], width);
+        vertex[3] = channel;
+        work->colors[i][channel] = read(1, vertex);
       }
     }
-    return work(1);
+    auto values =
+        work->arithmetic.evaluate(work->bounds, work->query, state.tetrahedral,
+                                  work->colors, state.narrow, consume);
+    if (!accept(values.status()))
+      return;
+    for (unsigned channel = 0; channel < 3; ++channel)
+      std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
+                      output.byte_offset + (point * 3 + channel) * width,
+                  &values.value()[channel], width);
   }
-};
-struct Lut3dKernel final {
-  Status write(const ResultProgramPhase& phase,
-               const ResourceVector<ResultTensorWriteWindow>& writers) {
-    if (writers.size() != 1 || !phase.query.prepared ||
-        !phase.query.prepared->state())
-      return {ErrorCode::OperationFailed,
-              "LUT3D requires a prepared packed writer"};
-    auto allocated = phase.allocator.allocate(sizeof(Lut3dState));
-    if (!allocated.ok())
-      return allocated.status();
-    auto buffer = allocated.take_value();
-    std::unique_ptr<Lut3dState, void (*)(Lut3dState*)> state(
-        new (buffer.data()) Lut3dState(
-            static_cast<const Lut3dProgram*>(phase.query.prepared->state()),
-            phase),
-        [](auto* value) { value->~Lut3dState(); });
-    return state->execute(writers);
+  *status = {};
+}
+Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
+  using Answer = Result<ps_prepared_kernel_v8>;
+  const auto invalid = [] {
+    return Answer({ErrorCode::TypeMismatch, "invalid LUT3D signature"});
+  };
+  const auto* state = static_cast<const Lut3dProgram*>(query.static_state);
+  if (!state || query.inputs.size() != 3 || query.outputs.size() != 1 ||
+      query.writes.size() != 1 || !query.task_parameters.empty() ||
+      !query.outputs[0].result_schema ||
+      !query.outputs[0].result_schema->same_schema(*state->output_schema) ||
+      query.scratch != std::array<std::uint64_t, 3>{sizeof(Lut3dScratch), 0, 0})
+    return invalid();
+  auto output = TileGrid::from_schema(*state->output_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  const auto& write = query.writes[0];
+  auto region = output.value().region(write.tile_index);
+  if (!region.ok())
+    return Answer(region.status());
+  if (write.port || write.member || write.domain != physical::Domain::Host ||
+      write.layout.element_type !=
+          state->output_schema->tensors[0].descriptor.element_type ||
+      !fixed_tensor::matches_region(write.layout, region.value()))
+    return invalid();
+  auto prepared = std::make_unique<PreparedLut3d>();
+  prepared->profile = state->profile;
+  prepared->tetrahedral = state->tetrahedral;
+  prepared->clamp = state->clamp;
+  prepared->extents = state->extents;
+  prepared->narrow = write.layout.element_type == ElementType::Float32;
+  const auto regions = input_regions(*state, region.value());
+  ResourceLimits limits;
+  limits.maximum_work = physical::ValidationLimits{}.maximum_work;
+  ResourceBudget budget(limits);
+  std::size_t slot = 0;
+  for (unsigned port = 0; port < 3; ++port) {
+    auto grid = TileGrid::from_schema(*query.inputs[port].result_schema,
+                                      query.tile_extent);
+    if (!grid.ok())
+      return Answer(grid.status());
+    prepared->inputs.grids[port] = grid.take_value();
+    prepared->input_narrow[port] =
+        query.inputs[port].result_schema->tensors[0].descriptor.element_type ==
+        ElementType::Float32;
+    auto tiles = required_tiles(regions[port], prepared->inputs.grids[port],
+                                budget, query.reads.size() - slot);
+    if (!tiles.ok())
+      return Answer(tiles.status());
+    for (auto index : tiles.value()) {
+      auto charged = budget.consume({1});
+      if (!charged.ok())
+        return Answer(charged);
+      const auto& read = query.reads[slot];
+      auto expected = prepared->inputs.grids[port].region(index);
+      if (!expected.ok())
+        return Answer(expected.status());
+      if (read.port != port || read.member || read.tile_index != index ||
+          read.domain != physical::Domain::Host ||
+          read.layout.element_type != query.inputs[port]
+                                          .result_schema->tensors[0]
+                                          .descriptor.element_type ||
+          !fixed_tensor::matches_region(read.layout, expected.value()))
+        return invalid();
+      prepared->inputs.slots[port].push_back(
+          {index, static_cast<std::uint32_t>(slot++)});
+    }
   }
-};
-using Lut3dResultProgram = numeric_ops::WholeTensorProgram<Lut3dKernel>;
-
+  if (slot != query.reads.size())
+    return invalid();
+  ps_prepared_kernel_v8 kernel{};
+  kernel.struct_size = sizeof(kernel);
+  kernel.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  kernel.context = prepared.release();
+  kernel.invoke_cpu = invoke;
+  kernel.release = [](const void* context) {
+    delete static_cast<const PreparedLut3d*>(context);
+  };
+  return Answer(kernel);
+}
 OperationDefinition operation(const std::string& key, bool tetrahedral,
                               SequenceProfile profile) {
   OperationDefinition result;
@@ -351,9 +431,7 @@ OperationDefinition operation(const std::string& key, bool tetrahedral,
   auto& traits = result.traits;
   traits.input_count = 3;
   traits.input_schema.resize(3);
-  for (auto& input : traits.input_schema)
-
-    traits.input_schema[0].element_type_mask = 12;
+  traits.input_schema[0].element_type_mask = 12;
   traits.input_schema[1].element_type_mask = 12;
   traits.input_schema[2].element_type_mask = 4;
   traits.requires_metadata_specialization = true;
@@ -362,17 +440,29 @@ OperationDefinition operation(const std::string& key, bool tetrahedral,
       {"output_color_description", OperationParameterType::String},
       {"dtype", OperationParameterType::String},
       {"out_of_domain", OperationParameterType::String}};
-  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
-                                       sizeof(Lut3dResultProgram));
-  traits.workspace_bytes = sizeof(Lut3dState);
+  traits.outputs[0].key = "values";
+  traits.outputs[0].output_schema = tensor_ops::port();
+  traits.outputs[0].result_schema = tensor_ops::scalar_schema();
   result.prepare_static = [tetrahedral, profile](const auto& inputs,
                                                  const auto& parameters) {
     return prepare(tetrahedral, profile, inputs, parameters);
   };
-  result.start_result = [](const auto&, const auto& allocator) {
-    return ResultContinuation::make<Lut3dResultProgram>(allocator);
+  result.lower = lower;
+  result.prepare_kernel =
+      [](const physical::KernelDesc& kernel,
+         const physical::Placement& placement, const KernelPreparation& query,
+         const ResourceSet&,
+         const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    if (kernel.symbol != "lut3d" || kernel.contract != lut_contract)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::TypeMismatch, "invalid LUT3D kernel"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::BackendUnavailable, "LUT3D requires CPU Host"});
+    return prepare_kernel(query);
   };
-  return sdk::with_whole_stage(std::move(result), UINT64_C(1) << 48);
+  return result;
 }
 }  // namespace
 Status register_lut3d_application(OperationRegistry* registry) {

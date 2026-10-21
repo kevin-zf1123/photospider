@@ -54,7 +54,8 @@ std::shared_ptr<T> own_callbacks(T value) {
 /** @brief Retains foreign prepared state and guards its eventual deleter. */
 inline std::shared_ptr<const void> protect_callback_state(
     std::shared_ptr<const void> state) {
-  if (!state)
+  // An alias may have a null address while retaining a real cleanup owner.
+  if (!state && state.use_count() == 0)
     return {};
   struct Owner {
     std::shared_ptr<const void> state;

@@ -24,7 +24,7 @@ struct SequenceInput final {
 inline SequenceInput sequence_input(const WorkflowInputDeclaration& input) {
   return {WorkflowInputReference{input.id}, input.result_schema};
 }
-/** @brief Authors a Result-backed Whole sequence operation node.
+/** @brief Authors a sequence with fixed values-tile and atomic-axis tasks.
  * @param id Nonzero workflow node ID.
  * @param start First scalar Result input and authoring schema hint.
  * @param other Endpoint Result for linspace or step Result for arange.
@@ -47,25 +47,29 @@ inline SequenceInput sequence_input(const WorkflowInputDeclaration& input) {
  * binding independently. The node stores workflow edges and static parameters,
  * not input payload. Changing count or dtype requires recompilation.
  *
- * Both outputs execute Whole. For a nonempty request, the coordinator supplies
- * authorized scalar tensor windows, and the operation computes the complete
- * selected output before consumer projection. The returned Result retains the
- * complete published object and global coordinates; a query does not create a
- * packed ROI slice. For count=1, runtime requests only `start`, while static
- * specialization still checks the declared second input. For larger counts,
- * both inputs are required even for an endpoint-only query. An axis component
- * query closes over its complete three-component tuple. `values` and `axis`
- * have separate identities and active-input associations.
+ * Each selected values tile has one fixed CPU task; axis has one task writing
+ * its complete three-component tuple. Unselected outputs are not computed.
+ * For count=1, tasks read only start; both declared input schemas still
+ * validate. Larger counts require both scalar payloads even for endpoint-only
+ * selection. Values use global indices and exact weighted arithmetic with
+ * direct final rounding. Axis is Int64 in integer mode and Float64 otherwise.
  *
- * Numeric failure is Run-scoped for the selected output; an axis failure does
- * not invalidate a separately successful values Result. Active input edits
- * invalidate the complete selected output. Values own count*sizeof(dtype)
- * bytes, axis owns 24 bytes, and exact-arithmetic scratch uses managed
- * resources. Empty queries produce empty coverage without sample reads or
- * arithmetic. Work, capacity, cancellation, upstream and stale errors retain
- * their status; failure releases unpublished storage. Published Results remain
- * readable for the lifetime of their owners. The worker and caller floating
- * environments are restored.
+ * Active floating inputs must be finite. Every computed floating component
+ * must round to a finite result, and every computed integer component must fit
+ * Int64. These are unchecked caller preconditions, with no promised numerical
+ * failure diagnostic. Unselected values/axis impose no output representability
+ * requirement. Underflow and signed zero retain their specified semantics.
+ * Selected tasks share one IR call: operational failure prevents successful
+ * publication of that call's outputs. Separate Runs can select outputs
+ * independently; there is no within-call output failure isolation.
+ *
+ * Each output tile owns its preallocated dense storage; axis owns 24 bytes.
+ * Each invocation uses private SequenceMath scratch. Empty selections emit no
+ * tasks, payload reads or scratch demand. Cancellation is checked per sample;
+ * exact arithmetic loops have fixed bounds. No runtime payload allocation,
+ * numerical validators, work counters or content cache is used. Successful
+ * Results outlive the context. Worker and caller floating environments are
+ * restored, including modes and flags.
  */
 inline Result<WorkflowNode> sequence_node(std::uint64_t id, SequenceInput start,
                                           SequenceInput other,
@@ -144,7 +148,7 @@ inline Result<WorkflowNode> sequence_node(std::uint64_t id, SequenceInput start,
  * @return A `sequence_node` with `values[count]` and Float64 `axis[3]` Results.
  * For count=1, runtime reads start only. For larger counts, values include
  * both endpoints and may contain repeated rounded values. The axis tuple is
- * [start,end,step]. See sequence_node for Result windows, projection, errors
+ * [start,end,step]. See sequence_node for fixed selection, errors
  * and ownership.
  */
 inline Result<WorkflowNode> linspace_node(
@@ -166,7 +170,7 @@ inline Result<WorkflowNode> linspace_node(
  * integer/floating input kinds require explicit cast nodes. Positive, zero and
  * negative steps are valid. For count=1, runtime reads start only and axis is
  * [start,start,+0]; otherwise axis is [start,last,step]. See sequence_node for
- * Result windows, projection, errors and ownership.
+ * fixed selection, errors and ownership.
  */
 inline Result<WorkflowNode> arange_node(
     std::uint64_t id, SequenceInput start, SequenceInput step,

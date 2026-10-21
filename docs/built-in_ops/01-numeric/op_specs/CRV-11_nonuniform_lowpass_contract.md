@@ -60,36 +60,14 @@ resampling followed by discrete filtering is not the strict reference. Boundary
 handling retains full-kernel normalization.
 
 positions and values independently accept Float32/Float64 and may mix. Output
-retains values dtype. All source values and final outputs must be finite;
-nonfinite samples or final overflow fail the complete-input run.
-This is a continuous real-signal contract, unlike the uniform discrete family's
-explicit IEEE NaN/Inf aggregation. Dependency and accelerated details follow.
+retains values dtype. Finite strictly increasing positions, finite contributing source endpoint values and finite representable selected outputs are unchecked caller preconditions. The fixed kernel consumes these numerical facts directly. The continuous real-signal contract and its source endpoint rules govern every positive-length reconstructed segment.
 
-Every nonempty complete-input Result request declares payload tile coverage with explicit validation
-needs  for both complete tensor members. Typed/upstream validation covers
-every element. The callback validates all positions globally through authorized
-windows, promotes coordinates into Root-owned storage, then reads source values
-through authorized windows without collecting or copying their full tensor. Each
-output uses the original positive-length reconstructed segments and mapped
-endpoints. Isolated contacts do not add numerical operands; coefficient
-cancellation does not remove endpoint validation. The callback computes every
-column and center, so invalid remote values may fail the Run even if output is not
-delivered. Empty reads no sample payload after static preflight.
+Every selected output tile lowers to one ABI 8 CPU task. It reads the complete positions vector and all positions along the filtered values axis for the selected other-axis coordinates, closed on each source's own tile grid. Dynamic positions determine which intervals contribute numerically, so the static values closure is a conservative superset. Extra physical samples are not numerical operands. Each task directly searches immutable source views and streams positive-length pieces; isolated contacts do not add endpoints, and coefficient cancellation does not omit an endpoint from its piece.
 
-The Result writer publishes all samples transactionally with full certified
-coverage and global coordinates. Input changes invalidate complete recorded output
-demand, and the Result owner survives context teardown. Root accounts promoted
-positions (8*K bytes plus metadata), pieces/coefficient vectors and growth overlap,
-fixed arithmetic workspace and complete output. Sparse requests still require the
-full output and may exhaust admission. Cancellation and all terminal errors
-release temporary state; failed runs publish no partial output.
+Only selected output tiles are allocated and computed. Each invocation owns fixed arithmetic, traversal and polynomial scratch; it retains two current pieces and borrows positions without copying a coordinate vector. Empty selection checks static metadata and emits no task or payload read. The executor publishes a successful call after all its writes succeed and retire. Escaped Results retain their storage owners.
 
-Strict correctly rounds the complete integral quotient; accelerated Apple Silicon
-and x86-64 keys allow final nonzero finite error <=4 ULP and must match strict
-finite/zero/sign classification. Strict fallback remains available; complete-input fallback
-counters are unavailable. Certified integration/rounding that cannot finish
-within available capacity/work/stage returns ResourceExhausted. Do not publish
-an unconverged approximation.
+Strict correctly rounds the complete integral quotient; accelerated Apple Silicon and x86-64 keys allow the shared final FP32 bound and currently evaluate through the strict algorithm. Precision or fixed arithmetic capacity exhaustion returns ResourceExhausted. Cancellation/resource failures propagate before a shortcut or precision retry; numerical uncertainty alone selects a higher order or precision.
+
 When every participating finite source/extension sample has identical bits,
 retain that constant including -0. Otherwise exact zero is +0 and nonzero
 underflow keeps the mathematical sign. Virtual zero padding contributes +0 and
@@ -116,7 +94,7 @@ would be unrepresentable. Underlying finite inputs retain their exact values.
 
 Ordered dynamic ports are `positions` and `values`. Each is a Result containing exactly one tensor member under any structurally valid schema id/version/member key. Use the complete `sample_shape()` including batch axes. `positions` has shape [K], rank 1, Float32/64, finite strictly increasing values and K=2..1048576. `values` has rank 1..8, positive extents and product <=2^40; static axis selects its extent K.
 
-The `samples` output is an immutable `photospider.tensor` v1 Result member with the original full shape and dtype and no attached domain description, evaluated at the original positions. The output retains its backing owners; the schema carries no operation resource configuration. Nonempty output has complete internal coverage, with public coverage restricted to requested tiles, and retains global coordinates.
+The `samples` output is an immutable `photospider.tensor` v1 Result member with the original full shape and dtype and no attached domain description, evaluated at the original positions. The output retains its backing owners; the schema carries no operation resource configuration. Output uses the full shape as ordinary axes with zero atomic trailing axes. Coverage contains only selected tiles and retains global coordinates.
 
 Static support_radius is a finite positive Float64; boundary is String default
 reflect. Four sinc kernels require finite positive Float64 cutoff; Kaiser also
@@ -126,45 +104,19 @@ selected by independent operation key, not a mode parameter.
 
 ## Algorithm, resources and mapping
 
-Globally validate/promote positions and locate each output center's support.
-Partition the integration domain at reconstructed segment boundaries and boundary
-extension folds/seams. On each piece, the source is affine. Analytic antiderivatives
-where available or certified quadrature/error enclosures may evaluate kernel
-moments against that affine function. Refine until final output rounding or the
-accelerated final bound is certified. Fixed quadrature order and an unverified
-residual are not sufficient. Do not first create an approximate uniform source.
+Each task declares complete positions and the full filtered axis of its selected values rectangle. Preparation verifies the canonical output, exact ordered input slots, dtype, empty task parameters and scratch size. Source affine views may have negative/zero strides or unaligned addresses. Lowering counts each source closure before enumeration and rejects closures exceeding its record budget. Immutable prepared state is shared; concurrent Runs own separate output and scratch.
 
-Large support may traverse many periods or all source intervals. Account all
-such work; exploiting repeated periods is allowed only with the same mathematical
-result. For N total values and J intersected pieces, base work is
-O(K+N log K+J) plus certified integration. Promoted positions retain 8*K element
-bytes plus metadata. Only one output's pieces are retained/reused at a time;
-no per-output certificate or full-output interval map is retained. Fixed arithmetic
-workspace, pieces/coefficient vectors and growth overlap consume managed capacity.
-Authorized position/value windows and N*sizeof(dtype) output are required even
-for sparse delivery; large sparse requests can now fail capacity admission.
+The stream partitions support at source knots and boundary folds/seams using exact integer coordinates in units of 2^-1074. Forward traversal chooses the segment immediately right of a cursor; backward traversal chooses the segment immediately left. Wrap preserves its discontinuous seam. Reflect reverses endpoint order on descending branches. Stored segment endpoints define the original affine function; clipped lower/upper endpoints define its positive integration measure.
 
-All input edits invalidate the complete output. All 15 formal keys use complete-input;
-source typed/upstream failures remain observable. Arbitrary immutable strides,
-zero/negative strides, offsets and unaligned access are supported. One immutable
-dense output owns data/metadata past context teardown, and requested delivery
-retains global coordinates. Cache-off/partitions do not change mathematical values.
+One traversal establishes the raw-constant shortcut and endpoint amplitude scale. Two radial cursors then test the exact paired-affine identity. Each precision/order attempt replays forward pieces and integrates a certified polynomial against each affine function. The complete kernel normalization remains independent of source boundaries. Source positions are accessed by binary search, without promoted positions or a retained partition vector.
 
-Poll cancellation during global positions validation, each integration/refinement
-piece and at bounded source-read/output batches; release temporary state on all
-terminal paths. A compact output does not waive global coordinate work or ancestry
-capacity. Empty Q reads no dynamic payload, though static preflight remains.
+For J pieces across selected output supports, each traversal costs O(J log K) geometry work plus arithmetic and endpoint reads; refinement can replay it. Scratch is independent of K, J and the number of output elements. It contains fixed 12288-bit arithmetic, two piece records and three coefficient arrays with 513, 513 and 1025 interval slots. Two order-512 factors require at most 1025 product coefficients. Blackman's second cosine temporarily uses the product array before convolution. All storage is preallocated and reused by that invocation.
+
+Large support may traverse many periods. Fixed memory does not bound traversal time; cancellation is polled in every piece, binary search and arithmetic loop. Precision/order limits bound each numerical refinement attempt. A failed or cancelled call exposes no partial Result. Empty selection reads no dynamic payload. Rebinding reuses immutable preparation and does not promise content-cache identity.
 
 ## Errors and acceptance
 
-Invalid static shape/axis/parameters fail compile/preflight with
-InvalidArgument/InvalidDomain; dtype/shape mismatch uses TypeMismatch. Invalid
-global positions or nonfinite source samples fail
-OperationFailed/InvalidDomain. Final output narrowing overflow fails
-OperationFailed/ArithmeticOverflow. ResourceExhausted, BackendUnavailable,
-upstream, typed, stale and cancellation errors retain their established identity.
-Dynamic numerical failures use Domain/Run, including undelivered values or
-output overflow. Failure/cancellation publishes no partial output.
+Invalid static shape/axis/parameters fail preparation with InvalidArgument/InvalidDomain; dtype/shape mismatch uses TypeMismatch. Numerical position ordering, endpoint finiteness and selected-output representability are caller preconditions, so the kernel performs no full-input validation pass. ResourceExhausted, BackendUnavailable, binding/upstream failures and cancellation retain their execution categories. Operational failures never become a numerical retry or success.
 
 Independent oracle uses the exact piecewise-linear reconstruction and certified
 continuous convolution. Finite constants under reflect/replicate/wrap are exactly
@@ -191,7 +143,7 @@ Together these check the continuous measure and shared floating contract.
 Test impulses as piecewise-linear hats, strongly nonuniform gaps, kernel support
 touches, exact affine cancellation, wrap seam jumps, multiple reflection periods,
 zero boundaries, both dtypes, mixed position precision, subnormal/extreme parameters,
-NaN/Inf in demanded versus distant samples and final overflow. Check accelerated
+valid finite endpoint extremes, local negative-zero support and representable output boundaries. Check accelerated
 4-ULP/classification/constant obligations against the same continuous oracle.
 
 Frequency response applies to the specified continuous kernel and reconstruction;
@@ -202,20 +154,14 @@ filter/resampling error and attenuation requirements. Uniform and nonuniform
 operators need not agree even at equally spaced positions: one filters discrete
 samples and the other filters their continuous linear reconstruction.
 
-Test partial delivery, exact mathematical segment selection and independent
-signal arithmetic, complete source/dirty support and remote-column Run failures,
-strides, low budgets, cancellation, cache-off and context-lifetime owners.
-The maintained public workflow binds positions/values and kernel parameters,
-then inspects samples through Compiler/ExecutionContext; commands and independent
-results are linked below.
+Test partial delivery, exact mathematical segment selection, independent signal arithmetic, source-grid closures, affine views, low budgets, cancellation in every traversal/refinement phase, concurrent Runs, sparse large logical outputs and escaped owners.
+Temporary public acceptance binds positions/values and kernel parameters, then inspects samples through Compiler/ExecutionContext and compares them with the independent oracle.
 
 - [Resampling family](CRV-11_resample_signal.md).
 - [Uniform counterpart](CRV-11_uniform_lowpass_contract.md).
 
 ## Maintained implementation and validation
 
-This shared contract covers five nonuniform kernels and 15 profile keys; it is not itself a registered operation. Static preparation stores immutable kernel, boundary, axis and profile state. Each complete-input Run promotes positions into Root-owned storage and retains one reusable piece vector.
+This shared contract covers five nonuniform kernels and 15 profile keys. `lowpass_nonuniform.cpp` emits `nonuniform-lowpass-fixed-v1` CPU tasks. `CheckedLowpassGeometry::piece_at` reads positions through a raw-word accessor. `NonuniformLowpassMath` streams exact pieces and paired-affine identities, while `CheckedLowpassPolynomialBuilder` uses fixed coefficient views with rigorous Taylor remainder bounds. All accelerated keys currently use strict arithmetic; precision 128..4096 and order <=512 may return `ResourceExhausted`.
 
-The implementation uses exact partition and paired-affine integration plus global Taylor moments with a rigorous tail bound, not local adaptive quadrature. All accelerated keys currently use the strict fallback; 128..4096-bit precision and order <=512 may return `ResourceExhausted`.
-
-Temporary acceptance should cover complete input and dirty support, global position validation, remote-column Run errors, cache replacement, static preparation reuse, active arithmetic cancellation and escaped Result/read-window owners. complete-input numerical/fallback counters are unavailable. See [CRV-11 umbrella](CRV-11_resample_signal.md).
+The independent Fraction/MPFR oracle enumerates boundary copies and preserves endpoint raw tags through a separate reconstruction for local constant-bit detection. Temporary public and direct checks cover numerical outputs, exact static closures, runtime ownership, cancellation, floating environment, fixed scratch bounds and allocation-free invocation. See [CRV-11 umbrella](CRV-11_resample_signal.md).

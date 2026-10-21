@@ -2,12 +2,12 @@
 
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <optional>
 
-#include "01-numeric/certified_math.hpp"
+#include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/directed_color_functions.hpp"
+#include "01-numeric/numeric_nan.hpp"
 #include "02-format-color/model_rational.hpp"
 
 namespace ps::plugin_internal::model_ops {
@@ -66,19 +66,24 @@ const char* operation_name(Kind kind);
 const char* source_model(Kind kind, GrayKind gray);
 const char* target_model(Kind kind, GrayKind gray);
 
-struct MathCounters final {
-  std::uint64_t accepted = 0, reference = 0, refinements = 0;
-};
 class ModelMath final {
   const MathConfig& config_;
   const Constants& constants_;
-  const RationalMath::Work& work_;
   RationalMath exact_;
-  numeric_ops::DirectedColorFunctions directed_;
-  numeric_ops::CertifiedMath certified_;
-  MathCounters counters_;
-  using Interval = numeric_ops::DirectedInterval::Interval;
-  using Frame = numeric_ops::DirectedInterval::Frame;
+  struct IntervalWork final {
+    RationalMath* exact;
+    Status operator()(std::uint64_t amount) const {
+      exact->work(amount);
+      return exact->status();
+    }
+  } interval_work_{&exact_};
+  using Math = numeric_ops::CheckedDirectedInterval;
+  numeric_ops::DirectedColorFunctionsStorage<Math> directed_;
+  using Interval = Math::Interval;
+  using Frame = Math::Frame;
+  bool active();
+  bool refine(unsigned precision);
+  std::uint64_t angle(std::uint64_t y, std::uint64_t x);
   struct RootTerm final {
     Rational argument;
     std::optional<Rational> exact;
@@ -109,10 +114,13 @@ class ModelMath final {
 
  public:
   ModelMath(const MathConfig& config, const Constants& constants,
-            const RationalMath::Work& work);
+            RationalMath::Work work);
+  ModelMath(const ModelMath&) = delete;
+  ModelMath& operator=(const ModelMath&) = delete;
+  ModelMath(ModelMath&&) = delete;
+  ModelMath& operator=(ModelMath&&) = delete;
   Result<std::uint64_t> evaluate(const std::array<std::uint64_t, 3>& bits,
                                  unsigned component,
                                  std::optional<double> candidate = {});
-  const MathCounters& counters() const { return counters_; }
 };
 }  // namespace ps::plugin_internal::model_ops

@@ -30,7 +30,7 @@ Return the greater value of matching elements in inputs `a` and `b`.
 Support UInt8, Int64, Float32 and Float64; shapes and dtypes match exactly.
 Output `values` preserves shape and dtype with no attached domain description. There are no static
 numeric parameters. Inherit the [binary contract](NUM-05_binary_contract.md)
-for both-operand demand, typed validation, errors, resources and execution.
+for both-operand demand, structural validation, errors, resources and execution.
 
 ## Numeric semantics
 
@@ -56,17 +56,13 @@ payload/sign bits, signaling NaNs, and Int64 values beyond Float64's exact range
 Use an independent integer/bit-classification oracle; apply shared resource,
 validation, lifetime, invalidation and cancellation cases.
 
-Current legacy maximum has Elementwise registration but rejects nonfinite values
-through its shared reader. Its existing zero tie handling does not establish
-this complete same-sign/mixed-sign contract. The maintained versioned keys implement these new dtype and propagation rules;
-see the execution entry below.
+The unsuffixed `numeric.maximum` key uses fixed CPU tile tasks and an unchecked finite Float32/Float64 domain. It returns positive zero for every zero pair. The suffixed keys below have the separate dtype and IEEE propagation rules specified here.
 
 ## Maintained implementation
 
 The three keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/ops/numeric/binary.hpp`.
-The shared Run-shared adapter retains and validates both complete inputs, including
-when a numeric identity determines a result.
+The fixed adapter declares both intersecting input tile sets, including when a numeric identity determines a result.
 Floating elementary operations use controlled correctly rounded hardware
 arithmetic after exact special-value classification, with exact fallback; integer
 operations retain checked exact arithmetic. Accelerated ordinary positive-base

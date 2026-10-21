@@ -1,8 +1,9 @@
-#include <memory>
 #pragma once
 
+#include <memory>
+
+#include "data/device_tensor_span.hpp"
 #include "photospider/data/result.hpp"
-#include "photospider/data/tensor.hpp"
 
 namespace ps::data_internal {
 // Owns affine/spatial backings, retained source Results, and backing leases.
@@ -11,7 +12,9 @@ namespace ps::data_internal {
 // owning Result mutex and commits coverage only after backing admission.
 struct ResultTensorBacking {
   std::uint64_t tile_extent = 128;
-  Tensor tensor;
+  Footprint coverage;
+  ResourceVector<TensorSpan> affine;
+  ResourceVector<DeviceTensorSpan> device;
   // True only when affine[i].region() equals coverage.boxes()[i].
   bool affine_canonical = false;
   ResourceVector<ResultRef> affine_owners;

@@ -1,235 +1,382 @@
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <memory>
 #include <new>
-#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "01-numeric/array_parameters.hpp"
-#include "01-numeric/exact_bezier.hpp"
 #include "01-numeric/exact_curve.hpp"
 #include "01-numeric/exact_sampling.hpp"
-#include "01-numeric/numeric_tensor_program.hpp"
-#include "01-numeric/uniform_axis.hpp"
+#include "common/fixed_point_inputs.hpp"
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "photospider/core/resource_allocator.hpp"
-#include "photospider/plugin/whole_stage.hpp"
+#include "common/tensor_program.hpp"
 
 namespace ps::plugin_internal {
 namespace {
 using numeric_ops::BinaryParts;
 using numeric_ops::SequenceProfile;
-struct LutPoint {
-  std::uint64_t query = 0;
-  unsigned first = 0, count = 0;
+struct LutMetadata final {
+  TensorDescriptor output;
+  std::uint32_t length = 0;
+  unsigned policy = 0;
 };
-struct LutState final {
+Result<LutMetadata> metadata(
+    bool channels, const std::vector<OperationMetadata>& inputs,
+    const std::map<std::string, ParameterValue>& parameters) {
+  using Answer = Result<LutMetadata>;
+  const auto mismatch = [] {
+    return Status{ErrorCode::TypeMismatch,
+                  "LUT1D input/table/axis shapes or logical size",
+                  FailureReason::None,
+                  {FailureOrigin::Schema, FailureScope::Unspecified}};
+  };
+  if (inputs.size() != 3)
+    return Answer(mismatch());
+  for (unsigned port = 0; port < 3; ++port) {
+    auto valid = tensor_ops::check_tensor(inputs[port]);
+    if (!valid.ok())
+      return Answer(valid);
+    const auto dtype =
+        inputs[port].result_schema->tensors[0].descriptor.element_type;
+    if (dtype != ElementType::Float64 &&
+        (port == 2 || dtype != ElementType::Float32))
+      return Answer(mismatch());
+  }
+  const auto in = inputs[0].result_schema->tensors[0].sample_shape();
+  const auto table = inputs[1].result_schema->tensors[0].sample_shape();
+  if (in.empty() || in.size() > 8 || table.size() != (channels ? 2U : 1U) ||
+      table[0] < 1 || table[0] > 1048576 ||
+      inputs[2].result_schema->tensors[0].sample_shape() !=
+          std::vector<std::uint64_t>{3} ||
+      (channels && (!table[1] || table[1] != in.back())))
+    return Answer(mismatch());
+  for (const auto* shape : {&in, &table}) {
+    std::uint64_t count = 1;
+    for (auto extent : *shape) {
+      if (!extent || extent > (UINT64_C(1) << 40) / count)
+        return Answer(mismatch());
+      count *= extent;
+    }
+  }
+  const auto& dtype = std::get<std::string>(parameters.at("dtype"));
+  const auto& policy = std::get<std::string>(parameters.at("out_of_domain"));
+  if ((dtype != "float32" && dtype != "float64") ||
+      (policy != "reject" && policy != "clamp" &&
+       policy != "linear_extrapolate"))
+    return Answer(numeric_ops::array_parameter_error("LUT1D dtype/domain"));
+  return Answer(LutMetadata{
+      {dtype == "float32" ? ElementType::Float32 : ElementType::Float64, in},
+      static_cast<std::uint32_t>(table[0]),
+      policy == "reject"  ? 0U
+      : policy == "clamp" ? 1U
+                          : 2U});
+}
+SchemaTemplate output_schema(const LutMetadata& metadata) {
+  auto schema = tensor_ops::scalar_schema();
+  schema.tensors[0].descriptor = metadata.output;
+  return schema;
+}
+std::array<Region, 3> input_regions(bool channels, std::uint32_t length,
+                                    const Region& output) {
+  std::array<Region, 3> regions;
+  regions[0] = length == 1
+                   ? Region(std::vector<RegionDimension>(output.rank(), {0, 0}))
+                   : output;
+  regions[1] = channels ? Region({{0, length}, output.dimensions().back()})
+                        : Region({{0, length}});
+  regions[2] = Region({{0, length == 1 ? 0U : 2U}});
+  return regions;
+}
+struct LutArithmetic final {
+  numeric_ops::ExactSampling sampling;
+  numeric_ops::ExactCurve curve;
+  explicit LutArithmetic(SequenceProfile profile)
+      : sampling(profile, true), curve(profile) {}
+};
+std::uint64_t scratch_bytes(std::uint32_t length) {
+  return length == 1 ? 0 : sizeof(LutArithmetic);
+}
+Result<OperationProgram> lower(bool channels, const OperationLowering& query) {
+  using Answer = Result<OperationProgram>;
+  auto parsed = metadata(channels, query.inputs, query.parameters);
+  if (!parsed.ok())
+    return Answer(parsed.status());
+  const auto& description = parsed.value();
+  auto output =
+      TileGrid::from_schema(output_schema(description), query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  std::array<TileGrid, 3> inputs;
+  for (unsigned port = 0; port < 3; ++port) {
+    auto grid = TileGrid::from_schema(*query.inputs[port].result_schema,
+                                      query.tile_extent);
+    if (!grid.ok())
+      return Answer(grid.status());
+    inputs[port] = grid.take_value();
+  }
+  ResourceLimits limits;
+  limits.maximum_work = query.limits.maximum_work;
+  ResourceBudget budget(limits);
+  OperationProgramBuilder builder(query);
+  for (const auto& member : query.requests[0].members)
+    for (auto tile : member.second) {
+      auto task =
+          builder.add_task(description.length == 1 ? "singleton" : "lookup",
+                           "uniform-lut-unchecked-v1", {},
+                           {scratch_bytes(description.length), 0, 0});
+      if (!task.ok())
+        return Answer(task.status());
+      auto region = output.value().region(tile);
+      if (!region.ok())
+        return Answer(region.status());
+      const auto regions =
+          input_regions(channels, description.length, region.value());
+      for (unsigned port = 0; port < 3; ++port) {
+        if (regions[port].empty()) {
+          auto valid = builder.read_input_schema(task.value(), port);
+          if (!valid.ok())
+            return Answer(valid);
+          continue;
+        }
+        auto reads = sdk::tiles_for_region(budget, inputs[port], regions[port]);
+        if (!reads.ok())
+          return Answer(reads.status());
+        for (auto index : reads.value()) {
+          auto valid = budget.consume({1});
+          if (valid.ok())
+            valid = builder.read_input(task.value(), port, 0, index);
+          if (!valid.ok())
+            return Answer(valid);
+        }
+      }
+      auto valid = builder.write_output(task.value(), 0, member.first, tile);
+      if (!valid.ok())
+        return Answer(valid);
+    }
+  return builder.finish();
+}
+struct PreparedLut final {
+  bool channels = false, narrow = false;
   SequenceProfile profile;
-  bool channels;
-  unsigned policy;
-  const ResultProgramPhase& phase;
-  std::array<std::optional<numeric_ops::MathTensorReader>, 3> readers;
-  std::function<Status(std::uint64_t)> consume;
-  std::vector<std::uint64_t> shape, at, table_at;
-  numeric_ops::UniformAxis axis;
-  numeric_ops::ExactCurve arithmetic;
-  std::array<std::uint64_t, 4> x{}, y{}, replicas{};
-  LutState(SequenceProfile selected, bool multi,
-           const ResultProgramPhase& invocation)
-      : profile(selected),
-        channels(multi),
-        policy(std::get<std::string>(
-                   invocation.query.parameters.at("out_of_domain")) == "reject"
-                   ? 0U
-               : std::get<std::string>(
-                     invocation.query.parameters.at("out_of_domain")) == "clamp"
-                   ? 1U
-                   : 2U),
-        phase(invocation),
-        consume([this](auto amount) { return work(amount); }),
-        shape(invocation.query.inputs[0]
-                  .result_schema->tensors[0]
-                  .sample_shape()),
-        at(shape.size(), 0),
-        table_at(multi ? 2 : 1, 0),
-        axis(selected),
-        arithmetic(selected) {
-    axis.knots = ResourceVector<std::uint64_t>(
-        ResourceAllocator<std::uint64_t>(phase.resources));
-    for (unsigned port = 0; port < readers.size(); ++port)
-      readers[port].emplace(phase.tensors->at({port, 0}),
-                            phase.query.cancellation);
+  std::uint32_t length = 0;
+  unsigned policy = 0;
+  std::array<bool, 3> input_narrow{};
+  fixed_tensor::PointInputs<3> inputs;
+};
+void invoke(const ps_kernel_invocation_v8* invocation,
+            ps_kernel_status_v8* status) noexcept {
+  FloatingEnvironment environment;
+  if (!environment.active()) {
+    *status = kernel_failure(ErrorCode::OperationFailed,
+                             "numeric environment unavailable");
+    return;
   }
-  Status work(std::uint64_t amount) const { return phase.consume_work(amount); }
-  void advance() {
-    for (auto i = at.size(); i; --i) {
-      if (++at[i - 1] < shape[i - 1])
-        break;
-      at[i - 1] = 0;
+  try {
+    const auto& state =
+        *static_cast<const PreparedLut*>(invocation->prepared_context);
+    const std::function<Status(std::uint64_t)> consume =
+        [invocation](std::uint64_t) {
+          return invocation->cancellation.is_cancelled &&
+                         invocation->cancellation.is_cancelled(
+                             invocation->cancellation.context)
+                     ? Status{ErrorCode::Cancelled, {}}
+                     : Status::success();
+        };
+    const auto accept = [&](const Status& checked) {
+      if (!checked.ok())
+        *status = kernel_failure(checked.code, checked.message.c_str(),
+                                 checked.reason);
+      return checked.ok();
+    };
+    if (!accept(consume(1)))
+      return;
+    fixed_tensor::PointReader<3> reader{state.inputs, *invocation};
+    const auto read = [&](unsigned port,
+                          const std::array<std::uint64_t, 8>& at) {
+      auto bits = reader.bits(port, at, state.input_narrow[port] ? 4 : 8);
+      if (state.input_narrow[port]) {
+        const auto raw = static_cast<std::uint32_t>(bits);
+        float number;
+        std::memcpy(&number, &raw, 4);
+        const double wide = number;
+        std::memcpy(&bits, &wide, 8);
+      }
+      return bits;
+    };
+    static_assert(alignof(LutArithmetic) <= alignof(std::max_align_t));
+    LutArithmetic* arithmetic = nullptr;
+    if (state.length > 1)
+      arithmetic =
+          new (invocation->scratch[0].allocation) LutArithmetic(state.profile);
+    const auto destroy = [](LutArithmetic* value) { value->~LutArithmetic(); };
+    std::unique_ptr<LutArithmetic, decltype(destroy)> guard(arithmetic,
+                                                            destroy);
+    std::array<std::uint64_t, 2> endpoints{};
+    if (state.length > 1)
+      endpoints = {read(2, {0}), read(2, {1})};
+    const bool descending =
+        BinaryParts::decode(endpoints[1], false).order_key() <
+        BinaryParts::decode(endpoints[0], false).order_key();
+    const auto key = [descending](std::uint64_t bits) {
+      const auto ordered = BinaryParts::decode(bits, false).order_key();
+      return descending ? UINT64_MAX - ordered : ordered;
+    };
+    const auto knot = [&](std::uint32_t index, std::uint64_t* bits) {
+      auto value = arithmetic->sampling.coordinate(index, state.length,
+                                                   endpoints, consume);
+      if (!accept(value.status()))
+        return false;
+      *bits = value.value();
+      return true;
+    };
+    const auto& output = invocation->outputs[0];
+    std::array<std::uint64_t, 8> at{};
+    std::uint64_t samples = 1;
+    for (unsigned axis = 0; axis < output.layout->rank; ++axis) {
+      at[axis] = output.layout->origin[axis];
+      samples *= output.layout->shape[axis];
     }
-  }
-  Status failure(const std::string& message,
-                 FailureReason reason = FailureReason::InvalidDomain) const {
-    Status result{ErrorCode::OperationFailed,
-                  message,
-                  reason,
-                  {FailureOrigin::Domain, FailureScope::Run}};
-    return result;
-  }
-  Result<std::uint64_t> read(unsigned port,
-                             const std::vector<std::uint64_t>& coordinate) {
-    auto charged = work(coordinate.size() + 1);
-    if (!charged.ok())
-      return Result<std::uint64_t>(charged);
-    const auto& input = phase.tensors->at({port, 0});
-    const bool narrow =
-        input.spec().descriptor.element_type == ElementType::Float32;
-    const auto bits = readers[port]->bits(coordinate);
-    auto value = BinaryParts::decode(bits, narrow);
-    if (value.nan || value.infinite) {
-      std::string message =
-          "nonfinite LUT1D port=" + std::to_string(port) + " coordinate=";
-      for (auto index : coordinate)
-        message += std::to_string(index) + ",";
-      return Result<std::uint64_t>(failure(message));
-    }
-    return Result<std::uint64_t>(numeric_ops::ExactBezier::widen(bits, narrow));
-  }
-  Status classify(LutPoint* point) {
-    auto value = read(0, at);
-    if (!value.ok())
-      return value.status();
-    point->query = value.value();
-    const auto key = axis.key(point->query);
-    const auto size = static_cast<unsigned>(axis.knots.size());
-    unsigned lo = 0, hi = size;
-    while (lo < hi) {
-      auto work = consume(1);
-      if (!work.ok())
-        return work;
-      const auto mid = lo + (hi - lo) / 2;
-      if (axis.key(axis.knots[mid]) < key)
-        lo = mid + 1;
-      else
-        hi = mid;
-    }
-    if (lo < size && axis.key(axis.knots[lo]) == key) {
-      point->first = lo;
-      point->count = 1;
-    } else if (!lo || lo == size) {
-      if (!policy)
-        return failure("LUT1D query outside axis domain");
-      if (policy == 1 || size == 1) {
-        point->first = lo ? size - 1 : 0;
-        point->count = 1;
+    for (std::uint64_t local = 0; local < samples; ++local) {
+      if (!accept(consume(1)))
+        return;
+      const auto column = state.channels ? at[output.layout->rank - 1] : 0;
+      std::uint64_t bits;
+      if (state.length == 1) {
+        const auto value = read(1, {0, column});
+        bits = state.narrow ? numeric_ops::numeric_bits(
+                                  numeric_ops::numeric_double(value), true)
+                            : value;
       } else {
-        point->first = lo ? size - 2 : 0;
-        point->count = 2;
+        const auto query = read(0, at);
+        const auto wanted = key(query);
+        std::uint32_t lo = 0, hi = state.length;
+        while (lo < hi) {
+          if (!accept(consume(1)))
+            return;
+          const auto mid = lo + (hi - lo) / 2;
+          std::uint64_t coordinate;
+          if (!knot(mid, &coordinate))
+            return;
+          if (key(coordinate) < wanted)
+            lo = mid + 1;
+          else
+            hi = mid;
+        }
+        std::uint32_t first = 0, count = 0;
+        std::uint64_t coordinate = 0;
+        if (lo < state.length && !knot(lo, &coordinate))
+          return;
+        if (lo < state.length && key(coordinate) == wanted) {
+          first = lo;
+          count = 1;
+        } else if (!lo || lo == state.length) {
+          // Reject's closed domain is a caller precondition. Extrapolation
+          // and clamp both retain bounded table indices for every query bit.
+          count = state.policy == 1 ? 1 : 2;
+          first = lo ? state.length - count : 0;
+        } else {
+          first = lo - 1;
+          count = 2;
+        }
+        std::array<std::uint64_t, 4> x{}, y{};
+        for (unsigned j = 0; j < count; ++j) {
+          if (!knot(first + j, &x[j]))
+            return;
+          y[j] = read(1, {first + j, column});
+        }
+        if (count == 2 && descending) {
+          std::swap(x[0], x[1]);
+          std::swap(y[0], y[1]);
+        }
+        auto value = arithmetic->curve.evaluate(
+            false, 2, 0, count, 0, count == 1 ? 0 : -1, query, x, y,
+            state.narrow, consume, {}, true);
+        if (!accept(value.status()))
+          return;
+        bits = value.value();
       }
-    } else {
-      point->first = lo - 1;
-      point->count = 2;
+      std::uint64_t offset = output.byte_offset;
+      for (unsigned axis = 0; axis < output.layout->rank; ++axis)
+        offset += (at[axis] - output.layout->origin[axis]) *
+                  output.layout->strides[axis];
+      std::memcpy(static_cast<std::uint8_t*>(output.allocation) + offset, &bits,
+                  state.narrow ? 4 : 8);
+      for (unsigned axis = output.layout->rank; axis-- > 0;) {
+        if (++at[axis] <
+            output.layout->origin[axis] + output.layout->shape[axis])
+          break;
+        at[axis] = output.layout->origin[axis];
+      }
     }
-    return Status::success();
+    *status = {};
+  } catch (const std::bad_alloc&) {
+    *status = kernel_failure(ErrorCode::ResourceExhausted);
+  } catch (...) {
+    *status =
+        kernel_failure(ErrorCode::OperationFailed, "LUT1D invocation failed");
   }
-  Status execute(const ResourceVector<ResultTensorWriteWindow>& writers) {
-    std::array<std::uint64_t, 3> axis_values{};
-    for (unsigned j = 0; j < 3; ++j) {
-      auto value = read(2, {j});
-      if (!value.ok())
-        return value.status();
-      axis_values[j] = value.value();
-    }
-    plugin_internal::FloatingEnvironment environment;
-    axis.sampling.environment_established = environment.active();
-    auto status = axis.validate(
-        axis_values,
-        phase.query.inputs[1].result_schema->tensors[0].sample_shape()[0],
-        consume);
-    if (!status.ok())
-      return status.code == ErrorCode::OperationFailed
-                 ? failure(status.message, status.reason)
-                 : status;
-    const auto total =
-        phase.query.output.result_schema->tensors[0].sample_count().value();
-    // Preserve complete query rejection before table arithmetic without point
-    // records.
-    for (std::uint64_t i = 0; i < total; ++i, advance()) {
-      auto query = read(0, at);
-      if (!query.ok())
-        return query.status();
-      auto key = axis.key(query.value());
-      if (!policy && (key < axis.key(axis.knots.front()) ||
-                      key > axis.key(axis.knots.back())))
-        return failure("LUT1D query outside axis domain");
-    }
-    numeric_ops::MathTensorWriter output(writers[0]);
-    const bool narrow =
-        phase.query.output.result_schema->tensors[0].descriptor.element_type ==
+}
+Result<ps_prepared_kernel_v8> prepare(bool channels, SequenceProfile profile,
+                                      const std::string& symbol,
+                                      const KernelPreparation& query) {
+  using Answer = Result<ps_prepared_kernel_v8>;
+  const auto invalid = [] {
+    return Answer({ErrorCode::TypeMismatch, "invalid fixed LUT1D invocation"});
+  };
+  if (query.outputs.size() != 1 || query.writes.size() != 1 ||
+      !query.task_parameters.empty())
+    return invalid();
+  auto parsed = metadata(channels, query.inputs, query.parameters);
+  if (!parsed.ok())
+    return Answer(parsed.status());
+  const auto& description = parsed.value();
+  const auto schema = output_schema(description);
+  if (symbol != (description.length == 1 ? "singleton" : "lookup") ||
+      query.scratch !=
+          std::array<std::uint64_t, 3>{scratch_bytes(description.length), 0,
+                                       0} ||
+      !query.outputs[0].result_schema ||
+      !query.outputs[0].result_schema->same_schema(schema))
+    return invalid();
+  auto grid = TileGrid::from_schema(schema, query.tile_extent);
+  if (!grid.ok())
+    return Answer(grid.status());
+  auto output = grid.value().region(query.writes[0].tile_index);
+  if (!output.ok())
+    return Answer(output.status());
+  auto state = std::make_unique<PreparedLut>();
+  state->channels = channels;
+  state->profile = profile;
+  state->narrow = description.output.element_type == ElementType::Float32;
+  state->length = description.length;
+  state->policy = description.policy;
+  for (unsigned port = 0; port < 3; ++port)
+    state->input_narrow[port] =
+        query.inputs[port].result_schema->tensors[0].descriptor.element_type ==
         ElementType::Float32;
-    const auto width = narrow ? 4U : 8U;
-    for (std::uint64_t i = 0; i < total; ++i, advance()) {
-      LutPoint point;
-      status = classify(&point);
-      if (!status.ok())
-        return status;
-      if (channels)
-        table_at[1] = at.back();
-      for (unsigned j = 0; j < point.count; ++j) {
-        table_at[0] = point.first + j;
-        auto value = read(1, table_at);
-        if (!value.ok())
-          return value.status();
-        x[j] = axis.knots[point.first + j];
-        y[j] = value.value();
-      }
-      // The exact linear evaluator requires a positive denominator.
-      if (point.count == 2 && axis.descending) {
-        std::swap(x[0], x[1]);
-        std::swap(y[0], y[1]);
-      }
-      auto value = arithmetic.evaluate(
-          false, 2, 0, point.count, 0, point.count == 1 ? 0 : -1, point.query,
-          x, y, narrow, consume, {}, environment.active());
-      if (!value.ok())
-        return value.status();
-      if (BinaryParts::decode(value.value(), narrow).infinite)
-        return failure("LUT1D output conversion overflow",
-                       FailureReason::ArithmeticOverflow);
-      numeric_ops::select_words(replicas.data(), value.value(), value.value(),
-                                1, profile);
-      std::memcpy(output.address(at), replicas.data(), width);
-    }
-    return work(1);
-  }
-};
-struct LutKernel final {
-  SequenceProfile profile;
-  bool channels;
-  LutKernel(SequenceProfile selected, bool multi)
-      : profile(selected), channels(multi) {}
-  Status write(const ResultProgramPhase& phase,
-               const ResourceVector<ResultTensorWriteWindow>& writers) {
-    if (writers.size() != 1)
-      return {ErrorCode::OperationFailed, "LUT1D requires one packed writer"};
-    auto allocated = phase.allocator.allocate(sizeof(LutState));
-    if (!allocated.ok())
-      return allocated.status();
-    auto buffer = allocated.take_value();
-    std::unique_ptr<LutState, void (*)(LutState*)> state(
-        new (buffer.data()) LutState(profile, channels, phase),
-        [](auto* value) { value->~LutState(); });
-    return state->execute(writers);
-  }
-};
-using LutProgram = numeric_ops::WholeTensorProgram<LutKernel>;
-
+  auto regions = input_regions(channels, description.length, output.value());
+  auto valid =
+      fixed_tensor::prepare_point_inputs(query, &state->inputs, &regions);
+  if (!valid.ok())
+    return Answer(valid);
+  ps_prepared_kernel_v8 kernel{};
+  kernel.struct_size = sizeof(kernel);
+  kernel.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  kernel.context = state.release();
+  kernel.invoke_cpu = invoke;
+  kernel.release = [](const void* context) {
+    delete static_cast<const PreparedLut*>(context);
+  };
+  return Answer(kernel);
+}
 OperationDefinition lut_operation(const std::string& key, bool channels,
                                   SequenceProfile profile) {
   OperationDefinition operation;
@@ -237,65 +384,50 @@ OperationDefinition lut_operation(const std::string& key, bool channels,
   auto& traits = operation.traits;
   traits.input_count = 3;
   traits.input_schema.resize(3);
-  for (auto& input : traits.input_schema)
-
-    traits.input_schema[0].element_type_mask =
-        traits.input_schema[1].element_type_mask = 12;
+  traits.input_schema[0].element_type_mask =
+      traits.input_schema[1].element_type_mask = 12;
   traits.input_schema[2].element_type =
       static_cast<std::uint32_t>(ElementType::Float64);
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = {{"dtype", OperationParameterType::String},
                              {"out_of_domain", OperationParameterType::String}};
-  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
-                                       sizeof(LutProgram));
-  traits.workspace_bytes = sizeof(LutState);
+  traits.outputs[0].key = "values";
+  traits.outputs[0].output_schema = tensor_ops::port();
+  traits.outputs[0].result_schema = tensor_ops::scalar_schema();
   operation.specialize_metadata = [channels, profile](const auto& inputs,
                                                       const auto& parameters) {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
-    const auto in = inputs[0].result_schema->tensors[0].sample_shape();
-    const auto table = inputs[1].result_schema->tensors[0].sample_shape();
-    const auto mismatch = [] {
-      return Status{ErrorCode::TypeMismatch,
-                    "LUT1D input/table/axis shapes or logical size",
-                    FailureReason::None,
-                    {FailureOrigin::Schema, FailureScope::Unspecified}};
-    };
-    if (in.empty() || in.size() > 8 || table.size() != (channels ? 2U : 1U) ||
-        table[0] < 1 || table[0] > 1048576 ||
-        inputs[2].result_schema->tensors[0].sample_shape() !=
-            std::vector<std::uint64_t>{3} ||
-        (channels && (!table[1] || table[1] != in.back())))
-      return Answer(mismatch());
-    for (const auto* shape : {&in, &table}) {
-      std::uint64_t count = 1;
-      for (auto extent : *shape) {
-        if (!extent || extent > (UINT64_C(1) << 40) / count)
-          return Answer(mismatch());
-        count *= extent;
-      }
-    }
-    const auto& dtype = std::get<std::string>(parameters.at("dtype"));
-    const auto& policy = std::get<std::string>(parameters.at("out_of_domain"));
-    if ((dtype != "float32" && dtype != "float64") ||
-        (policy != "reject" && policy != "clamp" &&
-         policy != "linear_extrapolate"))
-      return Answer(numeric_ops::array_parameter_error("LUT1D dtype/domain"));
+    auto parsed = metadata(channels, inputs, parameters);
+    if (!parsed.ok())
+      return Answer(parsed.status());
     auto available = numeric_ops::sequence_profile_available(profile);
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization resolved;
-    resolved.metadata.result_schema = std::make_shared<const SchemaTemplate>(
-        numeric_ops::numeric_tensor_schema(
-            dtype == "float32" ? ElementType::Float32 : ElementType::Float64,
-            in));
+    resolved.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(output_schema(parsed.value()));
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(resolved)});
   };
-  operation.start_result = [channels, profile](const auto&,
-                                               const auto& allocator) {
-    return ResultContinuation::make<LutProgram>(allocator, profile, channels);
+  operation.lower = [channels](const OperationLowering& query) {
+    return lower(channels, query);
   };
-  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
+  operation.prepare_kernel =
+      [channels, profile](
+          const physical::KernelDesc& kernel,
+          const physical::Placement& placement, const KernelPreparation& query,
+          const ResourceSet&,
+          const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    if (kernel.contract != "uniform-lut-unchecked-v1")
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::TypeMismatch, "invalid LUT1D kernel contract"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::BackendUnavailable, "LUT1D requires CPU Host"});
+    return prepare(channels, profile, kernel.symbol, query);
+  };
+  return operation;
 }
 }  // namespace
 Status register_lut1d_application(OperationRegistry* registry) {

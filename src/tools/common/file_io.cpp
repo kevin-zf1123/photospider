@@ -15,14 +15,15 @@
 
 #if defined(__APPLE__)
 #include <stdio.h>
+#include <sys/select.h>
 #elif defined(__linux__)
-#include <fcntl.h>
 #include <sys/syscall.h>
 #elif defined(_WIN32)
 #include <windows.h>
 #endif
 
 #if !defined(_WIN32)
+#include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
 #endif
@@ -92,33 +93,67 @@ std::string Files::read(const fs::path& path, std::uint64_t limit) {
   protect(path);
   interrupted();
 #if !defined(_WIN32)
-  if (path == "-") {
+  {
+    struct Descriptor {
+      int value = -1;
+      ~Descriptor() {
+        if (value >= 0)
+          ::close(value);
+      }
+    } file;
+    int input = STDIN_FILENO;
+    if (path != "-") {
+      // Nonblocking open closes the signal/check-to-open race for FIFOs.
+      // Polling also keeps an empty connected FIFO cancellable during reads.
+      file.value = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+      interrupted();
+      if (file.value < 0)
+        throw ToolError("cannot read " + path.string(), 4, "PS-IO-READ");
+      input = file.value;
+    }
+#if defined(__APPLE__)
+    if (input >= FD_SETSIZE)
+      throw ToolError("input descriptor exceeds select capacity", 4,
+                      "PS-IO-READ");
+#endif
     std::string result;
     char buffer[65536];
     for (;;) {
       interrupted();
-      pollfd descriptor{STDIN_FILENO, POLLIN, 0};
+#if defined(__APPLE__)
+      // Darwin poll does not report a FIFO writer's close after its last byte.
+      // select distinguishes that EOF from an initially unconnected FIFO.
+      fd_set readable;
+      FD_ZERO(&readable);
+      FD_SET(input, &readable);
+      timeval timeout{0, 100000};
+      const int ready =
+          select(input + 1, &readable, nullptr, nullptr, &timeout);
+#else
+      pollfd descriptor{input, POLLIN, 0};
       const int ready = poll(&descriptor, 1, 100);
+#endif
       if (ready < 0 && errno == EINTR)
         continue;
       if (ready < 0)
-        throw ToolError("stdin polling failed", 4, "PS-IO-READ");
+        throw ToolError("input polling failed: " + path.string(), 4,
+                        "PS-IO-READ");
       if (!ready)
         continue;
-      const auto count = ::read(STDIN_FILENO, buffer, sizeof(buffer));
-      if (count < 0 && errno == EINTR)
+      const auto count = ::read(input, buffer, sizeof(buffer));
+      if (count < 0 && (errno == EINTR || errno == EAGAIN))
         continue;
       interrupted();
       if (count < 0)
-        throw ToolError("stdin read failed", 4, "PS-IO-READ");
+        throw ToolError("read failed: " + path.string(), 4, "PS-IO-READ");
       if (!count)
         return result;
       if (static_cast<std::uint64_t>(count) > limit - result.size())
-        throw ToolError("input size limit exceeded: -");
+        throw ToolError("input size limit exceeded: " + path.string());
       result.append(buffer, static_cast<std::size_t>(count));
     }
   }
-#endif
+#else
   std::ifstream file;
   std::istream* stream = &std::cin;
   if (path != "-") {
@@ -141,6 +176,7 @@ std::string Files::read(const fs::path& path, std::uint64_t limit) {
   if (stream->bad())
     throw ToolError("read failed: " + path.string(), 4, "PS-IO-READ");
   return result;
+#endif
 }
 void Files::write(const fs::path& path, const std::string& bytes) const {
   interrupted();

@@ -58,9 +58,9 @@ oracle 通过也不表示 runtime 已实现。文档只描述当前功能或当�
 | 数学语义 | 公式、坐标方向、端点、颜色域、归一化、精度 | 只写“使用 OpenCV” |
 | 算法 | CPU 参考、优化方案、复杂度、临时内存、并行与取消点 | 将近似算法标成精确 |
 | 支持矩阵 | 通道、dtype、HDR/负值、CPU/GPU、平面/交错 | “支持所有格式” |
-| 空间/时间需求 | 静态 mapper 的成员 tile grants、显式 descriptor-only、数学 halo/边界、有限地址 superset 和 tile 失效传播 | 把任意变换当 Elementwise |
+| 空间/时间需求 | lowering 的固定成员 tile reads、schema-only reads、数学 halo/边界和有限地址 superset | 把任意变换当 Elementwise |
 | 返回映射 | 输出 Region、坐标原点、layout/stride、owner、缺失/ExplicitZero、发布范围与关联完整性 | 将 nominal plane origin 当实际 source support |
-| 资源与寿命 | output/scratch/state/page/临时 backing/校验成本、同时存活 ancestry、root capacity/work/stage、cache-off、取消与最终释放 | 将 managed peak 当 RSS 上界 |
+| 资源与寿命 | output/scratch/准备数据/临时 backing/校验成本、同时存活 owner、root capacity/work/stage、独立 Run、取消与最终释放 | 将 managed peak 当 RSS 上界 |
 | 错误模型 | 除零/NaN/Inf/overflow/association underflow，发生阶段、Status code/reason/detail/scope、前缀是否保留 | 每次 silently clamp |
 | 数值质量 | 舍入/累加顺序、容差、Measured/CertifiedBound 和支持范围，优化后端/fallback 的实际语义 | 用 residual=0 代替误差证明 |
 | 验收 | 独立 oracle、解析小样本、容差、边界、最小公开工作流 | 只检查“输出看起来正确” |
@@ -72,7 +72,7 @@ oracle 通过也不表示 runtime 已实现。文档只描述当前功能或当�
 | --- | --- | --- | --- |
 | 类型 | 明确，例如 Float32 输入、Float64 累加 | 例如 Metal Float32，有误差界 | fp16/fp64 GPU 未核验 |
 | 通道 | 1/3/4/任意 C，列语义 | 同参考或声明子集 | 不能由 C=4 推断 alpha |
-| 空间 | 统一 tile 请求与发布；完整输入计算使用 Run 共享 stage | tile+halo、分块归约 | 更复杂映射须专用证明与实现 |
+| 空间 | 固定 tile 请求与 call 退休；共享计算使用 task 和私有 value | tile+halo、分块归约 | 更复杂映射须专用证明与实现 |
 | 数值 | finite、signed、HDR、超范围策略 | 保留或回退 | 商业 bit identity |
 | 状态 | 静态决定性输入与显式 seed | 并行确定性等级 | 隐式时钟/随机种子 |
 
@@ -80,10 +80,10 @@ oracle 通过也不表示 runtime 已实现。文档只描述当前功能或当�
 
 - 解析样本：列输入数值与预期输出，至少覆盖 identity 和一个非平凡案例。
 - 数值 oracle：与独立公式或参考实现比较，注明绝对/相对误差、统计误差或边界误差；容差必须符合测量目标。
-- 空间一致性：whole、nonzero ROI、跨 tile 边界；全局算法也发布 tile，完整计算由共享 stage 复用。
+- 空间一致性：whole、nonzero ROI、跨 tile 边界；全局算法也使用固定 tile 输出，共享计算通过显式 task 依赖复用。
 - 语义：透明边缘、HDR、signed 和颜色域按算子需要选择，避免没有意义的全套矩阵。
 - 工作流：通过当前公开入口执行至少一次，给输入、输出检查方法和实际命令；尚未实现的流程只能标概念 DAG。
-- 资源/寿命：按节点风险验证低容量/work/stage、页窗口不足、取消、cache-off、多消费者、context 销毁后结果与 read window 存活、最终释放；完整覆盖不等于连续存储；显式收集须准入与计费。
+- 资源/寿命：按节点风险验证低容量/work/stage、block 准入失败、取消排空、独立 Run、多消费者、context 销毁后结果与 read window 存活、最终释放；完整覆盖不等于连续存储；显式收集须准入与计费。
 - 多输出/结果：验证独立请求与 joint 等价、无关输出不读取；静态容量下的零/非零 count、ObjectId 关联、发布前验证、不可变前缀和 descriptor support。
 - 性能：指定尺寸、半径、dtype、后端、硬件、managed peak、耗时统计与质量等级；列明计费排除项。
 
@@ -91,4 +91,4 @@ oracle 通过也不表示 runtime 已实现。文档只描述当前功能或当�
 
 `S` 为已公开标准公式；`F` 为官方描述确认功能存在；`B` 为指定产品版本和设置的黑盒结果；`U` 为未核验。F 不推导 B。黑盒差异应固定颜色 profile、传递函数、位深、alpha、图层顺序、mask、是否 linear blending、缩放、CPU/GPU 和输出编码。
 
-当前实现遵循 Photospider 0.37.0 与 Result C ABI 7 的[公共契约索引](contracts.md)及公开头文件；本模板用于组织规格，不会替代当前 API 定义。D2 转为 D1 前必须清除影响可观测结果的未决项。涉及公共数据类型、ABI、缓存身份或输入需求的选择，应走仓库现有 reviewed 流程；本研究不直接接受这些契约。
+当前实现遵循 Photospider 0.39.0 与 operation module C ABI 8 的[公共契约索引](contracts.md)及公开头文件；本模板用于组织规格，不会替代当前 API 定义。D2 转为 D1 前必须清除影响可观测结果的未决项。涉及公共数据类型、ABI、缓存身份或输入需求的选择，应走仓库现有 reviewed 流程；本研究不直接接受这些契约。

@@ -27,14 +27,10 @@ authoring helpers. Link `Photospider::ops_sdk` for standalone configuration,
 resource, report, LUT bake and Layer helpers. `PHOTOSPIDER_BUILD_OPS` requires
 `PHOTOSPIDER_BUILD_OPS_SDK`; kernel-only builds may disable both.
 
-Results and Tensors carry structure, data and storage owners. Domain descriptions
-are explicit static parameters, independently supplied to every consumer.
-Description editing uses the SDK's pure `format::edit_description` function;
-there are no metadata assignment/removal workflow nodes. Domain validators and
-report codecs are registered explicitly with the generic kernel services.
+Results and Tensors carry structure, data and storage owners. Domain descriptions are explicit static parameters, independently supplied to every consumer. Description editing uses the SDK's pure `format::edit_description` function. Report codecs are registered explicitly with the generic kernel services. Numerical sample validity is part of each operation's unchecked contract.
 
 Operation behavior and examples are documented in
 [`docs/built-in_ops/`](../../docs/built-in_ops/README.md) and the
 [kernel architecture guide](../../docs/kernel-architecture/README.md).
 
-Complete-input algorithms explicitly use SDK `to_whole`/`to_tile` and prepared Run-shared stages. Ordinary output actors publish requested complete member tiles. Host backing defaults to tiled planar and ordinary image operations default to straight alpha, without conformance declarations or automatic alpha validators. Explicit domain descriptions and association conversions remain operation configuration. Optional benchmark tooling is `Photospider::benchmark_tools` (`PHOTOSPIDER_BUILD_BENCHMARK_TOOLS=ON`), outside the kernel and ops SDK APIs.
+Operations lower their algorithms into fixed task graphs with explicit input tiles, independent output allocations and bounded scratch. Complete-input algorithms declare all required reads during lowering. Prepared kernels execute the resulting views through fixed invocation ABI 8. Host backing defaults to tiled planar, and ordinary image operations default to straight alpha. Domain descriptions and association conversions remain explicit operation configuration. Optional benchmark tooling is `Photospider::benchmark_tools` (`PHOTOSPIDER_BUILD_BENCHMARK_TOOLS=ON`), outside the kernel and ops SDK APIs.

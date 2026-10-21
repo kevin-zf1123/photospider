@@ -55,20 +55,9 @@ its own explicit parameter.
 
 ## Data demand and storage
 
-For an output footprint Q, the Result continuation requests only the mapped
-source support and the source descriptor. Its Need role mask is 9: Data (1) and
-Descriptor (8), with no Validation or Control role. Dependency-v2 maps dirty
-selected-channel samples back to the same non-channel output coordinates;
-changes to unselected channels do not dirty this output. An Empty request
-publishes an empty Result without reading payload.
+Each selected output tile lowers to a fixed CPU task. Its mapped source rectangle is closed over the source's own tile grid; atomic/spatial closure can include extra channels in the physical input views. Actual copying reads only selected coordinates and preserves raw bits. Preparation fixes exact read slots and output geometry, with zero scratch and no runtime dependency discovery.
 
-Generic Result tensors can expose valid positive-, negative- or zero-stride
-views. The mapper can preserve authorized backing partitions, including views
-with multiple owners. Selecting a spatial tensor's declared channel axis can
-retain the source physical owner and channel plane. Slicing a spatial height or
-width axis materializes in auto mode and fails under forced view. Materialized
-copies cover only the requested output and check cancellation within runs of at
-most 256 samples. The primitive disables Result caching.
+Auto/materialize copy into independent dense output storage. Nonempty view requests return InvalidArgument/InvalidDomain with ViewUnavailable and have only a schema dependency. Empty performs static checks without a payload task. Legal source views may have signed/zero strides or unaligned offsets. Output topology follows the family projection rules, while output storage remains independently owned. Cancellation is checked between at most 256 copied samples; failed calls publish no partial result.
 
 ## Example and validation
 

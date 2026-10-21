@@ -1,4 +1,3 @@
-#include "photospider/ops/numeric/diagnostics.hpp"
 #pragma once
 
 #include <cstdint>
@@ -160,29 +159,29 @@ inline Result<WorkflowNode> node(
  * dtype; Compiler checks actual Result edges. Helpers create only graph nodes
  * and parameters and may be used concurrently; invalid options fail
  * InvalidArgument/InvalidDomain/Schema. Allocation may throw bad_alloc.
- * Descriptor/edge conflicts fail TypeMismatch at compilation. Each nonempty
- * Run-shared stage acquires all complete input tensors.
- * The callback reads authorized windows directly, validates all finite strictly
- * increasing stops, then every finite position before color arithmetic.
- * Selected rows define the math, with unused generic rows remaining numerically
- * unused while typed/upstream validation still covers all inputs. Output port
- * `values` is a full-shape immutable Result using `photospider.tensor`
- * v1/member `samples`, shape S+[C], with explicit color configuration and
- * `atomic_trailing_axes=1`. A component request closes to its full color tuple;
- * Whole publication retains complete certified coverage and global coordinates.
- * Empty reads no sample payload. Input edits
- * invalidate complete recorded output demand. Numeric failures have Run scope.
- * Source windows, fixed arithmetic workspace, full output and O(K) Root-owned
- * stop storage must fit host budgets. Exact interpolation rounds only at
- * destination; direct/complete-identical rows keep converted zero signs, mixed
- * exact zeros are +0. RGB alone decodes and encodes transfer with exact alpha;
- * other models interpolate their own coordinates. Polar hue is unwrapped,
- * including zero chroma/saturation, with certified pi unit conversion. No gamut
- * clipping, model conversion, adaptation or ICC CMM. Host
- * work/capacity/stage/cancellation bounds apply to every refinement; an
- * unfinished proof fails ResourceExhausted. Output storage owners survive
- * context teardown. Domain resources remain with preparation, plans and active
- * execution that explicitly require them.
+ * Descriptor/edge conflicts fail TypeMismatch at compilation. Each selected
+ * output tile has one fixed CPU invocation, reading the matching query region
+ * and all stops/colors/p/q tiles on each input's own grid. K=1 still reads
+ * query. Output `values` uses photospider.tensor v1/member samples, descriptor
+ * shape S+[C], atomic_trailing_axes=1, without color metadata or input batch
+ * grouping. Empty emits no task. Only selected dense output tiles are
+ * allocated.
+ *
+ * Finite strictly increasing stops, finite queries, selected complete-color
+ * model/association validity, selected q>0, reject-domain membership and finite
+ * representable output are unchecked caller preconditions. RGBA with rounded
+ * zero alpha requires rounded zero RGB; valid transparent output is all +0.
+ * Exact interpolation rounds once at destination. Direct/complete-identical
+ * rows retain converted zero signs; genuine mixed exact zero is +0. RGB alone
+ * decodes/encodes transfer with exact alpha. Polar hue remains unwrapped with
+ * certified pi unit conversion, including at zero chroma or saturation.
+ *
+ * Each invocation borrows affine inputs and owns fixed arithmetic scratch.
+ * Preparation is immutable and shareable across Runs. Cancellation/capacity
+ * failures stop the invocation; incomplete certification is ResourceExhausted.
+ * CMYK selects and validates frozen ICC resources once per preparation, also
+ * for Empty and artifact import. Plans and kernels retain those resources;
+ * output Results retain their own data and survive context teardown.
  */
 /** @brief Linear-light RGB/RGBA; default description is three-channel sRGB. */
 inline Result<WorkflowNode> color_ramp_rgb_node(

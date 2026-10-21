@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.color_to_gray_strict
@@ -37,22 +37,20 @@ family; no missing semantic interpretation is inferred from sample magnitudes.
 
 Copy the native coordinate; the caller supplies the corresponding Gray configuration downstream. Contract three selected slots into one at their smallest physical index; retain channel axis and other channels.
 
-Exact same-position support: only selected Y/Y′/l/L; discarded chroma is not read.
-Take unions for multiple requested outputs and the forward relation for dirty
-mapping. Static structure and explicit-configuration checks apply even to Empty/bypass-only requests.
+Exact same-position support: only selected Y/Y′/l/L is consumed mathematically; physical source tiles may cover discarded chroma.
+Take the union over every sample of each complete retained output tile, then close on the source grid. Static structure and explicit-configuration checks apply even to Empty/bypass-only requests.
 No halo, hidden-color skip, alpha validation or full-image scan is introduced.
 Strict evaluates the complete specified formula with its stated copy/selection
 exceptions; accelerated numerical rules, raw specials and errors inherit the
 family/math contract. The normalized Lab lightness is l=L*/100 wherever relevant.
-Invalid consumed semantics or an explicit singularity fail the requested
-publication; unrelated unobserved sample errors do not. Preserve upstream scope.
+Semantic sample validity, finite rounded results and nonsingular semantic formulas are caller preconditions over complete retained output tiles. Fixed execution does not validate these numerical premises; operational errors retain the kernel category.
 
 ## Storage, resources and implementation identity
 
-This is a registered native Result primitive. Internal helper reuse preserves its declared support, rounding and validation.
-auto can share a legal same-owner view while retaining validation; forced view fails if that mapping cannot be represented.
-The implementation supports generic and spatial layouts. Empty demand is stateless, and publication is transactional.
-The implementation uses Result ABI 6 and the registered CPU profiles.
+This is a registered native Result primitive. Internal helper reuse preserves its declared support, rounding and static checks.
+Auto/materialize copy into independent dense output tiles. A nonempty forced view task reads only schema, uses zero scratch and fails InvalidArgument/ViewUnavailable.
+Generic and spatial layouts use complete output tiles and source-grid closure. Copies use zero scratch; Empty has no payload tasks. Successful calls publish in order.
+The implementation uses fixed invocation ABI 8 and the registered CPU profiles.
 
 ## Independent acceptance and conceptual workflow
 

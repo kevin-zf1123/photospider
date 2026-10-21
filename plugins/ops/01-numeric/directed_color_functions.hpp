@@ -17,8 +17,10 @@ struct DirectedColorFunctionsStorage final {
     Math math;
     explicit State(SequenceProfile profile) : math(profile) {}
   };
-  std::conditional_t<std::is_same_v<Math, DirectedInterval>, DirectedFunctions,
-                     State>
+  std::conditional_t<
+      std::is_same_v<Math, DirectedInterval>, DirectedFunctions,
+      std::conditional_t<std::is_same_v<Math, CheckedDirectedInterval>,
+                         CheckedDirectedFunctions, State>>
       functions;
   using Interval = typename Math::Interval;
   using Number = typename Math::Number;
@@ -26,10 +28,20 @@ struct DirectedColorFunctionsStorage final {
   explicit DirectedColorFunctionsStorage(SequenceProfile profile)
       : functions(profile) {}
 
+  void unresolved() {
+    if constexpr (Math::kChecked)
+      functions.math.retry();
+    else
+      throw typename Math::Unresolved{};
+  }
   void logarithm_point(Interval output, const Number& input) {
     auto& math = functions.math;
-    if (input.negative || math.top(input) < 0)
-      throw typename Math::Unresolved{};
+    if (!math.active())
+      return;
+    if (input.negative || math.top(input) < 0) {
+      unresolved();
+      return;
+    }
     Frame frame(math);
     const int exponent = math.top(input) - static_cast<int>(math.precision);
     auto normalized = math.interval(), one = math.interval(),
@@ -53,6 +65,8 @@ struct DirectedColorFunctionsStorage final {
       math.divide_small(term, term, 2 * k + 1);
       math.add(sum, sum, term);
       math.multiply(power, power, square);
+      if (!math.active())
+        return;
       if (math.top(power.high) <= 0) {
         math.widen(sum, math.top(power.high) < 0 ? 0 : 3);
         auto constant = math.interval(), scale = math.interval();
@@ -63,10 +77,12 @@ struct DirectedColorFunctionsStorage final {
         return;
       }
     }
-    throw typename Math::Unresolved{};
+    unresolved();
   }
   void logarithm(Interval output, Interval input) {
     auto& math = functions.math;
+    if (!math.active())
+      return;
     Frame frame(math);
     auto lower = math.interval(), upper = math.interval();
     logarithm_point(lower, input.low);
@@ -83,6 +99,8 @@ struct DirectedColorFunctionsStorage final {
 
   void exponential_point(Interval output, const Number& input) {
     auto& math = functions.math;
+    if (!math.active())
+      return;
     Frame frame(math);
     auto limit = math.interval();
     math.integer(limit, -static_cast<int>(math.precision));
@@ -101,8 +119,12 @@ struct DirectedColorFunctionsStorage final {
     math.integer(capacity, static_cast<int>(Math::kWords * 32) -
                                static_cast<int>(math.precision) - 64);
     math.multiply(limit, limit, capacity);
-    if (math.compare(input, limit.low) > 0)
-      Math::capacity();
+    if (math.compare(input, limit.low) > 0) {
+      math.stop_capacity();
+      return;
+    }
+    if (!math.active())
+      return;
     auto reduced = math.interval(), term = math.interval(),
          sum = math.interval();
     math.shift(reduced.low, input, -17, true);
@@ -114,6 +136,8 @@ struct DirectedColorFunctionsStorage final {
     for (unsigned n = 1; n < math.precision + 64; ++n) {
       math.multiply(term, term, reduced);
       math.divide_small(term, term, n);
+      if (!math.active())
+        return;
       const auto bound = std::max(math.top(term.low), math.top(term.high));
       if (bound <= 0) {
         math.widen(sum, bound < 0 ? 0 : 2);
@@ -126,10 +150,12 @@ struct DirectedColorFunctionsStorage final {
       }
       math.add(sum, sum, term);
     }
-    throw typename Math::Unresolved{};
+    unresolved();
   }
   void exponential(Interval output, Interval input) {
     auto& math = functions.math;
+    if (!math.active())
+      return;
     Frame frame(math);
     auto lower = math.interval(), upper = math.interval();
     exponential_point(lower, input.low);
@@ -141,9 +167,13 @@ struct DirectedColorFunctionsStorage final {
   // analytically; logarithm is never asked to approximate log(0).
   void power(Interval output, Interval base, Interval exponent) {
     auto& math = functions.math;
+    if (!math.active())
+      return;
     if (base.low.negative || exponent.low.negative ||
-        math.top(exponent.low) < 0)
-      throw typename Math::Unresolved{};
+        math.top(exponent.low) < 0) {
+      unresolved();
+      return;
+    }
     if (math.top(base.high) < 0) {
       math.integer(output, 0);
       return;

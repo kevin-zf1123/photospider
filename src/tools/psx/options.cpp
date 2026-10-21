@@ -7,9 +7,9 @@
 
 namespace ps::tools::psx {
 Invocation parse_options(int argc, char** argv, bool* json_diagnostics) {
-  auto parsed = parse_arguments(argc, argv, json_diagnostics, {},
-                                {"--bindings", "--threads", "--parallelism",
-                                 "--max-live-bytes", "--cache-bytes"});
+  auto parsed = parse_arguments(
+      argc, argv, json_diagnostics, {},
+      {"--bindings", "--threads", "--parallelism", "--max-live-bytes"});
   Invocation o;
   static_cast<CommonOptions&>(o) = std::move(parsed.common);
   require_input(
@@ -19,18 +19,14 @@ Invocation parse_options(int argc, char** argv, bool* json_diagnostics) {
   if (o.output == "-")
     throw ToolError("psx requires a result directory", 2);
   o.context.cpu_workers = positive_count(o, "--threads", 0);
-  o.context.gpu_enabled = true;
   o.execution.maximum_parallelism = positive_count(o, "--parallelism", 0);
+  if (o.context.cpu_workers > 4096 || o.execution.maximum_parallelism > 4096)
+    throw ToolError("--threads and --parallelism must be in [1,4096]", 2);
   if (o.has("--max-live-bytes"))
     o.context.maximum_live_bytes =
         unsigned_number(o.get("--max-live-bytes"), "--max-live-bytes");
-  if (o.has("--cache-bytes"))
-    o.context.result_cache_bytes =
-        unsigned_number(o.get("--cache-bytes"), "--cache-bytes");
   if (!o.context.maximum_live_bytes)
     throw ToolError("--max-live-bytes must be positive", 2);
-  if (o.context.result_cache_bytes > o.context.maximum_live_bytes)
-    throw ToolError("--cache-bytes exceeds --max-live-bytes", 2);
   if (o.has("--outputs"))
     output_names(o.get("--outputs"));
   return o;

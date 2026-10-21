@@ -40,9 +40,11 @@ static numeric parameters or implicit casts/axis extraction.
 
 Use first-order one-sided endpoints and central interior differences:
 
+```text
 D[0]   = (samples[1]-samples[0]) / step
-    D[N-1] = (samples[N-1]-samples[N-2]) / step
-    D[i]   = (samples[i+1]-samples[i-1]) / (2*step), 0<i<N-1
+D[N-1] = (samples[N-1]-samples[N-2]) / step
+D[i]   = (samples[i+1]-samples[i-1]) / (2*step), 0<i<N-1
+```
 
 For N=2 both results use the same one-sided quotient. There is no edge-order
 parameter or automatic higher-order stencil. For finite samples, evaluate the
@@ -54,60 +56,20 @@ final overflow yields signed infinity successfully. Among required samples,
 propagate the first NaN in ascending source index order, quieting it and preserving
 payload/sign. Without source NaNs, same-sign infinities in the subtraction yield
 fixed positive quiet NaN, otherwise subtraction/division determine the infinity
-sign. Step is finite and nonzero, so it cannot introduce a numeric NaN after
-successful validation. Fixed NaN bits follow [NUM-04](NUM-04_unary_contract.md).
+sign. Step is finite and nonzero as a caller precondition, so it cannot introduce a numeric NaN within the specified domain. Fixed NaN bits follow [NUM-04](NUM-04_unary_contract.md).
 
-## Dependencies, errors and invalidation
+## Fixed dependencies and errors
 
-For any nonempty demand, complete-input collects and validates complete samples and step
-before callback. The callback rejects zero/nonfinite step with Domain/Run
-InvalidArgument/InvalidDomain and InvalidSampleStep. A source failure may occur
-before step validation. Empty reads nothing. All active input edits invalidate
-all recorded output observations.
+Each selected output tile becomes one fixed CPU task. For interval `[a,b)`, its source support is the union of lower stencil image `[max(0,a-1),max(1,b-1))` and upper image `[min(a+1,N-1),min(b,N-1)+1)`, rounded to complete source tiles. The task also reads step tile zero. Source geometry is independent of output geometry; atomic source tiles can enlarge physical coverage. An interior center sample is not in its own stencil. With an ordinary source axis and tile extent one, its source tile is omitted; an atomic source tile can still cover that center. Empty selection emits no tasks or payload reads.
 
-Only the stated two-point stencil enters each numerical result; an interior
-center NaN still does not enter that result. complete-input reads it and all other samples
-for preparation and other complete outputs. Their upstream/typed failures may
-fail the Run. Public output identity and numeric NaN priority are unchanged.
+Active step must be finite and nonzero as an unchecked caller numerical precondition. No numerical diagnostic is guaranteed outside this domain. All IEEE sample values are valid. Static shape/dtype mismatches return TypeMismatch; source, resource, backend and cancellation failures retain their operational status. A task failure prevents successful publication of its IR call's outputs.
 
-## Algorithms, resources and acceptance
+## Algorithm and resources
 
-Compute all N stencils with the existing exact quotient workspace, then publish
-complete dense output. Full input collection, N*dtype_size output bytes and fixed
-workspace are required even for sparse demand. A reusable rank-one coordinate
-avoids per-read vector allocation. No per-output descriptors or dedup sets remain.
-Cancellation/work checks cover reads, exact arithmetic, stores and publication.
-Failed attempts release unpublished state/output; owner lifetime is unchanged.
+Each task computes its selected coordinates using preallocated `sizeof(ExactCalculus)` scratch and an independent dense output tile. Runtime borrows source views and performs no payload allocation. Prepare checks both input schemas, the ordinary output schema, canonical Host write, exact source/control reads, empty parameters and scratch. Root reserves maximum scratch per CPU lane, selected output bytes and executor metadata. Cancellation is checked during output iteration and exact arithmetic. Accepted work drains before failed storage is released; successful outputs can outlive the execution context.
 
-Conceptual fixture: samples=[0,1,4], step=[1] -> [1,2,3]. This approximates the
-derivative at endpoints; it does not claim the exact derivative of an unknown
-underlying continuous function. For samples=[-MAX,0,MAX], step=[MAX], all outputs
-are 1 despite overflowing naive intermediate differences. Verify with independent
-exact rational arithmetic. Test negative step, N=2, step subnormals, NaN priority,
-interior center NaN outside the requested stencil, infinities, signed zeros,
-disjoint source-read witnesses, dirty inverse stencils, budgets and cancellation.
+## Acceptance
 
-Focused Result math coverage exercises public workflows, exact small examples,
-negative step, N=2, exceptional values, budgets, pre-cancellation, and output
-lifetime after context retirement.
+For samples `[0,1,4]`, step `[1]`, expect `[1,2,3]`. For `[-MAX,0,MAX]` and step `[MAX]`, expect three ones despite naive intermediate overflow. Compare independent Fraction references for negative/subnormal step, N=2, first-stencil NaN, an interior center NaN, infinity arithmetic, signed zero, underflow and final overflow.
 
-## Implementation and executable acceptance
-
-All six registered profile keys use Run-shared Result programs and the existing
-`ExactCalculus` arithmetic. The manual public workflow binds Result sources
-whose tensor storage references the fixture's backing Values. Nonempty sparse
-requests still prepare all required inputs and publish the complete complete-input
-output with full tensor coverage. The query scopes the recorded dependency
-observation and dirty mapping; it does not trim Result coverage. The fixture
-checks that a center sample excluded from an interior stencil does not enter
-that output's arithmetic, while complete-input preparation reads and validates all active
-sources. It also exercises
-negative strides, unaligned and zero-stride input, caller and worker floating
-environments during actual continuation polls, schema rejection, work limits,
-cancellation, and output lifetime after context retirement.
-
-Use independent exact Fraction references for temporary numerical acceptance.
-Strict results must match the final rounded reference bits. Accelerated results
-use the shared final FP32-scaled bound and need not be bit-exact. Compile the
-checker with `-fno-fast-math -frounding-math -ffp-contract=off`; execution details
-and validation cases are in [NUM-15 Run-shared complete-input computation](../calculus-whole.md).
+Verify exact source closure and omitted center producers with an ordinary source axis and extent one, source atomic geometry that retains the shared center tile, sparse selections, negative/zero strides, unaligned input, concurrent Runs and artifact round trips. Include binding replacement, capacity rejection, cancellation, malformed preparation and escaped Result lifetime. The [fixed calculus execution contract](../calculus-execution.md) defines the resource and dependency boundaries. Temporary checks are removed after operation validation; the independent oracle is retained.

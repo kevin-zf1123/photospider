@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.38.0
+  VERSION 0.39.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -92,13 +92,14 @@ set(
   src/lib/compiler/optimizer.cpp
   src/lib/compiler/optimizer_registry.cpp
   src/lib/compiler/optimizers/deduplicate.cpp
+  src/lib/compiler/plan.cpp
   src/lib/compiler/plan_linking.cpp
   src/lib/compiler/plan_validation.cpp
+  src/lib/compiler/physical_program.cpp
   src/lib/compiler/plan_selection.cpp
   src/lib/compiler/planner.cpp
   src/lib/compiler/planner_registry.cpp
   src/lib/compiler/planners/static_tiles.cpp
-  src/lib/compiler/static_mapping.cpp
   src/lib/compiler/identity.cpp
   src/lib/compiler/artifact.cpp
   src/lib/compiler/artifact_text.cpp
@@ -114,6 +115,9 @@ set(
   src/lib/data/result.cpp
   src/lib/data/result_builder.cpp
   src/lib/data/result_tensor_store.cpp
+  src/lib/data/device_tensor_span.cpp
+  src/lib/data/result_device.cpp
+  src/lib/data/tensor_geometry.cpp
   src/lib/data/result_tensor_publication.cpp
   src/lib/data/result_tensor_window.cpp
   src/lib/data/result_capture.cpp
@@ -124,42 +128,22 @@ set(
   src/lib/core/cancellation.cpp
   src/lib/data/tensor_span.cpp
   src/lib/data/tensor_layout.cpp
-  src/lib/plugin/result_fragment_atlas.cpp
-  src/lib/plugin/result_program.cpp
-  src/lib/plugin/result_plugin_import.cpp
-  src/lib/plugin/result_c_extensions.cpp
-  src/lib/plugin/result_c_codec.cpp
-  src/lib/plugin/result_c_member.cpp
-  src/lib/plugin/result_c_poll_lease.cpp
-  src/lib/plugin/dependency_discovery.cpp
   src/lib/plugin/operation_contract.cpp
+  src/lib/plugin/operation_module.cpp
+  src/lib/plugin/fixed_invocation.cpp
+  src/lib/plugin/operation_program.cpp
   src/lib/data/tensor_validation.cpp
   src/lib/plugin/port_validation.cpp
   src/lib/data/input_snapshot.cpp
   src/lib/execution/execution.cpp
-  src/lib/execution/execution_context_resources.cpp
-  src/lib/execution/result_run.cpp
-  src/lib/execution/native_upload_codec.cpp
-  src/lib/execution/execution_device.cpp
-  src/lib/execution/callback_pool.cpp
-  src/lib/execution/result_stage_submission.cpp
-  src/lib/execution/execution_bindings.cpp
-  src/lib/execution/demand_query.cpp
-  src/lib/execution/tile_records.cpp
-  src/lib/execution/tile_cache.cpp
-  src/lib/execution/tile_binding_changes.cpp
-  src/lib/execution/demand_handle.cpp
-  src/lib/execution/result_cache_proof.cpp
-  src/lib/execution/result_publication_validation.cpp
-  src/lib/execution/result_fallback.cpp
-  src/lib/execution/structured_result_cache.cpp
-  src/lib/execution/structured_cache_state.cpp
-  src/lib/execution/structured_execution.cpp
+  src/lib/execution/task_schedule.cpp
+  src/lib/execution/cpu_workers.cpp
+  src/lib/execution/block_memory.cpp
   src/lib/execution/native_gpu.cpp
+  src/lib/execution/native_copy.cpp
   src/lib/graph/graph_context.cpp
   src/lib/plugin/operation_registry.cpp
   src/lib/plugin/operation_extensions.cpp
-  src/lib/plugin/validation_dispatch.cpp
   src/lib/core/utf8_validation.cpp)
 if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
   list(APPEND PHOTOSPIDER_KERNEL_SOURCES src/lib/execution/native_gpu_metal.mm)
@@ -184,7 +168,7 @@ set_source_files_properties(
   src/lib/compiler/plan_selection.cpp
   src/lib/compiler/planner.cpp
   src/lib/compiler/planner_registry.cpp
-  src/lib/compiler/planners/static_tiles.cpp src/lib/compiler/static_mapping.cpp
+  src/lib/compiler/planners/static_tiles.cpp
   src/lib/compiler/identity.cpp src/lib/compiler/artifact.cpp
   src/lib/compiler/artifact_text.cpp
   src/lib/plugin/operation_registry.cpp PROPERTIES
@@ -217,13 +201,6 @@ else()
 endif()
 # Common translation units are compiled once for the package and internal tests.
 set(PHOTOSPIDER_SEAM_SOURCES
-  src/lib/execution/execution_context_resources.cpp
-  src/lib/execution/result_run.cpp
-  src/lib/execution/native_upload_codec.cpp
-  src/lib/execution/execution_device.cpp
-  src/lib/execution/callback_pool.cpp
-  src/lib/execution/result_stage_submission.cpp
-  src/lib/execution/structured_execution.cpp
   src/lib/plugin/operation_registry.cpp)
 foreach(_native IN ITEMS src/lib/execution/native_gpu_metal.mm src/lib/execution/native_gpu_vulkan.cpp)
   if(_native IN_LIST PHOTOSPIDER_KERNEL_SOURCES)

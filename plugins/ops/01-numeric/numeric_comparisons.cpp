@@ -1,8 +1,8 @@
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <map>
 #include <memory>
 #include <new>
 #include <string>
@@ -12,11 +12,9 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/comparison_profiles.hpp"
 #include "01-numeric/exact_predicate.hpp"
-#include "01-numeric/numeric_tensor_program.hpp"
-#include "common/floating_environment.hpp"
+#include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
-#include "photospider/core/resource_allocator.hpp"
-#include "photospider/plugin/whole_stage.hpp"
+#include "common/tensor_program.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -42,18 +40,13 @@ struct ComparisonMath final {
   ComparisonMath(Comparison operation, SequenceProfile selected)
       : kind(operation), profile(selected) {}
   bool close(std::uint64_t a, std::uint64_t b, bool narrow,
-             const std::map<std::string, ParameterValue>& parameters) {
+             const BinaryParts& absolute, const BinaryParts& relative) {
     const auto x = BinaryParts::decode(a, narrow),
                y = BinaryParts::decode(b, narrow);
     if (x.nan || y.nan)
       return false;
     if (x.infinite || y.infinite)
       return x.infinite && y.infinite && x.negative == y.negative;
-    std::uint64_t absolute_bits = 0, relative_bits = 0;
-    const auto absolute = std::get<double>(parameters.at("atol"));
-    const auto relative = std::get<double>(parameters.at("rtol"));
-    std::memcpy(&absolute_bits, &absolute, 8);
-    std::memcpy(&relative_bits, &relative, 8);
     const auto high = x.magnitude >= y.magnitude ? x : y;
     const auto low = x.magnitude >= y.magnitude ? y : x;
     difference.set(high);
@@ -62,8 +55,8 @@ struct ComparisonMath final {
       difference.add(temporary);
     else
       difference.subtract(temporary);
-    threshold.set(BinaryParts::decode(absolute_bits, false));
-    product.set_product(BinaryParts::decode(relative_bits, false), high);
+    threshold.set(absolute);
+    product.set_product(relative, high);
     threshold.add(product);
     for (std::size_t end = difference.words.size(); end; end -= 4) {
       numeric_ops::compare_keys(difference.words.data() + end - 4,
@@ -78,13 +71,12 @@ struct ComparisonMath final {
     }
     return true;
   }
-  void evaluate(ElementType type, unsigned count,
-                const std::map<std::string, ParameterValue>& parameters,
-                std::uint8_t* output) {
+  void evaluate(ElementType type, unsigned count, const BinaryParts& absolute,
+                const BinaryParts& relative, std::uint8_t* output) {
     if (kind == Comparison::IsClose) {
       for (unsigned i = 0; i < count; ++i)
-        output[i] =
-            close(left[i], right[i], type == ElementType::Float32, parameters);
+        output[i] = close(left[i], right[i], type == ElementType::Float32,
+                          absolute, relative);
       return;
     }
     const bool floating =
@@ -134,56 +126,61 @@ struct ComparisonMath final {
     }
   }
 };
-struct ComparisonKernel final {
+struct ComparisonState final {
   Comparison kind;
   SequenceProfile profile;
-  ComparisonKernel(Comparison kind, SequenceProfile profile)
-      : kind(kind), profile(profile) {}
-  Status write(const ResultProgramPhase& phase,
-               const ResourceVector<ResultTensorWriteWindow>& writers) {
-    using namespace numeric_ops;  // NOLINT(build/namespaces)
-    const auto& spec = phase.query.inputs[0].result_schema->tensors[0];
-    const auto shape = spec.sample_shape();
-    const auto count = math_take(spec.sample_count());
-    auto memory = math_take(phase.allocator.allocate(sizeof(ComparisonMath)));
-    auto* arithmetic = new (memory.data()) ComparisonMath(kind, profile);
-    const auto destroy = [](ComparisonMath* value) {
-      value->~ComparisonMath();
-    };
-    std::unique_ptr<ComparisonMath, decltype(destroy)> guard(arithmetic,
-                                                             destroy);
-    MathTensorReader first(phase.tensors->at({0, 0}), phase.query.cancellation),
-        second(phase.tensors->at({1, 0}), phase.query.cancellation);
-    if (writers.size() != 1)
-      return {ErrorCode::OperationFailed,
-              "comparison requires one packed writer"};
-    MathTensorWriter writer(writers[0]);
-    std::vector<uint64_t> at(shape.size(), 0);
-    for (uint64_t begin = 0; begin < count; begin += 4) {
-      const auto lanes =
-          static_cast<unsigned>(std::min<uint64_t>(4, count - begin));
-      auto charged = phase.consume_work(
-          lanes *
-          (2 * shape.size() + (kind == Comparison::IsClose ? 1024 : 16)));
-      if (!charged.ok())
-        return charged;
-      std::array<uint8_t*, 4> destinations{};
-      std::array<uint8_t, 4> answers{};
-      for (unsigned lane = 0; lane < lanes; ++lane) {
-        arithmetic->left[lane] = first.bits(at);
-        arithmetic->right[lane] = second.bits(at);
-        destinations[lane] = writer.address(at);
-        math_next(at, shape);
-      }
-      arithmetic->evaluate(spec.descriptor.element_type, lanes,
-                           phase.query.parameters, answers.data());
-      for (unsigned lane = 0; lane < lanes; ++lane)
-        *destinations[lane] = answers[lane];
-    }
-    return phase.consume_work(1);
-  }
+  ElementType dtype;
+  BinaryParts absolute, relative;
+  fixed_tensor::PointInputs<2> inputs;
 };
-using ComparisonProgram = numeric_ops::WholeTensorProgram<ComparisonKernel>;
+void advance(std::array<std::uint64_t, 8>* at,
+             const ps_kernel_layout_v8& layout) noexcept {
+  for (unsigned axis = layout.rank; axis-- > 0;) {
+    if (++(*at)[axis] < layout.origin[axis] + layout.shape[axis])
+      break;
+    (*at)[axis] = layout.origin[axis];
+  }
+}
+bool cancelled(const ps_kernel_invocation_v8& invocation) noexcept {
+  return invocation.cancellation.is_cancelled &&
+         invocation.cancellation.is_cancelled(invocation.cancellation.context);
+}
+void comparison_invoke(const ps_kernel_invocation_v8* invocation,
+                       ps_kernel_status_v8* status) noexcept {
+  const auto& state =
+      *static_cast<const ComparisonState*>(invocation->prepared_context);
+  static_assert(alignof(ComparisonMath) <= alignof(std::max_align_t));
+  auto* arithmetic = new (invocation->scratch[0].allocation)
+      ComparisonMath(state.kind, state.profile);
+  const auto destroy = [](ComparisonMath* value) { value->~ComparisonMath(); };
+  std::unique_ptr<ComparisonMath, decltype(destroy)> guard(arithmetic, destroy);
+  fixed_tensor::PointReader<2> reader{state.inputs, *invocation};
+  const auto& output = invocation->outputs[0];
+  const auto& layout = *output.layout;
+  std::array<std::uint64_t, 8> at{};
+  std::copy(layout.origin, layout.origin + layout.rank, at.begin());
+  std::uint64_t count = 1;
+  for (unsigned axis = 0; axis < layout.rank; ++axis)
+    count *= layout.shape[axis];
+  const auto width = TensorSpan::element_size(state.dtype);
+  for (std::uint64_t begin = 0; begin < count; begin += 4) {
+    if (cancelled(*invocation)) {
+      *status = kernel_failure(ErrorCode::Cancelled);
+      return;
+    }
+    const auto lanes =
+        static_cast<unsigned>(std::min<std::uint64_t>(4, count - begin));
+    for (unsigned lane = 0; lane < lanes; ++lane) {
+      arithmetic->left[lane] = reader.bits(0, at, width);
+      arithmetic->right[lane] = reader.bits(1, at, width);
+      advance(&at, layout);
+    }
+    arithmetic->evaluate(state.dtype, lanes, state.absolute, state.relative,
+                         static_cast<std::uint8_t*>(output.allocation) +
+                             output.byte_offset + begin);
+  }
+  *status = {};
+}
 OperationDefinition comparison(const std::string& key, Comparison kind,
                                SequenceProfile profile) {
   OperationDefinition operation;
@@ -198,13 +195,18 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
   if (kind == Comparison::IsClose)
     traits.parameter_schema = {{"atol", OperationParameterType::Float64},
                                {"rtol", OperationParameterType::Float64}};
-  numeric_ops::set_whole_tensor_output(traits, ElementType::UInt8,
-                                       sizeof(ComparisonProgram));
-  traits.workspace_bytes = sizeof(ComparisonMath);
+  traits.outputs[0].key = "values";
+  traits.outputs[0].output_schema = tensor_ops::port();
+  traits.outputs[0].result_schema = tensor_ops::scalar_schema();
   operation.specialize_metadata = [kind, profile](const auto& inputs,
                                                   const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
+    for (const auto& input : inputs) {
+      auto status = tensor_ops::check_tensor(input);
+      if (!status.ok())
+        return Answer(status);
+    }
     const auto& first = inputs[0].result_schema->tensors[0];
     const auto& second = inputs[1].result_schema->tensors[0];
     const auto shape = first.sample_shape();
@@ -239,56 +241,98 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization result;
-    result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
-        numeric_ops::numeric_tensor_schema(ElementType::UInt8, shape));
+    auto schema = tensor_ops::scalar_schema();
+    schema.tensors[0].descriptor = {ElementType::UInt8, shape};
+    result.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(std::move(schema));
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.start_result = [kind, profile](const auto&, const auto& allocator) {
-    return ResultContinuation::make<ComparisonProgram>(allocator, kind,
-                                                       profile);
+  operation.lower = [](const OperationLowering& query) {
+    return fixed_tensor::lower_pointwise(query, "compare", "exact-predicate-v1",
+                                         sizeof(ComparisonMath));
   };
-  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
-}
-struct SelectionKernel final {
-  explicit SelectionKernel(SequenceProfile) {}
-  Status write(const ResultProgramPhase& phase,
-               const ResourceVector<ResultTensorWriteWindow>& writers) {
-    using namespace numeric_ops;  // NOLINT(build/namespaces)
-    const auto& output = phase.query.output.result_schema->tensors[0];
-    const auto& shape = output.descriptor.shape;
-    const auto count = math_take(output.sample_count());
-    const auto width = TensorSpan::element_size(output.descriptor.element_type);
-    std::array<MathTensorReader, 3> inputs{
-        MathTensorReader(phase.tensors->at({0, 0}), phase.query.cancellation),
-        MathTensorReader(phase.tensors->at({1, 0}), phase.query.cancellation),
-        MathTensorReader(phase.tensors->at({2, 0}), phase.query.cancellation)};
-    if (writers.size() != 1)
-      return {ErrorCode::OperationFailed,
-              "selection requires one packed writer"};
-    MathTensorWriter writer(writers[0]);
-    std::vector<uint64_t> at(shape.size(), 0);
-    for (uint64_t i = 0; i < count; ++i) {
-      auto charged = phase.consume_work(32 + width + 3 * shape.size());
-      if (!charged.ok())
-        return charged;
-      // Both complete branches remain required even for a constant condition.
-      const std::array<uint64_t, 3> bits{inputs[0].bits(at), inputs[1].bits(at),
-                                         inputs[2].bits(at)};
-      if (bits[0] > 1)
-        return {ErrorCode::InvalidArgument,
-                "InvalidCondition: port=0 byte=" + std::to_string(bits[0]) +
-                    " linear_index=" + std::to_string(i),
-                FailureReason::InvalidDomain,
-                {FailureOrigin::Domain, FailureScope::Run}};
-      const auto selected = bits[0] ? bits[1] : bits[2];
-      std::memcpy(writer.address(at), &selected, width);
-      math_next(at, shape);
+  operation.prepare_kernel =
+      [kind, profile](
+          const physical::KernelDesc& kernel,
+          const physical::Placement& placement, const KernelPreparation& query,
+          const ResourceSet&,
+          const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    using Answer = Result<ps_prepared_kernel_v8>;
+    if (kernel.symbol != "compare" || kernel.contract != "exact-predicate-v1" ||
+        !query.task_parameters.empty() ||
+        query.scratch !=
+            std::array<std::uint64_t, 3>{sizeof(ComparisonMath), 0, 0})
+      return Answer(
+          {ErrorCode::TypeMismatch, "invalid comparison kernel signature"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Answer({ErrorCode::BackendUnavailable,
+                     "comparison requires CPU Host placement"});
+    auto available = numeric_ops::sequence_profile_available(profile);
+    if (!available.ok())
+      return Answer(available);
+    auto state = std::make_unique<ComparisonState>();
+    auto valid = fixed_tensor::prepare_point_inputs(query, &state->inputs);
+    if (!valid.ok())
+      return Answer(valid);
+    state->kind = kind;
+    state->profile = profile;
+    state->dtype =
+        query.inputs[0].result_schema->tensors[0].descriptor.element_type;
+    if (kind == Comparison::IsClose) {
+      const auto decode = [](double value) {
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, &value, 8);
+        return BinaryParts::decode(bits, false);
+      };
+      state->absolute = decode(std::get<double>(query.parameters.at("atol")));
+      state->relative = decode(std::get<double>(query.parameters.at("rtol")));
     }
-    return phase.consume_work(1);
-  }
+    ps_prepared_kernel_v8 result{};
+    result.struct_size = sizeof(result);
+    result.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+    result.invoke_cpu = comparison_invoke;
+    result.context = state.release();
+    result.release = [](const void* context) {
+      delete static_cast<const ComparisonState*>(context);
+    };
+    return Answer(result);
+  };
+  return operation;
+}
+
+struct SelectionState final {
+  fixed_tensor::PointInputs<3> inputs;
+  std::size_t width = 0;
 };
-using SelectionProgram = numeric_ops::WholeTensorProgram<SelectionKernel>;
+void selection_invoke(const ps_kernel_invocation_v8* invocation,
+                      ps_kernel_status_v8* status) noexcept {
+  const auto& state =
+      *static_cast<const SelectionState*>(invocation->prepared_context);
+  fixed_tensor::PointReader<3> reader{state.inputs, *invocation};
+  const auto& output = invocation->outputs[0];
+  const auto& layout = *output.layout;
+  std::array<std::uint64_t, 8> at{};
+  std::copy(layout.origin, layout.origin + layout.rank, at.begin());
+  std::uint64_t count = 1;
+  for (unsigned axis = 0; axis < layout.rank; ++axis)
+    count *= layout.shape[axis];
+  for (std::uint64_t sample = 0; sample < count; ++sample) {
+    if (!(sample & 1023) && cancelled(*invocation)) {
+      *status = kernel_failure(ErrorCode::Cancelled);
+      return;
+    }
+    // The caller supplies 0/1 conditions; both branches are fixed dependencies.
+    const auto condition = reader.bits(0, at, 1);
+    const auto selected = reader.bits(condition ? 1 : 2, at, state.width);
+    std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
+                    output.byte_offset + sample * state.width,
+                &selected, state.width);
+    advance(&at, layout);
+  }
+  *status = {};
+}
 OperationDefinition selection(const std::string& key, SequenceProfile profile) {
   OperationDefinition operation;
   operation.key = key;
@@ -299,8 +343,9 @@ OperationDefinition selection(const std::string& key, SequenceProfile profile) {
     input.element_type_mask = 15;
   }
   traits.input_schema[0].element_type_mask = 1;
-  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
-                                       sizeof(SelectionProgram));
+  traits.outputs[0].key = "values";
+  traits.outputs[0].output_schema = tensor_ops::port();
+  traits.outputs[0].result_schema = tensor_ops::scalar_schema();
   traits.requires_metadata_specialization = true;
   operation.specialize_metadata = [profile](const auto& inputs, const auto&)
       -> Result<std::vector<OperationOutputSpecialization>> {
@@ -311,6 +356,11 @@ OperationDefinition selection(const std::string& key, SequenceProfile profile) {
                            FailureReason::None,
                            {FailureOrigin::Schema, FailureScope::Unspecified}});
     };
+    for (const auto& input : inputs) {
+      auto status = tensor_ops::check_tensor(input);
+      if (!status.ok())
+        return Answer(status);
+    }
     const auto shape = inputs[0].result_schema->tensors[0].sample_shape();
     const auto& left = inputs[1].result_schema->tensors[0];
     const auto& right = inputs[2].result_schema->tensors[0];
@@ -329,16 +379,53 @@ OperationDefinition selection(const std::string& key, SequenceProfile profile) {
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization result;
-    result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
-        numeric_ops::numeric_tensor_schema(left.descriptor.element_type,
-                                           shape));
+    auto schema = tensor_ops::scalar_schema();
+    schema.tensors[0].descriptor = {left.descriptor.element_type, shape};
+    result.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(std::move(schema));
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.start_result = [profile](const auto&, const auto& allocator) {
-    return ResultContinuation::make<SelectionProgram>(allocator, profile);
+  operation.lower = [](const OperationLowering& query) {
+    return fixed_tensor::lower_pointwise(query, "select", "bits-unchecked-v1",
+                                         0);
   };
-  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
+  operation.prepare_kernel =
+      [profile](
+          const physical::KernelDesc& kernel,
+          const physical::Placement& placement, const KernelPreparation& query,
+          const ResourceSet&,
+          const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    using Answer = Result<ps_prepared_kernel_v8>;
+    if (kernel.symbol != "select" || kernel.contract != "bits-unchecked-v1" ||
+        !query.task_parameters.empty() ||
+        query.scratch != std::array<std::uint64_t, 3>{})
+      return Answer(
+          {ErrorCode::TypeMismatch, "invalid select kernel signature"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Answer({ErrorCode::BackendUnavailable,
+                     "select requires CPU Host placement"});
+    auto available = numeric_ops::sequence_profile_available(profile);
+    if (!available.ok())
+      return Answer(available);
+    auto state = std::make_unique<SelectionState>();
+    auto valid = fixed_tensor::prepare_point_inputs(query, &state->inputs);
+    if (!valid.ok())
+      return Answer(valid);
+    state->width =
+        TensorSpan::element_size(query.writes[0].layout.element_type);
+    ps_prepared_kernel_v8 result{};
+    result.struct_size = sizeof(result);
+    result.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+    result.invoke_cpu = selection_invoke;
+    result.context = state.release();
+    result.release = [](const void* context) {
+      delete static_cast<const SelectionState*>(context);
+    };
+    return Answer(result);
+  };
+  return operation;
 }
 }  // namespace
 Status register_numeric_comparisons(OperationRegistry* registry) {

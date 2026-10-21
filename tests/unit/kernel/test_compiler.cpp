@@ -64,18 +64,16 @@ int dependency_chains() {
   PS_CHECK(compiled.value().ir_versions.back().ir.value().program().form ==
            ps::IRForm::ControlFlow);
   PS_CHECK(check_chains(compiled.value().ir_versions.back().ir.value(),
-                        {{70, 60, 10}, {50}, {40, 30}, {20}}) == 0);
+                        {{70, 60, 10, 50, 40, 30, 20}}) == 0);
   PS_CHECK(compiled.value().ir_versions.front().ir.value().nodes().size() == 7);
   std::vector<ps::IRCallId> executed;
-  for (const auto& block : compiled.value().plan.value().blocks())
-    for (const auto& instruction : block.instructions)
-      executed.push_back(compiled.value()
-                             .plan.value()
-                             .steps()[instruction.step_index]
-                             .node_id);
+  const auto& physical = compiled.value().plan->program();
+  for (const auto& block : physical.blocks)
+    for (auto call : block.calls)
+      executed.push_back(physical.calls[call].source_call);
   PS_CHECK(executed == std::vector<ps::IRCallId>({70, 60, 10, 50, 40, 30, 20}));
   ps::ExecutionContext execution(operations);
-  auto result = execution.execute(compiled.value().plan.value());
+  auto result = multi_result::run(execution, compiled.value().plan.value());
   PS_REQUIRE_OK(result);
   PS_CHECK(ps::test::named_scalar(result.value(), "result") == 6.0);
   auto encoded = ps::CompilerArtifact::export_ir(
@@ -126,8 +124,9 @@ int dependency_chains() {
                         {{70, 60}, {70, 50}, {40, 30}, {70, 60, 10}, {20}}) ==
            0);
   PS_CHECK(check_chains(alternative.value().ir_versions.back().ir.value(),
-                        {{70, 60}, {50}, {40, 30}, {10}, {20}}) == 0);
-  auto other_result = execution.execute(alternative.value().plan.value());
+                        {{70, 60, 50, 40, 30, 10, 20}}) == 0);
+  auto other_result =
+      multi_result::run(execution, alternative.value().plan.value());
   PS_REQUIRE_OK(other_result);
   PS_CHECK(ps::test::named_scalar(other_result.value(), "result") == 6.0);
 
@@ -147,8 +146,8 @@ int dependency_chains() {
                                                                   {20},
                                                                   {80}}) == 0);
   PS_CHECK(check_chains(roots.value().ir_versions.back().ir.value(),
-                        {{70, 60, 10}, {50}, {40, 30}, {20}, {80}}) == 0);
-  auto named = execution.execute(roots.value().plan.value());
+                        {{70, 60, 10, 50, 40, 30, 20, 80}}) == 0);
+  auto named = multi_result::run(execution, roots.value().plan.value());
   PS_REQUIRE_OK(named);
   PS_CHECK(ps::test::named_scalar(named.value(), "a") == 2.0);
   PS_CHECK(ps::test::named_scalar(named.value(), "z") == 6.0);
@@ -159,7 +158,7 @@ int dependency_chains() {
   PS_CHECK(same_roots.value().digest().value ==
            roots.value().ir_versions.front().ir.value().digest().value);
 
-  // An input used twice is still one producer and a separate join continuation.
+  // An input used twice is still one producer and a separate consuming task.
   ps::WorkflowDocument repeated;
   repeated.nodes = {
       {1, "core.constant", {}, {{"value", 3.0}}},
@@ -175,8 +174,8 @@ int dependency_chains() {
   PS_CHECK(check_chains(shared.value().ir_versions.front().ir.value(),
                         {{1}, {1}, {2, 3}}) == 0);
   PS_CHECK(check_chains(shared.value().ir_versions.back().ir.value(),
-                        {{1}, {2, 3}}) == 0);
-  auto doubled = execution.execute(shared.value().plan.value());
+                        {{1, 2, 3}}) == 0);
+  auto doubled = multi_result::run(execution, shared.value().plan.value());
   PS_REQUIRE_OK(doubled);
   PS_CHECK(ps::test::named_scalar(doubled.value(), "result") == 6.0);
 
@@ -189,7 +188,8 @@ int dependency_chains() {
                         {{1}, {1}}) == 0);
   PS_CHECK(check_chains(aliases.value().ir_versions.back().ir.value(), {{1}}) ==
            0);
-  auto alias_results = execution.execute(aliases.value().plan.value());
+  auto alias_results =
+      multi_result::run(execution, aliases.value().plan.value());
   PS_REQUIRE_OK(alias_results);
   PS_CHECK(ps::test::named_scalar(alias_results.value(), "a") == 3.0);
   PS_CHECK(ps::test::named_scalar(alias_results.value(), "b") == 3.0);
@@ -207,8 +207,8 @@ int dependency_chains() {
   PS_REQUIRE_OK(bound_input);
   PS_CHECK(check_chains(bound_input.value().ir_versions.front().ir.value(),
                         {{1}, {2}}) == 0);
-  auto external_result = execution.execute(
-      bound_input.value().plan.value(),
+  auto external_result = multi_result::run(
+      execution, bound_input.value().plan.value(),
       {{multi_result::binding(multi_result::take(execution.resource_budget()),
                               "input", 4.0)}});
   PS_REQUIRE_OK(external_result);
@@ -266,7 +266,6 @@ int main() {
   }
   PS_CHECK(!retained_revision.current());
 
-  using ps::Backend;
   using ps::Compiler;
   using ps::ErrorCode;
   using ps::GraphContext;
@@ -276,6 +275,7 @@ int main() {
   using ps::WorkflowNode;
   using ps::WorkflowNodeOutput;
   using ps::WorkflowOutput;
+  using ps::physical::Backend;
   using ps::test::kernel_registry;
 
   auto operations = kernel_registry();
@@ -285,14 +285,9 @@ int main() {
   const std::map<std::string, ps::ParameterValue> no_parameters;
   PS_CHECK(operations->find_traits(unknown_key).status().code ==
            ErrorCode::NotFound);
-  ps::ResultProgramMetadata unknown_metadata;
-  ps::ResultProgramQuery unknown_query(unknown_metadata, no_parameters);
-  ps::ResourceBudget direct_root;
-  PS_CHECK(
-      operations
-          ->start_result(unknown_key, unknown_query, direct_root.allocator())
-          .status()
-          .code == ErrorCode::NotFound);
+  PS_CHECK(operations->prepare_operation(unknown_key, {}, no_parameters)
+               .status()
+               .code == ErrorCode::NotFound);
   WorkflowDocument unknown_operation;
   unknown_operation.nodes = {{1, unknown_key, {}, {}}};
   unknown_operation.outputs = {{"result", 1, "value"}};
@@ -308,13 +303,10 @@ int main() {
       compiled.value().ir_versions.front().ir.value().digest().value.size() ==
       16U);
   PS_CHECK(compiled.value().plan.value().digest().value.size() == 16U);
-  PS_CHECK(compiled.value().plan.value().cache_key().value.size() == 16U);
   PS_CHECK(compiled.value().ir_versions.size() == 1);
   PS_CHECK(compiled.value().ir_versions.back().ir.value().digest().value !=
            compiled.value().plan.value().digest().value);
-  PS_CHECK(compiled.value().plan.value().digest().value !=
-           compiled.value().plan.value().cache_key().value);
-  PS_CHECK(compiled.value().plan.value().steps().back().backend ==
+  PS_CHECK(compiled.value().plan->program().placements.back().backend ==
            Backend::Cpu);
 
   WorkflowDocument unknown_parameter = ps::test::addition_document(2.0, 3.0);
@@ -355,26 +347,10 @@ int main() {
   auto signed_zero_operations = std::make_shared<ps::OperationRegistry>();
   ps::OperationDefinition signed_zero_definition;
   signed_zero_definition.key = "test.signed_zero";
-  signed_zero_definition.traits.workspace_bytes = 8;
   signed_zero_definition.traits.parameter_schema = {ps::OperationParameterSpec{
       "value", ps::OperationParameterType::Float64, true}};
   signed_zero_definition.traits.outputs[0] = multi_result::output("value");
-  signed_zero_definition.start_result =
-      [](const ps::ResultProgramQuery& query,
-         const ps::BufferAllocator& allocator) {
-        const auto parameter = query.parameters.find("value");
-        if (parameter == query.parameters.end())
-          return ps::Result<ps::ResultContinuation>(
-              ps::Status::failure(ErrorCode::InvalidArgument,
-                                  "signed-zero probe parameter is missing"));
-        const auto* value = std::get_if<double>(&parameter->second);
-        if (!value)
-          return ps::Result<ps::ResultContinuation>(ps::Status::failure(
-              ErrorCode::InvalidArgument,
-              "signed-zero probe parameter is not Float64"));
-        return ps::ResultContinuation::make<multi_result::Program>(
-            allocator, -1, std::signbit(*value) ? -1.0 : 1.0);
-      };
+  ps::test::install_scalar(signed_zero_definition, false);
   PS_CHECK(signed_zero_operations
                ->register_operation(std::move(signed_zero_definition))
                .ok());
@@ -397,13 +373,11 @@ int main() {
       negative_zero.value().ir_versions.front().ir.value().digest().value);
   PS_CHECK(positive_zero.value().plan.value().digest().value !=
            negative_zero.value().plan.value().digest().value);
-  PS_CHECK(positive_zero.value().plan.value().cache_key().value !=
-           negative_zero.value().plan.value().cache_key().value);
   ps::ExecutionContext signed_zero_execution(signed_zero_operations);
-  auto positive_zero_result =
-      signed_zero_execution.execute(positive_zero.value().plan.value());
-  auto negative_zero_result =
-      signed_zero_execution.execute(negative_zero.value().plan.value());
+  auto positive_zero_result = multi_result::run(
+      signed_zero_execution, positive_zero.value().plan.value());
+  auto negative_zero_result = multi_result::run(
+      signed_zero_execution, negative_zero.value().plan.value());
   if (!positive_zero_result.ok())
     std::cerr << positive_zero_result.status().message << " code="
               << static_cast<unsigned>(positive_zero_result.status().code)
@@ -412,10 +386,12 @@ int main() {
               << "\n";
   PS_CHECK(positive_zero_result.ok());
   PS_CHECK(negative_zero_result.ok());
-  PS_CHECK(ps::test::named_scalar(positive_zero_result.value(), "value") ==
-           1.0);
-  PS_CHECK(ps::test::named_scalar(negative_zero_result.value(), "value") ==
-           -1.0);
+  const auto positive_value =
+      ps::test::named_scalar(positive_zero_result.value(), "value");
+  const auto negative_value =
+      ps::test::named_scalar(negative_zero_result.value(), "value");
+  PS_CHECK(positive_value == 0 && !std::signbit(positive_value));
+  PS_CHECK(negative_value == 0 && std::signbit(negative_value));
 
   WorkflowDocument duplicate = ps::test::addition_document(1.0, 1.0);
   duplicate.nodes[1].id = 1U;
@@ -453,11 +429,12 @@ int main() {
   PlanningOptions gpu_options;
   gpu_options.execution_mode = ps::ExecutionMode::NativeGpu;
   auto gpu_compiled = compiler.compile(first, gpu_options);
-  PS_CHECK(gpu_compiled.ok());
-  PS_CHECK(gpu_compiled.value().plan.value().steps().front().backend ==
-           Backend::Cpu);
-  PS_CHECK(gpu_compiled.value().plan.value().digest().value !=
-           compiled.value().plan.value().digest().value);
+  PS_REQUIRE_OK(gpu_compiled);
+  for (const auto& task : gpu_compiled.value().plan->program().tasks)
+    PS_CHECK(gpu_compiled.value()
+                 .plan->program()
+                 .placements[task.placement]
+                 .backend == ps::physical::Backend::Cpu);
 
   auto other_operations = kernel_registry();
   Compiler other_compiler(other_operations);

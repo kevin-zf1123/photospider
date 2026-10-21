@@ -12,17 +12,22 @@
 #include "photospider/core/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
-// Fixed-capacity signed dyadic enclosures. The full pool is owned/admitted as
-// part of its operation continuation. No arithmetic limb allocates on the heap.
+// Fixed-capacity signed dyadic enclosures. The operation owns and admits the
+// complete pool in its scratch state. Arithmetic limbs use fixed storage.
 // Inputs and every intermediate are checked against the 12288-bit capacity.
 // Internal retry is distinct from caller resource/cancellation failures.
-// Only the FMT-09 compact instantiation uses it; the historical 192-word
-// implementation retains its public Status failure behavior.
+// Checked=true stores bounded control outcomes instead of throwing. Numerical
+// inputs still obey caller preconditions. Its owner checks fault before using
+// results and resets Retry only at a new precision attempt. Construction with
+// an initialization consumer retains that consumer's throwing check protocol;
+// the checked shaper constructs its admitted scratch with no such consumer.
+// Compact throwing instances use DirectedCapacityRetry to request more limbs.
 struct DirectedCapacityRetry final {};
-template <std::size_t Words = 192>
+template <std::size_t Words = 192, bool Checked = false>
 struct DirectedIntervalStorage final {
   static_assert(Words >= 4 && Words <= 192 && Words % 4 == 0);
   static constexpr std::size_t kWords = Words, kSlots = 128;
+  static constexpr bool kChecked = Checked;
   using Integer = FixedInteger<kWords>;
   using Workspace = ExactRatioWorkspace<kWords>;
   struct Unresolved {};
@@ -40,6 +45,48 @@ struct DirectedIntervalStorage final {
   unsigned precision = 128;
   unsigned product_checkpoint_words = 0;
   core_internal::WorkConsumer consume;
+  enum class Fault { None, Retry, Overflow, Underflow, Failure };
+  mutable Fault fault = Fault::None;
+  mutable ErrorCode failure_code = ErrorCode::Ok;
+  mutable FailureReason failure_reason = FailureReason::None;
+  // Internal limb/pool exhaustion is distinct from an identical status returned
+  // by the caller's consumer. Only the former may select a wider evaluator.
+  mutable bool capacity_exceeded = false;
+  std::array<Number, 2> stopped{};
+  bool active() const { return !Checked || fault == Fault::None; }
+  void reset() {
+    used = 0;
+    fault = Fault::None;
+    failure_code = ErrorCode::Ok;
+    failure_reason = FailureReason::None;
+    capacity_exceeded = false;
+  }
+  void fail(ErrorCode code, FailureReason reason = FailureReason::None) const {
+    if (active()) {
+      fault = Fault::Failure;
+      failure_code = code;
+      failure_reason = reason;
+    }
+  }
+  Status status() const { return {failure_code, {}, failure_reason}; }
+  void retry() const {
+    if (active())
+      fault = Fault::Retry;
+  }
+  void range(bool overflow) const {
+    if (active())
+      fault = overflow ? Fault::Overflow : Fault::Underflow;
+  }
+  void stop_capacity() const {
+    if constexpr (Checked) {
+      if (active())
+        capacity_exceeded = true;
+      fail(ErrorCode::ResourceExhausted, FailureReason::CapacityLimit);
+    } else {
+      capacity();
+    }
+  }
+
   // A runtime initialization consumer admits and polls between complete slots.
   // Keep Number's ordinary zero-initialization semantics for external users.
   static Number initialized_number(
@@ -74,7 +121,19 @@ struct DirectedIntervalStorage final {
         : context(owner), saved(owner.used) {}
     ~Frame() { context.used = saved; }
   };
-  void work(std::uint64_t amount) const { consume.check(amount); }
+  bool work(std::uint64_t amount) const {
+    if constexpr (Checked) {
+      if (!active())
+        return false;
+      const auto& checked = consume(amount);
+      if (!checked.ok())
+        fail(checked.code, checked.reason);
+      return active();
+    } else {
+      consume.check(amount);
+      return true;
+    }
+  }
   [[noreturn]] static void capacity() {
     if constexpr (Words < 192)
       throw DirectedCapacityRetry{};
@@ -83,16 +142,25 @@ struct DirectedIntervalStorage final {
                  FailureReason::CapacityLimit};
   }
   Number& number() {
-    if (used == pool.size())
-      capacity();
+    if (!active())
+      return stopped[0];
+    if (used == pool.size()) {
+      stop_capacity();
+      return stopped[0];
+    }
     auto& result = pool[used++];
     clear(result);
     return result;
   }
   Interval interval() {
-    if (used + 2 > pool.size())
-      capacity();
-    work(2 * kWords);
+    if (!active())
+      return {stopped[0], stopped[1]};
+    if (used + 2 > pool.size()) {
+      stop_capacity();
+      return {stopped[0], stopped[1]};
+    }
+    if (!work(2 * kWords))
+      return {stopped[0], stopped[1]};
     auto& low = pool[used++];
     auto& high = pool[used++];
     low.magnitude.words.fill(0);
@@ -101,26 +169,38 @@ struct DirectedIntervalStorage final {
     return {low, high};
   }
   void clear(Number& value) const {
-    work(kWords);
+    if (!active())
+      return;
+    if (!work(kWords))
+      return;
     value.magnitude.words.fill(0);
     value.negative = false;
   }
   void copy(Number& output, const Number& value) const {
-    work(kWords);
+    if (!active())
+      return;
+    if (!work(kWords))
+      return;
     output = value;
   }
   void copy(Interval output, Interval value) const {
-    work(2 * kWords);
+    if (!active())
+      return;
+    if (!work(2 * kWords))
+      return;
     output.low = value.low;
     output.high = value.high;
   }
   int top(const Number& value) const { return Workspace::top(value.magnitude); }
   void normalize(Number& value) const {
+    if (!active())
+      return;
     if (top(value) < 0)
       value.negative = false;
   }
   int compare_unsigned(const Integer& a, const Integer& b) {
-    work(kWords);
+    if (!work(kWords))
+      return 0;
     return rounding.compare(a, b);
   }
   int compare(const Number& a, const Number& b) {
@@ -130,18 +210,26 @@ struct DirectedIntervalStorage final {
     return a.negative ? -order : order;
   }
   void increment(Integer& value) const {
-    work(kWords);
+    if (!active())
+      return;
+    if (!work(kWords))
+      return;
     for (auto& word : value.words)
       if (++word)
         return;
-    capacity();
+    stop_capacity();
   }
   // Source and destination must be distinct; signed wrappers arrange this.
   void shift_unsigned(Integer& output, const Integer& value, int shift) const {
-    work(kWords * 2);
+    if (!active())
+      return;
+    if (!work(kWords * 2))
+      return;
     if (shift >= 0) {
-      if (!Workspace::shift(value, static_cast<unsigned>(shift), &output))
-        capacity();
+      if (!Workspace::shift(value, static_cast<unsigned>(shift), &output)) {
+        stop_capacity();
+        return;
+      }
       return;
     }
     const auto bits = static_cast<unsigned>(-shift), whole = bits / 64,
@@ -173,6 +261,8 @@ struct DirectedIntervalStorage final {
   }
   // Distinct source/destination. lower selects floor, otherwise ceiling.
   void shift(Number& output, const Number& value, int bits, bool lower) const {
+    if (!active())
+      return;
     shift_unsigned(output.magnitude, value.magnitude, bits);
     output.negative = value.negative;
     if (bits < 0 && discarded(value.magnitude, static_cast<unsigned>(-bits)) &&
@@ -181,11 +271,15 @@ struct DirectedIntervalStorage final {
     normalize(output);
   }
   void integer(Number& output, std::int64_t value) const {
+    if (!active())
+      return;
     clear(output);
     const auto raw = static_cast<std::uint64_t>(value);
     const auto magnitude = value < 0 ? UINT64_C(0) - raw : raw;
-    if (precision / 64 + (precision % 64 != 0) >= kWords)
-      capacity();
+    if (precision / 64 + (precision % 64 != 0) >= kWords) {
+      stop_capacity();
+      return;
+    }
     output.magnitude.words[precision / 64] = magnitude << (precision % 64);
     if (precision % 64)
       output.magnitude.words[precision / 64 + 1] =
@@ -193,10 +287,14 @@ struct DirectedIntervalStorage final {
     output.negative = value < 0;
   }
   void integer(Interval output, std::int64_t value) const {
+    if (!active())
+      return;
     integer(output.low, value);
     copy(output.high, output.low);
   }
   void unsigned_integer(Interval output, unsigned __int128 value) {
+    if (!active())
+      return;
     Frame frame(*this);
     auto& source = number();
     source.magnitude.words[0] = static_cast<std::uint64_t>(value);
@@ -206,6 +304,8 @@ struct DirectedIntervalStorage final {
   }
   void dyadic(Interval output, std::uint64_t significand, int exponent,
               bool negative = false) {
+    if (!active())
+      return;
     Frame frame(*this);
     auto& source = number();
     source.magnitude.words[0] = significand;
@@ -214,10 +314,14 @@ struct DirectedIntervalStorage final {
     shift(output.high, source, static_cast<int>(precision) + exponent, false);
   }
   void raw(Interval output, std::uint64_t bits, bool narrow) {
+    if (!active())
+      return;
     const auto parts = BinaryParts::decode(bits, narrow);
     dyadic(output, parts.significand, parts.exponent, parts.negative);
   }
   void widen(Interval value, std::uint64_t units) {
+    if (!active())
+      return;
     Frame frame(*this);
     auto& error = number();
     error.magnitude.words[0] = units;
@@ -229,15 +333,21 @@ struct DirectedIntervalStorage final {
   template <std::size_t N>
   void constant_prefix(Interval output,
                        const std::array<std::uint64_t, N>& words) {
-    if (precision < 128 || precision > 4096)
-      capacity();
+    if (!active())
+      return;
+    if (precision < 128 || precision > 4096) {
+      stop_capacity();
+      return;
+    }
     const unsigned shift = 4096 - precision;
     const auto whole = shift / 64, tail = shift % 64;
     // Check discarded HIGH bits separately; low discarded bits are enclosed
     // by the +1 upper endpoint. Source is a certified floor in Q_4096.
     for (std::size_t j = whole + kWords; j < N; ++j)
-      if (words[j] >> (j == whole + kWords ? tail : 0))
-        capacity();
+      if (words[j] >> (j == whole + kWords ? tail : 0)) {
+        stop_capacity();
+        return;
+      }
     clear(output.low);
     for (std::size_t i = 0; i < kWords && i + whole < N; ++i) {
       const auto j = i + whole;
@@ -249,12 +359,16 @@ struct DirectedIntervalStorage final {
     increment(output.high.magnitude);
   }
   void constant(Interval output, bool pi) {
+    if (!active())
+      return;
     if constexpr (Words < 192) {
       constant_prefix(output, pi ? pi_floor_4096 : ln2_floor_4096);
       return;
     }
-    if (precision < 128 || precision > 4096)
-      capacity();
+    if (precision < 128 || precision > 4096) {
+      stop_capacity();
+      return;
+    }
     Frame frame(*this);
     auto& source = number();
     const auto& words = pi ? pi_floor_4096 : ln2_floor_4096;
@@ -267,17 +381,23 @@ struct DirectedIntervalStorage final {
   }
   // Alias-safe signed integer addition, exact in the shared Q_precision units.
   void add(Number& output, const Number& a, const Number& b) {
+    if (!active())
+      return;
     Frame frame(*this);
     auto& temporary = number();
     if (a.negative == b.negative) {
-      if (std::max(top(a), top(b)) + 1 >= static_cast<int>(kWords * 64))
-        capacity();
-      work(3 * kWords);
+      if (std::max(top(a), top(b)) + 1 >= static_cast<int>(kWords * 64)) {
+        stop_capacity();
+        return;
+      }
+      if (!work(3 * kWords))
+        return;
       temporary = a;
       temporary.magnitude.add(b.magnitude);
     } else {
       const auto order = compare_unsigned(a.magnitude, b.magnitude);
-      work(3 * kWords);
+      if (!work(3 * kWords))
+        return;
       temporary = order >= 0 ? a : b;
       temporary.magnitude.subtract(order >= 0 ? b.magnitude : a.magnitude);
     }
@@ -285,6 +405,8 @@ struct DirectedIntervalStorage final {
     output = temporary;
   }
   void negate(Interval output, Interval value) {
+    if (!active())
+      return;
     Frame frame(*this);
     auto temp = interval();
     copy(temp.low, value.high);
@@ -296,6 +418,8 @@ struct DirectedIntervalStorage final {
     copy(output, temp);
   }
   void add(Interval output, Interval a, Interval b) {
+    if (!active())
+      return;
     Frame frame(*this);
     auto temp = interval();
     add(temp.low, a.low, b.low);
@@ -303,26 +427,41 @@ struct DirectedIntervalStorage final {
     copy(output, temp);
   }
   void subtract(Interval output, Interval a, Interval b) {
+    if (!active())
+      return;
     Frame frame(*this);
     auto opposite = interval();
     negate(opposite, b);
     add(output, a, opposite);
   }
   void multiply(Number& output, const Number& a, const Number& b, bool lower) {
+    if (!active())
+      return;
     Frame frame(*this);
     auto& product = number();
-    if constexpr (Words < 192)
+    if constexpr (Words < 192 || Checked) {
       if (top(a) >= 0 && top(b) >= 0 &&
-          top(a) + top(b) + 1 >= static_cast<int>(kWords * 64))
-        capacity();
+          top(a) + top(b) + 1 >= static_cast<int>(kWords * 64)) {
+        stop_capacity();
+        return;
+      }
+    }
     auto status = multiply_fixed(a.magnitude, b.magnitude, &product.magnitude,
                                  *consume, product_checkpoint_words);
-    if (!status.ok())
-      throw status;
+    if (!status.ok()) {
+      if constexpr (Checked) {
+        fail(status.code, status.reason);
+        return;
+      } else {
+        throw status;
+      }
+    }
     product.negative = a.negative != b.negative;
     shift(output, product, -static_cast<int>(precision), lower);
   }
   void multiply(Interval output, Interval a, Interval b) {
+    if (!active())
+      return;
     Frame frame(*this);
     auto result = interval();
     if (!a.low.negative && !b.low.negative) {
@@ -336,15 +475,24 @@ struct DirectedIntervalStorage final {
     bool first = true;
     for (const auto* left : {&a.low, &a.high})
       for (const auto* right : {&b.low, &b.high}) {
-        if constexpr (Words < 192)
+        if constexpr (Words < 192 || Checked) {
           if (top(*left) >= 0 && top(*right) >= 0 &&
-              top(*left) + top(*right) + 1 >= static_cast<int>(kWords * 64))
-            capacity();
+              top(*left) + top(*right) + 1 >= static_cast<int>(kWords * 64)) {
+            stop_capacity();
+            return;
+          }
+        }
         auto status = multiply_fixed(left->magnitude, right->magnitude,
                                      &product.magnitude, *consume,
                                      product_checkpoint_words);
-        if (!status.ok())
-          throw status;
+        if (!status.ok()) {
+          if constexpr (Checked) {
+            fail(status.code, status.reason);
+            return;
+          } else {
+            throw status;
+          }
+        }
         product.negative = left->negative != right->negative;
         shift(candidate, product, -static_cast<int>(precision), true);
         if (first || compare(candidate, result.low) < 0)
@@ -362,19 +510,25 @@ struct DirectedIntervalStorage final {
   // Only the small tier uses this path; each digit is charged before mutation.
   void divide_words(Integer& quotient, Integer& remainder,
                     const Integer& numerator, const Integer& denominator) {
+    if (!active())
+      return;
     Frame frame(*this);
     const auto n = static_cast<unsigned>((Workspace::top(numerator) + 64) / 64);
     const auto d =
         static_cast<unsigned>((Workspace::top(denominator) + 64) / 64);
-    if (!d)
-      capacity();
-    work(2 * kWords);
+    if (!d) {
+      stop_capacity();
+      return;
+    }
+    if (!work(2 * kWords))
+      return;
     quotient.words.fill(0);
     remainder = numerator;
     if (n < d)
       return;
     if (d == 1) {
-      work(4 * n);
+      if (!work(4 * n))
+        return;
       std::uint64_t rest = 0;
       for (unsigned i = n; i; --i) {
         const auto value = (static_cast<unsigned __int128>(rest) << 64) |
@@ -389,7 +543,8 @@ struct DirectedIntervalStorage final {
     }
     auto& u = number().magnitude;
     auto& v = number().magnitude;
-    work(2 * (n + d));
+    if (!work(2 * (n + d)))
+      return;
     const unsigned shift =
         static_cast<unsigned>(__builtin_clzll(denominator.words[d - 1]));
     std::uint64_t extra = 0;
@@ -410,7 +565,8 @@ struct DirectedIntervalStorage final {
     };
     for (unsigned digit = n - d + 1; digit; --digit) {
       const unsigned j = digit - 1;
-      work(8 * d + 8);
+      if (!work(8 * d + 8))
+        return;
       const auto high = upper(j + d), low = u.words[j + d - 1];
       const auto leading = v.words[d - 1];
       std::uint64_t q, r;
@@ -456,7 +612,8 @@ struct DirectedIntervalStorage final {
       }
       quotient.words[j] = q;
     }
-    work(kWords);
+    if (!work(kWords))
+      return;
     remainder.words.fill(0);
     for (unsigned i = 0; i < d; ++i)
       remainder.words[i] =
@@ -465,15 +622,20 @@ struct DirectedIntervalStorage final {
   }
   void divide_unsigned(Integer& quotient, Integer& remainder,
                        const Integer& numerator, const Integer& denominator) {
+    if (!active())
+      return;
     if constexpr (kWords <= 16) {
       divide_words(quotient, remainder, numerator, denominator);
       return;
     }
     Frame frame(*this);
     auto& shifted = number();
-    if (Workspace::top(denominator) < 0)
-      capacity();
-    work(2 * kWords);
+    if (Workspace::top(denominator) < 0) {
+      stop_capacity();
+      return;
+    }
+    if (!work(2 * kWords))
+      return;
     quotient.words.fill(0);
     remainder = numerator;
     const int bits = Workspace::top(numerator) - Workspace::top(denominator);
@@ -484,7 +646,8 @@ struct DirectedIntervalStorage final {
         static_cast<std::size_t>((Workspace::top(numerator) + 64) / 64);
     const auto blocks = (words + 3) / 4 * 4;
     for (int bit = bits; bit >= 0; --bit) {
-      work(2 * words + blocks);
+      if (!work(2 * words + blocks))
+        return;
       int order = 0;
       // All words above the original numerator are zero throughout division.
       // Restrict compare/subtract/shift to that proved active capacity.
@@ -526,6 +689,8 @@ struct DirectedIntervalStorage final {
   }
 
   void divide(Number& output, const Number& a, const Number& b, bool lower) {
+    if (!active())
+      return;
     Frame frame(*this);
     auto& scaled = number();
     auto& quotient = number();
@@ -543,8 +708,18 @@ struct DirectedIntervalStorage final {
     return (value.low.negative || top(value.low) < 0) && !value.high.negative;
   }
   void divide(Interval output, Interval a, Interval b) {
-    if (includes_zero(b))
-      throw Unresolved{};
+    if (!active())
+      return;
+    if (!active())
+      return;
+    if (includes_zero(b)) {
+      if constexpr (Checked) {
+        retry();
+        return;
+      } else {
+        throw Unresolved{};
+      }
+    }
     Frame frame(*this);
     auto result = interval();
     if constexpr (Words < 192) {
@@ -571,7 +746,16 @@ struct DirectedIntervalStorage final {
   }
   void divide_small(Number& output, const Number& value, std::uint64_t divisor,
                     bool lower) const {
-    work(kWords * 4);
+    if (!active())
+      return;
+    if (!work(kWords * 4))
+      return;
+    if constexpr (Checked) {
+      if (!divisor) {
+        fail(ErrorCode::InvalidArgument);
+        return;
+      }
+    }
     std::uint64_t remainder = 0;
     const auto words = static_cast<std::size_t>((top(value) + 64) / 64);
     // High words are zero even when output aliases value or reuses a slot.
@@ -590,6 +774,8 @@ struct DirectedIntervalStorage final {
     normalize(output);
   }
   void divide_small(Interval output, Interval value, std::uint64_t divisor) {
+    if (!active())
+      return;
     Frame frame(*this);
     auto result = interval();
     divide_small(result.low, value.low, divisor, true);
@@ -597,6 +783,8 @@ struct DirectedIntervalStorage final {
     copy(output, result);
   }
   void scale(Interval output, Interval value, int bits) {
+    if (!active())
+      return;
     Frame frame(*this);
     auto result = interval();
     shift(result.low, value.low, bits, true);
@@ -604,17 +792,25 @@ struct DirectedIntervalStorage final {
     copy(output, result);
   }
   std::uint64_t rounded(const Number& value, bool narrow) {
-    work(2 * kWords);
+    if (!work(2 * kWords))
+      return 0;
     rounding.numerator = value.magnitude;
     rounding.denominator.words.fill(0);
     rounding.denominator.words[0] = 1;
     rounding.negative = value.negative;
     auto result =
         rounding.round(narrow, *consume, -static_cast<int>(precision));
-    if (!result.ok())
-      throw result.status();
+    if (!result.ok()) {
+      if constexpr (Checked) {
+        fail(result.status().code, result.status().reason);
+        return 0;
+      } else {
+        throw result.status();
+      }
+    }
     return result.value();
   }
 };
 using DirectedInterval = DirectedIntervalStorage<>;
+using CheckedDirectedInterval = DirectedIntervalStorage<192, true>;
 }  // namespace ps::plugin_internal::numeric_ops

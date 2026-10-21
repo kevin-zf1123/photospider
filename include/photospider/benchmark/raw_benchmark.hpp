@@ -68,8 +68,9 @@ struct PHOTOSPIDER_BENCHMARK_API RawBenchmarkOptions final {
  * @brief Raw measurement and outcome for one benchmark iteration.
  *
  * @note A non-cancellation failure preserves completed compiler timing and a
- * typed error reason. Cancellation observed before final report publication
- * aborts the complete run instead of publishing any sample sequence.
+ * typed error reason and any available Run diagnostics. Cancellation observed
+ * before final report publication aborts the complete run instead of publishing
+ * any sample sequence.
  */
 struct PHOTOSPIDER_BENCHMARK_API RawBenchmarkSample final {
   /** @brief Zero-based iteration index. */
@@ -78,6 +79,19 @@ struct PHOTOSPIDER_BENCHMARK_API RawBenchmarkSample final {
   CompilationDiagnostics compilation;
   /** @brief Raw execution diagnostics, present as defaults before execution. */
   ExecutionDiagnostics execution;
+  /** @brief Retained completed task/call trace prefixes, including device
+   * timestamp records. Controlled by execution.trace_capacity; empty when
+   * tracing is disabled. Truncation counts remain in execution diagnostics.
+   * Records retain no Run, Result, module or device owner. Host timestamps use
+   * the Run's steady-clock epoch; device clocks follow each record's domain.
+   */
+  std::vector<ExecutionTaskTiming> task_timings;
+  std::vector<ExecutionCallTiming> call_timings;
+  /** @brief Host steady-clock durations, including failed stages. Zero means
+   * a stage was not reached or below clock resolution. join includes task
+   * drain and observer settlement; these are not device timestamp durations.
+   */
+  std::uint64_t prepare_ns = 0, submit_ns = 0, join_ns = 0;
   /** @brief Success or first compiler/execution/oracle exception category. */
   ErrorCode outcome = ErrorCode::Ok;
   /**
@@ -109,6 +123,12 @@ struct PHOTOSPIDER_BENCHMARK_API RawBenchmarkReport final {
    * runner's final publication decision.
    */
   std::vector<RawBenchmarkSample> samples;
+  /** @brief Actual context worker count and native device/driver description.
+   * The description is empty when preparation never created a native device.
+   * It is diagnostic text, not a persistent identity or parsing contract.
+   */
+  std::uint32_t cpu_workers = 0;
+  std::string native_device_description;
 };
 
 /**

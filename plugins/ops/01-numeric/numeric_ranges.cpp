@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <new>
 #include <string>
@@ -9,11 +11,10 @@
 #include <vector>
 
 #include "01-numeric/exact_ratio.hpp"
-#include "01-numeric/numeric_tensor_program.hpp"
+#include "common/fixed_point_inputs.hpp"
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "photospider/core/resource_allocator.hpp"
-#include "photospider/plugin/whole_stage.hpp"
+#include "common/tensor_program.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -30,14 +31,6 @@ struct RangeMath final {
   std::array<std::int64_t, 4> greater{}, less{};
   RangeMath(RangeKind operation, SequenceProfile selected)
       : kind(operation), profile(selected), ratio(selected) {}
-  Result<std::uint64_t> invalid(std::size_t port) const {
-    return Result<std::uint64_t>(
-        Status{ErrorCode::InvalidArgument,
-               "InvalidBounds: port=" + std::to_string(port) +
-                   " bits=" + std::to_string(bits[port]),
-               FailureReason::InvalidDomain,
-               {FailureOrigin::Domain, FailureScope::Run}});
-  }
   Result<std::uint64_t> evaluate(
       ElementType type, const std::function<Status(std::uint64_t)>& consume) {
     using Answer = Result<std::uint64_t>;
@@ -62,23 +55,12 @@ struct RangeMath final {
                               less.data(), profile);
     std::uint64_t output = 0;
     if (kind == RangeKind::Clamp) {
-      if (floating && parts[1].nan)
-        return invalid(1);
-      if (floating && parts[2].nan)
-        return invalid(2);
-      if (greater[2])
-        return invalid(1);
       output = floating && parts[0].nan
                    ? bits[0] | (UINT64_C(1) << (narrow ? 22 : 51))
                : less[0]    ? bits[1]
                : greater[1] ? bits[2]
                             : bits[0];
     } else {
-      for (unsigned port = 1; port < count; ++port)
-        if (parts[port].nan || parts[port].infinite)
-          return invalid(port);
-      if (!less[2])
-        return invalid(1);
       if (parts[0].nan) {
         output = bits[0] | (UINT64_C(1) << (narrow ? 22 : 51));
       } else if (key(3) == key(4)) {
@@ -117,59 +99,93 @@ struct RangeMath final {
     return Answer(output);
   }
 };
-struct RangeKernel final {
-  RangeKind kind;
+template <std::size_t Ports>
+struct RangeState final {
   SequenceProfile profile;
-  RangeKernel(RangeKind kind, SequenceProfile profile)
-      : kind(kind), profile(profile) {}
-  Status write(const ResultProgramPhase& phase,
-               const ResourceVector<ResultTensorWriteWindow>& writers) {
-    using namespace numeric_ops;  // NOLINT(build/namespaces)
-    if (writers.size() != 1)
-      return {ErrorCode::OperationFailed, "range requires one packed writer"};
-    const auto& target = phase.query.output.result_schema->tensors[0];
-    const auto shape = target.sample_shape();
-    const auto width = TensorSpan::element_size(target.descriptor.element_type);
-    auto scratch = math_take(phase.allocator.allocate(sizeof(RangeMath)));
-    static_assert(alignof(RangeMath) <= alignof(std::max_align_t));
-    std::unique_ptr<RangeMath, void (*)(RangeMath*)> math(
-        new (scratch.data()) RangeMath(kind, profile),
-        [](RangeMath* value) { value->~RangeMath(); });
-    std::array<std::optional<MathTensorReader>, 5> inputs;
-    const auto ports = kind == RangeKind::Clamp ? 3U : 5U;
-    for (unsigned port = 0; port < ports; ++port)
-      inputs[port].emplace(phase.tensors->at({port, 0}),
-                           phase.query.cancellation);
-    MathTensorWriter writer(writers[0]);
-    std::vector<uint64_t> coordinate(shape.size(), 0);
-    for (uint64_t i = 0, count = math_take(target.sample_count()); i < count;
-         ++i) {
-      math_require(phase.consume_work(ports * shape.size() + 1));
-      for (unsigned port = 0; port < ports; ++port)
-        math->bits[port] = inputs[port]->bits(coordinate);
-      auto result =
-          math->evaluate(target.descriptor.element_type, phase.consume_work);
-      if (!result.ok()) {
-        auto failure = result.status();
-        if (failure.detail.origin == FailureOrigin::Domain) {
-          failure.message += " coordinate=[";
-          for (size_t axis = 0; axis < coordinate.size(); ++axis) {
-            if (axis)
-              failure.message += ',';
-            failure.message += std::to_string(coordinate[axis]);
-          }
-          failure.message += ']';
-        }
-        return failure;
-      }
-      const auto bits = result.value();
-      std::memcpy(writer.address(coordinate), &bits, width);
-      math_next(coordinate, shape);
-    }
-    return phase.consume_work(1);
-  }
+  fixed_tensor::PointInputs<Ports> inputs;
 };
-using RangeProgram = numeric_ops::WholeTensorProgram<RangeKernel>;
+template <std::size_t Ports>
+void range_invoke(const ps_kernel_invocation_v8* invocation,
+                  ps_kernel_status_v8* status) noexcept {
+  FloatingEnvironment environment;
+  if (!environment.active()) {
+    *status = kernel_failure(ErrorCode::OperationFailed,
+                             "numeric environment unavailable");
+    return;
+  }
+  const auto& state =
+      *static_cast<const RangeState<Ports>*>(invocation->prepared_context);
+  static_assert(alignof(RangeMath) <= alignof(std::max_align_t));
+  try {
+    auto* math = new (invocation->scratch[0].allocation) RangeMath(
+        Ports == 3 ? RangeKind::Clamp : RangeKind::Remap, state.profile);
+    const auto destroy = [](RangeMath* value) { value->~RangeMath(); };
+    std::unique_ptr<RangeMath, decltype(destroy)> guard(math, destroy);
+    const std::function<Status(std::uint64_t)> consume =
+        [invocation](std::uint64_t) {
+          return invocation->cancellation.is_cancelled &&
+                         invocation->cancellation.is_cancelled(
+                             invocation->cancellation.context)
+                     ? Status{ErrorCode::Cancelled, {}}
+                     : Status::success();
+        };
+    fixed_tensor::PointReader<Ports> reader{state.inputs, *invocation};
+    const auto& output = invocation->outputs[0];
+    const auto& layout = *output.layout;
+    const auto dtype = static_cast<ElementType>(layout.element_type);
+    const auto width = TensorSpan::element_size(dtype);
+    std::array<std::uint64_t, 8> at{};
+    std::copy(layout.origin, layout.origin + layout.rank, at.begin());
+    std::uint64_t count = 1;
+    for (unsigned axis = 0; axis < layout.rank; ++axis)
+      count *= layout.shape[axis];
+    for (std::uint64_t sample = 0; sample < count; ++sample) {
+      for (unsigned port = 0; port < Ports; ++port)
+        math->bits[port] = reader.bits(port, at, width);
+      auto value = math->evaluate(dtype, consume);
+      if (!value.ok()) {
+        *status =
+            kernel_failure(value.status().code, value.status().message.c_str(),
+                           value.status().reason);
+        return;
+      }
+      const auto bits = value.value();
+      std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
+                      output.byte_offset + sample * width,
+                  &bits, width);
+      for (unsigned axis = layout.rank; axis-- > 0;) {
+        if (++at[axis] < layout.origin[axis] + layout.shape[axis])
+          break;
+        at[axis] = layout.origin[axis];
+      }
+    }
+    *status = {};
+  } catch (const std::bad_alloc&) {
+    *status = kernel_failure(ErrorCode::ResourceExhausted);
+  } catch (...) {
+    *status =
+        kernel_failure(ErrorCode::OperationFailed, "range arithmetic failed");
+  }
+}
+template <std::size_t Ports>
+Result<ps_prepared_kernel_v8> prepare_range(SequenceProfile profile,
+                                            const KernelPreparation& query) {
+  using Answer = Result<ps_prepared_kernel_v8>;
+  auto state = std::make_unique<RangeState<Ports>>();
+  auto valid = fixed_tensor::prepare_point_inputs(query, &state->inputs);
+  if (!valid.ok())
+    return Answer(valid);
+  state->profile = profile;
+  ps_prepared_kernel_v8 result{};
+  result.struct_size = sizeof(result);
+  result.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  result.invoke_cpu = range_invoke<Ports>;
+  result.context = state.release();
+  result.release = [](const void* context) {
+    delete static_cast<const RangeState<Ports>*>(context);
+  };
+  return Answer(result);
+}
 OperationDefinition range_operation(const std::string& key, RangeKind kind,
                                     SequenceProfile profile) {
   OperationDefinition operation;
@@ -181,9 +197,9 @@ OperationDefinition range_operation(const std::string& key, RangeKind kind,
   for (auto& input : traits.input_schema) {
     input.element_type_mask = kind == RangeKind::Clamp ? 15 : 12;
   }
-  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
-                                       sizeof(RangeProgram));
-  traits.workspace_bytes = sizeof(RangeMath);
+  traits.outputs[0].key = "values";
+  traits.outputs[0].output_schema = tensor_ops::port();
+  traits.outputs[0].result_schema = tensor_ops::scalar_schema();
   operation.specialize_metadata = [profile](const auto& inputs, const auto&)
       -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
@@ -193,6 +209,11 @@ OperationDefinition range_operation(const std::string& key, RangeKind kind,
                            FailureReason::None,
                            {FailureOrigin::Schema, FailureScope::Unspecified}});
     };
+    for (const auto& input : inputs) {
+      auto valid = tensor_ops::check_tensor(input);
+      if (!valid.ok())
+        return Answer(valid);
+    }
     const auto& selected = inputs[0].result_schema->tensors[0];
     const TensorDescriptor first{selected.descriptor.element_type,
                                  selected.sample_shape()};
@@ -213,15 +234,41 @@ OperationDefinition range_operation(const std::string& key, RangeKind kind,
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization result;
-    result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
-        numeric_ops::numeric_tensor_schema(first.element_type, first.shape));
+    auto schema = tensor_ops::scalar_schema();
+    schema.tensors[0].descriptor = first;
+    result.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(std::move(schema));
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.start_result = [kind, profile](const auto&, const auto& allocator) {
-    return ResultContinuation::make<RangeProgram>(allocator, kind, profile);
+  const std::string symbol = kind == RangeKind::Clamp ? "clamp" : "remap";
+  operation.lower = [symbol](const OperationLowering& query) {
+    return fixed_tensor::lower_pointwise(query, symbol, "range-unchecked-v1",
+                                         sizeof(RangeMath));
   };
-  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
+  operation.prepare_kernel =
+      [kind, profile, symbol](
+          const physical::KernelDesc& kernel,
+          const physical::Placement& placement, const KernelPreparation& query,
+          const ResourceSet&,
+          const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    using Answer = Result<ps_prepared_kernel_v8>;
+    if (kernel.symbol != symbol || kernel.contract != "range-unchecked-v1" ||
+        !query.task_parameters.empty() ||
+        query.scratch != std::array<std::uint64_t, 3>{sizeof(RangeMath), 0, 0})
+      return Answer(
+          {ErrorCode::TypeMismatch, "invalid range kernel signature"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Answer(
+          {ErrorCode::BackendUnavailable, "range requires CPU Host placement"});
+    auto available = numeric_ops::sequence_profile_available(profile);
+    if (!available.ok())
+      return Answer(available);
+    return kind == RangeKind::Clamp ? prepare_range<3>(profile, query)
+                                    : prepare_range<5>(profile, query);
+  };
+  return operation;
 }
 }  // namespace
 Status register_numeric_ranges(OperationRegistry* registry) {

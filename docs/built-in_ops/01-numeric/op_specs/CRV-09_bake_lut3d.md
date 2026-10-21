@@ -14,6 +14,10 @@ clarification_status: complete
 
 # CRV-09: bake_lut3d workflow template
 
+## Fixed execution status
+
+The fifteen geometry profile keys (`axis`, `grid`, `points`, `points_extra`, `color`) and four Result operations (Pack, Measure, Unpack, Gate) execute through fixed ABI 8 CPU tasks. The authoring helper builds ordinary source, sampling, application, measurement and gate nodes. A registry must provide those fixed definitions and the source operation keys. Report v3 retains its process-local owned-table ObjectId association.
+
 ## Revised lightness coordinate and implementation boundary
 
 The [2026-09-23 shared scale revision](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
@@ -65,7 +69,7 @@ member under an arbitrary schema id/version and key. Shapes come from the full
 `sample_shape()`, including batch axes. Axis is Float64[3,3], with static
 shape=[N0,N1,N2]. Inherit CRV-07's
 2..256 extents, independent ascending/descending axes, exact reconstructed
-Float64 coordinates and complete axis validation. Evaluate the source at those
+Float64 coordinates. Finite endpoints, consistent representable step and strict RN64 reconstructed ordering are caller preconditions for geometry and CRV-07 application. Evaluate the source at those
 grid colors. The exported table is a `photospider.tensor` Result with `samples`
 of shape [N0,N1,N2,3], selected table dtype and one atomic trailing component axis;
 its internal owned table uses `curve.bake_lut3d.table` v3 with tensor member
@@ -122,12 +126,11 @@ The supplied grid shape is fixed; no automatic refinement occurs. Partial table
 requests still require the global quality gate. No failed table is returned as a
 successful result with only a warning report.
 
-Axis is independently observable: axis-only requests validate and return the
-grid axis without source execution or error measurement. A nonempty table request
+Axis is independently observable: the geometry axis operation copies selected axis cells without source execution or error measurement. Axis numerical consistency remains a caller precondition. A nonempty table request
 triggers source evaluation of all grid vertices and all validation points plus
 the global acceptance gate, irrespective of its requested table subset. The final
 gate publishes the requested color ROI with its original global coordinates;
-generated complete-input Result outputs and source intermediates retain their full owners.
+selected geometry outputs and source intermediates retain their storage owners.
 
 ## Authoring and evaluation contract
 
@@ -152,9 +155,7 @@ and validation evaluations. A cached report cannot validate a new parameter
 snapshot or a different table dtype/method. A source which violates its pointwise
 assertion has no promised sampling-order-independent bake semantics.
 
-Validate all grid colors against the input model, all source output colors against
-the output model, and converted table colors against that output description.
-Nonfinite or model-invalid values fail computation. Validation compares the
+Finite model-valid grid colors, extra points and contributing source colors are caller preconditions for fixed geometry. Converted colors must remain finite and model-valid in their selected dtype. The geometry kernels perform no sample validation or narrowing-overflow diagnostic pass. Validation compares the
 actual source output (exactly promoted to Float64 if necessary) to CRV-07's
 correctly rounded applied LUT output at table_dtype, with no hidden higher-precision
 replacement of the source. Internal CRV-07 application explicitly supplies
@@ -171,7 +172,7 @@ workflow contract rather than a new opaque runtime composition primitive.
 
 ## Structured report schema
 
-The SDK defines SchemaTemplate id `curve.bake_lut3d.report` at version 3 with thirteen static Tensor members. The measurement stage publishes the report after evaluating the complete validation set, and the explicitly bound validator requires complete report coverage.
+The SDK defines SchemaTemplate id `curve.bake_lut3d.report` at version 3 with thirteen static Tensor members. The measurement stage publishes the report after evaluating the complete validation set, and the SDK report reader requires complete report coverage. A partial public projection can expose selected members, while measurement still writes the complete report before any member becomes available.
 
 | Tensor member | Dtype and shape |
 | --- | --- |
@@ -188,9 +189,9 @@ The SDK defines SchemaTemplate id `curve.bake_lut3d.report` at version 3 with th
 
 The thirteen members contain 361 bytes of fixed payload. `configuration_id` is the lowercase hexadecimal SHA-256 of the shape, interpolation, tolerances, source/table dtypes, extra-point count, explicit color descriptions and source recipe, under the `photospider.bake-configuration.v1` hash domain. The reader and gate receive the expected `Lut3dBakeDescription` explicitly.
 
-`measured_table_id` is an ordinary `UInt8[1,8]` payload encoding the ObjectId of the complete owned table read during measurement, in little-endian order. The gate compares it with the ObjectId of the current complete owned-table input. ObjectId is process-local identity, not a content digest: two tables with identical bytes but different ObjectIds are not interchangeable for this quality report.
+`measured_table_id` is an ordinary `UInt8[1,8]` payload encoding the ObjectId of the complete owned table read during measurement, in little-endian order. The gate compares it with the logical ObjectId supplied for the current owned-table input. ObjectId is process-local identity, not a content digest: two tables with identical bytes but different ObjectIds are not interchangeable for this quality report.
 
-Use `ExecutionContext::execute()` or request all thirteen report members through `execute_fragments()` before calling `read_lut3d_bake_report(result, description)`. The reader accesses completed data without starting production; its window limit must admit the largest member, 72 bytes. Axis values are ordinary payload rather than dynamic schema extents.
+Call `read_lut3d_bake_report(result, description)` only on a completed Result covering all thirteen report members. The reader accesses completed data without starting production; its window limit must admit the largest member, 72 bytes. Axis values are ordinary payload rather than dynamic schema extents.
 
 Compare errors and tolerances using exact arithmetic before report rounding.
 Choose maxima by exact absolute error, breaking ties with the earliest ordinal.
@@ -203,8 +204,7 @@ owned bake state/binding provenance as its gated table, not merely equal shapes.
 
 ## Demand, dirty propagation, ownership and resources
 
-Axis-only demand has all-axis Data/Validation support and no source/extra-point
-payload support. report or nonempty table demand has global support: axis,
+An axis geometry task reads the selected axis cells, closed on the input grid, and has no source/extra-point payload support. report or nonempty table demand has global support: axis,
 all generated grid inputs, the complete source outputs for grid/validation
 points, every extra point and all shared inputs actually required by source
 execution. Retain source typed/control/validation support, including exceptions
@@ -222,21 +222,16 @@ and schema identity preserved. No temporary pointer stands in for shared state.
 
 Let V=N0*N1*N2 and P=(N0-1)*(N1-1)*(N2-1)+M. A table/report observation evaluates
 V grid colors and P reference colors, then P applied-LUT queries and exact error
-checks, plus declared source work. The 15 geometry keys return Result tensors
-with complete complete-input outputs: grid inputs use 3*V*8 bytes, validation points use
-3*P*8 bytes, and converted color arrays use their selected dtype widths. Source
+checks, plus declared source work. The fifteen geometry keys allocate only selected output tiles: grid colors use 3*V*8 bytes for full selection, validation points use 3*P*8 bytes, and converted colors use their selected dtype widths. A sparse geometry request reserves only its selected tiles and fixed scratch. Source
 work and outputs additionally follow each source operator contract. The sampled
-table Result owns 3*V*b bytes; pack, unpack and gate retain legal authorized
-views, with packed materialization only for an ROI whose physical mapping is
-unavailable. They do not unconditionally collect and recopy the complete table.
-All shared owners,
+table Result owns 3*V*b bytes. Pack, Unpack and Gate each copy their selected samples into independent dense output tiles. Global measurement requires complete Pack and application inputs even when Gate returns one tile. Pack and Unpack use zero scratch; Measure owns one fixed report/arithmetic object, and Gate owns one fixed exact-error object per active invocation. All shared owners,
 scratch, staging and repeated work count against host limits. No unbudgeted full
 source batch or global table cache is allowed. A small requested ROI does not
 waive global measurement work. Managed payload accounting is not a claim about
 whole-process RSS.
 
 Account report/schema, grids, source compiled state, callback/recipe captures,
-snapshot and read-window ancestry, staging/validation buffers and scratch overlap.
+snapshot owners, invocation view directories and scratch overlap.
 Poll cancellation during grid/center enumeration, source invocation, extra-point
 scans and error reduction, and inherit the participating operators' bounded
 polling obligations. Exhausted budget/cancellation cannot yield a partial report
@@ -247,12 +242,9 @@ result-owned metadata and data remain until their final owner releases them.
 
 Malformed authoring bindings, unsupported model/shape and invalid tolerances fail
 compile/preflight with InvalidArgument/InvalidDomain; incompatible ports/source
-boundaries/descriptions use TypeMismatch. Invalid dynamic axes/validation points,
-model-invalid or nonfinite source results fail OperationFailed/InvalidDomain.
-Finite source output narrowing to nonfinite table values fails
-OperationFailed/ArithmeticOverflow. Source/upstream errors retain their origin.
+boundaries/descriptions use TypeMismatch. Dynamic axis consistency, validation-point bounds/model legality, finite representable color conversion and well-formed report values are unchecked premises for fixed invocation. Their violation has no promised runtime diagnostic. Source/upstream errors retain their origin.
 Method-unavailable, ResourceExhausted, cancellation and stale-binding failures
-retain established host categories and affect only dependent outputs.
+retain established host categories. A failed Run publishes no final RET map; already delivered retirement Results remain valid.
 
 A completed measurement with failed_count>0 leaves report successful but causes
 table observation to fail OperationFailed/InvalidDomain with diagnostic tag
@@ -304,22 +296,30 @@ if (!measured.ok()) return measured.status();
 const bool passed = measured.value().passed;
 ```
 
-The gate compares `measured_table_id` with the complete owned-table input ObjectId. Different ObjectIds fail with `OperationFailed`/`InvalidAssociation` even for byte-identical tables; `passed=false` instead fails the gate with `OperationFailed`/`InvalidDomain` and diagnostic `LutApproximationToleranceExceeded`. The report remains available for inspection.
+Gate first compares the report configuration with its static configuration and returns `TypeMismatch` on mismatch. It then compares `measured_table_id` with the invocation's owned-table association; a different ObjectId returns `OperationFailed`/`InvalidAssociation`, including for byte-identical tables. Only a matching report proceeds to the tolerance check. `passed=false` returns `OperationFailed`/`InvalidDomain` with `LutApproximationToleranceExceeded` and the first failing component's point/reference/LUT/error-upper raw bits. Report-only execution succeeds for a legitimate failed measurement. When jointly requesting a gated table, an `on_call_retired` observer can retain the successful Measure report before Gate fails; the failed Run itself returns no final results.
 
-All 15 `curve.bake_lut3d_{axis,grid,points,points_extra,color}` profile keys run shared Result stages. Their static mappers grant complete active inputs at compile time; bound validators check those inputs before numerical evaluation. Each stage computes complete internal coverage once per call activation, and requested output tile instructions publish views of that result. Numeric failures affect the Run. Changes to a participating input invalidate the relevant complete recorded demand; the axis output remains independent of source and extra-point data.
+### Fixed geometry tasks
+
+Each selected output tile emits one `bake-geometry-fixed-v1` CPU task. Axis copies its selected Float64 cells with zero scratch. Grid and cell-center tasks read six axis endpoints; step metadata remains a caller premise. Grid coordinates use endpoint-weighted RN64 reconstruction. Each center averages the two actual neighboring reconstructed Float64 knots and rounds that exact average to Float64. This preserves descending axes, endpoint raw bits and rounded-to-vertex centers.
+
+`points_extra` appends extra rows after centers. A task reads only the selected extra rows; it reads axis endpoints only if its output also contains centers. An extra-only tile therefore has no axis payload dependency and uses zero scratch. Color tasks read corresponding complete colors and copy same-dtype bits or perform one direct RN conversion, with zero scratch. Arithmetic grid/center tasks use one preallocated `ExactSampling` object, independent of the total grid or point count.
+
+Each source closes independently on its own tile grid, including batch/atomic grouping. Axis output has ordinary axes; other geometry outputs have one atomic trailing component axis. Input batch grouping is not retained. Preparation verifies canonical output, exact sorted read slots, dtype, task parameters and scratch. Empty selection emits no tasks. Kernels borrow affine input views, including negative/zero strides and unaligned addresses, write selected dense outputs and poll cancellation between components and arithmetic steps. Immutable preparation supports concurrent Runs with independent scratch and output owners.
+
+Finite consistent axis data, model-valid colors, in-range extras and representable converted outputs are caller preconditions. Call publication follows successful writes and ordered retirement. Temporary public/direct acceptance uses the independent `geometry_reference` in `oracle/ops/numeric/crv09/reference.py` for RN coordinates, rounded centers and dtype conversion; it also covers closure, cancellation, floating environment, sparse limits and ownership.
 
 `prepare_static` checks geometry parameters and Result metadata, then stores immutable geometry and bake state for reuse. The four unsuffixed Result operations are `curve.pack_lut3d`, `curve.measure_lut3d`, `curve.unpack_lut3d` and `curve.gate_lut3d`. Their schemas, report ordering, quality gate and explicit measured-table ObjectId field define the output contracts.
 
-Pack, Unpack and Gate acquire authorized Result tensor views first. Physically representable mappings retain source backing; `ViewUnavailable` leads to explicit transactional materialization of the requested region, preserving sample bits and dependency support while charging Root Payload. Pack requests the complete table, so its fallback can materialize the full table.
+### Fixed Result tasks
 
-Acceptance covers Float32/Float64 across supported geometries, including reversed and unaligned layouts, and checks the backing owner of retained views. Pack receives its complete input grant before the shared-stage callback and can publish its view without an initial Need poll. Output tile instructions then project the shared result; a fixed total poll count is not an API guarantee.
+Pack, Unpack and Gate emit one `bake-result-fixed-v1` CPU task per selected output tile. They close the corresponding source rectangle on its own grid and copy raw bytes to an independently allocated dense output. Gate also reads report members passed, first_failure_index/input/reference/lut, configuration_id and measured_table_id. Those reads are fixed before execution; a one-tile table selection still depends on the global Measure task.
 
-Managed accounting covers the axis grid, prepared report/geometry state, source program state, table output, read-window ancestry, exact arithmetic workspace, metadata and allocator overhead. Table, axis and report Results can be retained independently; an owning table read window can keep backing alive after output handles are released. Requesting a small table ROI does not reduce source evaluation, complete-input outputs or global measurement work.
+A nonempty Measure emits one task. It reads the complete axis, owned table, points, reference and applied colors, while the grid port contributes static schema only. Complete table reads establish readiness and supply identity; error arithmetic uses the point/reference/applied data. The task writes all tiles of all thirteen report members and exports the report in its retired CallRecord. Selecting one report member retains the same task and complete numerical work. Empty selection emits no task.
 
-Acceptance workflows should check owner retirement, both table dtypes, geometry/layout variations, source-error ordering, empty requests, configuration mismatch, measured-table ObjectId binding, preparation reuse and rebinding. Temporary programs are discarded after validation, while the independent mathematical oracle is retained. This specification does not claim measured performance or a successful maximum-grid execution.
+Preparation checks exact read/write slots, member grids, dtype, domain, parameters and scratch. Kernels borrow affine reads, use preallocated scratch, write dense outputs and poll cancellation in sample/arithmetic loops. Immutable preparation supports independent concurrent Runs. Measure and Gate compare errors using fixed 4352-bit integers and construct bounded failure records directly. Numerical sample legality is a caller premise; configuration/ObjectId association and measured tolerance are explicit Gate behavior. The SDK report reader independently validates all report fields.
+
+`measured_table_id` identifies the complete logical table Result through `input_object_ids`; a tile pointer, static physical ValueId or equal content is insufficient. Complete Pack exports share this ID, while partial Result projections and explicit Unpack/Gate copies receive fresh IDs. External DenseHost adaptation preserves the bound input association for kernel checks while its exported COPY wrapper is a new Result. The independent Fraction oracle accepts an explicit `source_type`; its Float32 source case evaluates Float64 source arithmetic followed by a distinct Float32 cast, preserving that graph's rounding boundaries and raw zero signs.
 
 - [3D LUT application](CRV-07_apply_lut3d.md).
 - [1D baking templates](CRV-04_bake_lut1d.md).
 - [Curve category](../curves.md).
-
-Geometry generators, Pack and Measure use prepared shared stages scoped to the current call activation. Output tile instructions publish requested tiles from their shared results. Unpack uses the default complete-table mapping; Gate uses the default mapping for the complete table and all thirteen report members. Measurement reads bounded row windows inside its fixed grants, and neither its later polls nor Gate expand Plan dependencies. Measure and gate are nondeterministic and non-cacheable because the measured table identity is Run-local; their dependent closure is ineligible for cross-Run completed-result, checkpoint and block reuse. Unpack and gate use authorized views where representable, otherwise explicitly charged copies.

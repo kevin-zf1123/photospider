@@ -39,10 +39,7 @@ coordinate and explicit-selector principles where applicable. Association arithm
 alpha-specific policies remain FMT-04/05 responsibilities; merely editing a
 channel must not silently run those operations.
 
-Physical output storage must follow the accepted planar image contract. A
-channel-count change does not authorize a new per-operator tile geometry,
-cross-owner image storage or implicit packed output. Interpretation and actual
-byte mapping remain separate.
+Physical output storage follows the fixed Plan: each produced tile is dense and independently owned. Channel-count changes retain the common tile geometry and explicit spatial topology. Interpretation and actual byte mapping remain separate.
 
 FMT-03 inherits exact scalar bit-copy semantics from the current numeric contract.
 Connected scalar Results have shape `[1]`; authored literals are encoded as
@@ -66,9 +63,9 @@ the FMT-02 mapping contract below.
 
 FMT-03 emits `expected_inputs` as `result-inputs-v1:` followed by 64 lowercase
 hexadecimal SHA-256 characters (81 characters total). The digest uses domain
-separation and covers the complete ordered canonical schema and physical layout
+separation and covers the complete ordered canonical schema and spatial topology
 for every connected input, including repeated and unused inputs. It hashes no
-sample payload and is not a validity proof. The zero-input complete-input literal path
+sample payload and is not a validity proof. The zero-input fixed ABI 8 literal path
 uses output shape `[1]` and prepared native bits.
 
 A takes a base tensor and a static ordered output-slot list. Each slot selects
@@ -81,20 +78,9 @@ Selections use explicit axis/index arguments or caller-supplied input descriptio
 without a fixed HWC assumption. Source bytes are preserved, including nonfinite
 IEEE patterns. Outputs carry no descriptions or color/alpha validity claims.
 
-Exact Data support is the union of the source samples selected by the requested
-output footprint. Constants require only their own value source, not a read of
-base pixels. Unchanged B slots read the corresponding base samples. Replaced
-slots do not read overwritten base values unless another requested mapping also
-selects them. All static shape/dtype and consumed metadata checks remain in
-Descriptor support. There is no new full-color or alpha sample validation scan.
-Necessary upstream complete-input work and intrinsic producer failure retain their scope.
+The mathematical source of each output coordinate is its effective expression: constants use the scalar, unchanged B slots use the original base, and replaced slots use their replacement. Runtime applies this relation to every coordinate in complete retained output tiles, then closes source regions through their grids. A retained tile containing both base and constant slots needs both sources. Static validation covers every connected input, including unused sources; required upstream tasks retain their declared scope.
 
-An output alias requires a legal retained mapping under the kernel contract.
-Sharing an owner or having equal sample values alone is insufficient. Constant
-zero-stride aliases may be valid generic tensors, but do not automatically
-satisfy canonical image row/tile storage. Materialized images reserve their
-whole virtual span and provide only the pages required by requested samples.
-All output paths retain the DAG's common tile geometry and exact valid coverage.
+Auto/materialize copy or fill complete selected output tiles into independent dense allocations. Every nonempty forced-view task has only schema dependencies and fails ViewUnavailable. Empty validates static configuration and emits no task. This behavior is inherited from fixed FMT-02C; scalar literal providers use zero-input, zero-scratch fixed tasks.
 
 ## Logical interface and shape
 
@@ -187,21 +173,11 @@ external channel s:    Y[j] = X[insert(u,source_axis,s)]
 constant scalar V:     Y[j] = V[0]
 ```
 
-Every equality is a byte copy. Data demand is the exact union of these source
-coordinates for requested j, deduplicating repeated sources. A scalar reads
-index zero only if at least one requested sample selects it. Disjoint regions
-remain disjoint; tile/page rounding affects backing admission, not logical Data.
-Descriptor checks cover all connected input shapes/dtypes and consumed metadata;
-no extra sample Validation or Control payload is introduced.
+Every equality defines a mathematical byte copy at one output coordinate. Runtime evaluates the relation over complete retained output tiles and deduplicates each port's source tile union. A scalar is read if any destination in those tiles selects it, including destinations added by output tile closure. Disjoint mapped regions remain separate before source-grid closure. Static descriptor checks cover every connected input, with no sample-domain validation.
 
-Forward dirty mapping inverts each spatial selection into every selecting output
-slot and intersects the observed footprint. A scalar value change dirties every
-observed sample in each slot that selects that scalar, and no other slots.
-Metadata, selector or map changes invalidate descriptor/mapping evidence. For
-B, an overwritten base sample has no effect unless another effective source
-expression reads it. This source-based rule also handles simultaneous swaps.
+The mathematical source relation includes simultaneous swaps and excludes overwritten base samples that no effective output expression selects. Physical execution first closes requests to complete output tiles and then closes each effective source region through its source grid. A base payload can be omitted only when all destinations in retained output tiles use other sources. This contract does not define incremental dirty propagation.
 
-Only requested constant values participate in runtime numeric reads. A malformed
+Constant values selected by complete retained output tiles participate in runtime reads. A malformed
 static literal or inconsistent descriptor fails preflight even for an unrequested
 slot. Required upstream failures, resource exhaustion and cancellation retain
 their own scope; consumer selection cannot undo already required producer work.
@@ -219,14 +195,14 @@ literal produces a `channel.scalar_literal_<profile>` node; repeated identical
 literal bits share that node. No rank-zero temporary is created.
 
 Preserve Descriptor dependencies and static validation for the original base and
-all connected sources, even if every requested output is constant. Expand only
+all connected sources, even if every retained output tile is constant. Expand only
 the static mapping, not one node per pixel. Retain named authoring provenance in
 diagnostics. A/B add no independent native operation keys; their profile selects
 the matching FMT-02C and constant-provider keys. Existing legacy `channel.swizzle`
 does not become an alias. Constants/helpers must obey the selected FMT metadata
 rules rather than silently restoring legacy typed-scalar validation.
 
-Lowering is conforming only when view availability, exact Data/dirty support,
+Lowering is conforming only when fixed layout policy, source tile closure,
 output structure, ownership, errors and publication match these definitions.
 Inlining/fusion may remove intermediates if it preserves those observations.
 Do not fall back to an old complete-input packed-image operation to make the graph run.
@@ -242,29 +218,10 @@ and semantics agree. The composition introduces no independent dtype or ABI.
 
 ## Storage, resources and failures
 
-Inherit FMT-02's checked virtual span, page-set admission, row padding, page
-alignment, retained views and immutable publication. Auto materializes if no
-legal view exists; forced view fails rather than returning an incompatible
-cross-owner or zero-stride image. Unrequested sample slots do not become valid
-merely because a neighboring requested slot supplied the same page.
+The fixed FMT-02C task writes an independently owned dense output tile with zero scratch. Input view metadata and immutable preparation scale with static spans and source tile closure; selected output allocations scale with complete selected tiles. Literal providers own their scalar output independently. Runs share immutable preparation and use fixed-size coordinate/cache state, with cancellation checks between at most 256 copies.
 
-For n sources, rank r, M effective rows, Nq requested samples and F windows,
-post-selector mapping/fill work is O(n*r+M+Nq*r+F*r), plus exact footprint union,
-page preparation and actual upstream work. Admit O(M) static mapping/reverse
-indices and bounded selector/descriptor structures. Resolve exact name/role
-matches once, charging lookup/string capacity as in FMT-02C. Constant source
-backing can be scalar-sized, while a canonical materialized constant image still
-charges its actual pages. Account retained ancestry, simultaneous inputs/output,
-window metadata and literal/scalar owners independently of logical copied bytes.
+Only effective mapped coordinates are numerically read. Physical tiles may cover extra samples, and upstream tasks retain their declared scope. Completed tiles can enable internal consumers; each public call retires only after its required work succeeds. Failed calls export no partial result. Output owners survive source/context destruction. No mutable constant cache, private pool or dynamic view publication is introduced.
 
-Poll cancellation/currentness at most every 1024 metadata/map/copy entries and
-before publication, or the tighter inherited primitive bound. Scalar row
-replication batches at most 256 samples per copy call while charging work and
-checking cancellation. Use host scheduling for disjoint destinations; no private
-thread pool or mutable constant cache.
-No result is published partially on failed observation. Generated pages and
-leases retire with their final owners. Inherit FMT-02's optional sample-only
-cache restriction and capacity/work/source failure attribution.
 
 | Failure | Phase | Outcome |
 | --- | --- | --- |
@@ -280,8 +237,7 @@ alone fail a copy/fill operation. No commercial pixel-equivalence claim is made.
 ## Acceptance and implementation dependencies
 
 Member files specify analytic fixtures and conceptual public workflows. Verify
-with an independent coordinate interpreter, byte oracle and finite-set Data/
-dirty evaluator, not with the production lowerer. Cover identity, partial/disjoint
+with an independent coordinate interpreter, byte oracle and finite-set source tile evaluator. Cover identity, partial/disjoint
 ROI, source reuse, channel-axis positions, constant-only requests, simultaneous
 swaps, overwritten-value nonreads, explicit selector descriptions, view/materialization and
 special-value bits. Validate helper lowering against the mathematical expressions
@@ -290,8 +246,8 @@ and retain original source descriptions after execution.
 Implementation delivery must include an actual public compile/execute example
 with checked output, commands and an offset channel ROI. FMT-02C, canonical
 metadata/map encodings, conforming generic constant
-sources and scalar-plus-planar dependency/publication support are prerequisites.
-The CPU implementation uses the kernel mapped-planar path for this composition.
+sources and fixed scalar/tile dependency and retirement support are prerequisites.
+The CPU implementation uses fixed FMT-02C tasks and scalar providers for this composition.
 
 Benchmark Float32 [4096,4096,4] base data for A BGR reorder, subset plus repeated
 source, and opaque-alpha insertion; for B one external-plane replacement and
@@ -305,6 +261,4 @@ No user-facing behavior question remains open. The specifications remain
 Proposed; old runtime tests or kernel page-window tests alone
 cannot establish conformance.
 
-This checks the equations
-and finite dependency sets only; it does not execute the proposed helpers,
-validate their graph lowering, or establish physical storage conformance.
+Mathematical oracles establish expected values and logical source mappings. Public compile/execute checks separately establish helper lowering and fixed runtime behavior.

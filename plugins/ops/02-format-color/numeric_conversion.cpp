@@ -1,18 +1,15 @@
 #include <algorithm>
 #include <array>
-#include <cfenv>  // NOLINT(build/c++11)
-#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <limits>
 #include <map>
 #include <memory>
+#include <new>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include "photospider/plugin/tile_helpers.hpp"
 
 #if defined(__aarch64__)
 #include <arm_neon.h>
@@ -23,66 +20,35 @@
 
 #if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
 #include <sys/sysctl.h>
-
-#include "photospider/core/cancellation_poll.hpp"
 #endif
 
-#include "02-format-color/result_mapping.hpp"
+#include "02-format-color/exact_conversion.hpp"
 #include "common/domain/exact_numeric.hpp"
+#include "common/fixed_point_inputs.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "photospider/data/region_runs.hpp"
-#include "photospider/ops/tensor_description.hpp"
+#include "common/tensor_program.hpp"
 
 namespace ps::plugin_internal {
 #if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
 namespace format_numeric {
 std::uint64_t sme_conversion_vector_bytes();
 std::uint64_t sme_f32_u8_tile(const std::uint8_t*, std::uint8_t*, std::uint64_t,
-                              const core_internal::CancellationPoll&);
+                              const ps_kernel_cancellation_v8&);
 }  // namespace format_numeric
 #endif
 namespace {
-using data_internal::format_numeric::ExactWorkFailure;
-using data_internal::format_numeric::ExactWorkScope;
 using data_internal::format_numeric::Natural;
 using data_internal::format_numeric::Rational;
+using format_numeric::ConversionMap;
+using format_numeric::Dyadic;
+using format_numeric::ExactConversion;
 using Parameters = std::map<std::string, ParameterValue>;
-#if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
-bool sme_conversion_available() {
-  static const bool available = [] {
-    for (const auto* name :
-         {"hw.optional.arm.FEAT_SME", "hw.optional.arm.FEAT_SME_F64F64"}) {
-      int value = 0;
-      std::size_t bytes = sizeof(value);
-      if (sysctlbyname(name, &value, &bytes, nullptr, 0) != 0 || !value)
-        return false;
-    }
-    return format_numeric::sme_conversion_vector_bytes() == 64;
-  }();
-  return available;
-}
-#endif
-struct FloatingEnvironment final {
-  fenv_t saved{};
-  FloatingEnvironment() {
-    fegetenv(&saved);
-    fesetround(FE_TONEAREST);
-    feclearexcept(FE_ALL_EXCEPT);
-  }
-  ~FloatingEnvironment() { fesetenv(&saved); }
-};
-
 Status invalid(const std::string& detail) {
   return {ErrorCode::InvalidArgument,
           "numeric.convert_format: " + detail,
           FailureReason::InvalidDomain,
           {FailureOrigin::Schema, FailureScope::Unspecified}};
-}
-Status sample_error(const std::string& detail, FailureReason reason) {
-  return {ErrorCode::OperationFailed,
-          "numeric.convert_format: " + detail,
-          reason,
-          {FailureOrigin::Domain, FailureScope::Unspecified}};
 }
 bool floating(ElementType t) {
   return t == ElementType::Float32 || t == ElementType::Float64;
@@ -128,27 +94,8 @@ std::optional<ElementType> dtype(const std::string& s) {
       return entry.second;
   return {};
 }
-const char* dtype_name(ElementType type) {
-  switch (type) {
-    case ElementType::UInt8:
-      return "uint8";
-    case ElementType::UInt16:
-      return "uint16";
-    case ElementType::Int8:
-      return "int8";
-    case ElementType::Int16:
-      return "int16";
-    case ElementType::Int64:
-      return "int64";
-    case ElementType::Float32:
-      return "float32";
-    case ElementType::Float64:
-      return "float64";
-  }
-  return "unknown";
-}
 Rational integer_value(std::uint64_t n, bool negative = false) {
-  return {Natural(n), Natural(1), negative, false};
+  return {Natural(n), Natural(1), negative && n != 0, false};
 }
 Rational maximum(ElementType type) {
   switch (type) {
@@ -179,54 +126,6 @@ Rational minimum(ElementType type) {
     default:
       return integer_value(0);
   }
-}
-std::uint64_t bits64(double value) {
-  std::uint64_t bits;
-  std::memcpy(&bits, &value, 8);
-  return bits;
-}
-Rational endpoint(const TensorEndpoint& value) {
-  if (const auto* i = std::get_if<std::int64_t>(&value))
-    return Rational::integer(*i);
-  if (const auto* f = std::get_if<double>(&value))
-    return Rational::binary(bits64(*f), false);
-  const auto& exact = std::get<TensorRationalEndpoint>(value);
-  Rational result;
-  result.n.words.assign(exact.numerator.begin(), exact.numerator.end());
-  result.d.words.assign(exact.denominator.begin(), exact.denominator.end());
-  result.n.trim();
-  result.d.trim();
-  result.negative = exact.negative;
-  return result;
-}
-Result<TensorEndpoint> represented(const Rational& value) {
-  const auto signed_limit = Rational::integer(INT64_MIN);
-  const auto upper_limit = Rational::integer(INT64_MAX);
-  if (value.d.compare(Natural(1)) == 0 && value.compare(signed_limit) >= 0 &&
-      value.compare(upper_limit) <= 0 && !value.negative_zero) {
-    const auto magnitude = value.n.low64();
-    return Result<TensorEndpoint>(TensorEndpoint{static_cast<std::int64_t>(
-        value.negative ? UINT64_C(0) - magnitude : magnitude)});
-  }
-  const auto bits = value.floating_bits(false);
-  if (((bits >> 52) & 2047) != 2047 &&
-      Rational::binary(bits, false).compare(value) == 0) {
-    double sample;
-    std::memcpy(&sample, &bits, sizeof(sample));
-    return Result<TensorEndpoint>(TensorEndpoint{sample});
-  }
-  Natural numerator = value.n, denominator = value.d;
-  const Natural divisor = Natural::gcd(numerator, denominator);
-  numerator = Natural::divide(numerator, divisor).first;
-  denominator = Natural::divide(denominator, divisor).first;
-  if (numerator.words.size() > 128 || denominator.words.size() > 128)
-    return Result<TensorEndpoint>(
-        invalid("exact decoder endpoint exceeds rational metadata limit"));
-  TensorRationalEndpoint exact;
-  exact.numerator.assign(numerator.words.begin(), numerator.words.end());
-  exact.denominator.assign(denominator.words.begin(), denominator.words.end());
-  exact.negative = value.negative;
-  return Result<TensorEndpoint>(TensorEndpoint{std::move(exact)});
 }
 // Range text is a static typed codec: i:<signed decimal> or f64:<16 hex
 // binary64 bits>, two endpoints separated by comma, channels by semicolon.
@@ -273,47 +172,6 @@ struct Bounds final {
   Rational source_lo, source_hi, target_lo, target_hi;
   bool identity = false;
 };
-Result<TensorEncoding> mapped_encoding(
-    const std::optional<TensorEncoding>& prior, const Bounds& b, bool rescale) {
-  using Output = Result<TensorEncoding>;
-  if (!rescale) {
-    if (prior)
-      return Output(*prior);
-    return Output(TensorEncoding{});
-  }
-  const Rational old_lo = prior ? endpoint(prior->stored[0]) : b.source_lo;
-  const Rational old_hi = prior ? endpoint(prior->stored[1]) : b.source_hi;
-  const Rational decoded_lo = prior ? endpoint(prior->decoded[0]) : b.source_lo;
-  const Rational decoded_hi = prior ? endpoint(prior->decoded[1]) : b.source_hi;
-  const auto decode = [&](const Rational& source) {
-    return Rational::add(
-        decoded_lo,
-        Rational::multiply(Rational::divide(Rational::subtract(source, old_lo),
-                                            Rational::subtract(old_hi, old_lo)),
-                           Rational::subtract(decoded_hi, decoded_lo)));
-  };
-  auto stored_lo = represented(b.target_lo);
-  if (!stored_lo.ok())
-    return Output(stored_lo.status());
-  auto stored_hi = represented(b.target_hi);
-  if (!stored_hi.ok())
-    return Output(stored_hi.status());
-  auto mapped_lo = represented(prior ? decode(b.source_lo) : b.source_lo);
-  if (!mapped_lo.ok())
-    return Output(mapped_lo.status());
-  auto mapped_hi = represented(prior ? decode(b.source_hi) : b.source_hi);
-  if (!mapped_hi.ok())
-    return Output(mapped_hi.status());
-  TensorEncoding result;
-  if (b.target_lo.compare(b.target_hi) < 0) {
-    result.stored = {stored_lo.take_value(), stored_hi.take_value()};
-    result.decoded = {mapped_lo.take_value(), mapped_hi.take_value()};
-  } else {
-    result.stored = {stored_hi.take_value(), stored_lo.take_value()};
-    result.decoded = {mapped_hi.take_value(), mapped_lo.take_value()};
-  }
-  return Output(std::move(result));
-}
 Result<std::vector<std::array<Rational, 2>>> range(const std::string& text) {
   using Output = Result<std::vector<std::array<Rational, 2>>>;
   std::vector<std::array<Rational, 2>> entries;
@@ -341,43 +199,35 @@ Result<std::vector<std::array<Rational, 2>>> range(const std::string& text) {
   }
   return Output(std::move(entries));
 }
-struct Preparation final {
+struct FixedBounds final {
+  ConversionMap map;
+  bool identity = false;
+};
+struct RuntimeConversion {
   ElementType source, target;
-  ResourceVector<Bounds> bounds;
-  std::optional<std::uint32_t> axis;
-  bool rescale, clip, identity, materialize;
+  bool rescale, clip, identity;
+  bool sme = false;
   std::string layout;
   std::optional<std::uint32_t> sample_axis;
   bool fast_u8_f32 = false;
   bool fast_f32_u8 = false;
   bool fast_i64_u8 = false;
   bool fast_f64_f32 = false;
+  std::shared_ptr<const std::vector<FixedBounds>> fixed_bounds;
+  std::array<std::uint32_t, 256> u8_f32{};
 };
-Status check_encoding(const std::optional<TensorEncoding>& encoding,
-                      const Bounds& bounds) {
-  if (!encoding)
-    return Status::success();
-  if (endpoint(encoding->stored[0]).compare(bounds.source_lo) != 0 ||
-      endpoint(encoding->stored[1]).compare(bounds.source_hi) != 0)
-    return invalid("declared source encoding conflicts with source range");
-  return Status::success();
-}
-Result<std::optional<TensorEncoding>> effective_channel_encoding(
-    const TensorDescription& description, std::size_t index) {
-  std::optional<TensorEncoding> effective =
-      description.channels[index].encoding;
-  for (const auto& group : description.groups)
-    for (std::size_t j = 0; j < group.indices.size(); ++j)
-      if (group.indices[j] == index && group.components[j].encoding) {
-        if (!effective)
-          effective = group.components[j].encoding;
-        else if (!(*effective == *group.components[j].encoding))
-          return Result<std::optional<TensorEncoding>>(
-              invalid("conflicting channel and group encodings"));
-      }
-  if (!effective)
-    effective = description.encoding;
-  return Result<std::optional<TensorEncoding>>(std::move(effective));
+struct Preparation final : RuntimeConversion {
+  ResourceVector<Bounds> bounds;
+  std::optional<std::uint32_t> axis;
+};
+Dyadic dyadic(const Rational& value) {
+  auto magnitude = value.n;
+  const auto zeros = magnitude.trailing_zeros();
+  magnitude.shift_right(zeros);
+  return Dyadic::normalized(
+      magnitude.low64(),
+      static_cast<int>(zeros) - static_cast<int>(value.d.bits() - 1),
+      value.negative || value.negative_zero);
 }
 Result<OperationPreparation> prepare(
     const std::vector<OperationMetadata>& inputs, const Parameters& params) {
@@ -425,7 +275,6 @@ Result<OperationPreparation> prepare(
                           : "auto";
   if (layout != "auto" && layout != "view" && layout != "materialize")
     return Output(invalid("layout must be auto, view or materialize"));
-  state->materialize = layout == "materialize";
   state->layout = layout;
   const bool source_explicit = params.count("source_range");
   const bool target_explicit = params.count("target_range");
@@ -512,25 +361,45 @@ Result<OperationPreparation> prepare(
   if (layout == "view" && !state->identity)
     return Output(invalid("ViewUnavailable: mapping is not an identity"));
 
+  auto maps = std::make_shared<std::vector<FixedBounds>>();
+  maps->reserve(state->bounds.size());
+  ExactConversion math;
+  const auto consume = [](std::uint64_t work) {
+    Natural::work(work);
+    return Status::success();
+  };
+  for (const auto& bounds : state->bounds) {
+    FixedBounds fixed;
+    fixed.identity = bounds.identity;
+    fixed.map.source[0] = dyadic(bounds.source_lo);
+    fixed.map.source[1] = dyadic(bounds.source_hi);
+    fixed.map.target[0] = dyadic(bounds.target_lo);
+    fixed.map.target[1] = dyadic(bounds.target_hi);
+    auto status = math.initialize(&fixed.map, consume);
+    if (!status.ok())
+      return Output(status);
+    maps->push_back(std::move(fixed));
+  }
+  state->fixed_bounds = std::move(maps);
+  if (state->fast_u8_f32) {
+    for (unsigned i = 0; i < state->u8_f32.size(); ++i)
+      state->u8_f32[i] = static_cast<std::uint32_t>(
+          Rational::divide(integer_value(i), integer_value(255))
+              .floating_bits(true));
+  }
   OperationOutputSpecialization output;
   auto schema = *inputs[0].result_schema;
   auto& output_tensor = schema.tensors[0];
   output_tensor.descriptor.element_type = state->target;
   output_tensor.atomic_trailing_axes = 0;
-  if (output_tensor.layout.spatial && (!state->identity || state->materialize))
-    output.metadata.result_schema =
-        std::make_shared<const SchemaTemplate>(std::move(schema));
+  output.metadata.result_schema =
+      std::make_shared<const SchemaTemplate>(std::move(schema));
   OperationPreparation result;
   result.outputs.push_back(std::move(output));
   result.state = std::move(state);
   return Output(std::move(result));
 }
 
-std::uint64_t raw(const std::uint8_t* source, ElementType type) {
-  std::uint64_t bits = 0;
-  std::memcpy(&bits, source, sample_width(type));
-  return bits;
-}
 void write_raw(std::uint8_t* target, ElementType type, std::uint64_t bits) {
   std::memcpy(target, &bits, sample_width(type));
 }
@@ -548,15 +417,6 @@ std::uint64_t nan_bits(std::uint64_t input, ElementType source,
   return (sign << (to + (to == 23 ? 8 : 11))) |
          (static_cast<std::uint64_t>(to == 23 ? 255 : 2047) << to) |
          (static_cast<std::uint64_t>(1) << (to - 1)) | payload;
-}
-std::string coordinate_text(const std::vector<std::uint64_t>& at) {
-  std::string text = " coordinate=[";
-  for (std::size_t i = 0; i < at.size(); ++i) {
-    if (i)
-      text += ',';
-    text += std::to_string(at[i]);
-  }
-  return text + ']';
 }
 std::uint32_t narrow_f64_bits(std::uint64_t bits) {
   const std::uint32_t sign = static_cast<std::uint32_t>(bits >> 63) << 31;
@@ -617,181 +477,99 @@ void i64_u8_span(const std::uint8_t* source, std::uint8_t* target,
     target[i] = mapped_i64_u8(bits);
   }
 }
-Status convert_one(const std::uint8_t* source, std::uint8_t* target,
-                   const Preparation& state, const Bounds& b,
-                   const std::vector<std::uint64_t>& at) {
-  const auto input = raw(source, state.source);
-  if (state.fast_u8_f32) {
-    static const auto lookup = [] {
-      std::array<std::uint32_t, 256> result{};
-      for (unsigned i = 0; i < result.size(); ++i)
-        result[i] = static_cast<std::uint32_t>(
-            Rational::divide(integer_value(i), integer_value(255))
-                .floating_bits(true));
-      return result;
-    }();
-    write_raw(target, state.target, lookup[input]);
-    return Status::success();
-  }
-  if (state.fast_i64_u8) {
-    write_raw(target, state.target, mapped_i64_u8(input));
-    return Status::success();
-  }
-  if (state.fast_f32_u8) {
-    const auto exponent = (input >> 23) & 255;
-    if (exponent == 255)
-      return sample_error(
-          "nonfinite source for integer target" + coordinate_text(at),
-          FailureReason::InvalidDomain);
-    float sample;
-    const auto bits = static_cast<std::uint32_t>(input);
-    std::memcpy(&sample, &bits, 4);
-    const double mapped = static_cast<double>(sample) * 255.0;
-    if (mapped < -0.5 || mapped > 255.5) {
-      if (!state.clip)
-        return sample_error("integer overflow" + coordinate_text(at),
-                            FailureReason::ArithmeticOverflow);
-      write_raw(target, state.target, mapped < 0 ? 0 : 255);
-      return Status::success();
-    }
-    const double lower = std::floor(mapped);
-    const auto rounded =
-        static_cast<std::int64_t>(lower) +
-        (mapped - lower > .5 ||
-         (mapped - lower == .5 && (static_cast<std::int64_t>(lower) & 1)));
-    if ((rounded < 0 || rounded > 255) && !state.clip)
-      return sample_error("integer overflow" + coordinate_text(at),
-                          FailureReason::ArithmeticOverflow);
-    write_raw(
-        target, state.target,
-        static_cast<std::uint64_t>(std::clamp<std::int64_t>(rounded, 0, 255)));
-    return Status::success();
-  }
-  if (state.fast_f64_f32) {
-    auto bits = narrow_f64_bits(input);
-    const bool finite = ((input >> 52) & 2047) != 2047;
-    if (state.rescale && (input & UINT64_C(0x7fffffffffffffff)) == 0) {
-      const auto& bounds = state.bounds[0];
-      if (bounds.source_lo.n.zero())
-        bits = static_cast<std::uint32_t>(bounds.target_lo.floating_bits(true));
-      else if (bounds.source_hi.n.zero())
-        bits = static_cast<std::uint32_t>(bounds.target_hi.floating_bits(true));
-      else
-        bits = 0;
-    }
-    if (finite && (bits & UINT32_C(0x7f800000)) == UINT32_C(0x7f800000)) {
-      if (!state.clip)
-        return sample_error("floating overflow" + coordinate_text(at),
-                            FailureReason::ArithmeticOverflow);
-      bits = (bits & UINT32_C(0x80000000)) | UINT32_C(0x7f7fffff);
-    }
-    write_raw(target, state.target, bits);
-    return Status::success();
-  }
-  if (state.source == state.target && b.identity) {
-    write_raw(target, state.target, input);
-    return Status::success();
-  }
-  Rational value;
-  bool source_nonfinite = false;
-  bool nan = false;
-  bool sign = false;
+Result<std::uint64_t> convert_one(std::uint64_t input,
+                                  const RuntimeConversion& state,
+                                  const FixedBounds& bounds,
+                                  ExactConversion* math,
+                                  const core_internal::WorkConsumer& consume) {
+  using Answer = Result<std::uint64_t>;
+  if (state.source == state.target && bounds.identity)
+    return Answer(input);
+  if (state.fast_u8_f32)
+    return Answer(state.u8_f32[input]);
+  if (state.fast_i64_u8)
+    return Answer(mapped_i64_u8(input));
+  Dyadic value;
   if (floating(state.source)) {
-    const unsigned fraction = state.source == ElementType::Float32 ? 23 : 52;
-    const std::uint64_t all = state.source == ElementType::Float32 ? 255 : 2047;
-    const auto exponent = (input >> fraction) & all;
-    sign = (input >> (fraction + (fraction == 23 ? 8 : 11))) != 0;
-    source_nonfinite = exponent == all;
-    nan = source_nonfinite &&
-          (input & ((static_cast<std::uint64_t>(1) << fraction) - 1));
-    if (!source_nonfinite)
-      value = Rational::binary(input, fraction == 23);
+    const bool narrow = state.source == ElementType::Float32;
+    const auto parts = numeric_ops::BinaryParts::decode(input, narrow);
+    if (parts.nan || parts.infinite) {
+      // Finite source is a caller precondition for integer destinations. This
+      // defensive branch prevents an invalid exponent from indexing scratch.
+      if (!floating(state.target))
+        return Answer(Status{ErrorCode::OperationFailed,
+                             {},
+                             FailureReason::InvalidDomain});
+      if (parts.nan)
+        return Answer(nan_bits(input, state.source, state.target));
+      const bool sign =
+          parts.negative != (state.rescale && bounds.map.slope_negative);
+      const bool small = state.target == ElementType::Float32;
+      return Answer(
+          (static_cast<std::uint64_t>(sign) << (small ? 31 : 63)) |
+          (small ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000)));
+    }
+    value = Dyadic::binary(input, narrow);
+    if (state.fast_f64_f32 && (!state.rescale || parts.magnitude)) {
+      auto bits = narrow_f64_bits(input);
+      if ((bits & UINT32_C(0x7f800000)) == UINT32_C(0x7f800000) && state.clip)
+        bits = (bits & UINT32_C(0x80000000)) | UINT32_C(0x7f7fffff);
+      return Answer(bits);
+    }
   } else {
+    bool sign = false;
     switch (state.source) {
-      case ElementType::UInt8:
-        value = integer_value(input);
-        break;
-      case ElementType::UInt16:
-        value = integer_value(input);
-        break;
       case ElementType::Int8:
-        value = Rational::integer(static_cast<std::int8_t>(input));
+        sign = (input & 128) != 0;
+        if (sign)
+          input = 256 - input;
         break;
       case ElementType::Int16:
-        value = Rational::integer(static_cast<std::int16_t>(input));
+        sign = (input & 32768) != 0;
+        if (sign)
+          input = 65536 - input;
         break;
       case ElementType::Int64:
-        value = Rational::integer(static_cast<std::int64_t>(input));
+        sign = (input >> 63) != 0;
+        if (sign)
+          input = UINT64_C(0) - input;
         break;
       default:
         break;
     }
+    value = Dyadic::normalized(input, 0, sign);
   }
-  if (source_nonfinite) {
-    if (!floating(state.target))
-      return sample_error(
-          "nonfinite source for integer target" + coordinate_text(at),
-          FailureReason::InvalidDomain);
-    if (nan) {
-      write_raw(target, state.target,
-                nan_bits(input, state.source, state.target));
-      return Status::success();
-    }
-    if (state.rescale && b.target_lo.compare(b.target_hi) > 0)
-      sign = !sign;
-    const bool small = state.target == ElementType::Float32;
-    write_raw(target, state.target,
-              (static_cast<std::uint64_t>(sign) << (small ? 31 : 63)) |
-                  (static_cast<std::uint64_t>(small ? 255 : 2047)
-                   << (small ? 23 : 52)));
-    return Status::success();
+  auto transformed =
+      math->map_value(value, state.rescale ? &bounds.map : nullptr, consume);
+  if (!transformed.ok())
+    return Answer(transformed);
+  if (floating(state.target))
+    return math->floating(state.target == ElementType::Float32, state.clip,
+                          consume);
+  std::uint64_t positive = 0, negative = 0;
+  switch (state.target) {
+    case ElementType::UInt8:
+      positive = 255;
+      break;
+    case ElementType::UInt16:
+      positive = 65535;
+      break;
+    case ElementType::Int8:
+      positive = 127;
+      negative = 128;
+      break;
+    case ElementType::Int16:
+      positive = 32767;
+      negative = 32768;
+      break;
+    case ElementType::Int64:
+      positive = INT64_MAX;
+      negative = UINT64_C(1) << 63;
+      break;
+    default:
+      break;
   }
-  if (state.rescale && !(b.identity && state.source == state.target)) {
-    if (value.compare(b.source_lo) == 0) {
-      value = b.target_lo;
-      value.negative_zero = b.target_lo.negative_zero;
-    } else if (value.compare(b.source_hi) == 0) {
-      value = b.target_hi;
-      value.negative_zero = b.target_hi.negative_zero;
-    } else {
-      const auto fraction =
-          Rational::divide(Rational::subtract(value, b.source_lo),
-                           Rational::subtract(b.source_hi, b.source_lo));
-      value = Rational::add(
-          b.target_lo,
-          Rational::multiply(fraction,
-                             Rational::subtract(b.target_hi, b.target_lo)));
-      value.negative_zero = false;
-    }
-  }
-  if (floating(state.target)) {
-    const bool small = state.target == ElementType::Float32;
-    auto bits = value.floating_bits(small);
-    const auto exponent = (bits >> (small ? 23 : 52)) & (small ? 255 : 2047);
-    if (exponent == (small ? 255 : 2047)) {
-      if (!state.clip)
-        return sample_error("floating overflow" + coordinate_text(at),
-                            FailureReason::ArithmeticOverflow);
-      bits = (bits & (static_cast<std::uint64_t>(1) << (small ? 31 : 63))) |
-             (small ? UINT32_C(0x7f7fffff) : UINT64_C(0x7fefffffffffffff));
-    }
-    write_raw(target, state.target, bits);
-    return Status::success();
-  }
-  const auto rounded = value.rounded_magnitude();
-  const auto low = minimum(state.target);
-  const auto high = maximum(state.target);
-  Rational rounded_value{rounded, Natural(1), value.negative, false};
-  if (rounded_value.compare(low) < 0 || rounded_value.compare(high) > 0) {
-    if (!state.clip)
-      return sample_error("integer overflow" + coordinate_text(at),
-                          FailureReason::ArithmeticOverflow);
-    rounded_value = rounded_value.compare(low) < 0 ? low : high;
-  }
-  const auto magnitude = rounded_value.n.low64();
-  write_raw(target, state.target,
-            rounded_value.negative ? UINT64_C(0) - magnitude : magnitude);
-  return Status::success();
+  return math->integer(positive, negative, state.clip, consume);
 }
 
 #if defined(__aarch64__)
@@ -934,7 +712,8 @@ __attribute__((target("avx2"))) std::uint64_t avx2_f64_f32(
 // Returns only the successfully converted prefix; the caller handles the
 // first unsupported lane with convert_one and may resume SIMD afterwards.
 std::uint64_t convert_span(const std::uint8_t* source, std::uint8_t* target,
-                           std::uint64_t count, const Preparation& state) {
+                           std::uint64_t count,
+                           const RuntimeConversion& state) {
   if (state.identity) {
     std::memcpy(target, source, count * sample_width(state.source));
     return count;
@@ -963,239 +742,208 @@ std::uint64_t convert_span(const std::uint8_t* source, std::uint8_t* target,
   return 0;
 }
 
-// Only these lanes are guaranteed to finish without a domain/overflow error
-// or additional exact-arithmetic work. Do not precharge later lanes before an
-// exceptional lane: low fuel must not mask the earlier numerical failure.
-std::uint64_t infallible_prefix(const std::uint8_t* source, std::uint64_t count,
-                                const Preparation& state) {
-  if (state.identity || state.fast_u8_f32 || state.fast_i64_u8)
-    return count;
-  const auto width = sample_width(state.source);
-  for (std::uint64_t i = 0; i < count; ++i) {
-    if (state.fast_f32_u8) {
-      std::uint32_t bits;
-      std::memcpy(&bits, source + i * width, sizeof(bits));
-      if (bits > UINT32_C(0x3f800000) && bits != UINT32_C(0x80000000))
-        return i;
-    } else if (state.fast_f64_f32) {
-      std::uint64_t bits;
-      std::memcpy(&bits, source + i * width, sizeof(bits));
-      const auto exponent = (bits >> 52) & 2047;
-      // Exclude zero/subnormal endpoint rules and the top binary32 binade,
-      // where rounding may overflow. The established scalar path handles it.
-      if (exponent < 897 || exponent >= 1150)
-        return i;
-    } else {
-      return 0;
+constexpr const char* conversion_contract = "numeric-conversion-v1";
+std::uint64_t scratch_bytes(const Preparation& state) {
+  return state.layout == "view" || state.identity ? 0 : sizeof(ExactConversion);
+}
+Result<OperationProgram> lower(const OperationLowering& query) {
+  const auto& state = *static_cast<const Preparation*>(query.static_state);
+  if (state.layout != "view")
+    return fixed_tensor::lower_pointwise(query, "convert", conversion_contract,
+                                         scratch_bytes(state));
+  OperationProgramBuilder builder(query);
+  for (const auto& member : query.requests[0].members)
+    for (auto tile : member.second) {
+      auto task = builder.add_task("convert", conversion_contract);
+      if (!task.ok())
+        return Result<OperationProgram>(task.status());
+      auto status = builder.read_input_schema(task.value(), 0);
+      if (status.ok())
+        status = builder.write_output(task.value(), 0, member.first, tile);
+      if (!status.ok())
+        return Result<OperationProgram>(status);
     }
-  }
-  return count;
+  return builder.finish();
 }
-
-using tensor_ops::require;
-using tensor_ops::take;
-using Poll = Result<ResultProgramPoll>;
-ResultBuilder result_builder(const ResultProgramPhase& phase, bool /*empty*/) {
-  auto builder = take(ResultBuilder::start(
-      phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {}, phase.query.tile_extent));
-
-  return builder;
-}
-Poll empty_result(const ResultProgramPhase& phase) try {
-  auto builder = result_builder(phase, true);
-  return Poll(ResultPublication{take(builder.seal()), true});
-} catch (const Status& status) {
-  return Poll(status);
-}
-Status checkpoint(const ResultProgramPhase& phase, std::uint64_t work) {
-  auto status = phase.consume_work(work);
-  if (!status.ok())
-    return status;
-  if (phase.query.cancellation.cancelled())
-    return {ErrorCode::Cancelled, "numeric conversion cancelled"};
-  return Status::success();
-}
-Status convert_window(const ResultProgramPhase& phase, const Preparation& state,
-                      const ResultTensorReadWindow& source_window,
-                      const ResultTensorWriteWindow& writer,
-                      bool* u8_lookup_ready) {
-  const auto& dims = writer.region().dimensions();
-  const auto width_axis = writer.sample_axis();
-  const auto height_axis = source_window.row_axis();
-  std::vector<std::uint64_t> at;
-  for (auto dim : dims)
-    at.push_back(dim.offset);
-  const auto source_width = sample_width(state.source);
-  const auto target_width = sample_width(state.target);
-  const auto height_end =
-      height_axis ? dims[*height_axis].offset + dims[*height_axis].extent : 1;
-  for (;;) {
-    for (std::uint64_t row = height_axis ? dims[*height_axis].offset : 0;
-         row < height_end;) {
-      if (height_axis)
-        at[*height_axis] = row;
-      std::uint64_t advanced_rows = height_end - row;
-      for (std::uint64_t column = dims[width_axis].offset;
-           column < dims[width_axis].offset + dims[width_axis].extent;) {
-        require(checkpoint(phase, 1));
-        if (height_axis)
-          at[*height_axis] = row;
-        at[width_axis] = column;
-        const auto src = take(source_window.rectangle_run(at));
-        const auto dst = take(writer.rectangle_run(at));
-        const auto rows = std::min({src.rows, dst.rows, advanced_rows});
-        advanced_rows = std::min(advanced_rows, rows);
-        const auto samples = std::min(src.row.samples, dst.row.samples);
-        const bool contiguous = src.row.sample_stride_bytes ==
-                                    static_cast<std::int64_t>(source_width) &&
-                                dst.row.sample_stride_bytes ==
-                                    static_cast<std::int64_t>(target_width);
-#if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
-        const auto tile_samples = rows * samples;
-        if (writer.spec().layout.spatial && state.fast_f32_u8 && contiguous &&
-            tile_samples >= 4096 && tile_samples <= 65536 &&
-            src.row_stride_bytes == static_cast<std::int64_t>(samples * 4) &&
-            dst.row_stride_bytes == static_cast<std::int64_t>(samples) &&
-            sme_conversion_available()) {
-          // Admission and conversion poll internally. A rejected tile stores
-          // nothing; bounded row conversion then supplies the exact diagnostic.
-          require(checkpoint(phase, tile_samples));
-          const auto polling =
-              core_internal::CancellationPoll::borrow(phase.query.cancellation);
-          const auto used = format_numeric::sme_f32_u8_tile(
-              src.row.data, dst.row.data, tile_samples, polling);
-          require(checkpoint(phase, 0));
-          if (used == tile_samples) {
-            column += samples;
-            continue;
-          }
-        }
-#endif
-        for (std::uint64_t dy = 0; dy < rows; ++dy) {
-          if (height_axis)
-            at[*height_axis] = row + dy;
-          const auto* source = src.row.data + static_cast<std::ptrdiff_t>(
-                                                  static_cast<__int128>(dy) *
-                                                  src.row_stride_bytes);
-          auto* target = dst.row.data +
-                         static_cast<std::ptrdiff_t>(static_cast<__int128>(dy) *
-                                                     dst.row_stride_bytes);
-          for (std::uint64_t dx = 0; dx < samples;) {
-            const auto* input = source + static_cast<std::ptrdiff_t>(
-                                             static_cast<__int128>(dx) *
-                                             src.row.sample_stride_bytes);
-            auto* output = target + static_cast<std::ptrdiff_t>(
-                                        static_cast<__int128>(dx) *
-                                        dst.row.sample_stride_bytes);
-            const auto limit = std::min<std::uint64_t>(64, samples - dx);
-            const auto safe = contiguous && *u8_lookup_ready
-                                  ? infallible_prefix(input, limit, state)
-                                  : 0;
-            const auto count = std::max<std::uint64_t>(1, safe);
-            for (std::uint64_t lane = 0; lane < count; ++lane)
-              require(checkpoint(phase, dims.size() + 64));
-            const auto used =
-                safe ? convert_span(input, output, safe, state) : 0;
-            for (std::uint64_t lane = used; lane < count; ++lane) {
-              at[width_axis] = column + dx + lane;
-              const auto& bounds =
-                  state.bounds[state.sample_axis ? at[*state.sample_axis] : 0];
-              auto status = convert_one(
-                  input +
-                      static_cast<std::ptrdiff_t>(static_cast<__int128>(lane) *
-                                                  src.row.sample_stride_bytes),
-                  output +
-                      static_cast<std::ptrdiff_t>(static_cast<__int128>(lane) *
-                                                  dst.row.sample_stride_bytes),
-                  state, bounds, at);
-              if (!status.ok()) {
-                status.message +=
-                    std::string(" source_dtype=") + dtype_name(state.source) +
-                    " target_dtype=" + dtype_name(state.target) +
-                    " range_index=" +
-                    std::to_string(state.sample_axis ? at[*state.sample_axis]
-                                                     : 0);
-                if (state.axis)
-                  status.message +=
-                      " channel_axis=" + std::to_string(*state.axis) +
-                      " channel=" + std::to_string(at[*state.sample_axis]);
-                return status;
-              }
-              *u8_lookup_ready = true;
-            }
-            dx += count;
-          }
-        }
-        column += samples;
-      }
-      row += advanced_rows;
-    }
-    bool next = false;
-    for (std::size_t axis = dims.size(); axis;) {
-      --axis;
-      if (axis == width_axis || (height_axis && axis == *height_axis))
-        continue;
-      if (++at[axis] < dims[axis].offset + dims[axis].extent) {
-        next = true;
-        break;
-      }
-      at[axis] = dims[axis].offset;
-    }
-    if (!next)
-      return Status::success();
-  }
-}
-struct Continuation final {
-  const Preparation* state;
-  Footprint output;
-  explicit Continuation(const Preparation* prepared) : state(prepared) {}
-  Poll poll(const ResultProgramPhase& phase) try {
-    const auto& tensor = phase.query.output.result_schema->tensors[0];
-    const auto shape = tensor.sample_shape();
-    output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
-                                        : take(Footprint::all(shape));
-
-    FloatingEnvironment environment;
-    ExactWorkScope exact_work(&phase.consume_work, &phase.query.cancellation);
-    auto scratch =
-        take(phase.resources.reserve(ResourceCapacity::host(16384, 16384)));
-    auto builder = result_builder(phase, false);
-    std::vector<ResultViewAxis> axes(shape.size());
-    for (std::size_t i = 0; i < axes.size(); ++i)
-      axes[i].output_axis = static_cast<std::int32_t>(i);
-
-    bool u8_lookup_ready = !state->fast_u8_f32;
-    require(format_result::planes(tensor, output, [&](const Region& box) {
-      auto window = take(
-          phase.tensors->at({0, 0}).acquire(box, phase.query.cancellation));
-      if (state->identity && !state->materialize)
-        return format_result::publish(phase, &builder, box, window, axes,
-                                      state->layout);
-      return builder.publish_tensor_kernel(
-          0, box,
-          [&](const auto& writers) {
-            try {
-              for (const auto& writer : writers)
-                require(convert_window(phase, *state, window, writer,
-                                       &u8_lookup_ready));
-              return Status::success();
-            } catch (const Status& status) {
-              return status;
-            } catch (const ExactWorkFailure& failure) {
-              return failure.status;
-            }
-          },
-          phase.query.cancellation);
-    }));
-    require(checkpoint(phase, 1));
-    return Poll(ResultPublication{take(builder.seal()), true});
-  } catch (const Status& status) {
-    return Poll(status);
-  } catch (const ExactWorkFailure& failure) {
-    return Poll(failure.status);
-  }
+struct PreparedConversion final {
+  RuntimeConversion state;
+  fixed_tensor::PointInputs<1> inputs;
 };
+void invoke(const ps_kernel_invocation_v8* invocation,
+            ps_kernel_status_v8* status) noexcept {
+  const auto& prepared =
+      *static_cast<const PreparedConversion*>(invocation->prepared_context);
+  const auto& state = prepared.state;
+  const auto consume = [invocation](std::uint64_t) {
+    return invocation->cancellation.is_cancelled &&
+                   invocation->cancellation.is_cancelled(
+                       invocation->cancellation.context)
+               ? Status{ErrorCode::Cancelled, {}}
+               : Status::success();
+  };
+  const auto accept = [status](const Status& checked) {
+    if (!checked.ok())
+      *status =
+          kernel_failure(checked.code, checked.message.c_str(), checked.reason);
+    return checked.ok();
+  };
+  if (!accept(consume(0)))
+    return;
+  if (state.layout == "view") {
+    *status = kernel_failure(ErrorCode::InvalidArgument, "ViewUnavailable",
+                             FailureReason::ViewUnavailable);
+    return;
+  }
+  FloatingEnvironment environment;
+  if (!environment.active()) {
+    *status = kernel_failure(ErrorCode::OperationFailed,
+                             "numeric environment unavailable");
+    return;
+  }
+  ExactConversion* math =
+      state.identity ? nullptr
+                     : new (invocation->scratch[0].allocation) ExactConversion;
+  fixed_tensor::PointReader<1> reader{prepared.inputs, *invocation};
+  const auto& output = invocation->outputs[0];
+  const auto rank = output.layout->rank;
+  const auto source_width = sample_width(state.source),
+             target_width = sample_width(state.target);
+  auto* target =
+      static_cast<std::uint8_t*>(output.allocation) + output.byte_offset;
+  std::array<std::uint64_t, 8> at{};
+  std::uint64_t samples = 1;
+  for (unsigned axis = 0; axis < rank; ++axis) {
+    at[axis] = output.layout->origin[axis];
+    samples *= output.layout->shape[axis];
+  }
+#if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
+  if (state.sme && samples >= 4096 && samples <= 65536) {
+    reader.bits(0, at, source_width);
+    const auto& view = *reader.cached[0];
+    bool contiguous = view.layout->rank == rank;
+    std::uint64_t stride = source_width;
+    for (unsigned axis = rank; axis-- > 0;) {
+      contiguous &=
+          view.layout->origin[axis] == output.layout->origin[axis] &&
+          view.layout->shape[axis] == output.layout->shape[axis] &&
+          view.layout->strides[axis] == static_cast<std::int64_t>(stride);
+      stride *= output.layout->shape[axis];
+    }
+    const auto* source =
+        static_cast<const std::uint8_t*>(view.allocation) + view.byte_offset;
+    if (contiguous && reinterpret_cast<std::uintptr_t>(source) % 4 == 0) {
+      const auto used = format_numeric::sme_f32_u8_tile(
+          source, target, samples, invocation->cancellation);
+      if (!accept(consume(0)))
+        return;
+      if (used == samples) {
+        *status = {};
+        return;
+      }
+    }
+  }
+#endif
+  for (std::uint64_t sample = 0; sample < samples;) {
+    if (!accept(consume(0)))
+      return;
+    const auto input = reader.bits(0, at, source_width);
+    const auto& view = *reader.cached[0];
+    std::uint64_t used = 0;
+    if (view.layout->strides[rank - 1] ==
+        static_cast<std::int64_t>(source_width)) {
+      const auto count = std::min<std::uint64_t>(
+          {64,
+           view.layout->origin[rank - 1] + view.layout->shape[rank - 1] -
+               at[rank - 1],
+           output.layout->origin[rank - 1] + output.layout->shape[rank - 1] -
+               at[rank - 1]});
+      __int128 offset = view.byte_offset;
+      for (unsigned axis = 0; axis < rank; ++axis)
+        offset += static_cast<__int128>(at[axis] - view.layout->origin[axis]) *
+                  view.layout->strides[axis];
+      used = convert_span(static_cast<const std::uint8_t*>(view.allocation) +
+                              static_cast<std::ptrdiff_t>(offset),
+                          target + sample * target_width, count, state);
+    }
+    if (!used) {
+      const auto& bounds =
+          (*state.fixed_bounds)[state.sample_axis ? at[*state.sample_axis] : 0];
+      auto converted = convert_one(input, state, bounds, math, consume);
+      if (!accept(converted.status()))
+        return;
+      write_raw(target + sample * target_width, state.target,
+                converted.value());
+      used = 1;
+    }
+    sample += used;
+    at[rank - 1] += used;
+    for (unsigned axis = rank; axis-- > 0;) {
+      if (at[axis] < output.layout->origin[axis] + output.layout->shape[axis])
+        break;
+      at[axis] = output.layout->origin[axis];
+      if (axis)
+        ++at[axis - 1];
+    }
+  }
+  *status = {};
+}
+Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
+  using Answer = Result<ps_prepared_kernel_v8>;
+  const auto invalid = [] {
+    return Answer(Status{ErrorCode::TypeMismatch,
+                         "invalid numeric conversion signature"});
+  };
+  const auto* state = static_cast<const Preparation*>(query.static_state);
+  if (!state || query.inputs.size() != 1 || query.outputs.size() != 1 ||
+      query.writes.size() != 1 || !query.task_parameters.empty() ||
+      query.scratch !=
+          std::array<std::uint64_t, 3>{scratch_bytes(*state), 0, 0})
+    return invalid();
+  auto expected = *query.inputs[0].result_schema;
+  expected.tensors[0].descriptor.element_type = state->target;
+  expected.tensors[0].atomic_trailing_axes = 0;
+  if (!query.outputs[0].result_schema ||
+      !query.outputs[0].result_schema->same_schema(expected))
+    return invalid();
+  auto prepared = std::make_unique<PreparedConversion>();
+  prepared->state = static_cast<const RuntimeConversion&>(*state);
+#if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
+  if (state->fast_f32_u8) {
+    bool available = true;
+    for (const auto* name :
+         {"hw.optional.arm.FEAT_SME", "hw.optional.arm.FEAT_SME_F64F64"}) {
+      int value = 0;
+      std::size_t bytes = sizeof(value);
+      available &= sysctlbyname(name, &value, &bytes, nullptr, 0) == 0 && value;
+    }
+    prepared->state.sme =
+        available && format_numeric::sme_conversion_vector_bytes() == 64;
+  }
+#endif
+  auto grid = TileGrid::from_schema(expected, query.tile_extent);
+  if (!grid.ok())
+    return Answer(grid.status());
+  auto region = grid.value().region(query.writes[0].tile_index);
+  if (!region.ok())
+    return Answer(region.status());
+  std::array<Region, 1> regions{
+      state->layout == "view"
+          ? Region(std::vector<RegionDimension>(region.value().rank()))
+          : region.value()};
+  auto valid =
+      fixed_tensor::prepare_point_inputs(query, &prepared->inputs, &regions);
+  if (!valid.ok())
+    return Answer(valid);
+  ps_prepared_kernel_v8 kernel{};
+  kernel.struct_size = sizeof(kernel);
+  kernel.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  kernel.context = prepared.release();
+  kernel.invoke_cpu = invoke;
+  kernel.release = [](const void* context) {
+    delete static_cast<const PreparedConversion*>(context);
+  };
+  return Answer(kernel);
+}
 
 OperationDefinition conversion() {
   OperationDefinition definition;
@@ -1206,8 +954,6 @@ OperationDefinition conversion() {
 
   port.element_type_mask = 127;
   traits.input_schema = {port};
-  traits.workspace_bytes = 16384;
-  traits.cacheable = false;
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = {
       {"dtype", OperationParameterType::String},
@@ -1222,18 +968,23 @@ OperationDefinition conversion() {
   output.key = "values";
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
-  output.continuation_bytes = sizeof(Continuation);
-  output.maximum_dependency_stages = 2;
   definition.prepare_static = [](const auto& inputs, const auto& params) {
     return prepare(inputs, params);
   };
-  definition.map_dependencies = sdk::pointwise_dependencies;
-  definition.start_result = [](const ResultProgramQuery& query,
-                               const BufferAllocator& allocator) {
-    if (query.tensor_outputs && query.tensor_outputs->empty())
-      return ResultContinuation::stateless<empty_result>();
-    return ResultContinuation::make<Continuation>(
-        allocator, static_cast<const Preparation*>(query.prepared->state()));
+  definition.lower = lower;
+  definition.prepare_kernel =
+      [](const physical::KernelDesc& kernel,
+         const physical::Placement& placement, const KernelPreparation& query,
+         const ResourceSet&,
+         const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    if (kernel.symbol != "convert" || kernel.contract != conversion_contract)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::TypeMismatch, "invalid conversion kernel"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::BackendUnavailable, "conversion requires CPU Host"});
+    return prepare_kernel(query);
   };
   return definition;
 }

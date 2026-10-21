@@ -27,16 +27,14 @@ registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
 Negate each observed numeric value. Inherit [NUM-04 common requirements](NUM-04_unary_contract.md)
-for input/output names, shape preservation, no attached domain description, complete-input and
-typed-validation support, ownership, resources, NaN handling and validation.
+for input/output names, shape preservation, no attached domain description, fixed tile reads and structural validation, ownership, resources, NaN handling and validation.
 There are no static parameters. Input and output dtype are the same, restricted
 to Int64, Float32 or Float64. UInt8 is rejected with TypeMismatch and requires
 an explicit cast before negation; there is no implicit output promotion.
 
 ## Exact behavior
 
-- Int64 computes mathematical -x. INT64_MIN fails the complete invocation with
-  OperationFailed/ArithmeticOverflow because +2^63 is not representable.
+- Int64 computes mathematical -x. The caller excludes INT64_MIN because +2^63 is not representable.
 - Floating values flip the sign bit, including zero, infinity and NaN. Quiet a
   signaling NaN and preserve its payload before/after this sign-bit transform.
   Thus +0 becomes -0, -0 becomes +0, and the signs of infinities swap.
@@ -51,15 +49,14 @@ integer-minimum detection and bit rules without reading beyond the full logical 
 
 ## Independent acceptance
 
-- Int64 `[-7,0,7,INT64_MAX]` -> `[7,0,-7,-INT64_MAX]`; INT64_MIN fails only
-  anywhere in a nonempty complete-input invocation. UInt8 inputs reject before data execution.
+- Int64 `[-7,0,7,INT64_MAX]` -> `[7,0,-7,-INT64_MAX]`; INT64_MIN violates the representability precondition. UInt8 inputs reject before data execution.
 - Float32 `0x00000000` -> `0x80000000`, `0xff800000` -> `0x7f800000`, and
   signaling NaN `0x7f812345` -> `0xffc12345`.
 - Float64 `0xfff0000000000042` -> `0x7ff8000000000042`; subnormal magnitude
   bits remain unchanged.
 - Double negation restores original bits except that an input signaling NaN
   remains quieted. Compare all three versions against an independent unsigned
-  sign-bit/integer oracle, and run inherited public ROI/cache/resource cases.
+  sign-bit/integer oracle, and run inherited public ROI/concurrent-Run/resource cases.
 
 Conceptual public fixture: a bound Float64 `[3]` input `[1,-2,-0]`, one selected
 neg key and values output must yield `[-1,2,+0]`. The maintained public workflow command and current validation boundary are documented below.
@@ -70,6 +67,5 @@ finite-expression policy; this operation uses the maintained numeric unary regis
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
-atomic failure for the complete invocation. Its numerical path follows
+exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

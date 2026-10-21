@@ -61,8 +61,8 @@ huge positive/negative integers, adjacent representable values around half and
 quarter integers, subnormals, NaN payloads and signed zeros. Use an independent
 high-precision oracle for ordinary arguments and midpoint-sensitive cases.
 
-Apply shared disjoint demand, typed-validation closure, invalidation, ownership,
-cache, cancellation and resource checks. Verify unsupported accelerated ranges
+Apply shared disjoint demand, structural-validation checks, new bindings, ownership,
+cancellation and resource checks. Verify unsupported accelerated ranges
 actually use strict fallback. Float32 LLVM libc is a candidate
 as documented in the shared contract; it supplies no implicit Float64 coverage.
 The maintained public run command and current validation boundary are documented below;
@@ -71,8 +71,7 @@ local timing is recorded in the implementation notes.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
-atomic failure for the complete invocation. Its numerical path follows
+exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 Float32 accelerated sinpi uses a polynomial in the original binary argument for `2^-120 <= |x| < 1/4`, with exact signed zero handling. Coefficients include pi powers; no rounded `pi*x` input is substituted. Exact quarter-turn roots retain the algebraic path.

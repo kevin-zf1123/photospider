@@ -31,13 +31,13 @@ the `channel_axis` of `options.input_description`; if both are present they must
 agree. When a description is supplied, every generated node receives it as its
 `input_description` parameter. Axis values refer to the cell descriptor, not
 the complete sample shape; existing batch axes remain a prefix. If the caller's
-declaration is known, `split_channels` checks the complete schema and physical-
-layout assertion. Each generated A node carries a domain-separated SHA-256
+declaration is known, `split_channels` checks the complete schema and spatial-
+topology assertion. Each generated A node carries a domain-separated SHA-256
 digest of the complete canonical schema as a bounded 64-character hex string,
-plus a separate physical-layout assertion, for compile-time verification of
+plus a separate spatial-topology assertion, for compile-time verification of
 forward producer references. The schema digest covers schema identity and
 batch axes, reads no samples, and is not a sample hash or validity proof. The
-separate physical-layout assertion is limited to 8,192 bytes; larger assertions
+separate spatial-topology assertion is limited to 8,192 bytes; larger assertions
 fail during authoring.
 
 For channel count C, the helper emits A nodes in index order, all bound to the
@@ -53,12 +53,7 @@ complete-input split operation is created.
 
 ## Runtime demand and validation
 
-Each consumed handle uses an ordinary A Result operation. A requested channel
-does not request sibling channel payloads; an unrequested generated A node has
-no sample demand. Each active node requests its exact selected-channel support
-and Descriptor, not Validation or Control. Its result retains batch axes and
-uses A's `keepdims` policy. Each handle has independent dependency and dirty
-mapping behavior.
+Each consumed handle uses an ordinary fixed A call. Only requested extraction calls produce payload tasks; each task reads the mapped source tile closure and writes an independent output tile. A source tile or producer may cover additional channels. Every result retains batch axes and follows A's keepdims and layout policies; no shared mutable runtime split state is introduced.
 
 For temporary public acceptance, use the UInt8 B/A/R/G tensor and expected red
 values from [channel extraction](FMT-01A_extract_channel_index.md#example-and-validation).

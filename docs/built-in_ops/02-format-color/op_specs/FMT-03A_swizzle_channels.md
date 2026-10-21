@@ -57,21 +57,11 @@ scalar source records; typed literals add scalar-literal nodes. Retain the base
 Descriptor dependency even for all-constant output and use transactional graph
 expansion, the selected CPU profile and the family layout policy.
 
-## Exact observation and ownership
+## Fixed execution and ownership
 
-For requested footprint Q, source Data is the exact union selected by the slot
-expressions. Requesting only a scalar-backed slot reads the scalar and no base
-pixels. Repeated base selection is deduplicated in input support, while every
-requested destination is still produced. A source change dirties all selecting
-output slots in the affected nonchannel coordinates. A scalar change dirties
-all observed samples of its selecting slots and no other output slots.
+The helper expands to fixed FMT-02C calls and, for typed literals, fixed scalar providers. Each retained output tile computes all of its effective source expressions. Lowering deduplicates the mapped source-grid tile union per port; unused ports retain schema dependencies. A constant or replacement-only request avoids base payload only when every destination in the normalized output tiles avoids base samples. Spatial tiles may contain multiple channels.
 
-Do not widen reads to complete colors, planes or tiles. Inherit required upstream
-failures. Output view availability follows the actual mapping; a reorder or
-constant insertion may require materialization. Constant-only images still use
-canonical planar page-backed storage when materialized. Output owner retention,
-copy/fill complexity, cancellation, errors and performance cases are those of
-the family and expanded graph, not those of the retired complete-input implementation.
+Auto/materialize copy to independently owned dense output tiles with zero scratch. Nonempty view fails with schema-only dependencies; Empty validates static inputs and emits no task. All copied bits are preserved, cancellation is checked between at most 256 samples, and a failed call exports no partial result. The family defines compatible rebinding, concurrent Runs and output lifetime.
 
 ## Independent acceptance fixtures
 
@@ -82,13 +72,11 @@ Use Float32 base [1,2,4] with straight RGB and independent alpha descriptions:
 ```
 
 Slots [2,1,0,3] give `[30,20,10,0.4]` and `[31,21,11,0.6]` at the two pixels.
-A downstream description can name those slots B/G/R/alpha, with R=2, G=1 and B=0; this configuration is not an output property. Requesting output (0,1,0) reads only base (0,1,2)=31. A base R-only change
-does not dirty this output observation. An explicit canonical R/G/B target
+A downstream description can name those slots B/G/R/alpha, with R=2, G=1 and B=0; this configuration is not an output property. At output (0,1,0), the copied value is base (0,1,2)=31. Other channels have no effect on that mathematical output value. An explicit canonical R/G/B target
 description supplied to a later consumer changes its interpretation but leaves those copied bytes intact.
 
 Slots [0,0,constant(V)] with Float32 V=[0.5] produce [10,10,0.5] and
-[11,11,0.5]. Duplicate R selections do not implicitly form an RGB group. A
-request for only slot 2 reads V[0] without base pixels. Changing V to -0.0 or
+[11,11,0.5]. Duplicate R selections do not implicitly form an RGB group. If the normalized output tiles contain only scalar-backed slots, they read V[0] without base pixels. Changing V to -0.0 or
 a Float32 NaN with payload 0x7fc01234 changes only that slot's output bits, with
 no shape or mapping change. Use byte comparison, not floating equality.
 
@@ -98,8 +86,7 @@ constant slots, rank-one and rank-eight bases, arbitrary channel axes, name/role
 ambiguity, literal/scalar dtype mismatch, and invalid/empty selections.
 
 The independent oracle enumerates output coordinates and copies bytes from an
-independently evaluated source expression; separately enumerate its Data and
-dirty sets. Validate lowered graphs against these results. The conceptual public
+independently evaluated source expression; separately derive complete output and source tile closure. Validate lowered graphs against these results. The conceptual public
 workflow is `base + scalar -> swizzle_channels expansion -> named values`.
 Implementation must provide actual compile/execute commands, a partial channel
 request and checked output.

@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 ---
 
@@ -13,7 +13,7 @@ clarification_status: complete
 
 The default registry provides `alpha.associate_<profile>` and
 `alpha.unassociate_<profile>` for `strict`, `accelerated_apple_silicon`, and
-`accelerated_x86_64`. Each uses Result ABI 6. Semantic calls bind one Result; raw
+`accelerated_x86_64`. Each uses fixed invocation ABI 8. Semantic calls bind one Result; raw
 plane/scalar calls may bind a second Result. The family and its members remain
 Proposed; status records design acceptance separately from implementation.
 
@@ -64,7 +64,7 @@ The arithmetic acts on stored coordinates: P=alpha*C even when C has encoded
 transfer. No implicit transfer decode, linearization, gamut/range conversion or
 alpha encoding occurs. Callers explicitly choose color/transfer boundary order.
 RGB/Gray samples may be finite signed/HDR values; there is no RGB<=alpha bound.
-Alpha must be finite in [0,1] when consumed by semantic color conversion.
+The caller supplies finite alpha in [0,1] when semantic color conversion consumes it.
 
 ## Ports, shape and static parameters
 
@@ -93,20 +93,18 @@ no implicit squeeze, broadcast or resizing occurs. Empty S uses internal/scalar
 raw weights rather than rank-zero external planes. Structure, selectors, group
 state and source kinds are static; input samples may change between executions.
 
-Every connected input receives Descriptor support. Raw arithmetic uses Data without semantic-domain
-Validation. There is no Control support. Each member has strict, Apple Silicon
-and x86-64 CPU profile entries. Association and unassociation always materialize;
-they have no layout parameter. They publish transactionally under Root budgets,
-check cancellation and retain no run payload state for Empty output. There is no
-integer alpha normalization, GPU implementation or mixed-dtype promotion.
-Integer-coded inputs require explicit numeric decoding/casting.
+Every connected input participates in static schema checks. The compiler emits
+fixed tasks with mapped payload reads and independent dense output tiles.
+Association and unassociation expose no layout parameter. Empty demand has no
+tasks. The three CPU profiles retain their capability requirements; this family
+provides no integer normalization, mixed-dtype promotion or GPU backend.
 
 ## Mathematical reference and numeric profiles
 
 Let x be one requested participating input component, a its selected alpha and
 RN_t the NUM strict rounding to input/output dtype t, with ties-to-even and
-gradual underflow. Semantic modes read both operands and require finite x and
-finite a in [0,1]. Then:
+gradual underflow. Semantic modes read both operands. The caller supplies finite x and finite a
+in [0,1] for every evaluated participating coordinate. Then:
 
 ```
 associate:
@@ -115,24 +113,23 @@ associate:
 
 unassociate:
     a == +/-0 and x == +/-0: y = +0
-    a == +/-0 and x != 0:   semantic domain failure
+    a == +/-0 and x != 0:   outside the semantic caller preconditions
     a > 0:                 y = RN_t(x / a)
 ```
 
 All positive alpha values, including subnormals, follow the arithmetic branch.
 Never replace a small positive value by zero or insert an epsilon denominator.
-Described association output must remain finite: a division result rounding to infinity fails
-with ArithmeticOverflow rather than clipping. Gradual underflow to a subnormal
+The caller guarantees that the correctly rounded semantic result is finite,
+including unassociation by a small positive alpha. The operation applies no clipping. Gradual underflow to a subnormal
 or signed zero is allowed. The special a=0 branch is canonical positive zero;
 for a>0, zero signs follow NUM arithmetic. Internal alpha and other pass-through
 components are copied bit-for-bit, preserving even the sign of zero.
 
 Strict multiplication/division rounds the exact result once to t, as in NUM-05C/D. Named
 accelerated arithmetic inherits those NUM profile guarantees, including exact
-classification, predicates, copied values and required fallback. It does not
-change semantic validity/overflow decisions or gain a new FMT-specific tolerance.
+classification, predicates, copied values and required fallback. It uses the same caller preconditions and gains no new FMT-specific tolerance.
 Preserve the caller's floating environment. Opacity a=1 is numerically identity
-after required semantic operand checks; it is not permission to skip failures.
+while retaining the same caller preconditions and declared input reads.
 Round-trip association is not generally lossless because rounding/underflow and
 zero-alpha hidden-color removal can lose information.
 
@@ -157,119 +154,81 @@ and any later interpretation are likewise configured by the caller. Shape,
 channel positions, alpha bits and copied samples follow the mapping above.
 No full-color validity is certified by producing only a subset.
 
-There is no external alpha owner, snapshot or origin identity in the result.
-The alpha index refers only to this output tensor's channel. A request for R may
-read input alpha without publishing output alpha. A downstream unassociate or
-other consumer needing alpha must explicitly request the alpha channel through
-the declared DAG. If only a detached partial result with missing alpha coverage
-is available, access fails under normal missing-coverage rules. It must not read
-an old input alpha through hidden configuration or manufacture alpha=0/1. This rule preserves
-exact output coverage and does not force alpha production for R alone.
+The output alpha index refers to this output tensor. Reading input alpha does
+not itself enlarge the declared write set; produced coverage is determined by
+the complete retained output tiles. A sample request for R can retain a spatial
+tile containing alpha and therefore produce alpha as well. Alpha coverage is
+absent only where its output tiles were not retained. Downstream consumers
+request the result's required tiles explicitly. Detached missing coverage remains
+an ordinary access/binding failure, without an external alpha owner, hidden
+snapshot, or manufactured zero/one value.
 
 Owners, read windows and declared DAG edges have their normal retained lifetime.
 Source/context destruction must not invalidate produced samples or active reads;
 unproduced samples do not become available through a hidden recovery mechanism.
 
-## Exact observation, validation and dirty support
+## Fixed reads and caller preconditions
 
-Let Q be requested output coordinates and T its selected color/component subset.
-Data includes original input at every Q coordinate and alpha at the mapped
-nonchannel coordinates of T. Internal alpha support is deduplicated with Q;
-raw scalar alpha contributes index zero iff T is nonempty. No unrequested color
-peer or AOV sample is added. Semantic Validation is each requested participating
-x and a, including at zero or one alpha. Pass-through alpha/AOV-only requests
-copy exact bits without extra finite/range validation. Static descriptor, group,
-source-state and channel-reference checks apply regardless of requested samples.
+Each retained output tile becomes one CPU task. For every converted component
+in that complete tile, the task declares its original input and mapped alpha.
+Pass-through channels declare only their own source. Per-port source-grid closures
+are unioned without spanning gaps in the maps. Batch and atomic axes can make
+source and output grids different. Scalar alpha contributes its sole sample only
+when a participating component is evaluated. Unused ports retain schema dependencies.
 
-No value-dependent Control read or short circuit at a=0 suppresses a required
-operand failure. Upstream complete-input work retains its original scope. A failed
-observation publishes no success and does not revoke unrelated completed output.
-Input component changes map pointwise to the same output; internal alpha changes
-also fan out to selected group components at that coordinate. Raw external plane
-changes fan out at matching coordinates; raw scalar changes affect all requested
-participating observations. Intersect dirty maps with actual observations.
-Descriptor changes invalidate inference. Even at alpha=0/1, retain all required
-Data and Validation dependencies.
+Semantic preconditions cover the participating coordinates actually evaluated in
+the complete output tile. They also apply at alpha zero or one. Additional source
+tile coverage does not itself cause evaluation or add color peers. Raw arithmetic
+retains its defined IEEE results without semantic finite/coverage restrictions.
+Violating a semantic premise promises no numerical result or diagnostic; runtime
+performs no sample-validation scan or output certification.
 
-## Reference algorithm, storage and resources
+The numerical semantics do not suppress declared reads at alpha zero or one.
+Required producer failures propagate through the executor. Public Results appear
+when the complete call succeeds and retires in order; internal task dependencies
+can consume completed private tiles earlier. Retained Results own their storage
+independently of input and execution-context lifetime.
 
-1. Resolve the explicit description or raw structure, source interpretation, axis and selectors.
-   Infer unchanged shape/dtype and target interpretation; reject invalid static
-   relationships without scanning samples.
-2. Compute exact Q/T input support; admit and acquire its immutable read windows.
-3. Admit Root resources and prepare needed destination state. A forced view first
-   proves that the complete declared map has one legal owner and affine relation.
-   Materialization copies or evaluates only requested coordinates.
-4. Check cancellation/currentness and publish successful coverage transactionally.
-   Preserve source status/diagnostics on failure and publish no payload state for
-   Empty observations. Publish internal channel references, never external alpha
-   bindings.
+## Arithmetic and bounded resources
 
-Materialized image-shaped boundary payloads use the same planar storage rules;
-changing a semantic label does not legalize interleaving or bypass image storage.
-Generic non-image raw tensors use their admitted owned representation. Canonical
-images reserve one full virtual span with the DAG tile geometry, valid edge rows,
-width padding and page-aligned tile starts. Only required pages receive backing;
-all produced pages remain retained until owner retirement. Read exports are not
-new persistent image layouts.
+Static preparation resolves descriptions, selectors, source maps and output
+schema. The kernel preparation callback checks the exact input slot union,
+canonical output tile, symbol, contract and scratch. Closure size is bounded
+before constructing each tile set, including malformed tasks with missing slots.
+The executor admits distinct dense output allocations and scratch before issue.
+Spatial metadata specifies logical axes independently of physical row-major
+output strides. No full-image virtual allocation is needed for a selected tile.
 
-For rank r, Nq requested samples and F windows, mapping/compute costs are
-O(Nq*r+F*r), plus static metadata, page sets and required upstream work. Bounded
-selection tables and exact admitted windows avoid per-pixel descriptions or an
-eager per-reserved-page directory. SIMD cannot read padding, unrelated channels
-or unprepared pages. Mask semantic zero-alpha lanes before division without
-skipping x validation or changing the caller's floating environment.
+Copied-only tasks declare zero scratch. A task with participating color uses a
+128-sample gather/output block with fixed offset storage, `sizeof(SampleBlock)`
+(currently 4096 bytes). `algorithm=reference` adds the caller-owned 4352-bit
+`RatioWorkspace`, giving `sizeof(ReferenceScratch)` (currently 6888 bytes).
+All mutable arithmetic belongs to that scratch; prepared maps and read-slot
+indexes are immutable and shared across Runs.
 
-Charge actual supplied backing, simultaneous input/output, retained normal
-owners, windows, numeric scratch and metadata; deduplicate shared owners. Virtual
-span, logical sample bytes and physical RSS are distinct. No extra alpha capture,
-external-binding ancestry, eviction, producer replay or private thread pool is
-introduced. Poll cancellation/currentness at most every 1024 entries/samples and
-before publication. Release unpublished resources on failure.
+Strict scalar arithmetic uses a nearest-even, gradual-underflow environment;
+SIMD uses true multiplication/division, with safe semantic zero-alpha division
+and exact NUM repair for raw exceptional lanes. The reference algorithm rounds
+fixed integer products or ratios directly. No runtime rational/vector allocation
+or private thread pool is used. Cancellation is checked every block of at most
+128 samples and at bounded exact-division steps. The caller's floating environment
+is restored on every return.
 
-Result caching is disabled. Each run consumes its declared input Results and
-metadata; no external alpha snapshot or origin relation is stored.
+## Errors and verification scope
 
-## Errors and support limits
+Malformed parameters, descriptions, selectors, channel relationships and shapes
+fail static preparation. Unsupported profile/backend and malformed kernel
+signatures fail before issue. Resource admission, cancellation, stale state and
+producer failures follow the executor protocol. Semantic domain and finite-result
+premises are not promised runtime error checks or coordinate diagnostics.
 
-| Condition | Phase | Outcome |
-| --- | --- | --- |
-| Missing/malformed selector, ambiguity, illegal mode/axis/parameter | Compile/direct preflight | InvalidArgument / InvalidDomain, schema origin. |
-| Wrong representation/model, external semantic alpha, missing internal alpha, dtype/rank/shape conflict | Static preflight | TypeMismatch / None. |
-| Requested nonfinite semantic color, invalid alpha, or B nonzero p at zero alpha | Semantic evaluation | OperationFailed / InvalidDomain, affected observation. |
-| Semantic result becomes nonfinite | Semantic evaluation | OperationFailed / ArithmeticOverflow. |
-| Raw nonfinite input, zero division or floating overflow | Raw evaluation | NUM-defined successful result. |
-| Missing coverage, resource/work, backend, cancellation or stale failure | Inherited phase | Preserve NUM/kernel code, origin and scope. |
-
-Diagnostics name the member, group/component, alpha channel/source and global
-coordinate for sample failures; static errors have no invented pixel coordinate.
-Strict and named CPU profiles retain NUM arithmetic guarantees and identical
-semantic validity decisions. No legacy typed-image behavior is accepted as a
-compatibility implementation.
-
-## Validation coverage and limits
-
-Use independent exact binary-rational strict rounding, NUM bit/special-value
-oracles and finite-set Data/Validation/dirty mapping. Members specify analytic
-fixtures. Cover RGB/Gray, noncanonical channel placement, ranks/axes, internal
-alpha in semantic modes, all explicit raw weight sources, source-state rejection,
-zero/tiny/one alpha, signed/HDR color and signed zeros.
-
-Compare whole, offset/disjoint and cross-tile requests, R-only, alpha-only and
-AOV-only output. Check invalid unrequested peers and required failures at zero
-alpha. For A -> B requests, B must explicitly demand A's alpha output channel;
-a detached A result lacking alpha must fail rather than use external provenance.
-Check complete-image rejection of boundary payloads, multiple-group intermediate
-payloads, source immutability, context-independent produced coverage, final lease
-release, low budgets, cancellation and restored floating environment.
-
-Benchmark Float32 [4096,4096,4] internal-alpha inputs, transparent/opaque/tiny
-alpha, full/R-only/alpha-only output and y/x=[127,130) at tile size 128. Record
-axes, profile/ISA/build, workers, source/page state, time statistics, bytes,
-virtual span, backing, ordinary retained owners and scratch/metadata peaks.
-Correctness gates timing.
-
-The native CPU implementation provides the registered Result members described
-above. Acceptance still requires independent checks of bit patterns, semantic
-domain failures, partial-region dependencies, transactional publication, Root
-resource limits, cancellation and retained-owner lifetime.
+Use independent rational/NUM bit references for both dtypes, semantic zero and
+subnormal alpha, raw NaN/Inf/zero behavior, all weight source kinds and exact
+pass-through samples. Check complete and selected output tiles, per-port closure,
+noncanonical axes, batch/spatial metadata, signed/zero/unaligned inputs, malformed
+signatures, zero scratch for copies, cancellation, floating environment, concurrent
+Runs and owners retained after context destruction. The independent
+[alpha oracle](../../../../oracle/ops/format_color/fmt04/generate.py) and generated
+[bit fixtures](../../../../oracle/ops/format_color/fmt04/golden.hpp) are retained;
+temporary public execution checkers are removed after validation. Native backend
+or performance claims require evidence from the relevant hardware.

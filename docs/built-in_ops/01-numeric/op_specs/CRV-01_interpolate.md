@@ -81,47 +81,20 @@ Float32 or Float64 independently. The `values` output uses schema
 `photospider.tensor`, member `samples`, no attached domain description, and shape [N] or [N,C]; the
 multi-function column is an ordinary sample axis.
 
-All four operations use Run-shared complete-input computation. For a nonempty request, the Result
-continuation requests ordinary payload tile Needs for all three
-inputs, then validates all x knots and query controls before ordinate arithmetic.
-It evaluates every query and output column and publishes the complete dense
-output, even when the request is sparse. Result structure and any explicitly bound contracts are checked over their
-authorized inputs. No Mask/color label triggers an automatic sample scan.
-Required upstream failures retain their producer scope. A sparse request records its requested dependency region Q;
-the returned Result can still have full computed coverage and global sample
-coordinates. Empty requests read no payload, while static schema and metadata
-checks still apply.
+Strict and Float64 output use exact rational evaluation of the whole formula followed by one RN-even conversion. The arithmetic arena has 352 limbs (22,528 bits) per integer and 96 slots, with at most 49 live formula slots. Accelerated Float32 evaluation propagates conservative intervals through the complete formula and accepts a candidate only when both enclosure endpoints round to the same Float32 value. This preserves monotonicity across queries and exact fallbacks. Knots and selected clamps remain exact. Exact cross products recognize a collinear complete local PCHIP stencil and use the equivalent linear formula.
 
-Strict and Float64 output use exact rational evaluation of the whole formula,
-followed by one RN-even conversion. The fixed arithmetic arena has 352 limbs
-(22,528 bits) and 96 slots, with at most 49 live formula slots. Accelerated
-Float32 evaluation propagates conservative intervals through the whole formula
-and publishes only when both endpoints round to the same Float32 value. This
-condition preserves monotonicity across queries and strict fallbacks. Knots and
-selected clamps remain exact. Exact cross products recognize a collinear
-complete local PCHIP stencil and use the equivalent linear formula; rounded slope
-equality does not trigger this reduction.
+The mathematical stencil is local: an exact knot or clamp uses one y, linear interpolation uses two endpoints, and PCHIP uses up to four neighboring y values. Unused generic y samples undergo no additional finite scan. These mathematical selections differ from the physical read superset declared below.
 
-The mathematical stencil remains local: an exact knot or clamp uses one y,
-linear interpolation uses two endpoints, and PCHIP uses its fixed local stencil.
-Generic y values outside every evaluated stencil receive no additional finite
-scan, although typed validation and upstream execution still cover the complete
-active input. Every query and output column is evaluated, so an invalid value in
-an unrequested row or column can fail the run. `reject` also collects all active
-inputs before classifying the domain.
+## Fixed execution, resources and caller preconditions
 
-Cache identity includes complete input versions, profile, metadata and parameters. When source Results are replaced, a reusable static preparation does not retain old source owners. Numerical failures have Run scope and publish no partial output. The operations do not report independent per-column Atom success. Input offsets, positive, zero and negative strides are supported. Published output storage and an authorized read window retain their owner beyond context destruction.
+Each selected output tile lowers to one fixed CPU Host task. For output rows `[r,r+R)` and, in the multi form, columns `[c,c+C)`, its immutable reads cover all `x[0:K]`, `query[r:r+R]` and `y[0:K,c:c+C]`. The scalar form reads all y. Each region is closed through its input's own tile grid, so batch, spatial or atomic axes can enlarge physical tile support. These reads are the static superset required for data-dependent knot search; the numerical stencil remains local.
 
-Searching/classification costs O(K+N log K), followed by N scalar evaluations
-(or N*C for multi), with classification shared across columns. The complete
-dense output needs b*N (or b*N*C) bytes even for a one-cell request. Input
-collection, retained owners, the fixed arithmetic workspace and the knot vector
-also require admission. The vector has 8*K element bytes plus allocator and
-metadata overhead; K<=65536 bounds the element storage at 524288 bytes. No full
-slope table is required. Work and cancellation checks run during input reads,
-binary search, exact arithmetic and before publication. Capacity or work
-exhaustion returns ResourceExhausted and releases failed output and scratch
-storage; resource limits do not weaken the arithmetic contract. Numeric failures
-are OperationFailed/InvalidDomain or final-output ArithmeticOverflow, with Run
-scope and the offending port/index where available. Other typed, upstream, stale
-and cancellation failures preserve their failure categories.
+The task evaluates only its selected global rows and columns. It searches x directly through fixed views, once per query row within that task, and reuses the classification across the task's columns. Query order and repetitions are unrestricted. Empty selection emits no payload task. Output tiles have separate dense allocations. `select_outputs` retains the closure of saved tasks; fresh compilation determines narrower task regions.
+
+Finite x with strictly increasing values, finite consumed query/y values, representable final outputs and queries within the knot interval under `reject` are unchecked caller preconditions. Preparation validates schemas, parameters, canonical output views, the exact input tile set and fixed scratch capacity. The kernel performs no global numeric validation scan. Clamp, endpoint selection, extrapolation and exact rounding retain their mathematical definitions.
+
+Each invocation constructs one `ExactCurve` in preallocated Host scratch of `sizeof(ExactCurve)`, containing the complete 96-slot integer arena and ratio workspace. Binary search uses bounded stack indices, and no knot vector or full slope table is allocated. The 352 limbs per integer are an arithmetic precision bound, not the total scratch byte count. Scratch is private to the invocation; prepared views are immutable and shared by concurrent Runs.
+
+Search costs `O(R log K)` x reads per task plus `R*C` local evaluations (C=1 for scalar). Input tile owners, selected output allocations and granted-lane scratch require resource admission. Cancellation is polled during search, column traversal and exact arithmetic. Internal capacity/zero-denominator guards and accelerated quality certification remain active. Static errors retain `InvalidArgument` or `TypeMismatch`; unavailable profiles, resource exhaustion and cancellation retain their operational status. Violating numerical caller preconditions has no specified numeric diagnostic.
+
+Tasks share their IR call's publication outcome. Successful task tiles can supply dependent tasks internally; public call Results appear only after all required tasks succeed and ordered retirement occurs. Rebinding reuses immutable preparation and produces independent Run-owned output. Content caching and repeated-demand identity are not provided. Result owners retain allocations beyond context lifetime.

@@ -85,8 +85,7 @@ PHOTOSPIDER_OPS_SDK_API Result<SchemaTemplate> lut3d_bake_table_schema(
 PHOTOSPIDER_OPS_SDK_API Status validate_lut3d_bake_schema(
     const SchemaTemplate& schema, const Lut3dBakeDescription& description);
 /** @brief Reads a sealed report through explicit owned Result read windows.
- * Obtain complete report coverage from `ExecutionContext::execute()` or request
- * all report members with `execute_fragments()`.
+ * The completed Result must cover all thirteen report members.
  * description must be the explicit configuration used to generate the report;
  * its canonical identity must match the configuration_id field. Configuration
  * is never inferred from the schema. Does not start a producer.
@@ -95,7 +94,7 @@ PHOTOSPIDER_OPS_SDK_API Status validate_lut3d_bake_schema(
  * Result and windows own backing after
  * context teardown. maximum_window must admit a complete member (at most 72
  * bytes); a smaller window fails with ResourceExhausted.
- * The helper applies the same validation as the gate and requires complete
+ * The helper independently validates report values and requires complete
  * coverage of all 13 report tensors. Optional consume_work accounts bounded
  * schema, axis and report validation.
  * Cancellation/I/O/capacity errors propagate; malformed report members fail

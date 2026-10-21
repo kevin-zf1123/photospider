@@ -24,4 +24,4 @@ For group size N, calculate the exact total divided by N, then round once to the
 
 For `input=[[1,2,3],[4,5,6]]` and `axes="1"`, Float64 output is `[[2],[5]]`. For Int64 `[2^53+1,2^53+2]`, compute the exact mean before Float64 rounding; pre-casting elements would produce the wrong result. For finite Float64 `[MAX,MAX]`, the mean is MAX despite a naive sum overflow.
 
-Nonempty requests read and validate the complete input, compute every group and publish the complete output before projection. An unrequested typed failure still fails Run-shared complete-input computation. Empty demand reads no payload or performs no arithmetic. Current fixture coverage and limits are in [NUM-11 Run-shared complete-input computation](../reductions-whole.md).
+Each selected output tile lowers to one fixed CPU task with its complete reduction groups. Prepare verifies the declared views; the invocation uses private preallocated exact state and a separate dense output tile. Empty selection emits no task. See [fixed reduction execution](../reductions-execution.md).

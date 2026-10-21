@@ -5,11 +5,19 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
+#include "photospider/core/resources.hpp"
 #include "photospider/core/status.hpp"
 
 namespace ps {
+namespace data_internal {
+struct AllocationScope;
+}
+namespace execution_internal {
+class BlockMemory;
+}
 namespace gpu_internal {
 class Device;
 }
@@ -73,7 +81,7 @@ class PHOTOSPIDER_API CpuStorage final
   friend class TensorSpan;
   friend class ResultRef;
   std::shared_ptr<const void> domain_;
-  std::vector<std::shared_ptr<const void>> allocation_scopes_;
+  std::shared_ptr<const data_internal::AllocationScope> allocation_scope_;
   CpuStorage() = default;
   // Declaration order makes bytes retire before their accounting lease.
   std::shared_ptr<void> lease_;
@@ -85,7 +93,12 @@ class PHOTOSPIDER_API CpuStorage final
   std::uint64_t byte_size_ = 0;
   bool native_writable_ = false;
   std::shared_ptr<const std::vector<std::uint8_t>> adopted_;
-  std::unique_ptr<std::uint8_t[]> allocated_;
+  struct AlignedDelete {
+    std::size_t alignment = alignof(std::max_align_t);
+    void operator()(std::uint8_t* pointer) const noexcept;
+  };
+  std::unique_ptr<std::uint8_t, AlignedDelete> allocated_{nullptr,
+                                                          AlignedDelete{}};
   std::uint64_t capacity_ = 0;
 };
 
@@ -112,6 +125,7 @@ class PHOTOSPIDER_API MutableBuffer final {
  private:
   friend class gpu_internal::Device;
   friend class BufferAllocator;
+  friend class execution_internal::BlockMemory;
   std::shared_ptr<CpuStorage> storage_;
 };
 
@@ -147,6 +161,13 @@ class PHOTOSPIDER_API BufferAllocator final {
    * returning, so a callback cannot catch an exception and recover publication.
    */
   Result<MutableBuffer> allocate(std::uint64_t size) const;
+  /** @brief Allocate host storage at a positive power-of-two alignment.
+   * Alignment is an address contract, not additional logical payload. Native
+   * allocator conversions reject this overload; their device preparation owns
+   * alignment negotiation. No allocation occurs for invalid alignment.
+   */
+  Result<MutableBuffer> allocate_aligned(std::uint64_t size,
+                                         std::uint64_t alignment) const;
   /** @brief Allocation-failure notification with the original reason and
    * detail. Status is borrowed for the call; observer exceptions are fenced. */
   using FailureObserver = std::function<void(const Status&)>;
@@ -187,10 +208,15 @@ class PHOTOSPIDER_API BufferAllocator final {
  private:
   friend class gpu_internal::Device;
   friend class ResourceBudget;
+  friend class execution_internal::BlockMemory;
+  Result<MutableBuffer> allocate_impl(std::uint64_t size,
+                                      std::uint64_t alignment) const;
   BufferAllocator limited_impl(std::uint64_t maximum_bytes,
                                FailureObserver failure, bool requested) const;
-  using AllocationCommit =
-      std::function<void(const std::shared_ptr<void>&, std::uint64_t)>;
+  // Successful allocation increments: payload bytes, then host-owner metadata
+  // bytes. Either increment may be zero; this never reserves new capacity.
+  using AllocationCommit = std::function<void(const std::shared_ptr<void>&,
+                                              std::uint64_t, std::uint64_t)>;
   std::function<Result<MutableBuffer>(std::uint64_t, const Reserve&,
                                       std::shared_ptr<const void>,
                                       const AllocationCommit&)>
@@ -202,7 +228,9 @@ class PHOTOSPIDER_API BufferAllocator final {
   Reserve native_shared_reserve_;
   Reserve requested_reserve_;
   std::shared_ptr<const void> domain_;
-  std::vector<std::shared_ptr<const void>> allocation_scopes_;
+  std::shared_ptr<const data_internal::AllocationScope> allocation_scope_;
+  // Explicit root for quota/provenance owners, preserved by native conversion.
+  std::optional<ResourceBudget> metadata_budget_;
   FailureObserver failure_;
 };
 }  // namespace ps

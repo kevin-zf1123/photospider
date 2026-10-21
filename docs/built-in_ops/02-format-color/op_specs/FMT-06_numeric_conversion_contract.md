@@ -5,24 +5,23 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: current_member_complete_extensions_pending
 ---
 
 # FMT-06: numerical dtype and interval conversion
 
-The default registry provides one native Result ABI 6 key,
+The default registry provides one CPU fixed invocation ABI 8 key,
 `numeric.convert_format_strict`. It accepts one single-tensor Result with no
 fields and publishes one `values` output Result containing one tensor. It supports
 all 49 source/target pairs among UInt8, UInt16, Int8, Int16, Int64, Float32 and
 Float64. The operation uses
 the exact numeric contract below and is registered only under this strict key;
-SIMD and eligible SME paths are internal implementations.
+SIMD and eligible SME paths are internal implementations bound during preparation.
 
 This family and its member remain Proposed. That design status is independent of
 the current registered implementation. The operation preserves Result schema
-identity, tensor key, logical shape and batch axes. It updates the tensor dtype,
-dtype and `atomic_trailing_axes` for the conversion. It reports full sample rank
+identity, tensor key, logical shape and batch axes. It updates the tensor dtype and `atomic_trailing_axes` for the conversion. It reports full sample rank
 including batch and cell axes at most 8, and a full sample count at most 2^40.
 
 Inherit [FMT-common](FMT_common_contract.md), the NUM numerical baseline and
@@ -58,12 +57,12 @@ encoding conversion.
 | Intervals | Shared pairs or complete static per-channel tables with an explicit channel axis; independent source/target defaults or overrides. |
 | Bounds | Finite endpoints; source lower<upper; target endpoints differ and may be reversed. |
 | Input outside source interval | Extrapolate; no implicit clipping to interval endpoints. |
-| Overflow | Round first; reject by default, optional clip to destination dtype endpoints. |
-| Nonfinite source | Integer target rejects NaN/Inf even with clip; floating targets use mapped Inf and deterministic NaN propagation. |
+| Overflow | Round first; reject requires representable rounded results as a caller precondition; clip clamps to destination dtype endpoints. |
+| Nonfinite source | Integer targets require finite source samples under both overflow modes; floating targets accept mapped Inf and deterministic NaN propagation. |
 | NaN width conversion | Preserve sign/high payload bits, widen with low zeros, narrow by discarding low bits, quiet nonidentity conversion. |
 | Identity | Same dtype plus static identity map copies exact bits, including signaling NaN and signed zero. |
-| Metadata | Respect checks declared encoding against resolved source ranges; preserve applicable semantics and update encoding/decoding relations. |
-| Layout | auto default; a same-dtype identity over the complete declared mapping may use a legal generic or spatial view; otherwise materialize, and forced view reports ViewUnavailable. |
+| Metadata | Preserve structural schema identity, tensor key, shape, batch axes and spatial topology; update dtype and clear atomic trailing axes. |
+| Layout | auto and materialize write independent dense output tiles, including identity; nonempty view is unavailable. |
 
 ## Types and logical parameters
 
@@ -107,7 +106,9 @@ extent, with no implicit repetition, sparse guessing or role-based matching.
 A shared source with tabulated target, or the reverse, is allowed. Component
 inputs use shared intervals. Preflight validates every table entry even if its
 channel samples are unrequested. Source endpoints must increase; target endpoints
-may decrease but cannot coincide. A constant target belongs to NUM-06B/constant
+may decrease but cannot coincide. Integer endpoint zero has no sign, including
+`i:-0`; floating endpoint tokens retain their explicit zero sign. A constant
+target belongs to NUM-06B/constant
 operations, not this encoding conversion. Signed-zero-equal endpoints are equal.
 
 ## Mathematical reference and conversion stages
@@ -117,7 +118,7 @@ For finite exact source value x and resolved bounds s0<s1 and t0!=t1:
 ```
 rescale=true:   v = t0 + (x-s0)*(t1-t0)/(s1-s0)
 rescale=false:  v = x
-result:        round v to destination, then apply reject/clip if it overflows
+result:        round v to destination, then apply the selected overflow policy
 ```
 
 Strict rounds this entire mathematical expression directly to the target once.
@@ -127,18 +128,20 @@ intermediate machine overflow is not an output overflow when exact v is finite.
 Resource exhaustion remains an explicit failure, not permission to approximate.
 
 For integer output, round v to an unbounded mathematical integer using
-nearest/ties-even, then test target integer bounds. Reject an out-of-range result
-or clip to the corresponding exact bound. Do not wrap or use an undefined
+nearest/ties-even, then test target integer bounds. With reject, the caller
+guarantees the rounded result is in range. With clip,
+clamp to the corresponding exact bound. Do not wrap or use an undefined
 machine cast to test overflow. Pure cast -0.5 -> UInt8 succeeds as 0; 255.5
-rounds to 256 and then rejects or clips to 255.
+rounds to 256, which violates the reject precondition and clips to 255.
 
 For floating output, correctly round v to the target format with gradual
 underflow. Finite results succeed, including inexact results and sources just
 outside the finite target interval that round back to a finite value. A rounded
-signed infinity from finite v rejects or clips to signed maximum finite under
-clip. Do not reject merely because exact v exceeds the maximum finite sample.
-Floating underflow remains successful. Ordinary NUM arithmetic overflow behavior
-is unchanged by this explicit checked conversion contract.
+signed infinity from finite v violates the reject precondition; clip returns
+signed maximum finite. An exact v above the maximum finite sample can still
+round to a finite target value. Floating underflow remains successful. These
+requirements concern conversion to the destination format, independently
+of ordinary NUM arithmetic.
 
 In rescale mode, exact input source endpoints select their corresponding target
 endpoint values before final conversion. Endpoint floating zero signs are retained
@@ -151,13 +154,12 @@ A same-dtype disabled conversion, or same-dtype pair with equal corresponding
 source/target bounds, is a bit copy. Endpoint zero signs must agree for a
 same-interval identity proof; differing explicit zero signs require the remap
 endpoint rule. Identity may apply to selected channels of a materialized result,
-but a view requires identity for the whole declared tensor mapping. No sample
-scan or coincidence of observed values establishes identity.
+and the output still owns independent storage. No sample scan or coincidence of observed values establishes identity.
 
 ## Nonfinite samples and NaN representation
 
-If the destination is integer, a NaN or either infinity in the original source
-fails InvalidDomain even under clip. Clip handles finite value overflow only.
+If the destination is integer, the caller supplies finite original source
+samples under both reject and clip. Clip handles finite value overflow only.
 For floating output, source infinity follows the sign of the exact affine slope,
 or preserves sign with scaling disabled; it remains infinity rather than being
 clipped as if it came from a finite overflowing result. Nonidentity source NaN
@@ -175,7 +177,7 @@ Pure dtype casts use correctly rounded conversion. Affine transforms round the
 exact expression once. The strict key may select SIMD instructions when their
 results satisfy these rules exactly; there are no separate accelerated keys.
 Integer outputs, discrete choices, endpoint/copy rules, NaN payloads and
-reject/clip/nonfinite classifications are identical across implementations.
+clip and nonfinite result rules are identical across implementations.
 Lanes outside a proven SIMD domain use the exact scalar path. Preserve the
 caller's floating environment. ISA dispatch is an implementation detail of the
 strict operation and does not relax its numerical contract.
@@ -197,103 +199,91 @@ its configuration. Rounding and clipping can lose information, so this relation
 is not a promise of exact sample recovery. A pure float cast does not decode
 integer-like alpha codes into normalized coverage.
 
-## Exact demand, layout and invalidation
+## Fixed Plan execution, layout and caller preconditions
 
-For requested coordinates Q, Data is exactly input[Q]. Tensor conversion checks
-only those samples, including nonfinite integer errors or overflow. Do not read
-other channels, scan global extrema or close over complete color groups. All
-static dtype/shape/bounds belong to Descriptor support and are
-checked independently of Q. There is no sample-derived Control dependency.
-Dirty samples map to identical logical output coordinates. Static intervals,
-mode, dtype or applicable metadata changes invalidate inference/results; no
-old success evidence survives a changed mapping. Required upstream complete-input work
-retains its original failure scope.
+The compiler emits one `convert` task for each retained output tile. The task
+reads the closure of that tile's logical coordinates in the input's own tile
+grid. Batch axes, atomic trailing axes and spatial topology can produce different
+input and output grids. The kernel evaluates every coordinate in the complete
+retained output tile. It does not evaluate additional samples merely because an
+input tile grants a larger region. Static range tables are checked in full,
+including entries for channels absent from the retained output tiles.
 
-Auto/view first requires same dtype and a statically proven identity for every
-channel, plus a legal immutable same-owner mapping under kernel rules. Forced
-view fails ViewUnavailable when this cannot be proved, even if Q happens to lie
-only in identity channels. Auto materializes otherwise. Materialize always
-reserves a new output and produces exactly Q, including for identity. Do not
-reinterpret source bytes or create a multi-owner image as a conversion shortcut.
-Identity view can retain a large existing backing but does not publish or read
-unrequested coverage merely because source bytes are available.
+The unchecked numerical contract requires finite original sources for integer
+targets, and representable correctly rounded results under `overflow=reject`.
+These premises cover every evaluated output-tile coordinate. They do not require
+inputs to lie inside the declared source interval. Floating NaN and infinity
+inputs retain their defined floating-output behavior. Violating a premise has
+unspecified numerical behavior and diagnostics; no first-error coordinate,
+validation scan or numerical certification is promised.
 
-## Reference algorithm, resources and errors
+Auto and materialize both write distinct preallocated, dense row-major output
+tiles. Spatial metadata records logical topology independently of these physical
+strides. Same-dtype identity copies exact bits into those outputs. View for a
+nonidentity declared map fails static preparation. View for an identity map
+lowers schema-only tasks and fails `InvalidArgument / ViewUnavailable` on
+nonempty execution, without reading source payload. Empty demand has no tasks;
+all static parameter and schema checks still apply.
 
-Resolve types, ranges and numeric policies; validate every static range table
-and typed endpoint. Build bounded per-channel constants and numeric mappings. Map Q to identical
-source coordinates, acquire admitted read windows, prove any identity view or
-reserve output with target-width layout and prepare required pages. For each
-requested sample, copy identity bytes or classify/transform/convert according
-to the reference. Check cancellation/currentness and publish only successful
-requested coverage. Static table preprocessing does not scan source pixels.
+## Exact arithmetic, resources and errors
 
-Images, including encoded results, obey planar storage, DAG tile geometry,
-edge-row padding, page-aligned tile starts and one full-image virtual range.
-Provided output backing scales with target sample width and admitted pages,
-not the source's stride bytes. Generic non-image tensors use admitted storage.
-Logical bytes, virtual capacity and physical RSS are distinct.
+Static preparation parses typed endpoints and constructs immutable per-channel
+maps. Let finite endpoints and input be integers in units of `2^-1074`. Store
+`W=S1-S0`, `A=T1-T0` and `B=T0*W-S0*A`. For an ordinary affine sample, round
+`(X*A+B)/W * 2^-1074` directly to the target. Endpoint selection preserves the
+target endpoint's zero sign. Pure casts preserve source zero signs; ordinary
+exact affine cancellation yields positive zero. Identity copying takes priority.
 
-For rank r, C interval entries, Nq samples and F windows, mapping work is
-O(C+Nq*r+F*r), plus exact rational/integer arithmetic and page-set work. Static
-finite endpoint widths and admitted numeric scratch bound each conversion;
-charge limb capacities/work to shared budgets and fail rather than approximate
-when insufficient. Do not allocate a full-image temporary or eager per-page
-directory. Coalesced/SIMD accesses remain inside requested spans and prepared
-pages. Use host scheduling and no private pool. Poll cancellation/currentness
-at most every 64 samples or bounded exact-arithmetic steps, during large table
-processing and immediately before publication, following NUM remap discipline.
+The implementation uses 68 fixed 64-bit limbs. Endpoint magnitudes are below
+`2^2098`, width/slope magnitudes below `2^2099`, and the affine numerator below
+`2^4198`. Floating division alignment and 64-bit integer quotient rounding fit
+within the 4352-bit capacity. Integer conversion checks magnitude before narrowing
+and applies ties-even before clipping. Every mutable arithmetic temporary belongs
+to an `ExactConversion` object in declared Host scratch. Static maps and the
+UInt8-to-Float32 lookup are prepared before invocation; runtime arithmetic does
+not allocate vectors or dynamic rational objects.
 
-Account simultaneous input/output owners, actual provided pages, windows,
-per-channel exact constants, encoding metadata and scratch; deduplicate retained
-owners. Views retain normal source capacity. Failed unpublished output releases
-resources without revoking prior observations. No eviction, replay or metadata
-alpha capture is introduced. Result caching is disabled. Empty output demand is stateless. A run reads only
-requested source coordinates, prepares output under Root resource limits, checks
-cancellation/currentness, and publishes successful coverage transactionally.
-Failures preserve source status and diagnostics; unpublished owners are released.
-Identity view retains its normal source owner and capacity. All layouts, including
-spatial storage, may use a view only when the complete declared mapping is a
-legal same-dtype identity; otherwise materialization writes target-width storage
-for requested pages. Data uses role 1 and Descriptor uses role 8; the operation
-requests no Validation or Control support.
+Each nonidentity task declares `sizeof(ExactConversion)` Host scratch, currently
+3880 bytes on the supported CPU build. Identity and view tasks declare zero
+scratch. Prepared maps and slot tables are immutable and reusable by concurrent
+Runs; coordinates, cached read views and scratch belong to one invocation.
+The executor reserves output and scratch capacity before issue, publishes calls
+in retirement order, and drains accepted work on operational failure. Retained
+Results own their independent allocations after execution-context destruction.
+
+The direct CPU loop polls cancellation at most every 64 samples and at bounded
+exact multiplication/division steps. It preserves the caller's floating
+environment and supports prevalidated signed, zero and unaligned input strides.
+Contiguous spans may use NEON or runtime-checked AVX2. Eligible contiguous
+Float32-to-UInt8 tiles can use SME when preparation binds the required hardware
+capabilities and 64-byte streaming vector length. SME admission chooses its
+proven numeric domain and uses the fixed invocation cancellation callback;
+remaining lanes use the same exact scalar semantics. No GPU backend is provided.
 
 | Failure | Phase | Status / reason |
 | --- | --- | --- |
-| Missing/malformed parameter, unsupported rounding/mode, invalid axis/table, nonfinite/invalid/degenerate bounds, source-encoding conflict | Compile/direct preflight | InvalidArgument / InvalidDomain. |
-| Unsupported dtype/rank or structurally incompatible effective descriptor | Static preflight | TypeMismatch / None. |
-| Original source NaN/Inf with integer target | Requested evaluation | OperationFailed / InvalidDomain. |
-| Finite rounded target overflow with reject | Requested evaluation | OperationFailed / ArithmeticOverflow. |
-| Forced view with a non-identity declared mapping | Compile/direct preflight | InvalidArgument / InvalidDomain; ViewUnavailable. |
-| Forced view for an identity mapping whose source physical representation cannot express the requested view | Observation evaluation | InvalidArgument / InvalidDomain; ViewUnavailable. |
-| Checked shape/address overflow, missing coverage, budget/work, unsupported backend, cancellation/stale or required producer failure | Inherited phase | Preserve NUM/kernel code, origin and scope. |
-
-Clip publishes the appropriate target dtype endpoint rather than adding a warning
-output. A sample conversion failure preserves its code, reason and coordinate, and
-adds `source_dtype`, `target_dtype` and `range_index`; for a tabulated range it also
-adds the cell-relative `channel_axis` and selected `channel`. `range_index` refers
-to the static interval table. These fields are added for numerical failures in
-`convert_one`; upstream, resource and cancellation diagnostics keep their original
-content.
-The operation is registered as one CPU strict key using Result operation ABI 6.
-Eligible contiguous spans use internal AArch64 NEON or runtime-checked amd64 AVX2;
-eligible Apple arm64 Float32→UInt8 spatial tiles may use the internal SME path.
-These paths preserve the exact same numerical behavior. No GPU backend is provided.
+| Malformed parameters, invalid bounds/table/axis, unsupported modes | Static preparation | InvalidArgument / InvalidDomain |
+| Unsupported dtype/rank/count or malformed fixed invocation signature | Static preparation / kernel preparation | TypeMismatch |
+| Forced view with a nonidentity map | Static preparation | InvalidArgument / InvalidDomain |
+| Nonempty forced view with an identity map | Invocation | InvalidArgument / ViewUnavailable |
+| Resource admission, cancellation, unavailable backend or producer failure | Kernel/executor phase | Preserve the operational status |
 
 ## Acceptance and implementation requirements
 
-The member lists independent analytic cases. Compare exact integer/rational
-oracles with strict rounding and use explicit bit patterns for NaNs/zero. Test all
-49 pairs, endpoints, outside-interval extrapolation, narrowing, large Int64 values,
-per-channel maps, explicit range selection and downstream configuration, exact regional failures, static
-invalid unrequested table entries and whole/disjoint/tile request equivalence.
-Verify view/materialize, context-independent owners, low budgets, cancellation,
-currentness, floating environment and declared fallback diagnostics.
+The reusable [Fraction oracle](../../../../oracle/ops/format_color/fmt06/reference.py)
+rounds directly to each target format; the [C++ references](../../../../oracle/ops/format_color/fmt06/reference.hpp)
+cover the common Float32/Int64-to-UInt8 paths. Use independent exact rational
+references for all 49 dtype pairs, including
+Int64 limits, extrapolation, reversed maps, large cancelling terms, subnormal
+rounding, per-channel tables and endpoint signs. Reject cases must satisfy the
+caller preconditions; clip cases include finite rounded overflow. Floating
+specials and identity use explicit bit-pattern checks.
 
-Temporary numeric-conversion acceptance should cover all 49 dtype pairs using
-independent exact references, ROI, cold-lookup budgets, failure ordering,
-floating environments, identity views, batch/view/Empty/bit-stride cases, ICC
-resource ownership, concurrent plan reuse and payload release. Add explicit
-alpha interoperability cases when changing inherited encoding behavior. An SME
-path requires an actual dispatch check on admitted hardware; CPU output agreement
-alone does not establish SME dispatch or performance.
+Exercise complete and selected output tiles, differing source grids, batch and
+spatial metadata, signed/zero/unaligned input strides, Empty/view behavior,
+malformed static/kernel signatures, cancellation, scratch bounds, floating
+environment restoration, concurrent Plan reuse and retained Result owners.
+Temporary builtin numeric and public execution checkers are removed after the
+family is validated. Keep independent oracles. Native SME dispatch requires
+direct hardware evidence; CPU output agreement alone proves no dispatch or
+performance claim.

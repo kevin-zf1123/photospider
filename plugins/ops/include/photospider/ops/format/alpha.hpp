@@ -29,7 +29,12 @@ struct AlphaSource final {
  * `algorithm` accepts `auto`, `scalar`, `simd`, or `reference`. These helpers
  * append nodes named `alpha.associate_<profile>` or
  * `alpha.unassociate_<profile>`. Both keys are registered for the three CPU
- * profiles in the default registry. Callers must serialize mutations to the
+ * profiles with fixed invocation ABI 8. Semantic arithmetic requires finite
+ * participating colors, finite alpha in [0,1], and a finite rounded result;
+ * unassociation at zero alpha requires zero color. These caller premises cover
+ * all evaluated coordinates in retained output tiles. Raw arithmetic preserves
+ * NUM IEEE results. Kernels use fixed source-tile closures and independent
+ * output allocations. Callers must serialize mutations to the
  * same `WorkflowDocument`.
  */
 struct AlphaAssociationOptions final {
@@ -67,7 +72,10 @@ struct AlphaEditOptions {
  * cell-axis index and excludes the Result batch prefix. It is required when
  * adding alpha to component Gray input. The helper appends an
  * `alpha.set_<profile>` node, registered for the three CPU profiles in the
- * default runtime.
+ * default runtime. Auto/materialize copy independent dense output tiles with
+ * zero scratch. Nonempty view fails ViewUnavailable with schema-only input
+ * dependencies; Empty creates no task. Selected colors and represented alpha
+ * obey semantic caller premises, without runtime validation-only reads.
  */
 struct SetAlphaOptions final : AlphaEditOptions {
   AlphaSource alpha_source;
@@ -121,8 +129,11 @@ PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> unassociate_alpha(
  * does not inspect input tensor metadata or read sample payloads. It appends
  * transactionally and returns a graph-owned `values` edge. The
  * `alpha.set_<profile>` key is registered for all three CPU profiles in the
- * current built-in registry. Callers must serialize mutations to the same
- * `WorkflowDocument`.
+ * current built-in registry. Each output slot reads only its mapped source;
+ * copying colors adds no alpha payload dependency. Complete output tiles can
+ * still contain alpha slots and require their source. Produced Results retain
+ * independent storage after input/context destruction. Callers must serialize
+ * mutations to the same `WorkflowDocument`.
  */
 PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> set_alpha(
     WorkflowDocument& document, WorkflowInput input,
@@ -132,13 +143,20 @@ PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> set_alpha(
  * `source_metadata` must describe an input Result with exactly one tensor and
  * no fields. Its schema assertion covers the canonical structure, including
  * schema identity, dtype, shape, batch axes, atomic axes and spatial axes.
- * A separate layout assertion covers physical storage order and row pitch.
+ * A separate topology assertion records spatial height/width/channel axes.
+ * Physical Plan and Run binding checks validate strides, offsets and capacity.
  * `axis` in the options is relative to cell axes and excludes the batch prefix.
  * Generated primitives verify assertions at compile time, including forward
  * producer references. No sample reads occur. Existing alpha/surviving
  * channels are exact same-dtype copies; missing-alpha opaque constants are
- * solved in exact descriptor arithmetic. Callers must serialize mutations to
- * the same `WorkflowDocument`.
+ * solved in exact descriptor arithmetic. Both extraction branches use fixed
+ * CPU output tiles; auto/materialize copy or fill, and nonempty view fails
+ * InvalidArgument. The opaque branch uses fixed CPU
+ * tasks with schema-only source dependencies and zero scratch. Auto/materialize
+ * fill selected output tiles.
+ * Empty executes no fill, and retained outputs own their storage independently
+ * of the source and execution context. Callers must serialize mutations to the
+ * same `WorkflowDocument`.
  */
 PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> extract_alpha(
     WorkflowDocument& document, WorkflowInput input,
@@ -149,9 +167,11 @@ PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> extract_alpha(
  * `source_metadata` must describe an input Result with exactly one tensor and
  * no fields. `axis` in the options is relative to cell axes and excludes the
  * batch prefix. The helper preserves surviving sample bits. A channel-bearing
- * source lowers to registered mapped assembly. An axis-free component uses
- * `core.identity` to retain the same samples, without a source-schema
- * assertion or layout conversion. Mapped assembly checks source assertions at
+ * source lowers to fixed mapped assembly: auto/materialize copy independent
+ * output tiles, while nonempty view fails with schema-only dependencies. An
+ * axis-free component uses core.identity COPY tasks to preserve sample bits,
+ * without a source-schema assertion or applying the helper layout policy.
+ * Mapped assembly checks source assertions at
  * compile time. Expansion is transactional. The graph-owned
  * edge names `values` for mapped assembly and `value` for `core.identity`.
  * Callers must serialize mutations to the same `WorkflowDocument`.

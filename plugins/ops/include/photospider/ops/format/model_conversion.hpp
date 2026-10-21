@@ -20,9 +20,9 @@ namespace ps::format {
 using ModelConstant = std::variant<float, double>;
 /** @brief Static options for native FMT-11 model conversions.
  *
- * Each helper appends a registered CPU Result operation with one input Result
- * containing one Float32 or Float64 tensor and returns its `values` output.
- * `axis` and `output_axis` index cell axes; the Result batch prefix is
+ * Each helper appends a fixed invocation ABI 8 CPU operation with one input
+ * Result containing one Float32 or Float64 tensor and returns its `values`
+ * output. `axis` and `output_axis` index cell axes; the Result batch prefix is
  * excluded. `layout` and `algorithm` default to `auto`; `profile` defaults to
  * `strict`. Optional `input_description` supplies explicit source
  * interpretation. Hue units, raw selectors/whites, the forward NCL matrix,
@@ -31,6 +31,15 @@ using ModelConstant = std::variant<float, double>;
  * independent of the underlying RGB basis/transfer. Reference bypasses
  * numerical fast filters; scalar suppresses batch SIMD; auto enables
  * profile-admitted SIMD and independently certified fast filters.
+ * Complete retained output tiles determine source-grid closure.
+ * Auto/materialize write independent dense outputs. Only color_to_gray accepts
+ * view statically; a nonempty view task fails InvalidArgument/ViewUnavailable.
+ * Other members reject forced view during static preparation, including Empty
+ * selections. Semantic finite-input/output, chroma/singularity and
+ * binary-selector rules are caller preconditions. Static schema/configuration
+ * checks remain enforced. Prepared kernels are immutable and reusable
+ * concurrently; each invocation has separate fixed scratch and borrows source
+ * owners through completion.
  */
 struct ModelConversionOptions final {
   std::string layout = "auto", algorithm = "auto", profile = "strict";

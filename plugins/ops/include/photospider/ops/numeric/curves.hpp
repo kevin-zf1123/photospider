@@ -52,19 +52,18 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
  * with schema photospider.tensor, member `samples`, shape [N] or [N,C]
  * (including C=1), selected dtype and ordinary data. Batch dimensions are
  * ordinary output axes. Compiler checks actual input edges; helpers own node
- * metadata and may be used concurrently. A nonempty request runs a shared stage
- * that acquires all three inputs, computes all queries and columns, and
- * publishes a complete dense output. Allocation may throw bad_alloc.
- * Invalid helper parameters
- * fail InvalidArgument/InvalidDomain/Schema; invalid edge metadata fails
- * TypeMismatch. It validates all x knots before y arithmetic. Exact knot/clamp
- * uses one y; linear uses two endpoints; PCHIP uses its fixed local stencil.
- * Generic y values outside evaluated stencils are numerically unused. Nonfinite
- * used input/rejected query fails OperationFailed/InvalidDomain at Run scope;
- * final overflow fails ArithmeticOverflow. Unrequested rows/columns and
- * upstream failures can fail the run. Output owns immutable packed storage
- * beyond context lifetime. Typed, resource, stale and cancellation failures
- * retain their categories. Any input edit invalidates output demand. Empty
+ * metadata and may be used concurrently. Each selected output tile is a fixed
+ * CPU task reading all x, its query rows and all y rows for its columns,
+ * closed through each source grid. It computes only selected global outputs
+ * with preallocated ExactCurve scratch. Allocation during authoring/preparation
+ * may throw bad_alloc. Invalid helper parameters fail InvalidArgument;
+ * incompatible connected metadata fails TypeMismatch. Finite consumed samples,
+ * ordered x, reject-domain queries and representable outputs are caller
+ * preconditions. Knot/clamp uses one y; linear uses two; PCHIP uses its local
+ * stencil. Generic unused y values receive no numeric scan. Output tiles own
+ * separate storage beyond context lifetime. Required tasks share one call's
+ * publication outcome. Resource, stale and cancellation failures retain their
+ * categories. Rebinding shares immutable preparation, not numeric state. Empty
  * reads no payload. Strict rounds complete exact rational formulas once.
  * Accelerated follows CpuNumericProfile's bound while preserving cross-query
  * monotonicity; the current fast Float32 path requires a uniquely rounded

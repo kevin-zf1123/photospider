@@ -5,16 +5,17 @@
 #include <functional>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "01-numeric/lut3d_bake_common.hpp"
-#include "01-numeric/uniform_axis.hpp"
+#include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
 #include "common/tensor_metadata.hpp"
+#include "common/tensor_program.hpp"
 #include "photospider/core/resource_allocator.hpp"
-#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -39,9 +40,11 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
       color.value().association != ColorAssociation::None ||
       color.value().source_layout != ColorSourceLayout::Interleaved)
     return Answer(invalid("bake geometry requires three-component colors"));
-  for (const auto& input : inputs)
-    if (!sole_tensor(input))
-      return Answer(mismatch("bake geometry requires one Result tensor"));
+  for (const auto& input : inputs) {
+    auto valid = tensor_ops::check_tensor(input);
+    if (!valid.ok())
+      return Answer(valid);
+  }
   TensorMetadata tensor;
   std::uint32_t tuple_axes = 0;
   OperationOutputSpecialization output;
@@ -102,157 +105,306 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
 struct GeometryProgram {
   Geometry kind;
   SequenceProfile profile;
-  ColorModel model;
   std::array<std::uint64_t, 3> dimensions;
+  std::shared_ptr<const SchemaTemplate> output_schema;
 };
-struct GeometryState {
-  std::array<numeric_ops::UniformAxis, 3> axes;
-  explicit GeometryState(SequenceProfile profile)
-      : axes{numeric_ops::UniformAxis(profile),
-             numeric_ops::UniformAxis(profile),
-             numeric_ops::UniformAxis(profile)} {}
-};
+using InputRegions = std::array<std::optional<Region>, 2>;
+InputRegions source_regions(const GeometryProgram& state,
+                            const Region& output) {
+  InputRegions regions;
+  if (state.kind == Geometry::Axis || state.kind == Geometry::Color) {
+    regions[0] = output;
+  } else {
+    const auto centers = product(state.dimensions, 1);
+    const auto rows = output.dimensions()[0];
+    if (state.kind == Geometry::Grid || rows.offset < centers)
+      regions[0] = Region({{0, 3}, {0, 2}});
+    if (state.kind == Geometry::Extra && rows.offset + rows.extent > centers) {
+      const auto begin = std::max(rows.offset, centers);
+      regions[1] = Region(
+          {{begin - centers, rows.offset + rows.extent - begin}, {0, 3}});
+    }
+  }
+  return regions;
+}
+std::uint64_t scratch_bytes(const GeometryProgram& state,
+                            const Region& output) {
+  if (state.kind == Geometry::Axis || state.kind == Geometry::Color ||
+      (state.kind == Geometry::Extra &&
+       output.dimensions()[0].offset >= product(state.dimensions, 1)))
+    return 0;
+  return sizeof(numeric_ops::ExactSampling);
+}
+Status check_tile_count(const TileGrid& grid, const Region& region,
+                        std::uint64_t maximum) {
+  std::uint64_t count = 1;
+  for (unsigned axis = 0; axis < grid.rank(); ++axis) {
+    const auto d = region.dimensions()[axis];
+    std::uint64_t extent = 1;
+    if (grid.batch_axis_mask() & (1U << axis))
+      extent = d.extent;
+    else if (axis == grid.width_axis() || axis == grid.height_axis())
+      extent = (d.offset + d.extent - 1) / grid.tile_extent() -
+               d.offset / grid.tile_extent() + 1;
+    if (extent > maximum / count)
+      return {ErrorCode::ResourceExhausted, "bake geometry read tile limit"};
+    count *= extent;
+  }
+  return Status::success();
+}
+constexpr const char* geometry_contract = "bake-geometry-fixed-v1";
+Result<OperationProgram> lower(const OperationLowering& query) {
+  using Answer = Result<OperationProgram>;
+  const auto& state = *static_cast<const GeometryProgram*>(query.static_state);
+  auto output = TileGrid::from_schema(*state.output_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  std::array<TileGrid, 2> inputs;
+  for (unsigned port = 0; port < query.inputs.size(); ++port) {
+    auto grid = TileGrid::from_schema(*query.inputs[port].result_schema,
+                                      query.tile_extent);
+    if (!grid.ok())
+      return Answer(grid.status());
+    inputs[port] = grid.take_value();
+  }
+  ResourceLimits limits;
+  limits.maximum_work = query.limits.maximum_work;
+  ResourceBudget budget(limits);
+  OperationProgramBuilder builder(query);
+  for (const auto& member : query.requests[0].members)
+    for (auto index : member.second) {
+      auto output_region = output.value().region(index);
+      if (!output_region.ok())
+        return Answer(output_region.status());
+      auto regions = source_regions(state, output_region.value());
+      auto task =
+          builder.add_task("bake-geometry", geometry_contract, {},
+                           {scratch_bytes(state, output_region.value()), 0, 0});
+      if (!task.ok())
+        return Answer(task.status());
+      for (unsigned port = 0; port < query.inputs.size(); ++port) {
+        if (!regions[port])
+          continue;
+        auto checked = check_tile_count(inputs[port], *regions[port],
+                                        query.limits.maximum_records);
+        if (!checked.ok())
+          return Answer(checked);
+        auto tiles =
+            sdk::tiles_for_region(budget, inputs[port], *regions[port]);
+        if (!tiles.ok())
+          return Answer(tiles.status());
+        for (auto tile : tiles.value()) {
+          auto status = budget.consume({1});
+          if (status.ok())
+            status = builder.read_input(task.value(), port, 0, tile);
+          if (!status.ok())
+            return Answer(status);
+        }
+      }
+      auto status = builder.write_output(task.value(), 0, member.first, index);
+      if (!status.ok())
+        return Answer(status);
+    }
+  return builder.finish();
+}
 struct GeometryKernel {
-  Status write(const ResultProgramPhase& phase,
-               const ResourceVector<ResultTensorWriteWindow>& writers) {
-    auto status = write_values(phase, writers);
-    if (status.detail.origin == FailureOrigin::Domain)
-      status.detail.scope = FailureScope::Run;
-    return status;
-  }
-  Status write_values(const ResultProgramPhase& phase,
-                      const ResourceVector<ResultTensorWriteWindow>& writers) {
-    const auto& program =
-        *static_cast<const GeometryProgram*>(phase.query.prepared->state());
-    const auto kind = program.kind;
-    const auto dimensions = program.dimensions;
-    const auto consume = phase.consume_work;
-    auto scratch = phase.allocator.allocate(sizeof(GeometryState));
-    if (!scratch.ok())
-      return scratch.status();
-    auto buffer = scratch.take_value();
-    std::unique_ptr<GeometryState, void (*)(GeometryState*)> state(
-        new (buffer.data()) GeometryState(program.profile),
-        [](auto* value) { value->~GeometryState(); });
-    auto& axes = state->axes;
-    for (auto& axis : axes)
-      axis.knots = ResourceVector<std::uint64_t>(
-          ResourceAllocator<std::uint64_t>(phase.resources));
-    std::array<std::optional<numeric_ops::MathTensorReader>, 2> readers;
-    for (unsigned port = 0; port < phase.query.inputs.size(); ++port)
-      readers[port].emplace(phase.tensors->at({port, 0}),
-                            phase.query.cancellation);
-    const auto read_value = [&](unsigned port, const auto& at) {
-      auto charged = consume(at.size() + 1);
-      if (!charged.ok())
-        return Result<std::uint64_t>(charged);
-      auto bits = readers[port]->bits(at);
-      const bool narrow =
-          tensor_descriptor(phase.query.inputs[port]).element_type ==
-          ElementType::Float32;
-      auto parts = BinaryParts::decode(bits, narrow);
-      if (parts.nan || parts.infinite)
-        return Result<std::uint64_t>(domain("nonfinite bake source color"));
-      return Result<std::uint64_t>(promote(bits, narrow));
-    };
-    std::array<std::uint64_t, 9> axis_bits{};
-    if (kind != Geometry::Color) {
-      for (unsigned d = 0; d < 3; ++d) {
-        std::array<std::uint64_t, 3> values{};
-        for (unsigned j = 0; j < 3; ++j) {
-          auto result = read_value(0, std::vector<std::uint64_t>{d, j});
-          if (!result.ok())
-            return (result.status());
-          values[j] = axis_bits[3 * d + j] = result.value();
-        }
-        auto validated = axes[d].validate(values, dimensions[d], consume);
-        if (!validated.ok())
-          return (validated);
-      }
-    }
-    const auto& tensor = phase.query.output.result_schema->tensors[0];
-    const TensorDescriptor descriptor{tensor.descriptor.element_type,
-                                      tensor.sample_shape()};
-    const unsigned width = TensorSpan::element_size(descriptor.element_type);
-    numeric_ops::MathTensorWriter writer(writers[0]);
-    const auto at = Region::whole(descriptor.shape).dimensions();
-    const auto count = tensor.sample_count().value();
-    for (std::uint64_t offset = 0; offset < count;) {
-      auto fuel = consume(64);
-      if (!fuel.ok())
-        return (fuel);
-      auto residue = offset;
-      std::vector<std::uint64_t> point(at.size());
-      for (unsigned d = at.size(); d; --d) {
-        point[d - 1] = at[d - 1].offset + residue % at[d - 1].extent;
-        residue /= at[d - 1].extent;
-      }
-      if (kind == Geometry::Axis) {
-        auto bits = axis_bits[point[0] * 3 + point[1]];
-        std::memcpy(writer.address(point), &bits, 8);
-        ++offset;
-        continue;
-      }
-      std::array<std::uint64_t, 3> values{};
-      for (unsigned c = 0; c < 3; ++c) {
-        if (kind == Geometry::Grid) {
-          values[c] = axes[c].knots[point[c]];
-        } else if (kind == Geometry::Color) {
-          point.back() = c;
-          auto result = read_value(0, point);
-          if (!result.ok())
-            return (result.status());
-          values[c] = result.value();
-        } else if (point[0] < product(dimensions, 1)) {
-          auto cell = point[0];
-          std::array<unsigned, 3> index{};
-          for (unsigned d = 3; d; --d) {
-            index[d - 1] = cell % (dimensions[d - 1] - 1);
-            cell /= dimensions[d - 1] - 1;
-          }
-          auto result = axes[c].sampling.weighted(
-              axes[c].knots[index[c]], axes[c].knots[index[c] + 1], 1, 1, 2,
-              false, false, consume);
-          if (!result.ok())
-            return (result.status());
-          values[c] = result.value();
-        } else {
-          auto result = read_value(
-              1,
-              std::vector<std::uint64_t>{point[0] - product(dimensions, 1), c});
-          if (!result.ok())
-            return (result.status());
-          values[c] = result.value();
-          auto key = axes[c].key(values[c]);
-          if (key < axes[c].key(axes[c].knots.front()) ||
-              key > axes[c].key(axes[c].knots.back()))
-            return (domain("extra validation point outside bake axis"));
-        }
-      }
-      if (!model_valid(program.model, values))
-        return (domain("model-invalid bake color"));
-      for (unsigned c = 0; c < 3; ++c) {
-        if (width == 4) {
-          auto converted = axes[0].sampling.weighted(values[c], values[c], 1, 0,
-                                                     1, true, false, consume);
-          if (!converted.ok())
-            return (converted.status());
-          values[c] = converted.value();
-          if (BinaryParts::decode(values[c], true).infinite)
-            return (Status{ErrorCode::OperationFailed,
-                           "bake source narrowing overflow",
-                           FailureReason::ArithmeticOverflow,
-                           {FailureOrigin::Domain, FailureScope::Group}});
-        }
-        point.back() = c;
-        std::memcpy(writer.address(point), &values[c], width);
-      }
-      offset += 3;
-    }
-    return consume(1);
-  }
+  const GeometryProgram* program;
+  fixed_tensor::PointInputs<2> inputs;
+  bool source_narrow, output_narrow;
 };
-using GeometryResultProgram = numeric_ops::WholeTensorProgram<GeometryKernel>;
+void invoke(const ps_kernel_invocation_v8* invocation,
+            ps_kernel_status_v8* status) noexcept {
+  const auto& state =
+      *static_cast<const GeometryKernel*>(invocation->prepared_context);
+  const auto& program = *state.program;
+  const auto consume = [invocation](std::uint64_t) {
+    return invocation->cancellation.is_cancelled &&
+                   invocation->cancellation.is_cancelled(
+                       invocation->cancellation.context)
+               ? Status{ErrorCode::Cancelled, {}}
+               : Status::success();
+  };
+  const auto accept = [status](const Status& value) {
+    if (!value.ok())
+      *status = kernel_failure(value.code, value.message.c_str(), value.reason);
+    return value.ok();
+  };
+  if (!accept(consume(0)))
+    return;
+  FloatingEnvironment environment;
+  if (!environment.active()) {
+    *status =
+        kernel_failure(ErrorCode::OperationFailed, "bake numeric environment");
+    return;
+  }
+  numeric_ops::ExactSampling* sampling = nullptr;
+  if (invocation->scratch_count && invocation->scratch[0].bytes)
+    sampling = new (invocation->scratch[0].allocation)
+        numeric_ops::ExactSampling(program.profile, true);
+  struct Lifetime {
+    numeric_ops::ExactSampling* value;
+    ~Lifetime() {
+      if (value)
+        value->~ExactSampling();
+    }
+  } lifetime{sampling};
+  fixed_tensor::PointReader<2> reader{state.inputs, *invocation};
+  const auto& output = invocation->outputs[0];
+  const auto& layout = *output.layout;
+  const unsigned width = state.output_narrow ? 4 : 8;
+  std::uint64_t count = 1;
+  for (unsigned axis = 0; axis < layout.rank; ++axis)
+    count *= layout.shape[axis];
+  const auto centers =
+      program.kind == Geometry::Color ? 0 : product(program.dimensions, 1);
+  for (std::uint64_t i = 0; i < count; ++i) {
+    if (!accept(consume(1)))
+      return;
+    std::array<std::uint64_t, 8> at{};
+    auto residue = i;
+    for (unsigned axis = layout.rank; axis-- > 0;) {
+      at[axis] = layout.origin[axis] + residue % layout.shape[axis];
+      residue /= layout.shape[axis];
+    }
+    std::uint64_t bits = 0;
+    if (program.kind == Geometry::Axis) {
+      bits = reader.bits(0, at, 8);
+    } else if (program.kind == Geometry::Color) {
+      bits = reader.bits(0, at, state.source_narrow ? 4 : 8);
+      if (state.source_narrow != state.output_narrow) {
+        if (state.source_narrow) {
+          bits = promote(bits, true);
+        } else {
+          double value;
+          std::memcpy(&value, &bits, 8);
+          const float converted = static_cast<float>(value);
+          bits = 0;
+          std::memcpy(&bits, &converted, 4);
+        }
+      }
+    } else if (program.kind == Geometry::Extra && at[0] >= centers) {
+      at[0] -= centers;
+      bits = reader.bits(1, at, 8);
+    } else {
+      const auto component = static_cast<unsigned>(at[layout.rank - 1]);
+      std::array<std::uint64_t, 8> source{};
+      source[0] = component;
+      auto first = reader.bits(0, source, 8);
+      source[1] = 1;
+      auto last = reader.bits(0, source, 8);
+      unsigned index;
+      if (program.kind == Geometry::Grid) {
+        index = static_cast<unsigned>(at[component]);
+      } else {
+        auto cell = at[0];
+        std::array<unsigned, 3> coordinates{};
+        for (unsigned axis = 3; axis-- > 0;) {
+          coordinates[axis] = cell % (program.dimensions[axis] - 1);
+          cell /= program.dimensions[axis] - 1;
+        }
+        index = coordinates[component];
+      }
+      auto value = sampling->coordinate(index, program.dimensions[component],
+                                        {first, last}, consume);
+      if (!accept(value.status()))
+        return;
+      bits = value.value();
+      if (program.kind != Geometry::Grid) {
+        auto next = sampling->coordinate(
+            index + 1, program.dimensions[component], {first, last}, consume);
+        if (!accept(next.status()))
+          return;
+        auto center = sampling->weighted(bits, next.value(), 1, 1, 2, false,
+                                         false, consume);
+        if (!accept(center.status()))
+          return;
+        bits = center.value();
+      }
+    }
+    std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
+                    output.byte_offset + i * width,
+                &bits, width);
+  }
+  *status = {};
+}
+Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
+  using Answer = Result<ps_prepared_kernel_v8>;
+  const auto invalid = [] {
+    return Answer(mismatch("invalid bake geometry signature"));
+  };
+  const auto* state = static_cast<const GeometryProgram*>(query.static_state);
+  if (!state ||
+      query.inputs.size() != (state->kind == Geometry::Extra ? 2U : 1U) ||
+      query.outputs.size() != 1 || query.writes.size() != 1 ||
+      !query.task_parameters.empty() || !query.outputs[0].result_schema ||
+      !query.outputs[0].result_schema->same_schema(*state->output_schema))
+    return invalid();
+  auto output = TileGrid::from_schema(*state->output_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  const auto& write = query.writes[0];
+  auto region = output.value().region(write.tile_index);
+  if (!region.ok())
+    return Answer(region.status());
+  if (write.port || write.member || write.domain != physical::Domain::Host ||
+      write.layout.element_type !=
+          state->output_schema->tensors[0].descriptor.element_type ||
+      !fixed_tensor::matches_region(write.layout, region.value()) ||
+      query.scratch != std::array<std::uint64_t, 3>{
+                           scratch_bytes(*state, region.value()), 0, 0})
+    return invalid();
+  auto regions = source_regions(*state, region.value());
+  auto prepared = std::make_unique<GeometryKernel>();
+  prepared->program = state;
+  prepared->source_narrow =
+      tensor_descriptor(query.inputs[0]).element_type == ElementType::Float32;
+  prepared->output_narrow = write.layout.element_type == ElementType::Float32;
+  std::size_t slot = 0;
+  for (unsigned port = 0; port < query.inputs.size(); ++port) {
+    auto grid = TileGrid::from_schema(*query.inputs[port].result_schema,
+                                      query.tile_extent);
+    if (!grid.ok())
+      return Answer(grid.status());
+    prepared->inputs.grids[port] = grid.take_value();
+    if (!regions[port])
+      continue;
+    auto checked = check_tile_count(prepared->inputs.grids[port],
+                                    *regions[port], query.reads.size() - slot);
+    if (!checked.ok())
+      return Answer(checked);
+    auto tiles = sdk::tiles_for_region(
+        ResourceBudget{}, prepared->inputs.grids[port], *regions[port]);
+    if (!tiles.ok())
+      return Answer(tiles.status());
+    if (tiles.value().size() > query.reads.size() - slot)
+      return invalid();
+    for (auto index : tiles.value()) {
+      const auto& read = query.reads[slot];
+      auto expected = prepared->inputs.grids[port].region(index);
+      if (!expected.ok())
+        return Answer(expected.status());
+      if (read.port != port || read.member || read.tile_index != index ||
+          read.domain != physical::Domain::Host ||
+          read.layout.element_type !=
+              tensor_descriptor(query.inputs[port]).element_type ||
+          !fixed_tensor::matches_region(read.layout, expected.value()))
+        return invalid();
+      prepared->inputs.slots[port].push_back(
+          {index, static_cast<std::uint32_t>(slot++)});
+    }
+  }
+  if (slot != query.reads.size())
+    return invalid();
+  ps_prepared_kernel_v8 kernel{};
+  kernel.struct_size = sizeof(kernel);
+  kernel.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  kernel.context = prepared.release();
+  kernel.invoke_cpu = invoke;
+  kernel.release = [](const void* context) {
+    delete static_cast<const GeometryKernel*>(context);
+  };
+  return Answer(kernel);
+}
 OperationDefinition geometry(Geometry kind, SequenceProfile profile,
                              const std::string& key) {
   OperationDefinition definition;
@@ -275,9 +427,9 @@ OperationDefinition geometry(Geometry kind, SequenceProfile profile,
   if (kind == Geometry::Points || kind == Geometry::Extra)
     traits.parameter_schema.push_back(
         {"extra_count", OperationParameterType::Int64, true, true, 0, 1048576});
-  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
-                                       sizeof(GeometryResultProgram));
-  traits.workspace_bytes = sizeof(GeometryState);
+  traits.outputs[0].key = "values";
+  traits.outputs[0].output_schema = tensor_ops::port();
+  traits.outputs[0].result_schema = tensor_ops::scalar_schema();
   definition.prepare_static =
       [kind, profile](const auto& inputs,
                       const auto& parameters) -> Result<OperationPreparation> {
@@ -292,15 +444,29 @@ OperationDefinition geometry(Geometry kind, SequenceProfile profile,
     OperationPreparation prepared;
     prepared.outputs = output.take_value();
     prepared.state = std::make_shared<const GeometryProgram>(
-        GeometryProgram{kind, profile, color.value().model,
+        GeometryProgram{kind, profile,
                         kind == Geometry::Color ? std::array<std::uint64_t, 3>{}
-                                                : shape(parameters)});
+                                                : shape(parameters),
+                        prepared.outputs[0].metadata.result_schema});
     return Result<OperationPreparation>(std::move(prepared));
   };
-  definition.start_result = [](const auto&, const auto& allocator) {
-    return ResultContinuation::make<GeometryResultProgram>(allocator);
+  definition.lower = lower;
+  definition.prepare_kernel =
+      [](const physical::KernelDesc& kernel,
+         const physical::Placement& placement, const KernelPreparation& query,
+         const ResourceSet&,
+         const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    if (kernel.symbol != "bake-geometry" ||
+        kernel.contract != geometry_contract)
+      return Result<ps_prepared_kernel_v8>(
+          mismatch("unknown bake geometry kernel"));
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::BackendUnavailable, "bake geometry requires CPU Host"});
+    return prepare_kernel(query);
   };
-  return sdk::with_whole_stage(std::move(definition), UINT64_C(1) << 48);
+  return definition;
 }
 }  // namespace
 Status register_lut3d_bake_geometry(OperationRegistry* registry) {

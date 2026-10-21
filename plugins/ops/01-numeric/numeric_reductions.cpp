@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -14,12 +14,10 @@
 
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_moments.hpp"
-#include "01-numeric/numeric_tensor_program.hpp"
+#include "common/fixed_point_inputs.hpp"
 #include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "photospider/core/resource_allocator.hpp"
-#include "photospider/ops/numeric/diagnostics.hpp"
-#include "photospider/plugin/whole_stage.hpp"
+#include "common/tensor_program.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -132,178 +130,246 @@ struct ReductionState final {
       arithmetic.emplace<numeric_ops::ExactMoments>(profile, type);
   }
 };
-struct ReductionKernel final {
+struct PreparedReduction final {
   ReductionKind kind;
   SequenceProfile profile;
-  ReductionKernel(ReductionKind operation, SequenceProfile selected)
-      : kind(operation), profile(selected) {}
-  Status write(const ResultProgramPhase& phase,
-               const ResourceVector<ResultTensorWriteWindow>& writers) {
-    if (writers.size() != 1)
-      return {ErrorCode::OperationFailed,
-              "reduction requires one packed writer"};
-    NumericDiagnostics report;
-    report.profile =
-        static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-    const auto identity = std::snprintf(
-        report.implementation.data(), report.implementation.size(),
-        "photospider.reduction-exact/1;accumulator-u64x68;%s",
-        numeric_ops::selection_implementation(profile));
-    if (identity < 0 ||
-        static_cast<std::size_t>(identity) >= report.implementation.size())
-      return {ErrorCode::OperationFailed,
-              "reduction diagnostic identity overflow"};
-    const auto finish = [&](Status result) {
-      // Failure attribution precedes optional diagnostics so a rejected report
-      // cannot replace an arithmetic or host failure. Cancelled/work-limited
-      // services may reject this final report; their original status survives.
-      if (!result.ok())
-        numeric_ops::math_record_failure(phase, result);
-      if (phase.report_diagnostic) {
-        auto reported = report_numeric(phase, report);
-        if (result.ok())
-          return reported;
-      }
-      return result;
+  ReductionMetadata description;
+  fixed_tensor::PointInputs<1> inputs;
+  ElementType source_type = ElementType::UInt8;
+};
+Region reduction_region(const Region& output, unsigned mask,
+                        const std::vector<std::uint64_t>& input_shape) {
+  auto dimensions = output.dimensions();
+  for (unsigned axis = 0; axis < dimensions.size(); ++axis)
+    if (mask & (1U << axis))
+      dimensions[axis] = {0, input_shape[axis]};
+  return Region(std::move(dimensions));
+}
+template <bool Count>
+void reduction_invoke(const ps_kernel_invocation_v8* invocation,
+                      ps_kernel_status_v8* status) noexcept {
+  FloatingEnvironment environment;
+  if (!environment.active()) {
+    *status = kernel_failure(ErrorCode::OperationFailed,
+                             "numeric environment unavailable");
+    return;
+  }
+  const auto& state =
+      *static_cast<const PreparedReduction*>(invocation->prepared_context);
+  const auto& description = state.description;
+  static_assert(alignof(ReductionState) <= alignof(std::max_align_t));
+  try {
+    const auto destroy = [](ReductionState* value) {
+      value->~ReductionState();
     };
-    const auto& work = phase.consume_work;
-    auto status = work(1);
-    if (!status.ok())
-      return finish(std::move(status));
-    auto parsed =
-        metadata(kind, phase.query.inputs[0].result_schema->tensors[0],
-                 phase.query.parameters);
-    if (!parsed.ok())
-      return finish(parsed.status());
-    const auto& description = parsed.value();
-    auto scratch = phase.allocator.allocate(sizeof(ReductionState));
-    if (!scratch.ok())
-      return finish(scratch.status());
-    auto buffer = scratch.take_value();
-    std::unique_ptr<ReductionState, void (*)(ReductionState*)> state(
-        new (buffer.data()) ReductionState(kind, profile,
-                                           phase.query.inputs[0]
-                                               .result_schema->tensors[0]
-                                               .descriptor.element_type),
-        [](ReductionState* item) { item->~ReductionState(); });
-    const auto& input = phase.tensors->at({0, 0});
-    const auto shape = input.spec().sample_shape();
+    std::unique_ptr<ReductionState, decltype(destroy)> math(nullptr, destroy);
+    if constexpr (!Count)
+      math.reset(new (invocation->scratch[0].allocation) ReductionState(
+          state.kind, state.profile, state.source_type));
+    const std::function<Status(std::uint64_t)> consume =
+        [invocation](std::uint64_t) {
+          return invocation->cancellation.is_cancelled &&
+                         invocation->cancellation.is_cancelled(
+                             invocation->cancellation.context)
+                     ? Status{ErrorCode::Cancelled, {}}
+                     : Status::success();
+        };
+    fixed_tensor::PointReader<1> reader{state.inputs, *invocation};
+    const auto& output = invocation->outputs[0];
+    const auto& layout = *output.layout;
     const auto out_width =
         TensorSpan::element_size(description.output.element_type);
-    numeric_ops::MathTensorReader reader(input, phase.query.cancellation);
-    numeric_ops::MathTensorWriter writer(writers[0]);
-    std::vector<std::uint64_t> coordinate(shape.size(), 0),
-        source(shape.size(), 0);
-    auto count = phase.query.output.result_schema->tensors[0].sample_count();
-    if (!count.ok())
-      return finish(count.status());
-    for (std::uint64_t group = 0; group < count.value(); ++group) {
-      std::visit([](auto& arithmetic) { arithmetic.reset(); },
-                 state->arithmetic);
-      source = coordinate;
-      for (std::uint64_t i = 0; i < description.count; ++i) {
-        status = work(shape.size() + 1);
-        if (!status.ok())
-          return finish(std::move(status));
-        const auto bits = reader.bits(source);
-        // Input attempts differ from output groups and final conversions.
-        ++report.evaluated_values;
-        status = std::visit(
-            [&](auto& arithmetic) { return arithmetic.add(bits, work); },
-            state->arithmetic);
-        if (!status.ok())
-          return finish(std::move(status));
-        for (std::size_t j = shape.size(); j; --j)
-          if (description.mask & (1U << (j - 1))) {
-            if (++source[j - 1] < shape[j - 1])
-              break;
-            source[j - 1] = 0;
+    const auto in_width = TensorSpan::element_size(state.source_type);
+    std::array<std::uint64_t, 8> at{};
+    std::copy(layout.origin, layout.origin + layout.rank, at.begin());
+    std::uint64_t groups = 1;
+    for (unsigned axis = 0; axis < layout.rank; ++axis)
+      groups *= layout.shape[axis];
+    for (std::uint64_t group = 0; group < groups; ++group) {
+      auto checked = consume(1);
+      if (!checked.ok()) {
+        *status = kernel_failure(checked.code);
+        return;
+      }
+      std::uint64_t bits = description.count;
+      if constexpr (!Count) {
+        std::visit([](auto& arithmetic) { arithmetic.reset(); },
+                   math->arithmetic);
+        auto source = at;
+        for (std::uint64_t i = 0; i < description.count; ++i) {
+          const auto value = reader.bits(0, source, in_width);
+          auto added = std::visit(
+              [&](auto& arithmetic) { return arithmetic.add(value, consume); },
+              math->arithmetic);
+          if (!added.ok()) {
+            *status =
+                kernel_failure(added.code, added.message.c_str(), added.reason);
+            return;
           }
-      }
-      Result<std::uint64_t> result(
-          Status{ErrorCode::Internal, "uninitialized reduction"});
-      if (auto* moments =
-              std::get_if<numeric_ops::ExactMoments>(&state->arithmetic))
-        result =
-            moments->finish(description.output.element_type, description.count,
-                            description.ddof, kind == ReductionKind::Std, work);
-      else
-        result =
-            std::get<numeric_ops::ExactAggregate>(state->arithmetic)
-                .finish_as(description.output.element_type,
-                           kind == ReductionKind::Mean ? description.count : 1,
-                           work);
-      if (!result.ok()) {
-        auto failure = result.status();
-        if (failure.reason == FailureReason::ArithmeticOverflow) {
-          failure.detail = {FailureOrigin::Domain, FailureScope::Run};
-          failure.message += " output linear=" + std::to_string(group);
+          for (unsigned axis = layout.rank; axis-- > 0;)
+            if (description.mask & (1U << axis)) {
+              if (++source[axis] < state.inputs.grids[0].shape()[axis])
+                break;
+              source[axis] = 0;
+            }
         }
-        return finish(std::move(failure));
+        Result<std::uint64_t> value(Status{ErrorCode::Internal, {}});
+        if (auto* moments =
+                std::get_if<numeric_ops::ExactMoments>(&math->arithmetic))
+          value = moments->finish(description.output.element_type,
+                                  description.count, description.ddof,
+                                  state.kind == ReductionKind::Std, consume);
+        else
+          value =
+              std::get<numeric_ops::ExactAggregate>(math->arithmetic)
+                  .finish_as(
+                      description.output.element_type,
+                      state.kind == ReductionKind::Mean ? description.count : 1,
+                      consume);
+        if (!value.ok()) {
+          *status = kernel_failure(value.status().code,
+                                   value.status().message.c_str(),
+                                   value.status().reason);
+          return;
+        }
+        bits = value.value();
       }
-      std::array<std::uint64_t, 4> replicas{};
-      numeric_ops::select_words(replicas.data(), result.value(), result.value(),
-                                1, profile);
-      std::memcpy(writer.address(coordinate), replicas.data(), out_width);
-      for (std::size_t j = coordinate.size(); j; --j) {
-        if (++coordinate[j - 1] < description.output.shape[j - 1])
+      std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
+                      output.byte_offset + group * out_width,
+                  &bits, out_width);
+      for (unsigned axis = layout.rank; axis-- > 0;) {
+        if (++at[axis] < layout.origin[axis] + layout.shape[axis])
           break;
-        coordinate[j - 1] = 0;
+        at[axis] = layout.origin[axis];
       }
     }
-    return finish(work(1));
+    *status = {};
+  } catch (const std::bad_alloc&) {
+    *status = kernel_failure(ErrorCode::ResourceExhausted);
+  } catch (...) {
+    *status = kernel_failure(ErrorCode::OperationFailed,
+                             "reduction arithmetic failed");
   }
-  Status publish(const ResultProgramPhase& phase, ResultBuilder& builder) {
-    const auto& target = phase.query.output.result_schema->tensors[0];
-    const auto region = Region::whole(target.sample_shape());
-    if (kind != ReductionKind::Count)
-      return sdk::publish_dense_tensor(
-          phase, builder, 0, region,
-          [&](const auto& writers) {
-            return numeric_ops::math_callback(
-                phase, [&] { return write(phase, writers); });
-          },
-          phase.query.cancellation);
-    auto description = numeric_ops::math_take(
-        metadata(kind, phase.query.inputs[0].result_schema->tensors[0],
-                 phase.query.parameters));
-    if (phase.report_diagnostic) {
-      NumericDiagnostics report;
-      report.profile =
-          static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-      const auto identity = std::snprintf(
-          report.implementation.data(), report.implementation.size(),
-          "photospider.reduction-count/1;metadata-only;%s",
-          numeric_ops::selection_implementation(profile));
-      if (identity < 0 ||
-          static_cast<std::size_t>(identity) >= report.implementation.size())
-        return {ErrorCode::OperationFailed,
-                "reduction count diagnostic identity overflow"};
-      numeric_ops::math_require(report_numeric(phase, report));
+}
+Result<OperationProgram> lower_reduction(ReductionKind kind,
+                                         const OperationLowering& query) {
+  using Answer = Result<OperationProgram>;
+  auto parsed = metadata(kind, query.inputs[0].result_schema->tensors[0],
+                         query.parameters);
+  if (!parsed.ok())
+    return Answer(parsed.status());
+  auto output =
+      TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
+  auto input =
+      TileGrid::from_schema(*query.inputs[0].result_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  if (!input.ok())
+    return Answer(input.status());
+  ResourceLimits limits;
+  limits.maximum_work = query.limits.maximum_work;
+  ResourceBudget budget(limits);
+  OperationProgramBuilder builder(query);
+  for (const auto& member : query.requests[0].members)
+    for (auto tile : member.second) {
+      auto task = builder.add_task(
+          operation_name(kind), "exact-reduction-unchecked-v1", {},
+          {kind == ReductionKind::Count ? 0 : sizeof(ReductionState), 0, 0});
+      if (!task.ok())
+        return Answer(task.status());
+      auto region = output.value().region(tile);
+      if (!region.ok())
+        return Answer(region.status());
+      if (kind == ReductionKind::Count) {
+        auto status = builder.read_input_schema(task.value(), 0);
+        if (!status.ok())
+          return Answer(status);
+      } else {
+        auto reads = sdk::tiles_for_region(
+            budget, input.value(),
+            reduction_region(
+                region.value(), parsed.value().mask,
+                query.inputs[0].result_schema->tensors[0].sample_shape()));
+        if (!reads.ok())
+          return Answer(reads.status());
+        for (auto index : reads.value()) {
+          auto status = budget.consume({1});
+          if (status.ok())
+            status = builder.read_input(task.value(), 0, 0, index);
+          if (!status.ok())
+            return Answer(status);
+        }
+      }
+      auto status = builder.write_output(task.value(), 0, member.first, tile);
+      if (!status.ok())
+        return Answer(status);
     }
-    numeric_ops::math_require(
-        phase.consume_work(description.output.shape.size() + 16));
-    auto bytes =
-        numeric_ops::math_take(phase.resources.allocator().allocate(8));
-    std::array<uint64_t, 4> replicas{};
-    numeric_ops::select_words(replicas.data(), description.count,
-                              description.count, 1, profile);
-    std::memcpy(bytes.data(), replicas.data(), 8);
-    numeric_ops::math_require(phase.consume_work(1));
-    return builder.publish_tensor(
-        0, region,
-        {0, std::vector<int64_t>(description.output.shape.size(), 0)},
-        std::move(bytes).freeze(), phase.query.cancellation);
+  return builder.finish();
+}
+Result<ps_prepared_kernel_v8> prepare_reduction(
+    ReductionKind kind, SequenceProfile profile,
+    const KernelPreparation& query) {
+  using Answer = Result<ps_prepared_kernel_v8>;
+  const auto invalid = [] {
+    return Answer(
+        {ErrorCode::TypeMismatch, "invalid reduction tile signature"});
+  };
+  if (query.inputs.size() != 1 || query.outputs.size() != 1 ||
+      query.writes.size() != 1)
+    return invalid();
+  auto parsed = metadata(kind, query.inputs[0].result_schema->tensors[0],
+                         query.parameters);
+  if (!parsed.ok())
+    return Answer(parsed.status());
+  auto state = std::make_unique<PreparedReduction>();
+  state->kind = kind;
+  state->profile = profile;
+  state->source_type =
+      query.inputs[0].result_schema->tensors[0].descriptor.element_type;
+  state->description = parsed.take_value();
+  const auto& write = query.writes[0];
+  if (query.outputs[0].result_schema->tensors[0].descriptor.shape !=
+          state->description.output.shape ||
+      write.layout.element_type != state->description.output.element_type)
+    return invalid();
+  if (kind == ReductionKind::Count) {
+    auto grid = TileGrid::from_schema(*query.outputs[0].result_schema,
+                                      query.tile_extent);
+    if (!grid.ok())
+      return Answer(grid.status());
+    auto region = grid.value().region(write.tile_index);
+    if (!region.ok())
+      return Answer(region.status());
+    if (!query.reads.empty() || write.port || write.member ||
+        write.domain != physical::Domain::Host ||
+        !fixed_tensor::matches_region(write.layout, region.value()))
+      return invalid();
+  } else {
+    const std::array<Region, 1> regions = {reduction_region(
+        fixed_tensor::view_region(write.layout), state->description.mask,
+        query.inputs[0].result_schema->tensors[0].sample_shape())};
+    auto valid =
+        fixed_tensor::prepare_point_inputs(query, &state->inputs, &regions);
+    if (!valid.ok())
+      return Answer(valid);
   }
-};
-using ReductionProgram = numeric_ops::WholeTensorProgram<ReductionKernel>;
+  ps_prepared_kernel_v8 result{};
+  result.struct_size = sizeof(result);
+  result.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  result.invoke_cpu = kind == ReductionKind::Count ? reduction_invoke<true>
+                                                   : reduction_invoke<false>;
+  result.context = state.release();
+  result.release = [](const void* context) {
+    delete static_cast<const PreparedReduction*>(context);
+  };
+  return Answer(result);
+}
 OperationDefinition reduction_operation(const std::string& key,
                                         ReductionKind kind,
                                         SequenceProfile profile) {
   OperationDefinition operation;
   operation.key = key;
   auto& traits = operation.traits;
-  traits.diagnostics = {numeric_diagnostic_identity()};
   traits.input_count = 1;
   traits.input_schema.resize(1);
 
@@ -317,14 +383,16 @@ OperationDefinition reduction_operation(const std::string& key,
   if (kind == ReductionKind::Variance || kind == ReductionKind::Std)
     traits.parameter_schema.insert(traits.parameter_schema.begin() + 1,
                                    {"ddof", OperationParameterType::Int64});
-  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
-                                       sizeof(ReductionProgram));
-  traits.workspace_bytes =
-      kind == ReductionKind::Count ? 0 : sizeof(ReductionState);
+  traits.outputs[0].key = "values";
+  traits.outputs[0].output_schema = tensor_ops::port();
+  traits.outputs[0].result_schema = tensor_ops::scalar_schema();
   operation.specialize_metadata = [kind, profile](const auto& inputs,
                                                   const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
+    auto valid = tensor_ops::check_tensor(inputs[0]);
+    if (!valid.ok())
+      return Answer(valid);
     auto resolved =
         metadata(kind, inputs[0].result_schema->tensors[0], parameters);
     if (!resolved.ok())
@@ -333,19 +401,42 @@ OperationDefinition reduction_operation(const std::string& key,
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization result;
-    result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
-        numeric_ops::numeric_tensor_schema(resolved.value().output.element_type,
-                                           resolved.value().output.shape));
-    if (kind == ReductionKind::Count) {
-      result.input_indices = std::vector<std::uint32_t>{};
-    }
+    auto schema = tensor_ops::scalar_schema();
+    schema.tensors[0].descriptor = resolved.value().output;
+    result.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(std::move(schema));
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.start_result = [kind, profile](const auto&, const auto& allocator) {
-    return ResultContinuation::make<ReductionProgram>(allocator, kind, profile);
+  operation.lower = [kind](const OperationLowering& query) {
+    return lower_reduction(kind, query);
   };
-  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
+  operation.prepare_kernel =
+      [kind, profile](
+          const physical::KernelDesc& kernel,
+          const physical::Placement& placement, const KernelPreparation& query,
+          const ResourceSet&,
+          const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    using Answer = Result<ps_prepared_kernel_v8>;
+    if (kernel.symbol != operation_name(kind) ||
+        kernel.contract != "exact-reduction-unchecked-v1" ||
+        !query.task_parameters.empty() ||
+        query.scratch !=
+            std::array<std::uint64_t, 3>{
+                kind == ReductionKind::Count ? 0 : sizeof(ReductionState), 0,
+                0})
+      return Answer(
+          {ErrorCode::TypeMismatch, "invalid reduction kernel signature"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Answer({ErrorCode::BackendUnavailable,
+                     "reduction requires CPU Host placement"});
+    auto available = numeric_ops::sequence_profile_available(profile);
+    if (!available.ok())
+      return Answer(available);
+    return prepare_reduction(kind, profile, query);
+  };
+  return operation;
 }
 }  // namespace
 Status register_numeric_reductions(OperationRegistry* registry) {

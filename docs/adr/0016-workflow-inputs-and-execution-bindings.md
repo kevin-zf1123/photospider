@@ -2,49 +2,30 @@
 
 - Status: Accepted
 
-## Current implementation: fixed grants and CFG returns
+## Decision
 
-The static Plan fixes every input read before execution. Runtime payload can
-select a CFG successor or a sample within a compiled grant; it cannot add
-producer tasks or widen that grant. Bindings remain per-Run owners and do not
-enter artifact files. Imported plans keep the same binding preflight rules and
-must execute with their linked frozen registry.
+Workflow declarations provide a name and Result schema. Each Run binds an
+owning `ResultRef` under that exact name. The compiler fixes input reads,
+physical layouts, memory domains, COPY tasks and control flow before execution.
+Payload owners remain outside compiler artifacts and identity.
 
-The DAG workflow-output restriction below applies to `WorkflowDocument`.
-Direct `IRProgram` frontends can return a matching SSA value, including an input
-or block parameter. Named returns have synthetic dependency records; consumers
-use `plan.output(name).record_index` rather than treating the return index as a
-physical step. Independent partially verifiable output tiles notify the observer
-as they are certified, including cache hits; bundle/prefix and complete-validation
-closures notify after their required coverage is ready. The observer's Result
-and the final returned projection need not share an ObjectId.
+The current operation module and fixed invocation interfaces are ABI 8.
+Operations lower to physical tasks and prepare immutable kernels. Invocation
+borrows the Plan's fixed input/output views and scratch; payload cannot add
+producer tasks or widen a compiled read.
 
-## 1. Core Summary (TL;DR)
+## Declaration and binding contract
 
-Workflow declarations provide a name and Result schema; each execution binds an owning `ResultRef` under that name. This keeps tensor shape and layout in the Result schema while keeping payload owners out of compiler identity. Every operation executes through the staged Result continuation protocol.
+`WorkflowDocument` schema 7 stores declarations, operation nodes and named
+outputs. Declaration IDs are unique and nonzero. Names are unique,
+case-sensitive printable ASCII strings of 1 to 128 bytes with no spaces. A
+document contains at most 4096 declarations. Every declaration is bound exactly
+once, including declarations unused by the graph.
 
-## 2. Mental Model & Intuition
-
-```text
-WorkflowDocument                         each execute call
-  names + Result schemas                       Result bindings
-          |                                         |
-          v                                         v
-       analyze -> optimize -> plan           schema/name preflight
-                                      +----------+-----------+
-                                      |          |           |
-                                  Result A   Result B   Result C
-                                      |          |           |
-                                      +----------+-----------+
-                                                 v
-                                      Result continuations
-                                                 |
-                                   certified outputs or failure
-```
-
-A declaration fixes the input name and Result schema expected at a workflow port. Each `execute` call supplies a `ResultRef` with the corresponding schema. The Result retains its tensor backing and resource owners while the execution or any returned view needs them; concurrent calls can reuse one plan with different immutable bindings.
-
-## 3. Formal Contracts & APIs
+A declaration fixes all named static Tensor members, dtype, cell shape,
+batch/atomic axes and topology. Structural input changes require preparation
+and compilation again. The following excerpts identify the binding fields;
+the public headers define the complete API:
 
 ```cpp
 struct WorkflowInputDeclaration final {
@@ -55,37 +36,70 @@ struct WorkflowInputDeclaration final {
 
 struct ExecutionBinding final {
   std::string name;
-  ResultRef result = {};
+  ResultRef result;
 };
 
-struct ExecutionOptions final {
-  std::function<Status(ValueRef, const ResultRef&)> result_publication = {};
-};
-
-struct ExecutionResult final {
-  ResourceMap<ResultRef> results = {};
+struct ExecutionBindings final {
+  std::vector<ExecutionBinding> inputs;
 };
 ```
 
-These excerpts show the public fields relevant to binding and publication. The current `WorkflowDocument` schema is 7. It stores declarations, operation nodes, and named outputs. Declaration ids are unique and nonzero; names are unique, exact, case-sensitive printable ASCII strings of 1 to 128 bytes with no spaces. A document contains at most 4096 declarations, and each declaration is bound exactly once, including declarations unused by the graph.
+The vector preserves duplicate names so preflight can reject them. Missing,
+extra, duplicate or malformed bindings fail with `InvalidArgument`.
+Incompatible Result schemas fail with `TypeMismatch`. The bound payload must
+already cover the compiled tile views and match their physical layout and
+domain. Layout adaptation requires explicit compiled COPY tasks. Preflight
+performs no numerical sample validation or implicit repacking.
 
-A declaration fixes all named static Tensor members, their dtype, cell shape, batch/atomic axes and topology. Input structure changes require preparation and compilation again. Each Run fixes plan, binding snapshot and generation. Payload addresses are excluded from compiler identity; schemas, traits, stage declarations and normalized member requests enter the relevant identities.
+`ExecutionContext::prepare` binds a Plan to concrete kernels and devices without
+executing payload work. `submit(prepared, bindings, cancellation, options)`
+copies the binding snapshot and returns a `RunHandle`; callers must not mutate
+the binding container during this copy. Concurrent Runs may share a
+`PreparedPlan` while retaining different immutable bindings. Imported Plans
+use the same preflight and the frozen registry to which they were linked.
 
-`ExecutionBinding` matches one declaration by name and owns a Result reference. The executor validates names as a multiset, so duplicate bindings remain visible and fail validation rather than being silently overwritten. It validates Result schema compatibility before scheduling operation work. The Run retains its binding snapshot and any admitted input owners until callbacks retire. `ExecutionContext::execute` returns named Results in `ExecutionResult::results` after callbacks retire and cancellation and graph-currentness checks allow completion.
+## Results and ordered observation
 
-`ExecutionOptions::result_publication` is a per-call observer for certified Result prefixes. Each caller has an independent serialized notification stream. A caller may retain the owning `ResultRef` beyond the callback. A prefix is not complete execution success: observer failure stops the Run, while previously certified prefixes remain valid. Callback exceptions are converted to typed execution failures; cancellation and callback retirement follow the Run's existing ordering.
+`WorkflowDocument` outputs select operation-node outputs. Direct
+`IRProgram` frontends may return matching SSA values, including inputs and
+block parameters. Named returns refer to the physical CFG's return values and
+the Plan return signature.
 
-## 4. Non-Goals & Explicit Boundaries
+A task's completed tile can satisfy an internal successor before its call
+retires. Each `CallGroup` retires in IR call order after its tasks settle.
+`ExecutionOptions::on_call_retired` receives an owning `CallRecord` on a
+separate serial lane. Its `values` map is keyed by physical value ID and
+contains the call's declared exports on success; failed and elided calls have
+no values. A callback can retain those Result owners beyond Run or context
+lifetime. Callback exceptions close delivery and abort the Run after accepted
+work drains. A callback must not join its own Run or destroy its context.
 
-- Workflow declarations do not load files or retain caller payloads.
-- Bindings have no optional/default values and receive no implicit schema conversion, resize, or layout repacking.
-- Runtime input data does not become compile-time parameters or literal nodes.
-- A workflow output selects an operation-node output; direct input passthrough is not a workflow output form.
-- Result tensor backing layout does not change logical sample authorization. Planar storage is not interleaved storage.
-- The Result C operation table remains ABI 7. This ADR describes the C++ workflow binding contract, not a separate C++ Tensor operation protocol.
+`RunHandle::join` waits for task quiescence and delivery settlement. Successful
+named returns appear in `ExecutionResult::results` only after the final
+cancellation and source-currentness checks. Earlier retired call exports stay
+valid when a later call fails. Observation and final RET ownership are
+independent; their Results need not have identical ObjectIds.
 
-## 5. Consequences
+## Identity and lifetime
 
-Malformed declarations and missing, extra, duplicate, or invalid binding names fail with `InvalidArgument`; an incompatible Result schema fails with `TypeMismatch`. These checks happen before operation callbacks. A caller can reuse a compiled plan with independent Result bindings, but it must not mutate its binding container while `execute` copies it. Every input member has its own grid and is requested and compared by member tile, as defined by [ADR 0023](0023-track-dependencies-between-fixed-tiles.md). The same backing may serve plans with different tile extents; production progress alone is not a content edit.
+Schemas, traits, normalized selections, fixed reads, layouts, placements and
+immutable resource identities participate in the corresponding compiler
+identities. Payload addresses and binding owners do not. Each Run retains its
+binding snapshot and admitted owners until accepted CPU/GPU work completes,
+including cancellation drain. Every member has its own tile grid as described
+by [ADR 0023](0023-track-dependencies-between-fixed-tiles.md).
 
-Cancellation is cooperative. The executor waits for entered callbacks to retire before releasing borrowed phases and owners. Each Run owns its producers; cancelling a Run stops and retires that Run's work without affecting another Run. Input Results retain their own backing owners, while Root-accounted working state, outputs, and transfers remain charged until their last owner retires.
+Cancellation stops new issue and drains accepted work; it does not cancel a
+different Run using the same Plan. Outputs and owning read windows retain their
+backing and resource accounting after context destruction. The last owner
+releases those resources. Execution has no cross-Run Result or checkpoint cache.
+
+## Boundaries
+
+- Declarations do not load files or retain caller payload.
+- Bindings have no optional/default values or implicit schema conversion.
+- Runtime input data is not a compile-time parameter or literal.
+- Logical sample authorization is independent of backing storage layout.
+- Preparation cannot retry a failed fixed placement on another backend.
+- This ADR defines C++ workflow binding and ownership; the operation ABI is
+  specified by the public fixed invocation and module headers.

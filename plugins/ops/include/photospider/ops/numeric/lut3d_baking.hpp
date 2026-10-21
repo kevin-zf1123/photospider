@@ -57,10 +57,9 @@ struct Lut3dValidationPoints {
 /** @brief Connectable exports; table is a globally quality-gated
  * `photospider.tensor` v1 Result with `samples` shape [N0,N1,N2,3], selected
  * dtype and atomic trailing color axis. Axis is an independent Float64 tensor.
- * report is a curve.bake_lut3d.report v3 ResultRef; request it through
- * `ExecutionContext::execute()` and read it with the public
- * read_lut3d_bake_report helper with description. Its measured_table_id tensor
- * identifies the complete table object acquired during measurement. This
+ * report uses curve.bake_lut3d.report v3. Read a completed Result with the
+ * public read_lut3d_bake_report helper and description. Its measured_table_id
+ * tensor identifies the complete table object acquired during measurement. This
  * identity is local to the producing Run; names are not auto-exported.
  */
 struct BakedLut3d {
@@ -78,30 +77,38 @@ struct BakedLut3d {
  * immutable binding snapshot, including shared inputs. No nested execution or
  * file save occurs.
  *
- * Profile geometry nodes use Run-shared stages with complete input tensors,
- * full internal results, recorded dependencies and numeric failures. Static
- * preparation validates each operation's metadata and stores immutable POD
- * state for geometry or report work; runtime callbacks reuse that prepared
- * state. Budget full grid, points, converted colors and source intermediates
- * even for partial table requests. Pack, measure, unpack and gate are
- * Result-only. Pack/unpack/gate try authorized tensor views first and keep
- * legal common-owner mappings; only a physical `ViewUnavailable` causes a
- * transactional packed materialization of that ROI, charged to Root payload.
- * The final gate returns requested complete-color fragments with global
- * coordinates. Measure and gate validate bounded report windows before table
- * publication; a passed gate checks measured_table_id against the owned-table
- * input after complete table validation. Measure and gate are declared
- * nondeterministic and non-cacheable: equal immutable inputs may produce
- * different intermediate ObjectIds in each Run. Their downstream closure cannot
- * reuse completed results, checkpoints or blocks across Runs. Every nonempty
- * table or report request validates all grid colors, complete source outputs,
- * centers and extra points. report successfully records passed=false on
- * exceeded tolerances; table then fails OperationFailed/ InvalidDomain with
- * LutApproximationToleranceExceeded. Axis-only observes no source or extra
- * points. Source/shape/domain/work/capacity/cancellation/stale failures retain
- * their categories. Result owners survive context teardown. Measured acceptance
- * applies only at listed points using the chosen interpolation and table output
- * dtype, never the continuous domain.
+ * Geometry keys use fixed CPU tasks for selected output tiles. Axis copies
+ * selected cells; grid/centers read six endpoints and use fixed ExactSampling
+ * scratch. Extra-only tiles read selected extra rows with zero scratch. Color
+ * copies or converts corresponding complete colors once, with zero scratch.
+ * Finite consistent axes, model-valid colors, in-range extras and finite
+ * converted values are caller preconditions. Inputs retain their own tile
+ * grids; outputs use ordinary axes plus one atomic component axis except for
+ * axis. Empty emits no task. Concurrent Runs own independent scratch and
+ * outputs.
+ *
+ * Pack/unpack/gate use one fixed CPU task per selected output tile and copy
+ * raw samples into independent dense storage. Pack/unpack require no scratch.
+ * A nonempty Measure emits one task that waits for the complete owned table,
+ * reads all validation points/reference/applied colors and writes all thirteen
+ * report members using fixed exact-integer scratch. Projecting the report or
+ * gated table preserves this global measurement closure. Its retired CallRecord
+ * exports the report, so an observer can retain it when a later Gate fails.
+ *
+ * Report v3 records the actual owned-table ObjectId through the invocation's
+ * input association. Gate first checks the configuration identity
+ * (TypeMismatch) and table association (OperationFailed/InvalidAssociation),
+ * then the measured tolerance result. A legitimate exceeded tolerance
+ * successfully produces a passed=false report; Gate fails
+ * OperationFailed/InvalidDomain with LutApproximationToleranceExceeded and
+ * first-failure details. Valid finite colors, consistent axes and well-formed
+ * report values are caller premises; the SDK report reader independently
+ * validates its input. Measure and Gate are nondeterministic: fresh owned
+ * tables receive fresh ObjectIds per Run. Axis-only requests read neither
+ * source nor extra points. Cancellation and resource failures propagate. Result
+ * owners survive context teardown. Acceptance applies only at the listed points
+ * using the selected interpolation and table dtype; it provides no
+ * continuous-domain bound.
  *
  * Calls modifying one document must be serialized. All authoring is staged;
  * failure or exception leaves document unchanged. Allocation or a source

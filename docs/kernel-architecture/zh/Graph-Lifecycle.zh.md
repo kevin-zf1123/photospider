@@ -37,7 +37,7 @@ Compiler stage 保留 currentness identity，但不会保留对 source document 
 
 `Compiler::bind_ir` 和 `CompilerArtifact` 导入函数产生不关联任何 `GraphContext` 的阶段。它们的 `revision()` 为 1，`current()` 表示其链接的冻结 `OperationRegistry` 是否仍存活。替换或销毁任何 `GraphContext` 都不影响它们。保存的 `.psir` 或 `.psxp` 文件不携带 snapshot、revision 或源活性；保存一个绑定 snapshot 的阶段后再加载，会得到 revision 为 1 的独立阶段。
 
-每个阶段（无论独立还是绑定 snapshot）都持有其 registry 的弱引用。`optimize` 和 `plan` 以 `Stale` 拒绝链接到其他 registry 的阶段；`ExecutionContext::execute`、`freeze` 和 `open_demand` 以 `Stale` 拒绝 registry 与 context 不同的 plan。因此加载产物的宿主需要注册或加载所需算子、冻结 registry、在同一 registry 上构建 `Compiler` 和 `ExecutionContext`，并在阶段使用期间保持 registry 存活。
+每个阶段（无论独立还是绑定 snapshot）都持有其 registry 的弱引用。`optimize` 和 `plan` 以 `Stale` 拒绝链接到其他 registry 的阶段；`ExecutionContext::prepare` 以 `Stale` 拒绝 registry 与 context 不同的 Plan；`submit` 要求 PreparedPlan 来自该 context，并重新检查源 currentness。因此加载产物的宿主需要注册或加载所需算子、冻结 registry、在同一 registry 上构建 `Compiler` 和 `ExecutionContext`，并在阶段使用期间保持 registry 存活。
 
 ## 5. 错误与生命周期
 

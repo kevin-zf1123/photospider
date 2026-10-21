@@ -14,7 +14,7 @@ clarification_status: complete
 
 # CRV-06D: color_ramp_cielch
 
-Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member , under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
 ## Revised lightness coordinate and implementation boundary
 
@@ -43,8 +43,7 @@ input-representation mode. The three primitives are implemented separately.
 Channels are l=L*/100, C*, h. l accepts finite extensions, C* is finite and nonnegative,
 and white is explicit, default D50. No alpha is present. Hue uses floating radians,
 floating pi multiples or exact Int64 p/q*pi. Selected rows require q>0, while an
-unselected generic q<=0 value adds no mathematical-domain error; typed/upstream
-validation still covers all inputs. Unreduced fractions are valid. Preserve the
+unselected generic q<=0 value adds no numerical precondition. Upstream failures still propagate through declared source tiles. Unreduced fractions are valid. Preserve the
 original hue value, its sign and winding count;
 there is no modulo reduction, one-turn output range or hue_path parameter.
 
@@ -56,7 +55,7 @@ Three independent entrypoints use colors[K,3] for floating hues, or
 lightness_chroma[K,2], hue_numerator[K], hue_denominator[K] for rational pi hues.
 Output remains three floating color channels. Static output_hue_unit is radian
 or pi_multiple, default radian for radian input and pi_multiple otherwise.
-The output color description records that actual unit. Rational input is retained
+The output_hue_unit parameter records that unit; the Result has no attached description. Rational input is retained
 exactly through interpolation and any unit conversion, then rounded only at output.
 
 ## Ports, parameters and descriptor
@@ -72,8 +71,7 @@ the same K as stops and lightness_chroma. No implicit broadcast is performed.
 Direct nodes supply static color_description, dtype, out_of_domain and
 output_hue_unit; constructors write the defaults specified here. The explicit
 description identifies CIELCh(ab), reference-white xy (default D50), channel units,
-no alpha, and the entrypoint's input hue representation. Attached descriptions
-must match. For rational input, the description interprets the coordinated ports
+no alpha, and the entrypoint's input hue representation. For rational input, the description interprets the coordinated ports
 as one color table; lightness_chroma[K,2] alone is not a complete three-channel
 ColorArray. Output is a complete CIELCh(ab) ColorArray whose hue unit is the
 selected floating output_hue_unit. No RGB transfer, gamut conversion, alpha or
@@ -97,8 +95,7 @@ pi products or components before the final destination conversion.
 
 Hit/clamp/K=1 selects one row and directly converts L/C and hue to the output
 units/dtype. Identical selected rows give the same result; both remain dependencies.
-All demanded floating source components and all returned components must be
-finite. C>=0 is required; negative zero C is valid. No intermediate-overflow
+All mathematically selected floating source components and returned components must be finite. C>=0 is required; negative zero C is valid. No intermediate-overflow
 failure is allowed when the exact final result is representable. Exact rational
 handling covers INT64_MIN without signed abs or intermediate overflow.
 
@@ -111,44 +108,21 @@ request partition. Direct hit/clamp/identical-row conversions preserve source fl
 signs, including across positive pi unit conversion. A rational zero numerator
 represents +0. On genuine interpolation, exact zero hue is +0 and nonzero
 underflow retains the mathematical sign. Apply the same direct/identical versus
-mixed zero rules to L/C. All selected source rows are validated before shortcuts.
+mixed zero rules to L/C. Selected complete-row legality is a caller precondition, including when a shortcut applies.
 
 ## Demand, invalidation, resources and failures
 
-All formal strict and accelerated keys use Run-shared Result programs. A nonempty
-Run declares ordinary payload tile Needs  for every input, so
-typed and upstream validation covers complete tensor members. The executor reads
-authorized windows directly; the callback does not collect or copy complete input
-arrays. It validates all stops, then every input position, before color arithmetic.
-Each position uses one exact hit/clamp/singleton row or two enclosing rows for its
-mathematics. Generic color rows outside all evaluated stencils remain numerically
-unused, while their typed/upstream validation still applies. Empty reads no sample
-payload after static preparation.
+All profiles use the [fixed execution contract](CRV-06_color_ramp.md#fixed-execution-and-caller-preconditions). Each selected complete-color output tile has one CPU task. Its reads cover the corresponding query region and all stops/colors/p/q tiles, each closed on its own source grid. Runtime selection uses one exact-hit/clamp/singleton row or two enclosing rows. Generic unselected colors and denominators are numerically unused; upstream failures still propagate through declared tile dependencies.
 
-The `values` port publishes an immutable `photospider.tensor` v1 Result with `samples` shape `sample_shape(input)+[C]`, `atomic_trailing_axes=1`. The shared stage publishes the full internal output transactionally; the shared stage retains full internal coverage; public actors expose only requested complete tiles and global coordinates. Fragments expose requested regions while retaining the full output owner.
+The `values` Result uses `photospider.tensor` v1/member `samples`, descriptor shape `sample_shape(input)+[C]`, and `atomic_trailing_axes=1`. It carries no color description or input batch-axis partition. The kernel writes only selected dense output tiles, borrowing affine source views and owning fixed arithmetic scratch. Empty emits no task or sample read. Successful call publication follows required task completion in retirement order, and output storage survives context teardown.
 
-Arbitrary immutable source strides, offsets and unaligned storage are supported. Selected operation resources remain owned by preparation and execution; the output retains its data backing. Input edits invalidate complete recorded output demand. Numeric errors have Run scope; failed callbacks publish no color subset. Upstream, resource and cancellation errors retain their categories.
+Finite ordered stops, finite queries, selected complete-color model/association validity, selected rational q>0, reject-domain membership and representable final output are unchecked caller preconditions. Lookup costs O(P log K) for P selected query points, plus exact/certified arithmetic; the kernel searches source stops directly without an O(K) copy. Static schemas, parameters, resources and kernel signatures remain checked. Cancellation and capacity failures stop execution without approximate substitution.
 
-Lookup work remains O(K+N log K), plus exact or certified arithmetic. Full output
-payload is N*C*sizeof(dtype), even for a small request. Account source owners/windows,
-fixed arithmetic workspace, the Root-owned ResourceVector stop index (8K element
-bytes plus allocator/metadata overhead), output and retained descriptors/resources.
-No per-output dependency records or point-state array is retained. Work/capacity and
-cancellation checks apply during scans, lookup, arithmetic and before publication;
-incomplete certification fails ResourceExhausted. No reduced-precision fallback is added.
-
-C=0 never suppresses hue mathematics or positive-denominator validation for
+C=0 never suppresses hue mathematics or the positive-denominator precondition for
 selected rational rows. Certified pi conversion retains its fixed precision
 ceiling; a finite large angle does not create an unbounded precision cache.
 
-Malformed statics/descriptions fail preflight with InvalidArgument/InvalidDomain;
-port shapes/dtypes and descriptor mismatch use TypeMismatch. Nonfinite demanded
-floats, negative C, selected q<=0, invalid stops or rejected input positions use
-OperationFailed/InvalidDomain at Run scope. Final narrowing
-overflow uses OperationFailed/ArithmeticOverflow. Platform mismatch, resources,
-cancellation, stale and upstream failures retain their established categories.
-No partially valid L/C/h tuple is published. Implementation cannot substitute a
-4-ULP path when exact rounding or unit conversion exceeds the budget.
+Malformed static parameters or descriptions fail preparation with InvalidArgument; incompatible port schemas, shapes or dtypes use TypeMismatch. Numerical conditions are caller preconditions, including finite destination results. Operational resource, backend, cancellation, stale-plan and upstream failures preserve their status; a failed required task prevents successful call publication. Certified hue conversion retains its fixed precision ceiling.
 
 ## Acceptance and public workflow obligation
 
@@ -165,12 +139,7 @@ Equal endpoints remain constant; neither same direction modulo a turn nor C=0
 changes the formula. A hit at hue=4 retains 4 in pi units. No hue_path parameter
 or normalization mode is accepted.
 
-Test channel requests expanding to full colors, mathematically unused generic rows and complete typed validation,
-selected q=0 failing even at C=0, global stop failures, whole-input dirty support,
-strides, budgets, cancellation, cache-off and output lifetime. The public
-Compiler/ExecutionContext workflow binds the entrypoint-specific ports and
-checks named values and metadata, with commands and independent expected
-results linked below.
+Use independent exact-rational or certified-pi/transfer references on valid inputs. Check complete-color tile coverage, mixed source grids and dtypes, unused generic rows, arbitrary source strides, concurrent Runs, cancellation, bounded scratch, allocation-free invocation and retained output lifetime. Numerical precondition violations are not runtime-error acceptance cases.
 
 - [Radian entrypoint](CRV-06D1_color_ramp_cielch.md).
 - [Floating pi entrypoint](CRV-06D2_color_ramp_cielch_pi.md).

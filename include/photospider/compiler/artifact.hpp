@@ -16,7 +16,7 @@ class Compiler;
 enum class ArtifactKind { IR, ExecutionPlan };
 
 /** @brief External operation symbol and compiler-visible contract identity.
- * Includes registered traits and validator/report references. It neither
+ * Includes registered traits and diagnostic report references. It neither
  * identifies nor authenticates native callback code. Hosts resolve symbols by
  * registering operations or loading libraries of their choosing.
  */
@@ -30,21 +30,21 @@ struct ArtifactOperation final {
  */
 struct ArtifactManifest final {
   ArtifactKind kind = ArtifactKind::IR;
-  std::uint32_t format_version = 4;
+  std::uint32_t format_version = 5;
   std::vector<ArtifactOperation> operations;
   std::vector<ResourceIdentity> resources;
 };
 
 /** @brief Editable, versioned .psir and .psxp compiler artifacts.
  *
- * Format v4 .psir stores typed SSA calls and an explicit program form: raw
- * dependency paths or control flow. .psxp stores privately lowered control
- * flow. Earlier artifact versions are rejected. .psxp stores ordered tile and
- * shared-stage instructions, read grants, publication targets, instruction
- * dependencies, backend/fallback choices and output selections. Import links
- * against the supplied frozen operation registry, validates
- * contracts/schemas/resources and recreates pure static preparation. Plan
- * import does not invoke the DAG frontend, optimizer or physical planner.
+ * Format v5 .psir stores typed SSA calls and an explicit program form:
+ * dependency paths or control flow. .psxp stores lowered control flow and
+ * physical schema/layout/tile/value/placement/kernel/task/call/block tables,
+ * including derived adjacency, liveness, reservation bounds, and selected
+ * output tiles. Task table order is independent of execution dependencies.
+ * Import links the frozen registry, validates contracts/schemas/resources,
+ * and recreates pure static preparation. Plan import validates the saved
+ * physical tables without running a frontend, optimizer or planner.
  *
  * Imported stages own metadata/preparation, have local revision one, and are
  * independent of GraphContext lifetime. The registry must remain alive and
@@ -63,7 +63,7 @@ class PHOTOSPIDER_API CompilerArtifact final {
    * parent identity records provenance. Default/stale objects fail Stale.
    */
   static Result<std::string> export_ir(const ValidatedIR& ir);
-  /** @brief Encode the complete static instruction program and control flow,
+  /** @brief Encode the complete static task program and control flow,
    * including explicit empty output selections.
    */
   static Result<std::string> export_plan(const ExecutionPlan& plan);
@@ -80,14 +80,13 @@ class PHOTOSPIDER_API CompilerArtifact final {
   static Result<ValidatedIR> import_ir(const Compiler& compiler,
                                        std::string_view text,
                                        ResourceSet resources = {});
-  /** @brief Restore declarations and instruction blocks without dependency
-   * mapping, tile expansion or backend selection. Saved reads, publications,
-   * dependencies and ready-before-use ordering are validated. Unsupported
-   * executable choices fail BackendUnavailable. Grids and static preparation
-   * are reconstructed; instruction order and declaration indices are retained.
+  /** @brief Restore declarations and fixed task tables without lowering.
+   * Saved IDs, affine views, dependencies, liveness, reservations, IR bindings
+   * and output coverage are validated as encoded. Table indices are retained.
    * The supplied registry must be nonnull and frozen and outlive the Plan;
    * otherwise binding fails InvalidArgument or later use fails Stale.
-   * No optimizer registry or compiler pipeline is required by the caller.
+   * Earlier artifact versions are rejected. No kernel/device preparation or
+   * payload execution occurs during import.
    */
   static Result<ExecutionPlan> import_plan(
       std::shared_ptr<OperationRegistry> operations, std::string_view text,

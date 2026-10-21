@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <set>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include "photospider/data/footprint.hpp"
@@ -103,6 +105,17 @@ int single_rectangle_limits() {
 }
 int bounds() {
   using ps::ErrorCode;
+  std::uint64_t used = UINT64_MAX;
+  const std::vector<Region> boxes{Region({{1, 1}}), Region({{9, 1}})};
+  PS_CHECK(Footprint::from_regions({16}, boxes, {}, &used).ok() && used > 1);
+  ps::FootprintLimits grant;
+  grant.maximum_work = used - 1;
+  std::uint64_t failed = UINT64_MAX;
+  PS_CHECK(Footprint::from_regions({16}, boxes, grant, &failed).status().code ==
+               ErrorCode::ResourceExhausted &&
+           failed == used - 1);
+  PS_CHECK(!Footprint::from_regions({0}, boxes, {}, &failed).ok() &&
+           failed == 0);
   const Point huge{UINT64_MAX, UINT64_MAX, 7, 2, 3, 4, 5, 6};
   auto all = Footprint::all(huge);
   PS_CHECK(all.ok() && all.value().boxes().size() == 1);
@@ -277,6 +290,127 @@ int event_sort_limits() {
            ps::ErrorCode::Cancelled);
   return 0;
 }
+int tile_cover_metadata() {
+  ps::ResourceBudget root;
+  Footprint source;
+  {
+    ps::ResourceAllocationScope scope(root);
+    auto made = Footprint::from_regions(
+        {16, 12}, {Region({{0, 2}, {0, 2}}), Region({{8, 2}, {8, 2}})});
+    PS_REQUIRE_OK(made);
+    source = made.take_value();
+  }
+  const auto baseline = root.statistics().allocated_metadata_bytes;
+  // Exercise implicit source-root selection outside the construction scope.
+  for (unsigned abort_at = 0; abort_at <= 3; ++abort_at) {
+    unsigned calls = 0;
+    bool counted = true;
+    ps::FootprintLimits limits;
+    limits.consume_work = [&](auto) {
+      ++calls;
+      if (calls <= 3) {
+        const auto statistics = root.statistics();
+        const auto remaining = (3 - calls) * 2 * sizeof(ps::RegionDimension);
+        counted &= statistics.live[ps::ResourceKind::Metadata] -
+                       statistics.allocated_metadata_bytes ==
+                   remaining;
+      }
+      return calls == abort_at
+                 ? Status::failure(ps::ErrorCode::Cancelled, "stop tile cover")
+                 : Status::success();
+    };
+    {
+      auto covered = source.tile_cover({4, 4}, limits);
+      PS_CHECK(counted);
+      if (abort_at) {
+        PS_CHECK(calls == abort_at);
+        PS_CHECK(covered.status().code == ps::ErrorCode::Cancelled);
+      } else {
+        PS_REQUIRE_OK(covered);
+        PS_CHECK(calls >= 3);
+        PS_CHECK(covered.value().shape() == Point({4, 3}));
+        PS_CHECK(covered.value().element_count().value() == 2);
+        PS_CHECK(root.statistics().allocated_metadata_bytes ==
+                 root.statistics().live[ps::ResourceKind::Metadata]);
+      }
+    }
+    PS_CHECK(root.statistics().allocated_metadata_bytes == baseline);
+    PS_CHECK(root.statistics().live[ps::ResourceKind::Metadata] == baseline);
+  }
+  source = {};
+  PS_CHECK(root.statistics().allocated_metadata_bytes == 0);
+  return 0;
+}
+int metadata_admission() {
+  using ps::ResourceKind;
+  std::vector<Region> boxes;
+  for (std::uint64_t i = 0; i < 128; ++i)
+    boxes.emplace_back(std::vector<ps::RegionDimension>{{i, 1}});
+  ps::ResourceLimits limits;
+  limits.capacity[ResourceKind::Host] = 512;
+  limits.capacity[ResourceKind::Metadata] = 512;
+  ps::ResourceBudget small(limits);
+  {
+    auto failure = ps::ErrorCode::Ok;
+    ps::ResourceAllocationScope scope(small, &failure);
+    auto footprint = Footprint::from_regions({128}, boxes);
+    PS_CHECK(footprint.status().code == ps::ErrorCode::ResourceExhausted);
+    PS_CHECK(failure == ps::ErrorCode::ResourceExhausted);
+  }
+  for (auto live : small.statistics().live.values)
+    PS_CHECK(live == 0);
+  ps::ResourceBudget roomy;
+  Footprint retained;
+  {
+    ps::ResourceAllocationScope scope(roomy);
+    auto footprint = Footprint::from_regions({128}, boxes);
+    PS_REQUIRE_OK(footprint);
+    PS_CHECK(footprint.value().boxes().size() == 1);
+    PS_CHECK(footprint.value().element_count().value() == 128);
+    PS_CHECK(roomy.statistics().peak[ResourceKind::Metadata] >
+             roomy.statistics().live[ResourceKind::Metadata]);
+    PS_CHECK(roomy.statistics().allocated_metadata_bytes ==
+             roomy.statistics().live[ResourceKind::Metadata]);
+    const auto bytes = roomy.statistics().allocated_metadata_bytes;
+    retained = footprint.take_value();
+    auto alias = retained;
+    PS_CHECK(roomy.statistics().allocated_metadata_bytes == bytes);
+    bool complete_count = true;
+    PS_REQUIRE_OK(retained.visit(
+        [&](const auto&) {
+          complete_count &= roomy.statistics().allocated_metadata_bytes ==
+                            roomy.statistics().live[ResourceKind::Metadata];
+          return Status::success();
+        },
+        128));
+    PS_CHECK(complete_count);
+  }
+  PS_CHECK(roomy.statistics().allocated_metadata_bytes > 0);
+  std::thread release([value = std::move(retained)]() mutable { value = {}; });
+  release.join();
+  PS_CHECK(roomy.statistics().allocated_metadata_bytes == 0);
+  {
+    ps::ResourceAllocationScope scope(roomy);
+    auto a =
+        Footprint::from_regions({16}, {Region({{0, 2}}), Region({{6, 2}})});
+    auto b =
+        Footprint::from_regions({16}, {Region({{1, 2}}), Region({{9, 2}})});
+    PS_REQUIRE_OK(a);
+    PS_REQUIRE_OK(b);
+    auto joined = a.value().unite(b.value());
+    auto common = a.value().intersect(b.value());
+    auto difference = a.value().subtract(b.value());
+    PS_REQUIRE_OK(joined);
+    PS_REQUIRE_OK(common);
+    PS_REQUIRE_OK(difference);
+    PS_CHECK(roomy.statistics().allocated_metadata_bytes ==
+             roomy.statistics().live[ResourceKind::Metadata]);
+  }
+  PS_CHECK(roomy.statistics().allocated_metadata_bytes == 0);
+  for (auto live : roomy.statistics().live.values)
+    PS_CHECK(live == 0);
+  return 0;
+}
 }  // namespace
 int main() {
   PS_CHECK(exhaustive() == 0);
@@ -284,5 +418,7 @@ int main() {
   PS_CHECK(event_sort_limits() == 0);
   PS_CHECK(bounds() == 0);
   PS_CHECK(single_rectangle_limits() == 0);
+  PS_CHECK(metadata_admission() == 0);
+  PS_CHECK(tile_cover_metadata() == 0);
   return 0;
 }

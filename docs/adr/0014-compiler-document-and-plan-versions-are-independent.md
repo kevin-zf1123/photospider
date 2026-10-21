@@ -2,53 +2,42 @@
 
 - Status: Accepted
 
-## Current implementation: unified IR and v4 artifacts
+## Current implementation
 
-Package 0.38.0 uses `ValidatedIR` for every validated IR version. Optimization is optional; the planner accepts legal dependency paths and privately deduplicates repeated Call IDs. Explicit CFG loops retain activation semantics. Ordered named optimizer invocations produce validated immutable versions. Content identity excludes provenance. `.psir` and `.psxp` are format v4; versions 1–3 require re-export. Plans identify their actual input IR and import without optimizer/mapper/planner execution. See [current contracts](../development/Compiler-Version-Contract.md).
+Package 0.39.0 uses `ValidatedIR` for every validated IR version. Analysis, optional named optimization and named physical planning remain separate operations. Ordered Call IDs define retirement and effect order; task dependencies define issue order. The planner produces immutable physical Task/Tile/Call/Block tables. Explicit CFG loops retain activation semantics. See the [version contract](../development/Compiler-Version-Contract.md).
 
-The sections below record the original decision's separate version axes. Their historical stage-type examples have been superseded by the unified IR API; document, package, ABI and artifact versions remain independent.
+`.psir` and `.psxp` use format 5. Older artifacts require recompilation/re-export; there is no continuation Plan translation. Import validates the saved tables and rebinds static contracts/resources without running an optimizer, lowerer or planner. Device preparation is a later explicit operation.
 
-## 1. Core Summary (TL;DR)
+## 1. Core summary
 
-The compiler builds distinct immutable semantic, optimized, and physical-plan values from a versioned workflow document. Document schema, plugin ABI, package API, planner behavior, and daemon IPC versions describe different contracts. Keeping them separate avoids implying compatibility where none is promised.
+Document schema, operation declarations, plugin ABI, package API, artifact encoding and compiler identities describe different contracts. Changing one does not imply compatibility or a version change in the others. Optimization creates another immutable `ValidatedIR`; it is not a mandatory distinct public stage type.
 
-## 2. Mental Model & Intuition
+## 2. Stage and identity model
 
-```text
-WorkflowDocument -> SemanticGraphIR -> OptimizedGraphIR -> ExecutionPlan
-       |                    |                  |                |
- document schema       semantic digest    optimized digest   plan digest/key
-```
+Analysis produces validated source semantics. Optional named optimizers preserve required semantic order and return independently validated immutable versions. The planner accepts a legal validated version and records its actual input digest, execution mode, physical tables and selected returns. Planner name and version identify compilation diagnostics; planner selection remains a compilation option. The Plan stores the resulting physical contract rather than planner provenance.
 
-Each transition validates its input and returns a complete value or an error. The plan targets local capabilities; it does not contain a remote device handle. A frozen registry identity protects stage use at runtime but is not canonical semantic content.
+IR content identity excludes provenance such as parent version and transformation history. Plan identity includes the physical execution contract; changing `CpuExact` to `NativeGpu` changes identity even when the saved tasks are all CPU. Preparation binds concrete devices and kernels without changing Plan topology or identity.
 
-## 3. Formal Contracts & APIs
+## 3. Compatibility axes
 
-```cpp
-// Excerpt; compiler and value types are declared by the public headers.
-class Compiler {
- public:
-  Result<SemanticGraphIR> analyze(const GraphSnapshot&, ResourceSet) const;
-  Result<OptimizedGraphIR> optimize(const SemanticGraphIR&) const;
-  Result<ExecutionPlan> plan(const OptimizedGraphIR&, const PlanningOptions&) const;
-};
+| Axis | Current contract |
+| --- | --- |
+| WorkflowDocument schema | 7 |
+| Result schema encoding | 6 |
+| OperationTraits | 30 |
+| Operation module / fixed invocation C ABI | 8 / 8 |
+| Native kernel service | 2 |
+| IR / Plan artifact format | 5 / 5 |
+| Package / SOVERSION | 0.39.0 / 0.39 |
 
-struct SemanticGraphDigest { std::string value; };
-struct OptimizedGraphDigest { std::string value; };
-struct ExecutionPlanDigest { std::string value; };
-struct PlanCacheKey { std::string value; };
-```
+The compiler encodes closed document fields, normalized parameters, copied operation contracts, static specialization and declared resource identities in the applicable content domain. Physical identity additionally includes schemas, layouts, tiles, placements, tasks, adjacency, call membership, CFG, selections and reservation bounds.
 
-The current WorkflowDocument schema is 7, OperationTraits version is 29, package version is 0.37.0, and the operation-plugin C table is Result ABI 7. Digests identify canonical content in separate domains; the plan cache key identifies disposable derived lookup. The compiler encodes the closed document fields, normalized parameters, copied operation traits, static preparation identity fields, output/input demands, optimizer identity, and target capability facts in their corresponding stage domains.
+Each in-memory stage carries a private weak identity for its exact frozen operation registry. Optimizer, planner and execution preparation reject a foreign-registry stage even if keys match. This runtime identity, native addresses, allocation IDs, timings, cancellation, queue state and daemon identifiers are excluded from canonical digests and serialized data.
 
-Each stage also carries a private weak identity for the exact frozen operation registry; optimizer, planner, and executor reject a foreign-registry stage even if operation keys match. That runtime identity is excluded from canonical digests and serialized data. Runtime addresses, allocation IDs, timings, cancellation, queue state, and daemon identifiers are excluded. Float parameter identity preserves copied binary64 bits in fixed little-endian order, including signed zero and non-finite payloads accepted by schema validation.
+Float parameter identity preserves copied binary64 bits in fixed little-endian order, including signed zero and non-finite payloads accepted by schema validation. Callback addresses and opaque static-state pointers are excluded; their declared immutable contract/resource identities participate where specified.
 
-Thus sign-sensitive operations do not collide across semantic, optimized, plan, or cache identities. Static prepared state and library pointers remain outside digest bytes; their resolved metadata and declared workspace bounds participate where specified.
-
-The independent axes include WorkflowDocument schema, OperationTraits, operation-plugin C ABI, semantic IR, optimizer rules, physical planner, installed package/API, and daemon IPC. WorkflowDocument schema 7, OperationTraits 29, package 0.37.0, and Result ABI 7 identify their current contracts; changing one does not assert compatibility in another.
-
-Internal IR and plan objects are in-memory contracts, not daemon wire formats. Their registry identity prevents use with an incompatible frozen operation set. A matching cache key never replaces plan validation and stale checks. Embedding-provided cache hits are revalidated; malformed or stale entries become misses. See [Compiler and execution](../kernel-architecture/Compiler-and-Execution.md) for current identity fields and stage validation.
+Plans are validated in-memory values and versioned compiler artifacts, not daemon wire messages. A content digest identifies content, not trusted native code. Source-bound Plans retain graph-currentness checks; standalone imported Plans are source independent. Saving a Plan never saves Run state, payload caches or device handles.
 
 ## 4. Consequences
 
-Consumers must version each public boundary they actually expose and rebuild disposable plans when source, traits, rules, or target capabilities change. A stale or invalid cache entry is rejected or treated as a miss. Package API changes can be breaking even when workflow schema is unchanged.
+Consumers version each boundary they expose and recompile derived Plans when source semantics, operation contracts, planner behavior or selected placement changes. A saved artifact must pass bounded parsing, structural validation and contract linking before preparation. Package changes may break consumers while workflow schema remains unchanged. This decision does not grant cross-version ABI or artifact compatibility.

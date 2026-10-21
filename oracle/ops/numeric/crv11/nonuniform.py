@@ -158,8 +158,13 @@ def reference(kernel,xt,vt,boundary,radius_raw,parameter_raw,beta_raw,x_raw,y_ra
     pieces = [partition(x,y,center,radius,boundary) for center in x]
     results = [None]*len(x)
     for i,p in enumerate(pieces):
-        if all(v==y_raw[0] for v in y_raw) and (boundary!=2 or not y_raw[0]):
-            results[i] = y_raw[0]
+        # Reconstruct raw-word labels separately to detect identical endpoint
+        # bits on the actual support, including virtual +0 extensions. Numeric
+        # Fraction reconstruction alone loses the sign of a local -0 constant.
+        raw_pieces = partition(x,y_raw,x[i],radius,boundary)
+        constant = raw_pieces[0][2]
+        if all(row[3] == 0 and row[2] == constant for row in raw_pieces):
+            results[i] = int(constant)
         else:
             exact = paired(p)
             if exact is not None:
@@ -212,6 +217,10 @@ def cases():
         # Collinear insertion changes the partition but not the reconstructed function.
         for x,y in (([0,F(3,4),2],[1,F(5,2),5]),([0,F(1,2),F(3,4),1,2],[1,2,F(5,2),3,5])):
             yield kernel,3,3,0,bits(F(1,2)),bits(1 if kernel==4 else F(1,4)),bits(3),[bits(v) for v in x],[bits(v) for v in y]
+        # Local -0 support must retain its sign even with distant nonzero data.
+        for vt in (3,4):
+            negative_zero = 1 << (31 if vt == 4 else 63)
+            yield kernel,3,vt,1,bits(F(1,4)),bits(1 if kernel==4 else F(1,4)),bits(2),[bits(i) for i in range(5)],[bits(1,vt),negative_zero,negative_zero,negative_zero,bits(1,vt)]
         # Periodic reconstructed quarter-wave response and a narrow irregular hat.
         yield kernel,3,3,3,bits(2),bits(1 if kernel==4 else F(1,4)),bits(2),[bits(i) for i in range(9)],[bits(v) for v in (0,1,0,-1,0,1,0,-1,0)]
         yield kernel,3,3,2,bits(F(1,8)),bits(1 if kernel==4 else F(3)),bits(2),[bits(v) for v in (0,F(2)**-20,F(1,2),3)],[bits(v) for v in (0,1,0,0)]

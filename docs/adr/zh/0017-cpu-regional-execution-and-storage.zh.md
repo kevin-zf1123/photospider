@@ -1,6 +1,7 @@
 # ADR 0017：以有界 CPU 存储执行区域工作
 
 - 状态：Accepted
+- 实现边界（2026-10-20）：Tile 几何与有界资源目标保持；下文 continuation、polling、shared-stage 和 publication-grant 执行为历史记录。Package 0.39 使用固定 task、私有 SSA 中间值、显式 COPY 与完整 block admission 替代，参见[物理 Plan 契约](../../kernel-architecture/zh/Compiler-and-Execution.zh.md)。
 - 英文权威文档：[English](../0017-cpu-regional-execution-and-storage.md)
 
 ## 1. 核心摘要

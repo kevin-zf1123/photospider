@@ -36,21 +36,24 @@ inline Result<WorkflowNode> node(std::uint64_t id, bool pchip, WorkflowInput x,
  * InvalidArgument/InvalidDomain/Schema; incompatible edge metadata fails
  * TypeMismatch.
  *
- * Each nonempty request runs a shared stage that acquires all input tensors,
- * validates global topology and all query controls, then publishes the complete
- * dense output with source ObjectId association. Empty reads no payload. Legal
- * source strides/offsets are supported; output ownership survives context
- * teardown. Promoted inputs use 16*K element bytes plus overhead, and complete
- * input/output storage consumes managed capacity/work.
+ * Each selected output tile runs one fixed task with complete x/y reads and
+ * the matching query interval, closed through each source grid. Only selected
+ * global outputs are computed and allocated. Scratch is one invocation-private
+ * preallocated ExactCurve arena; no promoted x/y arrays are retained. Empty
+ * reads no payload. Legal immutable signed/zero strides and unaligned offsets
+ * follow compiled views; output owners survive context teardown. Rebinding
+ * shares immutable preparation without retaining numerical state or cache IDs.
  *
  * Strict rounds the complete expression once. Accelerated follows the shared
  * FP32 bound and retains the monotone inverse mapping. Knot/clamp conversion
  * preserves x's zero sign; other exact zero is +0 and underflow preserves sign.
- * Dynamic topology/query errors use OperationFailed/InvalidDomain/Domain/Run;
- * final x overflow uses ArithmeticOverflow. Undelivered positions can fail.
- * Unused endpoint narrowing does not reject a finite root. Any input edit
- * invalidates complete output. Cancellation/resource/upstream failures retain
- * categories; failure publishes no partial Result.
+ * Global finite x/y, strict x ordering and strict y monotonicity are caller
+ * preconditions. Consumed queries must be finite and in domain under Reject;
+ * selected outputs must be representable. No numerical validation diagnostic
+ * is promised. Internal exact-arithmetic capacity guards remain. Cancellation,
+ * resources and upstream failures retain their categories; failed calls expose
+ * no partial public Result. Unreturned endpoint conversion does not invalidate
+ * a finite root.
  */
 inline Result<WorkflowNode> invert_linear_node(
     std::uint64_t id, WorkflowInput x, WorkflowInput y, WorkflowInput query,
@@ -61,16 +64,16 @@ inline Result<WorkflowNode> invert_linear_node(
                                     std::move(query), dtype, policy, profile);
 }
 /** @brief Inverts the original exact PCHIP polynomial with one final rounding.
- * Shares invert_linear_node's interface, global validation, errors and owners.
- * It does not swap x/y and fit a new curve. Exact destination lattice and
- * midpoint sign tests include zero-derivative, subnormal and overflow
+ * Shares invert_linear_node's interface, global topology preconditions and
+ * owners. It does not swap x/y and fit a new curve. Exact destination lattice
+ * and midpoint sign tests include zero-derivative, subnormal and overflow
  * boundaries. Accelerated Float32 uses certified bracketed iteration with
  * unique destination rounding; Float64 and unresolved cases use the strict
- * solver. Whole numerical/fallback diagnostics are unavailable. Exact collinear
- * stencils reduce to linear inversion, while knot/clamp conversions remain
- * exact. The combined mapping follows the same monotone inverse independently
- * of request order/partition. Host work/cancellation checks cover every root
- * comparison and limb multiplication; no approximate result replaces
+ * solver. Per-value numerical/fallback diagnostics are unavailable. Exact
+ * collinear stencils reduce to linear inversion, while knot/clamp conversions
+ * remain exact. The combined mapping follows the same monotone inverse
+ * independently of request order/partition. Cancellation checks cover every
+ * root comparison and limb multiplication; no approximate result replaces
  * exhaustion.
  */
 inline Result<WorkflowNode> invert_pchip_node(

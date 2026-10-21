@@ -29,8 +29,6 @@ void repeated_tensor_shapes() {
   traits.outputs[0].output_schema = constraint;
   traits.outputs[0].output_schema.result_schema_id = "test.repeated";
   traits.outputs[0].output_schema.result_schema_version = 1;
-  traits.outputs[0].continuation_bytes = 1;
-  traits.outputs[0].maximum_dependency_stages = 1;
   traits.outputs[0].result_schema = schema;
   auto resolved = take(resolve_operation_traits(traits, 2, {}));
   OperationMetadata first, second;
@@ -45,36 +43,7 @@ void repeated_tensor_shapes() {
       !different.ok() && different.status().code == ErrorCode::TypeMismatch,
       "repeated Result inputs include batch axes in homogeneous logical shape");
 }
-ValidationDefinition gain_validator(bool loose) {
-  ValidationDefinition validator;
-  validator.identity = {loose ? "test.gain.loose" : "test.gain.unit", 1,
-                        "gain/1"};
-  validator.prepare = [](const ValidationPreparation& preparation)
-      -> Result<std::shared_ptr<const void>> {
-    const auto& tensors = preparation.schema.tensors;
-    if (tensors.size() != 3 || tensors[2].key != "gain" ||
-        tensors[2].descriptor.element_type != ElementType::Float32 ||
-        tensors[2].sample_shape() != std::vector<std::uint64_t>{1})
-      return Result<std::shared_ptr<const void>>(
-          Status{ErrorCode::TypeMismatch, "expected named scalar"});
-    return Result<std::shared_ptr<const void>>(std::shared_ptr<const void>{});
-  };
-  validator.validate = [loose](const void*, const ValidationContext& context) {
-    auto window = context.acquire_tensor(2, Region::whole({1}));
-    if (!window.ok())
-      return window.status();
-    auto row = window.value().row_run({0});
-    if (!row.ok())
-      return row.status();
-    float value = 0;
-    std::memcpy(&value, row.value().data, sizeof(value));
-    return std::isfinite(value) && value >= 0 && value <= (loose ? 2 : 1)
-               ? Status::success()
-               : Status{ErrorCode::InvalidArgument, "invalid gain"};
-  };
-  return validator;
-}
-void scalar_prelude_workflows() {
+void named_scalar_workflows() {
   SchemaTemplate source_schema;
   source_schema.id = "test.scalar.members";
   for (const char* key : {"unused", "other", "gain"}) {
@@ -86,68 +55,56 @@ void scalar_prelude_workflows() {
   auto output_schema = source_schema;
   output_schema.tensors.resize(1);
   auto registry = std::make_shared<OperationRegistry>();
-  require(registry->register_validator(gain_validator(false)).ok(),
-          "unit gain validator");
-  require(registry->register_validator(gain_validator(true)).ok(),
-          "loose gain validator");
-  auto starts = std::make_shared<int>(0);
-  auto producer_starts = std::make_shared<int>(0);
-  for (int profile = 0; profile < 5; ++profile) {
+  auto consumers = std::make_shared<std::atomic<unsigned>>(0);
+  auto producers = std::make_shared<std::atomic<unsigned>>(0);
+  for (unsigned profile = 0; profile < 4; ++profile) {
+    const bool consumer = profile == 0;
     OperationDefinition operation;
-    operation.key = profile == 0   ? "test.scalar.consumer"
+    operation.key = consumer       ? "test.scalar.consumer"
                     : profile == 1 ? "test.scalar.nan"
                     : profile == 2 ? "test.scalar.range"
-                    : profile == 3 ? "test.scalar.valid"
-                                   : "test.scalar.loose";
-    auto& traits = operation.traits;
-    const bool consumer = profile == 0 || profile == 4;
-    traits.input_count = consumer ? 2 : 0;
-    traits.input_schema.clear();
+                                   : "test.scalar.valid";
+    operation.traits.input_count = consumer ? 2 : 0;
+    operation.traits.requires_metadata_specialization = consumer;
     if (consumer) {
-      OperationPortConstraint constraint;
-
-      constraint.tensor_key = "gain";
-      constraint.element_type = static_cast<uint32_t>(ElementType::Float32);
-      constraint.validators = {gain_validator(profile == 4).identity};
-      traits.input_schema = {constraint, constraint};
+      OperationPortConstraint port;
+      port.tensor_key = "gain";
+      port.element_type = static_cast<std::uint32_t>(ElementType::Float32);
+      port.rank = 1;
+      operation.traits.input_schema = {port, port};
+      operation.specialize_metadata = [output_schema](const auto& inputs,
+                                                      const auto&)
+          -> Result<std::vector<OperationOutputSpecialization>> {
+        for (const auto& input : inputs) {
+          const auto& tensors = input.result_schema->tensors;
+          if (tensors.size() != 3 || tensors[2].key != "gain" ||
+              tensors[2].sample_shape() != std::vector<std::uint64_t>{1})
+            return Result<std::vector<OperationOutputSpecialization>>(
+                {ErrorCode::TypeMismatch, "named scalar shape"});
+        }
+        OperationOutputSpecialization output;
+        output.metadata.result_schema =
+            std::make_shared<const SchemaTemplate>(output_schema);
+        return Result<std::vector<OperationOutputSpecialization>>(
+            std::vector<OperationOutputSpecialization>{std::move(output)});
+      };
     }
-    auto& output = traits.outputs[0];
-
-    output.output_schema.result_schema_id = "test.scalar.members";
+    auto& output = operation.traits.outputs[0];
+    output.output_schema.result_schema_id = source_schema.id;
     output.output_schema.result_schema_version = 1;
     output.result_schema = consumer ? output_schema : source_schema;
     output.input_indices =
-        consumer ? std::vector<uint32_t>{0} : std::vector<uint32_t>{};
-    output.continuation_bytes = sizeof(ScalarPreludeState);
-    output.maximum_dependency_stages = 2;
-    if (consumer) {
-      operation.map_dependencies = [](const ResultStaticQuery&) {
-        ResultStaticMapping mapping;
-        mapping.inputs.push_back(
-            {0, 2, false, take(TileSet::range(ResourceBudget{}, 0, 1))});
-        return Result<ResultStaticMapping>(std::move(mapping));
-      };
-    }
-    operation.start_result = [consumer, starts, producer_starts, profile](
-                                 const ResultProgramQuery&,
-                                 const BufferAllocator& allocator) {
-      if (!consumer)
-        ++*producer_starts;
-      return ResultContinuation::make<ScalarPreludeState>(
-          allocator, consumer,
-          profile == 1   ? std::numeric_limits<float>::quiet_NaN()
-          : profile == 2 ? 1.5F
-                         : .5F,
-          starts.get());
-    };
-    require(registry->register_operation(std::move(operation)).ok(),
-            "scalar fixture registration");
+        consumer ? std::vector<std::uint32_t>{0} : std::vector<std::uint32_t>{};
+    install_scalar_member(operation, consumer,
+                          profile == 1 ? std::numeric_limits<float>::quiet_NaN()
+                          : profile == 2 ? 1.5F
+                                         : .5F,
+                          consumer ? consumers : producers);
+    auto registered = registry->register_operation(std::move(operation));
+    require(registered.ok(), registered.message.c_str());
   }
-  require(registry->freeze().ok(), "scalar fixture freeze");
-  ExecutionContextConfig config;
-  config.managed_resources = ResourceLimits{};
-  config.result_cache_bytes = 4096;
-  ExecutionContext context(registry, config);
+  require(registry->freeze().ok(), "scalar registry freeze");
+  ExecutionContext context(registry);
   auto root = take(context.resource_budget());
   const auto binding = [&](float value) {
     auto builder =
@@ -155,28 +112,20 @@ void scalar_prelude_workflows() {
     auto buffer = take(root.allocator().allocate(sizeof(value)));
     std::memcpy(buffer.data(), &value, sizeof(value));
     auto storage = std::move(buffer).freeze();
-    for (uint32_t slot = 0; slot < 3; ++slot)
+    for (std::uint32_t member = 0; member < 3; ++member)
       require(builder
-                  .publish_tensor(slot, Region::whole({1}), {0, {INT64_MIN}},
+                  .publish_tensor(member, Region::whole({1}), {0, {INT64_MIN}},
                                   storage)
                   .ok(),
-              "scalar signed singleton source");
-    ExecutionBinding input;
-    input.name = "control";
-    input.result = take(builder.seal());
-    return input;
+              "signed singleton source");
+    return ExecutionBinding{"control", take(builder.seal())};
   };
-  auto external = binding(.5F);
   auto ignored = binding(std::numeric_limits<float>::quiet_NaN());
   ignored.name = "ignored";
   WorkflowDocument direct;
-  for (uint64_t id : {1, 2}) {
-    WorkflowInputDeclaration declaration;
-    declaration.id = id;
-    declaration.name = id == 1 ? "control" : "ignored";
-    declaration.result_schema = std::make_shared<SchemaTemplate>(source_schema);
-    direct.inputs.push_back(declaration);
-  }
+  direct.inputs = {
+      {1, "control", std::make_shared<SchemaTemplate>(source_schema)},
+      {2, "ignored", std::make_shared<SchemaTemplate>(source_schema)}};
   direct.nodes = {{91,
                    "test.scalar.consumer",
                    {WorkflowInputReference{1}, WorkflowInputReference{2}},
@@ -184,142 +133,49 @@ void scalar_prelude_workflows() {
   direct.outputs = {{"out", 91, "value"}};
   GraphContext graph(direct);
   auto plan = take(Compiler(registry).compile(graph)).plan.value();
-  auto success = context.execute(plan, {{external, ignored}});
-  require(
-      success.ok() && *starts == 1,
-      "selected named scalar is ready before consumer data poll and excluded "
-      "NaN is not read");
-  auto record = take(success.value().dependencies.tile_record({0, 0, 0}));
-  require(
-      record && record->inputs.size() == 1 &&
-          record->inputs[0].tensor_slot == 2 &&
-          record->inputs[0].tiles.size() == 1 &&
-          std::get<PlanWorkflowInput>(record->inputs[0].producer)
-                  .declaration_index == 0,
-      "selected scalar records its named member and excludes the unused port");
-  {
-    auto cached_config = config;
-    cached_config.result_cache_bytes = 4096;
-    ExecutionContext cached(registry, cached_config);
-    auto cached_root = take(cached.resource_budget());
-    ExecutionBindings inputs;
-    for (const char* name : {"control", "ignored"}) {
-      auto builder = take(ResultBuilder::start(cached_root, source_schema,
-                                               "scalar.cache.source"));
-      const float number = .5F;
-      for (uint32_t slot = 0; slot < 3; ++slot)
-        require(builder
-                    .publish_tensor(
-                        slot, Region::whole({1}),
-                        ByteView(reinterpret_cast<const uint8_t*>(&number), 4))
-                    .ok(),
-                "cached scalar source");
-      inputs.inputs.push_back({name, take(builder.seal())});
-    }
-    {
-      auto seed = cached.execute(plan, inputs);
-      require(seed.ok() && cached.cache_statistics().entries == 1,
-              "scalar completed Result retention");
-    }
-    ExecutionOptions limited;
-    limited.maximum_dependency_cache_work = 0;
-    uint64_t lower = 0, upper = 4096;
-    while (lower + 1 < upper) {
-      const auto middle = lower + (upper - lower) / 2;
-      limited.maximum_dependency_work = middle;
-      auto attempted = cached.execute(plan, inputs, {}, limited);
-      if (attempted.ok()) {
-        upper = middle;
-      } else {
-        require(attempted.status().code == ErrorCode::ResourceExhausted,
-                "scalar Run admission boundary");
-        lower = middle;
-      }
-    }
-    // Ordinary Run identities have variable-length metadata. Keep bounded
-    // headroom instead of assuming every later Run has the same exact cost.
-    limited.maximum_dependency_work = upper + 128;
-    for (uint64_t fuel : {8U, 64U, 128U, 256U, 512U, 1024U, 2048U}) {
-      limited.maximum_dependency_cache_work = fuel;
-      auto completed = cached.execute(plan, inputs, {}, limited);
-      if (!completed.ok())
-        std::cerr << "cache fuel=" << fuel
-                  << " Run quota=" << limited.maximum_dependency_work
-                  << " status="
-                  << static_cast<unsigned>(completed.status().code)
-                  << " reason="
-                  << static_cast<unsigned>(completed.status().reason)
-                  << " message=" << completed.status().message << '\n';
-      require(completed.ok(),
-              "optional cache miss restores scalar prelude with bounded Run "
-              "quota");
-    }
+  const auto& physical = plan.program();
+  require(physical.tasks.size() == 1 && physical.tasks[0].reads.size() == 1 &&
+              physical.tasks[0].reads[0].port == 0 &&
+              physical.tiles[physical.tasks[0].reads[0].tile].member == 2 &&
+              physical.values[physical.inputs[1]].tiles.empty(),
+          "named scalar fixes one member read and excludes the other port");
+  const auto check_bits = [](const ExecutionResult& result, float expected) {
+    const auto& output = result.results.at("out");
+    float actual = 0;
+    require(
+        output.read_tensor(take(output.descriptor()), 0, {0}, &actual, 4).ok(),
+        "scalar result read");
+    require(std::memcmp(&actual, &expected, 4) == 0,
+            "named scalar preserves sample bits");
+  };
+  for (float value : {.5F, 1.5F, std::numeric_limits<float>::quiet_NaN()}) {
+    const auto before = consumers->load();
+    auto result =
+        take(multi_result::run(context, plan, {{binding(value), ignored}}));
+    check_bits(result, value);
+    require(consumers->load() == before + 1,
+            "each binding executes its consumer");
   }
-  auto warm = context.execute(plan, {{external, ignored}});
-  require(warm.ok(), "cached Result scalar consumer remains valid");
-  const auto before = *starts;
-  for (float number : {std::numeric_limits<float>::quiet_NaN(), 1.5F}) {
-    auto invalid = context.execute(plan, {{binding(number), ignored}});
-    require(!invalid.ok() &&
-                invalid.status().code == ErrorCode::InvalidArgument &&
-                invalid.status().detail.input_id == 1 &&
-                invalid.status().detail.origin == FailureOrigin::Domain &&
-                *starts == before,
-            "bad direct named scalar reports input origin and never enters "
-            "consumer data poll");
-  }
-  for (const char* key : {"test.scalar.nan", "test.scalar.range"}) {
+  const char* names[] = {"test.scalar.nan", "test.scalar.range",
+                         "test.scalar.valid"};
+  const float values[] = {std::numeric_limits<float>::quiet_NaN(), 1.5F, .5F};
+  for (unsigned profile = 0; profile < 3; ++profile) {
     auto computed = direct;
     computed.inputs.erase(computed.inputs.begin());
     computed.nodes = {
-        {70, key, {}, {}},
+        {70, names[profile], {}, {}},
         {91,
          "test.scalar.consumer",
          {WorkflowNodeOutput{70, "value"}, WorkflowInputReference{2}},
          {}}};
     GraphContext computed_graph(computed);
-    auto computed_plan =
-        take(Compiler(registry).compile(computed_graph)).plan.value();
-    auto invalid = context.execute(computed_plan, {{ignored}});
-    require(!invalid.ok() &&
-                invalid.status().code == ErrorCode::OperationFailed &&
-                invalid.status().detail.node_id == 70 &&
-                invalid.status().detail.origin == FailureOrigin::Domain &&
-                *starts == before,
-            "bad computed named scalar reports upstream origin and never "
-            "enters consumer data poll");
+    auto compiled = take(Compiler(registry).compile(computed_graph));
+    const auto before = producers->load();
+    auto result = take(multi_result::run(context, *compiled.plan, {{ignored}}));
+    check_bits(result, values[profile]);
+    require(producers->load() == before + 1,
+            "only the selected producer member executes");
   }
-  auto shared = direct;
-  shared.inputs.erase(shared.inputs.begin());
-  shared.nodes = {{70, "test.scalar.range", {}, {}},
-                  {80,
-                   "test.scalar.loose",
-                   {WorkflowNodeOutput{70, "value"}, WorkflowInputReference{2}},
-                   {}},
-                  {91,
-                   "test.scalar.consumer",
-                   {WorkflowNodeOutput{70, "value"}, WorkflowInputReference{2}},
-                   {}}};
-  shared.outputs.push_back({"loose", 80, "value"});
-  auto shared_graph = std::make_shared<GraphContext>(shared);
-  auto shared_plan =
-      take(Compiler(registry).compile(*shared_graph)).plan.value();
-  auto run_plan = shared_plan;
-  ExecutionBindings run_bindings = {{ignored}};
-  auto warm_source = context.execute_fragments(
-      run_plan, run_bindings,
-      {{"loose", TileRequest{{{0, take(TileSet::range(root, 0, 1))}}}}});
-  require(warm_source.ok(),
-          "unbounded producer can publish a value valid for a looser consumer");
-  const auto produced = *producer_starts, consumed = *starts;
-  auto restricted = context.execute_fragments(
-      run_plan, run_bindings,
-      {{"out", TileRequest{{{0, take(TileSet::range(root, 0, 1))}}}}});
-  require(!restricted.ok() &&
-              restricted.status().code == ErrorCode::OperationFailed &&
-              restricted.status().detail.node_id == 70 &&
-              *producer_starts == produced && *starts == consumed,
-          "cached completed producer is revalidated per consumer before start");
   auto wrong_metadata = direct;
   auto wrong_schema = std::make_shared<SchemaTemplate>(source_schema);
   wrong_schema->tensors[2].descriptor.shape = {2};
@@ -327,8 +183,7 @@ void scalar_prelude_workflows() {
   GraphContext wrong_graph(wrong_metadata);
   auto refused = Compiler(registry).compile(wrong_graph);
   require(!refused.ok() && refused.status().code == ErrorCode::TypeMismatch,
-          "excluded runtime input still receives full static scalar metadata "
-          "validation");
+          "excluded payload still has its static scalar metadata checked");
 }
 void foundation_tensor_workflows() {
   Driver driver;
@@ -338,7 +193,7 @@ void foundation_tensor_workflows() {
   document.outputs = {{"number", 1, "value"}, {"alias", 2, "value"}};
   auto graph = std::make_shared<GraphContext>(document);
   auto compiled = take(Compiler(driver.registry).compile(*graph));
-  auto output = take(driver.context->execute(compiled.plan.value()));
+  auto output = take(multi_result::run(*driver.context, compiled.plan.value()));
   auto number = output.results.at("number");
   auto alias = output.results.at("alias");
   auto source_window = take(
@@ -349,10 +204,10 @@ void foundation_tensor_workflows() {
   const auto last = take(view_window.row_run({0}));
   double value = 0;
   std::memcpy(&value, last.data, sizeof(value));
-  require(value == 2.5 && first.data == last.data &&
-              source_window.storage_owner_token() ==
+  require(value == 2.5 && first.data != last.data &&
+              source_window.storage_owner_token() !=
                   view_window.storage_owner_token(),
-          "public constant to identity workflow publishes Result tensor views");
+          "public identity COPY owns independent output storage");
   {
     SchemaTemplate schema;
     schema.id = "photospider.tensor";
@@ -372,6 +227,7 @@ void foundation_tensor_workflows() {
     binding.name = "samples";
     binding.result = take(builder.seal());
     PlanningOptions planning;
+    planning.planner = "broadcast-inputs";
     const auto planned_grid =
         take(TileGrid::from_tensor(spec, planning.tile_extent));
     const auto last_tile = planned_grid.tile_count() - 1;
@@ -380,22 +236,27 @@ void foundation_tensor_workflows() {
     auto run =
         driver.prepare("core.identity", {binding}, {}, "value", planning);
     ResultRef identity;
-    const auto& grid = run.plan.steps()[0].tile_grids[0];
+    const auto& grid = run.plan.output("out").tile_grids[0];
     const auto tile = grid.tile_count() - 1;
     const auto selected_region = take(grid.region(tile));
-    auto selected_plan = take(run.plan.tile_plan(
-        "out", {{{0, take(TileSet::range(driver.root, tile, tile + 1))}}}));
-    auto result = driver.context->execute(selected_plan, run.bindings);
+    TileRequest selected_request;
+    selected_request.members.emplace(
+        0, take(TileSet::range(driver.root, tile, tile + 1)));
+    auto selected_plan =
+        take(run.plan.select_outputs({{"out", selected_request}}));
+    auto result =
+        multi_result::run(*driver.context, selected_plan, run.bindings);
     require(result.ok(), result.status().message.c_str());
     identity = result.value().results.at("out");
     auto window = take(identity.acquire_tensor(take(identity.descriptor()), 0,
                                                selected_region));
     require(
         *take(window.row_run({UINT64_MAX - 2})).data == 0x72 &&
-            window.storage_owner_token() == storage.get() &&
+            window.storage_owner_token() != storage.get() &&
             take(identity.descriptor()).tensor_coverage(0) ==
                 take(Footprint::from_regions({UINT64_MAX}, {selected_region})),
-        "Result identity preserves huge broadcast owner and exact sparse ROI");
+        "COPY materializes the exact sparse ROI from a huge broadcast "
+        "source");
   }
   SchemaTemplate huge;
   huge.id = "photospider.tensor";
@@ -416,6 +277,7 @@ void foundation_tensor_workflows() {
   binding.name = "samples";
   binding.result = take(builder.seal());
   PlanningOptions planning;
+  planning.planner = "broadcast-inputs";
   const auto planned_grid =
       take(TileGrid::from_tensor(member, planning.tile_extent));
   const auto last_tile = planned_grid.tile_count() - 1;
@@ -423,13 +285,18 @@ void foundation_tensor_workflows() {
       {{0, take(TileSet::range(driver.root, last_tile, last_tile + 1))}}};
   auto prepared =
       driver.prepare("core.identity", {binding}, {}, "value", planning);
-  require(prepared.plan.steps()[0].tile_grids[0].tile_count() ==
+  require(prepared.plan.output("out").tile_grids[0].tile_count() ==
               planned_grid.tile_count(),
           "planning a sparse request preserves the complete logical grid");
-  auto huge_output = driver.context->execute_fragments(
-      prepared.plan, prepared.bindings,
-      {{"out", TileRequest{{{0, take(TileSet::range(driver.root, last_tile,
-                                                    last_tile + 1))}}}}});
+  TileRequest selected_request;
+  selected_request.members.emplace(
+      0, take(TileSet::range(driver.root, last_tile, last_tile + 1)));
+  auto selected =
+      take(prepared.plan.select_outputs({{"out", selected_request}}));
+  auto loaded = take(CompilerArtifact::import_plan(
+      driver.registry, take(CompilerArtifact::export_plan(selected))));
+  auto huge_output =
+      multi_result::run(*driver.context, loaded, prepared.bindings);
   require(huge_output.ok(), huge_output.status().message.c_str());
   auto result = huge_output.value().results.at("out");
   uint8_t byte = 0;
@@ -438,18 +305,17 @@ void foundation_tensor_workflows() {
                   .ok() &&
               byte == 0x5a,
           "huge rank2 Result identity reads a representable source span");
-  auto record =
-      take(huge_output.value().dependencies.tile_record({0, 0, 0, last_tile}));
-  require(record && record->inputs.size() == 1 &&
-              record->inputs[0].tiles.size() == 1 &&
-              record->inputs[0].tiles.contains(last_tile),
-          "nonspatial huge tensor records its selected tile dependency");
+  const auto& program = loaded.program();
+  require(
+      program.tasks.size() == 1 && program.tasks[0].reads.size() == 1 &&
+          program.tiles[program.tasks[0].reads[0].tile].tile_index == last_tile,
+      "huge tensor has one statically declared source tile");
 }
 }  // namespace
 int main() {
   try {
     repeated_tensor_shapes();
-    scalar_prelude_workflows();
+    named_scalar_workflows();
     foundation_tensor_workflows();
     return 0;
   } catch (const std::exception& error) {

@@ -1,10 +1,11 @@
 # ADR 0021: Route Named Results Independently
 
 - Status: Accepted
+- Implementation boundary (2026-10-20): Named output/schema semantics remain. The PlanStep/instruction and storage-reuse descriptions below are historical. Package 0.39 preserves semantic calls in physical Call records, executes selected Task/Tile closure and publishes independent owning Results without a legacy Plan table; see [multiple outputs](../kernel-architecture/Multi-Output-Operations.md) and the [physical Plan contract](../kernel-architecture/Compiler-and-Execution.md).
 - Reader mirror: [Chinese](zh/0021-independent-node-results.zh.md)
-- Current boundary: per-output facet sets of the original decision are superseded; each output carries a resolved structural Result schema. See [Data Model](../kernel-architecture/Data-Model.md), [Structured Results and tensor slots](../kernel-architecture/Global-Results.md), and [Tensor descriptions](../kernel-architecture/Tensor-Semantic-Metadata.md).
+- Historical boundary: per-output facet sets of the original decision are superseded; each output carries a resolved structural Result schema. See [Data Model](../kernel-architecture/Data-Model.md), [Structured Results and tensor slots](../kernel-architecture/Global-Results.md), and [Tensor descriptions](../kernel-architecture/Tensor-Semantic-Metadata.md).
 
-## Current implementation: declarations and static instructions
+## Historical implementation: declarations and static instructions
 
 The static compiler preserves every call and output declaration, including unused
 siblings. `ExecutionPlan::steps()` is the complete physical contract table;

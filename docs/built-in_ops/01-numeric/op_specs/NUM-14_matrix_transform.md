@@ -51,7 +51,7 @@ All floating inputs may contain NaN/Inf. For an output row, source NaN priority
 is vectors[c] by increasing c, then the selected matrix row by increasing c,
 then bias[r]. Quiet the first source NaN with its sign/payload preserved. This
 priority precedes newly generated exceptional values and does not short-circuit
-required reads or typed validation.
+declared input dependencies.
 
 With no source NaN, any zero-times-infinity product yields the fixed positive
 quiet NaN. Otherwise classify each product using operand sign XOR and exact
@@ -66,20 +66,11 @@ Final floating overflow is the correctly signed infinity, a successful result.
 Fixed NaN patterns and floating-environment restoration follow
 [NUM-04](NUM-04_unary_contract.md).
 
-## complete-input demand and invalidation
+## Fixed task dependencies
 
-All profiles use the `WholeTensorProgram` Result path. Every nonempty request
-requires ordinary payload tile Needs for all three complete
-inputs, then computes one complete dense output. Sparse or partial consumers
-receive a projection of that output. Empty requests read no payload and perform
-no matrix arithmetic.
+Each requested output tile lowers to one CPU task. Vectors contribute the matching prefix coordinates and every Cin component. Matrix contributes the selected output channel rows and all Cin columns; bias contributes the selected output channels. Each region is mapped through that input's own grid, so tile granularity may include additional samples. Zero coefficients preserve all declared vector dependencies. A partial channel request can omit matrix/bias tiles outside its selected rows.
 
-Any change to vectors, matrix or bias invalidates all observed output samples
-through the generic complete-input dependency mapping. There is no matrix-specific
-dependency mapping or partial failure atom.
-Zero coefficients do not remove input requirements. A failed invocation
-publishes no partial output. Published storage owns its lifetime independently
-of the execution context.
+Prepare validates the exact fixed read slots, output view, kernel contract and scratch size. Kernels borrow admitted affine inputs and write one separate preallocated dense output tile. Sparse selection computes only requested output tiles. Empty selection emits no tasks or payload reads. Failure discards unpublished writes after accepted callbacks return; successful Result owners survive the context.
 
 ## Algorithms, resources and errors
 
@@ -87,20 +78,16 @@ Use a bounded exact dot accumulator or certified equivalent for at most four
 products plus bias, with one final rounding. SIMD/FMA implementations require
 proof of this result, rather than substituting a different sequential rounding
 order. Work is O(number of vector instances * Cout * Cin), plus exact arithmetic.
-Account full input owners/materialization, full dense output, and one fixed
-callback workspace containing the block buffers and exact accumulator. Full
-output storage must fit the budget, even for a small nonempty consumer request.
+Block admission accounts selected dense output tiles and a fixed per-lane workspace containing batch buffers and the exact accumulator. Input owners remain retained through completion.
 
 Read arbitrary valid immutable source strides/offsets. Use host workers/budgets,
 check cancellation per processing block and arithmetic refinement, and release
 unpublished state on failure. No hidden GPU/Metal version or private thread pool
-is introduced. Platform-specific keys require their named CPU targets. Cache-off
-and result lifetime after context destruction follow the common owner rules.
+is introduced. Platform-specific keys require their named CPU targets. Result lifetime after context destruction follows the common owner rules.
 
 Compile/preflight rejects dtype mismatch, unsupported Cin/Cout, bad bias/matrix
 shape and logical vector count above 2^40. Singular matrices do not cause an
-error. Generic nonfinite results use the numeric table; typed/upstream/resource/
-cancellation failures retain Status categories, and a failed observation publishes
+error. Generic nonfinite results use the numeric table; structural/upstream/resource/cancellation failures retain Status categories, and a failed observation publishes
 no partial output.
 
 ## Acceptance and implementation status
@@ -111,10 +98,7 @@ are the oracle. Include rectangular 2->4 and 4->3 transforms, multiple batches,
 identity and singular matrices, cancellation after huge products, subnormals,
 all NaN priorities, 0*Inf, infinity cancellation and signed-zero terms.
 
-A partial component request must show complete-input support on all input ports and
-whole-observation invalidation for changes anywhere in those inputs. Check
-Empty, arbitrary direct-input strides/offsets, typed validation, metadata errors,
-low budgets, cancellation and owner lifetime through public execution.
+A partial component request must show the selected vector-prefix, matrix-row and bias-channel tile sets. Check empty selection, admitted affine strides/offsets, structural metadata errors, low budgets, cancellation, concurrent Runs and owner lifetime through public execution.
 
 ## Implementation and executable acceptance
 
@@ -124,32 +108,15 @@ the order `vectors`, `matrix`, `bias`; each edge has one tensor member under any
 member key. The output is the `values` Result with `photospider.tensor` schema
 and tensor member `samples`.
 
-Static preparation validates dtype, rank, component counts, shape agreement, and the 2^40 logical-count limit, then specializes the output schema. Rebinding values with unchanged schemas reuses the compiled preparation. Replacing the matrix during an open demand recomputes from the replacement samples.
+Metadata specialization validates dtype, rank, component counts, shape agreement and the 2^40 logical-count limit. The fixed kernel preparation owns immutable profile, Cin and tile-to-slot maps, reusable by concurrent Runs with independent bindings.
 
-`exact_dot.hpp` uses a host-owned 4352-bit accumulator in units of 2^-2148; at
-most four binary64 products plus bias require 4198 magnitude bits. No product
-is independently rounded. The complete-input kernel requests Data, Validation, and
-Descriptor  for each complete input, reads through authorized Result
-tensor windows, caches the small matrix and bias, traverses vectors in blocks
-of at most 64, and writes through one packed Result writer. It publishes a
-complete dense output before consumers project sparse or partial requests;
-Empty demand performs no matrix arithmetic. Source NaN classification follows
-the required input arrivals and cannot suppress an upstream source failure.
-Typed RGBA validation includes alpha and dirties every observed output.
+`exact_dot.hpp` uses a 4352-bit accumulator in units of 2^-2148; at most four binary64 products plus bias require 4198 magnitude bits. No product is independently rounded. Each task caches its selected matrix rows and bias in invocation scratch, gathers matching vectors in blocks of at most 64, and writes directly into its preallocated output tile. A task's local output component count can be 1..4 even though the complete Cout is 2..4. Global row selection and dense output offsets preserve the nonzero channel origin.
 
-Temporary acceptance should check negative, zero, and unaligned strides, shifted
-origins, all four caller and worker rounding modes, exception-flag restoration,
-exact callback work thresholds, low Payload capacity, actual computation
-cancellation, and final release of all Root resources. Retaining an output
-Result and read window charges the 16-byte Float64 output once; after Result
-release, the window remains readable, and releasing it returns Root usage to
-zero. Report the profiles actually exercised; output agreement does not establish
-individual Accelerate or SME hardware instruction dispatch.
+Temporary acceptance should compare against independent exact dot and bit-classification references. Cover rank 1/8, all Cin/Cout pairs, one-channel output tails, nonzero tile origins, batch/atomic input grids, negative/zero/unaligned admitted strides, caller/worker floating state, 64-vector batch tails, imported Plans, rejected malformed signatures and concurrent Runs. Report actual profiles separately from Accelerate or SME instruction dispatch.
 
 ## Apple matrix candidate backends
 
-The Apple profile reuses the complete matrix and bias within the complete-input callback
-and reads each vector once. Blocks contain at most 64 vectors, including a tail;
+The Apple profile reuses selected matrix rows and bias within each fixed invocation and reads each selected vector once. Blocks contain at most 64 vectors, including a tail;
 arbitrary valid direct-input strides and offsets are supported.
 
 For Float32, finite operands are promoted exactly to binary64. Candidate
@@ -179,16 +146,8 @@ Uncertain rounding, zero, extreme ranges and original nonfinite operands use
 Float32 results across channel subsets, block tails and Regions. Float64
 retains `ExactDot`; its inputs and outputs are never narrowed.
 
-`MatrixBlock` owns 8,640 bytes of fixed buffers inside the admitted callback
-workspace, alongside the exact accumulator. All profiles use this workspace.
-Packing, candidate and certificate work is precharged against the active managed
-resource scope; exact replay charges its own arithmetic work. Cancellation is
-checked around each block and during exact arithmetic. Resource/cancellation
-failures return directly and release unpublished output and scratch.
-
-Per-value numeric fallback/copy counters are unavailable on this path and must
-not be reported as measured zeros. Backend switches and
-optional feature configuration participate in cache build identity.
+`MatrixBlock` owns 8,640 bytes of fixed buffers inside preallocated invocation scratch, alongside the exact accumulator. All profiles use this workspace.
+Cancellation is checked before each batch, inside exact arithmetic and before return. Arithmetic checkpoints query cancellation without dynamic sample-work charging. Resource/cancellation failures release unpublished output after callbacks drain. Per-value fallback/copy counters are unavailable. Build configuration selects the candidate implementation without changing task topology or placement.
 
 Accelerate uses thread-local single-thread mode and restores the previous mode;
 caller floating state is scoped across packing, calculation and certification.
@@ -207,7 +166,7 @@ See [Apple's SME platform notes](https://github.com/apple-oss-distributions/xnu/
 and [Arm ACLE streaming/ZA rules](https://arm-software.github.io/acle/main/acle.html).
 The implementation preserves `-fno-fast-math -frounding-math -ffp-contract=off`.
 
-Create temporary public Result checks for shape, exact values, typed validation, Empty, resource limits, cancellation, preparation reuse and escaped-owner lifetime. Compare matrix formulas against independent exact dot products. Benchmarking, when needed for a change, must report its measured scope separately from numerical acceptance.
+Create temporary public Result checks for shape, exact values, structural validation, empty selection, resource limits, cancellation, preparation reuse and escaped-owner lifetime. Compare matrix formulas against independent exact dot products. Benchmarking, when needed for a change, must report its measured scope separately from numerical acceptance.
 
 The Fraction oracle independently checks exact dot products and source-NaN
 priority. These checks are correctness samples, not

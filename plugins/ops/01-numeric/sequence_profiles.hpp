@@ -11,7 +11,7 @@ Status sequence_profile_available(SequenceProfile profile);
 const char* sequence_implementation();
 /** Multiplies 68 limbs by a small exact factor, using supplied product scratch.
  * Requires a successful capability check before entering the selected ISA.
- * Scratch holds 68 uint64 products and belongs to the host continuation.
+ * Scratch holds 68 uint64 products in caller-owned arithmetic state.
  */
 void sequence_multiply(core_internal::ExactBinarySum* value,
                        std::uint32_t factor, SequenceProfile profile,

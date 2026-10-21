@@ -13,7 +13,7 @@
 #include "photospider/core/status.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
-// Accounted as part of ExpressionEvaluator's continuation. Four samples cover
+// Stored in ExpressionEvaluator's invocation scratch. Four samples cover
 // two NEON vectors or one AVX2 vector. Intervals enclose the stepwise RN64 AST,
 // not an exact-real reassociation of the whole source expression.
 struct AcceleratedExpression final {
@@ -30,7 +30,7 @@ struct AcceleratedExpression final {
                   const std::function<Status(std::uint64_t)>& consume,
                   bool environment_established = false) {
     using K = ExpressionKind;
-    // Whole callers may hold the environment across all coordinate/AST batches.
+    // Callers may hold the environment across all coordinate/AST batches.
     std::optional<plugin_internal::FloatingEnvironment> environment;
     if (!environment_established)
       environment.emplace();

@@ -122,17 +122,21 @@ inline Result<BakedLut1d> interpolation(WorkflowDocument& document,
  * @note Construction reads no payload, freezes nothing and writes no files.
  * Runtime obeys expanded source contracts: output values[count] or [count,C]
  * and axis:Float64[3], independently demanded, immutable owners after context
- * teardown and source-specific finite/grid/domain/rounding rules. Nonempty
- * values executes complete Whole source outputs, even for sparse demand.
- * Interpolation materializes the full Float64 query array and full table.
- * Active inputs retain complete typed/source validation; numeric failures have
- * Run scope;
- * their edits invalidate output demand. Axis-only skips function inputs. N=1
- * ignores end payload; N>1 retains end even for first-value demand. Source
- * numerical, typed, upstream, backend, resource, cancellation and stale
- * failures retain their identities; no private cache or table approximation
- * guarantee is added. Unsupported profiles fail at source compile/preflight.
- * Use explicit host budgets for runtime execution.
+ * teardown and source-specific finite/grid/domain/rounding rules. Expression
+ * sampling uses fixed tasks and selected output allocations. Axis-only skips
+ * coefficients; N=1 excludes end payload while schemas remain checked. Larger
+ * counts retain end even for first-value selection. Selected outputs share the
+ * source call's publication outcome. Fixed Runs reuse immutable preparation,
+ * have independent output owners and provide no content-cache identity promise.
+ * Interpolation expansions use fixed linspace and curve tasks; sparse values
+ * request only their query/output tile closure. Axis belongs to the linspace
+ * call, while table values belong to the curve call. Bezier uses fixed values
+ * tasks with complete control support and a scalar-only axis task. Axis-only
+ * excludes controls; count one excludes end. Topology and selected numerical
+ * conditions are caller preconditions; selected tasks share call publication.
+ * Source backend, resource, cancellation and
+ * stale errors retain their categories; unsupported profiles fail at source
+ * preparation. Use explicit host budgets for runtime execution.
  */
 /** @brief Bakes a bounded expression; derives coefficient names from source.
  * expression and coefficients follow sample_expression_node. Shared contract
@@ -261,29 +265,35 @@ inline Result<BakedLut1d> bake_lut1d_pchip_multi(
  * node metadata and may be used concurrently; allocation may throw bad_alloc.
  * Invalid authoring parameters fail InvalidArgument/InvalidDomain.
  *
- * A Run-shared stage acquires complete input, table and axis tensors. It
- * validates the full endpoint-weighted RN64 grid, then validates all queries
- * before table arithmetic. It computes the complete output even for sparse
- * demand and publishes requested tile coverage in global sample coordinates.
- * Output association records actual source ObjectIds. Math knot/clamp/singleton
- * selects one table entry; other paths select two. Generic entries outside
- * evaluated stencils are numerically unused; complete typed and upstream
- * validation still applies. Singleton axes require bit-identical endpoints and
- * +0 step. Every query is validated even for constant tables. Numeric
- * domain/overflow failures have Run scope; typed/upstream/resource/
- * cancellation failures preserve their identities. Descending axes and all
- * CurveDomain policies retain their formulas. Exact selection preserves zero
- * sign; exact linear zero is -0 only for two -0 ends. Strict rounds once;
- * accelerated retains CpuNumericProfile's final FP32 bound. Caller fenv is
- * preserved. Output Result owners survive context teardown; any active input
- * edit invalidates the recorded demand. Empty reads no payload.
+ * Each selected output tile executes one fixed CPU task. For L>1 its reads
+ * cover the matching input region, all L table rows for selected channels and
+ * axis endpoints, rounded through each source grid. Step has no separate read.
+ * Knots use direct endpoint-weighted RN64 reconstruction during bounded lookup.
+ * The invocation owns preallocated ExactSampling/ExactCurve scratch independent
+ * of L; output storage covers selected tiles. L=1 reads only the table row,
+ * uses zero scratch and keeps input/axis as schema-only edges. Their producers
+ * can be omitted. Static metadata is checked for all three ports.
  *
- * `UniformAxis` stores the reconstructed Float64 grid in a Root-owned 8*L-byte
- * buffer. Input/table reads use authorized zero-copy Root windows; the
- * operation does not densify the entire source table. Root resources account
- * retained owners and windows. Grid, exact scratch and complete output use host
- * budgets. No approximation guarantee relative to the table's generating
- * function is inferred.
+ * Finite consumed queries/table entries, a valid complete strictly ordered
+ * axis, step consistency, reject's closed domain and finite representable
+ * outputs are unchecked caller preconditions. L=1 still requires axis=[a,a,+0]
+ * and, under reject, input numerically equal to a, though neither payload is
+ * read. Generic unused table entries have no additional finite requirement;
+ * declared upstream producer tiles must satisfy their own contracts. Math
+ * selection converts one entry for knot/clamp/singleton and two for a segment.
+ * Exact selection preserves zero sign; exact linear zero is -0 only for two -0
+ * ends. Strict rounds the whole formula once; accelerated retains the final
+ * FP32 bound and exact fallback. No bound relative to a generating function
+ * follows.
+ *
+ * Prepared affine views are borrowed only during invocation. Runs share only
+ * immutable preparation, own scratch/output, preserve fenv and check
+ * cancellation during output/search/arithmetic work. Static, binding, resource,
+ * backend and cancellation failures retain their categories; numerical
+ * precondition violations have no promised diagnostic. Public Results appear
+ * after all required tasks succeed and the call retires in order. Retained
+ * output owners survive context teardown. Empty reads no payload. Content
+ * caching and repeated Result identity are outside this contract.
  */
 /** @brief Applies one scalar table to every requested input element. */
 inline Result<WorkflowNode> apply_lut1d_node(

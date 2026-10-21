@@ -26,59 +26,6 @@ struct ExtensionIdentity final {
   }
 };
 
-/** @brief Borrowed static inputs to a pure, reentrant port validator.
- * No sample payload is accessible. The resource set contains only resources
- * explicitly declared by the operation's static preparation.
- */
-struct ValidationPreparation final {
-  const SchemaTemplate& schema;
-  const std::map<std::string, ParameterValue>& parameters;
-  const ResourceSet& resources;
-  bool output = false;
-  std::uint32_t port = 0;
-  /** @brief Prepared stage ordinal, or UINT32_MAX for an ordinary port. */
-  std::uint32_t shared_stage = UINT32_MAX;
-};
-
-/** @brief Synchronous host-granted read capabilities for one validation call.
- * Windows and reads are bounded by the captured coverage. No callback starts
- * a producer. Only the entry thread may invoke services, and no service or
- * borrowed object may be retained after the call. Returned owning windows may
- * be retained only within the call. Runtime code charges work through consume.
- */
-struct ValidationContext final {
-  ValidationContext(const SchemaTemplate& structure, const ResourceBudget& root,
-                    const CancellationToken& token)
-      : schema(structure), resources(root), cancellation(token) {}
-  const SchemaTemplate& schema;
-  const ResourceBudget& resources;
-  const CancellationToken& cancellation;
-  bool complete = false;
-  std::uint32_t tensor_slot = UINT32_MAX;
-  const Footprint* samples = nullptr;
-  std::function<Status(std::uint64_t)> consume;
-  std::function<const Footprint*(std::uint32_t)> tensor_coverage;
-  std::function<Result<ResultTensorReadWindow>(std::uint32_t, const Region&)>
-      acquire_tensor;
-};
-
-/** @brief Immutable, reentrant validation implementation owned by a registry.
- * prepare checks static constraints and returns owned immutable state.
- * validate may be absent for a static-only contract. Its scratch admission is
- * charged before entry. Callbacks must not retain borrowed arguments or mutate
- * shared state. owner retains code and is destroyed after callback objects.
- */
-struct ValidationDefinition final {
-  std::shared_ptr<const void> owner;
-  ExtensionIdentity identity;
-  std::uint64_t scratch_bytes = 0;
-  bool requires_complete = false;
-  std::function<Result<std::shared_ptr<const void>>(
-      const ValidationPreparation&)>
-      prepare;
-  std::function<Status(const void*, const ValidationContext&)> validate;
-};
-
 /** @brief Writable borrowed diagnostic storage, valid only during merge. */
 struct DiagnosticDestination final {
   std::uint8_t* data = nullptr;

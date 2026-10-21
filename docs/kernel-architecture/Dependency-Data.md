@@ -6,7 +6,7 @@ Status: Proposed breaking design. This page defines the operation-facing part of
 
 The compiler resolves all reads and task topology. A mapper reads fixed schemas, grids, static parameters, implementation profiles and selected outputs. It returns finite input tile sets and any internal stage graph. It is deterministic, bounded and free of runtime I/O. Payload never becomes an implicit mapper input.
 
-Static preparation describes output schemas, input projections, internal SSA tiles/tasks, implementation symbols, parameter encoding, scratch bounds and effects. The compiler flattens and validates that graph. Shared algorithms may produce several independent output tiles in one task. Runtime continuations and stage factories create no additional work.
+Static preparation describes output schemas, input projections, internal SSA tiles/tasks, implementation symbols, parameter encoding, scratch bounds and effects. The compiler flattens and validates that graph. Shared algorithms may produce several independent output tiles in one task. The fixed invocation path cannot add runtime dependencies or tasks.
 
 The execution ABI supplies a fixed invocation. This C++17 sketch is a logical interface, not the final C ABI 8 record layout:
 
@@ -82,7 +82,7 @@ The CPU adapter invokes one worker and completes after return. A kernel may poll
 
 The GPU adapter uses fixed views/parameters to encode dispatches/transfers and returns an accepted ticket or rejection. [Submission rules](Parallel-Execution-Model.md#cpu-and-gpu-completion-boundary) cover immediate completion, exactly-once events, visibility and drain. Inputs, outputs, scratch, parameter bytes, modules and command objects remain owned until actual completion.
 
-Proposed C ABI 8 uses fixed-width counts, sized/versioned records, immutable input views, exclusive output/scratch views, opaque native handles, status and completion services. It carries no STL layout or persisted pointer. The final header must define retain/release and borrowing for every handle. ABI 7 modules are rejected without a Need/Publication compatibility adapter. The production header and native adapters are implementation work beyond this semantic prototype. The native GPU service must independently change from its synchronous version-1 contract; operation ABI versioning alone does not make it asynchronous.
+The implemented C module and fixed invocation ABI 8 use fixed-width counts, exact sized/versioned records, immutable inputs, exclusive outputs/scratch, opaque native handles, status and completion services. The public headers define ownership and borrowing for each record without exporting STL layouts. Old module getters are rejected. Native GPU service ABI 2 independently defines asynchronous Metal/Vulkan preparation and accepted-completion ownership. See [Plugin ABI](Plugin-ABI.md) for the concrete records and tests.
 
 ## Checked boundaries and unchecked execution
 

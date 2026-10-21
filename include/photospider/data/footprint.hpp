@@ -42,6 +42,7 @@ class PHOTOSPIDER_API Footprint final {
   Footprint() = default;
   /** @brief Canonicalizes checked rectangles, retaining holes exactly.
    * @param shape Nonzero extents, rank 1..8; dense product may overflow.
+   * Borrowed until return; the result owns an independent domain copy.
    * @param boxes Rectangles in this domain; empty rectangles contribute
    * nothing.
    * @param limits Bounds checked before intermediate set growth.
@@ -50,15 +51,23 @@ class PHOTOSPIDER_API Footprint final {
    * work on success, failure or exception. Compound callers can share one
    * budget across normalizations.
    */
-  static Result<Footprint> from_regions(std::vector<std::uint64_t> shape,
+  static Result<Footprint> from_regions(const std::vector<std::uint64_t>& shape,
                                         const std::vector<Region>& boxes,
                                         const FootprintLimits& limits = {},
                                         std::uint64_t* consumed_work = nullptr);
-  /** @brief Creates All without enumerating samples. */
-  static Result<Footprint> all(std::vector<std::uint64_t> shape,
+  /** @brief Single borrowed rectangle; same bounds and errors as from_regions.
+   * @note shape and box are borrowed until return. No temporary box array is
+   * required; the returned Footprint owns its canonical metadata.
+   */
+  static Result<Footprint> from_region(const std::vector<std::uint64_t>& shape,
+                                       const Region& box,
+                                       const FootprintLimits& limits = {},
+                                       std::uint64_t* consumed_work = nullptr);
+  /** @brief Creates All without enumerating samples; shape is borrowed. */
+  static Result<Footprint> all(const std::vector<std::uint64_t>& shape,
                                const FootprintLimits& limits = {});
-  /** @brief Creates a known empty set in the supplied domain. */
-  static Result<Footprint> none(std::vector<std::uint64_t> shape,
+  /** @brief Creates a known empty set in the borrowed domain. */
+  static Result<Footprint> none(const std::vector<std::uint64_t>& shape,
                                 const FootprintLimits& limits = {});
   bool valid() const noexcept { return impl_ != nullptr; }
   bool empty() const noexcept { return boxes().empty(); }
@@ -103,9 +112,13 @@ class PHOTOSPIDER_API Footprint final {
 
  private:
   struct Impl;
+  static Result<Footprint> make_copy(const std::vector<std::uint64_t>& shape,
+                                     std::vector<Region> boxes,
+                                     ResourceLease lease);
   static Result<Footprint> make(std::vector<std::uint64_t> shape,
                                 std::vector<Region> boxes,
-                                ResourceLease lease = {});
+                                ResourceLease lease = {},
+                                ResourceLease shape_lease = {});
   std::shared_ptr<const Impl> impl_;
 };
 }  // namespace ps

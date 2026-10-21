@@ -33,25 +33,23 @@ family; no missing semantic interpretation is inferred from sample magnitudes.
 
 ## Mathematics, sample support and errors
 
-Compile the hard `x >= threshold` comparison, semantic finite validation and exact typed 0/1 selection without attached metadata. Retain shape and slots. The helper appends the registered MASK channel-threshold operation.
+Compile the hard `x >= threshold` comparison, the semantic finite-input precondition and exact typed 0/1 selection without attached metadata. Retain shape and slots. The helper appends the registered MASK channel-threshold operation.
 
 Exact same-position support: selected Gray only; all other channels bypass.
-Take unions for multiple requested outputs and the forward relation for dirty
-mapping. Static structure and explicit-configuration checks apply even to Empty/bypass-only requests.
+Take the union over every sample of each complete retained output tile, then close on the source grid. Static structure and explicit-configuration checks apply even to Empty/bypass-only requests.
 No halo, hidden-color skip, alpha validation or full-image scan is introduced.
 Strict evaluates the complete specified formula with its stated copy/selection
 exceptions; accelerated numerical rules, raw specials and errors inherit the
 family/math contract. The normalized Lab lightness is l=L*/100 wherever relevant.
-Invalid consumed semantics or an explicit singularity fail the requested
-publication; unrelated unobserved sample errors do not. Preserve upstream scope.
+Semantic sample validity, finite rounded results and nonsingular semantic formulas are caller preconditions over complete retained output tiles. Fixed execution does not validate these numerical premises; operational errors retain the kernel category.
 
 ## Storage, resources and implementation identity
 
-The helper appends the registered MASK threshold Result operation. The lowering target uses Result ABI 6. This operation materializes output and rejects forced view. Empty demand is stateless and publication is transactional.
+The helper appends the registered MASK threshold Result operation. The lowering target uses fixed invocation ABI 8. This operation materializes output and rejects forced view. Empty demand is stateless and publication is transactional.
 
 ## Independent acceptance and conceptual workflow
 
-Gray l=[0.25,0.5,0.75], threshold=0.5 yields [0,1,1]. Semantic NaN fails; raw NaN compares false. Integer packing stays in codecs.
+Gray l=[0.25,0.5,0.75], threshold=0.5 yields [0,1,1]. Semantic NaN is outside the caller precondition; raw NaN compares false. Integer packing stays in codecs.
 
 Also apply common mixed-region/component, dtype/profile, signed-zero, explicit-configuration,
 resource/cancellation and owner-lifetime acceptance where relevant. An independent

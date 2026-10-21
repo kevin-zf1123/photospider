@@ -78,11 +78,12 @@ inline Result<ResampledSignal> append(
  *
  * Position-only requests independently forward requested source bits, including
  * NaN/Inf/sNaN/-0, without reading old positions/values or validating a curve.
- * Typed/upstream source validation still applies. Samples inherit Whole
- * interpolation: full input/output storage, full invalidation and Run failures
- * even for undelivered positions/columns. Resource/cancellation checks and
- * owners follow the interpolator. Empty reads no payload. Packed/aliased
- * immutable output owns its storage and metadata past context teardown. No
+ * Positions use explicit tile copies with separate output ownership. Samples
+ * inherit fixed curve tasks: all x, selected query rows and all y rows of the
+ * selected columns, closed through source grids. Numerical domains and final
+ * representability are caller preconditions. Resource/cancellation checks and
+ * owners follow the interpolator. Empty reads no payload. Immutable output
+ * owns its storage and metadata past context teardown. No
  * hidden cache, filtering, sample-rate inference, antialias guarantee or
  * rounded-output round-trip claim is added.
  */

@@ -26,6 +26,8 @@ class FastMath final {
   std::array<std::array<I, kLanes>, Program::kNodes> values_{};
   std::array<std::array<I, Program::kNodes>, 3> constants_{};
   std::array<std::array<bool, Program::kNodes>, 3> ready_{};
+  std::array<double, kLanes> lows, highs, lo_exponents, hi_exponents, lower,
+      upper;
   static double down(double v) { return numeric_ops::numeric_down(v); }
   static double up(double v) { return numeric_ops::numeric_up(v); }
   static I constant(const Node& n) {
@@ -64,8 +66,6 @@ class FastMath final {
       }
       const bool function =
           n.code == Code::Power || n.code == Code::Exp || n.code == Code::Log;
-      std::array<double, kLanes> lows, highs, lo_exponents, hi_exponents, lower,
-          upper;
       bool any = false;
       for (unsigned lane = 0; lane < count; ++lane) {
         // Safe duplicated operands also protect SIMD's unused physical lanes.

@@ -10,7 +10,7 @@
 #include "01-numeric/accelerated_math.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
-// Fixed callback-owned storage, admitted as Whole operation workspace. Raw
+// Fixed invocation-owned storage, preallocated as declared task scratch. Raw
 // words survive conversion for exact replay.
 struct MatrixBlock final {
   static constexpr unsigned kRows = 64;

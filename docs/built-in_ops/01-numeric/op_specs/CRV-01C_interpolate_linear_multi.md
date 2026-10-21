@@ -48,20 +48,7 @@ node. Each port has one dtype, so y columns share that array's dtype; x, y and
 query may independently use Float32/Float64. Outputs select Float32/Float64,
 default Float64, with no attached domain description.
 
-For every nonempty request, the Run-shared Result program requests complete x, y and query inputs with ordinary payload tile Needs, including typed validation and upstream failures. It validates all x knots and query controls before y arithmetic, evaluates every query and output column, and publishes a complete dense Result of shape [N] or [N,C]. Empty reads no payload; static metadata validation still applies. A nonempty local request still computes and stores the complete output. Output tile actors retain the shared backing but expose only the requested complete member tiles, and sample coordinates remain global rather than being rebased to the request.
-
-The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
-linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
-outside every evaluated stencil do not undergo an additional finite scan. Typed
-validation and upstream execution cover complete inputs, including unused values.
-All query rows and output columns are evaluated, so errors in unrequested rows
-or columns can fail the run. Reject still performs full upstream collection.
-
-Any input change invalidates the recorded output demand. Cache identity includes
-complete input versions, profile, metadata and parameters. Numerical failures
-have Run scope and publish no partial successful output; they do not provide
-independent per-column Atom success. Input strides, offsets, zero strides and
-negative strides remain legal. Packed output storage outlives the context.
+Execution, physical read closure, caller preconditions, resource admission and ownership follow the [family fixed execution contract](CRV-01_interpolate.md#fixed-execution-resources-and-caller-preconditions). Each selected output tile reads all x, all y rows for its selected columns, and its query row range through the corresponding input grids. Only the tile's global output coordinates are evaluated. Mathematical stencil selection remains defined by this member specification.
 
 ## Shape, parameters and inference
 
@@ -80,30 +67,13 @@ and layout choices. Scalar and vector forms are not implicitly interconverted.
 
 ## Mapping, invalidation and ownership
 
-complete-input support, Run failure and ownership follow the scalar contract. Lookup
-runs once per complete query row and is shared across all C columns. Per-column
-formulas and numeric selection are unchanged. Every output column is computed;
-any input edit invalidates recorded output demand. Arbitrary legal immutable
-strides on either y axis remain supported. Output retains the rank-2 shape and
-no attached domain description, including C=1.
+Execution, physical read closure, caller preconditions, resource admission and ownership follow the [family fixed execution contract](CRV-01_interpolate.md#fixed-execution-resources-and-caller-preconditions). Each selected output tile reads all x, all y rows for its selected columns, and its query row range through the corresponding input grids. Only the tile's global output coordinates are evaluated. Mathematical stencil selection remains defined by this member specification.
+
+Classification runs once per query row within each tile and is reused across that tile's columns. Input batch and atomic axes are respected by each source grid. The output column axis remains ordinary, including C=1.
 
 ## Algorithm and resources
 
-Search/classification costs O(K+N log K), followed by N scalar evaluations
-(or N*C for multi). Classification is shared across columns. The complete dense
-output costs b*N (or b*N*C) bytes; reserve it even for one requested cell. Input
-collection and retained owners also require admission. The callback declares its
-fixed exact arithmetic workspace, and the host-accounted knot vector has 8*K
-element bytes plus allocator/metadata overhead. K<=65536 bounds its elements at
-524288 bytes. No full slope table is required.
-
-Poll work/cancellation during reads, binary search, exact arithmetic and before
-publication. Capacity and work exhaustion return ResourceExhausted, with failed
-output/workspace released. A giant logical broadcast can therefore fail a small
-payload budget even for sparse demand. Resource limits do not authorize weaker
-arithmetic. Backend, typed, upstream, stale and cancellation failures retain their
-categories. Numeric failures are OperationFailed/InvalidDomain or final-output
-ArithmeticOverflow, with Run scope and offending port/index where available.
+The [family resource contract](CRV-01_interpolate.md#fixed-execution-resources-and-caller-preconditions) applies. Each task has one preallocated `ExactCurve` arena and selected output storage. Direct binary search replaces a copied knot array; classification is shared by columns within the task. Resources scale with declared input tiles, selected outputs and granted-lane scratch, rather than the complete logical output. Capacity checks and cancellation preserve their operational categories.
 
 ## Acceptance and implementation status
 
@@ -116,14 +86,11 @@ independent exact per-column linear interpolation and direct rounding bits.
 
 Compare every selected column with the matching single-function operation,
 including mixed input dtype, both destinations, C=1 without squeezing, all
-domain policies and signed zeros. Very large logical shapes with sparse demand
-must still satisfy the complete-output budget. Read witnesses cover complete
-inputs; invalid data in another evaluated column fails the complete-input run. Test
-both numeric failures and complete typed validation, including unused values.
+domain policies and signed zeros. Very large logical shapes with sparse demand must fit only their declared input tiles, selected output storage and fixed scratch. Inspect exact static read sets, including atomic source tile rounding. Verify that unselected query rows and columns do not enter arithmetic.
 
 Deliver public WorkflowDocument examples with x/y/query bindings and named values
 through Compiler/ExecutionContext, with actual build/run commands in the
-maintained workflow. Apply scalar stride, cache, dirty, resource,
+maintained workflow. Apply scalar stride, rebinding, resource,
 cancellation and post-context owner lifetime checks to the rank-2 output.
 Measured native workloads and their limits are recorded in the implementation notes.
 
@@ -135,8 +102,7 @@ keys. The public `photospider/ops/numeric/curves.hpp` constructor is
 destination rounding. Accelerated Float32 evaluation accepts only enclosures
 whose endpoints round to the same Float32 result, preserving monotonicity;
 unresolved cases use exact fallback. Exact cross products identify collinear
-PCHIP stencils and reduce them to the linear formula. Complete input collection, Run failures and complete-output allocation follow
-the complete-input contract above; mathematical y stencils remain unchanged.
+PCHIP stencils and reduce them to the linear formula. Fixed task reads, selected output allocation and caller preconditions follow the family execution contract; mathematical y stencils remain unchanged.
 
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
 contains the shared arithmetic/resource details and current validation boundary.

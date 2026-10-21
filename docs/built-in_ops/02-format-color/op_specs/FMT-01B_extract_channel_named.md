@@ -48,11 +48,7 @@ layout where the selected Result supports them. The output carries no
 description. The selected samples are copied bit-for-bit, without sample-domain
 validation.
 
-The Result Need requests exact selected-channel Data support plus the source
-Descriptor, with role mask 9 and no Validation or Control role. Dirty propagation
-matches A: changes on the selected source channel invalidate mapped output
-coordinates, while other channels do not. Result caching is disabled. Empty
-output demand returns an empty Result without reading source payload.
+After lookup, the same fixed CPU lowering/preparation/copy path as A declares mapped source tile closure and independent output storage. Name/role selection adds no runtime lookup. Auto/materialize copy; a nonempty forced view fails with schema-only dependency. Empty emits no payload task after static checks. Input view coverage follows source grid geometry, which may include unselected channels; only selected coordinates are copied.
 
 ## Acceptance fixture and validation
 

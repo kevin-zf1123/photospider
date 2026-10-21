@@ -1,16 +1,16 @@
 # 当前实现与规格前置条件
 
-当前 package 为 Photospider 0.37.0，operation plugin 使用 Result C ABI 7，OperationTraits 为 29。本文概括当前包内可核对的注册入口、数据类型和执行边界；单个算子的端口、参数、数值行为和 Region 规则以对应实现契约为准。公共 C++ 契约有破坏性变更，consumer 必须重建。
+当前 package 为 Photospider 0.39.0，operation module 使用 C ABI 8，OperationTraits 为 30。本文概括当前包内可核对的注册入口、数据类型和执行边界；单个算子的端口、参数、数值行为和 Region 规则以对应实现契约为准。公共 C++ 契约有破坏性变更，consumer 必须重建。
 
 ## 默认 registry 与类型边界
 
-默认 registry 的注册入口位于[`plugins/ops/registry.cpp`](../../../plugins/ops/registry.cpp)，公开 operation C ABI 定义于[`result_operation_plugin_api.h`](../../../include/photospider/plugin/result_operation_plugin_api.h)。当前分类指南描述的是各族已实现子集；逐 key 的参数、dtype、shape、Region 与错误契约仍以对应专题为准。
+默认 registry 的注册入口位于[`plugins/ops/registry.cpp`](../../../plugins/ops/registry.cpp)，公开 operation C ABI 定义于[`operation_module_api.h`](../../../include/photospider/plugin/operation_module_api.h)。当前分类指南描述的是各族已实现子集；逐 key 的参数、dtype、shape、Region 与错误契约仍以对应专题为准。
 
 存在 key 只说明 registry 接受该定义，不单独证明任意存储路径都可执行。当前 operation 契约通过 `OperationTraits` 的输入约束、backend 能力和有序 `OperationOutputTraits` 声明输入输出；输出的 `result_schema`、metadata resolver 与 `ResultTensorSpec` 定义 Result 类型和 tensor 描述。Result-only operation 按其注册的 callback、schema 和 backend 契约执行，没有独立的 planar-storage capability flag。实现入口见[`operation_registry.hpp`](../../../include/photospider/plugin/operation_registry.hpp)和[`operation_registry.cpp`](../../../src/lib/plugin/operation_registry.cpp)。
 
 [`ElementType` in `tensor_span.hpp`](../../../include/photospider/data/tensor_span.hpp) 定义七种内建元素类型：`UInt8`、`Int8`、`UInt16`、`Int16`、`Int64`、`Float32` 和 `Float64`。descriptor 的 rank 为 1 到 8，各轴长度必须大于零。浮点 `Tensor` 可保留通用位模式；算子的数值契约可施加更窄的限制。
 
-图像 operation 按各自显式静态参数、布局、dtype 和 Region 契约执行。Result/Tensor 只保存结构、数据和实际存储 owner；不附着或传播颜色等领域描述。`Tensor` 是统一数值 backing，任意合法通道数不触发 RGB/alpha 推断。领域校验由 SDK 显式调用或端口绑定校验器完成；schema id/version 不触发 Layer、LUT 或颜色分派。
+图像 operation 按各自显式静态参数、布局、dtype 和 Region 契约执行。Result/Tensor 只保存结构、数据和实际存储 owner；不附着或传播颜色等领域描述。`Tensor` 是统一数值 backing，任意合法通道数不触发 RGB/alpha 推断。领域校验由算子或 SDK 显式调用完成；schema id/version 不触发 Layer、LUT 或颜色分派。
 
 `Photospider::ops` 提供内置算子注册与 authoring 实现，并依赖 `Photospider::ops_sdk`。SDK 通过 kernel 公共接口提供颜色配置、ICC/OCIO 资源、数值报告与领域数学；kernel 不依赖这些领域实现。
 
@@ -25,18 +25,13 @@
 
 ## 编译与产物
 
-`analyze` 将 DAG 翻译为静态 CFG/SSA；`bind_ir` 接收其他前端构造的 IR。
-`optimize` 当前为独立 no-op 阶段；planner 展开固定 tile 指令和输入授权，Run
-沿已选 CFG 路径顺序执行。Mapper 在编译时确定所有读取范围，运行时 Need 只
-验证既有 grants。`.psir` 与 `.psxp` v2 分别保存 IR 与完整 Plan；导入需要宿主
-提供冻结 registry 和资源，不自动查找 DSO，也不保存每次 Run 的输入 payload。
-完整 API 和错误处理示例见[编译与执行](../../kernel-architecture/Compiler-and-Execution.md#compiler-artifacts)。
+`analyze` 生成不可变 `ValidatedIR`；`bind_ir` 接收其他前端构造的 IR。可选的命名 optimizer 生成有序 IR 版本，默认编译不调用 optimizer。Planner 将算子 lowering 结果链接为固定物理 task、tile view 和 CFG。Run 按依赖发射就绪 task，按 IR 顺序退休 CallGroup。`.psir` 与 `.psxp` v5 分别保存 IR 与完整 Plan；导入需要宿主提供冻结 registry 和资源。完整接口见[编译与执行](../../kernel-architecture/Compiler-and-Execution.md)。
 
 ## Result、资源与错误边界
 
-Result 的全部成员为编译后固定的静态 Tensor。有效数量由普通 count/mask payload 表示，零有效数量不改变正 extent。每个公开 tile 完整且不可变。`CompleteBundle` 按准备后的固定范围统一公开，`IndependentChunks` 允许完整 tile 独立公开，`StablePrefix` 按成员局部 tile 顺序公开。共享 stage 在一次 call activation 内复用完整计算；循环重新进入 block 时清空旧 stage 状态。失败不公开当前事务。见 [Global Results](../../kernel-architecture/Global-Results.md)。
+Result 的全部成员为编译后固定的静态 Tensor。有效数量由普通 count/mask payload 表示，零有效数量不改变正 extent。Kernel 初始化全部声明输出后交付完成；Run 在 call 退休时交付其导出值，在最终 RET 时交付所选 Result。一个 call 内的共享计算由 task 和私有 value 表达。失败和取消必须排空已接受工作，之后才释放其借用存储。
 
-受管资源预算限制内核声明并计量的 managed capacity、work 和 stage，不构成进程 RSS 上限；调用方输入和未计量的系统/驱动分配不因此受限。见[Managed Resources](../../kernel-architecture/Managed-Resources.md)。普通 `execute` 对执行错误保持 fail-fast。见[Atom errors and quality](../../kernel-architecture/Atom-Errors-and-Quality.md)。
+受管资源预算限制内核声明并计量的 managed capacity 和 work，不构成进程 RSS 上限；调用方输入和未计量的系统/驱动分配不因此受限。调用方先 `prepare`，再 `submit` 并 `join` 获取执行结果；具体失败与退休规则见[编译与执行](../../kernel-architecture/Compiler-and-Execution.md)。
 
 ## 规格状态、边界与修订入口
 

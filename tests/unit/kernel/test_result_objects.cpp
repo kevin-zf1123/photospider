@@ -140,6 +140,118 @@ int tensor_memory_limit() {
     PS_CHECK(live == 0);
   return 0;
 }
+int window_admission_and_lifetime() {
+  auto root = budget(1048576);
+  ResultTensorReadWindow retained;
+  {
+    auto schema = points();
+    schema.tensors[0].descriptor.shape = {65};
+    auto started = ResultBuilder::start(root, schema, "fragmented.window");
+    PS_REQUIRE_OK(started);
+    auto builder = started.take_value();
+    for (std::uint64_t i = 0; i < 65; ++i) {
+      const std::int64_t value = i + 2;
+      PS_REQUIRE_OK(builder.publish_tensor(
+          0, Region({{i, 1}}),
+          ByteView(reinterpret_cast<const std::uint8_t*>(&value), 8)));
+    }
+    auto sealed = builder.seal();
+    PS_REQUIRE_OK(sealed);
+    auto result = sealed.take_value();
+    auto descriptor = result.descriptor();
+    PS_REQUIRE_OK(descriptor);
+    auto facts = descriptor.take_value();
+    const auto before = root.statistics().live.values;
+    CancellationSource cancellation;
+    cancellation.cancel();
+    {
+      auto denied = result.acquire_tensor(facts, 0, Region::whole({65}),
+                                          cancellation.token());
+      PS_CHECK(denied.status().code == ErrorCode::Cancelled);
+    }
+    PS_CHECK(root.statistics().live.values == before);
+    {
+      auto fill = root.reserve(
+          ResourceCapacity::host(root.available_capacity()[ResourceKind::Host] -
+                                 ResourceBudget::lease_metadata_bytes()));
+      PS_REQUIRE_OK(fill);
+      auto denied = result.acquire_tensor(facts, 0, Region::whole({65}));
+      PS_CHECK(denied.status().code == ErrorCode::ResourceExhausted);
+    }
+    PS_CHECK(root.statistics().live.values == before);
+    auto recovered = result.acquire_tensor(facts, 0, Region::whole({65}));
+    PS_REQUIRE_OK(recovered);
+    retained = recovered.take_value();
+  }
+  // The window owns all fragments after the producer, Result and facts retire.
+  for (std::uint64_t next = 0; next < 65;) {
+    auto row = retained.row_run({next});
+    PS_REQUIRE_OK(row);
+    PS_CHECK(row.value().samples && row.value().samples <= 65 - next);
+    for (std::uint64_t i = 0; i < row.value().samples; ++i) {
+      std::int64_t value = 0;
+      std::memcpy(&value,
+                  row.value().data + i * row.value().sample_stride_bytes, 8);
+      PS_CHECK(value == static_cast<std::int64_t>(next + i + 2));
+    }
+    next += row.value().samples;
+  }
+  retained = {};
+  for (auto live : root.statistics().live.values)
+    PS_CHECK(live == 0);
+  return 0;
+}
+int batch_admission_rollback() {
+  ResourceLimits limits;
+  limits.capacity[ResourceKind::Payload] = 12;
+  ResourceBudget root(limits);
+  {
+    auto schema = points();
+    auto& tensor = schema.tensors[0];
+    tensor.descriptor = {ElementType::Float32, {1, 1}};
+    tensor.batch_axes = {3, 1};
+    tensor.layout.spatial = true;
+    tensor.layout.channel_axis.reset();
+    auto started = ResultBuilder::start(root, schema, "batch.admission");
+    PS_REQUIRE_OK(started);
+    auto builder = started.take_value();
+    const float prior = 4;
+    PS_REQUIRE_OK(builder.publish_tensor(
+        0, Region({{0, 1}, {0, 1}, {0, 1}, {0, 1}}),
+        ByteView(reinterpret_cast<const std::uint8_t*>(&prior), 4)));
+    auto captured = builder.reference().capture();
+    PS_REQUIRE_OK(captured);
+    auto old = captured.take_value();
+    auto old_facts = old.descriptor(false);
+    PS_REQUIRE_OK(old_facts);
+    ResourceCapacity occupied;
+    occupied[ResourceKind::Payload] = 4;
+    auto blocker = root.reserve(occupied);
+    PS_REQUIRE_OK(blocker);
+    const auto before = root.statistics().live[ResourceKind::Payload];
+    unsigned callbacks = 0;
+    auto status = builder.publish_tensor_kernel(
+        0, Region({{1, 2}, {0, 1}, {0, 1}, {0, 1}}), [&](const auto&) {
+          ++callbacks;
+          return Status::success();
+        });
+    PS_CHECK(status.code == ErrorCode::ResourceExhausted && callbacks == 0);
+    PS_CHECK(root.statistics().live[ResourceKind::Payload] == before);
+    auto after = builder.reference().descriptor(false);
+    PS_REQUIRE_OK(after);
+    PS_CHECK(after.value().revision() == old_facts.value().revision());
+    PS_CHECK(after.value().tensor_coverage(0) ==
+             old_facts.value().tensor_coverage(0));
+    float observed = 0;
+    PS_REQUIRE_OK(
+        old.read_tensor(old_facts.value(), 0, {0, 0, 0, 0}, &observed, 4));
+    PS_CHECK(observed == prior);
+    PS_CHECK(builder.seal().status().code == ErrorCode::ResourceExhausted);
+  }
+  for (auto live : root.statistics().live.values)
+    PS_CHECK(live == 0);
+  return 0;
+}
 int disjoint_tensor_publications() {
   auto root = budget(131072);
   SchemaTemplate schema;
@@ -327,6 +439,8 @@ int main() {
   PS_CHECK(descriptors_and_lifetime() == 0);
   PS_CHECK(empty_and_failure() == 0);
   PS_CHECK(tensor_memory_limit() == 0);
+  PS_CHECK(window_admission_and_lifetime() == 0);
+  PS_CHECK(batch_admission_rollback() == 0);
   PS_CHECK(disjoint_tensor_publications() == 0);
   PS_CHECK(tensor_publication_frontiers() == 0);
   return 0;

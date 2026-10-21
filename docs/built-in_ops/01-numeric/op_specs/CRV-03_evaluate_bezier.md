@@ -28,207 +28,79 @@ identity, platform availability, floating environment, resource/error handling
 and acceptance. The per-component curve rules below take precedence. Completed
 clarification does not change the Proposed status or implementation boundary.
 
-## Confirmed scope
+## Scope and interface
 
-Evaluate quadratic or cubic parametric Bezier curves directly at dynamic
-parameters, returning an array of D-component values. Only degree 2 and 3 are
-included in this clarification round; Hermite and B-spline are not part of this
-CRV-03 target. Individual coordinate components may turn back or repeat.
+`curve.evaluate_bezier_<profile>` evaluates quadratic or cubic parametric Bezier curves at explicit local parameters. It returns D-component numeric values in query-row order. Components may turn back, repeat or remain constant; no geometry, color role, arc length, smoothing or monotonicity is inferred. [CRV-02](CRV-02_sample_bezier_function.md) separately samples a single-valued function by solving Bx(t)=x.
 
-The mathematical operation evaluates B(t); it does not solve Bx(t)=x as
-[CRV-02](CRV-02_sample_bezier_function.md) does. Query parameters are explicit
-input data; no arc-length interpretation is implied. The three explicit profile keys and public `evaluate_bezier_node` constructor
-are implemented; Proposed continues to describe specification acceptance status.
-
-## Confirmed control representation
-
-Use dynamic anchors[K,D] and relative handles[K-1,degree-1,D], with static
-degree equal to 2 or 3 for every segment in a node. Adjacent segments share an
-anchor. For segment j, quadratic control points are anchors[j],
-anchors[j]+handles[j,0], anchors[j+1]. Cubic control points are anchors[j],
-anchors[j]+handles[j,0], anchors[j+1]+handles[j,1], anchors[j+1].
-No coordinate is required to be monotone and handles are not automatically
-aligned. Finite arithmetic for reconstructing controls is defined below.
-
-## Confirmed query representation
-
-Queries use separate dynamic segment_indices[N] (Int64) and t[N] (floating).
-Each row names a zero-based segment and its local parameter in [0,1]. Evaluate
-that segment at the supplied t; no global-u decomposition or arc-length mapping
-is performed. For example, segment_indices[i]=2 and t[i]=0.25 selects the third
-segment at local t=1/4. Output values[N,D] preserves query row order.
-
-## Confirmed dimensions and size limits
-
-Require 2<=K<=65536 and D>=1. Anchors, handles and output each have a checked
-logical element count at most 2^40: K*D, (K-1)*(degree-1)*D and N*D respectively.
-D has no separate small-vector bound. D=1 retains a component axis. Components
-are generic numeric vector entries; no geometry, RGB/alpha or physical units
-are inferred merely from D. Query count N is positive and descriptor-defined.
-
-## Confirmed types and finite-value policy
-
-Anchors, handles and t independently accept Float32/Float64 and may mix dtypes.
-Segment indices is always Int64. Output values selects Float32/Float64 through
-a static dtype parameter, default Float64. Every mathematically used control component
-and all t values must be finite, and each published result must be finite. Negative
-and greater-than-one control values are valid; no value clipping is implicit.
-Destination overflow and nonfinite demanded data fail the Run.
-
-## Confirmed requested-component support
-
-All inputs are Results containing one tensor member under any schema id/version and member key; `sample_shape()` supplies the complete dimensions, including batch axes. The Run-shared Result program requests every input with Data, Validation and Descriptor, then validates every segment_indices/t row before any component arithmetic. It evaluates all N*D output cells and publishes an immutable dense Result using schema `photospider.tensor` v1 / member `samples`, shape [N,D], selected dtype and no attached domain description.
-
-A nonempty local request returns complete internal coverage, with public coverage restricted to requested tiles in global sample coordinates; coordinates are not rebased to the request. Empty produces empty coverage and does not poll a failing handle producer; static metadata and remaining execution stages still apply. For nonempty work, upstream handle failures propagate before endpoint shortcuts or invalid-query arithmetic.
-
-Mathematical selection is unchanged: t=0/1 reads only the selected anchor
-component for the polynomial; an interior uses both anchors and all relative
-handles of that segment and component. Generic numeric data outside every
-evaluated stencil is not additionally finite-checked. Explicitly bound validators and upstream execution apply to admitted inputs.
-Spatial metadata or four channels do not automatically install RGBA or alpha
-validation. The shared stage evaluates all output columns; endpoint mathematics
-can skip handle values, and any extra validation needs an explicit contract. All rows and
-components are evaluated, so a bad index/t or evaluated component can fail the
-Run. No partial successful output is published. There is no global mathematical
-topology/monotonicity scan.
-
-Any input edit invalidates recorded output demand. Cache identity includes all input versions, profile, metadata and parameters. Replacing segment/t sources retains the compiled static preparation. Repeating a completed demand returns the same Result object; an equivalent fresh four-source binding can reuse the content cache.
-
-Output name, dtype, rank-2 shape (including D=1) and no attached domain description are unchanged. Input zero/negative strides, offsets and unaligned storage remain legal. Output storage survives its context; the output owns its published payload, so source backings can retire. An authorized read window shares the output owner and can outlive the Result.
-
-## Confirmed reconstruction and numerical versions
-
-Widen each demanded Float32 input exactly to Float64. Reconstruct each demanded
-absolute handle control component by correctly rounding anchor-plus-offset to
-Float64, nearest/ties-to-even. These reconstructed controls define the curve,
-consistently with CRV-02. Raw anchor controls preserve their widened bits.
-
-Strict evaluates the mathematical Bezier polynomial of those controls at the
-exact supplied t, then correctly rounds once directly to output Float32/Float64.
-The two independently named CPU accelerated versions allow at most four final
-FP32-scaled representable steps from strict. At t=0/1, all versions correctly
-convert the selected anchor directly and preserve its zero sign. Intermediate
-de Casteljau or polynomial roundings do not define the strict reference.
-
-For an interior t with exact zero polynomial result, return -0 only when every
-reconstructed control component for that requested component is -0. Otherwise
-return +0. A nonzero exact result rounded to zero retains its mathematical sign.
-Accelerated versions must match these zero classifications and signs exactly.
-
-All accelerated component values must also stay between the smallest and largest
-control components correctly converted to output dtype. Overflowed conversions
-used only for those bounds act as extended infinities, not failures of another
-finite requested value. The selected reconstructed Float64 controls themselves
-must be finite; an anchor-plus-offset reconstruction overflow fails its demanded
-interior component, even if an abstract unbounded-control curve could cancel.
-Endpoint shortcuts never perform unneeded handle reconstruction.
-
-At the same demanded inputs, accelerated and strict share finite/nonfinite
-success classification and zero signs; the four-ULP allowance applies to nonzero
-finite results. If a fast path cannot guarantee error, range and special cases,
-fall back to strict. Per-value complete-input counters are unavailable. Work/capacity exhaustion
-fails explicitly. Results for a fixed profile/input/query do not depend on the
-request partition, neighboring queries, thread order or cache state.
-
-## Complete interface and polynomial
-
-| Ordered input | Descriptor |
+| Ordered input | Complete sample shape and dtype |
 | --- | --- |
 | 0 anchors | Float32/Float64 [K,D] |
 | 1 handles | Float32/Float64 [K-1,degree-1,D] |
 | 2 segment_indices | Int64 [N] |
 | 3 t | Float32/Float64 [N] |
 
-All ports are required Result inputs with one tensor member under any schema
-id/version/key. Output port `values` is a Result using schema
-`photospider.tensor` v1 / member `samples`, shape [N,D], selected dtype and no attached domain description. Batch axes are included in the complete `sample_shape()`. Static degree is required Int64 2 or 3; static dtype is
-required String float32/float64, with constructor default float64. Direct nodes
-supply both. No output axis, extrapolation, automatic segment selection, squeeze
-or implicit dtype conversion from integers is provided. Shape/dtype inference
-uses descriptors and these static parameters, without numeric input execution.
+Each input Result has one tensor member under any schema id/version/key. Shapes use complete `sample_shape()`, including batch axes. Anchors, handles and t independently accept Float32/Float64. Require K=2..65536, D>=1 and N>=1, with K*D, (K-1)*(degree-1)*D and N*D each <=2^40. D=1 retains its component axis. The compiler checks shapes, dtypes and overflow-safe products before payload execution, including Empty requests.
 
-Require 0<=segment_indices[i]<K-1 and finite 0<=t[i]<=1 for all rows.
-Invalid indices and t fail, without clipping, wrapping or extrapolation. t=-0
-is the t=0 endpoint. Query rows may be unordered or repeated. Adjacent segments
-share their mathematical endpoint but may have unrelated tangents; corners and
-coincident/degenerate anchors are valid. No smoothing or monotonicity is imposed.
+Required static parameters are Int64 `degree` equal to 2 or 3, and String `dtype` equal to `float32` or `float64`. `evaluate_bezier_node` defaults dtype to Float64; direct nodes specify both parameters. Output `values` is a Result using `photospider.tensor` v1/member `samples`, ordinary shape [N,D], selected dtype and no domain description. Integer coordinates require explicit conversion. No output axis, automatic segment selection, squeeze or extrapolation mode is provided.
 
-For demanded segment j and component c, reconstruct scalar controls P[0..d]
-as specified above. For 0<t<1 the exact mathematical value is
+## Control reconstruction and mathematical value
 
-B_c(t) = sum_{r=0..d} binomial(d,r)*(1-t)^(d-r)*t^r*P[r]
+For segment j, quadratic controls are anchors[j], RN64(anchors[j]+handles[j,0]), anchors[j+1]. Cubic controls are anchors[j], RN64(anchors[j]+handles[j,0]), RN64(anchors[j+1]+handles[j,1]), anchors[j+1]. Thus quadratic/outgoing offsets use the first anchor; cubic incoming offsets use the final anchor. Adjacent segments share an anchor but may have independent tangents and corners. Coincident or degenerate anchors are valid.
 
-The strict result is direct RN_dtype(B_c(t)), with the explicit zero rule.
-de Casteljau is an implementation option, but sequentially rounded blends do
-not define this strict polynomial. Endpoint conversion and every interior
-control reconstruction observe their separate rounding boundaries.
+Widen each consumed Float32 component exactly to Float64. Round every anchor-plus-offset reconstruction separately to Float64, nearest/ties-to-even. These reconstructed binary64 controls define the curve; raw anchors retain their widened bits. For degree d, selected segment j and component c, the exact mathematical value is:
 
-## Demand, dirty mapping and returned ownership
+```text
+B_c(t) = sum(r=0..d, binomial(d,r)*(1-t)^(d-r)*t^r*P[r])
+```
 
-For a nonempty request Q, the operation returns complete certified [N,D] coverage in global sample coordinates while dependency and dirty mappings retain Q. Input version, profile, metadata and parameter identity participate in cache validation; a source edit invalidates the corresponding recorded demand. Check that replacement segment and t Results can reuse static preparation.
+Strict rounds the complete polynomial once directly to the destination dtype. Sequentially rounded de Casteljau blends do not define the strict reference. At t=+0 or -0 select the first anchor, and at t=1 select the final anchor. Endpoint conversion does not reconstruct handles and preserves the selected anchor's zero sign. For an interior exact zero, return -0 only when every reconstructed control of that component is -0; otherwise return +0. Nonzero underflow retains the mathematical sign.
 
-The immutable dense output Result owns its packed payload independently of the
-four source backings and execution context. A previously acquired authorized
-read window shares that output owner and remains readable after releasing the
-Result. Releasing the final window releases the output Payload and all Root
-allocations. The Result schema and selected dtype remain stable across cache
-rebinds.
+The accelerated profiles follow the [final FP32 four-ULP contract](NUM_accelerated_contract.md), including exact endpoint/zero rules and control-range bounds. Each component stays between its minimum and maximum reconstructed controls correctly converted to output dtype. Conversion overflow used only for these bounds acts as extended infinity, allowing another finite result. Current profiles all use the same exact polynomial calculation with profile-specific integer helpers. Results are independent of request partition, neighboring queries and task order.
 
-## Algorithm, resources and errors
+## Caller preconditions and segment safety
 
-The callback retains one row classification and fixed arithmetic workspace,
-independent of N and D. It validates all rows, then reclassifies each row once
-for all columns. Work is O(N+N*D*degree), plus exact arithmetic, complete input
-collection and typed validation. Complete output costs b*N*D bytes. Admit that
-output and fixed workspace even for one requested cell, together with collected
-inputs/retained owners and metadata. Giant broadcast inputs/output can therefore
-fail a small payload budget. No per-cell dependency certificates or full
-coefficient table is retained.
+For each selected row require 0<=segment_indices[i]<K-1 and finite 0<=t[i]<=1. Queries may be repeated or unordered. A constant-time segment guard rejects invalid indices with `InvalidArgument/InvalidDomain` before forming control addresses, including negative Int64 values. The t range and finiteness are unchecked caller preconditions; t is not converted to an address or shift count.
 
-Use the host worker and resource ledger; poll cancellation on reads, row controls,
-inside exact arithmetic and before publication. Work/capacity failures preserve
-ResourceExhausted and release unpublished state/output. Numeric failures have Run
-scope, identifying offending port/index where available. Invalid segment/t is
-InvalidArgument/InvalidDomain; used nonfinite controls are OperationFailed/
-InvalidDomain; actual RN64 reconstruction or final conversion overflow is
-OperationFailed/ArithmeticOverflow. Typed, upstream, stale, backend and
-cancellation errors preserve their categories. complete-input numeric counters are not
-available; zero counters must not be interpreted as zero arithmetic/fallbacks.
-Public constant-node composition with D=2^39 and N=2^40 requests one cell but
-requires full output capacity and fails at the parametric node with
-ResourceExhausted/CapacityLimit. These cases verify the complete-output budget
-rule, not successful numerical execution at either physical maximum shape.
+Consumed control components must be finite, reconstructed absolute controls must remain finite Float64, and selected final outputs must be finite and representable in the chosen dtype. These are unchecked caller preconditions. Endpoint mathematics uses only the selected anchor component. Generic controls outside the selected mathematical stencil have no additional finite requirement. An interior cannot use an overflowing reconstructed control even if an abstract curve with unbounded controls could cancel. Numerical precondition violations have no promised diagnostic or numerical result. Static, address-safety and internal exact-capacity checks remain operational checks.
 
-## Acceptance and implementation boundary
+## Fixed execution and physical demand
 
-Quadratic fixture: anchors=[[0,0],[2,0]], handles=[[[1,2]]],
-segment_indices=[0,0,0], t=[0,0.5,1] -> values=[[0,0],[1,1],[2,0]].
-Cubic fixture: anchors=[[0,0],[3,0]], handles=[[[1,3],[-1,3]]],
-segment_indices=[0], t=[0.5] -> [[1.5,2.25]]. Use independent exact Bernstein
-polynomials after the separately required RN64 reconstruction, not the production
-de Casteljau helper, as oracle. Strict compares destination bits; accelerated
-checks ULP, converted-control bounds, zero classification and strict fallback where needed.
+Each selected output tile lowers to one fixed CPU Host task. For output region rows [r,r+R) and columns [c,c+C), its immutable read regions are:
 
-Test linear/constant degeneracies, loops/reversals, multiple segments, shared
-endpoints and corners, repeated/unsorted rows, D=1 without squeezing and large
-D with sparse component requests. Include mixed dtypes, RN64 control midpoints,
-actual reconstruction overflow, final cancellation, subnormals and signed zeros.
-Mathematical endpoint evaluation ignores unused generic handles/opposite anchor,
-but full collection and typed validation still apply. An unrequested bad query
-or evaluated component fails the complete Run. Verify complete source support,
-whole invalidation, all-port layouts/fenv, Empty/schema, active cancellation and
-work/output/workspace rejection. Acceptance also requires public constant-node
-composition cases showing that 2^39-column and 2^40-row sparse requests still
-require the complete payload budget and fail when it is insufficient. These cases check capacity rejection for each admitted profile; they do not
-establish successful numerical execution at either maximum shape.
+| Port | Logical support before source tile closure |
+| --- | --- |
+| anchors | [0,K) x [c,c+C) |
+| handles | [0,K-1) x [0,degree-1) x [c,c+C) |
+| segment_indices | [r,r+R) |
+| t | [r,r+R) |
 
-For temporary validation, source Values may supply immutable Referenced storage for source Results; bindings, output values and reads use Results. Cover admitted profiles, Float32/Float64, quadratic/cubic curves, all 16 reversed/unaligned input combinations, zero strides, caller/worker fenv, invalid static metadata, typed complete-input validation, unused generic values, error ordering, endpoint selection, overflow, Empty, dirty mapping, preparation reuse, work limits, cancellation and Root release. Use independent Fraction goldens for CRV-02 and CRV-03 rather than comparing two paths through the same implementation.
+Each source's own tile grid closes its region. Batch/spatial/atomic axes can enlarge the physical support; an atomic component axis can include other columns. Complete candidate control rows are required because segment indices are dynamic. Static handles dependencies remain even when every runtime query selects an endpoint. Upstream producers must satisfy their own contracts for all required output tiles, including values mathematically unused by this consumer.
 
-Production retains RN64 reconstruction and exact integer power-Horner with one final rounding. All current profiles use the same exact numerical calculation; NEON/AVX2 supply integer helpers. ExactPolynomial's fixed arena is reused with a 5329-bit numerator bound for degree<=3 and t in [0,1]. No inverse or global mathematical topology pass is performed. complete-input retains one row and fixed scratch. See implementation notes for public/core performance and its limits.
+The task classifies each selected row once and reuses segment/t across its columns. It evaluates only selected global cells and writes preallocated output tiles. The mathematical stencil consists of one anchor at an endpoint or all degree+1 controls of one segment/component in the interior. Empty selection has no payload tasks or reads. Selection from an existing Plan retains the closure of its saved tasks; fresh compilation determines narrower task regions.
 
-See [implementation notes](../math-implementation.md#crv-03-parametric-bezier-evaluation)
-for the arithmetic bounds.
+Preparation validates all input/output metadata, the kernel symbol/contract, exact scratch size, empty task parameters, canonical output geometry and the exact input tile slots. Prepared input views support signed/zero strides, offsets and unaligned storage. DirectTiles can retain those views; DenseHost imports use explicit Plan COPY tasks and their declared allocations.
 
+## Resources, publication and lifetime
+
+Each invocation owns preallocated `ExactPolynomial` plus `ExactSampling` scratch, independent of K, N and D. The kernel keeps one row classification and a degree+1 control array; it allocates no payload or full coefficient table. Metadata and source tile descriptions scale with the physical closure. Output storage covers selected tiles. Work is O(selected rows + selected cells*degree) plus exact arithmetic. Large logical N or D therefore does not alone require a complete dense output allocation.
+
+The exact polynomial arena retains capacity guards and bounded degree. Coefficients use units 2^-1075; the supplied t is imported with 1074 fractional bits. Horner evaluation and its denominator use the polynomial's actual degree after trimming, so constant and reduced-degree curves retain their scale. For valid degree<=3 and t in [0,1], the numerator bound is 5329 bits. These arithmetic rules also apply to concurrent Runs, which share immutable preparation and own separate scratch/output allocations.
+
+FloatingEnvironment establishes RN and gradual underflow before conversion/reconstruction and restores caller state. Cancellation is checked at rows, components and exact arithmetic steps. Resource admission, cancellation, stale/binding/layout/backend failures and internal capacity/divisor guards retain their operational categories. Declared tile writes become internal dependencies on success. The call's public Result appears only after all required tasks succeed and the call retires in order; a failed task cannot publish a successful partial call Result.
+
+Compatible source replacements reuse preparation. Retained output Results own allocations independently of input backing and the execution context. Content caching and repeated Result identity are outside this contract. Per-value arithmetic counters are not exposed.
+
+## Acceptance and implementation
+
+`plugins/ops/01-numeric/parametric_bezier.cpp` registers the three fixed CPU keys. The public `evaluate_bezier_node` constructor authors the four explicit input edges and static parameters.
+
+Quadratic fixture: anchors=[[0,0],[2,0]], handles=[[[1,2]]], segment_indices=[0,0,0], t=[0,0.5,1] gives [[0,0],[1,1],[2,0]]. Cubic fixture: anchors=[[0,0],[3,0]], handles=[[[1,3],[-1,3]]], segment_indices=[0], t=[0.5] gives [[1.5,2.25]]. Use the independent [Fraction Bernstein reference](../../../../oracle/ops/numeric/crv03/reference.py), with separate RN64 control reconstruction, for valid selected cells. Its complete-output request expansion must be replaced in a temporary checker by the actual selected tile cells. Remove temporary checkers after validation and retain the oracle.
+
+Compare strict result bits and accelerated ULP/range/zero guarantees; current exact profile implementations can additionally be compared bitwise. Cover both degrees, constant/reduced-degree curves, loops, repeated rows, shared endpoints, D=1, mixed dtypes, reconstruction midpoints, huge cancellation, subnormal t/results and signed zero. Check endpoint selection with mathematically unused generic nonfinite controls and valid selected interiors separately. Numerical precondition violations are excluded from valid-input acceptance; invalid segment indices exercise the address guard.
+
+Public workflow checks must cover sparse/nonzero output tiles, source-grid closure and selected component reads, ordinary/batch/atomic axes, all-port reverse/unaligned/zero strides, Empty, malformed static/prepare descriptions, compatible rebinding, concurrent Runs, all caller rounding modes, cancellation, scratch/output admission, failed-call publication and retained output lifetime. Use separate valid extreme shapes, such as D=2^39,N=1 and D=1,N=2^40, respecting all product bounds. Verify selected execution under explicit budgets instead of inferring it from metadata acceptance. Report each CPU profile actually executed; local Apple Silicon evidence does not establish x86 or GPU execution.
+
+- [Implementation notes](../math-implementation.md#crv-03-parametric-bezier-evaluation).
 - [Curve category](../curves.md).
 - [Operator template](../../00-foundation/spec-template.md).
 - [Foundation execution contract](../../00-foundation/contracts.md).

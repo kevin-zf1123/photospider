@@ -23,7 +23,7 @@ All FMT-05B/C inputs and outputs use the single-tensor Result ABI with
 support the seven native copy dtypes, preserve the batch prefix, and avoid
 sample-domain validation. Axes are cell-relative and exclude the Result batch
 prefix. The complete sample rank, including batch and cell axes, is at most 8;
-full sample count is at most 2^40. Native FMT-04/FMT-05A operations execute as Result ABI 6 operations. B/C are
+full sample count is at most 2^40. Native FMT-04/FMT-05A operations use fixed invocation ABI 8. B/C are
 compile-time compositions over registered Result operations.
 
 Inherit [FMT-common](FMT_common_contract.md), its NUM baseline and the
@@ -34,17 +34,11 @@ FMT-05A uses `alpha.set_<profile>`.
 Members are [A set](FMT-05A_set_alpha.md), [B extract](FMT-05B_extract_alpha.md)
 and [C remove](FMT-05C_remove_alpha.md).
 
-FMT-05A requests selected source colors as Data and Validation. For those color
-outputs, the new alpha source adds a separate Validation-only dependency. The
-published alpha channel requests its source as Data and Validation.
-All connected inputs receive Descriptor support; no Control support is declared.
-Raw association uses arithmetic Data without semantic-domain Validation. A channel
-axis contains at most 65,536 slots. The operation preserves
-source Status and diagnostics on failure, publishes materialized output
-transactionally under Root budgets and cancellation, and is stateless for Empty
-observations. Generic views require a complete single-owner affine proof;
-spatial set views are limited to internal identity mappings. Auto copies only on
-physical `ViewUnavailable`.
+FMT-05A declares only each output slot's mapped source payload. Copied colors
+have no additional alpha-validation dependency. Every connected input retains
+static schema checks. Set writes independent dense output tiles with zero scratch;
+nonempty view tasks fail ViewUnavailable with schema-only dependencies. Empty
+has no payload task. A channel axis contains at most 65,536 source slots.
 
 ## Purpose and representation
 
@@ -76,7 +70,7 @@ straight images; this family does not silently accept or normalize them.
 | A source | Same-tensor selected channel, matching explicit external component plane, or explicit shape-[1] scalar. No implicit broadcast of a plane. |
 | A placement | Preserve an existing alpha position by default; otherwise explicit channel position. New alpha has no guessed last-channel placement. |
 | A color | Copy stored straight color; no multiplication/division and no zero-alpha clearing. |
-| A validation | Requested new alpha or selected color requires finite new alpha in [0,1]; requested selected color must be finite. No old-alpha read solely for validation. |
+| A caller premises | Selected represented colors are finite and new alpha is finite in [0,1]. These semantic obligations create no validation-only payload edges. |
 | B absence | missing_alpha=error by default; explicit opaque generates the legal exact code for decoded coverage one. |
 | B samples | Copy actual alpha bits without color reads or an added finite/range scan. |
 | B shape | Complete nonchannel shape S; keepdims=false by default, optional singleton original channel axis; no rank-zero result. |
@@ -85,7 +79,7 @@ straight images; this family does not silently accept or normalize them.
 | Shared alpha | Reject A's in-place overwrite of an alpha slot referenced by other groups; use a new channel. C keeps the shared sample slot; callers configure the selected group downstream. |
 | Old alpha cleanup | Remove an old internal alpha channel only when no other declared reference remains; retain shared channels. |
 | Target index | A's channel_index is a final output position, never a request to overwrite color/AOV data. |
-| Layout | auto by default; explicit view/materialize. A view must still perform required semantic validation. |
+| Layout | auto/materialize produce independent output tiles; nonempty view fails with schema-only dependencies. The axis-free C identity branch retains its stated helper exception. |
 | Dtypes | A uses Float32/Float64 with same-dtype alpha. B/C preserve existing dtype. B opaque uses explicit alpha_encoding or FMT-06 dtype-default encoding, without a dependency on retired FMT-07. |
 
 ## Common interface and support
@@ -173,75 +167,49 @@ Every channel map reads original immutable inputs. Static shape/description
 checks apply to all required ports even when samples are not requested. Target
 assignment cannot change the mandatory straight image representation or create
 an external alpha binding. Raw structural editing remains available through
-FMT-01/02/03 and ordinary NUM operations; it does not promise FMT-05's semantic
-validation or establish another canonical image state.
+FMT-01/02/03 and ordinary NUM operations; it does not establish FMT-05's semantic caller premises or another canonical image state.
 
-## Exact request and invalidation consequences
+## Fixed tile dependencies and layout
 
-| Requested observation | Required sample support and validation |
+| Output value | Required source |
 | --- | --- |
-| A new alpha | Read new alpha at the mapped position as Data and Validation (scalar index zero when selected); validate finite [0,1]. No color/old-alpha samples. |
-| A selected group color | Read exactly that source component as Data and Validation; add Validation-only support from its new alpha source. Validate finite color and finite [0,1] alpha, then copy the color bits. Alpha=0 permits nonzero hidden straight color. |
-| A unrelated channel/group | Read only its remapped source component; no selected-group color/alpha validation. |
-| B actual alpha | Read only the selected internal alpha positions; exact bits, no added coverage-domain validation. |
-| B opaque fallback | Generate the preflight-resolved exact opaque code for requested positions; no source pixel reads. |
-| C surviving channel | Read only its remapped source component; no discarded-alpha samples or association arithmetic. |
+| A new alpha | Mapped alpha, including scalar index zero when needed. |
+| A selected color or unrelated channel | Its original mapped component; no additional new-alpha read. |
+| B actual alpha | Selected internal alpha sample bits. |
+| B opaque fallback | Static exact opaque code and schema only. |
+| C surviving channel | Its original mapped component. |
 
-A's new-alpha changes affect both its alpha output and the validation dependency
-of requested selected-group colors, even though copied color bytes do not depend
-arithmetically on alpha. Scalar changes have that effect across the requested
-extent. Replaced/removed old-alpha samples have no dependency merely because
-the old channel existed; if explicitly selected as the new source or retained
-for another group, the corresponding explicit mapping still applies.
-B maps dirty alpha coordinates to output coordinates; missing opaque has only
-structural dependencies. C drops removed-channel sample invalidations and
-remaps retained channels. Descriptor/shape/group changes invalidate static maps.
-Preserve disjoint requests; do not close them over unrequested colors or the
-whole image. Required upstream complete-input work retains its original scope.
+The compiler retains complete output tiles, maps each intersecting channel span,
+and unions closures in each source's own tile grid. It preserves gaps and declares
+schema-only dependencies for unused ports. Logical per-value formulas do not
+promise sample-granular scheduling. A tile containing both color and new alpha
+needs both sources; a color-only tile can omit the alpha producer. Static
+parameters and descriptions are validated even for Empty.
 
-## Layout selection
+FMT-05A auto/materialize copy to distinct dense row-major output allocations,
+including identity maps. Every nonempty view task fails
+`InvalidArgument / ViewUnavailable` with only schema dependencies. Set declares
+zero scratch. Public visibility follows successful ordered call retirement.
 
-FMT-05A exposes `layout=auto|view|materialize`. A generic forced view requires
-the entire declared output map to use one `CpuStorage` owner, one affine address
-expression and in-bounds spans. The spatial path is limited to an internal
-identity map. FMT-05B and channel-bearing FMT-05C pass layout to their registered primitives;
-a forced view follows each primitive's representability rules. A forced view
-reports `ViewUnavailable` when the physical proof fails.
+B uses fixed CPU tasks for both existing-alpha extraction and opaque generation. Auto/materialize produce independently owned dense output tiles; every nonempty view task fails InvalidArgument/InvalidDomain with schema-only dependency and no source payload read. Empty still validates static parameters and emits no task. Channel-bearing C uses fixed mapped assembly: auto/materialize copy, and nonempty view fails InvalidArgument/ViewUnavailable with schema-only dependencies. C component Gray identity uses core.identity.value and explicit COPY tasks, preserving sample bits without applying the helper layout policy.
 
-`auto` uses a legal view when the full requested map is proven; it materializes
-only on physical `ViewUnavailable`. It preserves semantic, descriptor and source
-failures with their original status and diagnostic. Materialization prepares and
-publishes requested coverage transactionally under Root budgets and cancellation.
-Empty observations retain no run payload state. All policies preserve validation
-obligations, metadata semantics and required source failures.
+## Ownership and numerical premises
 
-B extraction and C channel mapping can use existing Result views when those
-operations prove the requested mapping. Opaque B generation cannot view generated
-pixels. C component Gray identity uses `core.identity`, returning the input samples
-without a layout conversion. Channel-bearing C forwards layout to mapped assembly.
+External/scalar sources become ordinary samples in independently owned output
+tiles. Spatial metadata describes logical axes, independently of physical dense
+strides. Retained Results survive input and context destruction; no hidden alpha
+snapshot or metadata relation supplies missing coverage.
 
-## Ownership, partial results and failures
+Set callers supply finite selected color values and finite normalized alpha for
+the semantic values they represent. These premises apply to the complete retained
+output tiles and promise no runtime validation or coordinate diagnostic. Source
+tile over-grants do not themselves evaluate other components. B/C retain their
+bit-copy/fill semantics without adding these Set premises.
 
-Canonical output images obey planar storage and one full-image virtual range.
-External input planes are copied or legally mapped into the result's logical
-internal alpha channel under existing owner/layout rules; no new multi-owner
-image storage or metadata pointer shortcut is introduced. Scalar expansion must
-also obey image storage, not expose an illegal image zero-stride backing.
-
-Only requested, successfully produced observations become valid. R-only output
-can require reading new alpha for validation without publishing the result's
-alpha plane. A later consumer must request that result alpha channel explicitly;
-missing alpha coverage does not resolve via retained external semantic metadata.
-Normal DAG edges and read/view owners keep required resources alive. Deleting a
-logical alpha channel does not promise immediate release of a shared backing.
-
-Static group, shape, reference, placement and canonical-representation conflicts
-fail preflight. A requested invalid alpha or nonfinite selected color fails
-semantic evaluation as OperationFailed/InvalidDomain; B's bit-copy alone does
-not reject such alpha bytes. Missing required alpha fails unless the explicit
-B opaque or C identity policy applies. Resource exhaustion, cancellation,
-publication and arithmetic used for checked shape/offset calculation inherit
-NUM/kernel rules. Channel copying performs no floating arithmetic.
+Static group, shape, reference, placement and representation conflicts fail
+preparation. Resources, cancellation, missing bindings and producer failures
+follow the fixed executor protocol. A byte copy does not certify other semantic
+values or make an unproduced alpha tile available.
 
 ## Required semantic acceptance cases
 
@@ -249,8 +217,8 @@ Required independent cases include:
 
 - Straight C=0.5 with old alpha=0.5 and new alpha=0.25 gives C=0.5, alpha=0.25.
   New alpha=0 still gives C=0.5. Removing alpha preserves C=0.5.
-- A accepts finite hidden straight color at new alpha=0. A NaN selected color
-  fails only when requested; an unrelated AOV request does not trigger it.
+- A preserves finite hidden straight color at new alpha=0. Its selected-color
+  finiteness is a caller premise; unrelated AOV copies add no such premise.
 - B preserves negative zero, out-of-range samples and NaN payload bits; opaque
   fallback generates the exact encoded coverage-one code over S. No source color read occurs.
 - A shared-slot replacement fails; explicit insertion retains the old shared
@@ -264,31 +232,13 @@ Required independent cases include:
 
 ## Reference execution, resources and composition
 
-Resolve group, explicit input description, channel surgery and layout before evaluating
-payloads. Compile a direct source map and reverse dirty map; never repeatedly
-search all channels per output sample. For Q, acquire only declared Data and
-Validation windows. A validates exactly the requested selected components and
-mapped new alpha even when values alias a legal view. Allocate/prepare destination
-pages only for materialization, copy/generate exact bytes, check cancellation and
-publish exact successful coverage with its structural schema. Original input values
-always supply sources; no mutation or sequential overwrite occurs.
-
-For rank r, C channel descriptors, Nq requested samples and F windows, reference
-work is O(C*r+Nq*r+F*r), plus host page-set work and required upstream execution.
-Static maps need O(C+r); admitted windows/footprints, descriptors and page sets
-are separately charged. No full-image sample buffer or eager per-reserved-page
-directory is required. Deduplicate alpha validation support across requested
-colors. Vector loads must stay within authorized spans and prepared pages;
-coalescing cannot read padding or unrequested channels. Use host scheduling for
-disjoint observations, not a private worker pool.
-
-Charge actual provided backing, simultaneously retained source/result owners,
-metadata/maps, staging and windows, not just requested logical bytes. View output
-can retain a larger original allocation; deduplicate shared owners in accounting.
-No eviction, replay or hidden alpha snapshot storage is introduced. Poll work,
-cancellation and currentness at most every 1024 entries/samples during mapping,
-validation and copy, and immediately before publication. Failure releases
-unpublished resources and leaves prior successful observations intact.
+Static preparation resolves group, description and channel surgery, then retains
+immutable source maps. Fixed kernels copy or fill all coordinates in each
+retained output tile. Original inputs supply every source, so channel movement
+cannot become a sequential overwrite. Set polls cancellation every 128 samples,
+uses no arithmetic scratch and creates no dynamic windows or payload allocations.
+Prepared maps and read indexes support concurrent Runs; the executor owns workers,
+output reservations, completion and ordered publication.
 
 B resolves its opaque constant once with exact descriptor arithmetic, without
 source samples; include descriptor/encoding work in compile/admission budgets.
@@ -303,13 +253,6 @@ branch adds no source-schema assertion or layout conversion. Mapped assembly
 uses the aggregate structural `expected_inputs` assertion. These helpers add
 no sample checks from A and no persistent alpha relation.
 
-Initial optional sample-only completed-result caching is disabled, following the
-inherited primitives. Any later cache needs source/descriptor/coverage/layout
-identity and A's validation evidence, including new-alpha dependencies when
-color bytes are unchanged. A prior successful byte copy is insufficient proof
-that new alpha has the same semantic validity. No external alpha binding is
-needed for cache identity; ordinary declared inputs remain dependencies.
-
 ## Error phases and diagnostics
 
 | Condition | Phase | Status / reason |
@@ -318,19 +261,17 @@ needed for cache identity; ordinary declared inputs remain dependencies.
 | Missing alpha without the selected fallback | Static preflight | InvalidArgument / InvalidDomain; identify selected group. |
 | Unsupported dtype, mixed A dtypes, nonchannel shape mismatch or noncanonical premultiplied input | Static preflight | TypeMismatch / None. |
 | Invalid opaque encoding, or coverage one has no legal exactly representable output code | Static preflight | InvalidArgument / InvalidDomain. |
-| Forced view unavailable, including opaque generation | Observation evaluation | InvalidArgument / InvalidDomain; ViewUnavailable diagnostic. |
-| Requested invalid new alpha or nonfinite A selected color | Semantic evaluation | OperationFailed / InvalidDomain, affected observation. |
+| Nonempty forced view | Invocation | InvalidArgument; reason follows the selected fixed primitive. Set and mapped removal use ViewUnavailable. |
 | Size/offset overflow, budget/work, missing source coverage, backend, cancellation or stale failure | Inherited phase | Preserve NUM/kernel code, origin and scope. |
 
-Identify member, group, channel/source and global coordinate for sample errors;
-static errors have no invented pixel coordinate. B/C do not introduce NaN/Inf
-or coverage-range errors for copies. Missing source coverage remains missing,
-not an implicit zero. Required upstream failures keep their original scope.
+Static errors carry no invented sample coordinate. Invalid Set numerical
+premises have no promised runtime diagnostic. B/C add no NaN/Inf or coverage-range
+checks for copies. Missing source coverage remains an ordinary binding failure.
 
 ## Validation and performance evidence
 
 Temporary public workflow checks should inspect output samples, structural
-schemas, Data/Validation support, exact opaque encodings and failed-expansion
+schemas, fixed per-port tile reads, exact opaque encodings and failed-expansion
 rollback for A/B/C. Numerical alpha oracles remain independent references;
 unit arithmetic alone does not prove workflow behavior. Delete temporary
 numeric/integration checks after validation. No installed-consumer or current

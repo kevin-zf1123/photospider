@@ -1,6 +1,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <future>
@@ -19,43 +20,39 @@
 #include "support/test_support.hpp"
 
 namespace {
-using FixturePoll = ps::Result<ps::ResultProgramPoll>;
-// NOLINTBEGIN(whitespace/indent_namespace)
-using FixtureCallback =
-    std::function<FixturePoll(const ps::ResultProgramPhase&)>;
-// NOLINTEND
-FixturePoll publish_number(const ps::ResultProgramPhase& phase, double number) {
-  auto builder = multi_result::take(ps::ResultBuilder::start(
-      phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {}, phase.query.tile_extent));
-  multi_result::check(builder.publish_tensor(
-      0, ps::Region::whole({1}),
-      ps::ByteView(reinterpret_cast<const std::uint8_t*>(&number),
-                   sizeof(number))));
-  return FixturePoll(
-      ps::ResultPublication{multi_result::take(builder.seal()), true});
-}
-struct FixtureProgram {
-  FixtureCallback compute;
-  explicit FixtureProgram(FixtureCallback callback)
-      : compute(std::move(callback)) {}
-  FixturePoll poll(const ps::ResultProgramPhase& phase) {
-    return compute(phase);
-  }
-};
 ps::OperationDefinition fixture_operation(std::string key,
-                                          ps::OperationTraits traits,
-                                          FixtureCallback compute) {
-  traits.outputs = {multi_result::output("value")};
-  traits.outputs[0].continuation_bytes = sizeof(FixtureProgram);
-  traits.cacheable = false;
+                                          std::function<double()> compute) {
   ps::OperationDefinition definition;
   definition.key = std::move(key);
-  definition.traits = std::move(traits);
-  definition.start_result = [compute = std::move(compute)](
-                                const ps::ResultProgramQuery&,
-                                const ps::BufferAllocator& allocator) {
-    return ps::ResultContinuation::make<FixtureProgram>(allocator, compute);
+  definition.traits.outputs = {multi_result::output("value")};
+  multi_result::install_fixed(definition, {-1}, {0});
+  definition.prepare_kernel =
+      [compute = std::move(compute)](
+          const auto&, const auto&, const auto& query, const auto&,
+          const auto*) -> ps::Result<ps_prepared_kernel_v8> {
+    if (!query.reads.empty() || query.writes.size() != 1 ||
+        query.writes[0].bytes != sizeof(double))
+      return ps::Result<ps_prepared_kernel_v8>(
+          {ps::ErrorCode::TypeMismatch, "benchmark fixture signature"});
+    ps_prepared_kernel_v8 kernel{};
+    kernel.struct_size = sizeof(kernel);
+    kernel.abi_version = 8;
+    kernel.context = new std::function<double()>(compute);
+    kernel.release = [](const void* context) {
+      delete static_cast<const std::function<double()>*>(context);
+    };
+    kernel.invoke_cpu = [](const ps_kernel_invocation_v8* invocation,
+                           ps_kernel_status_v8* status) {
+      const auto& callback = *static_cast<const std::function<double()>*>(
+          invocation->prepared_context);
+      const double value = callback();
+      const auto& output = invocation->outputs[0];
+      std::memcpy(
+          static_cast<std::uint8_t*>(output.allocation) + output.byte_offset,
+          &value, sizeof(value));
+      *status = {};
+    };
+    return ps::Result<ps_prepared_kernel_v8>(kernel);
   };
   return definition;
 }
@@ -166,32 +163,15 @@ const ps::CompilationDiagnostics& sentinel_compilation_diagnostics() noexcept {
 
 /**
  * @brief Builds internally coherent successful execution sentinels.
- * @return Diagnostics containing fallback, transfer, backend, timing, and
- * digest observations distinct from defaults.
- * @throws std::bad_alloc If sentinel container allocation fails.
- * @note The unavailable GPU attempt legitimately has zero duration and the
- * later CPU attempt is the selected backend for that node.
+ * @return Fixed execution counters distinct from their initial values.
  */
 ps::ExecutionDiagnostics make_sentinel_execution_diagnostics() {
   ps::ExecutionDiagnostics diagnostics;
-  diagnostics.execute_us = 29U;
-  diagnostics.selected_backends = {
-      {{1U, 0}, ps::Backend::Cpu},
-      {{2U, 0}, ps::Backend::Gpu},
-      {{3U, 0}, ps::Backend::Cpu},
-  };
-  diagnostics.transfer_count = 1U;
-  diagnostics.transfer_bytes = sizeof(double);
-  diagnostics.peak_live_bytes = 24U;
-  diagnostics.fallback_reasons = {"node 1 sentinel GPU fallback"};
-  diagnostics.operation_timings = {
-      {{1U, 0}, ps::Backend::Gpu, 0U, ps::ErrorCode::BackendUnavailable},
-      {{1U, 0}, ps::Backend::Cpu, 3U, ps::ErrorCode::Ok},
-      {{2U, 0}, ps::Backend::Gpu, 5U, ps::ErrorCode::Ok},
-      {{3U, 0}, ps::Backend::Cpu, 7U, ps::ErrorCode::Ok},
-  };
-  diagnostics.plan_digest = std::string(64U, 'a');
-  diagnostics.result_digest = std::string(64U, 'b');
+  diagnostics.activations = 1;
+  diagnostics.submitted_tasks = 7;
+  diagnostics.completed_tasks = 7;
+  diagnostics.retired_calls = 3;
+  diagnostics.peak_active_tasks = 2;
   return diagnostics;
 }
 
@@ -254,12 +234,29 @@ int main() {
   using namespace ps;  // NOLINT(build/namespaces)
   auto operations = std::make_shared<OperationRegistry>();
   PS_CHECK(operations
-               ->register_operation(fixture_operation(
-                   "test.benchmark_constant", OperationTraits{},
-                   [](const ResultProgramPhase& phase) {
-                     return publish_number(phase, 6.5);
-                   }))
+               ->register_operation(fixture_operation("test.benchmark_constant",
+                                                      [] { return 6.5; }))
                .ok());
+  unsigned preparations = 0;
+  auto retry = fixture_operation("test.benchmark_prepare", [] { return 3.0; });
+  const auto prepare = retry.prepare_kernel;
+  retry.prepare_kernel =
+      [&, prepare](const auto& kernel, const auto& placement, const auto& query,
+                   const auto& resources,
+                   const auto* device) -> Result<ps_prepared_kernel_v8> {
+    if (++preparations == 1)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::OperationFailed, "first preparation rejected"});
+    return prepare(kernel, placement, query, resources, device);
+  };
+  PS_REQUIRE_OK(operations->register_operation(std::move(retry)));
+  unsigned executions = 0;
+  PS_REQUIRE_OK(operations->register_operation(
+      fixture_operation("test.benchmark_execution", [&] {
+        if (++executions == 1)
+          throw std::runtime_error("first invocation rejected");
+        return 3.0;
+      })));
   operations->freeze();
   Compiler compiler(operations);
   ExecutionContext execution(operations);
@@ -267,6 +264,75 @@ int main() {
   document.outputs[0].name = "sum";
   GraphContext graph(std::move(document));
   RawBenchmarkRunner benchmark(&compiler, &execution);
+  RawBenchmarkOptions successful_options;
+  successful_options.iterations = 2;
+  successful_options.oracle_name = "constant-value";
+  successful_options.correctness_oracle = [](const ExecutionResult& result) {
+    return CorrectnessObservation{
+        multi_result::number(result.results.at("sum")) == 6.5,
+        {}};
+  };
+  successful_options.execution.trace_capacity = 1;
+  auto successful = benchmark.run(graph, successful_options);
+  PS_REQUIRE_OK(successful);
+  PS_CHECK(successful.value().samples.size() == 2);
+  PS_CHECK(successful.value().cpu_workers == execution.cpu_workers());
+  PS_CHECK(successful.value().native_device_description.empty());
+  for (const auto& sample : successful.value().samples)
+    PS_CHECK(sample.outcome == ErrorCode::Ok && sample.correctness_checked &&
+             sample.correctness_accepted && sample.execution.activations == 1 &&
+             sample.execution.completed_tasks == 1 &&
+             sample.execution.submitted_tasks == 1 &&
+             sample.execution.retired_calls == 1 &&
+             sample.task_timings.size() == 1 &&
+             sample.call_timings.size() == 1 &&
+             sample.task_timings[0].status == ErrorCode::Ok &&
+             sample.task_timings[0].completion_ns <=
+                 sample.task_timings[0].consumed_ns &&
+             sample.call_timings[0].outcome == CallOutcome::Succeeded);
+  RawBenchmarkOptions failure_options;
+  failure_options.iterations = 2;
+  failure_options.execution.trace_capacity = 1;
+  GraphContext prepare_graph(
+      single_operation_document("test.benchmark_prepare"));
+  auto failed_preparation = benchmark.run(prepare_graph, failure_options);
+  PS_REQUIRE_OK(failed_preparation);
+  PS_CHECK(preparations == 2 && failed_preparation.value().samples.size() == 2);
+  PS_CHECK(failed_preparation.value().samples[0].outcome ==
+               ErrorCode::OperationFailed &&
+           failed_preparation.value().samples[0].reason ==
+               "first preparation rejected" &&
+           failed_preparation.value().samples[0].execution.submitted_tasks ==
+               0);
+  PS_CHECK(failed_preparation.value().samples[1].outcome == ErrorCode::Ok &&
+           failed_preparation.value().samples[1].execution.completed_tasks ==
+               1);
+  GraphContext execution_graph(
+      single_operation_document("test.benchmark_execution"));
+  auto failed_execution = benchmark.run(execution_graph, failure_options);
+  PS_REQUIRE_OK(failed_execution);
+  PS_CHECK(executions == 2 && failed_execution.value().samples.size() == 2);
+  const auto& failed_sample = failed_execution.value().samples[0];
+  PS_CHECK(failed_sample.outcome == ErrorCode::OperationFailed &&
+           failed_sample.reason == "first invocation rejected" &&
+           failed_sample.execution.submitted_tasks == 1 &&
+           failed_sample.execution.completed_tasks == 1 &&
+           failed_sample.execution.allocation_count == 1 &&
+           failed_sample.prepare_ns > 0 && failed_sample.submit_ns > 0 &&
+           failed_sample.join_ns > 0 &&
+           failed_sample.task_timings.size() == 1 &&
+           failed_sample.task_timings[0].status == ErrorCode::OperationFailed);
+  PS_CHECK(failed_sample.call_timings.size() == 1);
+  PS_CHECK(failed_sample.call_timings[0].outcome == CallOutcome::Failed);
+  PS_CHECK(failed_execution.value().samples[1].outcome == ErrorCode::Ok);
+  failure_options.bindings.inputs = {{"unexpected", {}}};
+  auto failed_submission = benchmark.run(graph, failure_options);
+  PS_REQUIRE_OK(failed_submission);
+  PS_CHECK(failed_submission.value().samples.size() == 2);
+  for (const auto& sample : failed_submission.value().samples)
+    PS_CHECK(sample.outcome == ErrorCode::InvalidArgument &&
+             sample.execution.submitted_tasks == 0 &&
+             !sample.correctness_checked);
   auto benchmark_cancellation_operations =
       std::make_shared<OperationRegistry>();
   CancellationSource* active_benchmark_cancellation = nullptr;
@@ -274,24 +340,26 @@ int main() {
   std::uint32_t cancel_on_callback = 0U;
   PS_CHECK(benchmark_cancellation_operations
                ->register_operation(fixture_operation(
-                   "test.benchmark_cancel", OperationTraits{},
+                   "test.benchmark_cancel",
                    [&active_benchmark_cancellation, &benchmark_callback_count,
-                    &cancel_on_callback](
-                       const ResultProgramPhase& invocation) -> FixturePoll {
+                    &cancel_on_callback]() {
                      ++benchmark_callback_count;
                      if (active_benchmark_cancellation != nullptr &&
                          benchmark_callback_count == cancel_on_callback) {
                        static_cast<void>(
                            active_benchmark_cancellation->cancel());
                      }
-                     return publish_number(invocation, 1.0);
+                     return 1.0;
                    }))
                .ok());
   benchmark_cancellation_operations->freeze();
   Compiler benchmark_cancellation_compiler(benchmark_cancellation_operations);
+  ExecutionContextConfig cancellation_config;
+  cancellation_config.cpu_workers = 1;
+  cancellation_config.maximum_queued_tasks = 4;
+  cancellation_config.maximum_live_bytes = 65536;
   ExecutionContext benchmark_cancellation_execution(
-      benchmark_cancellation_operations,
-      ExecutionContextConfig{1U, false, 4U, 65536U});
+      benchmark_cancellation_operations, cancellation_config);
   GraphContext benchmark_cancellation_graph(
       single_operation_document("test.benchmark_cancel"));
   RawBenchmarkRunner cancellation_benchmark(&benchmark_cancellation_compiler,
@@ -408,31 +476,15 @@ int main() {
     PS_CHECK(sample->compilation.optimize_us ==
              expected_compilation.optimize_us);
     PS_CHECK(sample->compilation.plan_us == expected_compilation.plan_us);
-    PS_CHECK(sample->execution.execute_us == expected_execution.execute_us);
-    PS_CHECK(sample->execution.selected_backends ==
-             expected_execution.selected_backends);
-    PS_CHECK(sample->execution.transfer_count ==
-             expected_execution.transfer_count);
-    PS_CHECK(sample->execution.transfer_bytes ==
-             expected_execution.transfer_bytes);
-    PS_CHECK(sample->execution.peak_live_bytes ==
-             expected_execution.peak_live_bytes);
-    PS_CHECK(sample->execution.fallback_reasons ==
-             expected_execution.fallback_reasons);
-    PS_CHECK(sample->execution.plan_digest == expected_execution.plan_digest);
-    PS_CHECK(sample->execution.result_digest ==
-             expected_execution.result_digest);
-    PS_CHECK(sample->execution.operation_timings.size() ==
-             expected_execution.operation_timings.size());
-    for (std::size_t index = 0U;
-         index < sample->execution.operation_timings.size(); ++index) {
-      const auto& actual = sample->execution.operation_timings[index];
-      const auto& expected = expected_execution.operation_timings[index];
-      PS_CHECK(actual.output == expected.output);
-      PS_CHECK(actual.backend == expected.backend);
-      PS_CHECK(actual.duration_us == expected.duration_us);
-      PS_CHECK(actual.outcome == expected.outcome);
-    }
+    PS_CHECK(sample->execution.activations == expected_execution.activations);
+    PS_CHECK(sample->execution.submitted_tasks ==
+             expected_execution.submitted_tasks);
+    PS_CHECK(sample->execution.completed_tasks ==
+             expected_execution.completed_tasks);
+    PS_CHECK(sample->execution.retired_calls ==
+             expected_execution.retired_calls);
+    PS_CHECK(sample->execution.peak_active_tasks ==
+             expected_execution.peak_active_tasks);
   }
 
   CancellationSource null_oracle_cancellation;

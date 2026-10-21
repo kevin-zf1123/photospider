@@ -44,8 +44,18 @@ inline int native_requested_quota(
                         .limited_requested(logical);
     PS_CHECK(!reversed.allocate(logical).ok());
     PS_CHECK(reversed.allocate(1).ok());
+    // Quota/provenance owners remain live in the allocator handles after
+    // backing release. They are now managed metadata, not payload.
+    PS_CHECK(root.statistics().live[ResourceKind::Payload] == 0);
+    PS_CHECK(root.statistics().allocated_metadata_bytes > 0);
+    host = BufferAllocator{};
+    native = BufferAllocator{};
+    copied = BufferAllocator{};
+    actual = BufferAllocator{};
+    reversed = BufferAllocator{};
     for (auto live : root.statistics().live.values)
       PS_CHECK(live == 0);
+    PS_CHECK(root.statistics().allocated_metadata_bytes == 0);
   }
   // A failed root admission also returns the requested-size quota.
   ResourceLimits limits;

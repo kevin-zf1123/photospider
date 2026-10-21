@@ -2,7 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "./result_registry_fixture.hpp"
+#include "./operation_registry_fixture.hpp"
 
 #ifndef PS_OPERATION_UTF8_CASE
 #error "PS_OPERATION_UTF8_CASE must select one UTF-8 contract case"
@@ -109,30 +109,35 @@ void destroy_fixture(void*) {
  * @return Structurally complete parameter record carrying selected key bytes.
  * @throws Nothing.
  */
-ps_result_parameter_descriptor_v7 make_parameter() noexcept {
+ps_parameter_spec_v8 make_parameter() noexcept {
   const KeyBytes key = parameter_key();
-  return {sizeof(ps_result_parameter_descriptor_v7), key.data, key.size,
-          PS_RESULT_PARAMETER_FLOAT64_V7, 0U};
+  return {sizeof(ps_parameter_spec_v8),
+          {key.data, key.size},
+          PS_PARAMETER_FLOAT64_V8,
+          0U,
+          0U,
+          0.,
+          0.};
 }
 
 /** @brief Static parameter declaration for the selected UTF-8 case. */
-const ps_result_parameter_descriptor_v7 parameter = make_parameter();
+const ps_parameter_spec_v8 parameter = make_parameter();
 
-ps_result_operation_v7 make_descriptor() noexcept {
+ps_operation_v8 make_descriptor() noexcept {
   const KeyBytes key = operation_key();
-  return result_registry_fixture::make_operation(key.data, key.size, &parameter,
-                                                 1);
+  return operation_registry_fixture::make_operation(key.data, key.size,
+                                                    &parameter, 1);
 }
 const auto descriptor = make_descriptor();
 // NOLINTBEGIN(whitespace/indent_namespace)
 const auto api =
-    result_registry_fixture::make_api(&descriptor, destroy_fixture);
+    operation_registry_fixture::make_api(&descriptor, destroy_fixture);
 // NOLINTEND
 
 }  // namespace
 
-extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v7*
-ps_result_operation_plugin_get_api_v7(void) {
+extern "C" PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
+ps_operation_module_get_api_v8(void) {
   return &api;
 }
 
@@ -141,7 +146,7 @@ ps_result_operation_plugin_get_api_v7(void) {
  * @return Monotonic destroy count.
  * @throws Nothing.
  */
-extern "C" PS_RESULT_EXPORT std::uint32_t
+extern "C" PS_OPERATION_MODULE_EXPORT std::uint32_t
 ps_operation_utf8_fixture_destroy_count(void) {
   return destroy_count.load(std::memory_order_relaxed);
 }

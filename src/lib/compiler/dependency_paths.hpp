@@ -15,21 +15,16 @@ inline std::vector<IRBlock> lower_dependency_paths(
     const std::vector<IRBlock>& source, IRForm form) {
   if (form == IRForm::ControlFlow)
     return source;
+  if (source.empty())
+    return {};
   std::set<IRCallId> emitted;
-  std::vector<IRBlock> blocks;
-  for (const auto& path : source) {
-    IRBlock block;
-    block.id = path.id;
+  IRBlock block;
+  block.id = source.front().id;
+  for (const auto& path : source)
     for (auto call : path.calls)
       if (emitted.insert(call).second)
         block.calls.push_back(call);
-    if (block.calls.empty())
-      continue;
-    if (!blocks.empty())
-      blocks.back().terminator = IRJump{{block.id, {}}};
-    blocks.push_back(std::move(block));
-  }
-  blocks.back().terminator = source.back().terminator;
-  return blocks;
+  block.terminator = source.back().terminator;
+  return {std::move(block)};
 }
 }  // namespace ps::compiler_internal

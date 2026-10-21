@@ -1,17 +1,5 @@
 include_guard(GLOBAL)
 
-function(photospider_add_result_table_fixture target source)
-  cmake_parse_arguments(PS "BAD" "" "" ${ARGN})
-  add_library(${target} MODULE "${source}")
-  target_link_libraries(${target} PRIVATE Photospider::operation_sdk)
-  target_compile_definitions(${target} PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
-  set_target_properties(${target} PROPERTIES C_STANDARD 11
-    C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
-  if(PS_BAD)
-    target_compile_definitions(${target} PRIVATE PS_RESULT_BAD_TABLES=1)
-  endif()
-endfunction()
-
 # Test modules use the same instrumentation as their host. Mach-O C modules
 # need an atexit owner to retire compiler-rt image globals before dlclose unmaps
 # the image; the generated mod_term_func destructor alone is not sufficient.

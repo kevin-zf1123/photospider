@@ -31,7 +31,7 @@ stored in the original floating dtype. UInt8 and Int64 are exact identity.
 Shape and dtype are preserved; there are no operation parameters or implicit
 conversion to an integer output array. Inherit the
 [NUM-04 common contract](NUM-04_unary_contract.md) for the input/values interface,
-complete-input/typed-validation support, output structure, resources and lifetime.
+fixed tile reads and structural preparation, output structure, resources and lifetime.
 
 ## Exact semantics
 
@@ -51,16 +51,14 @@ No arithmetic overflow or ULP tolerance is needed for this operation.
 ## Resources and acceptance
 
 Work is O(M), element scratch O(1) and output payload M*b, plus common mapping
-and typed-validation costs. SIMD must preserve zero signs and NaN quieting and
-evaluate the full logical input for every nonempty request. Inherited sticky failure,
-cancellation, cache-off and final-owner rules apply.
+and structural preparation costs. SIMD must preserve zero signs and NaN quieting within each selected output tile. Fixed invocation cancellation and final-owner rules apply.
 
 Analytic public fixture: [-1.5,-0,+0,0.25,1.5] -> [-2,-0,+0,+0,1].
 Verify output dtype is unchanged. Cover all UInt8 values, Int64 values above
 2^53 and extrema, floating neighbors of integers, subnormals, signed zeros,
 infinities and NaN payloads. Compare to an independent rational integral oracle
 and explicit bit handling; check all three keys bitwise and apply shared public
-ROI/read-witness/lifetime/resource validation.
+ROI/fixed-read/lifetime/resource validation.
 
 The maintained implementation is in the numeric operator registry. Its public
 WorkflowDocument -> Compiler -> ExecutionContext run command is documented below.
@@ -69,6 +67,5 @@ This specification alone does not claim a product test run.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
-atomic failure for the complete invocation. Its numerical path follows
+exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

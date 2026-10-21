@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 ---
 
@@ -15,9 +15,9 @@ Inherit [FMT-common](FMT_common_contract.md), the NUM numerical/execution baseli
 [model coverage](FMT_model_conversion_coverage.md) and
 [canonical image/codec boundary](FMT_codec_boundary.md). The family contains [A decode](FMT-09A_decode_transfer.md) and
 [B encode](FMT-09B_encode_transfer.md). Each direction has strict, accelerated
-Apple Silicon and accelerated x86-64 CPU Result ABI 6 keys. Their exact scalar
+Apple Silicon and accelerated x86-64 CPU fixed invocation ABI 8 keys. Their exact scalar
 definitions are normative in [FMT-09 mathematics](FMT-09_transfer_math.md). The
-specification remains Proposed; registration and implementation status are separate.
+specification remains Proposed; registration and implementation status are separate. The fixed invocation, tile coverage and caller-precondition rules below govern this family in place of inherited window, validation and dirty-mapping execution descriptions.
 
 ## Purpose and responsibilities
 
@@ -41,13 +41,11 @@ last-axis conventions do not override the FMT contract.
 
 ## Confirmed curve set, meaning and domains
 
-D denotes A decoding and E denotes B encoding. All semantic participating inputs
-must be finite; listed domains are additional input checks. The selected output
-must round to a finite result. Static validity does not replace sample checks.
+D denotes A decoding and E denotes B encoding. Semantic callers guarantee finite participating inputs, membership in the listed input domains and finite rounded outputs throughout complete retained output tiles. These are unchecked sample-domain preconditions. Static description and parameter checks remain mandatory.
 
 | Curve | Native linear quantity | Semantic input domains and selected behavior |
 | --- | --- | --- |
-| linear | Preserve coherent native units/reference, relative or absolute. | Any finite value; exact bit-copy identity, subject to semantic validation. |
+| linear | Preserve coherent native units/reference, relative or absolute. | Any finite value; exact bit-copy identity, subject to the finite caller precondition. |
 | power_gamma | Explicit relative scene or display quantity. | Any finite input in either direction; finite gamma>0 required. Apply magnitude power then restore sign; values above 1 are not clipped. |
 | srgb | Explicit relative scene or display quantity. | Any finite input; signed extension with published piecewise constants, no gamut/black normalization or monitor-luminance scaling. |
 | bt709 | Scene-relative, inverse/source OETF pair. | Any finite input; published BT.709-6 constants plus signed extension. Does not select BT.1886 implicitly. |
@@ -60,12 +58,11 @@ must round to a finite result. Static validity does not replace sample checks.
 
 No output-domain clamp is added. This valid semantic decode
 can exceed the next semantic encoder's [0,1] input domain in Float64, so that
-next call rejects it. Preserve the formula, not an unrequested normalization or
+next call is outside its semantic input precondition. Preserve the formula, not an unrequested normalization or
 endpoint fix. A caller needing [0,1] applies an explicit clamp. No full-range
 validity proof or exact round-trip promise is attached to such an output.
 
-The signed extension belongs only to gamma/sRGB/709/2020. PQ/HLG semantic
-out-of-domain values fail. ACES intrinsic floors/caps remain in both Float32 and
+The signed extension belongs only to gamma/sRGB/709/2020. PQ/HLG semantic domains remain caller obligations. ACES intrinsic floors/caps remain in both Float32 and
 Float64; no unbounded variant is introduced under the same identifier. Vendor
 camera logs require separately versioned future definitions. Ordinary log2/log10
 math remains in NUM.
@@ -143,7 +140,7 @@ ACEScct color space. All native units/reference checks remain in preparation.
 
 Without `input_description`, raw calls require `components` and an explicit
 curve. An index list requires `axis`; `components=all` may omit it. Raw formula
-evaluation omits described-domain finiteness checks, while intrinsic PQ/1886
+evaluation uses its defined IEEE outcomes, while intrinsic PQ/1886
 max and ACES cap/floor branches still execute. Static parameter and storage
 checks apply in both paths.
 
@@ -152,101 +149,46 @@ curve's linear quantity and B computes the target encoded quantity; callers
 provide the corresponding configuration to later consumers. Description
 parameters affect computation identity but do not certify unrequested samples.
 
-## Exact requests, validation and invalidation
+## Fixed tile dependencies and identity
 
-Let Q be requested output coordinates and T their intersection with participating
-components. Descriptor support (role 8) covers the connected input Result.
-Pass-through components and raw selections request Data (role 1); semantic
-participating components request Data plus Validation (roles 1 and 4). Semantic
-Validation covers input[T] and finite rounded transformed results; no unrequested
-component or alpha sample is read. There is no Control dependence. All required static descriptions and
-parameters are checked regardless of requested pixels, including Empty requests.
-An Empty request does not acquire sample windows or run arithmetic.
+Each retained output tile produces one fixed CPU task. Every coordinate is initialized: a participating coordinate evaluates its transfer, and an unselected coordinate copies bits. The complete output region is closed over the input's own TileGrid, including any difference in atomic trailing axes. Preparation verifies exactly those read slots. Extra samples granted by source-grid closure are not evaluated and do not extend semantic caller preconditions. Intrinsic floors/caps retain their source dependencies because branch selection uses the actual input.
 
-Every transformed component uses only itself. Do not skip hidden straight color
-because alpha=0; alpha is not read to make such a decision. Alpha/AOV-only and
-unselected-group requests are exact copies without transfer-domain validation.
-Invalid unrequested peers do not fail another component's observation. A required
-upstream complete-input operation retains its own dependency and failure extent.
+Static description, parameter, shape and profile checks apply even to Empty. An Empty output request emits no payload task. A tile containing only bypass components performs no transfer arithmetic. Hidden straight color remains participating when alpha is zero; the curve has no alpha input dependency.
 
-An input dirty set maps identically to output coordinates; there is no alpha or
-cross-channel fanout. Keep these input witnesses even on intrinsic constant
-branches such as ACES caps. Static description/parameter changes require
-reinference and invalidate affected compiled identity. Failures stay within the
-normal observation model; no global validity scan or partial success for a
-failed observation is introduced.
+Only linear and gamma=1 are whole-mapping static identities. They copy bits before NaN classification, preserving signaling NaNs and signed zeros. Semantic callers still guarantee finite participating identity samples in retained output tiles. Neither a bypass-only request nor a runtime cap/floor selects the identity exception.
 
-## Identity, storage, resources and errors
+`auto` and `materialize` both write independent dense row-major output tiles. Forced `view` rejects a statically nonidentity curve during preparation. A nonempty identity `view` task depends only on the input schema and returns `InvalidArgument/ViewUnavailable`. It acquires no source payload and publishes no Result. Empty identity view has no task.
 
-Linear and gamma=1 are static bit-copy identities, including raw NaN payloads and
-signed zero. Semantic identity still validates the selected samples and publishes
-the appropriate transfer metadata. Auto may share a legal read-only owner when
-the complete declared transformation is a static identity. This applies to legal
-generic and spatial Result storage. A request limited to alpha does not make a
-nonidentity transformation viewable; constant/cap branches are not static
-identities. Forced view rejects a statically nonidentity mapping during compile
-or direct preflight, and rejects an identity whose requested physical mapping
-cannot be proven during observation evaluation.
+## Numerical scratch, ownership and errors
 
-All nonidentity curves materialize requested coverage in a new Result owner.
-`materialize` forces this even for identities. Result storage and publication
-follow the declared generic or spatial layout; only requested coverage is
-produced. A shared view publishes only admitted Result coverage and its actual
-validation scope, not blanket validity of the backing.
+The Plan declares output and scratch allocations before execution. Copy-only tasks use zero scratch. Gamma=2 uses a fixed 64-sample gather/result/offset block and preserves the exact signed square/sqrt algorithm, including integer NaN handling and the existing SIMD capability gate. General curves add fixed fast, compact and wide numerical workspaces plus branch-gather arrays. Execution processes at most 64 points per block; fast candidates gather at most 16 operands from the chosen branch.
 
-Preparation resolves selectors, metadata and the immutable curve program without
-retaining per-run payload state. During execution, map exact input demand, acquire
-read windows, admit output pages and lazily allocate numerical workspace, then
-check cancellation/currentness before publication. Owners and produced coverage
-survive the normal producer/context lifetime. Empty output demand is stateless.
+Preparation freezes the real-expression DAG and exact branch thresholds. Rational branches are compiled into degree-at-most-two polynomials with signed integer numerators and one positive common denominator, each bounded to 64 bits, optionally followed by sqrt. Runtime forms the polynomial in units of 2^-2148 using fixed 4352-bit integers. A finite binary64 input uses fewer than 2098 bits in units of 2^-1074; the polynomial magnitude uses fewer than 4262 bits, and the final division/root midpoint products fit the workspace. Static constant reduction precedes the coefficient-size bound.
 
-For N requested samples, rank r and F windows, addressing costs O(N*r+F*r), plus
-static metadata and curve arithmetic. Strict transcendental/coefficient work and
-scratch must be charged and bounded under NUM; exhaustion fails without silently
-switching to approximate math. No per-pixel metadata or eager full-image payload
-scan is allowed. SIMD must not read padding, peer channels or unprepared pages.
-Poll cancellation/currentness within bounded runs of at most 1024 visited entries,
-inside bounded multiprecision refinement and before publication. Simple copy,
-identity and gamma=2 spans can process up to 1024 samples per run; the general
-curve path batches at most 64 samples. Numerical workspace is allocated lazily
-through the observation allocator, and identity/copy paths need no math workspace.
-The floating-point environment is established for execution and restored on exit.
-Accelerated profiles retain strict fallback and NUM diagnostics. Release
-unpublished buffers/pages/scratch on failure. Deduplicate retained owners when
-accounting for actual backing, windows, outputs and numeric workspace; virtual
-address reservation, logical bytes and resident backing are distinct metrics.
+Transcendental branches retain directed interval refinement, compact 128/256-bit attempts and wide attempts up to 4096-bit working precision. Matching rounded endpoints are required for strict results. An explicit internal-capacity or unresolved-precision outcome may select the wide evaluator. Cancellation and caller resource failures, even if they use the same status code as internal capacity exhaustion, propagate without retry. All runtime numerical storage belongs to invocation scratch; no dynamic rational construction, heap allocation or exception-driven refinement is used.
 
-Result caching is disabled. Raw and semantic validity are separate, and distinct
-709/2020 transfer descriptions remain distinct even when a coefficient set is
-numerically equal. NUM backend selection, fallback diagnostics, exact copy rules
-and precision bounds remain unchanged.
+The host retains immutable preparation, source views, exclusive output and scratch through completion. Numerical caches are local to the invocation. Cancellation is polled at least every 64 visited points and within bounded exact/refinement loops. Every return restores the floating environment. The executor publishes successful retained Result values at ordered Call retirement; failed calls publish no successful Result. Currentness, admission, missing coverage and backend failures follow the physical Plan contract. The family provides no runtime numerical diagnostic stream or Result cache.
 
 | Condition | Phase | Outcome |
 | --- | --- | --- |
-| Malformed/missing/irrelevant parameter, invalid gamma/Lb/Lw, ambiguous selector, source assertion conflict | Compile/direct preflight | InvalidArgument / InvalidDomain. |
-| Unsupported dtype/model, incompatible units/reference, wrong source transfer state or structural layout | Static preflight | TypeMismatch / None. |
-| Requested semantic input nonfinite or outside curve domain | Requested evaluation | OperationFailed / InvalidDomain. |
-| Finite semantic formula rounds to a nonfinite result | Requested evaluation | OperationFailed / ArithmeticOverflow. |
-| Forced view of a statically nonidentity mapping | Compile/direct preflight | InvalidArgument / InvalidDomain; ViewUnavailable. |
-| Forced view of an identity mapping whose physical representation cannot express the requested view | Observation evaluation | InvalidArgument / InvalidDomain; ViewUnavailable. |
-| Raw domain/nonfinite/overflow arithmetic | Raw evaluation | NUM-defined result, except static parameter failures. |
-| Resource/work, missing coverage, cancellation/currentness or backend failure | Inherited phase | Preserve existing status; no semantic fallback hides it. |
+| Malformed/missing/irrelevant parameter, invalid gamma/Lb/Lw, ambiguous selector, source assertion conflict | Static preparation | InvalidArgument / InvalidDomain. |
+| Unsupported dtype/model, incompatible units/reference, wrong source transfer or structural layout | Static preparation | TypeMismatch. |
+| Semantic nonfinite/out-of-domain input or nonfinite rounded output | Caller sample precondition | Outside the fixed invocation contract; no sample error guaranteed. |
+| Forced view of a statically nonidentity curve | Static preparation | InvalidArgument / InvalidDomain, ViewUnavailable message. |
+| Nonempty identity forced view | Invocation | InvalidArgument / ViewUnavailable. |
+| Raw domain/nonfinite/overflow arithmetic | Evaluation | Defined IEEE result of the selected formula. |
+| Capacity/refinement exhaustion, missing coverage, cancellation/currentness or backend failure | Corresponding preparation/execution phase | Preserve operational status. |
 
-## Target support matrix
+## Support matrix
 
-| Dimension | Target support | Not implied |
+| Dimension | Support | Boundary |
 | --- | --- | --- |
-| Numeric profiles | Three default-registry CPU entries per direction: strict, accelerated Apple Silicon and accelerated x86-64. NUM defines their precision, ISA checks and explicit fallback reporting. | No automatic profile dispatcher, unsuffixed alias or GPU implementation. |
-| Samples | Float32/Float64; same dtype throughout one tensor. Semantic RGB/compatible Gray; explicit raw components. | Integer decoding, Float16, mixed per-channel dtype or implicit complex math. |
-| Storage | Legal generic and spatial Result tensor layouts; shape and axes unchanged. | Interleaved image semantics, per-node tile geometry or metadata-only storage adaptation. |
-| Demand | Exact per-output-coordinate Data and dirty mapping, selected-component Validation, static Descriptor dependence; no halo or pixel Control read. | complete-input fallback claimed as exact FMT support. |
-| Publication | Exact Q coverage at unchanged global coordinates with ordinary retained immutable owner/read windows. | Unrequested samples as implicit zero, whole-owner sample-validity certificates or hidden recovery. |
-| Determinism | Static curve/reference/parameters and explicit NUM numerical profile. | Display-device queries, implicit environment/view settings or external color engines. |
-
-Requested errors retain node/output and logical sample attribution under the
-inherited failure model. Missing coverage remains missing; padding and unproduced
-samples never become ExplicitZero. Disjoint observations preserve their own
-success/failure scope and required upstream dependencies.
+| Profiles | Strict, accelerated Apple Silicon and accelerated x86-64 CPU keys in each direction; NUM precision and ISA rules apply. | No automatic dispatcher, unsuffixed alias or GPU implementation. |
+| Samples | Float32/Float64, same dtype throughout; semantic RGB/compatible Gray or explicit raw components. | No implicit integer decoding, casts or range normalization. |
+| Storage | Generic/spatial input with admitted signed/zero strides; independent dense output tiles; unchanged shape and axes. | Logical spatial axes do not require a full-image contiguous allocation. |
+| Dependencies | Fixed input-grid closure of complete retained output tiles, or schema-only for forced identity view. | No sample-dependent dependency discovery or alpha shortcut. |
+| Publication | All samples of each retained output tile, at unchanged global coordinates. | Unproduced samples remain missing. |
+| Determinism | Immutable curve/reference/parameters and explicit numerical profile. | No external display/device interpretation or color engine. |
 
 ## Acceptance and implementation dependencies
 
@@ -254,18 +196,9 @@ Use independent high-precision real-function evaluation and exact rational
 constants for strict rounding. Do not compare against a second call to these
 operators as the oracle. Reference cases cover every branch threshold and its
 adjacent Float32/64 values, signed zeros, gamma=1, negative/HDR extensions,
-nonfinite raw results, semantic rejection, intrinsic plateaus/caps, BT.2020
+nonfinite raw results, valid semantic-domain fixtures, intrinsic plateaus/caps, BT.2020
 variants and explicit reference/parameter conflicts. Members add concrete cases.
 
-Compare full, offset/disjoint, R-only, alpha/AOV-only and cross-tile requests,
-including y/x=[127,130) under tile size 128. Put NaN or invalid-domain samples in
-unrequested peers, then request them separately. Test hidden color at zero alpha,
-complete-input upstream failures, exact dirty support, Empty, source immutability,
-view/materialize equality, retained owner lifetime, budgets/cancellation and
-floating-environment restoration. A view must not bypass identity validation.
+Compare full, offset/disjoint, participating-only and bypass-only output tile selections, differing input/output grids, Empty, source immutability, retained owner lifetime, concurrent Runs, artifact import, malformed task rejection, zero runtime allocation, scratch canaries, cancellation and floating-environment restoration. Test native identity bit copies and schema-only view failure separately. Semantic fixtures satisfy every retained participating sample's preconditions; raw fixtures verify NaN payloads, infinities, signed zeros and intrinsic plateaus without a semantic-domain filter.
 
-Validate the Result operations with independent high-precision references,
-partial-component and ROI requests, Empty demand, identity views, owner lifetime,
-resource limits, cancellation and floating-environment restoration. Future camera-log
-variants require separately specified transfer definitions; they are outside
-these registered keys.
+Keep the independent high-precision oracle and remove temporary built-in execution checkers after verification. Future camera-log variants require separately specified transfer definitions.

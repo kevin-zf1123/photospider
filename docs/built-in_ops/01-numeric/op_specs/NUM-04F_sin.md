@@ -55,7 +55,7 @@ The conceptual public fixture is `[+0,-0]` -> `[+0,-0]`.
 Build a WorkflowDocument with that floating array bound to input,
 compile one selected key and inspect output bits
 through ExecutionContext. Repeat in both dtypes and platform profiles, including
-disjoint requests and exact source-read witnesses.
+disjoint requests and exact declared input tiles.
 
 For a nontrivial finite fixture, input=[1] represents exactly one radian.
 Strict sin(1) has Float32 bits `0x3f576aa4` and Float64 bits
@@ -67,15 +67,14 @@ rounding establish these reference bits without using the production libm.
 
 Also test ordinary small/large finite radian inputs, signed zero, NaN payloads,
 infinity, neighbors of rounded pi multiples, independent correct
-rounding and accelerated ULP/classification. Apply all shared resource, cache,
+rounding and accelerated ULP/classification. Apply all shared resources, concurrent Runs,
 lifetime and cancellation cases. A real public executable, run commands and
 the maintained public run command is documented below; local timing is recorded in the implementation notes.
 
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
-atomic failure for the complete invocation. Its numerical path follows
+exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 Float32 accelerated sin uses an explicit-FMA NEON/AVX2 odd polynomial for `2^-120 <= |x| <= 1`, with exact signed zero handling. The even polynomial is shared with sinc; its final multiply has a separate error certificate.

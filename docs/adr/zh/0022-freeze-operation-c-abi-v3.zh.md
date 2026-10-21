@@ -1,6 +1,7 @@
 # ADR 0022：所有算子冻结同一套按前缀协商的 C ABI
 
 - 状态：Proposed
+- 实现边界（2026-10-20）：本文保持为历史 Proposed 设计，不是当前二进制契约。Package 0.39 实现 exact-size operation module ABI 8、fixed invocation ABI 8 和 native kernel service ABI 2。静态 lowering 与固定 completion 模型取代下文 staged continuation surface；不暗示已实现 prefix negotiation 或提议中的统一 import 策略。参见 [Plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)。
 - 英文权威文档：[ADR 0022](../0022-freeze-operation-c-abi-v3.md)
 - 相关：[ADR 0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md)、[ADR 0014](0014-compiler-document-and-plan-versions-are-independent.zh.md)、[ADR 0015](0015-breaking-product-boundary-scope-reset.zh.md)、[ADR 0016](0016-workflow-inputs-and-execution-bindings.zh.md)、[ADR 0023](0023-track-dependencies-between-fixed-tiles.zh.md)
 
@@ -41,7 +42,7 @@ Package 0.36.0 中，内置算子通过未冻结的 C++ registry 注册，外部
 
 ## 3. 契约规约与接口（Formal Contracts & APIs）
 
-冻结 ABI 的具体头文件属于后续设计，其版本号在冻结时确定。下面的形态只说明协商规则；它是目标，不是任何现有头文件中的声明，字段和类型名称仅作示意。当前精确大小的 ABI 6 声明位于 `photospider/plugin/result_operation_plugin_api.h`，说明见[插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)。
+冻结 ABI 的具体头文件属于后续设计，其版本号在冻结时确定。下面的形态只说明协商规则；它是目标，不是任何现有头文件中的声明，字段和类型名称仅作示意。当前精确大小的 ABI 8 声明位于 `photospider/plugin/operation_module_api.h`，说明见[插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)。
 
 ```c
 /* Illustrative target shape; not declared in any current header. */

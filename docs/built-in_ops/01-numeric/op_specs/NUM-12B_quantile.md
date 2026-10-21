@@ -33,9 +33,7 @@ element type is Float32 or Float64.
 `axis` is a required static Int64 parameter in `0..rank-1`, measured against the
 full source sample shape. `dtype` is a required static String parameter whose
 value is `float32` or `float64`. These parameters and the q tensor schema are
-validated as static metadata. The numerical q constraint, finite and in
-`[0,1]`, is checked inside the callback for active q input; it is not a scalar
-bounds preflight.
+validated as static metadata. Active q must be finite in `[0,1]` as a caller numerical precondition. A constant-time guard protects memory indices and shifts; no out-of-domain diagnostic is guaranteed.
 
 The `values` output is a `Result` with schema `photospider.tensor` and tensor key
 `samples`. It has the selected output dtype and keeps the source rank and shape,
@@ -63,9 +61,7 @@ most 53 bits and N<=2^40, so `(N-1)*significand` fits in 93 bits; the integer
 rank and exact remainder over a power-of-two denominator represent h. Integer
 samples retain exact integer values through ordering and interpolation setup;
 they are not first converted to floating point. The exact finite selection or interpolation is
-rounded once to the output dtype. Strict uses exact final rounding.
-Accelerated profiles use the shared [FP32 four-ULP contract](NUM_accelerated_contract.md)
-and its verified quotient/fallback rules. No approximate quantile sketch,
+rounded once to the output dtype. All profiles use exact final RN rounding for this dyadic denominator. No approximate quantile sketch,
 rank-error tolerance or NUM-14 certificate is used.
 
 ## NaNs, infinities and zero signs
@@ -74,8 +70,7 @@ The complete active source line is ordered and checked for NaNs before selecting
 the rank, including for q=0 or q=1. If a line contains a NaN, return the first
 NaN in original axis order, quieted and converted to `dtype` under the
 [reduction NaN payload rule](NUM-11_reduction_contract.md). Stable sorting keeps
-NaNs after non-NaNs and preserves their original order. A source NaN does not
-hide invalid q once the callback is reached.
+NaNs after non-NaNs and preserves their original order. The q precondition applies even when the source contains NaNs.
 
 When `w == 0`, convert the selected sample directly. This preserves its signed
 zero and correctly converts a selected infinity. For `0 < w < 1`, two
@@ -86,48 +81,20 @@ exact zero mixtures produce positive zero. Nonzero exact results that underflow
 retain their mathematical sign. Infinities outside the selected pair do not by
 themselves produce NaN.
 
-## complete-input demand and input projection
+Finite source values can round to signed infinity when narrowing to Float32. All source IEEE bit patterns are supported; the finite-domain restriction in the NUM baseline does not apply to source samples of this operation.
 
-For N>=2, the continuation issues a Need for the complete source and complete
-q member with ordinary member tile Needs with explicitly bound validators. It reads their
-authorized Result windows and computes one complete keep-dimension output for
-every line. Sparse consumer demand does not reduce the source or q domain. A
-source edit or q edit invalidates all observed output coordinates. A source
-producer or typed-input failure can occur before the callback checks q's
-numeric domain.
+## Fixed execution and q projection
 
-For N==1, static metadata specialization validates q's shape and element type,
-and validates `axis` and `dtype`, but projects runtime selection to source port
-zero. The continuation issues no q payload Need and records no q runtime data,
-validation or descriptor relation. A failing q producer therefore does not
-participate in that request; changing q cannot invalidate its output.
+Each selected output tile becomes a fixed CPU task. Its source rectangle keeps the output's non-axis intervals and expands the source axis to its complete length L. Source tile closure uses the source's own grid and includes every sample on those lines, even for q=0 or q=1. Tile rounding can include additional samples, which are not processed. Unselected lines impose no payload dependency except through tile rounding.
 
-An Empty request issues no payload Need, performs no line ordering or
-interpolation, and publishes the declared output schema with empty sample
-coverage.
+For L>1, each task also reads q's scalar tile. For L=1, metadata still checks q's complete shape/dtype, but lowering records only a schema reference. q payload and its producer do not participate. Empty selection emits no task or payload reads.
 
-## State, work and error behavior
+## Scratch, validation and failure
 
-The continuation allocates fixed `OrderingState` through the phase allocator's
-Payload capacity. It uses the same per-line key and permutation metadata as
-[sort](NUM-12A_sort.md): 16*L element bytes plus allocator headers, alignment
-and Entries reservations per line, charged as Root metadata. Each line is
-permuted once per callback. The exact position and interpolation workspace
-lives in the fixed state. Authorized source and q windows coexist with the
-complete output payload; sparse consumers still pay for the selected full
-output. The operation does not first pack its complete inputs. There is no
-permutation block cache shared across lines or independent invocations.
+Each invocation reserves `sizeof(StableOrderWorkspace) + sizeof(ExactQuantile) + 16*L` scratch bytes. It reuses the same key/permutation buffers across lines of the tile. Exact arithmetic preserves integer endpoint precision and weights until the final conversion. Output tiles have independent dense allocations. Runtime creates no payload or permutation allocation; Root admits the maximum scratch per CPU lane and selected output storage, plus executor metadata.
 
-Work, reads, comparisons and exact arithmetic are charged to the execution
-Root. Cancellation, work or capacity failure aborts the transactional complete-input
-writer, releases unpublished state and output, and preserves the first typed
-failure. Invalid active q returns `InvalidArgument` with
-`FailureReason::InvalidDomain`, Domain origin, Run scope and
-`InvalidQuantileProbability` diagnostics containing the q bits. Invalid q is
-not an Atom-scoped sample result.
+Prepare verifies complete input and output schemas, canonical Host writes, exact source/q read membership, empty task parameters and scratch. A malformed static parameter returns InvalidArgument; incompatible schema or task signature returns TypeMismatch. Source, resource, backend and cancellation failures retain their operational statuses. Cancellation is checked during classification, comparisons and writes. Operational failure prevents successful publication of the IR call's outputs; accepted work drains before storage release. Returned immutable owners can outlive ExecutionContext, and concurrent Runs share only immutable prepared metadata. The invocation restores floating modes and exception flags.
 
-## Current behavior checks
+## Acceptance
 
- The checks do not claim x86 arithmetic execution, performance
-or a complete q structural-contract/error/resource matrix. The specification
-remains Proposed.
+Compare with the retained [NUM12 Fraction oracle](../../../../oracle/ops/numeric/num12/reference.py). Include integer endpoints near Int64 limits, q=0/1, -0, subnormal q and adjacent binary values around integral ranks. Test both output dtypes, Float64-to-Float32 overflow, first-source NaN priority, same/opposite infinities, signed-zero ties and underflow. Check sparse line closure, non-last axes, rank eight, batch/atomic geometry, negative strides, length-one q producer omission, concurrent Runs, artifact import, rebinding, cancellation, resource rejection and malformed prepare signatures. See [fixed ordering execution](../ordering-execution.md).

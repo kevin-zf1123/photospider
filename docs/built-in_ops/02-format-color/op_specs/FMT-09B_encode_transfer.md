@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.transfer_encode_strict
@@ -19,7 +19,7 @@ registered_operation_keys:
 
 Inherit the complete [FMT-09 contract](FMT-09_transfer_contract.md) and
 [scalar definitions](FMT-09_transfer_math.md). This direction has strict,
-accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 6 keys. The
+accelerated Apple Silicon and accelerated x86-64 CPU fixed invocation ABI 8 keys. The
 specification remains Proposed.
 
 ## Interface and observable behavior
@@ -35,8 +35,7 @@ follow the family table. The explicit source description must already identify t
 compatible linear quantity. An encoded source is rejected rather than encoded
 again, even when its existing transfer matches the chosen target.
 
-For each requested participating q, read only input[q], perform semantic
-validation or raw evaluation, and output RN_dtype(E(input[q])). Linear and
+For each participating q within a complete retained output tile, evaluate RN_dtype(E(input[q])). Semantic callers establish the family domain and finite-output preconditions; raw uses the full IEEE formula. Linear and
 gamma=1 obey the special bit-copy identity. Unselected samples copy exactly.
 No alpha multiplication, hidden-color clearing, basis/white conversion or
 range normalization is implicit. Integer dtype must be converted before B in
@@ -50,22 +49,15 @@ explicit description.
 
 ## Dependencies, errors and storage
 
-Inherit exact pointwise demand, invalidation, validation scope and source-state
-errors. PQ accepts [0,10000] cd/m²; BT.1886 accepts [Lb,Lw]; HLG accepts [0,1].
-Reference incompatibility is static; no metadata update performs a scene-to-display
-rendering. Static parameter checks precede sample evaluation in all modes.
+Inherit fixed source-grid closure, static checks, scratch and operational failures. Semantic PQ inputs are in [0,10000] cd/m², BT.1886 inputs in [Lb,Lw] and HLG inputs in [0,1]. Reference compatibility is checked statically. The caller establishes sample validity for every participating coordinate in retained output tiles.
 
-Auto/view/materialize follows the family identity rule. Semantic identity retains
-its requested finite checks and independent output structure. Nonidentity B
-materializes requested coverage under Result owner, prepared-coverage,
-cancellation, bounded strict-math and publication rules. Intrinsic ACEScc floor
-samples retain their source witnesses and can still fail input validation.
+Auto/materialize initialize independent dense tiles. Nonidentity forced view fails statically; a nonempty identity view task depends only on schema and fails ViewUnavailable. Intrinsic ACEScc floors retain their input dependency. Empty requests retain static checks and emit no payload task.
 
 ## Independent acceptance fixtures
 
 1. Gamma=2: [-4,-0,0.25,4] -> [-2,-0,0.5,2] exactly. Gamma=1 raw copies all
-   bits, while semantic identity rejects nonfinite participating samples.
-The decimal breakpoint is not an exactly representable Float32/64 sample.
+   bits; semantic identity requires finite participating samples.
+2. sRGB: the decimal breakpoint is not an exactly representable Float32/64 sample.
    Test each dtype's actual bit patterns adjacent to the exact rational threshold
    with an independent branch oracle. For example Float32 0x3b4d2e1c denotes
    approximately 0.0031308000907301903, lies above the threshold, and takes the
@@ -73,9 +65,9 @@ The decimal breakpoint is not an exactly representable Float32/64 sample.
    anchor 0x3d25aed5. Test negative counterparts and un-clipped values above 1.
 3. 709/2020: test beta and its neighbors for each selected coefficient variant.
    Metadata records the explicit variant regardless of dtype or export plan.
-4. BT.1886 with Lb=1,Lw=100: E(1)=0, E(100)=1 exactly. Semantic E(0) fails;
+4. BT.1886 with Lb=1,Lw=100: E(1)=0, E(100)=1 exactly. Semantic E(0) is outside its input precondition;
    raw E(0) gives -b using the selected exact black/white parameters.
-5. Negative/above-10000 semantic input fails without clipping.
+5. PQ values outside [0,10000] violate the semantic input precondition. Raw values retain the formula, with no extra clipping.
 6. HLG: E(0)=0.
    Compare exact input values on either side of 1/12 to the high-precision
    reference; do not pretend rounded input 1/12 is the exact breakpoint.
@@ -87,10 +79,7 @@ The decimal breakpoint is not an exactly representable Float32/64 sample.
 9. Encoded-source rejection, incompatible reference/unit rejection, explicit
    different explicit descriptions and raw calls must be distinct fixtures.
    A P3 group with linear relative values may use sRGB E without changing basis.
-10. Alpha-only/AOV-only and disjoint tile-crossing requests copy only requested
-    samples. A nonfinite requested color fails even at alpha=0. Forced view of
-    a nonidentity curve fails; source state and unchanged bypass samples must
-    agree between auto/materialize and full/sparse execution.
+10. Compare full and sparse output tile selections. Bypass-only tiles copy bits with zero scratch. Alpha=0 does not waive participating color preconditions. Nonidentity forced view fails statically, while nonempty identity view fails using only schema. Compare valid semantic results under auto/materialize and both CPU profiles available on the host.
 
 An explicit D -> basis/reference stage -> E workflow composes these operations;
 the registry does not choose such a chain automatically. FMT-06 and an I/O codec

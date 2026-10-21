@@ -8,19 +8,41 @@
 namespace ps::plugin_internal::numeric_ops {
 // Analytic remainders supplement directed rounding at every operation. A
 // refinement may succeed only when both enclosing endpoints round identically.
-struct DirectedFunctions final {
+template <bool Checked = false>
+struct DirectedFunctionsStorage final {
   struct RangeResult {
     bool overflow;
   };
-  DirectedInterval math;
-  using Interval = DirectedInterval::Interval;
-  using Frame = DirectedInterval::Frame;
-  explicit DirectedFunctions(
+  using Math = DirectedIntervalStorage<192, Checked>;
+  Math math;
+  using Interval = typename Math::Interval;
+  using Frame = typename Math::Frame;
+  explicit DirectedFunctionsStorage(
       SequenceProfile profile,
       const core_internal::WorkConsumer* initialization = nullptr)
       : math(profile, initialization) {}
+  void unresolved() {
+    if constexpr (Checked)
+      math.retry();
+    else
+      throw typename Math::Unresolved{};
+  }
+  void range(bool overflow) {
+    if constexpr (Checked)
+      math.range(overflow);
+    else
+      throw RangeResult{overflow};
+  }
   // Precondition: finite positive input, already classified by the adapter.
   void logarithm(Interval output, const BinaryParts& input) {
+    if (!math.active())
+      return;
+    if constexpr (Checked) {
+      if (!input.significand) {
+        math.fail(ErrorCode::InvalidArgument);
+        return;
+      }
+    }
     Frame frame(math);
     const int exponent =
         input.exponent + 63 - __builtin_clzll(input.significand);
@@ -39,6 +61,8 @@ struct DirectedFunctions final {
     // z in [0,1/3]. The remainder after k terms is bounded above by
     // 2*z^(2k+1)/((2k+1)*(1-z^2)) <= 3*z^(2k+1).
     for (unsigned k = 0; k < math.precision + 64; ++k) {
+      if (!math.active())
+        return;
       math.scale(term, power, 1);
       math.divide_small(term, term, 2 * k + 1);
       math.add(sum, sum, term);
@@ -53,26 +77,28 @@ struct DirectedFunctions final {
         return;
       }
     }
-    throw DirectedInterval::Unresolved{};
+    return unresolved();
   }
   void exponential(Interval output, Interval input) {
+    if (!math.active())
+      return;
     Frame frame(math);
     auto limit = math.interval();
     math.integer(limit, 1024);
     if (math.compare(input.low, limit.high) >= 0)
-      throw RangeResult{true};
+      return range(true);
     math.negate(limit, limit);
     // e > 8/3 > 2^(5/4), hence e^-1024 < 2^-1280 < half of
     // the smallest binary64 subnormal. These branches certify the final
     // destination range instead of fabricating a finite real enclosure.
     if (math.compare(input.high, limit.low) <= 0)
-      throw RangeResult{false};
+      return range(false);
     math.integer(limit, 1024);
     if (math.compare(input.high, limit.high) > 0)
-      throw DirectedInterval::Unresolved{};
+      return unresolved();
     math.negate(limit, limit);
     if (math.compare(input.low, limit.low) < 0)
-      throw DirectedInterval::Unresolved{};
+      return unresolved();
     auto reduced = math.interval(), term = math.interval(),
          sum = math.interval();
     math.scale(reduced, input, -14);
@@ -81,6 +107,8 @@ struct DirectedFunctions final {
     // |r|<=1/16. After term n, the remaining absolute tail is less
     // than 2*|next term|. Directed term endpoints enclose that magnitude.
     for (unsigned n = 1; n < math.precision + 64; ++n) {
+      if (!math.active())
+        return;
       math.multiply(term, term, reduced);
       math.divide_small(term, term, n);
       if (std::max(math.top(term.low), math.top(term.high)) <= 0) {
@@ -93,9 +121,11 @@ struct DirectedFunctions final {
       }
       math.add(sum, sum, term);
     }
-    throw DirectedInterval::Unresolved{};
+    return unresolved();
   }
   void sincos_series(Interval sine, Interval cosine, Interval input) {
+    if (!math.active())
+      return;
     Frame frame(math);
     auto square = math.interval(), sin_term = math.interval(),
          cos_term = math.interval();
@@ -110,6 +140,8 @@ struct DirectedFunctions final {
     // first omitted term; interval multiplication also retains input error.
     bool sin_done = false, cos_done = false;
     for (unsigned n = 1; n < math.precision + 64; ++n) {
+      if (!math.active())
+        return;
       if (!sin_done) {
         math.multiply(sin_term, sin_term, square);
         math.divide_small(sin_term, sin_term, (2 * n) * (2 * n + 1));
@@ -140,9 +172,11 @@ struct DirectedFunctions final {
         return;
       }
     }
-    throw DirectedInterval::Unresolved{};
+    return unresolved();
   }
   void sinc_series(Interval output, Interval input) {
+    if (!math.active())
+      return;
     Frame frame(math);
     auto square = math.interval(), term = math.interval(),
          sum = math.interval();
@@ -153,6 +187,8 @@ struct DirectedFunctions final {
     // sin(x)/x = sum (-x*x)^k/(2k+1)!, including x=0 by continuity.
     // Caller proves |x|<=1; the alternating remainder is the next term.
     for (unsigned k = 1; k < math.precision + 64; ++k) {
+      if (!math.active())
+        return;
       math.multiply(term, term, square);
       math.divide_small(term, term, (2 * k) * (2 * k + 1));
       const auto bound = std::max(math.top(term.low), math.top(term.high));
@@ -163,10 +199,12 @@ struct DirectedFunctions final {
       }
       math.add(sum, sum, term);
     }
-    throw DirectedInterval::Unresolved{};
+    return unresolved();
   }
   void orient(Interval sine, Interval cosine, Interval s, Interval c,
               unsigned quadrant, bool negative) {
+    if (!math.active())
+      return;
     Frame frame(math);
     auto sin_result = math.interval(), cos_result = math.interval();
     math.copy(sin_result, (quadrant & 1) ? c : s);
@@ -179,6 +217,8 @@ struct DirectedFunctions final {
     math.copy(cosine, cos_result);
   }
   void sincos(Interval sine, Interval cosine, const BinaryParts& input) {
+    if (!math.active())
+      return;
     Frame frame(math);
     auto x = math.interval(), half_pi = math.interval(),
          quotient = math.interval(), half = math.interval();
@@ -194,7 +234,7 @@ struct DirectedFunctions final {
     math.shift(lower, quotient.low, -static_cast<int>(math.precision), true);
     math.shift(upper, quotient.high, -static_cast<int>(math.precision), true);
     if (math.compare(lower, upper) != 0)
-      throw DirectedInterval::Unresolved{};
+      return unresolved();
     const auto quadrant = static_cast<unsigned>(lower.magnitude.words[0] & 3);
     auto multiple = math.interval(), reduced = math.interval(),
          s = math.interval(), c = math.interval();
@@ -208,14 +248,16 @@ struct DirectedFunctions final {
     auto bound = math.interval();
     math.integer(bound, 1);
     if (math.compare(reduced.high, bound.high) > 0)
-      throw DirectedInterval::Unresolved{};
+      return unresolved();
     math.negate(bound, bound);
     if (math.compare(reduced.low, bound.low) < 0)
-      throw DirectedInterval::Unresolved{};
+      return unresolved();
     sincos_series(s, c, reduced);
     orient(sine, cosine, s, c, quadrant, input.negative);
   }
   void arctangent(Interval output, Interval input) {
+    if (!math.active())
+      return;
     Frame frame(math);
     auto one = math.interval(), half = math.interval(), z = math.interval(),
          offset = math.interval();
@@ -233,7 +275,7 @@ struct DirectedFunctions final {
       math.scale(offset, offset, -2);
     } else {
       if (math.compare(input.high, half.high) > 0)
-        throw DirectedInterval::Unresolved{};
+        return unresolved();
       math.copy(z, input);
     }
     auto square = math.interval(), power = math.interval(),
@@ -245,6 +287,8 @@ struct DirectedFunctions final {
     // |z|<=1/2. The alternating remainder is at most the omitted
     // z^(2k+1)/(2k+1), including negative z by oddness.
     for (unsigned k = 1; k < math.precision + 64; ++k) {
+      if (!math.active())
+        return;
       math.multiply(power, power, square);
       math.divide_small(term, power, 2 * k + 1);
       if (std::max(math.top(term.low), math.top(term.high)) <= 0) {
@@ -259,7 +303,9 @@ struct DirectedFunctions final {
       }
       math.add(sum, sum, term);
     }
-    throw DirectedInterval::Unresolved{};
+    return unresolved();
   }
 };
+using DirectedFunctions = DirectedFunctionsStorage<>;
+using CheckedDirectedFunctions = DirectedFunctionsStorage<true>;
 }  // namespace ps::plugin_internal::numeric_ops

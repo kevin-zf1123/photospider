@@ -1,6 +1,6 @@
 # 公共数据与执行约定
 
-本页保留研究期数据、空间、颜色与数值设计约定。涉及当前运行行为时，以 0.37.0 package 的公开头文件和[kernel 架构指南](../../kernel-architecture/README.md)为准，尤其是[数据模型](../../kernel-architecture/Data-Model.md)、[依赖采样](../../kernel-architecture/Dependency-Sampling.md)、[资源](../../kernel-architecture/Managed-Resources.md)和[全局结果](../../kernel-architecture/Global-Results.md)。本文中的 Proposed 设计不是当前实现承诺；分类页参数仍须与已实现节点的具体规格区分。
+本页保留研究期数据、空间、颜色与数值设计约定。涉及当前运行行为时，以 0.39.0 package 的公开头文件和[kernel 架构指南](../../kernel-architecture/README.md)为准，尤其是[数据模型](../../kernel-architecture/Data-Model.md)、[依赖采样](../../kernel-architecture/Dependency-Sampling.md)、[资源](../../kernel-architecture/Managed-Resources.md)和[全局结果](../../kernel-architecture/Global-Results.md)。本文中的 Proposed 设计不是当前实现承诺；分类页参数仍须与已实现节点的具体规格区分。
 
 ## 数据对象与输出
 
@@ -21,7 +21,7 @@
 pure 算子的未请求端口不执行。
 所有端口都传递 Result，每个 Result 的 Tensor 成员名称、数量、dtype、rank 和正 extent 在 preparation 后固定。数据依赖数量使用静态容量与普通 payload，例如 `records[N,R]` 和 `count:Int64[1]`，或同形状数据加 mask。Count、mask、offsets 没有内核特殊含义，读取它们需要编译后的 payload grant；descriptor-only 不提供这些值。有效数量可以为零，shape 仍保持正 extent。每个公开 tile 完整初始化，未使用位置按算子规则填充。未生产 tile 不缩短数组，要求完整结果的算子在容量不足时失败。
 
-普通 tile 指令事务发布一个完整成员 tile。Planner 为 `CompleteBundle` 编译准备后的固定成员闭包；`IndependentChunks` 允许完整 tile 独立公开；`StablePrefix` 使用明确的成员局部 tile 顺序。旧 descriptor 不随之后生产增长。共享全局计算由每次 call activation 内唯一的 stage 计算完成，消费者复用其不可变提交及依赖证据；证据不授予上游读取权限。见[全局结果](../../kernel-architecture/Global-Results.md)。
+Planner 根据成员 publication policy 编译固定 selection 闭包；每个 task 完整初始化其声明的输出 tile。Task 完成后可向内部后继转发；CallGroup 在全部成员 task settle 后按 IR 顺序退休，成功时才向 observer 交付声明的 Result exports。共享计算使用显式 task 和 call 私有 value。外部 ResultBuilder 的 coverage/capture 规则独立于 call 退休，旧 descriptor 不随之后生产增长。见[全局结果](../../kernel-architecture/Global-Results.md)。
 
 ## 颜色、alpha 与 emission
 
@@ -60,39 +60,26 @@ Response 只保存 Q=P+E、T=1−A，不能恢复原 P/A/E；两种代数的数�
 | --- | --- | --- |
 | E | 同像素/样本 | Elementwise 仍服从 shape 规则；多输出按各端口定义 observation |
 | H(r) | 有限邻域 | 编译期固定 Halo 或有限邻域并集；radius 不自动等于全算法 halo |
-| W | 全局计算 | 完整输入由静态 mapper 授权；全局计算使用 call 共享 stage，显式物化和临时 backing 均需预算 |
+| W | 全局计算 | 完整输入由 lowering 声明；共享计算使用固定 task 和私有 value，输出与 scratch 均需预算 |
 | R | 任意源采样 | STMap 使用完整 source 静态授权；其他 sampler/warp 需证明合法地址的有限静态范围 |
 | S | scan/reduce/递推 | 已有 ordered scan 和具名全局 recipe；跨 tile 状态、顺序和发布 finality 逐算法证明 |
 | T | 多时间点 | 仍需专用序列、时间窗与边界帧契约 |
 
-数学支持集用于在编译期推导固定成员 tile grants。每个输出或共享 stage 的 mapper 明确返回 input/shared reads；input projection 只限定可选端口，不能替代读取边。运行时 Need 只检查既有 grants，不调度 producer、不收窄授权，也不扩张依赖。数据相关地址必须由有限静态 superset 覆盖。内核不提供 data/control/validation 角色或 Exact/Conservative/Unknown 模式；授权和失效按固定 tile 网格记录。完整输入范围可使用紧凑区间。每个输出说明自己的静态 mapper、view 映射与共享 stage；数值上只使用局部 stencil 不代表依赖范围同样局部。
+数学支持集用于在编译期推导固定成员 tile reads。Lowering 明确声明 task 的 payload reads、schema reads、writes 和额外 ordering dependencies；input projection 不能替代读取边。运行时 invocation 只接收固定 views，不增加 producer 或扩张依赖。数据相关地址必须由有限静态 superset 覆盖；schema-only read 不提供 count、mask 等 payload。每个输出说明其闭包、view 映射及共享中间 task；数值上只使用局部 stencil 不代表已编译读取范围同样局部。
 
 ## 资源、缓存与生命周期
 
-`ExecutionContext` 持有共享的受管资源 Root。调用方可用 `ExecutionContextConfig::managed_resources` 指定限额；省略时使用 `ResourceLimits{}` 默认值。共享 Root 统一准入 Host/Device/Shared/Metadata/Referenced/Payload、临时 Disk、entries/files、
-I/O slots/queue，以及累计 work/bytes/requests/stages；`maximum_live_bytes` 仍是 Payload 子限额。
-重叠维度不能相加解释为物理内存。先预留再分配，增长计入新旧同时存活容量。
-已提交 work、stage 和 I/O 在失败/取消后不退还；不足时返回 ResourceExhausted。
+`ExecutionContext` 持有共享 ResourceBudget Root；`managed_resources` 可指定限额，省略时使用 `ResourceLimits{}`。当前维度为 Host、Device、Shared、Metadata、Referenced、Entries、Queue 和 Payload；`maximum_live_bytes` 是 Payload 子限额。Host 包含 Metadata 和 Shared，Device 包含 Shared，重叠维度不能相加为物理内存。每个 block 在发射前原子预留全部输出及各 backend lane 的最大 scratch；容量不足返回 `ResourceExhausted`。累计 work 和 stage 准入后不退还。Metadata 分别报告 reserved capacity 与已成功分配的受控字节，Run attribution 保留到对应 owner 释放。
 
-mandatory backing 独立于可选 completed cache；关闭 cache 仍需保留活动消费者正在使用的结果。Result 的 association 记录有序源 ObjectId，用于 lineage 与 dependency reporting；执行侧的 `TileRecord`/`TileEvidence` 保存不含 payload 的依赖祖先关系。两者都不强持输入 `ResultRef` 或祖先 payload。活动 `ResultTensorInput` capability 和已取得的 read window 在各自生命周期内持有被请求的 Result 或 backing；physical tensor view 持有它发布字节所依赖的 source Results。结果和 owning read window 可超过 `ExecutionContext` 生命周期，backing 在最后一个实际 owner 释放后回收。详见[Global Results](../../kernel-architecture/Global-Results.md)。I/O 由 continuation yield 显式计划后执行，不能在 structured callback 中隐式阻塞读写。
+执行器没有跨 Run 的 Result、checkpoint 或 block cache。PreparedPlan 共享不可变准备数据，各 Run 持有独立的 bindings、activation 和工作状态。Result association 记录有序源 ObjectId；需要源 backing 的 view 保留对应 owner。已接受 invocation 的 inputs、outputs、scratch 和 completion storage 保持到真实完成，取消不能提前释放。跨 domain 使用显式 COPY。Result 与 owning read window 可超过 `ExecutionContext` 生命周期，最后一个实际 owner 释放 backing。见[Global Results](../../kernel-architecture/Global-Results.md)。
 
-每份规格给输出、scratch、阶段 state、页窗口、临时文件、校验成本和峰值同时存活对象，
-同时给算法 work/stage 上界或显式拒绝条件。例如整数直方图有扫描 stage 下界准入，
-FFT 有两代完整临时 complex backing，连通域有独立于最终 K 的 union backing。
-`WithinBudgetOrFail` 覆盖受管理容量；allocator 内部、legacy 未埋点 metadata、线程栈、
-驱动及 OS cache 等属于排除范围。
-详见[Managed resources](../../kernel-architecture/Managed-Resources.md)。
+每份规格说明输出、scratch、准备数据、校验成本、最大在途 task 和峰值同时存活对象，并给出固定工作上界或拒绝条件。全局算法需要的临时值须进入物理 Plan；最终输出较小不代表临时 backing 同样小。`WithinBudgetOrFail` 覆盖受管理容量，排除 allocator 私有开销、普通 shared control block、线程栈、provider opaque context、驱动和 OS cache；受控计费不等同于 RSS。见[Managed resources](../../kernel-architecture/Managed-Resources.md)。
 
-内容缓存身份包含 operation contract、参数、ordered inputs、已授权输入样本内容和 canonical schema。执行调用身份使用 plan digest、Run、block activation 和指令坐标。Result 的页大小、文件偏移、descriptor revision 和资源限额不进入内容缓存身份。物理计划选择保留在 physical plan identity。外部 LUT/profile/model 由宿主载入不可变快照，路径字符串本身不能代表内容身份；后端/质量选项按对应节点契约参与身份。
+IR identity 包含静态 operation contract、参数、schema、输入关系和控制流；Plan identity 还包含固定 reads/writes、placement、layout、依赖、selection 和资源界。运行期 completion 使用 Run、activation、submission 键。外部 LUT/profile/model 由宿主载入不可变快照，路径字符串不能代表内容身份；payload owner 和地址不写入 artifact。
 
 ## 错误与数值质量
 
-规格分别记录 `Status.code` 分类、`reason` 原因和 `detail` 来源/范围；诊断字符串不作分支条件。
-Atom、ValidationDomain、Association 为语义失败范围；Group、Run、Waiter 记录运行影响范围。
-失败保留实际 upstream node/input 身份。host read/work/allocation 失败是 sticky，callback
-不能返回成功掩盖它。发布前检查整个 envelope 与关联字段；失败不得附带成功 Tensor/证书。
-普通 `execute` 保持 fail-fast。普通 structured Result 同样使用 context Root；默认构造 context 时无需显式提供 `managed_resources`。
-已认证前缀可在之后运行失败时保留，不能称作完整成功结果。
+规格分别记录 `Status.code`、`reason` 和 `detail`；诊断字符串不作为分支条件。Task 操作失败形成 call failure cut：更早 call 继续完成并有序退休，cut 及之后未提交的工作被跳过，已接受工作排空。同一 call 从实际失败 task 中选择最小 TaskId。用户取消、Stale、device/context/observer 失败按 Run abort 契约处理。`join()` 等待 task quiescence 与 observer settlement；失败不返回最终成功结果。此前已退休的 call Result 保持有效。数值输入前提、质量检查与 typed failure 由各算子固定 kernel 契约定义。
 
 ops SDK 的 `QualityReport` 区分 Measured 与 CertifiedBound。有限 residual 包括零 residual 都不自动
 成为误差证明；当前 CertifiedBound factory 仅覆盖受限整数对角系统及匹配的 Float64 estimate。
@@ -107,6 +94,6 @@ ops SDK 的 `QualityReport` 区分 Measured 与 CertifiedBound。有限 residual
 每项节点规格提供实际公开入口 workflow、独立 oracle、输入/参数、可检查预期结果和运行方法。
 有限浮点的 `atol=1e-6, rtol=1e-5` 仅可作新研究候选；已有算子的精确舍入、bitwise 或
 特定容差契约优先。局部算法按需要检查 whole/ROI/tile；全局 Result 检查页大小、静态容量下的零/非零 count、
-关联、cache-off、取消、低预算、上下文销毁后寿命。
+关联、独立 Run、取消排空、低预算准入、上下文销毁后寿命。
 
 [^random]: John K. Salmon 等，*Parallel Random Numbers: As Easy as 1, 2, 3*，SC11，2011；[作者与项目页](https://random123.com/)。原研究参考；Photospider 随机键布局仍为建议。

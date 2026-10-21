@@ -5,7 +5,7 @@ kind: mathematical_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_handoff_pending_platform_review
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 ---
 
@@ -24,13 +24,11 @@ formula as a real expression, then round once to the unchanged output dtype
 under NUM. Derived coefficients, gamma reciprocals and logarithms are not
 implicitly rounded to Float64 intermediates. Only the selected branch executes;
 a mathematically inactive log/exp/power branch cannot cause overflow/domain
-failure. Accelerated precision and diagnostics inherit NUM's final-output
+failure. Accelerated precision inherits NUM's final-output
 contract. Branch/domain decisions and all explicit copy results remain exact.
 
-Semantic mode checks requested inputs and final results for finiteness, plus
-any curve-specific domain. A finite result rounding to infinity fails; there is
-no extra output clipping. Intrinsic max/floor/saturation below is part of the
-curve and remains in raw mode. Raw removes sample semantic checks, retaining
+Semantic callers guarantee finite participating inputs and rounded outputs, plus the curve-specific input domain, throughout complete retained output tiles. Fixed invocation does not validate these sample-domain preconditions. There is no extra output clipping. Intrinsic max/floor/saturation below is part of the
+curve and remains in raw mode. Raw retains
 NUM nonfinite/domain outcomes and static parameter checks. In nonidentity evaluations, NaN inputs follow
 NUM propagation before ordered branch comparisons; they cannot accidentally
 fall into a finite cap branch. Nonfinite inputs other than NaN may select a
@@ -52,7 +50,7 @@ Gamma requires finite static gamma>0, with no implicit default exponent:
 - E(u)=u^(1/gamma).
 
 Gamma=1 copies all input bits under the family identity rule, before raw NaN
-propagation or formula evaluation. Semantic finite-input checks still apply. Parameter fields not applicable to a curve are
+propagation or formula evaluation. Semantic finite-input caller preconditions still apply. Parameter fields not applicable to a curve are
 rejected rather than silently ignored.
 
 ## sRGB
@@ -125,8 +123,7 @@ would define a different transform and is not accepted here.
 ## HLG
 
 Use only [BT.2100-3 Table 5](https://www.itu.int/rec/R-REC-BT.2100) OETF and
-inverse OETF. Derived b,c are exact
-expressions for the strict reference, not separately rounded decimal constants.
+inverse OETF. Set a=17883277/100000000, b=1-4*a and c=1/2-a*ln(4*a). Derived b,c are exact real expressions for the strict reference.
 
 - E(L)=sqrt(3*L) for L<=1/12; otherwise a*ln(12*L-b)+c.
 - D(V)=V^2/3 for V<=1/2; otherwise (exp((V-c)/a)+b)/12.
@@ -135,8 +132,7 @@ Both semantic input domains are [0,1]. The inverse returns scene-linear values
 on the stated normalized scale; this is not an additional output-range clamp.
 With the published a, D(1) is approximately 1.00000002693480736626 and E(1) is
 approximately 0.99999999506613058251 before rounding. The maintainer selected
-these unmodified formulas. Float64 D(1) followed by semantic E fails E's input
-domain check. Float32 rounding may hide the excess; its oracle must use its own
+these unmodified formulas. Float64 D(1) followed by semantic E violates E's input-domain precondition. Float32 rounding may hide the excess; its oracle must use its own
 dtype. No endpoint snapping or new normalized HLG variant is defined. No system gamma, black lift, display peak, OOTF or complete HLG
 EOTF is included. Raw allows formula evaluation outside these sample domains;
 it does not switch to an odd extension.
@@ -161,6 +157,8 @@ ACEScc decoding:
 2. t<V<h: D(V)=2^(17.52*V-9.72).
 3. V>=h: D(V)=65504.
 
+For ACEScct, A=105402377416545/10000000000000, B=729055341958355/10000000000000000, Xbreak=1/128 and Ybreak=155251141552511/1000000000000000. These decimals are exact rationals.
+
 - E(L)=A*L+B for L<=Xbreak; otherwise (log2(L)+9.72)/17.52.
 - D(V)=(V-B)/A for V<=Ybreak; otherwise 2^(17.52*V-9.72) for V<h,
   and 65504 for V>=h.
@@ -171,20 +169,8 @@ and values above 1, subject to finite output. The ACEScc floor and both decoding
 caps are preserved. Cct's negative linear toe is not clipped. No half-float
 storage restriction is imposed by the mathematical cap; both dtypes retain it.
 
-## Composition capability table
+## Composition requirements
 
-The [machine-readable capability table](FMT-09_composition_capabilities.json)
-records every selected curve/coefficient variant, semantic input domains, native
-reference, successful-output guarantees, lossy behavior and explicit unit-bridge
-requirements. It is a summary of this mathematical contract, not a runtime codec
-or executable validator. Its `table_version` does not version persisted metadata.
-Domain endpoints are exact decimal strings or named family parameters. `finite`
-still permits arithmetic overflow to fail; it promises no total finite mapping.
+The family domain table specifies each direction's semantic input domain and native reference. Every stage separately requires a finite rounded output. Before composing D/E, the caller establishes that the actual stored first-stage values meet the next stage's domain and explicit description. BT.1886's exact Lb/Lw endpoints may round outside those bounds in the output dtype; HLG has the endpoint excess stated above. Neither condition adds an implicit clamp or an observable sample error outside the caller preconditions.
 
-Before composing D/E, check the actual stored first-stage result against the
-next stage's input domain and descriptor. In particular, BT.1886's exact bounds
-Lb/Lw can round outside those bounds when not representable in the output dtype.
-HLG has the separate endpoint excess specified above. Even when composition is
-admissible, quantization, underflow, rounded joins and floor/cap branches preclude
-a general inverse-elimination rule. The table does not add a clamp, unit bridge,
-normalization or rendering stage.
+Linear and gamma=1 retain their explicit bit-copy rule. Other round trips are subject to quantization, underflow, rounded joins and floor/cap information loss. PQ decode loses near-zero codes and encode(0) is positive; ACEScc encoding loses nonpositive inputs, and both ACES decoding caps lose high codes. These properties do not authorize inverse elimination. Relative/absolute luminance conversion and display rendering remain explicit separate stages.

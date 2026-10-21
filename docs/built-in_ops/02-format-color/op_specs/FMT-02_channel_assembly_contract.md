@@ -11,7 +11,7 @@ clarification_status: complete
 
 # FMT-02: channel assembly and concatenation family
 
-The default C++ `OperationRegistry` registers twelve CPU Result-operation keys for `assemble`, `concatenate`, `assemble_mapped` and `scalar_literal`, each with `strict`, `accelerated_apple_silicon` and `accelerated_x86_64` profiles. These built-in operations use the current Result contracts; external C modules use the separately versioned Result C ABI 6 importer. Public authoring helpers are installed in `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT specification remains Proposed independently of the registered implementation.
+The default C++ `OperationRegistry` registers twelve CPU Result-operation keys for `assemble`, `concatenate`, `assemble_mapped` and `scalar_literal`, each with `strict`, `accelerated_apple_silicon` and `accelerated_x86_64` profiles. These built-in operations use fixed invocation ABI 8. Public authoring helpers are installed in `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT specification remains Proposed independently of the registered implementation.
 
 This is the operator-local clarification for the Proposed FMT-02 family. Inherit
 [FMT-common](FMT_common_contract.md), the NUM numerical/resource conventions
@@ -35,7 +35,7 @@ alpha editing belong to FMT-04/05. Merely joining alpha with color planes does
 not request premultiplication or color conversion.
 
 The family uses tensors with explicit per-invocation interpretation (FMT-common
-C13). Image storage is planar and uses the one tile geometry of its DAG. An
+C13). Spatial topology uses explicit H/W/channel axes and the common tile geometry of its Plan. Physical output storage uses the fixed Plan's dense tile contract. An
 optional per-input description supplies channel axes and named selectors; it
 cannot change physical addresses. Ordinary numerical policy is inherited rather
 than reopened in this interview.
@@ -72,22 +72,25 @@ actually uses.
 
 ## Current Result interface and bounds
 
-The twelve registered keys use single-tensor Result inputs and outputs. Every connected input contributes Descriptor support, including those unused by the selected mapping. Data support includes only mapped sources in the requested output footprint. Each input descriptor contains one tensor.
+The twelve registered keys use single-tensor Result inputs and outputs. Every connected input contributes Descriptor support, including those unused by the selected mapping. Payload dependencies contain the source-grid closure of all mappings in complete selected output tiles. Each input descriptor contains one tensor.
 
 The implementation supports seven native dtypes by exact bit copy, preserves the first input's Result schema id, tensor key and publication policy, sets `atomic_trailing_axes` to zero and attaches no description. Batch axes form a cell-independent prefix and must match across nonscalar sources; a scalar literal is an explicit unbatched shape-[1] source. Full input and output sample counts are bounded by 2^40, and the combined batch/cell rank is at most eight. `axis`, `input_axes` and `output_axis` address cell axes, excluding the Result batch prefix. Connected ports and static maps follow the implementation's admission limits.
 
-For nonspatial generic tensors, a zero-copy view requires **one physical `CpuStorage` owner for all supplied parts** and **one affine address expression for the entire requested region**. The `generic_view` path checks equal owner identities, compatible nonchannel strides, a consistent channel stride and the expected byte address of every mapped part. Independently owned generic sources, inconsistent strides or addresses make the physical view unavailable.
+### Fixed tile execution
 
-For spatial output, the operation instead builds explicit `ResultTensorViewPiece` records for each mapped source part and authorized window. The builder checks the complete, disjoint target coverage and physical representability; pieces may retain different storage owners and Roots. A forced `view` policy reports `ViewUnavailable` when the physical mapping cannot be represented. `auto` copies only for that nonsticky result, while `materialize` directly copies the requested regions. Scalar row replication uses batches of at most 256 samples and checks work and cancellation during copying.
+Each selected output tile is one fixed CPU Host task. Lowering intersects its channel interval with the statically resolved destination spans, maps each intersection to the corresponding source coordinates, and unions source-grid tiles separately for each input port. Repeated sources deduplicate input tiles. Disjoint source spans remain separate before tile closure; no bounding rectangle bridges unused gaps. A source tile can cover extra channels or cells because of its batch, spatial or atomic geometry.
 
-The public Result workflow and implementation details are in the
-[architecture reference](../../../kernel-architecture/Channel-and-Color-Operations.md#structural-channel-operations).
+Every complete retained output tile must be initialized, including all channels that its geometry covers. A channel-local request avoids other sources only when its normalized output tiles do not also contain destinations backed by those sources. Unused ports contribute schema-only references, so an otherwise unused producer performs no sample work. Static metadata validation still covers all connected inputs. DenseHost bindings use explicit Plan COPYs; DirectTiles use their compiled views.
 
-### Spatial view construction
+Preparation fixes destination spans, coordinate maps and exact read slots, and verifies the output geometry, kernel contract, empty task parameters and zero scratch. Runtime chooses a span by destination channel, reads only the mapped source coordinate and copies the original bytes to a dense, independently owned output tile. Legal input views support signed/zero strides and unaligned offsets. Runtime state consists of fixed-size coordinate arrays and one cached read view; it allocates no payload, mapping table or workspace. Cancellation is polled between at most 256 copied samples.
 
-For each requested destination box, the operation intersects the prepared source spans with that box, resolves the affine axes and acquires an owning read window for every resulting part. It constructs all piece records before binding their borrowed `ResultTensorReadWindow*` pointers, after the windows vector is complete. This keeps the pointers valid during publication.
+Auto and materialize both copy. Every nonempty view task returns InvalidArgument/ViewUnavailable because fixed produced tiles own distinct storage. A view task has only schema dependencies and requests no source payload. Empty still validates static inputs and parameters but emits no task. Operational admission, cancellation and mandatory upstream effects retain the executor's error ordering.
 
-The operation calls `ResultBuilder::publish_tensor_view(0, box, pieces)` once, so the builder either certifies the entire destination box or leaves its previous coverage unchanged. A physical `ViewUnavailable` lets `auto` materialize that box; `view` reports failure and `materialize` uses the writer directly. Source read, schema, authorization, resource and cancellation failures retain their own errors. The C++ vector overload has no fixed 16-piece limit: Root work and metadata admission bound its size, while the separate C ABI bridge accepts 1..16 pieces.
+The zero-input scalar_literal primitive validates explicit dtype and lowercase native-order hex bytes during static preparation. A nonempty selection produces one shape-[1] tile with zero scratch; it copies the prepared bytes without conversion or NaN quieting. Empty emits no task. FMT-03 can reuse one literal call for repeated identical typed values.
+
+Successful tile completion enables internal consumers. Public call Results become available after all required tasks succeed and the call retires in order; a failed call exports no partial output. Literal-provider and assembly calls have separate retirement boundaries. Retained results survive source and context teardown. The fixed path has no dynamic view publication, incremental dirty propagation or sample cache.
+
+See the [architecture reference](../../../kernel-architecture/Channel-and-Color-Operations.md#structural-channel-operations).
 
 ## Clarification decisions
 
@@ -99,9 +102,9 @@ The operation calls `ResultBuilder::publish_tensor_view(0, box, pieces)` once, s
 | Axes and shape | A: explicit inserted axis, no automatic squeeze. B: separately resolved input axes and explicit output axis; corresponding remaining axes match in order. | Confirmed |
 | Arity and static structure | Allow one input, reject zero inputs; input list, axes and channel counts are static. | Confirmed |
 | Interpretation conflicts | Inputs carry no descriptions, so there is nothing to conflict. Components from Gray/Black-White or differently encoded sources are combined by index; the consumer's description defines the result. | Confirmed; C13 |
-| Regions and invalidation | Exact output-channel/region support and corresponding forward dirty mapping; unused inputs have no payload request. | Confirmed |
+| Regions | Complete selected output tiles determine mapped source-grid closure; unused ports are schema-only. | Confirmed |
 | Coordinate interpretation | Nonchannel axes correspond by index. No coordinate-label comparison or spatial alignment is performed. | Confirmed; C13 |
-| Output storage | auto/view/materialize with default auto; views require a legal retained mapping, otherwise auto materializes. | Confirmed |
+| Output storage | Auto/materialize copy to independent dense tiles; nonempty view fails, Empty has no task. | Confirmed |
 | Explicit destination mapping | Support explicit source component to output slot mapping. | Confirmed |
 | Mapping member placement | C provides mapped assembly; A/B remain ordered forms. | Confirmed |
 | Mapping completeness and reuse | Every output slot has one source, with no holes or duplicate writes; source omissions/reuse are allowed. | Confirmed |
@@ -150,7 +153,7 @@ unimplemented native integer widths remain dependencies. Float signed zeros,
 Inf and NaN payloads are preserved exactly when successfully supplied.
 
 For A, [H,W] planes may produce [C,H,W] or [H,W,C]. For B, [3,H,W] and
-[H,W,1] may produce [H,W,4]. Physical planar addressing is separate from this
+[H,W,1] may produce [H,W,4]. Physical input addressing is separate from this
 logical axis choice, and no local tile geometry is introduced.
 
 All three members permit a single input and reject an empty input list. A single
@@ -224,127 +227,20 @@ possible without a complete image/color description.
 | Dtype | UInt8, UInt16, Int8, Int16, Int64, Float32, Float64, same across all inputs/output | Missing native widths require implementation; no implicit cast or Float16 extension. |
 | Cell rank | A: 1..7 to 2..8; B: 1..8 to the same cell rank; C: output cell rank r+1 in 1..8 | Full sample rank includes batch and cell axes and is at most 8. Cell rank zero/empty dimensions and dynamic arity are excluded; C with r=0 has channel-vector inputs only. |
 | Values | Exact element bytes, including HDR/signed and IEEE special patterns | No ULP relaxation for copying; no color/alpha-domain scan. |
-| Input layout | Legal generic strided tensors and canonical planar image windows | Raw does not admit an interleaved image without explicit import. |
-| Output | auto/view/materialize with exact requested coverage | No cross-owner image representation or implicit packed ROI export. |
+| Input layout | Plan-validated affine views for generic or spatial topology; DenseHost uses explicit imports | Topology and descriptions cannot override physical view validation. |
+| Output | Independent dense selected tiles; auto/materialize copy | No output alias or implicit packed ROI export. |
 | Backend | Portable CPU and named Apple Silicon/x86-64 CPU profiles with identical copy semantics | GPU is unpromised; unavailable named backends fail explicitly. |
 | Execution | Exact mapped components/regions with no halo | Existing complete-input implementation is not a conforming replacement. |
 
-## Data, descriptor and dirty mapping
+## Coordinates, storage and resource bounds
 
-Let Q be the requested output footprint, preserving every disjoint box and its
-global coordinates. For A, input i receives exactly the projection of
-Q intersected with j[a]=i, with axis a removed. For B, input i receives exactly
-Q intersected with pi<=j[a]<p(i+1), with output axis a removed and source axis ai
-inserted at channel coordinate j[a]-pi. Empty intersections request no input
-payload. Adjacent regions may coalesce only when their union is exact; do not
-bridge gaps or round coverage up to tiles, rows, channel tuples or pages.
-C uses its destination-indexed mapping table as specified by its member contract;
-source support is the exact union over requested mapping entries, including
-deduplication when multiple destinations select the same source component.
+For A, intersect each complete selected output tile with channel i and remove the output channel axis. For B, intersect with prefix interval [pi,p(i+1)), subtract pi and insert the coordinate at source axis ai. C uses its destination-indexed source selection. Explicit internal scalar records map to source coordinate [0]. These are logical sample mappings; physical reads are their unions closed through each source grid.
 
-There is no Control payload and no additional sample Validation domain. Static
-descriptor checks cover every connected input's shape/dtype, axis and supplied
-description even if its payload is unrequested. Explicit output grouping does not
-add RGB/alpha read closure. Necessary upstream complete-input computation or intrinsic
-producer failures retain their own scope; a raw consumer cannot manufacture a
-missing value from a failed producer.
+The output uses the first source's schema id, member key, publication policy and batch prefix, with the inferred channel dimension, atomic_trailing_axes=0 and projected spatial topology. Topology describes axes independently of the Plan's concrete strides. A description cannot relabel spatial H/W axes or change addresses. Input count, shape, axes, descriptions and mapping changes require new compilation; bindings can change compatible immutable payloads between Runs.
 
-Forward dirty mapping is the inverse insertion for A and inverse axis movement
-plus channel-prefix offset for B, intersected with the observed output domain.
-C maps each changed source component to every selecting destination, so its dirty
-relation can have several outputs for one source sample.
-Changing an unselected input channel dirties no observed output samples. Changes
-to arity, shape, axis, prefix counts or consumed descriptions invalidate the
-compiled descriptor/mapping; no pixel-only cache may conceal them. Coordinate
-translation occurs only through the declared index formulas, never by comparing
-physical addresses or grid origins. Changing an `input_descriptions` entry
-changes the invocation identity.
+Selected output storage is proportional to complete selected tiles. Input view and preparation metadata scale with source tile closure, participating ports and static mapping spans; neither runtime storage nor mapping expansion allocates one entry per unrequested logical sample. A/B have at most one span per input; C has one span per mapping row. Per sample the implementation uses a binary span lookup, O(rank) coordinate projection and a cached view or binary tile-slot lookup. There is no all-input search per sample, full-image gather or private worker pool.
 
-Every output element has exactly one source. C may reuse that source for several
-destinations; A/B may likewise receive aliased input ports. This is local exactness, not
-a claim that a broader upstream dependency graph is exact. Failed observations
-publish no partial success; separately completed observations retain their
-outcomes under the inherited host contract.
-
-## Output layout, ownership and resource behavior
-
-Separate source planes may belong to unrelated address-space owners. A list of
-those owners is not by itself one assembled image under the accepted storage
-contract. Any proposed zero-copy result must establish a legal output address
-map, retained ownership and authorized coverage within the applicable image
-storage contract. The kernel currently supplies no general facility for
-remapping arbitrary source pages into a new shared image reservation.
-
-For spatial output, a split/reassemble sequence can publish separate authorized pieces as one view when each mapped physical subregion is representable and the builder can certify its coverage, owners and absence of cycles. An unrelated source owner is permitted there, but arbitrary page remapping or equal sample bytes alone do not establish a valid view. Nonspatial generic output keeps the single-`CpuStorage`-owner, single-affine-expression requirement described in [Current Result interface and bounds](#current-result-interface-and-bounds).
-
-Materialized output follows canonical planar offsets, page admission and exact sample publication. Packed ROI export is a separate read operation.
-
-`auto` attempts only a legal view and otherwise materializes. It must not hide a
-source, metadata, cancellation or resource failure by retrying a different
-layout. `view` fails with ViewUnavailable if no legal view exists. `materialize`
-always creates separate result storage. A view retains its backing owner and
-the mapping needed to keep every authorized access valid after source
-handles or ExecutionContext retire. Complete source provenance alone is not
-enough: current byte mappings, component order, storage policy and requested
-coverage must also agree. Generic tensor views require a representable legal
-mapping; sharing one owner does not by itself guarantee representability.
-
-For materialized images, reserve the complete canonical output virtual span and
-prepare only the union of pages intersecting requested sample bytes. One DAG
-tile geometry applies to input and output. Use the kernel's edge-row padding
-and page-alignment formulas; padding/gaps are not pixels, valid samples or zero
-boundary values. Generic non-image materialization may use ordinary owned
-requested fragments. It does not create a second authoritative image layout.
-
-For A/B, with n inputs, rank r, Nq requested elements and F participating windows, the
-reference mapping/copy work is O(n*r+Nq*r+F*r), plus metadata size, page-set
-construction and actual upstream work. B walks disjoint prefix intervals in
-channel order; do not scan all n sources per element. Mapping state is O(n+r)
-plus admitted footprint/window records. C additionally admits its M-entry
-mapping/reverse index and selector lookup structures as specified in its member.
-A view copies zero sample payload but
-still pays descriptor, request, window and ownership costs.
-
-Charge Nq*d only as logical copied volume. Actual allocations include output
-page capacity, temporary/staging capacity, window/metadata capacity and retained
-source ancestry. Deduplicate backing shared by multiple input ports or views
-using kernel accounting identity. Account simultaneous source/destination peaks,
-row/page padding, and sparse coverage metadata. Virtual bytes, supplied backing
-and logical samples remain separate; none is an RSS guarantee. No eager metadata
-entry is allocated for every possible sample/page in an unused full-image span.
-
-Produced pages survive until the final image owner retires; no eviction/replay
-or temporary-file paging is introduced. Failed unpublished allocations roll
-back without losing existing valid regions. Poll cancellation/currentness and
-charge work at most every 1024 entries/elements during metadata validation,
-mapping, page preparation and copy, and immediately before publication.
-Prepared state is invocation-local. Reusing an immutable plan does not share
-mutable per-run payload state. Empty observations are stateless. ResultBuilder
-publication is transactional; a failed candidate leaves existing valid regions
-untouched.
-
-## Reference algorithm and permitted optimizations
-
-1. Validate static parameters, all input descriptors and supplied descriptions;
-   infer axes, output shape, B prefix counts or C's resolved mapping table.
-   This phase reads no payload and performs no color-domain validation.
-2. Partition Q by input channel ownership using the exact formulas above.
-   Declare per-port Data and Descriptor support and acquire only needed windows.
-3. For auto/view, prove output view representability. If auto requires copying,
-   or materialize is selected, admit the full result reservation and prepare
-   destination pages before giving a bounded write window to the operation.
-4. Enumerate each requested input-owned region and copy d bytes per sample into
-   its mapped output position, or publish the proven equivalent retained view.
-5. Check cancellation/currentness and publish the exact requested coverage only
-   after all required work succeeds.
-
-CPU optimizations can coalesce consecutive source and destination row runs only
-when their complete byte intervals are both authorized and contiguous. SIMD
-loads must not cross into unrequested channels, row padding, footprint gaps or
-unprepared pages. Independent destination observations may run through host
-scheduling; no private pool, arithmetic approximation or full-input gather is
-needed. Repeated references to one source still map to their separate requested
-output channels without mutating the source.
+The executor admits output allocations and task records before issue and retains source owners through their last read. Runs share immutable preparation and own their output allocations independently. Copy work is exact byte movement, including sNaNs, signed zeros and integer extrema. Metadata/slot validation happens before unchecked numerical execution; cancellation remains operational.
 
 ## Error mapping
 
@@ -353,7 +249,7 @@ output channels without mutating the source.
 | Zero inputs, malformed or unsorted `input_descriptions`, missing or out-of-range axis, axis that conflicts with a description, illegal rank insertion, absent or ambiguous C selector | Compile/direct preflight | InvalidArgument / InvalidDomain, schema origin. |
 | Dtype mismatch, incompatible nonchannel extents, unsupported tensor rank/type or channel-table length | Compile/direct preflight | TypeMismatch / None. |
 | Checked shape/prefix overflow, host port/graph capacity or resource/work admission failure | Inherited validation/admission phase | Preserve the shared NUM/kernel status rather than truncate or wrap. |
-| Forced view cannot represent the requested result | Requested observation evaluation | InvalidArgument / ViewUnavailable. |
+| Nonempty forced view | Fixed task execution | InvalidArgument / ViewUnavailable; schema-only source dependencies. |
 | Missing source coverage, required upstream failure, cancellation, stale plan, unsupported backend or allocation failure | Respective inherited phase | Preserve inherited code/reason/origin and observation scope. |
 
 Diagnostics identify the input ordinal, relevant axis/group/field and operation.
@@ -361,59 +257,10 @@ Do not invent a pixel coordinate for static descriptor errors. NaN/Inf or an
 out-of-range alpha alone is not an assembly failure; this operator does not
 consume those sample invariants.
 
-## Acceptance and performance plan
+## Acceptance
 
-The member files provide explicit input/output fixtures. Use an independent
-coordinate scatter oracle and independent byte-address evaluator rather than
-the production mapper. Strict and accelerated profiles must produce identical
-sample bits; descriptor/discrete results are exact. Include these cases:
+Use an independent coordinate interpreter and byte-address evaluator for all seven dtypes. Compare strict and available accelerated profiles bit-for-bit. Cover every legal source/output axis, rank-one channel vectors, component insertion, batch prefixes, spatial/atomic grids, prefix boundaries, mixed C structures, omitted and repeated sources, static names/roles and malformed maps.
 
-- Split/reassemble with original ordering and explicit original grouping;
-  independently owned planes; A single-input insertion; B single-input identity
-  and channel-axis movement; B rank-one vectors and all legal axis positions.
-- Same-dtype limits and raw bit fixtures; reject mixed dtypes, unequal extents,
-  implicit broadcast, invalid axes, rank-zero and A rank-eight inputs.
-- Duplicate names in an `input_descriptions` entry make only the matching C
-  selector ambiguous. Gray/Black-White and mixed-source components assemble by
-  index with exact bits and no numerical conversion; the output carries no
-  description, and a consumer given an RGB description reads the result as RGB.
-  An `input_descriptions` entry affects only its invocation and its identity.
-- C covers mixed source structures, selector name/role/index equivalence and
-  ambiguity, source omissions/reuse, duplicate/hole rejection, mapping order,
-  destination fan-out dirty support and an R channel copied to slot 2.
-- Full versus offset/disjoint ROI and y/x=[127,130) across four tiles for T=128;
-  select one output channel and instrument that other input payloads are not
-  requested. Compare Data and dirty support against the independent mapping.
-- Generic positive/negative/zero strides; continuous and tiled images; differing
-  legal tile configurations across DAGs and rejection of mismatched geometry
-  within one DAG; a description cannot bypass the image import boundary.
-- View success when genuinely representable, forced-view failure for unrelated
-  owners, auto materialization, repeated source aliases, resource/metadata/work
-  limits, cancellation, cache-off, and surviving result/windows after context
-  teardown. Verify backing charges retire with the last owner.
+Exercise sparse source unions, large sparse logical domains, output tile closure, signed/zero-stride inputs, DenseHost COPYs, Empty and nonempty view failures. Verify actual public split/reassemble, swizzle/replace and alpha-removal helpers, including scalar/literal expansion and compatible rebinding. Check prepared-signature rejection, cancellation, source failure, concurrent Runs and retained ownership. A no-base-read fixture must select output tiles whose complete maps use only external/scalar sources.
 
-Benchmark correctness first, then A assembling four independent Float32
-[4096,4096] planes and B concatenating RGB plus alpha for the same spatial
-extent. Compare full requests, one-channel requests and the cross-tile ROI.
-Measure common-owner view, forced materialization and unrelated-owner auto
-separately. Record revision/compiler, hardware/ISA, worker count, dtype, axes,
-ROI, DAG geometry, page size, row pitch, initial source/page state and cache mode;
-report median/tail latency, copied/source bytes, virtual reservation, backing,
-metadata/staging peak and retained owners. No throughput guarantee is inferred.
-
-## Sources and remaining implementation work
-
-Repository contracts and source links above establish the inspected baseline.
-The byte-copy and index equations are specified directly; no external commercial
-pixel-compatibility claim is made (U: unverified under the template's convention).
-No operator-local behavior question remains open. The current implementation supplies canonical description and mapping encodings,
-native dtypes, exact dependency/publication support, legal view checks and the
-member registrations.
-
-## Canonical image alpha constraint
-
-Under FMT-common, complete image descriptions supplied to consumers use straight
-colors and internal alpha indices only. Assembly cannot establish a persistent
-external alpha relation or declare a canonical premultiplied image. Copying a
-premultiplied boundary component does not numerically recover straight color.
-Missing alpha companions are not resolved through another tensor's owner.
+Temporary builtin checks are removed after validation; independent mathematical/byte oracles remain. Report actual CPU profiles and execution evidence separately from source inspection. Performance measurements require the same schema, requests, bindings, worker count and numerical workload; no throughput guarantee follows from registration.

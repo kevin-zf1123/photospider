@@ -6,8 +6,7 @@ category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-result_operation_abi: 4
-kernel_package: "0.36.0"
+fixed_invocation_abi: 8
 ---
 
 # FMT-01: extract tensor channels
@@ -29,8 +28,7 @@ duplicates and replacement; FMT-02 owns explicit channel assembly.
 
 Each A/B node accepts one Result input named `input` and publishes one Result
 output named `values`. Input and output schemas contain one tensor member and no
-fields. Package 0.36.0 uses Result operation ABI 6, WorkflowDocument 6 and
-OperationTraits 28. The six CPU registry keys are:
+fields. The six fixed invocation ABI 8 CPU registry keys are:
 
 | Member | Strict | Apple Silicon profile | x86-64 profile |
 | --- | --- | --- | --- |
@@ -74,13 +72,13 @@ checks dtype, descriptor rank, selected axis/index, the supplied description and
 `keepdims` shape. Nothing is guessed from the channel count.
 Direct A/B nodes may include `expected_source_schema` and
 `expected_source_layout` together; preparation compares them to the producer's
-schema digest and physical-layout assertion. The schema assertion is the
+schema digest and spatial-topology assertion. The schema assertion is the
 domain-separated SHA-256 digest of the complete canonical schema, encoded as 64
 lowercase hex characters; it covers schema identity and batch axes and does not inspect
-samples or certify their validity. Layout has its own assertion. The public
+samples or certify their validity. The separate layout assertion encodes spatial height/width/channel axes; it does not assert runtime strides, offsets or row pitch. The physical Plan and Run binding validate those views. The public
 `format::split_channels` helper writes both assertions on every generated A
 node. It also verifies a declared input immediately, so forward producer
-references are checked when compiled. The physical-layout assertion remains a
+references are checked when compiled. The spatial-topology assertion remains a
 separate string parameter capped at 8,192 bytes; an oversized layout assertion
 is rejected during authoring.
 
@@ -104,7 +102,7 @@ keepdims=false: preserve batch coordinates; insert k at cell axis a;
 
 Output tensor key, schema id, batch axes and publication policy are retained.
 The descriptor reflects the selected shape and its spatial layout remains valid
-when the selection is a representable channel-plane view. When `keepdims=false`
+when the selected axis is the declared channel axis or keepdims retains a singleton spatial axis. When `keepdims=false`
 removes an axis inside the atomic trailing range, `atomic_trailing_axes`
 decreases by one. The output carries no description. The extraction does not
 claim that a component is a complete color or validate its numeric domain.
@@ -133,41 +131,21 @@ constructing a component `TensorDescription`, and passes it to that consumer.
 The operation does not scan sample values, validate coverage intervals or
 certify color/alpha semantics.
 
-## Result demand, dirty mapping and empty requests
+## Fixed execution, input closure and Empty
 
-The output uses Dependency-v2. For output footprint Q, the Result Need requests
-exactly Q's mapped source support and the source Descriptor, with role mask 9:
-Data (1) plus Descriptor (8). It requests neither Validation nor Control
-support. A source change confined to an unselected channel dirties no output
-sample. A change in selected-channel support maps to the corresponding output
-coordinates. Descriptor changes require reinference.
+Each selected output tile is one CPU Host task with one preallocated dense output and zero scratch. Lowering maps that tile's global coordinates to the source thin rectangle defined above, then declares the intersecting tiles from the source's own grid. Batch, atomic or spatial axes may enlarge physical input coverage. The kernel reads only the selected coordinates within those declared views; a required upstream producer still computes its own declared tiles. Prepared input slots are immutable and support legal signed/zero strides and unaligned offsets. DenseHost input adaptation uses explicit Plan COPY tasks.
 
-Empty output demand uses a stateless continuation that publishes an empty Result
-without requesting sample payload. An upstream producer may still perform its
-own wider work; that producer's demand and failure scope remain unchanged.
-Result caching is disabled for A/B.
+Static preparation validates selectors, source assertions and the output schema. Kernel preparation verifies the symbol/contract, exact input slots, output geometry, empty task parameters and zero scratch. Runtime performs bitwise copies into the Plan's dense output and checks cancellation between at most 256 samples. Scratch and coordinate state are independent of the full logical extent; input descriptors and output allocations scale with the selected tile closure.
 
-## Views, copies and ownership
+Empty requests retain static validation and emit no payload task. Independent Runs share immutable preparation and have distinct output storage. Selection and imported Plan artifacts preserve the declared closure; execution does not discover further dependencies. Incremental dirty propagation, content caching and source alias identities are outside this fixed execution contract.
 
-`auto` first tries an authorized Result view and copies only after
-`ViewUnavailable`. `view` requires a representable view. `materialize` copies
-only requested output coverage through a transactional Result writer. Copy
-work checks cancellation within runs of at most 256 samples. Failure or
-cancellation publishes no partial output.
+## Layout policy, ownership and failures
 
-For generic tensors, valid positive, negative and zero strides are supported.
-The Result mapper can partition a requested window by its authorized backing
-regions and retain the corresponding owners, including for a view spanning
-multiple backing owners. For spatial tensors, selecting the declared channel
-axis can retain the source image owner and preserve the channel plane's source
-mapping. Slicing a spatial height or width axis cannot use a forced view: `auto`
-materializes in the projected output layout. When squeezing removes a spatial
-axis, the output uses a generic tensor layout; with `keepdims=true`, it retains
-the spatial layout with a singleton extent. No layout change grants access to
-samples outside authorized coverage.
+`auto` and `materialize` both copy selected output tiles into independent storage. The fixed Plan requires each produced tile to own a distinct allocation, so every nonempty `view` task returns InvalidArgument/InvalidDomain with `ViewUnavailable`. Such a task depends only on the source schema and reads no payload, so it does not trigger an otherwise unused source producer. Empty view requests succeed after static checks. A mandatory source effect or other required computation retains its own scheduling and failure obligations.
 
-No private worker pool or result cache is used. Views retain source backing
-owners for their lifetime. Materialized output owns its copied backing.
+Selecting the declared spatial channel axis preserves the projected spatial topology. Squeezing a height/width or another nonchannel axis produces generic topology; keepdims preserves the singleton spatial extent. These topology rules do not alter the independent dense output allocation. The output has no attached interpretation.
+
+Completed tiles can satisfy internal dependencies. Public call results appear only after every required task succeeds and the call retires in order; failures and cancellation expose no partial call result. Retained copied outputs survive source, Run and context teardown. There is no private worker pool or dynamic publication callback.
 
 ## FMT-01C split helper
 
@@ -180,9 +158,9 @@ choose which handles to connect or export. An unrequested sibling does not
 request its channel's payload.
 
 The helper validates options and source metadata before appending. For a declared
-workflow input, it checks full schema and physical-layout assertions against the
+workflow input, it checks full schema and spatial-topology assertions against the
 declaration. For a forward producer edge, generated A nodes carry a bounded
-SHA-256 digest of the complete canonical schema and a separate physical-layout
+SHA-256 digest of the complete canonical schema and a separate spatial-topology
 assertion for compile-time comparison. It stages all nodes and
 handles before changing the document; any error leaves the graph unchanged.
 Expansion is bounded to 65,536 channels and also obeys ordinary workflow node
@@ -195,5 +173,7 @@ and output limits. No samples are read to determine the channel count.
 | Missing or conflicting axis, invalid index, `keepdims`, selector, absent or ambiguous name/role, B without `input_description`, failed schema/layout/channel-count assertion | `InvalidArgument` / `InvalidDomain` during static preparation |
 | Malformed `input_description` or one that does not fit the input descriptor | The `tensor_description_from_parameter` / `validate_tensor_description` status during static preparation |
 | Unsupported element type, malformed Result schema or incompatible descriptor/layout | `TypeMismatch` |
-| Forced view cannot represent the requested mapping | `InvalidArgument` / `InvalidDomain`, diagnostic `ViewUnavailable` |
+| Any nonempty forced-view selection | `InvalidArgument` / `InvalidDomain`, diagnostic `ViewUnavailable` |
 | Missing source coverage, work/resource exhaustion, cancellation or upstream failure | Preserve the corresponding Result/runtime status and scope |
+
+For temporary public checks, compare raw bytes for all seven dtypes, named/index equivalence, every cell-axis position, batch/spatial/atomic projection, sparse large logical domains, signed/zero-stride inputs, Empty and all layout policies. Exercise split and existing-alpha extraction through Compiler/ExecutionContext, verify malformed signatures and source assertions, and check concurrent Runs, cancellation, independent result owners and failure publication. Retain the independent byte oracle; delete temporary builtin test programs after validation.

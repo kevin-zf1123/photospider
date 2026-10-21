@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.rgb_to_hsl_strict
@@ -38,25 +38,23 @@ family; no missing semantic interpretation is inferred from sample magnitudes.
 Use exact extrema, six-sector hue and the chosen algebraic saturation extension. Gray produces H=S=+0; finite HDR/negative data is not clipped.
 
 Exact same-position support: each H/S/L request uses R,G,B; only S evaluates its singular denominator.
-Take unions for multiple requested outputs and the forward relation for dirty
-mapping. Static structure and explicit-configuration checks apply even to Empty/bypass-only requests.
+Take the union over every sample of each complete retained output tile, then close on the source grid. Static structure and explicit-configuration checks apply even to Empty/bypass-only requests.
 No halo, hidden-color skip, alpha validation or full-image scan is introduced.
 Strict evaluates the complete specified formula with its stated copy/selection
 exceptions; accelerated numerical rules, raw specials and errors inherit the
 family/math contract. The normalized Lab lightness is l=L*/100 wherever relevant.
-Invalid consumed semantics or an explicit singularity fail the requested
-publication; unrelated unobserved sample errors do not. Preserve upstream scope.
+Semantic sample validity, finite rounded results and nonsingular semantic formulas are caller preconditions over complete retained output tiles. Fixed execution does not validate these numerical premises; operational errors retain the kernel category.
 
 ## Storage, resources and implementation identity
 
-This is a registered native Result primitive. Internal helper reuse preserves its declared support, rounding and validation.
+This is a registered native Result primitive. Internal helper reuse preserves its declared support, rounding and static checks.
 This member materializes transformed output and rejects forced view even for a bypass-only request.
-The implementation supports generic and spatial layouts. Q permits a physical view when the complete requested mapping is representable; other members materialize and reject forced view. Empty demand is stateless, and publication is transactional.
-The implementation uses Result ABI 6 and the registered CPU profiles.
+The implementation supports generic and spatial layouts. Complete output tiles determine source-grid closure and numerical preconditions. Pure copies/constants use zero scratch; arithmetic uses fixed declared scratch. Empty has no payload tasks, and successful calls publish in order.
+The implementation uses fixed invocation ABI 8 and the registered CPU profiles.
 
 ## Independent acceptance and conceptual workflow
 
-RGB=(1,0,0) gives (0,1,0.5). RGB=(1,0,-1) fails S but permits H/L. Retain the actual underlying transfer.
+RGB=(1,0,0) gives (0,1,0.5). RGB=(1,0,-1) is outside the semantic S precondition; a complete retained tile containing only H/L can still be evaluated. Retain the actual underlying transfer.
 
 Also apply common mixed-region/component, dtype/profile, signed-zero, explicit-configuration,
 resource/cancellation and owner-lifetime acceptance where relevant. An independent

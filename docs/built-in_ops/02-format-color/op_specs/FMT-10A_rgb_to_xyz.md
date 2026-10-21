@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.rgb_to_xyz_strict
@@ -18,7 +18,7 @@ registered_operation_keys:
 # FMT-10A: linear RGB to XYZ
 
 Inherit the complete [FMT-10 family](FMT-10_rgb_basis_contract.md) and
-[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 6
+[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered fixed invocation ABI 8
 operations under the strict, accelerated Apple Silicon and accelerated x86-64
 CPU profiles.
 
@@ -33,11 +33,10 @@ explicit input_description and checks any explicit assertions. Raw provides its 
 basis and ordered component triple explicitly. Source transfer decoding and
 non-native semantic code scaling must be done before A, never implicitly here.
 
-Construct M from the exact resolved xy coordinates. For requested transformed
-row i, output RN_dtype(sum_j M[i,j]*RGB[j]+0). Read the full source RGB triple
+Construct M from the exact resolved xy coordinates. For each transformed
+row i in a retained output tile, output RN_dtype(sum_j M[i,j]*RGB[j]+0). Read the full source RGB triple
 at that spatial coordinate for every nonidentity transformed request, even if
-some coefficients are zero. Semantic mode requires those inputs and the
-requested rounded output finite. Unrequested matrix rows are not evaluated.
+some coefficients are zero. Semantic callers guarantee finite consumed inputs and finite rounded outputs throughout the retained output tile. Rows outside retained tiles are not evaluated.
 
 Write X/Y/Z into the original R/G/B slots on the source white/unit/reference
 scale. No description is attached; callers supply the resulting XYZ configuration
@@ -47,14 +46,13 @@ A has no destination white, adaptation method or arbitrary matrix parameter.
 ## Mapping, storage and errors
 
 Inherit complete-triple point support for nonidentity, pointwise native identity
-copy, exact bypass support, dirty mapping and auto/view/materialize. Native exact
+copy, source-grid tile closure and auto/view/materialize. Native exact
 I may copy bits while publishing new model roles; approximate I may not.
 All geometry/selector/representation checks apply before pixels, including Empty
 or alpha-only observations. Failure of a consumed peer is not suppressed by a
 zero coefficient or by source alpha=0. No whole-image scan is introduced.
 
-Semantic overflow occurs only for a requested row's rounded result; raw keeps
-NUM special values. Required upstream failures, resource/exact-coefficient
+Semantic sample validity is an unchecked caller precondition; raw keeps NUM special values. Required upstream failures, resource/exact-coefficient
 budgets, cancellation, prepared Result coverage and normal owner lifetime inherit
 the family. No source invalidation or relabel mutates another consumer.
 
@@ -71,17 +69,16 @@ the family. No source invalidation or relabel mutates another consumer.
    oracle; lack of numeric work capacity reports resource failure, not an
    invented epsilon-singular classification.
 4. For the diagonal fixture, request only X with finite R=1,G=0,B=max_finite.
-   X succeeds with 1 although the unused Z would overflow. Put NaN in G instead:
-   semantic X fails, and raw X returns that quieted source NaN despite M[X,G]=0.
+   Use a tile grid retaining X without Z. X succeeds with 1 although Z would overflow. Raw X with NaN in G returns that quieted source NaN despite M[X,G]=0; this NaN input is outside semantic caller preconditions.
 5. Nonidentity input [-0,-0,-0] yields +0 for each exact-zero output under the
    three-term plus +0 NUM rule. This is different from the native exact-I copy
    rule; a row alone looking like identity does not select a whole-node shortcut.
 6. Noncanonical R/G/B slots, sparse cross-tile requests and alpha-only output
    preserve positions and exact support. Alpha NaN does not affect requested
-   color; hidden nonfinite color still fails at alpha=0.
+   color. Alpha=0 does not waive the finite semantic color precondition.
 
 Use the installed `format::rgb_to_xyz` helper to append A to a workflow, then
 compile and execute the resulting Result graph. Keep transfer decoding and any
-other required stage explicit before A. Runtime validation status is recorded in
-the linked Result implementation documentation; the mathematical fixtures above
+other required stage explicit before A. Fixed invocation behavior is described in
+the linked implementation documentation; the mathematical fixtures above
 remain the independent numerical acceptance targets.

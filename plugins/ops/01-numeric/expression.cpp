@@ -344,10 +344,11 @@ Result<Expression> parse(const std::string& source,
 }
 Result<double> evaluate(const Expression& expression, double x,
                         const std::uint8_t* coefficients, std::uint8_t* scratch,
-                        const CancellationToken& cancellation) {
+                        const ps_kernel_cancellation_v8& cancellation) {
   double value = 0;
   for (std::size_t i = 0; i < expression.nodes.size(); ++i) {
-    if ((i & 31U) == 0 && cancellation.cancelled()) {
+    if ((i & 31U) == 0 && cancellation.is_cancelled &&
+        cancellation.is_cancelled(cancellation.context)) {
       Status s;
       s.code = ErrorCode::Cancelled;
       return Result<double>(s);
@@ -383,9 +384,6 @@ Result<double> evaluate(const Expression& expression, double x,
         value = a * b;
         break;
       case Kind::Divide:
-        if (b == 0)
-          return Result<double>(Status::failure(ErrorCode::OperationFailed,
-                                                "expression division by zero"));
         value = a / b;
         break;
       case Kind::Power:
@@ -416,9 +414,6 @@ Result<double> evaluate(const Expression& expression, double x,
         value = std::max(a, b);
         break;
     }
-    if (!std::isfinite(value))
-      return Result<double>(Status::failure(
-          ErrorCode::OperationFailed, "nonfinite expression subexpression"));
     std::memcpy(scratch + i * sizeof(double), &value, sizeof(value));
   }
   return Result<double>(value);

@@ -1,12 +1,8 @@
-#include "photospider/ops/errors.hpp"
 #pragma once
 
 #include <array>
-#include <charconv>
 #include <cstdint>
-#include <cstring>
 #include <functional>
-#include <string>
 
 #include "01-numeric/accelerated_expression.hpp"
 #include "01-numeric/certified_math.hpp"
@@ -15,29 +11,6 @@
 #include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
-inline std::string expression_coordinate(std::uint64_t bits) {
-  double value = 0;
-  std::memcpy(&value, &bits, 8);
-  std::array<char, 64> text{};
-  const auto written = std::to_chars(text.data(), text.data() + text.size(),
-                                     value, std::chars_format::general);
-  return written.ec == std::errc{} ? std::string(text.data(), written.ptr)
-                                   : "unavailable";
-}
-template <class Reason>
-inline Status expression_failure(std::uint64_t index, bool have_x,
-                                 std::uint64_t x, Reason reason,
-                                 const std::string& message) {
-  AtomKey atom;
-  atom.rank = 1;
-  atom.coordinate[0] = index;
-  return Status{ErrorCode::OperationFailed,
-                "sample=" + std::to_string(index) + " x=" +
-                    (have_x ? expression_coordinate(x) : "unavailable") + " " +
-                    message,
-                reason,
-                {FailureOrigin::Domain, FailureScope::Atom, atom}};
-}
 struct ExpressionEvaluator final {
   AcceleratedExpression accelerated;
   ExactElementary elementary;
@@ -50,9 +23,8 @@ struct ExpressionEvaluator final {
         profile(selected) {}
   Result<std::uint64_t> evaluate(
       const ExpressionProgram& program, std::uint64_t x,
-      const std::array<std::uint64_t, 256>& coefficients, std::uint64_t sample,
-      const std::function<Status(std::uint64_t)>& consume,
-      const std::function<Status(NumericMathFunction, bool)>& report) {
+      const std::array<std::uint64_t, 256>& coefficients,
+      const std::function<Status(std::uint64_t)>& consume) {
     using Answer = Result<std::uint64_t>;
     using K = ExpressionKind;
     for (unsigned i = 0; i < program.size; ++i) {
@@ -64,14 +36,6 @@ struct ExpressionEvaluator final {
                         node.kind == K::Coefficient;
       const auto a = leaf ? 0 : values[node.left],
                  b = leaf ? 0 : values[node.right];
-      const auto left = BinaryParts::decode(a, false),
-                 right = BinaryParts::decode(b, false);
-      const auto fail = [&](auto reason, const char* message) {
-        return Answer(expression_failure(sample, true, x, reason,
-                                         "span=[" + std::to_string(node.begin) +
-                                             "," + std::to_string(node.end) +
-                                             ") " + message));
-      };
       if (node.kind == K::Literal) {
         values[i] = node.bits;
         continue;
@@ -91,23 +55,6 @@ struct ExpressionEvaluator final {
       if (node.kind == K::Negative) {
         values[i] = a ^ (UINT64_C(1) << 63);
         continue;
-      }
-      if (node.kind == K::Divide && !right.magnitude)
-        return fail(ops_error::DivideByZero, "division by zero");
-      if (node.kind == K::Sqrt && left.negative && left.magnitude)
-        return fail(FailureReason::InvalidDomain, "sqrt negative operand");
-      if (node.kind == K::Ln && (!left.magnitude || left.negative))
-        return fail(FailureReason::InvalidDomain, "ln nonpositive operand");
-      if (node.kind == K::Power) {
-        if (!left.magnitude && right.negative && right.magnitude)
-          return fail(ops_error::DivideByZero, "zero to negative power");
-        const bool integer =
-            right.exponent >= 0 || !right.magnitude ||
-            (-right.exponent < 64 &&
-             (right.significand & ((UINT64_C(1) << -right.exponent) - 1)) == 0);
-        if (left.negative && left.magnitude && !integer)
-          return fail(FailureReason::InvalidDomain,
-                      "negative base with noninteger exponent");
       }
       ElementaryKind basic = ElementaryKind::Abs;
       CertifiedKind math = CertifiedKind::Exp;
@@ -165,27 +112,14 @@ struct ExpressionEvaluator final {
         default:
           break;
       }
-      if (function != NumericMathFunction::Other) {
-        charged = report(function, false);
-        if (!charged.ok())
-          return Answer(charged);
-      }
       auto result =
           function == NumericMathFunction::Other ||
                   function == NumericMathFunction::Sqrt
               ? elementary.evaluate(basic, ElementType::Float64, a, b, consume)
               : mathematics.evaluate(math, ElementType::Float64, a, b, consume,
-                                     [&] {
-                                       return profile == SequenceProfile::Strict
-                                                  ? Status::success()
-                                                  : report(function, true);
-                                     });
+                                     [] { return Status::success(); });
       if (!result.ok())
         return result;
-      const auto value = BinaryParts::decode(result.value(), false);
-      if (value.nan || value.infinite)
-        return fail(FailureReason::ArithmeticOverflow,
-                    "nonfinite intermediate");
       values[i] = result.value();
     }
     return Answer(values[program.size - 1]);

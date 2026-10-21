@@ -37,30 +37,16 @@ No filtering, implicit uniform sampling or periodic extension is performed.
 
 ## Output-specific execution
 
-[CRV-11's complete template contract](CRV-11_resample_signal.md) is normative.
-Samples demand inherits the forward interpolator's Run-shared complete-input computation: typed and
-upstream validation covers all active input Results, authorized Result windows
-provide sample reads, full output allocation and input invalidation apply, and
-numeric failures retain Run scope. Mathematical column independence remains;
-invalid undelivered queries or columns can fail the run. Empty reads no payload.
-Positions output independently forwards requested new_positions as a mapped
-Result view, preserving dtype, descriptor, owner and raw special bits.
-It does not allocate a copied payload, invoke the interpolator or read old
-positions/values. Normal typed/upstream validation still applies to the requested
-query region. Joint requests cannot broaden semantic dependencies.
+[CRV-11's template contract](CRV-11_resample_signal.md) is normative. Samples use fixed curve tasks, with complete x, selected query rows and complete y rows for the selected columns. Physical support is closed through each source grid. Finite consumed samples, ordered knots, reject-domain queries and representable outputs are caller preconditions. Only selected output tiles are computed and allocated.
 
-Inherit explicit dirty support per output, immutable mapped fragments or aliases,
-arbitrary strides, owners beyond context lifetime, budget accounting for source
-and template state, cache-off, cancellation and upstream failures. No failed sample
-is hidden by a successful positions output, and no positions-only observation
-inherits an unrelated interpolation failure.
+Positions independently copies requested new_positions tiles through `core.identity`, preserving descriptor, dtype and raw special bits. Its separate allocations retain ownership beyond context lifetime. Position-only selection has no old positions/values dependency. Samples and positions belong to different IR calls; they retain each call's retirement outcome. Joint exports require a successful Run. Rebinding, source failures, resource admission and cancellation follow the expanded operations.
 
 ## Acceptance and status
 
 Use the corresponding CRV-01 analytic fixtures for samples and exact byte
 comparison against new_positions for positions. Test nonfinite positions-only
-forwarding followed by failed samples demand, partial indices,
-independent dirty effects, both outputs jointly/separately, profile/dtype mixing,
+forwarding independently of valid samples demand, partial indices,
+output-specific static dependencies, both outputs jointly/separately, profile/dtype mixing,
 strides, context-lifetime ownership, low budgets and cancellation. Use a temporary public workflow that expands this template and requests
 samples/positions through Compiler/ExecutionContext.
 
@@ -69,4 +55,4 @@ samples/positions through Compiler/ExecutionContext.
 This template uses the public helper in `photospider/ops/numeric/resampling.hpp`
 and ordinary workflow composition. Temporary acceptance inherits CRV-01 exact-copy
 and numerical-accuracy checks and adds composition checks; it does not require
-a separate resampling formula oracle. complete-input numerical/fallback counters are unavailable.
+a separate resampling formula oracle. Per-value numerical/fallback counters are unavailable.

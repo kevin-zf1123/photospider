@@ -45,17 +45,6 @@ if(NOT PHOTOSPIDER_FMT10_SIMD)
     COMPILE_DEFINITIONS PHOTOSPIDER_FMT10_NO_SIMD)
 endif()
 
-# Retain the allocation-based exact evaluator for controlled comparisons.
-set(PHOTOSPIDER_FMT10_EXACT_KERNEL "LIMB" CACHE STRING "FMT-10 exact kernel: LIMB or REFERENCE")
-set_property(CACHE PHOTOSPIDER_FMT10_EXACT_KERNEL PROPERTY STRINGS LIMB REFERENCE)
-if(NOT PHOTOSPIDER_FMT10_EXACT_KERNEL MATCHES "^(LIMB|REFERENCE)$")
-  message(FATAL_ERROR "Unknown PHOTOSPIDER_FMT10_EXACT_KERNEL")
-endif()
-if(PHOTOSPIDER_FMT10_EXACT_KERNEL STREQUAL "REFERENCE")
-  set_property(SOURCE plugins/ops/02-format-color/rgb_basis_math.cpp APPEND PROPERTY
-    COMPILE_DEFINITIONS PHOTOSPIDER_FMT10_REFERENCE_EXACT)
-endif()
-
 set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/expression.cpp
   plugins/ops/01-numeric/expression_metadata.cpp

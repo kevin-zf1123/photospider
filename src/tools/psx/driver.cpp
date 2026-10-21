@@ -44,20 +44,10 @@ void execute(const Invocation& o,
   }
   diagnostics->timing("plan load", started);
   ExecutionContext context(operations, o.context);
-  if (!context.gpu_enabled()) {
-    for (const auto& block : plan.blocks())
-      for (const auto& instruction : block.instructions) {
-        const auto& original = plan.steps()[instruction.step_index];
-        const auto& step =
-            instruction.shared_stage == UINT32_MAX
-                ? original
-                : *original.shared_stages[instruction.shared_stage];
-        if (step.backend == Backend::Gpu && !instruction.cpu_fallback)
-          throw ToolError(
-              "compiled GPU instruction requires an unavailable device", 1,
-              "PS-BackendUnavailable");
-      }
-  }
+  diagnostics->stage = "prepare";
+  started = Clock::now();
+  auto prepared = take(context.prepare(plan));
+  diagnostics->timing("prepare", started);
   diagnostics->stage = "bindings";
   started = Clock::now();
   ExecutionBindings bindings;
@@ -91,8 +81,9 @@ void execute(const Invocation& o,
   } join{done, monitor};
   diagnostics->stage = "execution";
   started = Clock::now();
-  auto result = take(context.execute(plan, std::move(bindings),
-                                     cancellation.token(), options));
+  auto run = take(context.submit(prepared, std::move(bindings),
+                                 cancellation.token(), options));
+  auto result = take(run.join());
   diagnostics->timing("execution", started);
   diagnostics->stage = "result-export";
   started = Clock::now();
@@ -109,7 +100,7 @@ int run(int argc, char** argv, Diagnostics* diagnostics) {
     print_common_help();
     std::cout << "psx options:\n"
                  "  --bindings FILE --threads N --parallelism N\n"
-                 "  --max-live-bytes N --cache-bytes N\n";
+                 "  --max-live-bytes N\n";
     return 0;
   }
   if (o.has("--version")) {

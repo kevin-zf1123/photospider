@@ -5,27 +5,35 @@
 #include <cstring>
 #include <limits>
 
-#include "01-numeric/exact_predicate.hpp"
+#include "01-numeric/exact_product.hpp"
 #include "01-numeric/sequence_profiles.hpp"
 #include "common/domain/rgb_geometry.hpp"
 
 namespace ps::plugin_internal::basis_ops {
 using numeric_ops::BinaryParts;
 using numeric_ops::SequenceProfile;
+// Static numerators/denominator are bounded by Natural's 8192 bits. A finite
+// binary64 sample in units 2^-1074 has <2098 bits, so the absolute sum of three
+// products has <10292 bits. Division alignment and rounding fit in 10496 bits.
+using RowInteger = numeric_ops::FixedInteger<164>;
+struct RowWorkspace final {
+  numeric_ops::ExactRatioWorkspace<164> ratio{SequenceProfile::Strict};
+  RowInteger input;
+};
 struct ExactRow final {
-  std::array<Natural, 3> numerator;
-  std::array<bool, 3> negative{};
-  Natural denominator{1};
+  std::array<RowInteger, 3> numerator;
+  std::array<bool, 3> negative{}, nonzero{};
+  RowInteger denominator;
   std::array<double, 3> approximate{};
   std::array<double, 3> error{};
   bool candidate_available = true;
   explicit ExactRow(const Matrix& matrix, unsigned row);
   // Includes all three terms even for zero coefficients; implicit +0 bias.
-  // Original allocation-based algorithm, retained for differential tests.
-  std::uint64_t evaluate_reference(const std::array<std::uint64_t, 3>& input,
-                                   bool narrow) const;
-  std::uint64_t evaluate(const std::array<std::uint64_t, 3>& input,
-                         bool narrow) const;
+  // All mutable integers belong to declared invocation scratch.
+  Result<std::uint64_t> evaluate(
+      const std::array<std::uint64_t, 3>& input, bool narrow,
+      RowWorkspace* workspace,
+      const core_internal::WorkConsumer& consume) const;
 };
 
 constexpr unsigned block_size = 64;

@@ -1,6 +1,7 @@
 # ADR 0003: Execution Contexts Own Local Resources
 
 - Status: Accepted
+- Implementation boundary (2026-10-20): The context-ownership decision remains. The API/configuration examples below are historical; current package 0.39 uses fixed Plan `prepare`/`submit`/`join`, bounded CPU/GPU admission and per-Run metadata observation. Payload/result caches and implicit backend fallback are removed. See the [current execution contract](../kernel-architecture/Compiler-and-Execution.md) and [managed resources](../kernel-architecture/Managed-Resources.md).
 
 ## 1. Core Summary (TL;DR)
 An `ExecutionContext` owns bounded local workers, callback admission, caches, and resource accounting. Each call creates private run state and keeps its bindings and results separate from other calls. This makes resource sharing explicit without creating graph-count-scaled worker pools.

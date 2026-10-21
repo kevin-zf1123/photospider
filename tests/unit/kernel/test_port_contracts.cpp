@@ -1,3 +1,4 @@
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -9,7 +10,7 @@
 #include <variant>
 #include <vector>
 
-#include "photospider/plugin/tile_helpers.hpp"
+#include "photospider/plugin/operation_program.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
@@ -23,77 +24,33 @@ OperationMetadata metadata(SchemaTemplate schema) {
       std::make_shared<const SchemaTemplate>(std::move(schema));
   return result;
 }
-struct TensorProgram {
-  bool copy_samples, requested = false;
-  explicit TensorProgram(bool copy_samples) : copy_samples(copy_samples) {}
-  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
-    const auto& spec = phase.query.output.result_schema->tensors[0];
-    const auto shape = spec.sample_shape();
-    const auto demand =
-        phase.query.tensor_outputs.value_or(take(Footprint::all(shape)));
-    if (!requested && !demand.empty() && !phase.query.inputs.empty()) {
-      requested = true;
-      ResultProgramNeed need;
-      for (unsigned i = 0; i < phase.query.inputs.size(); ++i) {
-        if (copy_samples && i == 0)
-          need.tiles.push_back(take(sdk::tile_need_for_samples(
-              phase.resources, phase.query, i, 0, demand)));
-        else
-          need.tiles.push_back({i, 0, true, {}});
-      }
-      return Result<ResultProgramPoll>(std::move(need));
-    }
-    const auto count = take(demand.element_count());
-    if (count > 4096)
-      return Result<ResultProgramPoll>(
-          Status{ErrorCode::ResourceExhausted, "bounded semantic fixture"});
-    check(phase.consume_work(count));
-    auto builder = take(ResultBuilder::start(phase.resources,
-                                             *phase.query.output.result_schema,
-                                             phase.query.semantic_key, {}));
-    const auto width = TensorSpan::element_size(spec.descriptor.element_type);
-    for (const auto& box : demand.boxes()) {
-      const auto size = take(box.element_count());
-      auto bytes = take(phase.allocator.allocate(size * width));
-      std::memset(bytes.data(), 0, bytes.size());
-      if (copy_samples) {
-        const auto& input = phase.query.inputs[0].result_schema->tensors[0];
-        std::uint64_t next = 0;
-        check(
-            take(Footprint::from_regions(shape, {box}))
-                .visit(
-                    [&](const auto& at) {
-                      auto* destination = bytes.data() + next++ * width;
-                      if (input.descriptor.element_type ==
-                          spec.descriptor.element_type)
-                        return phase.read_tensor(0, 0, at, destination, width);
-                      float source = 0;
-                      auto status =
-                          phase.read_tensor(0, 0, at, &source, sizeof(source));
-                      const double converted = source;
-                      std::memcpy(destination, &converted, sizeof(converted));
-                      return status;
-                    },
-                    size, phase.query.cancellation));
-      }
-      check(
-          builder.publish_tensor(0, box, ByteView(bytes.data(), bytes.size())));
-    }
-    return Result<ResultProgramPoll>(
-        ResultPublication{take(builder.seal()), true});
-  } catch (const multi_result::Failure& failure) {
-    return Result<ResultProgramPoll>(failure.status);
-  }
-};
 OperationDefinition definition(std::string key, const SchemaTemplate& schema,
                                bool copy_samples = false) {
   OperationDefinition result;
   result.key = std::move(key);
   result.traits.outputs = {multi_result::output("value", schema)};
-  result.traits.workspace_bytes = 32768;
-  result.start_result = [copy_samples](const ResultProgramQuery&,
-                                       const BufferAllocator& allocator) {
-    return ResultContinuation::make<TensorProgram>(allocator, copy_samples);
+  multi_result::install_fixed(result, {copy_samples ? 0 : -1}, {0});
+  result.lower = [copy_samples](const OperationLowering& query) {
+    OperationProgramBuilder builder(query);
+    for (const auto& member : query.requests[0].members)
+      for (auto tile : member.second) {
+        auto task = builder.add_task(copy_samples ? "pass" : "constant",
+                                     "multi-results-v1");
+        if (!task.ok())
+          return Result<OperationProgram>(task.status());
+        for (std::uint32_t port = 0; port < query.inputs.size(); ++port) {
+          auto status =
+              copy_samples && port == 0
+                  ? builder.read_input(task.value(), port, member.first, tile)
+                  : builder.read_input_schema(task.value(), port);
+          if (!status.ok())
+            return Result<OperationProgram>(status);
+        }
+        auto status = builder.write_output(task.value(), 0, member.first, tile);
+        if (!status.ok())
+          return Result<OperationProgram>(status);
+      }
+    return builder.finish();
   };
   return result;
 }
@@ -125,6 +82,85 @@ OperationDefinition copy_definition(const std::string& key,
     result.outputs[0].metadata = metadata(std::move(schema));
     return Result<OperationPreparation>(std::move(result));
   };
+  if (widen) {
+    const auto identical = d.prepare_kernel;
+    d.prepare_kernel = [identical](const physical::KernelDesc& kernel,
+                                   const physical::Placement& placement,
+                                   const KernelPreparation& query,
+                                   const ResourceSet& resources,
+                                   const ps_native_gpu_service_v2* gpu)
+        -> Result<ps_prepared_kernel_v8> {
+      if (query.reads.size() == 1 && query.writes.size() == 1 &&
+          query.reads[0].layout.element_type ==
+              query.writes[0].layout.element_type)
+        return identical(kernel, placement, query, resources, gpu);
+      const auto invalid = [] {
+        return Result<ps_prepared_kernel_v8>(
+            {ErrorCode::InvalidArgument, "invalid widening signature"});
+      };
+      if (kernel.symbol != "pass" || kernel.contract != "multi-results-v1" ||
+          placement.backend != physical::Backend::Cpu ||
+          placement.domain != physical::Domain::Host ||
+          query.reads.size() != 1 || query.writes.size() != 1 ||
+          !query.task_parameters.empty() ||
+          query.scratch != std::array<std::uint64_t, 3>{})
+        return invalid();
+      const auto& input = query.reads[0];
+      const auto& output = query.writes[0];
+      if (input.port || output.port || input.member || output.member ||
+          input.domain != physical::Domain::Host ||
+          output.domain != physical::Domain::Host ||
+          input.layout.element_type != ElementType::Float32 ||
+          output.layout.element_type != ElementType::Float64 ||
+          input.layout.rank != output.layout.rank || !input.layout.rank ||
+          input.layout.rank > 8 || input.layout.shape != output.layout.shape ||
+          input.layout.origin != output.layout.origin ||
+          input.layout.byte_offset || output.layout.byte_offset)
+        return invalid();
+      std::uint64_t count = 1;
+      for (unsigned axis = input.layout.rank; axis-- > 0;) {
+        if (!input.layout.shape[axis] ||
+            input.layout.shape[axis] > 4096 / count ||
+            input.layout.strides[axis] !=
+                static_cast<std::int64_t>(count * 4) ||
+            output.layout.strides[axis] != static_cast<std::int64_t>(count * 8))
+          return invalid();
+        count *= input.layout.shape[axis];
+      }
+      if (input.bytes != count * 4 || output.bytes != count * 8)
+        return invalid();
+      ps_prepared_kernel_v8 prepared{};
+      prepared.struct_size = sizeof(prepared);
+      prepared.abi_version = 8;
+      prepared.context = new std::uint64_t{count};
+      prepared.release = [](const void* state) {
+        delete static_cast<const std::uint64_t*>(state);
+      };
+      prepared.invoke_cpu = [](const ps_kernel_invocation_v8* call,
+                               ps_kernel_status_v8* status) {
+        *status = {};
+        const auto count =
+            *static_cast<const std::uint64_t*>(call->prepared_context);
+        const auto* input =
+            static_cast<const std::uint8_t*>(call->inputs[0].allocation) +
+            call->inputs[0].byte_offset;
+        auto* output = static_cast<std::uint8_t*>(call->outputs[0].allocation) +
+                       call->outputs[0].byte_offset;
+        for (std::uint64_t i = 0; i < count; ++i) {
+          if (call->cancellation.is_cancelled &&
+              call->cancellation.is_cancelled(call->cancellation.context)) {
+            status->code = PS_KERNEL_CANCELLED_V8;
+            return;
+          }
+          float source;
+          std::memcpy(&source, input + i * 4, 4);
+          const double value = source;
+          std::memcpy(output + i * 8, &value, 8);
+        }
+      };
+      return Result<ps_prepared_kernel_v8>(prepared);
+    };
+  }
   return d;
 }
 OperationDefinition generator() {
@@ -193,43 +229,47 @@ int inference() {
   ExecutionContextConfig config;
   config.managed_resources = ResourceLimits{};
   ExecutionContext execution(registry, config);
-  auto run = execution.execute(compiled.value().plan.value());
+  auto run = multi_result::run(execution, compiled.value().plan.value());
   if (!run.ok())
     std::cerr << run.status().message << "\n";
   PS_CHECK(run.ok());
   const auto& output = run.value().results.at("output");
-  ResultProgramMetadata direct_metadata;
-  direct_metadata.output.result_schema = node.outputs[0].result_schema;
-  ResultProgramQuery query(direct_metadata, doc.nodes[0].parameters);
-  query.semantic_key = "test.generate.direct";
-  ResourceBudget root;
-  auto allocator = root.allocator();
-  auto continuation = registry->start_result(d.key, query, allocator);
-  PS_CHECK(continuation.ok());
-
-  ResultObjectInputs objects;
-  ResultProgramPhase phase{
-      query,
-      objects,
-      allocator,
-      root,
-      [&](std::uint64_t units) { return root.consume({units}); },
-      std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok)};
-  auto state = continuation.take_value();
-  auto direct = state.poll(phase);
-  PS_CHECK(direct.ok() &&
-           std::holds_alternative<ResultPublication>(direct.value()));
-  const auto& direct_output =
-      std::get<ResultPublication>(direct.value()).result;
+  auto direct = registry->prepare_operation(d.key, {}, doc.nodes[0].parameters);
+  PS_REQUIRE_OK(direct);
+  auto grids = TileGrid::members(*node.outputs[0].result_schema);
+  PS_REQUIRE_OK(grids);
+  auto request = TileRequest::all(grids.value(), ResourceBudget{});
+  PS_REQUIRE_OK(request);
+  auto lowered =
+      direct.value()->lower({request.value()}, 128, physical::Backend::Cpu, {});
+  PS_REQUIRE_OK(lowered);
+  const auto& physical = lowered.value().program;
+  PS_CHECK(physical.tasks.size() == 1 && physical.tasks[0].writes.size() == 1);
+  auto kernel =
+      direct.value()->prepare_kernel(physical, 0, lowered.value().outputs);
+  PS_REQUIRE_OK(kernel);
+  const auto& tile = physical.tiles[physical.tasks[0].writes[0]];
+  auto layout = kernel_layout(physical.layouts[tile.layout]);
+  std::array<float, 3> samples{1, 1, 1};
+  ps_kernel_mutable_view_v8 view{samples.data(),
+                                 sizeof(samples),
+                                 0,
+                                 &layout,
+                                 PS_KERNEL_DOMAIN_HOST_V8,
+                                 0,
+                                 0,
+                                 0,
+                                 0};
+  ps_kernel_invocation_v8 invocation{};
+  invocation.outputs = &view;
+  invocation.output_count = 1;
+  kernel.value().bind(&invocation);
+  PS_REQUIRE_OK(kernel_status(kernel.value().invoke(invocation)));
   for (unsigned i = 0; i < 3; ++i) {
-    float first = 1, second = 1;
-    PS_CHECK(
-        output.read_tensor(take(output.descriptor()), 0, {i}, &first, 4).ok());
-    PS_CHECK(
-        direct_output
-            .read_tensor(take(direct_output.descriptor()), 0, {i}, &second, 4)
-            .ok());
-    PS_CHECK(first == 0 && second == first);
+    float first = 1;
+    PS_REQUIRE_OK(
+        output.read_tensor(take(output.descriptor()), 0, {i}, &first, 4));
+    PS_CHECK(first == 0 && samples[i] == first);
   }
   doc.nodes[0].parameters["count"] = INT64_C(5);
   GraphContext changed(doc);
@@ -290,6 +330,24 @@ int inference() {
                 .prepare_operation("test.repeated",
                                    {field, field, field, field, field}, {})
                 .ok());
+  auto fixed_repeated =
+      definition("test.fixed_repeated", multi_result::schema());
+  fixed_repeated.traits.input_schema = repeated.traits.input_schema;
+  fixed_repeated.traits.repeated_minimum = 1;
+  fixed_repeated.traits.repeated_maximum = 4;
+  PS_CHECK(inference_registry.register_operation(fixed_repeated).ok());
+  PS_CHECK(inference_registry
+               .prepare_operation("test.fixed_repeated", {field, field}, {})
+               .ok());
+  // Fixed output metadata still requires homogeneous repeated inputs.
+  const auto other_type =
+      metadata(multi_result::schema(ElementType::Float64, {2, 4}));
+  for (const auto& mismatch : {wrong, other_type}) {
+    auto rejected = inference_registry.prepare_operation("test.fixed_repeated",
+                                                         {field, mismatch}, {});
+    PS_CHECK(!rejected.ok() &&
+             rejected.status().code == ErrorCode::TypeMismatch);
+  }
   auto preserve =
       copy_definition("test.widen", *field.result_schema, false, true);
   PS_CHECK(inference_registry.register_operation(preserve).ok());
@@ -320,8 +378,8 @@ int inference() {
   PS_CHECK(widen_plan.ok());
   ExecutionContext widened_execution(borrowed, config);
   const std::vector<float> input_samples{1, 2, 3, 4, -5, -6, -7, -8};
-  auto widened_run = widened_execution.execute(
-      widen_plan.value().plan.value(),
+  auto widened_run = multi_result::run(
+      widened_execution, widen_plan.value().plan.value(),
       {{{"input", source(take(widened_execution.resource_budget()),
                          *field.result_schema, input_samples)}}});
   PS_CHECK(widened_run.ok());
@@ -352,8 +410,8 @@ int inference() {
   GraphContext repeated_graph(repeated_doc);
   auto repeated_plan = Compiler(borrowed).compile(repeated_graph);
   PS_CHECK(repeated_plan.ok());
-  auto repeated_run = widened_execution.execute(
-      repeated_plan.value().plan.value(), repeated_bindings);
+  auto repeated_run = multi_result::run(
+      widened_execution, repeated_plan.value().plan.value(), repeated_bindings);
   PS_CHECK(repeated_run.ok());
   const auto& repeated_output = repeated_run.value().results.at("output");
   auto repeated_facts = take(repeated_output.descriptor());
@@ -398,8 +456,8 @@ int dtype_masks() {
     ExecutionContextConfig config;
     config.managed_resources = ResourceLimits{};
     ExecutionContext context(registry, config);
-    auto run = context.execute(
-        plan.value().plan.value(),
+    auto run = multi_result::run(
+        context, plan.value().plan.value(),
         {{multi_result::binding(take(context.resource_budget()), "a", 4)}});
     PS_CHECK(run.ok() &&
              multi_result::number(run.value().results.at("result")) == 4);
@@ -490,8 +548,9 @@ int c_contract() {
           PS_CHECK(compiled.ok());
           PS_CHECK(compiled.value()
                        .plan.value()
-                       .steps()[0]
-                       .traits.repeated_resolved == count);
+                       .calls()[0]
+                       .prepared->traits()
+                       .repeated_resolved == count);
           const auto& metadata = *compiled.value()
                                       .ir_versions.front()
                                       .ir.value()
@@ -505,8 +564,13 @@ int c_contract() {
           for (unsigned i = 0; i < count; ++i)
             bindings.inputs.push_back(
                 source(doc.inputs[i], i == 0 ? 2 : -3, layout));
-          auto run = execution.execute(compiled.value().plan.value(), bindings);
-          PS_CHECK(run.ok());
+          auto run = multi_result::run(execution, compiled.value().plan.value(),
+                                       bindings);
+          if (layout != 0) {
+            PS_CHECK(!run.ok() && run.status().code == ErrorCode::TypeMismatch);
+            continue;
+          }
+          PS_REQUIRE_OK(run);
           const auto& output = run.value().results.at("output");
           auto facts = output.descriptor().take_value();
           for (unsigned i = 0; i < count; ++i) {
@@ -519,40 +583,45 @@ int c_contract() {
               PS_CHECK(output.read_tensor(facts, 0, {i}, &number, 8).ok());
             }
             PS_CHECK(number == (i == 0 ? 2 : -3));
-            ResourceVector<TileChange> changes{
-                ResourceAllocator<TileChange>(root)};
-            changes.push_back({PlanWorkflowInput{i}, 0, 0,
-                               take(TileSet::from_indices(root, {0})), false});
-            auto dirty = run.value().dependencies.dirty_units(changes);
-            const auto returned =
-                compiled.value().plan.value().output("output").record_index;
-            PS_CHECK(dirty.ok() && dirty.value().size() == 2);
-            PS_CHECK((dirty.value()[0] == TileUnit{0, 0, 0}));
-            PS_CHECK((dirty.value()[1] == TileUnit{returned, 0, 0}));
-            for (const auto step : {std::size_t{0}, returned}) {
-              auto record =
-                  take(run.value().dependencies.tile_record({step, 0, 0}));
-              PS_CHECK(record && record->inputs.size() == count);
-              for (std::size_t port = 0; port < count; ++port) {
-                const auto& input = record->inputs[port];
-                PS_CHECK(
-                    std::holds_alternative<PlanWorkflowInput>(input.producer) &&
-                    std::get<PlanWorkflowInput>(input.producer)
-                            .declaration_index == port &&
-                    input.tensor_slot == 0 && input.tiles.size() == 1 &&
-                    input.tiles.contains(0));
-              }
-            }
           }
         }
       }
     }
   }
+  // A selected nonzero output tile must retain the original repeated port.
+  auto partial_doc = document(3, ElementType::Float64, 3);
+  partial_doc.nodes[0].parameters["dtype"] = std::string("float64");
+  GraphContext partial_graph(partial_doc);
+  PlanningOptions partial_options;
+  partial_options.tile_extent = 1;
+  const TileRequest third{{{0, take(TileSet::range(root, 2, 3))}}};
+  partial_options.output_requests = {{"output", third}};
+  auto partial_plan = compiler.compile(partial_graph, partial_options);
+  PS_REQUIRE_OK(partial_plan);
+  const auto& physical = partial_plan.value().plan.value().program();
+  PS_CHECK(physical.tasks.size() == 1 && physical.tasks[0].reads.size() == 1 &&
+           physical.tasks[0].reads[0].port == 2);
+  auto partial_run =
+      multi_result::run(execution, partial_plan.value().plan.value(),
+                        {{source(partial_doc.inputs[0], 43, 0),
+                          source(partial_doc.inputs[1], 47, 0),
+                          source(partial_doc.inputs[2], 53, 0)}});
+  PS_REQUIRE_OK(partial_run);
+  const auto& partial_result = partial_run.value().results.at("output");
+  auto partial_facts = take(partial_result.descriptor());
+  double selected = 0;
+  PS_REQUIRE_OK(
+      partial_result.read_tensor(partial_facts, 0, {2}, &selected, 8));
+  PS_CHECK(selected == 53);
+  PS_CHECK(partial_facts.tensor_coverage(0) ==
+           take(Footprint::from_regions({3}, {Region({{2, 1}})})));
+  PS_CHECK(
+      !partial_result.read_tensor(partial_facts, 0, {0}, &selected, 8).ok());
   auto halves = document(2, ElementType::Float32);
   GraphContext halves_graph(halves);
   auto half_plan = compiler.compile(halves_graph).take_value();
-  auto half_run = execution.execute(
-      half_plan.plan.value(),
+  auto half_run = multi_result::run(
+      execution, half_plan.plan.value(),
       {{source(halves.inputs[0], .5, 0), source(halves.inputs[1], .5, 0)}});
   PS_CHECK(half_run.ok());
   auto half_output = half_run.value().results.at("output");
@@ -568,7 +637,7 @@ int c_contract() {
   large.nodes[0].parameters["dtype"] = std::string("float64");
   GraphContext large_graph(large);
   auto large_plan = compiler.compile(large_graph).take_value();
-  auto large_run = execution.execute(large_plan.plan.value(),
+  auto large_run = multi_result::run(execution, large_plan.plan.value(),
                                      {{source(large.inputs[0], 1e100, 0),
                                        source(large.inputs[1], -1e100, 0)}});
   PS_CHECK(large_run.ok());
@@ -582,10 +651,9 @@ int c_contract() {
   }
   ExecutionBindings half_bindings{
       {source(halves.inputs[0], .5, 0), source(halves.inputs[1], .5, 0)}};
-  auto run_plan = half_plan.plan.value();
-  ExecutionBindings run_bindings = half_bindings;
-  auto empty =
-      execution.execute_fragments(run_plan, run_bindings, {{"output", {}}});
+  auto empty_plan = half_plan.plan.value().select_outputs({{"output", {}}});
+  PS_REQUIRE_OK(empty_plan);
+  auto empty = multi_result::run(execution, empty_plan.value(), half_bindings);
   PS_CHECK(empty.ok());
   const auto& empty_output = empty.value().results.at("output");
   auto empty_facts = empty_output.descriptor().take_value();
@@ -595,21 +663,23 @@ int c_contract() {
       !empty_output.read_tensor(empty_facts, 0, {0}, &unavailable, 4).ok());
   CancellationSource stopped;
   PS_CHECK(stopped.cancel());
-  PS_CHECK(
-      execution.execute(half_plan.plan.value(), half_bindings, stopped.token())
-          .status()
-          .code == ErrorCode::Cancelled);
+  auto prepared = execution.prepare(half_plan.plan.value());
+  PS_REQUIRE_OK(prepared);
+  auto cancelled =
+      execution.submit(prepared.value(), half_bindings, stopped.token());
+  const auto cancelled_status =
+      cancelled.ok() ? cancelled.value().join().status() : cancelled.status();
+  PS_CHECK(cancelled_status.code == ErrorCode::Cancelled);
   auto huge = document(2, ElementType::Float64, UINT64_C(1) << 61);
   GraphContext huge_graph(huge);
   auto huge_plan = compiler.compile(huge_graph);
   PS_CHECK(huge_plan.ok());
-  auto huge_run = execution.execute(
-      huge_plan.value().plan.value(),
+  auto huge_run = multi_result::run(
+      execution, huge_plan.value().plan.value(),
       {{source(huge.inputs[0], 2, 3), source(huge.inputs[1], -3, 3)}});
   // A partial source cannot satisfy the complete requested input tile,
   // even when the callback reads only the first sample.
-  PS_CHECK(!huge_run.ok() &&
-           huge_run.status().code == ErrorCode::InvalidArgument);
+  PS_CHECK(!huge_run.ok() && huge_run.status().code == ErrorCode::NotFound);
   for (unsigned count : {0U, 5U}) {
     GraphContext graph(document(count, ElementType::Float64));
     PS_CHECK(compiler.compile(graph).status().code == ErrorCode::TypeMismatch);
@@ -641,7 +711,7 @@ int c_contract() {
        {PS_BAD_CONTRACT_1, PS_BAD_CONTRACT_3, PS_BAD_CONTRACT_5,
         PS_BAD_CONTRACT_6, PS_BAD_CONTRACT_7, PS_BAD_CONTRACT_8,
         PS_BAD_CONTRACT_9, PS_BAD_CONTRACT_10, PS_BAD_CONTRACT_11,
-        PS_BAD_CONTRACT_12}) {
+        PS_BAD_CONTRACT_12, PS_BAD_CONTRACT_13}) {
     OperationRegistry malformed;
     auto rejected = malformed.load_plugin(path);
     PS_CHECK(rejected.code == ErrorCode::InvalidArgument);

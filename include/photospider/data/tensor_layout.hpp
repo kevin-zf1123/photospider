@@ -4,6 +4,9 @@
 
 #include "photospider/data/tensor_span.hpp"
 namespace ps {
+namespace data_internal {
+class ResultDeviceAccess;
+}
 /** @brief Thread-safe per-Result growth capacity for retained storage.
  * @note Physical allocations are charged separately to their owning Root.
  * Growth remains charged until the corresponding backing owner retires.
@@ -16,6 +19,7 @@ class PHOTOSPIDER_API TensorBudget final {
 
  private:
   friend class ResultBuilder;
+  friend class data_internal::ResultDeviceAccess;
   Status charge(std::uint64_t bytes);
   void release(std::uint64_t bytes) noexcept;
   std::uint64_t maximum_bytes_;

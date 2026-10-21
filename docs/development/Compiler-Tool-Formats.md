@@ -1,6 +1,6 @@
 # Compiler tool file formats
 
-The driver reads and writes strict UTF-8 JSON for DAGs and manifests, with `format` and integer `version: 1` tags. Binary Tensor files use little-endian scalar representations. `.psir` and `.psxp` use the independent version-4 text codec. See [tool usage and bounds](Compiler-Tools.md).
+The driver reads and writes strict UTF-8 JSON for DAGs and manifests, with `format` and integer `version: 1` tags. Binary Tensor files use little-endian scalar representations. `.psir` and `.psxp` use the independent version-5 text codec. See [tool usage and bounds](Compiler-Tools.md).
 
 ## DAG JSON
 
@@ -72,7 +72,7 @@ Intervals are half-open member-local tile indices, not sample coordinates. `slot
 ]}
 ```
 
-For example, Python `struct.pack('<4d', 1, 2, 3, 4)` creates the 32-byte input. Paths are manifest-relative; `-` is not a raw-file path. There must be exactly one entry for every Plan input and every declared Tensor slot. Byte length is exactly the product of the full sample shape and dtype width, with overflow checks. Data is dense logical row-major order. Binding uses the execution context's Root and publishes the whole Tensor before execution.
+For example, Python `struct.pack('<4d', 1, 2, 3, 4)` creates the 32-byte input. Paths are manifest-relative; `-` is not a raw-file path. There must be exactly one entry for every Plan input and every declared Tensor slot. Byte length is exactly the product of the full sample shape and dtype width, with overflow checks. Data is dense logical row-major order. The tool reads and validates the complete file, then uses the execution context's Root to create bindings according to the saved Plan contract. `DirectTiles` allocates each required dense Host tile separately, with zero byte offset and matching compiled capacity; unrequested tiles are not retained. `DenseHost` retains one complete dense member allocation when any of its tiles is requested; the Plan's explicit COPY tasks materialize independent selected tiles during execution. Incompatible physical layouts fail before Run submission, including in check mode. The C++ `PlanningOptions::input_layouts` API selects this contract; `psc` uses the default DirectTiles contract.
 
 ## Results
 
@@ -92,12 +92,12 @@ A successful `psx` run creates a new directory with `manifest.json` and generate
 
 The binary fragment holds 9.0 and 12.0. `shape` on the Tensor is its static full shape; `offset` and `shape` on each fragment are actual covered logical coordinates. Fragment ordering and splitting are implementation details. Fragments are disjoint, collectively cover only published samples, and each stores contiguous row-major little-endian bytes for its region. Empty coverage produces no binary file. Consumers must use the manifest rather than infer coverage from filenames or full schema shape. Results are output files, not resumable execution state.
 
-## IR and Plan text v4
+## IR and Plan text v5
 
-The version-4 `.psir` prefix is:
+The version-5 `.psir` prefix is:
 
 ```text
-psir 4
+psir 5
 stage ir
 parent "..."
 producer "optimize" "1"
@@ -106,6 +106,24 @@ parameters { }
 
 `parent` is provenance and may be empty for initial frontend/validation output. The producer's resolved options use the typed parameter grammar. Subsequent sections store operation-contract/resource manifests, input declarations/bindings, call declarations, return signature, entry, `form dependency_paths|control_flow` and blocks. Both forms are valid for raw and optimizer-produced IR. Each import yields `ValidatedIR` and recomputes content identity; provenance does not contribute to it.
 
-`.psxp` begins with `psxp 4` and `parent` equal to the actual input IR digest, then execution mode, tile extent, privately lowered CFG declarations, saved backend placements, selected outputs and complete `code`. Code contains publication targets/samples, fixed input/shared grants, instruction dependencies and CPU fallback permission. Import recomputes grids, links contracts and validates code without mapper/optimizer/planner execution. The saved program must have ControlFlow form; it may differ from the parent's dependency-path form.
+`.psxp` begins with `psxp 5` and `parent` equal to the actual input IR digest, then execution mode, tile extent, lowered CFG declarations and selected output requests. Its `physical` section stores entry, input IDs, return-schema IDs and these ordered tables:
 
-Text supports semicolon line comments and escaped strings. Parameters use `i64`, `f64`, `f64_bits`, `bool`, `string`; encoding preserves IEEE-754 bits. See `src/lib/compiler/artifact_text.cpp` for the exact bounded grammar and `tests/unit/kernel/test_compiler_artifact.cpp` for round trips. v1–v3 fail with a re-export diagnostic. Artifact identities detect content changes but do not authenticate code or files. Package, document schema, C ABI and artifact versions are independent axes.
+| Table | Encoded fields |
+| --- | --- |
+| `schemas` | Structural Result schemas |
+| `layouts` | Element type, rank, byte offset and eight shape/origin/signed-stride entries |
+| `tiles` | Value, member, layout, producer, domain, tile index, capacity and alignment |
+| `values` | Source IR value, schema, owner, kind, import-source ID, input-layout contract and ordered tile IDs |
+| `placements` | Backend, domain, profile and queue |
+| `kernels` | Operation, symbol, contract and ABI version |
+| `tasks` | Kind, call/kernel/placement IDs, reads, writes, schema reads, parameter bytes, explicit dependencies, predecessors, successors and scratch |
+| `calls` | Source call, block, retirement ordinal, effect task, task IDs, exports and input/output binding IDs |
+| `blocks` | Source block, terminator, condition, task/call/argument/live-in/return IDs, edges and reservation vectors |
+
+Value kinds are Input (0), Argument (1), Produced (2) and Imported (3). Input-layout contracts are DirectTiles (0) and DenseHost (1); non-input values use 0. An Imported value has zero source IR value, a block owner and a canonical Input ID in `import_source`; other kinds use the absent ID there. Its tiles have explicit COPY producers. Boundary import COPYs use an absent call ID and execute after all real calls retire. The loader checks provenance and rejects raw DenseHost payload use that bypasses an import.
+
+Table IDs are consecutive from zero; `4294967295` represents an absent ID. Task order does not constrain dependency order. The loader preserves IDs and independently validates adjacency, liveness, reservations, layout bounds and correspondence to IR. Saved derived tables must match their definitions; loading does not repair them. Operation preparation is reconstructed from validated IR and the supplied registry/resources, without calling a lowerer, optimizer or planner. The saved IR has ControlFlow form and may differ from the parent's dependency-path form.
+
+Artifact text is bounded to 64 MiB. Physical tables share a 4194304-record bound and physical references share a 16777216-entry bound. Opaque task parameter bytes consume the separate validation work budget of 268435456 units, alongside structural work; they are not dependency edges. Import and export use the same physical validation contract.
+
+Text supports semicolon line comments and escaped strings. Parameters use `i64`, `f64`, `f64_bits`, `bool`, `string`; encoding preserves IEEE-754 bits. See `src/lib/compiler/artifact_text.cpp` for the exact bounded grammar and `tests/unit/kernel/test_physical_compiler.cpp` for physical round trips. v1–v4 fail with a re-export diagnostic. Artifact identities detect content changes but do not authenticate code or files. Package, document schema, C ABI and artifact versions are independent axes.

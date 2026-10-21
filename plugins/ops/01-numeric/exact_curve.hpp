@@ -321,8 +321,9 @@ class ExactCurve final {
                   negative_zero);
   }
   // Invert the original mathematical segment, not its rounded forward map.
-  // Topology/finite checks and exact knot selection belong to the adapter.
-  // The non-knot target is strictly inside this segment's open y interval.
+  // Topology/finite preconditions and exact knot selection belong to the
+  // caller. The non-knot target is strictly inside this segment's open y
+  // interval.
   Result<std::uint64_t> inverse(
       bool pchip, unsigned knots, unsigned first, unsigned count,
       unsigned segment, int selected, std::uint64_t query,

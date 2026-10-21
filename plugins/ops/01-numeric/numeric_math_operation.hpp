@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <new>
 #include <optional>
@@ -17,11 +18,9 @@
 #include "01-numeric/certified_math.hpp"
 #include "01-numeric/exact_elementary.hpp"
 #include "01-numeric/exp_simd.hpp"
-#include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/core/resource_allocator.hpp"
+#include "common/fixed_point_inputs.hpp"
+#include "common/tensor_program.hpp"
 #include "photospider/plugin/operation_registry.hpp"
-#include "photospider/plugin/result_program.hpp"
-#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 struct FloatMathWorkspace final {
@@ -154,84 +153,126 @@ Status compute_math_batch(Arithmetic& arithmetic, Kind kind,
   return Status::success();
 }
 
-template <class Arithmetic, class Kind>
-struct PointMathKernel final {
+template <class Arithmetic>
+struct PointMathScratch final {
+  Arithmetic arithmetic;
+  MathBatchWorkspace block;
+  FloatMathWorkspace fast;
+  explicit PointMathScratch(SequenceProfile profile) : arithmetic(profile) {}
+};
+template <class Kind, std::size_t Ports>
+struct PointMathState final {
   Kind kind;
   SequenceProfile profile;
-  PointMathKernel(Kind kind, SequenceProfile profile)
-      : kind(kind), profile(profile) {}
-  Status write(const ResultProgramPhase& phase,
-               const ResourceVector<ResultTensorWriteWindow>& writers) {
-    const auto& descriptor =
-        phase.query.output.result_schema->tensors[0].descriptor;
-    const auto count =
-        math_take(phase.query.output.result_schema->tensors[0].sample_count());
-    auto memory = math_take(phase.allocator.allocate(
-        sizeof(Arithmetic) + sizeof(MathBatchWorkspace) +
-        sizeof(FloatMathWorkspace)));
-    static_assert(sizeof(Arithmetic) % alignof(MathBatchWorkspace) == 0);
-    static_assert(alignof(Arithmetic) <= alignof(std::max_align_t));
-    auto* arithmetic = new (memory.data()) Arithmetic(profile);
-    const auto destroy = [](Arithmetic* value) { value->~Arithmetic(); };
-    std::unique_ptr<Arithmetic, decltype(destroy)> guard(arithmetic, destroy);
-    auto* block = new (memory.data() + sizeof(Arithmetic)) MathBatchWorkspace;
-    auto* fast =
-        new (memory.data() + sizeof(Arithmetic) + sizeof(MathBatchWorkspace))
-            FloatMathWorkspace;
-    MathTensorReader first(phase.tensors->at({0, 0}), phase.query.cancellation);
-    std::optional<MathTensorReader> second;
-    if (phase.query.inputs.size() == 2)
-      second.emplace(phase.tensors->at({1, 0}), phase.query.cancellation);
-    if (writers.size() != 1)
-      return Status{ErrorCode::OperationFailed,
-                    "numeric writer requires one packed window"};
-    const auto& writer = writers[0];
-    std::vector<std::uint64_t> at(descriptor.shape.size(), 0);
-    ResultTensorMutableRun row;
-    std::uint64_t row_start = 0, row_left = 0;
-    plugin_internal::FloatingEnvironment environment;
+  ElementType output_type;
+  std::size_t input_width = 0;
+  fixed_tensor::PointInputs<Ports> inputs;
+};
+template <class Arithmetic, class Kind, std::size_t Ports>
+void point_math_invoke(const ps_kernel_invocation_v8* invocation,
+                       ps_kernel_status_v8* status) noexcept {
+  plugin_internal::FloatingEnvironment environment;
+  if (!environment.active()) {
+    *status = kernel_failure(ErrorCode::OperationFailed,
+                             "numeric environment unavailable");
+    return;
+  }
+  const auto& state = *static_cast<const PointMathState<Kind, Ports>*>(
+      invocation->prepared_context);
+  using Scratch = PointMathScratch<Arithmetic>;
+  static_assert(alignof(Scratch) <= alignof(std::max_align_t));
+  try {
+    auto* scratch =
+        new (invocation->scratch[0].allocation) Scratch(state.profile);
+    const auto destroy = [](Scratch* value) { value->~Scratch(); };
+    std::unique_ptr<Scratch, decltype(destroy)> guard(scratch, destroy);
+    const std::function<Status(std::uint64_t)> consume =
+        [invocation](std::uint64_t) {
+          return invocation->cancellation.is_cancelled &&
+                         invocation->cancellation.is_cancelled(
+                             invocation->cancellation.context)
+                     ? Status{ErrorCode::Cancelled, {}}
+                     : Status::success();
+        };
+    fixed_tensor::PointReader<Ports> reader{state.inputs, *invocation};
+    const auto& output = invocation->outputs[0];
+    const auto& layout = *output.layout;
+    const auto width = TensorSpan::element_size(state.output_type);
+    std::array<std::uint64_t, 8> at{};
+    std::copy(layout.origin, layout.origin + layout.rank, at.begin());
+    std::uint64_t count = 1;
+    for (unsigned axis = 0; axis < layout.rank; ++axis)
+      count *= layout.shape[axis];
     for (std::uint64_t offset = 0; offset < count;
          offset += MathBatchWorkspace::kCount) {
+      auto cancelled = consume(1);
+      if (!cancelled.ok()) {
+        *status = kernel_failure(cancelled.code);
+        return;
+      }
       const auto size =
           std::min<std::uint64_t>(MathBatchWorkspace::kCount, count - offset);
-      auto charged = phase.consume_work(
-          size * (phase.query.inputs.size() * at.size() + 1));
-      if (!charged.ok())
-        return charged;
       for (std::size_t lane = 0; lane < size; ++lane) {
-        block->bits[lane] = {first.bits(at), second ? second->bits(at) : 0};
-        if (!row_left) {
-          row = math_take(writer.row_run(at));
-          row_start = at.back();
-          row_left = row.samples;
-        }
-        block->destination[lane] =
-            row.data + static_cast<std::ptrdiff_t>(
-                           static_cast<__int128>(at.back() - row_start) *
-                           row.sample_stride_bytes);
-        --row_left;
-        for (std::size_t axis = at.size(); axis-- > 0;) {
-          if (++at[axis] < descriptor.shape[axis])
+        scratch->block.bits[lane][0] = reader.bits(0, at, state.input_width);
+        if constexpr (Ports == 2)
+          scratch->block.bits[lane][1] = reader.bits(1, at, state.input_width);
+        scratch->block.destination[lane] =
+            static_cast<std::uint8_t*>(output.allocation) + output.byte_offset +
+            (offset + lane) * width;
+        for (unsigned axis = layout.rank; axis-- > 0;) {
+          if (++at[axis] < layout.origin[axis] + layout.shape[axis])
             break;
-          at[axis] = 0;
+          at[axis] = layout.origin[axis];
         }
       }
       auto calculated = compute_math_batch(
-          *arithmetic, kind, profile, descriptor.element_type, *block, *fast,
-          size, phase.consume_work, environment);
-      if (!calculated.ok())
-        return calculated;
+          scratch->arithmetic, state.kind, state.profile, state.output_type,
+          scratch->block, scratch->fast, size, consume, environment);
+      if (!calculated.ok()) {
+        *status = kernel_failure(calculated.code, calculated.message.c_str(),
+                                 calculated.reason);
+        return;
+      }
     }
-    return phase.consume_work(1);
+    *status = {};
+  } catch (const std::bad_alloc&) {
+    *status = kernel_failure(ErrorCode::ResourceExhausted);
+  } catch (...) {
+    *status =
+        kernel_failure(ErrorCode::OperationFailed, "numeric arithmetic failed");
   }
-};
+}
+template <class Arithmetic, class Kind, std::size_t Ports>
+Result<ps_prepared_kernel_v8> prepare_point_math(
+    Kind kind, SequenceProfile profile, const KernelPreparation& query) {
+  using State = PointMathState<Kind, Ports>;
+  using Answer = Result<ps_prepared_kernel_v8>;
+  auto state = std::make_unique<State>();
+  auto valid = fixed_tensor::prepare_point_inputs(query, &state->inputs);
+  if (!valid.ok())
+    return Answer(valid);
+  state->kind = kind;
+  state->profile = profile;
+  state->output_type = query.writes[0].layout.element_type;
+  state->input_width = TensorSpan::element_size(
+      query.inputs[0].result_schema->tensors[0].descriptor.element_type);
+  ps_prepared_kernel_v8 result{};
+  result.struct_size = sizeof(result);
+  result.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  result.invoke_cpu = point_math_invoke<Arithmetic, Kind, Ports>;
+  result.context = state.release();
+  result.release = [](const void* context) {
+    delete static_cast<const State*>(context);
+  };
+  return Answer(result);
+}
 
 template <class Arithmetic, class Kind>
 OperationDefinition point_math_operation(const std::string& key, Kind kind,
                                          SequenceProfile profile,
                                          unsigned ports, unsigned dtype_mask,
                                          bool rational = false) {
-  using Program = WholeTensorProgram<PointMathKernel<Arithmetic, Kind>>;
+  using Scratch = PointMathScratch<Arithmetic>;
   OperationDefinition operation;
   operation.key = key;
   auto& traits = operation.traits;
@@ -243,9 +284,9 @@ OperationDefinition point_math_operation(const std::string& key, Kind kind,
   traits.requires_metadata_specialization = true;
   if (rational)
     traits.parameter_schema = {{"dtype", OperationParameterType::String}};
-  set_whole_tensor_output(traits, ElementType::Float64, sizeof(Program));
-  traits.workspace_bytes = sizeof(Arithmetic) + sizeof(MathBatchWorkspace) +
-                           sizeof(FloatMathWorkspace);
+  traits.outputs[0].key = "values";
+  traits.outputs[0].output_schema = tensor_ops::port();
+  traits.outputs[0].result_schema = tensor_ops::scalar_schema();
   operation.specialize_metadata = [profile, rational](const auto& inputs,
                                                       const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
@@ -256,6 +297,11 @@ OperationDefinition point_math_operation(const std::string& key, Kind kind,
                            FailureReason::None,
                            {FailureOrigin::Schema, FailureScope::Unspecified}});
     };
+    for (const auto& input : inputs) {
+      auto valid = tensor_ops::check_tensor(input);
+      if (!valid.ok())
+        return Answer(valid);
+    }
     const auto& first = inputs[0].result_schema->tensors[0];
     const auto shape = first.sample_shape();
     if (shape.empty() || shape.size() > 8)
@@ -295,10 +341,36 @@ OperationDefinition point_math_operation(const std::string& key, Kind kind,
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.start_result = [kind, profile](const ResultProgramQuery&,
-                                           const BufferAllocator& allocator) {
-    return ResultContinuation::make<Program>(allocator, kind, profile);
+  operation.lower = [](const OperationLowering& query) {
+    return fixed_tensor::lower_pointwise(
+        query, "point-math", "numeric-unchecked-v1", sizeof(Scratch));
   };
-  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
+  operation.prepare_kernel =
+      [kind, profile, ports](
+          const physical::KernelDesc& kernel,
+          const physical::Placement& placement, const KernelPreparation& query,
+          const ResourceSet&,
+          const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    using Answer = Result<ps_prepared_kernel_v8>;
+    if (kernel.symbol != "point-math" ||
+        kernel.contract != "numeric-unchecked-v1" ||
+        !query.task_parameters.empty() ||
+        query.scratch != std::array<std::uint64_t, 3>{sizeof(Scratch), 0, 0})
+      return Answer(
+          {ErrorCode::TypeMismatch, "invalid point-math kernel signature"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Answer({ErrorCode::BackendUnavailable,
+                     "point-math requires CPU Host placement"});
+    auto available = sequence_profile_available(profile);
+    if (!available.ok())
+      return Answer(available);
+    if (ports == 1)
+      return prepare_point_math<Arithmetic, Kind, 1>(kind, profile, query);
+    if (ports == 2)
+      return prepare_point_math<Arithmetic, Kind, 2>(kind, profile, query);
+    return Answer({ErrorCode::TypeMismatch, "unsupported point-math arity"});
+  };
+  return operation;
 }
 }  // namespace ps::plugin_internal::numeric_ops

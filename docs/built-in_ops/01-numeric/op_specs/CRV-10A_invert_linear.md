@@ -37,24 +37,20 @@ is inverted. Endpoints correctly convert corresponding x, preserving zero sign.
 
 Use the exact selected-segment linear inverse formula and correctly round once; accelerated uses the shared FP32-scaled bound.
 Other mathematical exact zeros are +0 and nonzero underflow retains sign.
-Demanded queries and outputs are finite, with narrowing overflow failure.
+Consumed queries and selected final outputs must be finite and representable as caller preconditions.
 
-All three formal profile keys use complete-input. Every nonempty request collects all x/y/query Results with ordinary payload tile Needs, validates global topology and all query controls, then computes a complete dense Result. Any input edit invalidates the complete output; dynamic numerical failures are Domain/Run, including invalid or overflowing undelivered positions.
+All three profile keys use the [family fixed execution contract](CRV-10_invert.md#fixed-execution-resources-and-caller-preconditions). One task per selected output tile reads complete x/y and the corresponding query interval through the source grids, then computes only its global output coordinates. Each invocation has private preallocated ExactCurve scratch. Finite globally monotone controls, valid consumed queries and representable outputs are unchecked caller preconditions. Static schemas and fixed invocation signatures remain checked.
 
-Empty requests read no payload. Inherit CRV-10's typed/upstream closure, arbitrary strides, output ownership, cache-off, complete input/output storage, work and cancellation rules. Lookup work is O(K+N log K) plus exact arithmetic. Numerical stencils and rounding rules remain unchanged; unused endpoint conversion cannot reject a finite root. No partial output is published on failure. complete-input fallback counters are N/A; the actual strict fallback remains available.
+Empty selection emits no task. Rebinding reuses immutable preparation, with independent output owners and no content-cache identity guarantee. Signed/zero input strides, resource admission, cancellation, exact arithmetic guards and ordered call publication follow the family. Unreturned endpoint conversion does not invalidate a finite root. Fixed invocations expose no per-value numerical/fallback counters.
 
 Conceptual fixture: x=[0,1,3],y=[0,2,4],query=[3,1,3] -> values=[2,0.5,2].
 Negating y and query retains the result. Apply CRV-10's independent exact oracle,
-boundary/rounding/monotonicity, dirty/partial-read, stride, budget, cancellation
+boundary/rounding/monotonicity, fixed-read/sparse-output, stride, budget, cancellation
 and owner-lifetime acceptance. A temporary public Compiler/ExecutionContext
 workflow should supply x/y/query and static dtype/policy. Create this check for the current change and remove it after validation.
 
 ## Maintained implementation and validation
 
+`curve_inverse.cpp` registers the inverse keys through the shared fixed adapter in `plugins/ops/01-numeric/fixed_curve.hpp`. Public constructors are `invert_linear_node` and `invert_pchip_node` in [`inverse_curves.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/inverse_curves.hpp). The exact inverse arithmetic remains in `ExactCurve::inverse`.
 
-
-`plugins/ops/01-numeric/curve_inverse.cpp` registers the six complete-input Result keys; the public constructors are `invert_linear_node` and `invert_pchip_node` in [`inverse_curves.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/inverse_curves.hpp). The current Result implementation retains the exact inverse algorithm and resource accounting described above.
-
-For temporary validation, bind immutable source Results and read outputs through authorized windows. Cover caller/worker floating environments, mixed dtypes, negative/zero strides, dirty scope, knot/clamp signed zero, preparation reuse and repeated-demand identity. Include Empty without polling a failing producer, SampledSignal errors attributed to input 2, cancellation and source-owner retirement.
-
-A three-element Float32/Float64 output and its windows retain 12/24 Payload bytes after source retirement; releasing the last window releases that payload. A constant View with N=2^40 must fail `ResourceExhausted/CapacityLimit` when complete complete-input output storage exceeds the configured Payload cap. This case checks admission, not numerical execution at that logical size.
+Temporary public validation follows the family: independent exact references, supported profiles, mixed dtypes, sparse/empty selections, immutable affine bindings, fixed read/write/scratch signatures, concurrent Runs, cancellation, capacity admission and owner lifetime. Large logical outputs require only selected output tiles and fixed scratch; no full-output capacity rejection is mandated. Remove temporary runtime checkers after validation and preserve the oracle.

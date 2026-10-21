@@ -32,8 +32,8 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* name,
 }
 }  // namespace binary_detail
 /** @brief Shared Result-backed contract for the binary node helpers.
- * Each input Result contains exactly one tensor member in slot 0 and may also
- * contain fields. Schema IDs may vary. Inputs are checked against the explicit
+ * Each input Result contains exactly one tensor member in slot 0. Schema IDs
+ * may vary. Inputs are checked against the explicit
  * structure and dtype requirements of this operation.
  * Metadata specialization requires matching input dtypes and complete sample
  * shapes, rank 1..8, positive extents, and at most 2^40 samples. The output is
@@ -41,24 +41,17 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* name,
  * `samples`, the full logical sample shape, and ordinary data. There is no
  * implicit cast or broadcast.
  *
- * A nonempty Whole request needs complete input support with Data, Validation
- * and Descriptor roles (mask 13). The coordinator supplies authorized tensor
- * windows, preserving compatible signed and zero strides without requiring
- * packed input collection. The operation computes and publishes one complete
- * packed Result; the executor then projects requested coordinates. Empty
- * requests may use a metadata-only poll, but perform no sample reads or
- * arithmetic and return empty tensor coverage. Any input change invalidates
- * all observed output coordinates. Special numerical identities retain both
- * input obligations.
+ * Each selected output tile generates one fixed CPU invocation with both
+ * intersecting input tile sets, preallocated output and per-lane arithmetic
+ * scratch. Prepare validates the exact task signature. Empty selection emits
+ * no tasks or payload reads. Inputs use the Plan's admitted affine layouts.
+ * Special numerical identities retain both declared input dependencies.
  *
- * Shape or dtype mismatch returns TypeMismatch/Schema. Integer overflow
- * anywhere fails the invocation with OperationFailed/ArithmeticOverflow/Run
- * and no Atom key.
- * IEEE nonfinite results succeed. Source, work, capacity and cancellation
- * errors retain their categories. The complete output and fixed scratch use
- * managed resources even for sparse requests. Published Results retain
- * immutable storage beyond context lifetime, and cache witnesses retain both
- * input Results and their exact sample bits.
+ * Shape/dtype mismatch returns TypeMismatch/Schema. Representable integer
+ * results are an unchecked caller precondition. Floating special values follow
+ * each operation's IEEE rules. Resource, upstream and cancellation failures
+ * retain their categories; accepted callbacks retain borrowed owners until
+ * return. Successful Results own storage beyond context lifetime.
  *
  * Strict arithmetic uses round-to-nearest-even with gradual underflow.
  * Arithmetic preserves the CPU worker's floating environment, and execution
@@ -72,7 +65,8 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* name,
  * The helpers own their node metadata and are pure and safe for concurrent use;
  * allocation may throw std::bad_alloc.
  */
-/** @brief Exact a+b; UInt8/Int64/Float32/64, checked integer range.
+/** @brief Exact a+b; UInt8/Int64/Float32/64, caller supplies representable
+ * integers.
  * @note Uses the shared binary execution/ownership/error contract above.
  */
 inline Result<WorkflowNode> add_node(
@@ -80,7 +74,8 @@ inline Result<WorkflowNode> add_node(
     CpuNumericProfile profile = CpuNumericProfile::Strict) {
   return binary_detail::node(id, "add", std::move(a), std::move(b), profile);
 }
-/** @brief Exact a-b; UInt8/Int64/Float32/64, checked integer range.
+/** @brief Exact a-b; UInt8/Int64/Float32/64, caller supplies representable
+ * integers.
  * @note Uses the shared binary execution/ownership/error contract above.
  */
 inline Result<WorkflowNode> subtract_node(
@@ -89,7 +84,8 @@ inline Result<WorkflowNode> subtract_node(
   return binary_detail::node(id, "subtract", std::move(a), std::move(b),
                              profile);
 }
-/** @brief Exact a*b; UInt8/Int64/Float32/64, checked integer range.
+/** @brief Exact a*b; UInt8/Int64/Float32/64, caller supplies representable
+ * integers.
  * @note Uses the shared binary execution/ownership/error contract above.
  */
 inline Result<WorkflowNode> multiply_node(

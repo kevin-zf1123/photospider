@@ -16,100 +16,28 @@ implementation_status: implemented
 
 # NUM-13B: integral_image
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+The three `numeric.integral_image_<profile>` keys accept one Result tensor member under any member key. Output port `values` uses `photospider.tensor` with member `samples`. Required static String `axes` names exactly two distinct nonnegative input axes as comma-separated canonical integers. Normalize the pair to increasing order. Input rank is 2..8 with positive extents; both input/output logical counts are at most 2^40. The output takes the complete input `sample_shape()`, including batch axes, as ordinary axes and adds one to each selected extent. Other coordinates identify independent planes. No image/color semantics or physical units are inferred.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+For selected axes a,b and output coordinate o, sum source coordinates s[a] in [0,o[a]) and s[b] in [0,o[b]), with other coordinates equal to o. Each result is an exact rectangle sum followed by one conversion. Required static String `dtype` uses [prefix_sum's same-domain rules](NUM-13A_prefix_sum.md); the public helper defaults to Int64 for integer inputs and Float64 for floating inputs.
 
-The `numeric.integral_image_*` operations accept one `Result` tensor member under
-any member key. The output port key is `values`; its Result schema is
-`photospider.tensor` with tensor member `samples`. The source
-`sample_shape()` includes batch axes; the output uses that complete shape as
-ordinary axes and has no batch topology. Compute two-axis rectangular
-prefix sums with leading zero boundaries. Required static String axes name
-exactly two distinct nonnegative input axes; normalize the pair to increasing
-order. Input rank is 2..8 with positive extents. The output retains all other
-axes and adds one to each selected axis. All other axes
-are independent batches, with no image/color semantics inferred. Input/output
-logical counts must not exceed 2^40; output carries no domain description.
+## Numerical semantics and source coverage
 
-For selected axes a,b and an output coordinate o, sum the input rectangle
-s[a] in [0,o[a]), s[b] in [0,o[b]), with all other coordinates equal to o.
-This is the exact rectangle sum, not a composition of rounded row and column
-prefix outputs. Inherit reduce_sum's four input dtypes, same-domain destination
-selection (integer default Int64, float default Float64) and final range checking
-or correct rounding. Static dtype is explicit in direct nodes.
+Inherit [prefix_sum's arithmetic and unchecked integer precondition](NUM-13A_prefix_sum.md). A rectangle with either boundary zero yields integer zero or floating +0. Source NaN priority follows original logical row-major coordinates, independent of physical strides and tile layout. Preserve the sum contract's payload conversion, mixed-infinity and zero-sign rules. Rounded output and generated NaN never become source carry. Floating overflow remains an output infinity while later rectangles retain exact cancellation.
 
-## Prefix semantics and exact demand
+Requested tiles with equal non-scan-axis origins and extents form one CPU task. Its source is the rectangle from zero to the largest positive boundary required on each selected axis, restricted to the group's non-scan region. Every intersecting input tile is declared. Multiple selected rectangles may enlarge the bounding source rectangle. A zero-only tile, for which one selected axis contains only boundary zero, contributes no source extent. A group consisting only of zero rows/columns has no payload reads or arithmetic scratch. Empty selection emits no task.
 
-Inherit [prefix_sum's arithmetic and failure rules](NUM-13A_prefix_sum.md), using
-rectangle contributors rather than line contributors. If either selected output
-boundary is zero, the rectangle is empty: return integer zero or floating +0
-while complete-input still validates full input support for a nonempty demand. The kernel
-reads through authorized Result windows and does not pack a second full input
-payload. Nonempty rectangle NaN priority follows original
-logical row-major coordinates, independent of which selected axis is processed
-first. Preserve the shared payload conversion and mixed-infinity/zero rules.
+Only declared output tiles are converted and written. Integer representability is required for every declared write. `ExecutionPlan::select_outputs` keeps complete compiled tasks, including all reads, writes and scratch of any retained multi-write task; the integer precondition covers all such writes. Fresh compilation can narrow the bounding rectangle. Final Result coverage follows the selected outputs.
 
-All complete-output rectangles are converted/range-checked; any integer overflow
-fails Domain/Run, including outside the consumer projection. Internal exact sums
-can exceed the destination range. Rounded integral outputs never become exact
-carry. Strict remains reproducible; accelerated floating results retain their
-own shared bound. Empty demand reads nothing; nonempty demand requests Data,
-Validation and Descriptor  for complete input support, including
-zero-boundary requests. Any source edit invalidates all recorded observations,
-including projections at zero boundaries.
-The shared stage retains the complete internal output in global coordinates.
-Public actors publish only requested complete tiles. Retaining backing or
-dependency evidence never grants access to unrequested coordinates.
+## Algorithm, resources and errors
 
-## Algorithms, resources and errors
+For each plane, process the lower-numbered selected axis as rows and the higher-numbered axis as columns. Merge the current row's exact prefix with the saved exact rectangle from previous rows at that column. The terms are disjoint. Save magnitude/sign, first source NaN, both infinity flags and all-negative-zero state before final conversion. Previous rows precede the current row for NaN priority; reset every column per plane.
 
-For each independent plane, visit the lower-numbered selected axis as outer rows
-and the higher-numbered axis as inner columns. The current row's exact prefix
-is added to the saved exact prefix rectangle for all previous rows at that column.
-These disjoint contributions cover precisely the desired rectangle. Save exact
-magnitude/sign, first-NaN, both infinity flags and all-negative-zero flag before
-any destructive final conversion. Earlier rows have NaN priority over the current
-row; within each row preserve source logical order. Reset all columns per plane.
+Each source sample is read once per group. Scratch is `sizeof(ScanState) + W * sizeof(SumCarry)`, with W the required source prefix width on the higher-numbered selected axis. Zero-only groups use no scratch. Mutable state and dense output tiles are preallocated per invocation; prepared metadata and slot maps are immutable. Input affine views support negative and zero strides. No rounded-output recurrence, full intermediate output or runtime payload allocation is required.
 
-This takes O(full_input_count) exact updates/conversions with one fixed pair of
-full workspaces and one compact carry per inner-axis column. Column element
-capacity is `560*W` bytes on the recorded arm64 build, plus ResourceAllocator
-header, alignment and Entries, charged as metadata. The complete dense output
-is additional payload; input reads use authorized windows rather than a packed
-copy. W is the higher-numbered selected axis's extent; it is not chosen by
-physical stride or assumed to be the shorter axis.
-No repeated rectangle scan, per-output descriptors or persistent table is retained.
-Work/cancellation checks cover resets, reads, merges, conversions and publication.
+Static schema, shape caps, axes and dtype errors fail before execution. Preparation rejects incorrect kernel contracts, missing/extra source reads, incompatible writes and scratch sizes. Cancellation checks cover output initialization, column resets, source reads and exact arithmetic. Operational failures prevent successful call retirement. Per-value NumericDiagnostics and sample work-limit counters are unavailable. Successful output owners outlive the execution context.
 
-Schema/output caps remain compile/preflight errors. complete-input failures release output,
-state and columns; floating exceptional results follow exact sum rules. Budget
-failure never changes arithmetic precision. Final output owners outlive context.
+## Acceptance and implementation
 
-## Acceptance and implementation status
+For input `[[1,2],[3,4]]` and axes `"0,1"`, expect `[[0,0,0],[0,1,3],[0,4,10]]`. Use independent exact rectangle enumeration as the oracle. Cover nonadjacent axes, independent planes, NaN priority, negative/zero strides, zero-only unions, sparse bounding rectangles, concurrent Runs, empty selections, artifact roundtrips and cancellation. Distinguish fresh compilation from task-preserving selection when checking integer representability and upstream failure scope.
 
-Conceptual fixture: input=[[1,2],[3,4]], axes="0,1" yields
-[[0,0,0],[0,1,3],[0,4,10]]. Use independent exact rectangle summation as the
-oracle. Test zero boundaries with full source validation, non-leading integral axes,
-independent batches, disjoint corners with an L-shaped source union, Run failure
-when an unrequested integer rectangle overflows despite representable later results, NaN priority across axes and all inherited dtype/stride/resource cases.
-
-Four-corner rectangle queries on rounded floating outputs may introduce their
-own rounding/cancellation error; this operator guarantees each integral-image
-result, not exact recovery from arbitrary downstream subtraction. Test exact
-integer fixtures separately from floating retrieval accuracy. Temporary public-path acceptance should cover independent small-integer enumeration,
-cross-plane NaN/layout cases, resource limits, cancellation, Empty demand and
-zero-boundary input validation.
-
-## Implementation and executable acceptance
-
-All six registered profile keys use the exact complete-input algorithm above. Current
-public workflow and focused Result math coverage are in
-[NUM-13 Run-shared complete-input computation](../scans-whole.md). Proposed specification status is
-unchanged.
+Four-corner subtraction of rounded floating outputs has its own rounding/cancellation error; each integral value is guaranteed independently. See [fixed scan execution](../scans-execution.md) for the six scan profile definitions and public helpers. This family overrides the [NUM baseline](NUM_common_contract.md) where fixed execution or unchecked numerical preconditions differ. Proposed specification status is unchanged.

@@ -24,7 +24,7 @@ void list_planners(const Invocation& o, const PlannerRegistry& registry) {
       throw ToolError("unknown planner: " + o.get("--help-planner"), 2);
     print_planner(*definition);
     std::cout << "Planning options: --backend cpu|gpu --tile-extent N "
-                 "--outputs a,b --requests FILE --max-instructions N "
+                 "--outputs a,b --requests FILE --max-tasks N "
                  "--max-dependency-edges N\n";
     return;
   }
@@ -88,7 +88,7 @@ int run(int argc, char** argv, Diagnostics* diagnostics) {
            "--help-optimizer NAME\n"
            "  --save-ir N=PATH --release-ir-after-save N\n"
            "  --planner NAME --list-planners --help-planner NAME\n"
-           "  --backend cpu|gpu --tile-extent N --max-instructions N "
+           "  --backend cpu|gpu --tile-extent N --max-tasks N "
            "--max-dependency-edges N\n"
            "  --print-pipeline\n"
            "  -v --verbose       Report optimizer stages and IR releases\n"

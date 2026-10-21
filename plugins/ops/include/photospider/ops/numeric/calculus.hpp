@@ -32,25 +32,25 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
                    {}});
 }
 }  // namespace calculus_detail
-/** @brief Authors exact discrete differences with one RN-even conversion.
+/** @brief Authors discrete differences with one final numeric conversion.
  * samples [N], 2<=N<=2^40, and step [1] share Float32/64 dtype. Output values
- * [N] has ordinary data. Endpoints use adjacent one-sided differences;
- * interiors use (samples[i+1]-samples[i-1])/(2*step). Whole reads/validates
- * full samples and step for nonempty demand, then computes complete dense
- * output. Only the two stencil values enter each numerical result. Source
- * failure may precede callback step validation. Zero/nonfinite step fails
- * Domain/Run InvalidArgument/InvalidDomain with InvalidSampleStep. Negative
- * finite step is valid. Source NaN priority is ascending source index; exact
- * zero is +0. Finite underflow/overflow and exceptional values follow the
- * stated exact formula. Any active input edit invalidates all recorded
- * observations. Full input collection, full output and fixed exact workspace
- * are required even for sparse demand. Empty requests read nothing. Shape/dtype
- * errors are TypeMismatch/Schema; upstream, typed, cancellation and resource
- * failures retain their categories. Helpers are pure/concurrent-safe, return
- * owned metadata, may throw bad_alloc, and reject invalid id/profile with
- * InvalidArgument/Schema. Published storage survives context retirement. This
- * discrete rule approximates a continuous derivative; it does not infer one
- * from an unknown underlying function.
+ * [N] has ordinary axes. Endpoints use adjacent one-sided differences;
+ * interiors use (samples[i+1]-samples[i-1])/(2*step). Each selected output
+ * tile has one fixed CPU task whose source reads cover exactly the union of
+ * lower/upper stencil images, rounded to source tiles. It also reads step.
+ * Finite nonzero step is a caller numerical precondition; negative step is
+ * valid and out-of-domain diagnostics are not guaranteed. Source NaN priority
+ * is increasing stencil index; exact zero is +0 and final overflow is signed
+ * infinity. Strict rounds the exact quotient once; accelerated profiles follow
+ * their stated final error budget. A task borrows preallocated ExactCalculus
+ * scratch and owns an independent dense output tile. Empty emits no tasks.
+ * Prepare checks schemas, canonical writes, complete reads and scratch. Shape
+ * or dtype incompatibility returns TypeMismatch. Resource, upstream and
+ * cancellation failures retain their operational categories and prevent the
+ * call's successful publication. Immutable outputs can outlive the context.
+ * Helpers return owned metadata, support concurrent calls, may throw bad_alloc,
+ * and reject invalid id/profile with InvalidArgument/InvalidDomain/Schema.
+ * The formula approximates a continuous derivative of sampled data.
  */
 inline Result<WorkflowNode> derivative_1d_node(
     std::uint64_t id, WorkflowInput samples, WorkflowInput step,
@@ -58,20 +58,21 @@ inline Result<WorkflowNode> derivative_1d_node(
   return calculus_detail::node(id, "derivative_1d",
                                {std::move(samples), std::move(step)}, profile);
 }
-/** @brief Authors initial + step/2 times an exact weighted sample prefix.
+/** @brief Authors initial plus an exact weighted trapezoidal prefix.
  * samples [N], 1<=N<=2^40, step [1] and initial [1] share Float32/64 dtype.
- * values [N] contains ordinary data. Output zero copies initial bits, including
- * sNaN and signed zero. Only N=1 excludes samples/step via static projection;
- * for N>1 all inputs are read/validated even for output0 projection. At
- * positive i, weights on samples[0..i] are 1,2,...,2,1 and the whole expression
- * rounds once. NaN priority is initial then ascending source indices; exact
- * zero is +0. Whole preparation precedes step validation; invalid step or any
- * upstream failure affects the Run. Exact prefix state survives final
- * conversion and complete output is published before projection. Other errors,
- * ownership and authoring rules match derivative_1d_node. No regional
- * windows/checkpoints or per-output association state remains. The discrete
- * formula approximates an underlying integral, with exact rounding only for the
- * stated formula.
+ * values [N] has ordinary axes. Output zero copies initial bits, including
+ * sNaN and signed zero. A canonical tile containing only zero has a separate
+ * initial-only task with zero scratch and schema-only samples/step references.
+ * This applies for N=1 and tile extent one. All other selected tiles share one
+ * task reading samples through the greatest selected index, step and initial.
+ * At positive i, weights on samples[0..i] are 1,2,...,2,1. Exact prefix state
+ * survives every final conversion; unselected coordinates are not converted.
+ * NaN priority is initial then increasing source index; exact zero is +0.
+ * A saved Plan retains all writes and reads of a retained multiwrite task.
+ * Task failures share the IR call's publication outcome, including initial-only
+ * and prefix tasks. Each invocation owns scratch; concurrent Runs share only
+ * immutable metadata. Other numerical preconditions, errors and ownership
+ * rules match derivative_1d_node. This is a discrete trapezoidal approximation.
  */
 inline Result<WorkflowNode> integrate_1d_node(
     std::uint64_t id, WorkflowInput samples, WorkflowInput step,

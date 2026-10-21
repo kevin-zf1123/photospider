@@ -49,7 +49,7 @@ that status is independent of implementation status.
 Floating operations follow NUM-04's IEEE-like result policy: domain errors,
 division by zero and floating overflow produce specified NaN/infinity outputs
 as successful observations. Both operands at the requested coordinate are read
-and validated, including cases where a special numeric identity determines the
+through fixed views, including cases where a special numeric identity determines the
 result. No implicit short-circuit changes upstream failure/data obligations.
 
 Normally propagate the sole input NaN, or the first input when both are NaN,
@@ -63,8 +63,7 @@ Confirmed operator-specific decisions:
 
 - Add/subtract/multiply support all four dtypes and preserve dtype. Floating
   results are correctly rounded to that dtype; integer exact results outside
-  UInt8/Int64 fail the complete invocation, without wrap, saturation
-  or implicit promotion.
+  UInt8/Int64 violate an unchecked caller precondition; no wrap, saturation or implicit promotion is specified.
 - Divide supports Float32/Float64 only, preserving dtype. Integer conversion is
   explicit; there is no implicit integer quotient mode.
 - Minimum/maximum support all four dtypes and preserve dtype, with bitwise
@@ -79,46 +78,22 @@ Each operation has named inputs `a`, `b` and output `values`, except atan2/atan2
 use `y` and `x` in that order. Each bound input Result contains exactly one
 tensor member in slot 0. The Result schema IDs may
 differ. Input rank is 1..8, extents are positive, and the full sample shapes
-and dtypes match. Input structure and explicitly bound validators are checked under the
-operation contract; there is no implicit domain-label validation. The `values` output is a Result using schema `photospider.tensor`,
+and dtypes match. Structural input validation occurs before issue. The `values` output is a Result using schema `photospider.tensor`,
 tensor key `samples`, the complete input sample shape as ordinary axes, and
 no attached domain description. Output batch topology is dropped. No implicit broadcast, cast or
 unit inference occurs.
 
-Compile/preflight rejects unsupported dtype, mismatched shape or unknown static
-parameters before numeric reads. A nonempty complete-input request needs complete input
-support with ordinary member tile Needs with explicitly bound validators. The coordinator
-supplies authorized tensor windows, including legal signed and zero strides;
-the operation does not require a packed copy of either input. It validates and
-computes the complete packed output Result, after which the executor projects
-requested coordinates. Empty requests may use a metadata-only poll, but perform
-no sample reads or arithmetic and produce empty tensor coverage. A change to
-either input invalidates all observed output coordinates. Special numeric
-identities retain both input obligations.
+Compilation rejects unsupported dtype, mismatched shape and invalid static parameters before numeric reads. Each selected output tile lowers to one CPU task with the intersecting tiles of both inputs. Prepare validates the fixed signature and scratch. The invocation borrows admitted affine views, computes only the selected output tile and writes into its separate preallocated dense allocation. Empty selection emits no tasks or payload reads. Special numeric identities preserve both declared input dependencies.
 
-Integer overflow anywhere, including outside the requested coordinates, fails
-the invocation with OperationFailed/ArithmeticOverflow/Run and no Atom key.
-Failure releases unpublished output and scratch; published Results retain their
-immutable storage beyond context lifetime. Inherit [NUM-04 execution conventions](NUM-04_unary_contract.md)
-for floating environment, rounding, ownership and cancellation. Output and
-fixed scratch use managed resources even for sparse requests. Work is O(N) for
-simple operations plus explicitly charged refinement; sparse requests may cost
-more work and memory.
+Integer results must fit the destination dtype as an unchecked caller precondition. Floating NaN/infinity/domain-result rules remain specified successful outcomes. Operational failure releases unpublished output after accepted callbacks return. Successful Result owners survive context lifetime. Scratch contains fixed arithmetic state and bounded batch buffers; no dynamic per-sample work charge is applied. Cancellation is queried before each 64-sample batch and inside long refinement. See [fixed mathematical execution](../point-math-execution.md).
 
-Acceptance uses independent exact integer/rational or high-precision mathematical
-oracles, not the implementation helper. Exercise all supported dtypes, signed
-zeros, subnormals, extrema, NaN payload priority, valid strided inputs, disjoint
-requests, typed validation, complete-input overflow failure and resource/cancellation cleanup.
-A conceptual WorkflowDocument fixture binds both arrays, compiles a selected key,
-and reads requested values through ExecutionContext. Implementation delivery
-provides actual runnable public fixtures and results as documented below.
+Acceptance uses independent exact integer/rational or high-precision references. Exercise supported dtypes, special bits, signed strides, sparse/empty selections, exact fixed dependencies, concurrent Runs, malformed task signatures and resource/cancellation cleanup.
 
 ## Maintained implementation
 
 All 27 keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/ops/numeric/binary.hpp`.
-The shared complete-input Result implementation validates both complete inputs, even
-when a numeric identity determines a result. Floating elementary operations
+The shared fixed invocation implementation declares both input tile sets, including when a numeric identity determines a result. Floating elementary operations
 use controlled correctly rounded hardware arithmetic after exact special-value
 classification, with exact fallback; integer operations retain checked exact
 arithmetic. Accelerated ordinary positive-base power and angle results use

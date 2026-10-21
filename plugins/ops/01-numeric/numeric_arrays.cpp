@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -9,241 +10,291 @@
 
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/array_profiles.hpp"
-#include "01-numeric/numeric_tensor_program.hpp"
+#include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
-#include "photospider/ops/numeric/diagnostics.hpp"
-#include "photospider/plugin/whole_stage.hpp"
+#include "common/tensor_program.hpp"
 
 namespace ps::plugin_internal {
 namespace {
-using namespace numeric_ops;  // NOLINT(build/namespaces)
-struct ArrayKernel final {
-  bool constant;
-  SequenceProfile profile;
-  ArrayKernel(bool constant, SequenceProfile profile)
-      : constant(constant), profile(profile) {}
-  Status publish(const ResultProgramPhase& phase, ResultBuilder& builder) {
-    const auto& target = phase.query.output.result_schema->tensors[0];
-    const auto shape = target.sample_shape();
-    const auto& input = phase.tensors->at({0, 0});
-    const auto source_shape = input.spec().sample_shape();
-    const auto width = TensorSpan::element_size(target.descriptor.element_type);
-    const bool view =
-        std::get<std::string>(phase.query.parameters.at("layout")) == "view";
-    std::vector<uint64_t> axes;
-    if (!constant)
-      axes = math_take(parse_array_list(
-          std::get<std::string>(phase.query.parameters.at("axis_map")), false));
-    Status status;
-    if (view && constant) {
-      MathTensorReader reader(input, phase.query.cancellation);
-      const auto bits = reader.bits({0});
-      math_require(phase.consume_work(width + shape.size()));
-      auto buffer = math_take(phase.resources.allocator().allocate(width));
-      std::memcpy(buffer.data(), &bits, width);
-      status = builder.publish_tensor(
-          0, Region::whole(shape), {0, std::vector<int64_t>(shape.size(), 0)},
-          std::move(buffer).freeze(), phase.query.cancellation);
-    } else if (view) {
-      ResultTensorViewTransform transform;
-      transform.source_axes.resize(source_shape.size());
-      for (size_t axis = 0; axis < source_shape.size(); ++axis)
-        transform.source_axes[axis] = {static_cast<int32_t>(axes[axis]), 0,
-                                       source_shape[axis] == 1 ? 0 : 1};
-      auto window = math_take(
-          input.acquire(Region::whole(source_shape), phase.query.cancellation));
-      status = builder.publish_tensor_view(0, Region::whole(shape), window,
-                                           transform, phase.query.cancellation);
-      if (status.reason == FailureReason::ViewUnavailable)
-        return {ErrorCode::InvalidArgument,
-                "ViewUnavailable: complete broadcast source is not affine",
-                FailureReason::InvalidDomain,
-                {FailureOrigin::Domain, FailureScope::Run}};
-    } else {
-      MathTensorReader reader(input, phase.query.cancellation);
-      status = sdk::publish_dense_tensor(
-          phase, builder, 0, Region::whole(shape),
-          [&](const auto& writers) -> Status {
-            return math_callback(phase, [&]() -> Status {
-              if (writers.size() != 1)
-                return {ErrorCode::OperationFailed,
-                        "array requires one packed writer"};
-              std::vector<uint64_t> coordinate(shape.size(), 0),
-                  source(source_shape.size(), 0);
-              if (constant) {
-                const auto bits = reader.bits({0});
-                const auto plane_axes = std::min<size_t>(shape.size(), 2);
-                const auto plane_samples =
-                    shape.back() *
-                    (plane_axes == 2 ? shape[shape.size() - 2] : 1);
-                const auto planes =
-                    math_take(target.sample_count()) / plane_samples;
-                for (uint64_t plane = 0; plane < planes; ++plane) {
-                  auto rectangle =
-                      math_take(writers[0].rectangle_run(coordinate));
-                  if (rectangle.row.samples != shape.back() ||
-                      rectangle.rows !=
-                          (plane_axes == 2 ? shape[shape.size() - 2] : 1) ||
-                      rectangle.row.sample_stride_bytes !=
-                          static_cast<int64_t>(width) ||
-                      (rectangle.rows > 1 &&
-                       rectangle.row_stride_bytes !=
-                           static_cast<int64_t>(shape.back() * width)))
-                    return {ErrorCode::OperationFailed,
-                            "constant requires packed rectangles"};
-                  math_require(phase.consume_work(width));
-                  std::memcpy(rectangle.row.data, &bits, width);
-                  const auto bytes = plane_samples * width;
-                  for (uint64_t offset = width; offset < bytes;) {
-                    const auto size =
-                        std::min<uint64_t>({offset, 65536, bytes - offset});
-                    math_require(phase.consume_work(size));
-                    array_copy_block(rectangle.row.data + offset,
-                                     rectangle.row.data, size, profile);
-                    offset += size;
-                  }
-                  for (size_t axis = shape.size() - plane_axes; axis-- > 0;) {
-                    if (++coordinate[axis] < shape[axis])
-                      break;
-                    coordinate[axis] = 0;
-                  }
-                }
-              } else {
-                MathTensorWriter writer(writers[0]);
-                std::array<uint8_t, 32> block{};
-                std::array<uint8_t*, 32> destinations{};
-                size_t buffered = 0;
-                const auto flush = [&] {
-                  const auto lanes = buffered / width;
-                  for (size_t lane = 1; lane < lanes; ++lane)
-                    if (destinations[lane] != destinations[0] + lane * width)
-                      throw Status{ErrorCode::OperationFailed,
-                                   "broadcast requires packed output"};
-                  array_copy_block(destinations[0], block.data(), buffered,
-                                   profile);
-                  buffered = 0;
-                };
-                for (uint64_t i = 0, count = math_take(target.sample_count());
-                     i < count; ++i) {
-                  math_require(phase.consume_work(axes.size() + width));
-                  for (size_t axis = 0; axis < source_shape.size(); ++axis)
-                    source[axis] =
-                        source_shape[axis] == 1 ? 0 : coordinate[axes[axis]];
-                  const auto bits = reader.bits(source);
-                  std::memcpy(block.data() + buffered, &bits, width);
-                  destinations[buffered / width] = writer.address(coordinate);
-                  buffered += width;
-                  if (buffered == block.size())
-                    flush();
-                  math_next(coordinate, shape);
-                }
-                if (buffered)
-                  flush();
-              }
-              return phase.consume_work(1);
-            });
-          },
-          phase.query.cancellation);
-    }
-    if (!status.ok())
-      return status;
-    math_require(phase.consume_work(1));
-    if (phase.report_diagnostic) {
-      NumericDiagnostics report;
-      report.profile =
-          static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-      const auto* implementation = array_implementation(profile, view);
-      std::memcpy(report.implementation.data(), implementation,
-                  std::strlen(implementation) + 1);
-      if (view)
-        report.view_elements = math_take(target.sample_count());
-      else
-        report.copied_elements = math_take(target.sample_count());
-      return report_numeric(phase, report);
-    }
-    return Status::success();
-  }
+using numeric_ops::SequenceProfile;
+struct ArrayMetadata final {
+  std::vector<std::uint64_t> source;
+  TensorDescriptor output;
+  std::array<unsigned, 8> axes{};
 };
-using ArrayProgram = WholeTensorProgram<ArrayKernel>;
+Result<ArrayMetadata> metadata(
+    bool constant, const OperationMetadata& input,
+    const std::map<std::string, ParameterValue>& parameters) {
+  using Answer = Result<ArrayMetadata>;
+  auto valid = tensor_ops::check_tensor(input);
+  if (!valid.ok())
+    return Answer(valid);
+  ArrayMetadata result;
+  const auto& source = input.result_schema->tensors[0];
+  result.source = source.sample_shape();
+  const auto mismatch = [](const char* message) {
+    return Answer(Status{ErrorCode::TypeMismatch, message});
+  };
+  if (result.source.empty() || result.source.size() > 8)
+    return mismatch("array source rank outside 1..8");
+  if (constant && result.source != std::vector<std::uint64_t>{1})
+    return mismatch("constant requires a scalar [1]");
+  auto shape = numeric_ops::parse_array_list(
+      std::get<std::string>(parameters.at("shape")), true);
+  if (!shape.ok())
+    return Answer(shape.status());
+  result.output = {source.descriptor.element_type, shape.take_value()};
+  if (!constant) {
+    auto parsed = numeric_ops::parse_array_list(
+        std::get<std::string>(parameters.at("axis_map")), false);
+    if (!parsed.ok())
+      return Answer(parsed.status());
+    if (parsed.value().size() != result.source.size() ||
+        result.output.shape.size() < result.source.size())
+      return mismatch(
+          "broadcast must map every source axis without rank reduction");
+    unsigned used = 0;
+    for (unsigned axis = 0; axis < result.source.size(); ++axis) {
+      auto mapped = parsed.value()[axis];
+      if (mapped >= result.output.shape.size() || (used & (1U << mapped)))
+        return Answer(numeric_ops::array_parameter_error(
+            "broadcast axis map must be injective and in range"));
+      used |= 1U << mapped;
+      result.axes[axis] = static_cast<unsigned>(mapped);
+      if (result.source[axis] != 1 &&
+          result.source[axis] != result.output.shape[mapped])
+        return mismatch("broadcast mapped extent must match or be one");
+    }
+  }
+  return Answer(std::move(result));
+}
+Region source_region(bool constant, const ArrayMetadata& description,
+                     const Region& output) {
+  if (constant)
+    return Region::whole({1});
+  std::vector<RegionDimension> dimensions;
+  for (unsigned axis = 0; axis < description.source.size(); ++axis)
+    dimensions.push_back(description.source[axis] == 1
+                             ? RegionDimension{0, 1}
+                             : output.dimensions()[description.axes[axis]]);
+  return Region(std::move(dimensions));
+}
+Result<OperationProgram> lower_array(bool constant,
+                                     const OperationLowering& query) {
+  using Answer = Result<OperationProgram>;
+  auto parsed = metadata(constant, query.inputs[0], query.parameters);
+  if (!parsed.ok())
+    return Answer(parsed.status());
+  auto output =
+      TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
+  auto input =
+      TileGrid::from_schema(*query.inputs[0].result_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  if (!input.ok())
+    return Answer(input.status());
+  ResourceLimits limits;
+  limits.maximum_work = query.limits.maximum_work;
+  ResourceBudget budget(limits);
+  OperationProgramBuilder builder(query);
+  for (const auto& member : query.requests[0].members)
+    for (auto tile : member.second) {
+      auto task = builder.add_task(constant ? "constant" : "broadcast",
+                                   "array-bitcopy-v1");
+      if (!task.ok())
+        return Answer(task.status());
+      auto region = output.value().region(tile);
+      if (!region.ok())
+        return Answer(region.status());
+      auto reads = sdk::tiles_for_region(
+          budget, input.value(),
+          source_region(constant, parsed.value(), region.value()));
+      if (!reads.ok())
+        return Answer(reads.status());
+      for (auto index : reads.value()) {
+        auto status = budget.consume({1});
+        if (status.ok())
+          status = builder.read_input(task.value(), 0, 0, index);
+        if (!status.ok())
+          return Answer(status);
+      }
+      auto status = builder.write_output(task.value(), 0, member.first, tile);
+      if (!status.ok())
+        return Answer(status);
+    }
+  return builder.finish();
+}
+struct PreparedArray final {
+  bool constant = false;
+  SequenceProfile profile;
+  ArrayMetadata description;
+  fixed_tensor::PointInputs<1> inputs;
+};
+void array_invoke(const ps_kernel_invocation_v8* query,
+                  ps_kernel_status_v8* status) noexcept {
+  const auto& state =
+      *static_cast<const PreparedArray*>(query->prepared_context);
+  const auto cancelled = [&] {
+    return query->cancellation.is_cancelled &&
+           query->cancellation.is_cancelled(query->cancellation.context);
+  };
+  if (cancelled()) {
+    *status = kernel_failure(ErrorCode::Cancelled);
+    return;
+  }
+  fixed_tensor::PointReader<1> reader{state.inputs, *query};
+  const auto& output = query->outputs[0];
+  const auto& layout = *output.layout;
+  const auto width =
+      TensorSpan::element_size(state.description.output.element_type);
+  auto* destination =
+      static_cast<std::uint8_t*>(output.allocation) + output.byte_offset;
+  std::uint64_t count = 1;
+  for (unsigned axis = 0; axis < layout.rank; ++axis)
+    count *= layout.shape[axis];
+  if (state.constant) {
+    const auto bits = reader.bits(0, {}, width);
+    std::memcpy(destination, &bits, width);
+    const auto bytes = count * width;
+    // Grow a filled prefix; each copy is disjoint and at most 64 KiB.
+    for (std::uint64_t offset = width; offset < bytes;) {
+      if (cancelled()) {
+        *status = kernel_failure(ErrorCode::Cancelled);
+        return;
+      }
+      const auto size = std::min({offset, UINT64_C(65536), bytes - offset});
+      std::memcpy(destination + offset, destination,
+                  static_cast<std::size_t>(size));
+      offset += size;
+    }
+  } else {
+    std::array<std::uint64_t, 8> at{}, source{};
+    std::array<std::uint8_t, 32> block{};
+    unsigned buffered = 0;
+    for (std::uint64_t index = 0; index < count; ++index) {
+      if (index % 64 == 0 && cancelled()) {
+        *status = kernel_failure(ErrorCode::Cancelled);
+        return;
+      }
+      auto remainder = index;
+      for (unsigned axis = layout.rank; axis-- > 0;) {
+        at[axis] = layout.origin[axis] + remainder % layout.shape[axis];
+        remainder /= layout.shape[axis];
+      }
+      for (unsigned axis = 0; axis < state.description.source.size(); ++axis)
+        source[axis] = state.description.source[axis] == 1
+                           ? 0
+                           : at[state.description.axes[axis]];
+      const auto bits = reader.bits(0, source, width);
+      std::memcpy(block.data() + buffered, &bits, width);
+      buffered += width;
+      if (buffered == block.size() || index + 1 == count) {
+        numeric_ops::array_copy_block(destination, block.data(), buffered,
+                                      state.profile);
+        destination += buffered;
+        buffered = 0;
+      }
+    }
+  }
+  *status = {};
+}
 OperationDefinition array_operation(const std::string& key, bool constant,
                                     SequenceProfile profile) {
   OperationDefinition operation;
   operation.key = key;
   auto& traits = operation.traits;
-  traits.diagnostics = {numeric_diagnostic_identity()};
   traits.requires_metadata_specialization = true;
   traits.input_count = 1;
   traits.input_schema.resize(1);
-
   traits.input_schema[0].element_type_mask = 127;
-  traits.parameter_schema = {{"layout", OperationParameterType::String},
-                             {"shape", OperationParameterType::String}};
+  traits.parameter_schema = {{"shape", OperationParameterType::String}};
   if (!constant)
     traits.parameter_schema.push_back(
         {"axis_map", OperationParameterType::String});
-  set_whole_tensor_output(traits, ElementType::Float64, sizeof(ArrayProgram));
+  traits.outputs[0].key = "values";
+  traits.outputs[0].output_schema = tensor_ops::port();
+  traits.outputs[0].result_schema = tensor_ops::scalar_schema();
   operation.specialize_metadata = [constant, profile](const auto& inputs,
                                                       const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
-    const auto mismatch = [](const char* message) {
-      return Answer(Status{ErrorCode::TypeMismatch,
-                           message,
-                           FailureReason::None,
-                           {FailureOrigin::Schema, FailureScope::Unspecified}});
-    };
-    const auto& source = inputs[0].result_schema->tensors[0];
-    const auto source_shape = source.sample_shape();
-    if (constant && source_shape != std::vector<uint64_t>{1})
-      return mismatch("constant requires one scalar");
-    auto shape =
-        parse_array_list(std::get<std::string>(parameters.at("shape")), true);
-    if (!shape.ok())
-      return Answer(shape.status());
-    if (!constant) {
-      auto axes = parse_array_list(
-          std::get<std::string>(parameters.at("axis_map")), false);
-      if (!axes.ok())
-        return Answer(axes.status());
-      if (axes.value().size() != source_shape.size() ||
-          shape.value().size() < source_shape.size())
-        return mismatch(
-            "broadcast must map every source axis without rank reduction");
-      uint32_t used = 0;
-      for (size_t axis = 0; axis < source_shape.size(); ++axis) {
-        const auto mapped = axes.value()[axis];
-        if (mapped >= shape.value().size() || (used & (1U << mapped)))
-          return Answer(array_parameter_error(
-              "broadcast axis map must be injective and in range"));
-        used |= 1U << mapped;
-        if (source_shape[axis] != 1 &&
-            source_shape[axis] != shape.value()[mapped])
-          return mismatch("broadcast mapped extent must match or be one");
-      }
-    }
-    const auto& layout = std::get<std::string>(parameters.at("layout"));
-    if (layout != "view" && layout != "dense")
-      return Answer(
-          array_parameter_error("array layout must be view or dense"));
-    auto available = sequence_profile_available(profile);
+    auto parsed = metadata(constant, inputs[0], parameters);
+    if (!parsed.ok())
+      return Answer(parsed.status());
+    auto available = numeric_ops::sequence_profile_available(profile);
     if (!available.ok())
       return Answer(available);
-    auto schema = numeric_tensor_schema(source.descriptor.element_type,
-                                        shape.take_value());
-    if (constant && layout == "view")
-      schema.tensors[0].atomic_trailing_axes =
-          schema.tensors[0].descriptor.shape.size();
+    auto schema = tensor_ops::scalar_schema();
+    schema.tensors[0].descriptor = parsed.value().output;
     OperationOutputSpecialization result;
     result.metadata.result_schema =
         std::make_shared<const SchemaTemplate>(std::move(schema));
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.start_result = [constant, profile](const auto&,
-                                               const auto& allocator) {
-    return ResultContinuation::make<ArrayProgram>(allocator, constant, profile);
+  operation.lower = [constant](const auto& query) {
+    return lower_array(constant, query);
   };
-  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
+  operation.prepare_kernel =
+      [constant, profile](
+          const physical::KernelDesc& kernel,
+          const physical::Placement& placement, const KernelPreparation& query,
+          const ResourceSet&,
+          const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    using Answer = Result<ps_prepared_kernel_v8>;
+    const auto invalid = [] {
+      return Answer({ErrorCode::TypeMismatch, "invalid array invocation"});
+    };
+    if (kernel.symbol != (constant ? "constant" : "broadcast") ||
+        kernel.contract != "array-bitcopy-v1" || query.inputs.size() != 1 ||
+        query.outputs.size() != 1 || query.writes.size() != 1 ||
+        !query.task_parameters.empty() ||
+        query.scratch != std::array<std::uint64_t, 3>{})
+      return invalid();
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Answer(
+          {ErrorCode::BackendUnavailable, "array requires CPU Host placement"});
+    auto available = numeric_ops::sequence_profile_available(profile);
+    if (!available.ok())
+      return Answer(available);
+    auto parsed = metadata(constant, query.inputs[0], query.parameters);
+    if (!parsed.ok())
+      return Answer(parsed.status());
+    auto state = std::make_unique<PreparedArray>();
+    state->constant = constant;
+    state->profile = profile;
+    state->description = parsed.take_value();
+    const auto& target = query.outputs[0].result_schema->tensors[0];
+    if (target.sample_shape() != state->description.output.shape ||
+        target.descriptor.element_type !=
+            state->description.output.element_type)
+      return invalid();
+    auto output_grid = TileGrid::from_schema(*query.outputs[0].result_schema,
+                                             query.tile_extent);
+    if (!output_grid.ok())
+      return Answer(output_grid.status());
+    auto output_region = output_grid.value().region(query.writes[0].tile_index);
+    if (!output_region.ok())
+      return Answer(output_region.status());
+    const auto input =
+        source_region(constant, state->description, output_region.value());
+    const std::array<Region, 1> regions{input};
+    auto valid =
+        fixed_tensor::prepare_point_inputs(query, &state->inputs, &regions);
+    if (!valid.ok())
+      return Answer(valid);
+    ps_prepared_kernel_v8 result{};
+    result.struct_size = sizeof(result);
+    result.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+    result.context = state.release();
+    result.invoke_cpu = array_invoke;
+    result.release = [](const void* context) {
+      delete static_cast<const PreparedArray*>(context);
+    };
+    return Answer(result);
+  };
+  return operation;
 }
 }  // namespace
 Status register_numeric_arrays(OperationRegistry* registry) {
@@ -251,7 +302,7 @@ Status register_numeric_arrays(OperationRegistry* registry) {
        {std::make_pair("_strict", SequenceProfile::Strict),
         std::make_pair("_accelerated_apple_silicon",
                        SequenceProfile::AppleSilicon),
-        std::make_pair("_accelerated_x86_64", SequenceProfile::X86Avx2)}) {
+        std::make_pair("_accelerated_x86_64", SequenceProfile::X86Avx2)})
     for (bool constant : {true, false}) {
       auto status = registry->register_operation(array_operation(
           std::string(constant ? "numeric.constant" : "numeric.broadcast") +
@@ -260,7 +311,6 @@ Status register_numeric_arrays(OperationRegistry* registry) {
       if (!status.ok())
         return status;
     }
-  }
   return Status::success();
 }
 }  // namespace ps::plugin_internal

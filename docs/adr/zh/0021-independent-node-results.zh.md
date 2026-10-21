@@ -1,10 +1,11 @@
 # ADR 0021：独立路由命名结果
 
 - 状态：Accepted
+- 实现边界（2026-10-20）：命名 output/schema 语义保持。下文 PlanStep/instruction 与 storage reuse 描述为历史记录。Package 0.39 以物理 Call record 保留语义 call，执行选定 Task/Tile 闭包并发布独立 owning Result，不保留旧 Plan 表；参见[多输出](../../kernel-architecture/zh/Multi-Output-Operations.zh.md)与[物理 Plan 契约](../../kernel-architecture/zh/Compiler-and-Execution.zh.md)。
 - 英文权威文档：[ADR 0021](../0021-independent-node-results.md)
-- 当前边界：原决策中每个输出的 facet 集已被取代；每个输出携带解析后的结构化 Result schema。参见 [数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、[结构化 Result 与 tensor slot](../../kernel-architecture/zh/Global-Results.zh.md) 和 [Tensor 描述](../../kernel-architecture/zh/Tensor-Semantic-Metadata.zh.md)。
+- 历史边界：原决策中每个输出的 facet 集已被取代；每个输出携带解析后的结构化 Result schema。参见 [数据模型](../../kernel-architecture/zh/Data-Model.zh.md)、[结构化 Result 与 tensor slot](../../kernel-architecture/zh/Global-Results.zh.md) 和 [Tensor 描述](../../kernel-architecture/zh/Tensor-Semantic-Metadata.zh.md)。
 
-## 当前实现：声明与静态指令
+## 历史实现：声明与静态指令
 
 静态编译器保留全部 call 和输出声明，包括未使用的 sibling。
 `ExecutionPlan::steps()` 是完整物理契约表；`blocks()[i].instructions` 保存

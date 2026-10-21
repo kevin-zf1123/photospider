@@ -22,7 +22,7 @@ namespace detail {
  * structural constraints and batch axes, with domain-separated SHA-256 and
  * returns the
  * lowercase 64-character digest. It reads no sample data and makes no
- * validity claim. Physical layout is asserted separately. The returned string
+ * validity claim. Spatial topology is asserted separately. The returned string
  * belongs to the caller. Canonicalization and string allocation may throw;
  * calls are thread-safe.
  */
@@ -46,7 +46,12 @@ inline std::string layout_assertion(const ResultTensorLayout& layout) {
  * `axis`, when present, indexes cell axes and excludes the Result batch prefix.
  * Without a description, the caller supplies the axis explicitly. `keepdims`
  * leaves the selected cell axis with extent one. `layout` is `auto`, `view` or
- * `materialize`. `profile` selects one of the three CPU registrations. The
+ * `materialize`. Auto/materialize copy selected tiles to independent storage;
+ * a nonempty view task fails InvalidArgument without source payload reads.
+ * Empty performs static checks and emits no copy task. Source views may have
+ * legal signed/zero strides; output tiles use the fixed Plan's dense layout.
+ * Retained outputs survive source and context teardown.
+ * `profile` selects one of the three CPU registrations. The
  * helpers serialize every default into generated nodes; direct nodes must
  * specify their required values explicitly.
  */
@@ -73,10 +78,11 @@ struct ChannelHandle final {
  *
  * `source_metadata` is the inferred metadata for `input` and must describe a
  * Result schema with one tensor member and no fields. For a declared workflow
- * input, the helper checks the declared schema and physical layout. It stages
+ * input, the helper checks the declared schema and spatial topology. It stages
  * every node and handle before appending; generated A nodes carry canonical
- * schema/layout assertions for compile-time checks, including forward producer
- * references. The helper reads no samples and does not execute the workflow.
+ * schema/topology assertions for compile-time checks, including forward
+ * producer references. The helper reads no samples and does not execute the
+ * workflow.
  *
  * The channel axis is resolved on the tensor descriptor; Result batch axes
  * remain outside it. The helper returns handles `c0` through `c(C-1)` for the
@@ -87,7 +93,7 @@ struct ChannelHandle final {
  *
  * @param document Workflow to extend; unchanged if validation or staging fails.
  * @param input Source Result edge.
- * @param source_metadata Inferred schema, descriptor and physical layout.
+ * @param source_metadata Inferred schema, descriptor and spatial topology.
  * @param options Static extraction policy and CPU profile.
  * @return One handle per channel in index order, or an error such as
  *         `InvalidArgument`, `ResourceExhausted` or the source metadata status.

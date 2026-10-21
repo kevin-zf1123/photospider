@@ -12,8 +12,7 @@ enum class Backend : std::uint32_t { Cpu = 1, Gpu = 2 };
 struct PHOTOSPIDER_API OperationMetadata final {
   /** @brief Complete Result schema, owned for the metadata lifetime.
    * Required at operation boundaries. Tensor descriptors and structural
-   * grouping belong to the schema's members; validators bind to operation
-   * ports separately. No payload is held.
+   * grouping belong to the schema's members. No payload is held.
    */
   std::shared_ptr<const SchemaTemplate> result_schema = {};
 };

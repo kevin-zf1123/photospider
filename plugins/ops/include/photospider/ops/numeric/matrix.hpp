@@ -8,7 +8,7 @@
 #include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
-/** @brief Authors a Run-shared full-tensor operation for y=M*x+b.
+/** @brief Authors a fixed CPU tile operation for y=M*x+b.
  * The `vectors`, `matrix`, and `bias` input edges each reference one Result
  * tensor member under any member key. Their sample shapes are [...,Cin],
  * [Cout,Cin], and [Cout]; all dtypes match and are Float32 or Float64, Cin/Cout
@@ -18,21 +18,22 @@ namespace ps::numeric {
  * The returned node has no parameters, casts, implicit broadcast, inverse, or
  * homogeneous-coordinate division; singular matrices are valid.
  *
- * Nonempty demand validates Data, Validation, and Descriptor for every full
- * input and computes a complete dense output. Sparse and partial consumers
- * project that output; a change to any input dirties every observed output.
- * Empty demand publishes empty tensor coverage without matrix arithmetic.
+ * Each selected output tile declares the corresponding vector prefixes with
+ * all Cin components, selected matrix rows and selected bias channels. Reads
+ * use each input's grid; prepare checks fixed views before issue. Output tiles
+ * and arithmetic scratch are preallocated. Empty selection emits no tasks.
  * Products and their sum with bias are exact before one RN-even conversion.
  * Source NaN priority is vector components, selected matrix row, then bias.
  * A zero-times-infinity product or opposite infinities produce positive qNaN.
  * Finite exact zero is negative only when every product and bias are negative
  * zero; overflow to infinity succeeds.
  *
- * Shape and dtype failures return TypeMismatch/Schema. Source, typed
- * validation, budget, and cancellation failures retain their categories, and
- * failed work publishes no partial output. Full output storage and fixed
- * callback scratch must fit the host resource budget. Published Result storage
- * owns its lifetime beyond context retirement.
+ * Shape and dtype failures return TypeMismatch/Schema. Structural binding,
+ * resource and cancellation failures retain their categories. Failed work
+ * discards unpublished writes after accepted callbacks return. Selected output
+ * allocations and per-lane scratch enter block admission. Successful Result
+ * owners retain storage beyond context lifetime. Prepared state is immutable
+ * across Runs; mutable exact-dot and batch state is invocation-local.
  *
  * @param id Nonzero workflow node identifier.
  * @param vectors Workflow reference for the vectors Result input.

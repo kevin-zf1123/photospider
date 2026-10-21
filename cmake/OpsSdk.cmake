@@ -7,7 +7,6 @@ set(PHOTOSPIDER_OPS_SDK_SOURCES
   plugins/ops/common/domain/transfer_definition.cpp
   plugins/ops/common/domain/rgb_geometry.cpp
   plugins/ops/common/domain/rgb_geometry_codec.cpp
-  plugins/ops/common/domain/contracts.cpp
   plugins/ops/common/domain/description_editor.cpp
   plugins/ops/common/domain/color_array.cpp
   plugins/ops/common/domain/tensor_description.cpp

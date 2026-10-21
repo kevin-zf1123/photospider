@@ -18,7 +18,7 @@ clarification_status: complete
 
 # CRV-06B: color_ramp_cmyk
 
-Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member , under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -39,7 +39,7 @@ No CMYKA or implicit alpha association is provided; coverage may be handled by
 separate explicit data/operations. This clarification is complete; the current
 registry and shared ICC-resource infrastructure implement the public path below.
 
-Validate per-channel amounts only. Do not derive a total-ink limit from profile
+Per-channel finite [0,1] amounts are caller preconditions. Do not derive a total-ink limit from profile
 tables, redistribute K, perform black generation or alter the supplied recipe.
 Total-ink control and actual profile color conversion belong to separate explicit
 color-management operations. This ramp promises component interpolation, not
@@ -59,15 +59,9 @@ to the shared color-management dependency.
 Inherit RGB ramp's stops/input interface, K=1..65536, finite strictly increasing
 stops, clamp/reject (default clamp), scalar query finiteness, independently mixed
 Float32/Float64 input/stops/colors and output dtype defaulting to colors dtype.
-Output appends exactly four channels and carries the matching CMYK profile
-description. Input rank is 1..7 and logical input/color/output counts are <=2^40.
+Output appends exactly four channels interpreted by the explicit profile parameter; it carries no description. Input rank is 1..7 and logical input/color/output counts are <=2^40.
 
-The complete four-channel CMYK tuple is the observation/validation unit. Globally
-validate stops and every position after complete-input ordinary tile Needs input validation; mathematically use one or two
-complete colors. Direct hit/clamp/single-stop paths convert only that selected
-color; unused generic rows skip mathematical checks, while complete typed
-validation still applies. Attached source color descriptions
-must match the explicit static CMYK profile description.
+The complete four-channel CMYK tuple is the observation unit. Selected rows obey caller numerical preconditions. Hit/clamp/singleton paths convert one selected row; ordinary interpolation uses two rows. Static dependencies include all stops/colors tiles, so upstream failures remain visible even for numerically unused rows.
 
 Each channel is interpolated by the exact mathematical linear formula, with one
 final output-dtype rounding. Strict correctly rounds the whole formula; accelerated follows the shared
@@ -89,11 +83,10 @@ color_description is the proposed canonical description-helper String referring
 to the frozen profile resource, CMYK model, channel order C/M/Y/K, normalized ink
 units and alpha=none. It has no RGB primaries/gamma overrides or default printing
 profile. dtype is float32/float64, default colors dtype in constructors; policy
-is clamp/reject, default clamp. Direct nodes supply all three. If colors already
-has a color description, model/profile/channel interpretation must match.
+is clamp/reject, default clamp. Direct nodes supply all three. Results carry no attached color description.
 
 The host binds an immutable resource reference and retains its content for the
-compiled plan and exported values. Encoded metadata alone must not leave an
+prepared operation, compiled Plan and active kernels. Exported values retain their data backing independently. Encoded metadata alone must not leave an
 unresolvable pointer after context destruction. Resource loading is a separate
 authoring action; this callback does not read mutable profile paths or perform
 filesystem I/O. Rebinding a different profile requires a new compiled identity.
@@ -108,63 +101,30 @@ clamp and K=1 correctly convert the selected color directly. Values stay in
 no out-of-domain extrapolation is provided. The unchanged profile labels the
 four output amounts and is not numerically consulted by the interpolation.
 
-All formal strict and accelerated keys use Run-shared Result programs. A nonempty
-Run declares ordinary payload tile Needs  for every input, so
-typed and upstream validation covers complete tensor members. The executor reads
-authorized windows directly; the callback does not collect or copy complete input
-arrays. It validates all stops, then every input position, before color arithmetic.
-Each position uses one exact hit/clamp/singleton row or two enclosing rows for its
-mathematics. Generic color rows outside all evaluated stencils remain numerically
-unused, while their typed/upstream validation still applies. Empty reads no sample
-payload after static preparation.
+All profiles use the [fixed execution contract](CRV-06_color_ramp.md#fixed-execution-and-caller-preconditions). Each selected complete-color output tile has one CPU task. Its reads cover the corresponding query region and all stops/colors/p/q tiles, each closed on its own source grid. Runtime selection uses one exact-hit/clamp/singleton row or two enclosing rows. Generic unselected colors and denominators are numerically unused; upstream failures still propagate through declared tile dependencies.
 
-The `values` port publishes an immutable `photospider.tensor` v1 Result with `samples` shape `sample_shape(input)+[C]`, `atomic_trailing_axes=1`. The shared stage publishes the full internal output transactionally; the shared stage retains full internal coverage; public actors expose only requested complete tiles and global coordinates. Fragments expose requested regions while retaining the full output owner.
+The `values` Result uses `photospider.tensor` v1/member `samples`, descriptor shape `sample_shape(input)+[C]`, and `atomic_trailing_axes=1`. It carries no color description or input batch-axis partition. The kernel writes only selected dense output tiles, borrowing affine source views and owning fixed arithmetic scratch. Empty emits no task or sample read. Successful call publication follows required task completion in retirement order, and output storage survives context teardown.
 
-Arbitrary immutable source strides, offsets and unaligned storage are supported. Selected operation resources remain owned by preparation and execution; the output retains its data backing. Input edits invalidate complete recorded output demand. Numeric errors have Run scope; failed callbacks publish no color subset. Upstream, resource and cancellation errors retain their categories.
-
-Lookup work remains O(K+N log K), plus exact or certified arithmetic. Full output
-payload is N*C*sizeof(dtype), even for a small request. Account source owners/windows,
-fixed arithmetic workspace, the Root-owned ResourceVector stop index (8K element
-bytes plus allocator/metadata overhead), output and retained descriptors/resources.
-No per-output dependency records or point-state array is retained. Work/capacity and
-cancellation checks apply during scans, lookup, arithmetic and before publication;
-incomplete certification fails ResourceExhausted. No reduced-precision fallback is added.
+Finite ordered stops, finite queries, selected complete-color model/association validity, selected rational q>0, reject-domain membership and representable final output are unchecked caller preconditions. Lookup costs O(P log K) for P selected query points, plus exact/certified arithmetic; the kernel searches source stops directly without an O(K) copy. Static schemas, parameters, resources and kernel signatures remain checked. Cancellation and capacity failures stop execution without approximate substitution.
 
 ## Resources, errors and acceptance
 
-For N full-input color tuples, ordinary lookup work is O(K+N log K), plus exact
-four-channel interpolation and typed validation. Output payload is 4*N*b bytes;
-an optional packed stop index is 8K. Account immutable profile bytes and validator
-work once under actual shared ownership, plus all source windows, descriptor/index
-metadata, arithmetic limbs, output/scratch and simultaneous growth capacity.
-Many tiny outputs may retain one substantial profile resource; payload-only
-measurement does not capture that ancestry. No source profile or table is loaded
-outside host admission. Use RGB's cancellation intervals and the common resource,
-cache-off and publication/lifetime rules.
-
-Missing profile, unsupported profile class/version/space or invalid profile data
-fails authoring/compile/preflight with InvalidArgument/InvalidDomain; preserve
-resource-parser detail. Port/descriptor mismatch uses TypeMismatch. Invalid
-requested positions/stops, ink outside finite [0,1] or reject-domain lookup uses
-OperationFailed/InvalidDomain at Run scope. Valid convex numeric
-interpolation has no expected output overflow. Resource/cancellation/backend,
-stale and upstream/typed errors retain their original Status/source/scope.
-No partial color or unowned profile reference is published on failure.
+CMYK uses the [family resource contract](CRV-06_color_ramp.md#cmyk-resources). The resource validator runs once per preparation, including Empty and artifact import, without copying the complete profile. Missing resources return NotFound; unsupported or malformed ICC contents return InvalidArgument with parser detail. Resource admission and parser work limits preserve ResourceExhausted. Numerical ink/query/stop conditions are caller preconditions. No ICC CMM or automatic resource attachment to output Results occurs.
 
 Fixture under a valid frozen CMYK printing profile: stops=[0,1],
 colors=[[0,0,0,0],[1,0.5,0,0.25]], input=[0.5] ->
 values=[[0.5,0.25,0,0.125]]. An independent rational interpolation oracle
 verifies all three profiles by bits. Check K=1, exact stops, zeros, boundaries,
-irregular spacing, invalid ink/NaN in selected versus remote rows and all
+irregular spacing, unused generic rows containing invalid ink/NaN and all
 Float32/Float64 combinations. Sum of components may exceed a device's ink limit;
 the ramp intentionally does not turn that into an inferred TAC validation.
 
 Public WorkflowDocument fixtures must supply an actual validated profile
-resource and inspect output profile identity as well as amounts. Check different
+resource and inspect prepared resource identity as well as output amounts. Check different
 file paths with identical frozen content, changed content requiring recompilation,
-missing/RGB/DeviceLink/ICCmax/malformed profiles, exact read/dirty sets, partial
+missing/RGB/DeviceLink/ICCmax/malformed profiles, source-grid read closure, partial
 channel requests expanding to full CMYK, strides, low resource budgets, cancellation,
-cache-off and profile/value lifetime after context destruction. Create the public checks for the current operation change. CMYK/RGB conversion
+profile and value ownership after context destruction. Create the public checks for the current operation change. CMYK/RGB conversion
 requires its own profile transform.
 
 Profile-format references are the

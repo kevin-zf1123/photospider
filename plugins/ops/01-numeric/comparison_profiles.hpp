@@ -7,7 +7,7 @@
 
 namespace ps::plugin_internal::numeric_ops {
 // Compare four independent unsigned integer keys without numeric conversions.
-// Inputs and outputs are exactly four slots in admitted continuation scratch.
+// Inputs and outputs are exactly four slots in admitted invocation scratch.
 void compare_keys(const std::uint64_t* a, const std::uint64_t* b,
                   std::int64_t* greater, std::int64_t* less,
                   SequenceProfile profile);

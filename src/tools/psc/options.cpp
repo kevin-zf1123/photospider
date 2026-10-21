@@ -103,9 +103,9 @@ Invocation parse_options(int argc, char** argv, bool* json_diagnostics) {
   auto parsed = parse_arguments(
       argc, argv, json_diagnostics,
       {"--print-pipeline", "--list-optimizers", "--list-planners", "--verbose"},
-      {"-x", "--emit", "--planner", "--backend", "--tile-extent",
-       "--max-instructions", "--max-dependency-edges", "--help-optimizer",
-       "--help-planner", "--error-limit"},
+      {"-x", "--emit", "--planner", "--backend", "--tile-extent", "--max-tasks",
+       "--max-dependency-edges", "--help-optimizer", "--help-planner",
+       "--error-limit"},
       {"-O", "--opt-option", "--save-ir", "--release-ir-after-save"}, true);
   Invocation o;
   static_cast<CommonOptions&>(o) = std::move(parsed.common);
@@ -154,7 +154,7 @@ Invocation parse_options(int argc, char** argv, bool* json_diagnostics) {
   const std::set<std::string> planning_options = {"--planner",
                                                   "--backend",
                                                   "--tile-extent",
-                                                  "--max-instructions",
+                                                  "--max-tasks",
                                                   "--max-dependency-edges",
                                                   "--outputs",
                                                   "--requests"};
@@ -182,13 +182,13 @@ Invocation parse_options(int argc, char** argv, bool* json_diagnostics) {
   if (!o.planning.tile_extent ||
       (o.planning.tile_extent & (o.planning.tile_extent - 1)))
     throw ToolError("tile extent must be a positive power of two", 2);
-  if (o.has("--max-instructions"))
-    o.planning.maximum_instructions =
-        unsigned_number(o.get("--max-instructions"), "--max-instructions");
+  if (o.has("--max-tasks"))
+    o.planning.maximum_tasks =
+        unsigned_number(o.get("--max-tasks"), "--max-tasks");
   if (o.has("--max-dependency-edges"))
     o.planning.maximum_dependency_edges = unsigned_number(
         o.get("--max-dependency-edges"), "--max-dependency-edges");
-  if (!o.planning.maximum_instructions || !o.planning.maximum_dependency_edges)
+  if (!o.planning.maximum_tasks || !o.planning.maximum_dependency_edges)
     throw ToolError("planning limits must be positive", 2);
   if (o.has("--outputs"))
     o.planning.output_names = output_names(o.get("--outputs"));

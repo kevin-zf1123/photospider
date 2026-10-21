@@ -1,9 +1,10 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
@@ -15,13 +16,14 @@
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
 #include "common/domain/model_coordinates.hpp"
+#include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/status_helpers.hpp"
 #include "photospider/core/utf8_validation.hpp"
 #include "photospider/data/region_runs.hpp"
 #include "photospider/ops/format/channel_editing.hpp"
-#include "photospider/plugin/tile_helpers.hpp"
+#include "photospider/plugin/tile_geometry.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -382,281 +384,336 @@ Result<OperationPreparation> prepare(
   return Result<OperationPreparation>(status);
 }
 
-using Poll = Result<ResultProgramPoll>;
-ResultBuilder assembly_builder(const ResultProgramPhase& phase,
-                               bool /*empty*/) {
-  auto result = take(ResultBuilder::start(
-      phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {}, phase.query.tile_extent));
+struct InputPort final {
+  TileGrid grid;
+  std::vector<std::pair<TileIndex, std::uint32_t>> slots;
+  std::array<std::int8_t, 8> output_axes{};
+  unsigned rank = 0;
+  int channel_axis = -1;
+  bool scalar = false;
+};
+InputPort input_port(const OperationMetadata& metadata, const Assembly& a,
+                     unsigned port, unsigned batches) {
+  InputPort result;
+  result.rank = metadata.result_schema->tensors[0].sample_shape().size();
+  result.scalar = a.scalars[port];
+  if (a.axes[port])
+    result.channel_axis = batches + *a.axes[port];
+  for (unsigned axis = 0; axis < result.rank; ++axis) {
+    if (result.scalar) {
+      result.output_axes[axis] = -1;
+    } else if (axis < batches) {
+      result.output_axes[axis] = axis;
+    } else if (static_cast<int>(axis) == result.channel_axis) {
+      result.output_axes[axis] = batches + a.axis;
+    } else {
+      const auto cell = axis - batches -
+                        (result.channel_axis >= 0 &&
+                         static_cast<int>(axis) > result.channel_axis);
+      result.output_axes[axis] = batches + cell + (cell >= a.axis);
+    }
+  }
   return result;
 }
-Poll empty_result(const ResultProgramPhase& phase) try {
-  auto result = assembly_builder(phase, true);
-  return Poll(ResultPublication{take(result.seal()), true});
-} catch (const Status& status) {
-  return Poll(status);
+std::optional<Region> source_region(const Region& output, unsigned channel_axis,
+                                    const InputPort& port, const Span& span) {
+  const auto& channel = output.dimensions()[channel_axis];
+  const auto begin = std::max(channel.offset, span.destination);
+  const auto end =
+      std::min(channel.offset + channel.extent, span.destination + span.count);
+  if (begin >= end)
+    return {};
+  if (port.scalar)
+    return Region({{0, 1}});
+  std::vector<RegionDimension> dimensions;
+  for (unsigned axis = 0; axis < port.rank; ++axis)
+    dimensions.push_back(
+        static_cast<int>(axis) == port.channel_axis
+            ? RegionDimension{span.source + begin - span.destination,
+                              end - begin}
+            : output.dimensions()[port.output_axes[axis]]);
+  return Region(std::move(dimensions));
 }
-Region span_region(const ResultTensorSpec& output, const Assembly& assembly,
-                   const Span& span) {
-  auto dims = Region::whole(output.sample_shape()).dimensions();
-  dims[output.batch_axes.size() + assembly.axis] = {span.destination,
-                                                    span.count};
-  return Region(std::move(dims));
-}
-std::vector<ResultViewAxis> mapping(const ResultProgramQuery& query,
-                                    const Assembly& a, const Span& span) {
-  const auto& source = query.inputs[span.port].result_schema->tensors[0];
-  const auto batches = query.output.result_schema->tensors[0].batch_axes.size();
-  const auto source_axis = a.axes[span.port];
-  std::vector<ResultViewAxis> axes(source.sample_shape().size());
-  for (std::size_t i = 0; i < axes.size(); ++i) {
-    if (a.scalars[span.port]) {
-      axes[i].output_axis = -1;
-    } else if (i < batches) {
-      axes[i].output_axis = i;
-    } else if (source_axis && i - batches == *source_axis) {
-      axes[i].output_axis = batches + a.axis;
-      axes[i].source_origin = span.source;
-      axes[i].output_origin = span.destination;
-    } else {
-      const auto j =
-          i - batches - (source_axis && i - batches > *source_axis ? 1 : 0);
-      axes[i].output_axis = batches + (j < a.axis ? j : j + 1);
+Result<std::set<TileIndex>> required_tiles(
+    const Region& output, unsigned channel_axis, const Assembly& assembly,
+    const InputPort& port, unsigned port_index, const ResourceBudget& budget,
+    std::uint64_t maximum_tiles) {
+  using Answer = Result<std::set<TileIndex>>;
+  auto admitted = budget.consume({1});
+  if (!admitted.ok())
+    return Answer(admitted);
+  std::set<TileIndex> result;
+  if (assembly.layout == "view")
+    return Answer(std::move(result));
+  for (auto index : assembly.by_port[port_index]) {
+    auto charged = budget.consume({1});
+    if (!charged.ok())
+      return Answer(charged);
+    auto region =
+        source_region(output, channel_axis, port, assembly.spans[index]);
+    if (!region)
+      continue;
+    // Bound the closure before constructing even its compressed intervals.
+    // During prepare the bound is the number of supplied immutable read slots.
+    std::uint64_t count = 1;
+    for (unsigned axis = 0; axis < port.grid.rank(); ++axis) {
+      const auto dimension = region->dimensions()[axis];
+      std::uint64_t extent = 1;
+      if (port.grid.batch_axis_mask() & (1U << axis))
+        extent = dimension.extent;
+      else if (axis == port.grid.height_axis() ||
+               axis == port.grid.width_axis())
+        extent = (dimension.offset + dimension.extent - 1) /
+                     port.grid.tile_extent() -
+                 dimension.offset / port.grid.tile_extent() + 1;
+      if (extent > maximum_tiles / count)
+        return Answer(
+            {ErrorCode::ResourceExhausted, "assembly input tile limit"});
+      count *= extent;
     }
-  }
-  return axes;
-}
-struct Projected final {
-  const void* owner = nullptr;
-  std::uint64_t offset = 0;
-  std::array<RegionDimension, 8> dims{};
-  std::array<std::int64_t, 8> strides{};
-};
-Status unavailable_view() {
-  return {ErrorCode::InvalidArgument, "no common affine owner mapping",
-          FailureReason::ViewUnavailable};
-}
-// Retain the pre-Result whole-query view predicate, including cross-box owners.
-Status generic_view(const ResultProgramPhase& phase, const Assembly& a,
-                    const Footprint& outputs) {
-  ResourceVector<Projected> views{
-      ResourceAllocator<Projected>(phase.resources)};
-  const auto& output = phase.query.output.result_schema->tensors[0];
-  const auto rank = output.sample_shape().size();
-  const auto channel_axis = output.batch_axes.size() + a.axis;
-  for (std::size_t s = 0; s < a.spans.size(); ++s) {
-    const auto& span = a.spans[s];
-    auto clipped = take(outputs.intersect(take(Footprint::from_regions(
-        output.sample_shape(), {span_region(output, a, span)}))));
-    const auto axes = mapping(phase.query, a, span);
-    std::function<Status(const Region&, const ResultTensorReadWindow&)> inspect;
-    inspect = [&](const Region& box, const ResultTensorReadWindow& window) {
-      require(phase.consume_work(rank + axes.size()));
-      auto affine = window.affine_view();
-      if (!affine.ok()) {
-        if (affine.status().code != ErrorCode::NotFound)
-          return affine.status();
-        auto partitioned = window.visit_backing_regions(
-            phase.resources, [&](const Region& region) {
-              const auto selected =
-                  format_result::mapped_preimage(box, region, axes);
-              if (selected) {
-                const auto& part = *selected;
-                auto source =
-                    take(phase.tensors->at({span.port, 0})
-                             .acquire(format_result::mapped_region(part, axes),
-                                      phase.query.cancellation));
-                auto status = inspect(part, source);
-                if (!status.ok())
-                  return status;
-              }
-              return Status::success();
-            });
-        if (!partitioned.ok())
-          return partitioned.status();
-        return partitioned.value() ? Status::success() : unavailable_view();
-      }
-      Projected view;
-      view.owner = affine.value().storage().get();
-      std::copy(box.dimensions().begin(), box.dimensions().end(),
-                view.dims.begin());
-      std::vector<std::uint64_t> at;
-      for (std::size_t i = 0; i < axes.size(); ++i) {
-        const auto& axis = axes[i];
-        at.push_back(take(axis.source_coordinate(
-            axis.output_axis < 0 ? 0
-                                 : box.dimensions()[axis.output_axis].offset)));
-        if (axis.output_axis >= 0)
-          view.strides[axis.output_axis] =
-              affine.value().layout().byte_strides[i];
-      }
-      view.offset = take(affine.value().byte_address(at));
-      views.push_back(view);
-      return Status::success();
-    };
-    for (const auto& box : clipped.boxes()) {
-      auto window = take(phase.tensors->at({span.port, 0})
-                             .acquire(format_result::mapped_region(box, axes),
-                                      phase.query.cancellation));
-      auto status = inspect(box, window);
+    auto tiles = sdk::tiles_for_region(budget, port.grid, *region);
+    if (!tiles.ok())
+      return Answer(tiles.status());
+    for (auto tile : tiles.value()) {
+      auto status = budget.consume({1});
       if (!status.ok())
-        return status;
+        return Answer(status);
+      result.insert(tile);
+      if (result.size() > maximum_tiles)
+        return Answer(
+            {ErrorCode::ResourceExhausted, "assembly input tile union limit"});
     }
   }
-  if (views.empty())
-    return unavailable_view();
-  const auto& first = views.front();
-  auto strides = first.strides;
-  bool channel_stride = first.dims[channel_axis].extent > 1;
-  for (const auto& view : views) {
-    require(phase.consume_work(rank + 1));
-    if (view.owner != first.owner)
-      return unavailable_view();
-    for (std::size_t d = 0; d < rank; ++d)
-      if (d != channel_axis && strides[d] != view.strides[d])
-        return unavailable_view();
-    if (!channel_stride &&
-        view.dims[channel_axis].offset != first.dims[channel_axis].offset) {
-      __int128 delta = static_cast<__int128>(view.offset) - first.offset;
-      for (std::size_t d = 0; d < rank; ++d)
-        if (d != channel_axis)
-          delta -= (static_cast<__int128>(view.dims[d].offset) -
-                    first.dims[d].offset) *
-                   strides[d];
-      const auto dc = static_cast<__int128>(view.dims[channel_axis].offset) -
-                      first.dims[channel_axis].offset;
-      if (delta % dc || delta / dc < INT64_MIN || delta / dc > INT64_MAX)
-        return unavailable_view();
-      strides[channel_axis] = delta / dc;
-      channel_stride = true;
+  return Answer(std::move(result));
+}
+Result<OperationProgram> lower(const OperationLowering& query) {
+  using Answer = Result<OperationProgram>;
+  const auto& assembly = *static_cast<const Assembly*>(query.static_state);
+  const auto& spec = query.outputs[0].result_schema->tensors[0];
+  const auto batches = spec.batch_axes.size();
+  auto output =
+      TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  std::vector<InputPort> inputs;
+  for (unsigned i = 0; i < query.inputs.size(); ++i) {
+    auto port = input_port(query.inputs[i], assembly, i, batches);
+    auto grid = TileGrid::from_schema(*query.inputs[i].result_schema,
+                                      query.tile_extent);
+    if (!grid.ok())
+      return Answer(grid.status());
+    port.grid = grid.take_value();
+    inputs.push_back(std::move(port));
+  }
+  ResourceLimits limits;
+  limits.maximum_work = query.limits.maximum_work;
+  ResourceBudget budget(limits);
+  OperationProgramBuilder builder(query);
+  for (const auto& member : query.requests[0].members)
+    for (auto tile : member.second) {
+      auto task = builder.add_task("assemble", "channel-assembly-copy-v1");
+      if (!task.ok())
+        return Answer(task.status());
+      auto region = output.value().region(tile);
+      if (!region.ok())
+        return Answer(region.status());
+      for (unsigned i = 0; i < inputs.size(); ++i) {
+        auto reads =
+            required_tiles(region.value(), batches + assembly.axis, assembly,
+                           inputs[i], i, budget, query.limits.maximum_records);
+        if (!reads.ok())
+          return Answer(reads.status());
+        if (reads.value().empty()) {
+          auto status = builder.read_input_schema(task.value(), i);
+          if (!status.ok())
+            return Answer(status);
+        }
+        for (auto source : reads.value()) {
+          auto status = builder.read_input(task.value(), i, 0, source);
+          if (!status.ok())
+            return Answer(status);
+        }
+      }
+      auto status = builder.write_output(task.value(), 0, member.first, tile);
+      if (!status.ok())
+        return Answer(status);
+    }
+  return builder.finish();
+}
+struct PreparedAssembly final {
+  std::vector<InputPort> inputs;
+  std::vector<Span> spans;
+  unsigned axis = 0, width = 0;
+  bool require_view = false;
+};
+void invoke(const ps_kernel_invocation_v8* invocation,
+            ps_kernel_status_v8* status) noexcept {
+  const auto cancelled = [&] {
+    return invocation->cancellation.is_cancelled &&
+           invocation->cancellation.is_cancelled(
+               invocation->cancellation.context);
+  };
+  if (cancelled()) {
+    *status = kernel_failure(ErrorCode::Cancelled);
+    return;
+  }
+  const auto& state =
+      *static_cast<const PreparedAssembly*>(invocation->prepared_context);
+  if (state.require_view) {
+    *status = kernel_failure(ErrorCode::InvalidArgument,
+                             "ViewUnavailable: fixed assembly requires copy",
+                             FailureReason::ViewUnavailable);
+    return;
+  }
+  const auto& output = invocation->outputs[0];
+  std::array<std::uint64_t, 8> at{}, source{};
+  std::uint64_t samples = 1;
+  for (unsigned axis = 0; axis < output.layout->rank; ++axis) {
+    at[axis] = output.layout->origin[axis];
+    samples *= output.layout->shape[axis];
+  }
+  auto* destination =
+      static_cast<std::uint8_t*>(output.allocation) + output.byte_offset;
+  const ps_kernel_const_view_v8* cached = nullptr;
+  unsigned cached_port = UINT32_MAX;
+  for (std::uint64_t sample = 0; sample < samples; ++sample) {
+    if (sample % 256 == 0 && cancelled()) {
+      *status = kernel_failure(ErrorCode::Cancelled);
+      return;
+    }
+    const auto next =
+        std::upper_bound(state.spans.begin(), state.spans.end(), at[state.axis],
+                         [](std::uint64_t channel, const Span& span) {
+                           return channel < span.destination;
+                         });
+    const auto& span = *std::prev(next);
+    const auto& port = state.inputs[span.port];
+    for (unsigned axis = 0; axis < port.rank; ++axis)
+      source[axis] = port.scalar ? 0
+                     : static_cast<int>(axis) == port.channel_axis
+                         ? span.source + at[state.axis] - span.destination
+                         : at[port.output_axes[axis]];
+    bool contained = cached && cached_port == span.port;
+    for (unsigned axis = 0; contained && axis < port.rank; ++axis)
+      contained = source[axis] >= cached->layout->origin[axis] &&
+                  source[axis] - cached->layout->origin[axis] <
+                      cached->layout->shape[axis];
+    if (!contained) {
+      const auto tile = fixed_tensor::input_tile(port.grid, source);
+      const auto slot =
+          std::lower_bound(port.slots.begin(), port.slots.end(), tile,
+                           [](const auto& entry, TileIndex index) {
+                             return entry.first < index;
+                           });
+      cached = &invocation->inputs[slot->second];
+      cached_port = span.port;
+    }
+    __int128 offset = cached->byte_offset;
+    for (unsigned axis = 0; axis < port.rank; ++axis)
+      offset +=
+          static_cast<__int128>(source[axis] - cached->layout->origin[axis]) *
+          cached->layout->strides[axis];
+    std::memcpy(destination + sample * state.width,
+                static_cast<const std::uint8_t*>(cached->allocation) +
+                    static_cast<std::ptrdiff_t>(offset),
+                state.width);
+    for (unsigned axis = output.layout->rank; axis-- > 0;) {
+      if (++at[axis] < output.layout->origin[axis] + output.layout->shape[axis])
+        break;
+      at[axis] = output.layout->origin[axis];
     }
   }
-  for (const auto& view : views) {
-    require(phase.consume_work(rank + 1));
-    __int128 expected = first.offset;
-    for (std::size_t d = 0; d < rank; ++d)
-      expected +=
-          (static_cast<__int128>(view.dims[d].offset) - first.dims[d].offset) *
-          strides[d];
-    if (expected != view.offset ||
-        (view.dims[channel_axis].extent > 1 &&
-         strides[channel_axis] != view.strides[channel_axis]))
-      return unavailable_view();
-  }
+  *status = {};
+}
+Status output_signature(const KernelPreparation& query, Region* output) {
+  const auto invalid = [] {
+    return Status{ErrorCode::TypeMismatch, "invalid assembly output signature"};
+  };
+  if (!query.static_state || query.outputs.size() != 1 ||
+      query.writes.size() != 1 || !query.task_parameters.empty() ||
+      query.scratch != std::array<std::uint64_t, 3>{})
+    return invalid();
+  const auto& write = query.writes[0];
+  const auto& schema = *query.outputs[0].result_schema;
+  auto grid = TileGrid::from_schema(schema, query.tile_extent);
+  if (!grid.ok())
+    return grid.status();
+  auto region = grid.value().region(write.tile_index);
+  if (!region.ok())
+    return region.status();
+  if (write.port || write.member || write.domain != physical::Domain::Host ||
+      write.layout.element_type != schema.tensors[0].descriptor.element_type ||
+      !fixed_tensor::matches_region(write.layout, region.value()))
+    return invalid();
+  *output = region.take_value();
   return Status::success();
 }
-struct State final {
-  const Assembly* assembly;
-  Footprint output;
-  explicit State(const Assembly* value) : assembly(value) {}
-  Poll poll(const ResultProgramPhase& phase) try {
-    auto scratch =
-        take(phase.resources.reserve(ResourceCapacity::host(16384, 16384)));
-    const auto& spec = phase.query.output.result_schema->tensors[0];
-    output = phase.query.tensor_outputs
-                 ? *phase.query.tensor_outputs
-                 : take(Footprint::all(spec.sample_shape()));
-    const auto& supplied = phase;
-    auto result = assembly_builder(phase, false);
-    std::string policy = assembly->layout;
-    if (!spec.layout.spatial && policy != "materialize") {
-      auto available = generic_view(supplied, *assembly, output);
-      if (!available.ok()) {
-        if (policy == "view" || !format_result::view_unavailable(available))
-          return Poll(available);
-        policy = "materialize";
-      }
+Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
+  using Answer = Result<ps_prepared_kernel_v8>;
+  Region output;
+  auto valid = output_signature(query, &output);
+  if (!valid.ok())
+    return Answer(valid);
+  const auto& assembly = *static_cast<const Assembly*>(query.static_state);
+  if (query.inputs.size() != assembly.axes.size())
+    return Answer({ErrorCode::TypeMismatch, "invalid assembly input arity"});
+  const auto& spec = query.outputs[0].result_schema->tensors[0];
+  const auto batches = spec.batch_axes.size();
+  auto state = std::make_unique<PreparedAssembly>();
+  state->axis = batches + assembly.axis;
+  state->width = TensorSpan::element_size(spec.descriptor.element_type);
+  state->require_view = assembly.layout == "view";
+  const auto channel = output.dimensions()[state->axis];
+  for (const auto& span : assembly.spans)
+    if (span.destination < channel.offset + channel.extent &&
+        channel.offset < span.destination + span.count)
+      state->spans.push_back(span);
+  std::size_t slot = 0;
+  ResourceLimits limits;
+  limits.maximum_work = physical::ValidationLimits{}.maximum_work;
+  ResourceBudget budget(limits);
+  for (unsigned i = 0; i < query.inputs.size(); ++i) {
+    auto port = input_port(query.inputs[i], assembly, i, batches);
+    auto grid = TileGrid::from_schema(*query.inputs[i].result_schema,
+                                      query.tile_extent);
+    if (!grid.ok())
+      return Answer(grid.status());
+    port.grid = grid.take_value();
+    auto reads = required_tiles(output, state->axis, assembly, port, i, budget,
+                                query.reads.size() - slot);
+    if (!reads.ok())
+      return Answer(reads.status());
+    for (auto tile : reads.value()) {
+      if (slot >= query.reads.size())
+        return Answer({ErrorCode::TypeMismatch, "missing assembly input slot"});
+      const auto& read = query.reads[slot];
+      auto region = port.grid.region(tile);
+      if (!region.ok())
+        return Answer(region.status());
+      if (read.port != i || read.member || read.tile_index != tile ||
+          read.domain != physical::Domain::Host ||
+          read.layout.element_type != spec.descriptor.element_type ||
+          !fixed_tensor::matches_region(read.layout, region.value()))
+        return Answer({ErrorCode::TypeMismatch, "invalid assembly input slot"});
+      port.slots.push_back({tile, static_cast<std::uint32_t>(slot++)});
     }
-    require(format_result::planes(spec, output, [&](const Region& box) {
-      if (spec.layout.spatial && policy != "materialize") {
-        std::uint64_t piece_bytes = 0;
-        constexpr auto metadata_per_piece =
-            sizeof(ResultTensorViewPiece) +
-            8 * (sizeof(ResultViewAxis) + sizeof(RegionDimension));
-        if (!core_internal::checked_multiply(assembly->spans.size(),
-                                             metadata_per_piece, &piece_bytes))
-          return Status{ErrorCode::ResourceExhausted, {}};
-        auto piece_memory = take(phase.resources.reserve(
-            ResourceCapacity::host(piece_bytes, piece_bytes)));
-        ResourceVector<ResultTensorReadWindow> windows{
-            ResourceAllocator<ResultTensorReadWindow>(phase.resources)};
-        std::vector<ResultTensorViewPiece> pieces;
-        windows.reserve(assembly->spans.size());
-        pieces.reserve(assembly->spans.size());
-        for (const auto& span : assembly->spans) {
-          auto clipped =
-              take(Footprint::from_regions(spec.sample_shape(), {box}));
-          clipped = take(clipped.intersect(take(Footprint::from_regions(
-              spec.sample_shape(), {span_region(spec, *assembly, span)}))));
-          for (const auto& part : clipped.boxes()) {
-            ResultTensorViewTransform transform;
-            transform.source_axes = mapping(phase.query, *assembly, span);
-            windows.push_back(
-                take(phase.tensors->at({span.port, 0})
-                         .acquire(format_result::mapped_region(
-                                      part, transform.source_axes),
-                                  phase.query.cancellation)));
-            pieces.push_back({nullptr, part, std::move(transform)});
-          }
-        }
-        // Bind borrowed pointers only after the window vector is complete.
-        for (std::size_t i = 0; i < pieces.size(); ++i)
-          pieces[i].source = &windows[i];
-        auto status = result.publish_tensor_view(0, box, pieces,
-                                                 phase.query.cancellation);
-        if (status.ok())
-          return status;
-        if (!format_result::view_unavailable(status))
-          return status;
-        if (policy == "view")
-          return unavailable_view();
-      }
-      for (std::size_t s = 0; s < assembly->spans.size(); ++s) {
-        const auto& span = assembly->spans[s];
-        auto clipped =
-            take(Footprint::from_regions(spec.sample_shape(), {box}));
-        clipped = take(clipped.intersect(take(Footprint::from_regions(
-            spec.sample_shape(), {span_region(spec, *assembly, span)}))));
-        const auto axes = mapping(phase.query, *assembly, span);
-        for (const auto& part : clipped.boxes()) {
-          auto window =
-              take(phase.tensors->at({span.port, 0})
-                       .acquire(format_result::mapped_region(part, axes),
-                                phase.query.cancellation));
-          auto status = format_result::publish(
-              supplied, &result, part, window, axes,
-              spec.layout.spatial ? "materialize" : policy, span.port);
-          if (!status.ok())
-            return status;
-        }
-      }
-      return Status::success();
-    }));
-    return Poll(ResultPublication{take(result.seal()), true});
-  } catch (const Status& status) {
-    return Poll(status);
+    state->inputs.push_back(std::move(port));
   }
-};
+  if (slot != query.reads.size())
+    return Answer({ErrorCode::TypeMismatch, "extra assembly input slots"});
+  ps_prepared_kernel_v8 kernel{};
+  kernel.struct_size = sizeof(kernel);
+  kernel.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  kernel.context = state.release();
+  kernel.invoke_cpu = invoke;
+  kernel.release = [](const void* context) {
+    delete static_cast<const PreparedAssembly*>(context);
+  };
+  return Answer(kernel);
+}
 struct ScalarState final {
   std::array<std::uint8_t, 8> bits{};
   std::size_t width = 0;
-  Poll poll(const ResultProgramPhase& phase) try {
-    auto result = assembly_builder(phase, true);
-    require(phase.consume_work(width));
-    require(result.publish_tensor_kernel(
-        0, Region::whole({1}),
-        [&](const auto& writers) {
-          auto row = writers[0].row_run({0});
-          if (!row.ok())
-            return row.status();
-          std::memcpy(row.value().data, bits.data(), width);
-          return Status::success();
-        },
-        phase.query.cancellation));
-    return Poll(ResultPublication{take(result.seal()), true});
-  } catch (const Status& status) {
-    return Poll(status);
-  }
 };
 
 OperationDefinition definition(const std::string& key, int member,
@@ -671,7 +728,6 @@ OperationDefinition definition(const std::string& key, int member,
   t.repeated_minimum = 1;
   t.repeated_maximum = 1024;
   t.repeated_match = false;
-  t.cacheable = false;
   t.requires_metadata_specialization = true;
   t.parameter_schema = {
       {"input_descriptions", OperationParameterType::String, false},
@@ -695,50 +751,25 @@ OperationDefinition definition(const std::string& key, int member,
   out.key = "values";
   out.output_schema = port;
   out.result_schema = tensor_ops::scalar_schema();
-  out.continuation_bytes = sizeof(State);
-  out.maximum_dependency_stages = 17;
   op.prepare_static = [member, profile](const auto& inputs,
                                         const auto& params) {
     return prepare(inputs, params, member, profile);
   };
-  op.map_dependencies =
-      [](const ResultStaticQuery& compiled) -> Result<ResultStaticMapping> {
-    try {
-      const auto query = sdk::static_query_view(compiled);
-      const auto* assembly =
-          static_cast<const Assembly*>(compiled.prepared.state());
-      const auto& spec = query.output.result_schema->tensors[0];
-      const auto output = query.tensor_outputs
-                              ? *query.tensor_outputs
-                              : take(Footprint::all(spec.sample_shape()));
-      ResultStaticMapping result;
-      for (std::uint32_t port = 0; port < query.inputs.size(); ++port) {
-        auto samples = take(Footprint::none(
-            query.inputs[port].result_schema->tensors[0].sample_shape()));
-        for (auto index : assembly->by_port[port]) {
-          const auto& span = assembly->spans[index];
-          const auto clipped =
-              take(output.intersect(take(Footprint::from_regions(
-                  spec.sample_shape(), {span_region(spec, *assembly, span)}))));
-          const auto axes = mapping(query, *assembly, span);
-          for (const auto& box : clipped.boxes())
-            samples = take(samples.unite(take(Footprint::from_regions(
-                samples.shape(), {format_result::mapped_region(box, axes)}))));
-        }
-        result.inputs.push_back(take(sdk::tile_need_for_samples(
-            compiled, port, 0, samples, samples.empty())));
-      }
-      return Result<ResultStaticMapping>(std::move(result));
-    } catch (const Status& status) {
-      return Result<ResultStaticMapping>(status);
-    }
-  };
-  op.start_result = [](const ResultProgramQuery& query,
-                       const BufferAllocator& allocator) {
-    if (query.tensor_outputs && query.tensor_outputs->empty())
-      return ResultContinuation::stateless<empty_result>();
-    return ResultContinuation::make<State>(
-        allocator, static_cast<const Assembly*>(query.prepared->state()));
+  op.lower = lower;
+  op.prepare_kernel =
+      [](const physical::KernelDesc& kernel,
+         const physical::Placement& placement, const KernelPreparation& query,
+         const ResourceSet&,
+         const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    if (kernel.symbol != "assemble" ||
+        kernel.contract != "channel-assembly-copy-v1")
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::TypeMismatch, "unknown assembly kernel"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::BackendUnavailable, "assembly requires CPU Host"});
+    return prepare_kernel(query);
   };
   return op;
 }
@@ -781,7 +812,6 @@ OperationDefinition scalar_literal(const std::string& key,
   auto& t = op.traits;
   t.input_count = 0;
   t.requires_metadata_specialization = true;
-  t.cacheable = false;
   t.parameter_schema = {{"dtype", OperationParameterType::Int64},
                         {"bits", OperationParameterType::String}};
   auto& out = t.outputs[0];
@@ -789,8 +819,6 @@ OperationDefinition scalar_literal(const std::string& key,
 
   out.output_schema.element_type_mask = 127;
   out.result_schema = tensor_ops::scalar_schema();
-  out.continuation_bytes = sizeof(ScalarState);
-  out.maximum_dependency_stages = 1;
   op.prepare_static =
       [profile](const auto&,
                 const auto& parameters) -> Result<OperationPreparation> {
@@ -815,12 +843,62 @@ OperationDefinition scalar_literal(const std::string& key,
     prepared.state = std::move(state);
     return Answer(std::move(prepared));
   };
-  op.start_result = [](const ResultProgramQuery& query,
-                       const BufferAllocator& allocator) {
-    if (query.tensor_outputs && query.tensor_outputs->empty())
-      return ResultContinuation::stateless<empty_result>();
-    return ResultContinuation::make<ScalarState>(
-        allocator, *static_cast<const ScalarState*>(query.prepared->state()));
+  op.lower = [](const OperationLowering& query) -> Result<OperationProgram> {
+    OperationProgramBuilder builder(query);
+    for (const auto& member : query.requests[0].members)
+      for (auto tile : member.second) {
+        auto task = builder.add_task("literal", "channel-scalar-bits-v1");
+        if (!task.ok())
+          return Result<OperationProgram>(task.status());
+        auto status = builder.write_output(task.value(), 0, member.first, tile);
+        if (!status.ok())
+          return Result<OperationProgram>(status);
+      }
+    return builder.finish();
+  };
+  op.prepare_kernel =
+      [](const physical::KernelDesc& kernel,
+         const physical::Placement& placement, const KernelPreparation& query,
+         const ResourceSet&,
+         const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    using Answer = Result<ps_prepared_kernel_v8>;
+    if (kernel.symbol != "literal" ||
+        kernel.contract != "channel-scalar-bits-v1" || !query.inputs.empty() ||
+        !query.reads.empty())
+      return Answer({ErrorCode::TypeMismatch, "invalid scalar literal kernel"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Answer(
+          {ErrorCode::BackendUnavailable, "scalar literal requires CPU Host"});
+    Region region;
+    auto valid = output_signature(query, &region);
+    if (!valid.ok())
+      return Answer(valid);
+    ps_prepared_kernel_v8 result{};
+    result.struct_size = sizeof(result);
+    result.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+    result.context =
+        new ScalarState(*static_cast<const ScalarState*>(query.static_state));
+    result.release = [](const void* context) {
+      delete static_cast<const ScalarState*>(context);
+    };
+    result.invoke_cpu = [](const ps_kernel_invocation_v8* invocation,
+                           ps_kernel_status_v8* status) {
+      if (invocation->cancellation.is_cancelled &&
+          invocation->cancellation.is_cancelled(
+              invocation->cancellation.context)) {
+        *status = kernel_failure(ErrorCode::Cancelled);
+        return;
+      }
+      const auto& state =
+          *static_cast<const ScalarState*>(invocation->prepared_context);
+      const auto& output = invocation->outputs[0];
+      std::memcpy(
+          static_cast<std::uint8_t*>(output.allocation) + output.byte_offset,
+          state.bits.data(), state.width);
+      *status = {};
+    };
+    return Answer(result);
   };
   return op;
 }

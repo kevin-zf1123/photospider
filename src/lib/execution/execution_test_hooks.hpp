@@ -1,294 +1,30 @@
 #pragma once
 
 #include <cstdint>
-#include <string_view>
 
-#include "photospider/plugin/operation_registry.hpp"
+#include "photospider/core/status.hpp"
 
 namespace ps::execution_testing {
-enum class TimingKind : std::uint8_t {
-  ValueMaterialization,
-  NativeGather,
-  AtlasMaterialization,
-  ReadyDispatch,
-  CompletionPublication,
-  FinalAssembly,
-};
-using ExecutionTimingHook = void (*)(TimingKind, std::uint64_t, std::uint64_t,
-                                     bool) noexcept;
-ExecutionTimingHook execution_timing_hook() noexcept;
-
-/**
- * @brief Callback invoked after one backend callback enters its waiting queue.
- * @param backend Exact CPU or optional GPU lane holding the callback.
- * @return No value.
- * @throws Any test exception, which the notification boundary fences.
- * @note The pool mutex remains held so the matching worker cannot pop until the
- * callback returns; use only for deterministic noninstalled regressions.
- */
-using CallbackQueuedHook = void (*)(Backend backend);
-
-/**
- * @brief Scheduler-owned failure boundaries exposed to deterministic tests.
- *
- * @note Values identify only noninstalled test-kernel observation points; they
- * do not extend the public execution status or installed ABI.
- */
-enum class SchedulerFailurePoint : std::uint8_t {
-  /** @brief A selected GPU step has no local GPU lane and cannot fall back. */
-  GpuBackendUnavailable,
-  /** @brief Context-wide waiting-callback admission rejected one attempt. */
-  WaitingAdmissionRejected,
-  /** @brief A backend FIFO rejected one callback before ownership transfer. */
-  CallbackSubmitRejected,
-  /** @brief Callback submission raised before transferring queue ownership. */
-  CallbackSubmitException,
-};
-
-/**
- * @brief Deterministic test action applied at backend FIFO submission.
- *
- * @note Production builds never compile or observe this vocabulary.
- */
-enum class CallbackSubmitAction : std::uint8_t {
-  /** @brief Preserve ordinary backend queue submission. */
-  Proceed,
-  /** @brief Simulate queue acceptance followed by dropping work before start.
-   * Destroys the unstarted queue entry; dependency-stage retirement resolves
-   * its completion as Cancelled.
-   */
-  Drop,
-  /** @brief Return the same false rejection as a stopped backend queue. */
-  Reject,
-  /** @brief Raise `std::bad_alloc` before backend queue mutation. */
-  ThrowBadAlloc,
-  /** @brief Raise a standard exception whose diagnostic pointer is null. */
-  ThrowNullDiagnostic,
-};
-
-/**
- * @brief Protected failure-Status materialization boundaries under test.
- *
- * @note Values distinguish noninstalled fault-injection sites without adding
- * a public error, ABI field, or production branch.
- */
-enum class FailureStatusConstructionPoint : std::uint8_t {
-  /** @brief The callback/scheduler exception-fence failure helper. */
-  ExceptionFence,
-  /** @brief Run-loop observation of cancellation or graph staleness. */
-  ExternalStop,
-};
-
-/**
- * @brief Callback invoked immediately before one scheduler failure is saved.
- * @param point Exact scheduler-owned failure boundary.
- * @return No value.
- * @throws Any test exception, which the notification boundary fences.
- * @note Tests use this point to make cancellation or graph replacement win
- * before the Run takes its first-failure lock.
- */
-using BeforeSchedulerFailureHook = void (*)(SchedulerFailurePoint point);
-
-/**
- * @brief Selects one deterministic backend queue-submission test action.
- * @param backend Exact CPU or optional GPU queue being submitted.
- * @return Proceed, reject, or raise one selected exception before queue
- * mutation.
- * @throws Any test exception, which is fenced and treated as Proceed.
- */
-using CallbackSubmitActionHook = CallbackSubmitAction (*)(Backend backend);
-
-/**
- * @brief Selects failure at one protected diagnostic/Status materialization.
- * @param point Exact noninstalled construction boundary being observed.
- * @return True to enter the allocation-free `finish_failure_safely` fallback
- * or external-stop fallback immediately before owned materialization.
- * @throws Any test exception, which is fenced and treated as false.
- */
-using FailureStatusConstructionHook = bool (*)(FailureStatusConstructionPoint);
-
-/**
- * @brief Callback invoked after complete result assembly and before the final
- * success-publication stop check.
- * @return No value.
- * @throws Nothing.
- * @note Tests may hold this otherwise unobservable boundary with external
- * synchronization. The callback must not re-enter the executing Run.
- */
-using FinalResultReadyHook = void (*)() noexcept;
-
-/**
- * @brief Callback invoked after submission and before retirement waiting.
- * @return No value.
- * @throws Nothing.
- * @note The static coordinator owns the submitted callback and has not yet
- * waited for its queue owner to retire. Tests may hold this otherwise
- * unobservable boundary, but must not re-enter the executing Run.
- */
-using PostSubmitObservationHook = void (*)() noexcept;
-
-/** @brief One positive explicit phase work call inside an executor poll.
- * @note Actor and operation are borrowed for notification only. Ordinals start
- * at one for each executor poll; they are private synchronization points.
- */
-struct PhaseWorkPoint final {
-  std::string_view operation;
-  Backend backend;
-  const void* actor;
-  std::uint32_t poll;
-  std::uint64_t ordinal, work;
-};
-
-/**
- * @brief Private callback set for deterministic execution regressions.
- *
- * @note This type exists only in the noninstalled test-kernel variant and has
- * no public ABI, product archive, export, or package-consumer effect.
+/** @brief Private native allocation fault seams in the test-kernel variant.
+ * The caller keeps this immutable set alive until clearing it and until all
+ * native calls have returned. Competing installations are not supported.
+ * No installed kernel or public ABI exposes these callbacks.
  */
 struct ExecutionTestHooks final {
-  /** @brief Optional callback-waiting boundary observer. */
-  CallbackQueuedHook callback_queued = nullptr;
-  /** @brief Optional scheduler failure pre-commit observer. */
-  BeforeSchedulerFailureHook before_scheduler_failure = nullptr;
-  /** @brief Optional deterministic queue submission controller. */
-  CallbackSubmitActionHook callback_submit_action = nullptr;
-  /** @brief Optional protected diagnostic/Status construction controller. */
-  FailureStatusConstructionHook fail_failure_status_construction = nullptr;
-  /** @brief Optional final result-publication boundary observer. */
-  FinalResultReadyHook final_result_ready = nullptr;
-  /** @brief Optional post-submit external-stop observation boundary hook. */
-  PostSubmitObservationHook post_submit_observation = nullptr;
-  /** @brief Called after the callback body, before queue ownership retires. */
-  FinalResultReadyHook callback_body_finished = nullptr;
-  /** @brief Called after successful checkpoint retention, outside its lock. */
-  FinalResultReadyHook checkpoint_published = nullptr;
-  /** @brief Called after a completed checkpoint and its provenance are found.
-   */
-  FinalResultReadyHook checkpoint_borrowed = nullptr;
-  /** @brief Called after native submission, before synchronous completion.
-   * @note Must not re-enter the device queue or access in-flight buffers.
-   */
-  FinalResultReadyHook native_submitted = nullptr;
-  /** @brief Opt into actual native devices; default scheduler fixtures use
-   * hardware-independent lanes. Read only when constructing a context.
-   */
-  bool native_device = false;
-  /** @brief Vulkan allocation fault checkpoint, zero disables injection. */
+  /** @brief Vulkan allocation fault checkpoint; zero disables injection. */
   std::uint32_t native_allocation_failure = 0;
-  /** @brief Optional smaller Vulkan allocation-object limit for tests. */
+  /** @brief Optional smaller Vulkan allocation-object limit. */
   std::uint32_t native_allocation_limit = 0;
-  /** @brief Observes vkFreeMemory completion before capacity is returned. */
-  FinalResultReadyHook native_memory_freed = nullptr;
-  /** @brief Optional host materialization/stage observer for private profiling.
-   * Bytes count successful output spans (zero for scheduler stages).
-   */
-  ExecutionTimingHook execution_timing = nullptr;
-  /** @brief Injects a typed capacity-query error before native preparation. */
+  /** @brief Observes vkFreeMemory before allocation capacity is returned. */
+  void (*native_memory_freed)() noexcept = nullptr;
+  /** @brief Injects a typed error before Metal/Vulkan capacity preparation. */
   ErrorCode (*native_capacity_error)() noexcept = nullptr;
-  /** @brief Borrowed state for the structured notifications below. */
-  void* structured_context = nullptr;
-  /** @brief Outside core locks, immediately before the work stop check. */
-  void (*phase_work_started)(void*, const PhaseWorkPoint&) noexcept = nullptr;
-  /** @brief Observes the same work service's returned status. */
-  void (*phase_work_finished)(void*, const PhaseWorkPoint&,
-                              ErrorCode) noexcept = nullptr;
 };
 
-/**
- * @brief Installs or clears the private process-global execution callbacks.
- * @param hooks Borrowed immutable callback set, or null to clear.
- * @return No value.
- * @throws Nothing.
- * @note The caller keeps a nonnull set alive until clearing it and must not
- * install competing sets concurrently.
- */
+/** @brief Install borrowed hooks, or clear them with null. */
 void install_execution_test_hooks(const ExecutionTestHooks* hooks) noexcept;
-
-/** @brief Whether a newly constructed context requires actual native hardware.
- */
-bool use_native_device() noexcept;
-
-/**
- * @brief Notifies the installed callback-waiting boundary observer.
- * @param backend Exact backend lane whose queue accepted one callback.
- * @return No value.
- * @throws Nothing; every test exception is fenced.
- * @note Only the noninstalled test-kernel variant invokes this function.
- */
-void notify_callback_queued(Backend backend) noexcept;
-
-/**
- * @brief Notifies the installed scheduler failure pre-commit observer.
- * @param point Exact failure boundary about to be recorded.
- * @return No value.
- * @throws Nothing; every test exception is fenced.
- * @note Only the noninstalled test-kernel variant invokes this function.
- */
-void notify_before_scheduler_failure(SchedulerFailurePoint point) noexcept;
-
-/**
- * @brief Returns the installed deterministic queue-submission action.
- * @param backend Exact lane receiving a callback.
- * @return Requested action, or Proceed when no hook is installed or it throws.
- * @throws Nothing.
- * @note Only the noninstalled test-kernel variant invokes this function.
- */
-CallbackSubmitAction callback_submit_action(Backend backend) noexcept;
-
-/**
- * @brief Reports whether protected diagnostic/Status creation must fail.
- * @param point Exact noninstalled construction boundary being observed.
- * @return True only when the installed hook requests the allocation fallback
- * at the owned diagnostic materialization point.
- * @throws Nothing.
- * @note Only the noninstalled test-kernel variant invokes this function.
- */
-bool fail_failure_status_construction(
-    FailureStatusConstructionPoint point) noexcept;
-
-/**
- * @brief Notifies the installed complete-result publication observer.
- * @return No value.
- * @throws Nothing.
- * @note The caller has fully assembled local Values and diagnostics but has
- * not passed the final cancellation/currentness linearization point. Only the
- * noninstalled test-kernel variant invokes this function.
- */
-void notify_final_result_ready() noexcept;
-
-/**
- * @brief Notifies the installed post-submit observation callback.
- * @return No value.
- * @throws Nothing.
- * @note The caller owns the submission before waiting for retirement. Only the
- * noninstalled test-kernel variant invokes this function.
- */
-void notify_post_submit_observation() noexcept;
-
-/** @brief Observes a returned callback body before its queue owner retires.
- * @note Private test-only point, outside queue and Run locks; hook is noexcept.
- */
-void notify_callback_body_finished() noexcept;
-/** @brief Observes retained state before the publishing callback returns.
- * @note Private test-only point; must not re-enter the publishing Run.
- */
-void notify_checkpoint_published() noexcept;
-/** @brief Observes a successful checkpoint lookup outside its directory lock.
- */
-void notify_checkpoint_borrowed() noexcept;
-
-/** @brief Observes positive phase work only during the actual poll call.
- * @note Hooks must not re-enter the Run. Borrowed state must outlive callbacks.
- */
-void notify_phase_work_started(const PhaseWorkPoint& point) noexcept;
-void notify_phase_work_finished(const PhaseWorkPoint& point,
-                                ErrorCode status) noexcept;
-
-/** @brief Observes native submission while storage remains owned in flight. */
-void notify_native_submitted() noexcept;
 bool fail_native_allocation(std::uint32_t checkpoint) noexcept;
 std::uint32_t native_allocation_limit(std::uint32_t physical) noexcept;
 void notify_native_memory_freed() noexcept;
 ErrorCode native_capacity_error() noexcept;
-
 }  // namespace ps::execution_testing

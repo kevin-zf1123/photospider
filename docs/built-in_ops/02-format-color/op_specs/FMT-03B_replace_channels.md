@@ -60,27 +60,11 @@ at replaced destinations, and preserve Descriptor dependencies for all connected
 inputs, including unused sources. Scalar source records and typed literals
 follow the family lowering; expansion is transactional.
 
-## Regional dependencies and resources
+## Fixed execution and ownership
 
-For each requested output sample, Data reads only its effective source expression.
-Unchanged slots depend on their original base positions; replaced slots depend
-on replacements. Overwritten base samples are not read unless selected as a
-source for another requested destination. A base change propagates to every
-effective expression that reads it, including swap destinations; it does not
-automatically dirty the same-index overwritten output.
+The helper expands to fixed FMT-02C calls and, for typed literals, fixed scalar providers. Each retained output tile computes all of its effective source expressions. Lowering deduplicates the mapped source-grid tile union per port; unused ports retain schema dependencies. A constant or replacement-only request avoids base payload only when every destination in the normalized output tiles avoids base samples. Spatial tiles may contain multiple channels.
 
-External source changes map only to slots selecting those components. A scalar
-change affects all observed nonchannel positions of its selecting slots. Data
-support deduplicates identical source coordinates; dirty support includes every
-repeated use. There is no extra sample Validation or Control domain and no
-sequential mutation dependency. Static descriptor checks remain required.
-
-Use the family's scalar-fill/image-layout distinction, view proof, page budget,
-owner retention, exact valid coverage and failure policy. An unchanged input
-plane may be reused only when the resulting whole mapping remains legal; mixing
-it with independent replacement owners does not create a new permitted image
-storage form. Auto materializes when necessary. Forced view failure, metadata
-errors and source/resource/cancellation outcomes retain the family categories.
+Auto/materialize copy to independently owned dense output tiles with zero scratch. Nonempty view fails with schema-only dependencies; Empty validates static inputs and emits no task. All copied bits are preserved, cancellation is checked between at most 256 samples, and a failed call exports no partial result. The family defines compatible rebinding, concurrent Runs and output lifetime.
 
 ## Independent acceptance fixtures
 
@@ -89,12 +73,12 @@ Take Float32 base [1,2,4] with logical straight RGBA samples
 An external Gray component plane X has shape [1,2] and samples [[7,8]].
 Replace destination R from X and alpha from same-dtype scalar V=[0.5].
 Expected output is `[[[7,20,30,0.5],[8,21,31,0.5]]]`. A subsequent consumer may be explicitly configured as R/G/B/alpha. Base R and base alpha are not read for these replaced outputs.
-Requesting only (0,1,0) reads X[0,1]=8, no base pixels and no V.
+Output (0,1,0) copies X[0,1]=8. A no-base/no-V dependency check must select complete output tiles containing only that replacement.
 
 For the simultaneous swap R<-base G, G<-base R, the output is
 `[[[20,10,30,0.4],[21,11,31,0.6]]]`; no R/G/B/alpha description is attached.
 Reversing replacement-list order has the same result. A request only for output
-R depends on original G, so changing original R does not dirty that observation.
+R copies original G, independently of the original R value.
 
 For mixed source axes, external X has shape [2,1,2], axis 0, with planes
 [[100,101]] and [[200,201]]. Replacing B from X channel 1 produces B values
@@ -108,7 +92,7 @@ replacement without hidden color arithmetic. Test that every failed expansion
 leaves the graph unchanged and that base values/metadata remain unchanged.
 
 The oracle independently evaluates all source expressions against the original
-inputs and enumerates Data/dirty support, including overwritten-value nonreads.
+inputs and derives source tile closure, including overwritten-value nonreads within each complete output tile.
 The conceptual public workflow is `base + external plane + scalar ->
 replace_channels expansion -> named values`. Implementation must supply actual
 public commands and checked partial-region output.

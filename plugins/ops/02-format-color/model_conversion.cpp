@@ -15,14 +15,14 @@
 #include "02-format-color/model_math.hpp"
 #include "02-format-color/model_simd.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
 #include "common/tensor_program.hpp"
-#include "photospider/core/resource_allocator.hpp"
 #include "photospider/core/status_helpers.hpp"
 #include "photospider/ops/format/channel.hpp"
-#include "photospider/ops/numeric/diagnostics.hpp"
 #include "photospider/ops/tensor_description.hpp"
-#include "photospider/plugin/tile_helpers.hpp"
+#include "photospider/plugin/fixed_invocation.hpp"
+#include "photospider/plugin/tile_geometry.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -36,6 +36,7 @@ struct Slot final {
 };
 struct Preparation final {
   MathConfig math;
+  std::shared_ptr<const SchemaTemplate> output_schema;
   std::shared_ptr<const Constants> constants;
   std::optional<std::uint32_t> source_axis;
   std::optional<std::uint32_t> output_axis;
@@ -200,18 +201,18 @@ TensorChannelDescription bypass_description(const TensorDescription& source,
 void valid_pair(const std::array<double, 2>& pair, const char* name) {
   require(std::isfinite(pair[0]) && std::isfinite(pair[1]),
           std::string(name) + " must be finite");
-  const RationalMath::Work work = [](std::uint64_t) {
-    return Status::success();
-  };
+  const auto work = [](std::uint64_t) { return Status::success(); };
   RationalMath exact(SequenceProfile::Strict);
   exact.bind(work);
   const auto a = exact.binary(numeric_ops::numeric_bits(pair[0]));
   const auto b = exact.binary(numeric_ops::numeric_bits(pair[1]));
-  require(exact.order(a, exact.integer(0)) > 0 &&
-              exact.order(b, exact.integer(0)) > 0 &&
-              exact.order(exact.add(a, b), exact.integer(1)) < 0,
-          std::string(name) +
-              " requires positive entries whose exact sum is below one");
+  const bool valid = exact.order(a, exact.integer(0)) > 0 &&
+                     exact.order(b, exact.integer(0)) > 0 &&
+                     exact.order(exact.add(a, b), exact.integer(1)) < 0;
+  if (!exact.active())
+    throw exact.status();
+  require(valid, std::string(name) +
+                     " requires positive entries whose exact sum is below one");
 }
 std::array<double, 2> parameter_pair(const Params& p, const char* x,
                                      const char* y) {
@@ -309,6 +310,11 @@ void native_metadata(const TensorInterpretation& interpretation,
                      const TensorDescription& description, Preparation& out,
                      const Params& p) {
   const auto kind = out.math.kind;
+  const auto& association = interpretation.association.empty()
+                                ? description.association
+                                : interpretation.association;
+  if (!association.empty() && association != "straight")
+    throw mismatch("FMT-11 requires straight color coordinates");
   if (interpretation.model != source_model(kind, out.math.gray) ||
       interpretation.convention != "relative-v1" || interpretation.profile ||
       interpretation.configured)
@@ -939,6 +945,7 @@ Result<OperationPreparation> prepare(
     }
     output.metadata.result_schema =
         std::make_shared<SchemaTemplate>(std::move(schema));
+    out.output_schema = output.metadata.result_schema;
     auto constants = prepare_constants(out.math);
     if (!constants.ok())
       throw constants.status();
@@ -952,47 +959,6 @@ Result<OperationPreparation> prepare(
   }
 }
 
-Status located(Status status, const std::vector<std::uint64_t>& at,
-               int component) {
-  if (status.detail.origin == FailureOrigin::Domain) {
-    status.message += " at [";
-    for (std::size_t i = 0; i < at.size(); ++i)
-      status.message += (i ? "," : "") + std::to_string(at[i]);
-    status.message += "] model component " + std::to_string(component);
-  }
-  return status;
-}
-struct Scratch final {
-  ModelMath math;
-  bool allow_candidate;
-  static constexpr std::size_t kBatch = 64;
-  std::array<std::array<double, kBatch>, 3> input{};
-  std::array<double, kBatch> candidates{};
-  std::array<std::array<std::uint64_t, 3>, kBatch> bits{};
-  explicit Scratch(const MathConfig& config, const Constants& constants,
-                   const RationalMath::Work& work)
-      : math(config, constants, work),
-        allow_candidate(config.algorithm != Algorithm::Reference) {}
-};
-using tensor_ops::take;
-using Poll = Result<ResultProgramPoll>;
-void check(Status status) {
-  if (!status.ok())
-    throw status;
-}
-ResultBuilder builder_for(const ResultProgramPhase& phase, bool /*empty*/) {
-  auto builder = take(ResultBuilder::start(
-      phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {}, phase.query.tile_extent));
-
-  return builder;
-}
-Poll empty_result(const ResultProgramPhase& phase) try {
-  auto builder = builder_for(phase, true);
-  return Poll(ResultPublication{take(builder.seal()), true});
-} catch (const Status& status) {
-  return Poll(status);
-}
 std::optional<Region> intersection(const Region& a, const Region& b) {
   std::vector<RegionDimension> dims;
   for (unsigned axis = 0; axis < a.rank(); ++axis) {
@@ -1005,330 +971,360 @@ std::optional<Region> intersection(const Region& a, const Region& b) {
   }
   return Region(std::move(dims));
 }
-std::vector<std::uint64_t> mapped_coordinate(
-    const std::vector<ResultViewAxis>& map,
-    const std::vector<std::uint64_t>& at) {
-  std::vector<std::uint64_t> source;
-  for (const auto& axis : map)
-    source.push_back(take(axis.source_coordinate(
-        axis.output_axis < 0 ? 0 : at[axis.output_axis])));
-  return source;
+bool arithmetic(const Preparation& state, const Preparation::Span& span) {
+  return span.slot.component >= 0 &&
+         copied_component(state.math.kind, span.slot.component,
+                          state.math.gray) == -1;
 }
-Status run_region(const ResultProgramPhase& phase, const Preparation& p,
-                  const Preparation::Span& span, const Region& region,
-                  Scratch* scratch, NumericDiagnostics* report,
-                  const std::vector<ResultTensorReadWindow>& inputs,
-                  const ResultTensorWriteWindow* writer) {
-  const auto& tensor = phase.query.output.result_schema->tensors[0];
-  const auto& dims = region.dimensions();
-  const auto sample_axis = tensor.layout.spatial ? tensor.batch_axes.size() +
-                                                       tensor.layout.width_axis
-                                                 : region.rank() - 1;
-  auto axis = sample_axis;
-  // Generic channel-last converted slots have one sample per row. Traverse
-  // rectangle rows to retain SIMD batches without gathering peer components.
-  const bool rectangles = !tensor.layout.spatial && p.output_axis == axis &&
-                          dims[axis].extent == 1 && region.rank() > 1;
-  if (rectangles)
-    --axis;
-  std::vector<std::uint64_t> at;
-  for (auto d : dims)
-    at.push_back(d.offset);
-  const auto width = p.math.narrow ? 4U : 8U;
-  const auto component =
-      static_cast<unsigned>(std::max(0, span.slot.component));
-  const bool candidate =
-      writer && scratch->allow_candidate && span.slot.component >= 0 &&
-      (p.math.kind == Kind::RgbToYcbcr || p.math.kind == Kind::YcbcrToRgb) &&
-      p.math.profile != SequenceProfile::Strict &&
-      p.math.algorithm != Algorithm::Reference;
-  std::array<double, 3> coefficients{};
-  std::array<std::uint64_t, 3> read_work{};
-  for (std::size_t i = 0; i < inputs.size(); ++i)
-    read_work[i] = take(inputs[i].read_work());
-  if (candidate) {
-    for (unsigned c = 0; c < 3; ++c) {
-      const auto bound = p.constants->first_fast[component][c];
-      coefficients[c] = bound.low + (bound.high - bound.low) * .5;
+struct Scratch final {
+  ModelMath math;
+  static constexpr unsigned kBatch = 64;
+  std::array<std::array<double, kBatch>, 3> input{};
+  std::array<double, kBatch> candidates{};
+  std::array<std::array<std::uint64_t, 3>, kBatch> bits{};
+  std::array<std::uint64_t, kBatch> offsets{};
+  Scratch(const MathConfig& config, const Constants& constants,
+          RationalMath::Work work)
+      : math(config, constants, work) {}
+};
+std::uint64_t scratch_bytes(const Preparation& state, const Region& region) {
+  if (state.layout == Layout::View)
+    return 0;
+  for (const auto& span : state.spans)
+    if (arithmetic(state, span) && intersection(span.region, region))
+      return sizeof(Scratch);
+  return 0;
+}
+Result<std::set<TileIndex>> required_tiles(const Preparation& state,
+                                           const Region& output,
+                                           const TileGrid& grid,
+                                           const ResourceBudget& budget,
+                                           std::uint64_t maximum) {
+  using Answer = Result<std::set<TileIndex>>;
+  std::set<TileIndex> result;
+  if (state.layout == Layout::View)
+    return Answer(std::move(result));
+  for (const auto& span : state.spans) {
+    auto charged = budget.consume({1});
+    if (!charged.ok())
+      return Answer(charged);
+    const auto part = intersection(span.region, output);
+    if (!part)
+      continue;
+    for (const auto& map : span.maps) {
+      const auto region = format_result::mapped_region(*part, map);
+      std::uint64_t count = 1;
+      for (unsigned axis = 0; axis < grid.rank(); ++axis) {
+        const auto d = region.dimensions()[axis];
+        std::uint64_t extent = 1;
+        if (grid.batch_axis_mask() & (1U << axis))
+          extent = d.extent;
+        else if (axis == grid.height_axis() || axis == grid.width_axis())
+          extent = (d.offset + d.extent - 1) / grid.tile_extent() -
+                   d.offset / grid.tile_extent() + 1;
+        if (extent > maximum / count)
+          return Answer(
+              {ErrorCode::ResourceExhausted, "model read tile limit"});
+        count *= extent;
+      }
+      auto tiles = sdk::tiles_for_region(budget, grid, region);
+      if (!tiles.ok())
+        return Answer(tiles.status());
+      for (auto index : tiles.value()) {
+        auto status = budget.consume({1});
+        if (!status.ok())
+          return Answer(status);
+        result.insert(index);
+        if (result.size() > maximum)
+          return Answer(
+              {ErrorCode::ResourceExhausted, "model read union limit"});
+      }
     }
   }
-  for (;;) {
-    if (phase.query.cancellation.cancelled())
-      return {ErrorCode::Cancelled, "FMT-11 cancelled"};
-    auto available = dims[axis].offset + dims[axis].extent - at[axis];
-    std::array<const std::uint8_t*, 3> pointers{};
-    std::array<std::int64_t, 3> strides{};
-    std::size_t input = 0;
-    for (unsigned c = 0; c < 3; ++c) {
-      if (!(span.mask & (1U << c)))
-        continue;
-      const auto& window = inputs[input];
-      const auto address_work = read_work[input];
-      const auto& map = span.maps[input++];
-      check(phase.consume_work(address_work));
-      const auto source = mapped_coordinate(map, at);
-      const auto sample = window.sample_axis();
-      const auto row = window.row_axis();
-      if (map[sample].output_axis == static_cast<std::int32_t>(axis)) {
-        const auto run = take(window.row_run(source));
-        pointers[c] = run.data;
-        strides[c] = run.sample_stride_bytes;
-        available = std::min(available, run.samples);
-      } else if (row &&
-                 map[*row].output_axis == static_cast<std::int32_t>(axis)) {
-        check(phase.consume_work(address_work));
-        const auto run = take(window.rectangle_run(source));
-        pointers[c] = run.row.data;
-        strides[c] = run.row_stride_bytes;
-        available = std::min(available, run.rows);
-      } else {
-        pointers[c] = take(window.row_run(source)).data;
-        available = 1;
+  return Answer(std::move(result));
+}
+constexpr const char* model_contract = "model-conversion-fixed-v1";
+Result<OperationProgram> lower(const OperationLowering& query) {
+  using Answer = Result<OperationProgram>;
+  const auto& state = *static_cast<const Preparation*>(query.static_state);
+  auto output =
+      TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
+  auto input =
+      TileGrid::from_schema(*query.inputs[0].result_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  if (!input.ok())
+    return Answer(input.status());
+  ResourceLimits limits;
+  limits.maximum_work = query.limits.maximum_work;
+  ResourceBudget budget(limits);
+  OperationProgramBuilder builder(query);
+  std::uint64_t read_records = 0;
+  const auto tile_limit = query.limits.maximum_records > 8
+                              ? (query.limits.maximum_records - 8) / 2
+                              : 0;
+  for (const auto& member : query.requests[0].members)
+    for (auto tile : member.second) {
+      auto region = output.value().region(tile);
+      if (!region.ok())
+        return Answer(region.status());
+      auto task =
+          builder.add_task("model-conversion", model_contract, {},
+                           {scratch_bytes(state, region.value()), 0, 0});
+      if (!task.ok())
+        return Answer(task.status());
+      auto reads = required_tiles(
+          state, region.value(), input.value(), budget,
+          std::min(tile_limit, query.limits.maximum_edges - read_records));
+      if (!reads.ok())
+        return Answer(reads.status());
+      read_records += reads.value().size();
+      if (reads.value().empty()) {
+        auto status = builder.read_input_schema(task.value(), 0);
+        if (!status.ok())
+          return Answer(status);
+      }
+      for (auto index : reads.value()) {
+        auto status = builder.read_input(task.value(), 0, 0, index);
+        if (!status.ok())
+          return Answer(status);
+      }
+      auto status = builder.write_output(task.value(), 0, member.first, tile);
+      if (!status.ok())
+        return Answer(status);
+    }
+  return builder.finish();
+}
+struct PreparedModel final {
+  MathConfig math;
+  std::shared_ptr<const Constants> constants;
+  std::vector<Preparation::Span> parts;
+  fixed_tensor::PointInputs<1> inputs;
+  bool calculates = false, view = false;
+};
+void invoke(const ps_kernel_invocation_v8* invocation,
+            ps_kernel_status_v8* status) noexcept {
+  const auto& state =
+      *static_cast<const PreparedModel*>(invocation->prepared_context);
+  const auto consume = [invocation](std::uint64_t) {
+    return invocation->cancellation.is_cancelled &&
+                   invocation->cancellation.is_cancelled(
+                       invocation->cancellation.context)
+               ? Status{ErrorCode::Cancelled, {}}
+               : Status::success();
+  };
+  const auto accept = [status](const Status& result) {
+    if (!result.ok())
+      *status =
+          kernel_failure(result.code, result.message.c_str(), result.reason);
+    return result.ok();
+  };
+  if (!accept(consume(0)))
+    return;
+  if (state.view) {
+    *status = kernel_failure(ErrorCode::InvalidArgument, "ViewUnavailable",
+                             FailureReason::ViewUnavailable);
+    return;
+  }
+  FloatingEnvironment environment;
+  if (state.calculates && !environment.active()) {
+    *status =
+        kernel_failure(ErrorCode::OperationFailed, "model numeric environment");
+    return;
+  }
+  std::unique_ptr<Scratch, void (*)(Scratch*)> scratch(
+      state.calculates ? new (invocation->scratch[0].allocation)
+                             Scratch(state.math, *state.constants, consume)
+                       : nullptr,
+      [](Scratch* s) {
+        if (s)
+          s->~Scratch();
+      });
+  fixed_tensor::PointReader<1> reader{state.inputs, *invocation};
+  const auto& output = invocation->outputs[0];
+  const auto& layout = *output.layout;
+  auto* destination = static_cast<std::uint8_t*>(output.allocation);
+  const unsigned width = state.math.narrow ? 4 : 8;
+  for (const auto& span : state.parts) {
+    const auto& dims = span.region.dimensions();
+    std::uint64_t points = 1;
+    for (const auto& d : dims)
+      points *= d.extent;
+    const auto component =
+        static_cast<unsigned>(std::max(0, span.slot.component));
+    const int copy =
+        span.slot.component < 0
+            ? 0
+            : copied_component(state.math.kind, component, state.math.gray);
+    const bool computes = copy == -1;
+    const bool candidate = computes &&
+                           (state.math.kind == Kind::RgbToYcbcr ||
+                            state.math.kind == Kind::YcbcrToRgb) &&
+                           state.math.profile != SequenceProfile::Strict &&
+                           state.math.algorithm != Algorithm::Reference;
+    std::array<double, 3> coefficients{};
+    if (candidate) {
+      for (unsigned c = 0; c < 3; ++c) {
+        const auto bound = state.constants->first_fast[component][c];
+        coefficients[c] = bound.low + (bound.high - bound.low) * .5;
       }
     }
-    std::uint8_t* target = nullptr;
-    std::int64_t target_stride = 0;
-    if (writer) {
-      if (rectangles) {
-        const auto run = take(writer->rectangle_run(at));
-        target = run.row.data;
-        target_stride = run.row_stride_bytes;
-        available = std::min(available, run.rows);
-      } else {
-        const auto run = take(writer->row_run(at));
-        target = run.data;
-        target_stride = run.sample_stride_bytes;
-        available = std::min(available, run.samples);
-      }
-    }
-    if (!available)
-      return {ErrorCode::Internal, "FMT-11 empty Result run"};
-    for (std::uint64_t offset = 0; offset < available;) {
-      const auto count =
-          std::min<std::uint64_t>(Scratch::kBatch, available - offset);
-      if (phase.query.cancellation.cancelled())
-        return {ErrorCode::Cancelled, "FMT-11 cancelled"};
-      check(phase.consume_work(count));
+    for (std::uint64_t begin = 0; begin < points; begin += Scratch::kBatch) {
+      if (!accept(consume(0)))
+        return;
+      const auto count = static_cast<unsigned>(
+          std::min<std::uint64_t>(Scratch::kBatch, points - begin));
       for (unsigned lane = 0; lane < count; ++lane) {
-        scratch->bits[lane] = {};
+        auto index = begin + lane;
+        std::array<std::uint64_t, 8> at{}, source{};
+        std::uint64_t offset = output.byte_offset;
+        for (unsigned axis = dims.size(); axis-- > 0;) {
+          at[axis] = dims[axis].offset + index % dims[axis].extent;
+          index /= dims[axis].extent;
+          offset += (at[axis] - layout.origin[axis]) * layout.strides[axis];
+        }
+        std::array<std::uint64_t, 3> bits{};
+        unsigned map_index = 0;
         for (unsigned c = 0; c < 3; ++c) {
           if (!(span.mask & (1U << c)))
             continue;
-          std::memcpy(&scratch->bits[lane][c],
-                      pointers[c] +
-                          static_cast<std::int64_t>(offset + lane) * strides[c],
-                      width);
+          const auto& map = span.maps[map_index++];
+          for (unsigned axis = 0; axis < map.size(); ++axis) {
+            const auto& m = map[axis];
+            source[axis] = m.source_origin;
+            if (m.output_axis >= 0)
+              source[axis] += at[m.output_axis] - m.output_origin;
+          }
+          bits[c] = reader.bits(0, source, width);
           if (candidate) {
-            const auto classified = numeric_ops::BinaryParts::decode(
-                scratch->bits[lane][c], p.math.narrow);
+            const auto parts =
+                numeric_ops::BinaryParts::decode(bits[c], state.math.narrow);
             scratch->input[c][lane] =
-                classified.nan || classified.infinite
+                parts.nan || parts.infinite
                     ? 0
-                    : numeric_ops::numeric_double(scratch->bits[lane][c],
-                                                  p.math.narrow);
+                    : numeric_ops::numeric_double(bits[c], state.math.narrow);
           }
         }
+        if (!computes) {
+          const auto value = copy == -2 ? UINT64_C(0) : bits[copy];
+          std::memcpy(destination + offset, &value, width);
+        } else {
+          scratch->bits[lane] = bits;
+          scratch->offsets[lane] = offset;
+        }
       }
+      if (!computes)
+        continue;
       if (candidate) {
         std::array<const double*, 3> data{};
         for (unsigned c = 0; c < 3; ++c)
           data[c] = scratch->input[c].data();
         dot_candidates(data, coefficients, span.mask,
-                       scratch->candidates.data(), count, p.math.profile,
-                       p.math.algorithm == Algorithm::Auto);
+                       scratch->candidates.data(), count, state.math.profile,
+                       state.math.algorithm == Algorithm::Auto);
       }
       for (unsigned lane = 0; lane < count; ++lane) {
-        auto bits = scratch->bits[lane][0];
-        if (span.slot.component >= 0) {
-          const bool arithmetic =
-              copied_component(p.math.kind, component, p.math.gray) < 0;
-          if (arithmetic)
-            ++report->evaluated_values;
-          const auto before = scratch->math.counters().reference;
-          const auto computed = scratch->math.evaluate(
-              scratch->bits[lane], component,
-              candidate ? std::optional<double>(scratch->candidates[lane])
-                        : std::nullopt);
-          const auto references = scratch->math.counters().reference - before;
-          report->strict_math_calls += references;
-          if (p.math.profile != SequenceProfile::Strict &&
-              scratch->allow_candidate && references) {
-            report->strict_fallbacks += references;
-            bool finite = true;
-            for (unsigned c = 0; c < 3; ++c) {
-              if (!(span.mask & (1U << c)))
-                continue;
-              const auto value = numeric_ops::BinaryParts::decode(
-                  scratch->bits[lane][c], p.math.narrow);
-              finite = finite && !value.nan && !value.infinite;
-            }
-            const auto reason =
-                finite ? NumericFallbackReason::RoundingUnresolved
-                       : NumericFallbackReason::SpecialValueProtection;
-            report->fallback_reasons[static_cast<unsigned>(reason)] +=
-                references;
-          }
-          if (!computed.ok()) {
-            auto coordinate = at;
-            coordinate[axis] += offset + lane;
-            return located(computed.status(), coordinate, span.slot.component);
-          }
-          bits = computed.value();
-          if (writer && !arithmetic)
-            ++report->copied_elements;
-        } else if (writer) {
-          ++report->copied_elements;
+        auto value = scratch->math.evaluate(
+            scratch->bits[lane], component,
+            candidate ? std::optional<double>(scratch->candidates[lane])
+                      : std::nullopt);
+        if (!value.ok()) {
+          accept(value.status());
+          return;
         }
-        if (writer)
-          std::memcpy(
-              target + static_cast<std::int64_t>(offset + lane) * target_stride,
-              &bits, width);
+        const auto bits = value.value();
+        std::memcpy(destination + scratch->offsets[lane], &bits, width);
       }
-      offset += count;
     }
-    at[axis] += available;
-    if (at[axis] < dims[axis].offset + dims[axis].extent)
-      continue;
-    at[axis] = dims[axis].offset;
-    bool next = false;
-    for (std::size_t i = dims.size(); i;) {
-      --i;
-      if (i == axis)
-        continue;
-      if (++at[i] < dims[i].offset + dims[i].extent) {
-        next = true;
-        break;
-      }
-      at[i] = dims[i].offset;
-    }
-    if (!next)
-      return Status::success();
   }
+  *status = {};
 }
-struct State final {
-  const Preparation* p;
-  Footprint output;
-  explicit State(const Preparation* prepared) : p(prepared) {}
-  Poll poll(const ResultProgramPhase& phase) try {
-    const auto& spec = phase.query.output.result_schema->tensors[0];
-    output = phase.query.tensor_outputs
-                 ? *phase.query.tensor_outputs
-                 : take(Footprint::all(spec.sample_shape()));
-
-    plugin_internal::FloatingEnvironment environment;
-    MathConfig config = p->math;
-    if (!environment.active())
-      config.algorithm = Algorithm::Reference;
-    const RationalMath::Work work = [&](std::uint64_t n) {
-      if (phase.query.cancellation.cancelled())
-        return Status{ErrorCode::Cancelled, "FMT-11 cancelled"};
-      return phase.consume_work(n);
-    };
-    auto memory = take(phase.allocator.allocate(sizeof(Scratch)));
-    std::unique_ptr<Scratch, void (*)(Scratch*)> scratch(
-        new (memory.data()) Scratch(config, *p->constants, work),
-        [](Scratch* s) { s->~Scratch(); });
-    NumericDiagnostics report;
-    report.profile = p->math.profile == SequenceProfile::Strict
-                         ? CpuNumericProfile::Strict
-                     : p->math.profile == SequenceProfile::AppleSilicon
-                         ? CpuNumericProfile::AppleSiliconNeon
-                         : CpuNumericProfile::X86Avx2;
-    const char* implementation =
-        "photospider.fmt11/"
-        "1;Result-runs;exact-rational;certified;no-fast-math;rounding-math;fp-"
-        "contract=off;"
-#if defined(__APPLE__) && defined(__aarch64__)
-        "Darwin/arm64;"
-#elif defined(__FreeBSD__)
-        "FreeBSD;"
-#elif defined(__linux__) && defined(__x86_64__)
-        "Linux/x86_64;"
-#else
-        "portable;"
-#endif
-        __clang_version__;
-    std::strncpy(report.implementation.data(), implementation,
-                 report.implementation.size() - 1);
-    auto result = [&]() -> Poll {
-      try {
-        auto builder = builder_for(phase, false);
-        for (const auto& span : p->spans)
-          for (const auto& box : output.boxes()) {
-            check(work(box.rank() + 1));
-            const auto part = intersection(span.region, box);
-            if (!part)
-              continue;
-            const auto footprint =
-                take(Footprint::from_regions(spec.sample_shape(), {*part}));
-            check(format_result::planes(
-                spec, footprint, [&](const Region& region) {
-                  std::vector<ResultTensorReadWindow> inputs;
-                  for (const auto& map : span.maps)
-                    inputs.push_back(take(phase.tensors->at({0, 0}).acquire(
-                        format_result::mapped_region(region, map),
-                        phase.query.cancellation)));
-                  if (p->math.kind == Kind::ColorToGray &&
-                      p->layout != Layout::Materialize) {
-                    check(run_region(phase, *p, span, region, scratch.get(),
-                                     &report, inputs, nullptr));
-                    format_result::PublicationCounts counts;
-                    const auto status = format_result::publish(
-                        phase, &builder, region, inputs[0], span.maps[0],
-                        p->layout == Layout::View ? "view" : "auto", 0,
-                        &counts);
-                    report.view_elements += counts.viewed;
-                    report.copied_elements += counts.copied;
-                    return status;
-                  }
-                  return builder.publish_tensor_kernel(
-                      0, region,
-                      [&](const auto& writers) {
-                        try {
-                          for (const auto& writer : writers)
-                            check(run_region(phase, *p, span, writer.region(),
-                                             scratch.get(), &report, inputs,
-                                             &writer));
-                          return Status::success();
-                        } catch (const Status& status) {
-                          return status;
-                        }
-                      },
-                      phase.query.cancellation);
-                }));
-          }
-        check(work(1));
-        return Poll(ResultPublication{take(builder.seal()), true});
-      } catch (const Status& status) {
-        return Poll(status);
-      }
-    }();
-    if (!result.ok())
-      phase.record_failure(result.status());
-    if (phase.report_diagnostic) {
-      auto reported = report_numeric(phase, report);
-      if (result.ok() && !reported.ok())
-        return Poll(reported);
+Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
+  using Answer = Result<ps_prepared_kernel_v8>;
+  const auto invalid = [] {
+    return Answer({ErrorCode::TypeMismatch, "invalid model kernel signature"});
+  };
+  const auto* state = static_cast<const Preparation*>(query.static_state);
+  if (!state || query.inputs.size() != 1 || query.outputs.size() != 1 ||
+      query.writes.size() != 1 || !query.task_parameters.empty() ||
+      !query.outputs[0].result_schema ||
+      !query.outputs[0].result_schema->same_schema(*state->output_schema))
+    return invalid();
+  auto output =
+      TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  const auto& write = query.writes[0];
+  auto region = output.value().region(write.tile_index);
+  if (!region.ok())
+    return Answer(region.status());
+  const auto scratch = scratch_bytes(*state, region.value());
+  if (query.scratch != std::array<std::uint64_t, 3>{scratch, 0, 0} ||
+      write.port || write.member || write.domain != physical::Domain::Host ||
+      write.layout.element_type !=
+          (state->math.narrow ? ElementType::Float32 : ElementType::Float64) ||
+      !fixed_tensor::matches_region(write.layout, region.value()))
+    return invalid();
+  auto prepared = std::make_unique<PreparedModel>();
+  prepared->math = state->math;
+  prepared->constants = state->constants;
+  prepared->calculates = scratch != 0;
+  prepared->view = state->layout == Layout::View;
+  for (const auto& span : state->spans) {
+    const auto part = intersection(span.region, region.value());
+    if (part) {
+      prepared->parts.push_back(span);
+      prepared->parts.back().region = *part;
     }
-    return result;
-  } catch (const Status& status) {
-    return Poll(status);
   }
-};
+  auto input =
+      TileGrid::from_schema(*query.inputs[0].result_schema, query.tile_extent);
+  if (!input.ok())
+    return Answer(input.status());
+  prepared->inputs.grids[0] = input.take_value();
+  ResourceLimits limits;
+  limits.maximum_work = physical::ValidationLimits{}.maximum_work;
+  auto reads = required_tiles(*state, region.value(), prepared->inputs.grids[0],
+                              ResourceBudget(limits), query.reads.size());
+  if (!reads.ok())
+    return Answer(reads.status());
+  std::size_t slot = 0;
+  for (auto index : reads.value()) {
+    const auto& read = query.reads[slot];
+    auto expected = prepared->inputs.grids[0].region(index);
+    if (!expected.ok())
+      return Answer(expected.status());
+    if (read.port || read.member || read.tile_index != index ||
+        read.domain != physical::Domain::Host ||
+        read.layout.element_type != write.layout.element_type ||
+        !fixed_tensor::matches_region(read.layout, expected.value()))
+      return invalid();
+    prepared->inputs.slots[0].push_back(
+        {index, static_cast<std::uint32_t>(slot++)});
+  }
+  if (slot != query.reads.size())
+    return invalid();
+  ps_prepared_kernel_v8 kernel{};
+  kernel.struct_size = sizeof(kernel);
+  kernel.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  kernel.context = prepared.release();
+  kernel.invoke_cpu = invoke;
+  kernel.release = [](const void* context) {
+    delete static_cast<const PreparedModel*>(context);
+  };
+  return Answer(kernel);
+}
 OperationDefinition definition(Kind kind, SequenceProfile profile,
                                const char* suffix) {
   OperationDefinition def;
   def.key = std::string(operation_name(kind)) + suffix;
   auto& traits = def.traits;
-  traits.diagnostics = {numeric_diagnostic_identity()};
   traits.input_count = 1;
   OperationPortConstraint port;
 
   port.element_type_mask = 127;
   traits.input_schema = {port};
-  traits.cacheable = false;
   traits.requires_metadata_specialization = true;
-  traits.workspace_bytes = sizeof(Scratch);
   // All statics are optional in the schema so preparation can supply defaults
   // and diagnose member-specific applicability, including Empty requests.
   const auto add = [&](const char* key, OperationParameterType type) {
@@ -1352,46 +1348,25 @@ OperationDefinition definition(Kind kind, SequenceProfile profile,
   output.key = "values";
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
-  output.continuation_bytes = sizeof(State);
-  output.maximum_dependency_stages = 2;
   def.prepare_static = [kind, profile](const auto& inputs, const auto& params) {
     return prepare(kind, profile, inputs, params);
   };
-  def.map_dependencies =
-      [](const ResultStaticQuery& compiled) -> Result<ResultStaticMapping> {
-    try {
-      const auto query = sdk::static_query_view(compiled);
-      const auto* p =
-          static_cast<const Preparation*>(compiled.prepared.state());
-      const auto output =
-          query.tensor_outputs
-              ? *query.tensor_outputs
-              : take(Footprint::all(
-                    query.output.result_schema->tensors[0].sample_shape()));
-      ResultStaticMapping result;
-      std::vector<Region> regions;
-      for (const auto& span : p->spans)
-        for (const auto& box : output.boxes()) {
-          const auto part = intersection(span.region, box);
-          if (part)
-            for (const auto& map : span.maps)
-              regions.push_back(format_result::mapped_region(*part, map));
-        }
-      result.inputs.push_back(take(sdk::tile_need_for_samples(
-          compiled, 0, 0,
-          take(Footprint::from_regions(p->source_shape, regions)),
-          regions.empty())));
-      return Result<ResultStaticMapping>(std::move(result));
-    } catch (const Status& status) {
-      return Result<ResultStaticMapping>(status);
-    }
-  };
-  def.start_result = [](const ResultProgramQuery& query,
-                        const BufferAllocator& allocator) {
-    if (query.tensor_outputs && query.tensor_outputs->empty())
-      return ResultContinuation::stateless<empty_result>();
-    return ResultContinuation::make<State>(
-        allocator, static_cast<const Preparation*>(query.prepared->state()));
+  def.lower = lower;
+  def.prepare_kernel =
+      [](const physical::KernelDesc& kernel,
+         const physical::Placement& placement, const KernelPreparation& query,
+         const ResourceSet&,
+         const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    if (kernel.symbol != "model-conversion" ||
+        kernel.contract != model_contract)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::TypeMismatch, "invalid model conversion kernel"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::BackendUnavailable,
+           "model conversion requires CPU Host"});
+    return prepare_kernel(query);
   };
   return def;
 }

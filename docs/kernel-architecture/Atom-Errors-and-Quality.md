@@ -17,6 +17,8 @@ struct FailureDetail final {
   FailureScope scope = FailureScope::Unspecified;
   std::optional<AtomKey> atom = {};
   std::uint64_t node_id = 0, input_id = 0;
+  std::optional<std::uint64_t> call_sequence = {};
+  std::optional<std::uint32_t> task_id = {};
   std::uint64_t domain_code = 0;  // opaque, preserved without interpretation
 };
 struct AtomKey final {
@@ -54,15 +56,15 @@ class QualityReport final {
 - Atom identifies exactly one logical producer observation.
 - Group, Run and Waiter describe operational extent and do not invent a failed semantic value at an arbitrary coordinate.
 
-`FailureScope` uses `Unspecified=0`, `Atom=1`, `Group=4`, `Run=5`, and `Waiter=6`. `AtomKey` identifies an output index and 1..8 coordinates, with unused coordinates zero. `FailureDetail` carries `origin`, `scope`, optional `atom`, `node_id`, `input_id`, and opaque `domain_code`. The operations SDK's `InvalidAssociation` domain error identifies a mismatch in explicit operation data, such as the ObjectId of the table measured for a LUT report. These numeric scopes classify failure extent; they do not define per-sample dependency semantics.
+`FailureScope` uses `Unspecified=0`, `Atom=1`, `Group=4`, `Run=5`, and `Waiter=6`. `AtomKey` identifies an output index and 1..8 coordinates, with unused coordinates zero. `FailureDetail` carries `origin`, `scope`, optional `atom`, `node_id`, `input_id`, optional `call_sequence`/`task_id`, and opaque `domain_code`. The operations SDK's `InvalidAssociation` domain error identifies a mismatch in explicit operation data, such as the ObjectId of the table measured for a LUT report. These numeric scopes classify failure extent; they do not define per-sample dependency semantics.
 
-The host binds `node_id` or `input_id` to the actual source of a failure. Propagation retains that identity and the original atom. A transport read failure remains Io/Group with its input declaration identity. Failure records have no success Tensor or success dependency certificate.
+Fixed invocation ABI 8 returns `code`, `reason`, opaque `domain_code` and a 256-byte message array including its terminator through `ps_kernel_status_v8`. The kernel does not interpret domain codes. C++ callers may construct `Status` with `DomainErrorCode`; C kernels fill the status record directly. Stable operation domain codes are defined in `photospider/ops/errors.hpp`.
 
-`FailureReason` contains only kernel-generic causes. An operation that needs a finer domain meaning constructs `Status(code, message, DomainErrorCode{value}, detail)`, or calls `fail_domain(status_code, domain_code)` from C. The kernel copies the value into `FailureDetail::domain_code` and transports it unchanged; it does not interpret or validate the number. The operations SDK defines its stable codes in `photospider/ops/errors.hpp`, for example `ops_error::DivideByZero` and `ops_error::InvalidAssociation`. A caller that branches on these codes includes that SDK header.
+The coordinator assigns Backend/Run origin and scope to a failed task and supplies its actual `node_id` and `task_id`. Observer exceptions use Observer/Run with the source call and dynamic `call_sequence`. These identity fields and the optional atom describe diagnostic provenance; they do not establish successful output or dependency readiness.
 
-Read, work and allocation service errors are sticky, including exceptions caught by a callback. A callback cannot replace a prior service failure by returning a value or another same-code status. A recorded domain failure is likewise not replaced by a later callback status, exception, or diagnostic-report failure. A detected Protocol violation survives later cancellation.
+During a Run, Cancelled outranks Stale, which outranks other abort causes; the first observed cause within a category wins. This ordering applies until the Run locks its terminal outcome and includes completion-protocol faults. Accepted work must finish cleanup before a terminal result is returned. Ordinary task failures retire in CallGroup order; a younger failure does not skip an unsettled older call.
 
-Failed ResultRefs and structured actors retain the first cause, reason, scope, and domain code in inline bounded diagnostic storage (up to 256 diagnostic bytes). The host may fill missing producer identity/scope for that same cause; it does not change an already specified upstream identity. Diagnostic-copy allocation failure returns the fixed machine-readable fields with an empty diagnostic. These inline bytes are charged with their owning managed runtime objects.
+Task failure messages are copied into storage reserved before issue. Invalid or duplicate completions use an empty-message `Internal`/`MalformedEnvelope` status to keep that failure path allocation-free. Failed Result construction state separately retains the first failure's fixed fields and up to 256 diagnostic bytes. If copying an owning `Status` cannot allocate, the fixed fields survive with an empty message. Repeated `RunHandle::join()` similarly preserves the locked error category and identity.
 
 ## Algorithms and mathematical quality bounds (operations SDK)
 
@@ -85,8 +87,8 @@ const double bound = residual
 
 Each proof row is charged through `consume_work` before access; cancellation or work failure returns no report. The proof does not cover arbitrary Float64 systems, residual-only stopping rules, other norms or relative error.
 
-Numerical evidence and dependency guarantees are independent. Conservative relations remain Conservative. Managed resource accounting retains its [documented scope](Managed-Resources.md); a numerical bound does not establish a product RSS hard bound.
+Numerical evidence and dependency guarantees are independent. Managed resource accounting retains its [documented scope](Managed-Resources.md); a numerical bound does not establish a product RSS hard bound.
 
 ## Limitations and caller handling
 
-Ordinary `execute` remains fail-fast. Quality evidence describes numerical estimates and remains separate from dependency completeness. The kernel's generic report channel is `DiagnosticAccumulator` (see [Port validators and diagnostic reports](Global-Results.md#port-validators-and-diagnostic-reports)); `QualityReport` is not transported through it.
+Quality evidence describes numerical estimates independently of task completion and dependency readiness. `DiagnosticAccumulator` is an explicit report-merging API (see [Structural contracts and diagnostic records](Global-Results.md#structural-contracts-and-diagnostic-records)); fixed invocation ABI 8 has no report-submission callback, and `QualityReport` remains an independent SDK object.

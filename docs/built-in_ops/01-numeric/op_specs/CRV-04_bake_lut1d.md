@@ -28,9 +28,7 @@ opaque bake callback or a new runtime function-object type.
 Available building blocks include expression sampling (NUM-01), a Bezier
 function sampler (CRV-02), and linspace query generation followed by CRV-01
 interpolation. The six concrete source templates inherit this completed contract.
-These building blocks and the six public constructors are implemented. Legacy
-LUT consumers retain their own interfaces; dynamic-axis consumption is tracked
-separately under CRV-05.
+All six public constructors author graph metadata and expand to fixed execution. LUT consumers have separate contracts.
 
 ## Confirmed source templates
 
@@ -72,13 +70,12 @@ node performs the selected final table conversion.
 
 Authoring names in individual files identify templates, not OperationRegistry keys. Expansion creates ordinary WorkflowDocument nodes with distinct node IDs, explicit static parameters, declared dynamic edges and named WorkflowOutput port references. Profile maps to key suffix `_strict`, `_accelerated_apple_silicon` or `_accelerated_x86_64` for every expanded node. It adds no profile parameter to the operation schemas. Constructors reserve existing and referenced node IDs, allocate the lowest unused positive IDs and enforce the 65,536-node document limit. They construct all nodes before mutating the caller's graph, so invalid authoring leaves the graph unchanged. The caller declares Result-backed workflow inputs and binds Results that satisfy the declared schemas; static schema hints do not replace compiler validation of bound Results.
 
-Construction only authors metadata and node references. The returned `BakedLut1d` contains `WorkflowNodeOutput` references for `values` and `axis`; its `outputs` method creates caller-named `WorkflowOutput` declarations. The caller chooses the demand and executes the graph through the ordinary Result workflow. Baked outputs are generic Result tensors; consumers validate their own LUT domain, ordering, channel and dtype requirements.
+Construction only authors metadata and node references. The returned `BakedLut1d` contains `WorkflowNodeOutput` references for `values` and `axis`; its `outputs` method creates caller-named `WorkflowOutput` declarations. The caller chooses the demand and executes the graph through the ordinary Result workflow. Baked outputs are generic Result tensors. Consumers check static channel/dtype compatibility; callers must also satisfy their numerical domain and ordering preconditions. CRV-05 L>1 declares all table rows for selected columns, so the producer must satisfy its own numerical requirements across that physical closure. Its L=1 path keeps the axis schema but omits axis payload; separately requested outputs can still require the axis producer.
 
 ## Inherited semantic differences
 
 Template convenience does not introduce new numerical validation or silently
-normalize incompatible source semantics. NUM-01/CRV-02 reject equal endpoints
-for count>=2 and collapsed sampled coordinates under their exact rules.
+normalize incompatible source semantics. NUM-01 requires distinct endpoints and sufficient selected-coordinate precision as caller preconditions. CRV-02 requires global valid x topology and selected-coordinate/domain precision as caller preconditions.
 Interpolation templates inherit linspace's allowed equal endpoints and repeated
 rounded positions. All support descending sampling where their source permits
 it. K remains an interpolation/Bezier control count, distinct from output count.
@@ -100,29 +97,22 @@ interpolation error relative to a continuous function.
 
 ## Demand, resources, errors and lifetime
 
-All expanded formal source outputs use CPU complete-input. A nonempty `values` request computes the complete baked table and returns its complete internal coverage, with public coverage restricted to requested tiles, even when the caller requests only a subset. Interpolation templates first materialize the complete Float64 linspace query array (`8*count` bytes), then the complete interpolation output (`count*C*dtype_size` bytes), in addition to active source owners and source-specific workspace. The host accounts these allocations through the same Root resource budget. A sparse request does not reduce the complete-input output owner or numerical work.
+The expression template inherits fixed NUM-01 execution. Each selected values tile is a task with independent dense storage and preallocated arithmetic scratch; axis is an atomic 24-byte task. Count one omits end payload, and axis-only omits all coefficients. Full static schemas remain checked. Larger counts read both endpoints even for the first values tile. Empty selection creates no pure payload task. Numerical domains and coordinate precision are caller preconditions; resource, source, backend and cancellation failures retain their operational categories. When both outputs are selected, they share one IR call's publication outcome.
 
-`axis` is an independent Float64 `[3]` Result. Axis-only demand does not execute expression coefficients, Bezier controls or interpolation x/y. For `count=1`, expanded sources omit the end payload; for larger counts, even a first-value demand collects end and computes the complete grid. Each source preserves its formula, selection, typed validation and numeric allowance. Active Result inputs retain complete typed and upstream validation, so a failure outside the requested numerical region can still fail the complete-input Run. Arithmetic errors retain the producing source operation's Run scope. Empty demand returns empty coverage without polling a value producer or reading payload. Any metadata processing needed to construct and seal that empty Result remains part of ordinary execution.
+Changing bindings reuses immutable static preparation and creates new Run-owned results. There is no content cache or repeated-demand identity guarantee. Callers bind immutable Result sources through `ExecutionBindings`, prepare the Plan, submit a Run and read named `ExecutionResult.results` after join. Successful Result owners and read windows can retain allocations beyond context lifetime.
 
-Dependency support maps the requested output region back to its source support. Editing a source invalidates the values demand according to that recorded mapping; function controls do not dirty the independent axis.
-
-Repeating an identical demand retains its completed Result identity. Equal-content source Results can reuse cached computation. Replacing bindings reuses static `PreparedOperation` objects while producing outputs for the new inputs.
-
-Callers publish source data as immutable source Results and bind them through `ExecutionBindings`; demand execution returns named outputs in `DemandResult.results`, and reads use Result tensor access. Baked `values` and `axis` have independent immutable Result owners. Their authorized read windows retain the corresponding Root allocations after the Result handles, source backing and execution context retire. Releasing the final window returns the corresponding live Root resources to zero.
-
-The expanded source operations own numerical evaluation, validation, Result publication and source-level failures; the execution host owns scheduling, cache identity, shared resource admission and cancellation. If a complete-input output exceeds the caller's resource budget, execution returns its resource failure before publishing partial table contents. Callers should budget for the full query and table, and should request `axis` only when needed.
+Interpolation expansions use fixed linspace and curve tasks. Sparse values propagate only their required query tile closure to linspace and allocate selected curve output tiles. Axis-only selection excludes curve inputs and execution. Axis belongs to the linspace call and values to the curve call; they have separate call retirement outcomes. Bezier expansions use fixed values tasks with complete control support and a separate scalar-only axis task. Count one omits end, and axis-only omits controls. Selected outputs share the sampler call's publication outcome. Resource and dependency rules for executable families come from their expanded operation contracts; a constructor adds no hidden evaluation or storage.
 
 ## Acceptance and implementation boundary
 
 For every template and CPU profile, construct the generated graph and its explicit WorkflowDocument expansion through the public authoring APIs. Compare output schemas and coverage, requested Result bits, analytic fixture values, source support and dirty mapping. Exercise both table dtypes and the four demand modes: full values, axis-only, joint values and axis, and sparse values. Keep template-equivalence checks distinct from the numeric oracles that validate the underlying samplers and interpolators.
 
-Behavior coverage includes count one with a failing end producer, count greater than one with a failing end producer, empty demand with a real failing source continuation, source-specific equal-endpoint/domain rules, independent axis demand, mixed endpoint/table dtypes, fresh-source cache hits, repeated-demand Result identity, static preparation reuse after binding changes, work/payload rejection, cancellation after computation starts and recovery. Test reversed, unaligned and scalar zero-stride source layouts across every input port, and verify caller and worker floating-environment preservation. Exercise source owner retirement, independent values/axis ownership, Result and read-window lifetime, and release of all Root resources. A sparse million-row PCHIP request under a 1 MiB Payload budget returns `ResourceExhausted / CapacityLimit` at node 1 before the complete linspace query Result can be admitted; this checks full-query admission and does not claim successful maximum-size execution. Injected computation WorkLimit and cancellation also return with live Payload at zero.
+For expression, Bezier and interpolation expansions, cover count one with a failing end producer, empty selection, axis-only with failing coefficients, mixed dtypes, static preparation reuse after binding changes, sparse maximum count, resource rejection, cancellation and output lifetime. Compare generated and explicit graphs through actual fixed public execution. For Bezier, also cover axis-only with failing control producers and explicit graph equivalence.
 
 No additional numeric primitive is introduced. Numerical arithmetic and independent numeric oracles for the underlying operations remain in NUM-01/02 and CRV-01/02; generated/explicit graph equivalence alone does not prove their numerical contracts. Other platforms and native GPU behavior require their own direct evidence.
 
 The source specifications remain Proposed independently of implementation.
-CRV-05 now executes the scalar/channels LUT consumer chains and their separate
-discretization acceptance.
+CRV-05 defines the scalar/channels LUT consumer chains and separate discretization acceptance.
 
 - [NUM-01 expression](NUM-01_sample_expression.md).
 - [NUM-02A linspace](NUM-02A_linspace.md).

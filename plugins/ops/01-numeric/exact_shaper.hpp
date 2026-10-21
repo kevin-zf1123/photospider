@@ -11,13 +11,14 @@
 #include "01-numeric/numeric_nan.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
-// Whole log-ratio / exponential interpolation. The adapter validates matching
-// dtypes and 0<lower<upper before this entry, including special input values.
+// Whole-formula log-ratio / exponential interpolation. Matching dtypes are
+// prepared statically; finite 0<lower<upper is a caller precondition.
 class ExactShaper final {
-  DirectedFunctions functions_;
+  CheckedDirectedFunctions functions_;
   RatioWorkspace exact_;
-  using Interval = DirectedInterval::Interval;
-  using Frame = DirectedInterval::Frame;
+  using Interval = CheckedDirectedInterval::Interval;
+  using Frame = CheckedDirectedInterval::Frame;
+  using Fault = CheckedDirectedInterval::Fault;
   struct Odd {
     std::uint64_t value;
     int exponent;
@@ -30,14 +31,18 @@ class ExactShaper final {
   std::uint64_t round(std::uint64_t numerator, std::uint64_t denominator,
                       bool narrow, int scale, bool negative = false) {
     work(2 * exact_.numerator.words.size());
+    if (!functions_.math.active())
+      return 0;
     exact_.numerator.words.fill(0);
     exact_.numerator.words[0] = numerator;
     exact_.denominator.words.fill(0);
     exact_.denominator.words[0] = denominator;
     exact_.negative = negative;
     auto result = exact_.round(narrow, *functions_.math.consume, scale);
-    if (!result.ok())
-      throw result.status();
+    if (!result.ok()) {
+      functions_.math.fail(result.status().code, result.status().reason);
+      return 0;
+    }
     return result.value();
   }
   static std::uint64_t infinity(bool narrow) {
@@ -136,54 +141,78 @@ class ExactShaper final {
     return dyadic(core, l.exponent + difference * static_cast<int>(multiplier),
                   narrow);
   }
-  std::uint64_t round_scaled(const DirectedInterval::Number& value, bool narrow,
-                             int scale) {
+  std::uint64_t round_scaled(const CheckedDirectedInterval::Number& value,
+                             bool narrow, int scale) {
     auto& math = functions_.math;
-    work(2 * DirectedInterval::kWords);
+    work(2 * CheckedDirectedInterval::kWords);
+    if (!math.active())
+      return 0;
     math.rounding.numerator = value.magnitude;
     math.rounding.denominator.words.fill(0);
     math.rounding.denominator.words[0] = 1;
     math.rounding.negative = value.negative;
     auto result = math.rounding.round(narrow, *math.consume,
                                       scale - static_cast<int>(math.precision));
-    if (!result.ok())
-      throw result.status();
+    if (!result.ok()) {
+      functions_.math.fail(result.status().code, result.status().reason);
+      return 0;
+    }
     return result.value();
   }
   int exponential(Interval output, Interval z) {
     auto& math = functions_.math;
+    if (!math.active())
+      return 0;
     Frame frame(math);
     auto limit = math.interval();
     math.integer(limit, 1024);
-    if (math.compare(z.low, limit.high) >= 0)
-      throw DirectedFunctions::RangeResult{true};
+    if (math.compare(z.low, limit.high) >= 0) {
+      math.range(true);
+      return 0;
+    }
     math.negate(limit, limit);
-    if (math.compare(z.high, limit.low) <= 0)
-      throw DirectedFunctions::RangeResult{false};
-    if (math.compare(z.low, limit.low) < 0)
-      throw DirectedInterval::Unresolved{};
+    if (math.compare(z.high, limit.low) <= 0) {
+      math.range(false);
+      return 0;
+    }
+    if (math.compare(z.low, limit.low) < 0) {
+      math.retry();
+      return 0;
+    }
     math.negate(limit, limit);
-    if (math.compare(z.high, limit.high) > 0)
-      throw DirectedInterval::Unresolved{};
+    if (math.compare(z.high, limit.high) > 0) {
+      math.retry();
+      return 0;
+    }
     auto ln2 = math.interval(), quotient = math.interval(),
          multiple = math.interval(), residual = math.interval();
     math.constant(ln2, false);
     math.divide(quotient, z, ln2);
+    if (!math.active())
+      return 0;
     auto& integral = math.number();
     math.shift(integral, quotient.low, -static_cast<int>(math.precision), true);
-    if (math.top(integral) >= 12)
-      throw DirectedInterval::Unresolved{};
+    if (!math.active())
+      return 0;
+    if (math.top(integral) >= 12) {
+      math.retry();
+      return 0;
+    }
     const auto magnitude = static_cast<int>(integral.magnitude.words[0]);
     const int exponent = integral.negative ? -magnitude : magnitude;
     math.integer(multiple, exponent);
     math.multiply(multiple, multiple, ln2);
     math.subtract(residual, z, multiple);
     math.integer(limit, 1);
-    if (math.compare(residual.high, limit.high) > 0)
-      throw DirectedInterval::Unresolved{};
+    if (math.compare(residual.high, limit.high) > 0) {
+      math.retry();
+      return 0;
+    }
     math.negate(limit, limit);
-    if (math.compare(residual.low, limit.low) < 0)
-      throw DirectedInterval::Unresolved{};
+    if (math.compare(residual.low, limit.low) < 0) {
+      math.retry();
+      return 0;
+    }
     functions_.exponential(output, residual);
     return exponent;
   }
@@ -198,92 +227,106 @@ class ExactShaper final {
       const std::function<Status()>& interval_attempt) {
     using Answer = Result<std::uint64_t>;
     auto& math = functions_.math;
-    math.used = 0;
+    math.reset();
     math.consume = &consume;
     struct End {
-      DirectedInterval& math;
+      CheckedDirectedInterval& math;
       ~End() { math.consume = nullptr; }
     } end{math};
-    try {
-      work(16);
-      const auto x = BinaryParts::decode(bits, narrow),
-                 l = BinaryParts::decode(lower, narrow),
-                 u = BinaryParts::decode(upper, narrow);
-      const auto type = narrow ? ElementType::Float32 : ElementType::Float64;
-      const auto one =
-          narrow ? UINT64_C(0x3f800000) : UINT64_C(0x3ff0000000000000);
-      if (x.nan)
-        return Answer(converted_nan(bits, type, type));
-      if (inverse) {
-        if (!x.magnitude)
-          return Answer(lower);
-        if (bits == one)
-          return Answer(upper);
-        if (x.infinite)
-          return Answer(x.negative ? 0 : infinity(narrow));
-        if (auto exact = inverse_dyadic(x, l, u, narrow))
-          return Answer(*exact);
-      } else {
-        if (!x.magnitude)
-          return Answer(infinity(narrow) | (UINT64_C(1) << (narrow ? 31 : 63)));
-        if (x.negative)
-          return Answer(narrow ? UINT64_C(0x7fc00000)
-                               : UINT64_C(0x7ff8000000000000));
-        if (x.infinite)
-          return Answer(infinity(narrow));
-        if (bits == lower)
-          return Answer(0);
-        if (bits == upper)
-          return Answer(one);
-        const auto ox = odd(x), ol = odd(l), ou = odd(u);
-        if (ox.value == ol.value && ol.value == ou.value) {
-          const auto numerator = ox.exponent - ol.exponent;
-          return Answer(round(numerator < 0 ? -numerator : numerator,
-                              ou.exponent - ol.exponent, narrow, 0,
-                              numerator < 0));
-        }
+    const auto finish = [&](std::uint64_t value) -> Answer {
+      return math.fault == Fault::Failure ? Answer(math.status())
+                                          : Answer(value);
+    };
+    work(16);
+    if (!math.active())
+      return Answer(math.status());
+    const auto x = BinaryParts::decode(bits, narrow),
+               l = BinaryParts::decode(lower, narrow),
+               u = BinaryParts::decode(upper, narrow);
+    const auto type = narrow ? ElementType::Float32 : ElementType::Float64;
+    const auto one =
+        narrow ? UINT64_C(0x3f800000) : UINT64_C(0x3ff0000000000000);
+    // Guard integer decomposition and division, not the full bound contract.
+    if (!l.significand || !u.significand)
+      return Answer(Status{ErrorCode::InvalidArgument, {}});
+    if (x.nan)
+      return Answer(converted_nan(bits, type, type));
+    if (inverse) {
+      if (!x.magnitude)
+        return Answer(lower);
+      if (bits == one)
+        return Answer(upper);
+      if (x.infinite)
+        return Answer(x.negative ? 0 : infinity(narrow));
+      if (auto exact = inverse_dyadic(x, l, u, narrow))
+        return finish(*exact);
+    } else {
+      if (!x.magnitude)
+        return Answer(infinity(narrow) | (UINT64_C(1) << (narrow ? 31 : 63)));
+      if (x.negative)
+        return Answer(narrow ? UINT64_C(0x7fc00000)
+                             : UINT64_C(0x7ff8000000000000));
+      if (x.infinite)
+        return Answer(infinity(narrow));
+      if (bits == lower)
+        return Answer(0);
+      if (bits == upper)
+        return Answer(one);
+      const auto ox = odd(x), ol = odd(l), ou = odd(u);
+      if (ox.value == ol.value && ol.value == ou.value) {
+        const auto numerator = ox.exponent - ol.exponent;
+        return finish(round(numerator < 0 ? -numerator : numerator,
+                            ou.exponent - ol.exponent, narrow, 0,
+                            numerator < 0));
       }
-      auto reported = interval_attempt();
-      if (!reported.ok())
-        return Answer(reported);
-      for (unsigned precision = 128; precision <= 4096; precision *= 2) {
-        work(1);
-        math.precision = precision;
-        Frame frame(math);
-        try {
-          auto log_lower = math.interval(), log_upper = math.interval(),
-               delta = math.interval(), input = math.interval(),
-               numerator = math.interval(), output = math.interval();
-          functions_.logarithm(log_lower, l);
-          functions_.logarithm(log_upper, u);
-          math.subtract(delta, log_upper, log_lower);
-          int scale = 0;
-          if (inverse) {
-            math.raw(input, bits, narrow);
-            math.multiply(numerator, input, delta);
-            math.add(numerator, numerator, log_lower);
-            scale = exponential(output, numerator);
-          } else {
-            functions_.logarithm(input, x);
-            math.subtract(numerator, input, log_lower);
-            math.divide(output, numerator, delta);
-          }
-          const auto low = round_scaled(output.low, narrow, scale);
-          const auto high = round_scaled(output.high, narrow, scale);
-          if (low == high)
-            return Answer(low);
-        } catch (const DirectedInterval::Unresolved&) {
-          // Refine the complete expression; work failures are not retries.
-        }
-      }
-      return Answer(Status{ErrorCode::ResourceExhausted,
-                           "log shaper rounding precision limit",
-                           FailureReason::CapacityLimit});
-    } catch (const DirectedFunctions::RangeResult& range) {
-      return Answer(range.overflow ? infinity(narrow) : 0);
-    } catch (const Status& status) {
-      return Answer(status);
     }
+    if (!math.active())
+      return Answer(math.status());
+    auto reported = interval_attempt();
+    if (!reported.ok())
+      return Answer(reported);
+    for (unsigned precision = 128; precision <= 4096; precision *= 2) {
+      if (math.fault == Fault::Retry)
+        math.reset();
+      work(1);
+      if (!math.active())
+        return Answer(math.status());
+      math.precision = precision;
+      Frame frame(math);
+      auto log_lower = math.interval(), log_upper = math.interval(),
+           delta = math.interval(), input = math.interval(),
+           numerator = math.interval(), output = math.interval();
+      functions_.logarithm(log_lower, l);
+      functions_.logarithm(log_upper, u);
+      math.subtract(delta, log_upper, log_lower);
+      int scale = 0;
+      if (inverse) {
+        math.raw(input, bits, narrow);
+        math.multiply(numerator, input, delta);
+        math.add(numerator, numerator, log_lower);
+        scale = exponential(output, numerator);
+      } else {
+        functions_.logarithm(input, x);
+        math.subtract(numerator, input, log_lower);
+        math.divide(output, numerator, delta);
+      }
+      if (math.fault == Fault::Overflow)
+        return Answer(infinity(narrow));
+      if (math.fault == Fault::Underflow)
+        return Answer(UINT64_C(0));
+      if (math.fault == Fault::Failure)
+        return Answer(math.status());
+      if (math.fault == Fault::Retry)
+        continue;
+      const auto low = round_scaled(output.low, narrow, scale);
+      const auto high = round_scaled(output.high, narrow, scale);
+      if (!math.active())
+        return Answer(math.status());
+      if (low == high)
+        return Answer(low);
+    }
+    return Answer(
+        Status{ErrorCode::ResourceExhausted, {}, FailureReason::CapacityLimit});
   }
 };
 }  // namespace ps::plugin_internal::numeric_ops

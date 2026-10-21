@@ -18,120 +18,83 @@ using namespace ps;  // NOLINT(build/namespaces)
 OperationDefinition definition() {
   OperationDefinition op;
   op.key = "test.results";
-  op.traits.workspace_bytes = 2048;
   op.traits.outputs = {multi_result::output("first"),
                        multi_result::output("second")};
-  op.start_result = [](const ResultProgramQuery& query,
-                       const BufferAllocator& allocator) {
-    return ResultContinuation::make<multi_result::Program>(
-        allocator, -1, 10.0 + query.output_index);
-  };
+  multi_result::install_fixed(op, {-1, -1}, {10, 11});
   return op;
 }
 
-Result<ResultRef> invoke_constant(const OperationRegistry& registry,
-                                  const std::string& key, unsigned output) {
-  auto traits = registry.find_traits(key);
-  if (!traits.ok())
-    return Result<ResultRef>(traits.status());
-  ResultProgramMetadata metadata;
-  metadata.output.result_schema = std::make_shared<const SchemaTemplate>(
-      *traits.value()
-           .outputs[output < traits.value().outputs.size() ? output : 0]
-           .result_schema);
-  const std::map<std::string, ParameterValue> parameters;
-  ResultProgramQuery query(metadata, parameters);
-  query.output_index = output;
-  query.semantic_key = key;
-  ResourceBudget root;
-  auto allocator = root.allocator();
-  auto state = registry.start_result(key, query, allocator);
-  if (!state.ok())
-    return Result<ResultRef>(state.status());
-
-  ResultObjectInputs objects;
-  ResultProgramPhase phase{
-      query,
-      objects,
-      allocator,
-      root,
-      [&](std::uint64_t units) { return root.consume({units}); },
-      std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok)};
-  auto continuation = state.take_value();
-  auto polled = continuation.poll(phase);
-  if (!polled.ok())
-    return Result<ResultRef>(polled.status());
-  const auto* publication = std::get_if<ResultPublication>(&polled.value());
-  if (!publication || !publication->complete)
-    return Result<ResultRef>(
-        Status{ErrorCode::OperationFailed, "missing constant publication"});
-  return Result<ResultRef>(publication->result);
+Result<ResultRef> invoke_constant(
+    const std::shared_ptr<OperationRegistry>& registry, const std::string& key,
+    const std::string& output) {
+  WorkflowDocument document;
+  document.nodes = {{1, key, {}, {}}};
+  document.outputs = {{"selected", 1, output}};
+  GraphContext graph(document);
+  auto compiled = Compiler(registry).compile(graph);
+  if (!compiled.ok())
+    return Result<ResultRef>(compiled.status());
+  ExecutionContext context(registry);
+  auto result = multi_result::run(context, compiled.value().plan.value());
+  return result.ok() ? Result<ResultRef>(result.value().results.at("selected"))
+                     : Result<ResultRef>(result.status());
 }
 
 int registration_and_invocation() {
-  OperationRegistry registry;
+  auto registry = std::make_shared<OperationRegistry>();
   auto op = definition();
-  PS_CHECK(registry.register_operation(op).ok());
-  auto found = registry.find_traits(op.key);
+  PS_REQUIRE_OK(registry->register_operation(op));
+  auto found = registry->find_traits(op.key);
   PS_CHECK(found.ok() && found.value().outputs.size() == 2);
   op.traits.outputs[1].key = "mutated";
-  PS_CHECK(registry.find_traits(op.key).value().outputs[1].key == "second");
-  auto value = invoke_constant(registry, op.key, 1);
-  PS_CHECK(value.ok() && multi_result::number(value.value()) == 11);
-  PS_CHECK(!invoke_constant(registry, op.key, 2).ok());
+  op.traits.outputs[1].result_schema->tensors[0].descriptor.shape = {99};
+  const auto retained = registry->find_traits(op.key);
+  PS_CHECK(
+      retained.value().outputs[1].key == "second" &&
+      retained.value().outputs[1].result_schema->tensors[0].sample_shape() ==
+          std::vector<std::uint64_t>{1});
   op = definition();
   op.key = "test.duplicate";
   op.traits.outputs[1].key = "first";
-  PS_CHECK(!registry.register_operation(op).ok());
+  PS_CHECK(!registry->register_operation(op).ok());
   op.traits.outputs.clear();
-  PS_CHECK(!registry.register_operation(op).ok());
-  op = definition();
-  op.key = "test.nonfree";
-  op.traits.cacheable = false;
-  op.traits.side_effect_free = false;
-  PS_CHECK(!registry.register_operation(op).ok());
-  // A typed first result must not impose its schema on a generic sibling.
+  PS_CHECK(!registry->register_operation(op).ok());
+  // Independent sibling schemas retain their own structural grouping.
   auto mixed = definition();
   mixed.key = "test.mixed";
-  auto& first = mixed.traits.outputs[0];
-  first.result_schema->tensors[0].atomic_trailing_axes = 1;
-  PS_CHECK(registry.register_operation(mixed).ok());
-  auto generic = invoke_constant(registry, mixed.key, 1);
-  PS_CHECK(generic.ok());
+  mixed.traits.outputs[0].result_schema->tensors[0].atomic_trailing_axes = 1;
+  PS_REQUIRE_OK(registry->register_operation(mixed));
+  PS_REQUIRE_OK(registry->freeze());
+  auto value = invoke_constant(registry, "test.results", "second");
+  PS_REQUIRE_OK(value);
+  PS_CHECK(multi_result::number(value.value()) == 11);
+  PS_CHECK(!invoke_constant(registry, "test.results", "absent").ok());
+  auto generic = invoke_constant(registry, mixed.key, "second");
+  PS_REQUIRE_OK(generic);
   PS_CHECK(generic.value().schema().tensors[0].atomic_trailing_axes == 0);
   PS_CHECK(multi_result::number(generic.value()) == 11);
   auto c_registry = std::make_shared<OperationRegistry>();
-  PS_CHECK(c_registry->load_plugin(PS_MULTI_OUTPUT_FIXTURE).ok());
+  PS_REQUIRE_OK(c_registry->load_plugin(PS_MULTI_OUTPUT_FIXTURE));
   PS_CHECK(c_registry->find_traits("test.c_results").value().outputs[1].key ==
            "second");
-  PS_CHECK(c_registry->freeze().ok());
-  WorkflowDocument c_document;
-  c_document.nodes = {{1, "test.c_results", {}, {}}};
-  c_document.outputs = {{"selected", 1, "second"}};
-  GraphContext c_graph(c_document);
-  auto c_plan = Compiler(c_registry).compile(c_graph);
-  PS_CHECK(c_plan.ok());
-  ExecutionContext c_execution(c_registry);
-  auto c_value = c_execution.execute(c_plan.value().plan.value());
-  PS_CHECK(c_value.ok() &&
-           multi_result::number(c_value.value().results.at("selected")) == 11);
+  PS_REQUIRE_OK(c_registry->freeze());
+  auto c_value = invoke_constant(c_registry, "test.c_results", "second");
+  PS_REQUIRE_OK(c_value);
+  PS_CHECK(multi_result::number(c_value.value()) == 11);
   return 0;
 }
 
-int staged_selection() {
+int independent_shapes() {
   auto op = definition();
-  op.key = "test.staged_results";
+  op.key = "test.shaped_results";
   op.traits.outputs[1] = multi_result::output(
       "second", multi_result::schema(ElementType::Float64, {2}));
-  op.start_result = [](const ResultProgramQuery& query,
-                       const BufferAllocator& allocator) {
-    return ResultContinuation::make<multi_result::Program>(
-        allocator, -1, 20.0 + query.output_index);
-  };
-  OperationRegistry registry;
-  PS_CHECK(registry.register_operation(op).ok());
-  auto result = invoke_constant(registry, op.key, 1);
-  PS_CHECK(result.ok());
+  multi_result::install_fixed(op, {-1, -1}, {20, 21});
+  auto registry = std::make_shared<OperationRegistry>();
+  PS_REQUIRE_OK(registry->register_operation(op));
+  PS_REQUIRE_OK(registry->freeze());
+  auto result = invoke_constant(registry, op.key, "second");
+  PS_REQUIRE_OK(result);
   PS_CHECK(result.value().schema().tensors[0].sample_shape() ==
            std::vector<std::uint64_t>{2});
   PS_CHECK(multi_result::number(result.value(), {0}) == 21);
@@ -161,10 +124,7 @@ int compilation() {
     return Result<std::vector<OperationOutputSpecialization>>(
         std::vector<OperationOutputSpecialization>{std::move(output)});
   };
-  identity.start_result = [](const ResultProgramQuery&,
-                             const BufferAllocator& allocator) {
-    return ResultContinuation::make<multi_result::Program>(allocator, 0);
-  };
+  multi_result::install_fixed(identity, {0}, {0});
   PS_CHECK(registry->register_operation(identity).ok());
   PS_CHECK(registry->freeze().ok());
   WorkflowDocument document;
@@ -187,23 +147,22 @@ int compilation() {
                .outputs[1]
                .result_schema->tensors[0]
                .descriptor.element_type == ElementType::Int64);
-  const auto& steps = compiled.value().plan.value().steps();
-  PS_CHECK(steps.size() == 3);
-  PS_CHECK((steps[0].result_ref() == ValueRef{1, 0}));
-  PS_CHECK((steps[1].result_ref() == ValueRef{1, 1}));
-  PS_CHECK((steps[2].result_ref() == ValueRef{2, 0}));
-  PS_CHECK(steps[1].output_result_schema->tensors[0].sample_shape() ==
-           std::vector<std::uint64_t>{2});
-  PS_CHECK(std::get<PlanStepInput>(steps[2].inputs[0]).step_index == 1);
-  std::vector<bool> scheduled(3, false);
-  for (const auto& block : compiled.value().plan.value().blocks())
-    for (const auto& instruction : block.instructions) {
-      PS_CHECK(instruction.step_index == 1 || instruction.step_index == 2);
-      scheduled[instruction.step_index] = true;
-    }
-  PS_CHECK(!scheduled[0] && scheduled[1] && scheduled[2]);
+  const auto& plan = compiled.value().plan.value();
+  const auto& program = plan.program();
+  PS_CHECK(program.calls.size() == 2 && program.tasks.size() == 2);
+  const auto first = plan.calls()[0].outputs[0];
+  const auto second = plan.calls()[0].outputs[1];
+  PS_CHECK(program.values[first].tiles.empty());
+  PS_CHECK(program.values[second].tiles.size() == 1);
+  PS_CHECK(plan.calls()[1].inputs == std::vector<physical::Id>{second});
+  PS_CHECK(program.schemas[program.values[second].schema]
+               ->tensors[0]
+               .sample_shape() == std::vector<std::uint64_t>{2});
+  const auto& identity_task = program.tasks[program.calls[1].tasks[0]];
+  PS_CHECK(identity_task.reads.size() == 1 &&
+           program.tiles[identity_task.reads[0].tile].value == second);
   ExecutionContext context(registry);
-  auto executed = context.execute(compiled.value().plan.value());
+  auto executed = multi_result::run(context, plan);
   PS_CHECK(executed.ok());
   const auto& integer_result = executed.value().results.at("selected");
   std::int64_t integer = 0;
@@ -215,13 +174,9 @@ int compilation() {
   document.outputs.push_back({"first", 1, "first"});
   GraphContext both(document);
   auto all = compiler.compile(both);
-  PS_CHECK(all.ok() && all.value().plan.value().steps().size() == 3);
-  scheduled.assign(3, false);
-  for (const auto& block : all.value().plan.value().blocks())
-    for (const auto& instruction : block.instructions)
-      scheduled.at(instruction.step_index) = true;
-  PS_CHECK(scheduled[0] && scheduled[1] && scheduled[2]);
-  auto all_executed = context.execute(all.value().plan.value());
+  PS_REQUIRE_OK(all);
+  PS_CHECK(all.value().plan.value().program().tasks.size() == 3);
+  auto all_executed = multi_result::run(context, all.value().plan.value());
   PS_CHECK(all_executed.ok());
   PS_CHECK(multi_result::number(all_executed.value().results.at("first"),
                                 {2, 4}) == 10);
@@ -292,7 +247,7 @@ int inference() {
 int main() {
   PS_CHECK(registration_and_invocation() == 0);
   PS_CHECK(inference() == 0);
-  PS_CHECK(staged_selection() == 0);
+  PS_CHECK(independent_shapes() == 0);
   PS_CHECK(compilation() == 0);
   return 0;
 }

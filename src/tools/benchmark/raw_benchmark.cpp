@@ -1,5 +1,6 @@
 #include "photospider/benchmark/raw_benchmark.hpp"
 
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -123,6 +124,7 @@ Result<RawBenchmarkReport> RawBenchmarkRunner::run(
   }
 
   RawBenchmarkReport report;
+  report.cpu_workers = execution_->cpu_workers();
   report.oracle_name =
       options.correctness_oracle ? options.oracle_name : "unchecked";
   report.samples.reserve(options.iterations);
@@ -150,8 +152,37 @@ Result<RawBenchmarkReport> RawBenchmarkRunner::run(
 #endif
     sample.compilation = workflow.diagnostics;
 
-    auto executed = execution_->execute(workflow.plan.value(), bindings,
-                                        cancellation, options.execution);
+    auto executed = [&]() -> Result<ExecutionResult> {
+      auto started = std::chrono::steady_clock::now();
+      auto elapsed = [&] {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - started)
+                .count());
+      };
+      auto prepared = execution_->prepare(workflow.plan.value());
+      sample.prepare_ns = elapsed();
+      if (!prepared.ok())
+        return Result<ExecutionResult>(prepared.status());
+      started = std::chrono::steady_clock::now();
+      auto submitted = execution_->submit(prepared.value(), bindings,
+                                          cancellation, options.execution);
+      sample.submit_ns = elapsed();
+      if (!submitted.ok())
+        return Result<ExecutionResult>(submitted.status());
+      auto observation = submitted.value().observation();
+      started = std::chrono::steady_clock::now();
+      auto joined = submitted.value().join();
+      sample.join_ns = elapsed();
+      sample.execution = observation.snapshot();
+      sample.task_timings.resize(sample.execution.task_timing_count);
+      sample.call_timings.resize(sample.execution.call_timing_count);
+      sample.task_timings.resize(observation.copy_task_timings(
+          sample.task_timings.data(), sample.task_timings.size()));
+      sample.call_timings.resize(observation.copy_call_timings(
+          sample.call_timings.data(), sample.call_timings.size()));
+      return joined;
+    }();
     if (!executed.ok()) {
       if (executed.status().code == ErrorCode::Cancelled) {
         return Result<RawBenchmarkReport>(executed.status());
@@ -206,6 +237,7 @@ Result<RawBenchmarkReport> RawBenchmarkRunner::run(
     }
     report.samples.push_back(std::move(sample));
   }
+  report.native_device_description = execution_->native_device_description();
   if (cancellation.cancelled()) {
     return Result<RawBenchmarkReport>(Status::failure(
         ErrorCode::Cancelled,

@@ -26,8 +26,7 @@ values remain exact.
 Compute sin(pi*p/q) with exact pi and the exact Int64 fraction p/q. Inherit the
 [rational pi contract](NUM-04_rational_pi_contract.md) in full: ordered numerator/
 denominator inputs, identical positive rank-1..8 shapes, q>0, unreduced fraction
-support, floating output dtype default Float64, complete-input demand,
-integer range-safe reduction, errors, resources, fallback, cache and ownership.
+support, floating output dtype default Float64, fixed tile demand, integer range-safe reduction, operational errors, resources, numerical refinement and ownership.
 Output values preserves shape with no attached domain description. No implicit floating division
 or conversion of p/q defines this operation.
 
@@ -38,8 +37,7 @@ Integers use numerator-sign zero; exact halves are +/-1. Sine is bounded in [-1,
 Strict correctly rounds the entire mathematical function directly to output dtype.
 Accelerated inherits the final four-ULP bound and exact special-case rules from
 the shared contract. Reduced denominators 1,2,3,4,6 use correctly rounded common-angle paths in all three profiles.
-No input NaN/payload propagation applies to the two integer ports. Invalid q
-fails independently of any zero numerator identity. Unsupported platforms and
+No input NaN/payload propagation applies to the two integer ports. Positive q is an unchecked caller precondition, including for a zero numerator. Unsupported platforms and
 runtime resource/upstream/cancellation failures retain the shared Status contract.
 
 Conceptual public fixture: p=[0,1,1,-1,2], q=[1,6,2,1,6] -> [0,0.5,1,-0,RN_dtype(sqrt(3)/2)].
@@ -51,13 +49,12 @@ not a floating quotient fed into the old sinpi helper.
 
 Provide a real public WorkflowDocument run with numerator/denominator bindings,
 static dtype and named values through the maintained public workflow. Verify actual
-sparse read/dirty sets, invalid denominators, source changes, cache-off, budgets,
+fixed sparse reads, positive denominators, new bindings, budgets,
 cancellation, fallback behavior and result lifetime. The validation boundary is
 recorded below; local timing is recorded in the implementation notes. The existing floating sinpi specification retains its own input domain.
 
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
-atomic failure for the complete invocation. Its numerical path follows
+exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

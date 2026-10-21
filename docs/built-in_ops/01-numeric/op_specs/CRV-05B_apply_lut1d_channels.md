@@ -24,110 +24,27 @@ arithmetic in accelerated profiles follows the shared
 range/fallback rules. Discrete results, copies, selected endpoints and special
 values remain exact.
 
-## Confirmed channel interface
+## Channel interface
 
-Inputs in order are Result tensors input[...,C], table[L,C] and a shared Float64
-axis[3]. Each Result contains one tensor member under any schema id/version/key;
-shapes use complete `sample_shape()` including batch axes. The final input axis is
-the channel axis and its length equals the table's second extent. Each input[...,c]
-uses only table[:,c]. Output port `values` is a Result using schema
-`photospider.tensor` v1/member `samples`, preserving the complete input shape,
-including C=1, with selected dtype and no attached domain description.
-It does not map one scalar to C outputs; that is the separate color-ramp family.
+Required inputs in order are input `[...,C]`, table `[L,C]` and shared Float64 axis `[3]`. Each Result has one tensor member under any schema id/version/key; complete `sample_shape()` includes batch axes. Input and table independently accept Float32/Float64. Require 1<=L<=1048576, C>=1, positive extents, input rank 1..8 and each logical product <=2^40. The final input axis equals the table's second extent. Rank-1 `[C]` is one vector and C=1 remains an explicit axis.
 
-Inherit [single-table CRV-05A](CRV-05A_apply_lut1d.md) for floating dtype rules,
-output default matching the authoring `input_type` hint (independent of compiled
-edge validation), complete shared-axis validation, descending axes,
-singleton tables, three domain modes, strict whole-formula interpolation, exact
-zero/selection rules and the shared accelerated final FP32 bound. Each input Result's tensor has one dtype; channels do not carry independently
-selected dtypes or axes. Input and table tensor shapes come from full
-`sample_shape()` including batch axes. Output port `values` uses
-`photospider.tensor` v1/member `samples`, with the complete input shape, selected
-Float32/Float64 dtype and no attached domain description.
-Require C>=1, 1<=L<=1048576, positive input extents and input rank 1..8.
-A rank-1 input [C] is one vector. Input and table logical element counts must
-each be <=2^40, with products checked without overflow. There is no additional
-small C limit. Input Float32/Float64 and table Float32/Float64 may differ.
+Output `values` uses `photospider.tensor` v1/member `samples`, preserves the complete input shape as ordinary axes, selects Float32/Float64 and carries no domain description. Static `dtype` and `out_of_domain` parameters, constructor defaults, axis formula, numerical preconditions and rounding follow [CRV-05A](CRV-05A_apply_lut1d.md). Metadata checks include the input/table C relation and every declared edge even when its payload is inactive. Each tensor has one dtype; the shared axis and policy apply to every channel.
 
-## Static parameters, inference and demand
+Each input[...,c] uses table[:,c]. Queries and therefore knot/segment selection are independent per channel. This operation preserves C instead of mapping one scalar to a vector; no color conversion is inferred.
 
-Static dtype and out_of_domain inherit CRV-05A's required String encodings,
-constructor defaults and explicit direct-node parameters. There is no channel_axis,
-per-channel dtype, per-channel policy or independent-axis mode. Validate the
-table/input C relation at compile/preflight; output shape/dtype are static.
+## Fixed demand and resources
 
-Every nonempty complete-input request requests complete input, table and axis Results with ordinary payload tile Needs, including typed validation and upstream failures. It validates the complete reconstructed axis first, then every finite/domain query before table arithmetic. It computes every output element and channel and publishes one immutable packed dense Result of the complete input shape, with complete internal coverage, with public coverage restricted to requested tiles and global coordinates. Empty reads no payload; static metadata checks still apply.
+Each selected output tile executes one fixed CPU task. For L>1 reads cover that input region, all L table rows in the output tile's final-axis interval and axis positions 0 and 1. Each source grid closes these regions independently; source atomic axes may cover extra channels or the step. Only the selected one/two entries of each channel participate in arithmetic. All required producer tiles must satisfy their producer's contract.
 
-Mathematical table selection is unchanged: knot/clamp/singleton converts one
-entry; interpolation/extrapolation uses its adjacent pair, independently per
-channel. Generic entries outside all evaluated stencils receive no additional
-finite scan. Typed validation and upstream collection cover the complete table.
-Errors in otherwise-unrequested queries or evaluated channels can fail the Run.
-Any input/table/axis edit invalidates recorded output demand; dirty mapping
-follows that recorded demand. Cache identity retains all input versions, profile,
-metadata and parameters. There is no
-per-channel Atom success isolation. Output dtype, shape and no attached domain description remain
-unchanged; arbitrary input offsets, unaligned and signed/zero strides remain
-legal. The complete immutable owner survives context destruction.
+For L=1 only table row zero for selected channels has payload dependencies. Input and axis are schema-only and scratch is zero. Finite input, axis `[a,a,+0]` and reject's input equality to a remain unchecked caller preconditions, even though the constant-output kernel reads neither query nor axis. Unneeded producers may be absent from the selected closure.
 
-## Algorithm, resources and errors
+The [family contract](CRV-05_apply_lut1d.md#fixed-execution-resources-and-caller-preconditions) defines constant-size per-invocation arithmetic scratch for L>1, selected output storage, prepared affine views, cancellation, fenv and ordered call publication. Lookup costs O(M log L) coordinate reconstructions for M selected elements. Sparse channels allocate only selected output tiles; physical table support scales with L and the selected column interval after source-grid closure. Output owners survive execution-context destruction. Invalid numerical preconditions carry no diagnostic guarantee.
 
-For M input elements, work is O(L+M log L) plus exact arithmetic and typed
-validation. Singleton lookup is constant time per query. `UniformAxis` stores
-the directly reconstructed Float64 grid in a Root-owned, host-accounted 8*L-byte
-buffer (up to 8 MiB), plus allocator/metadata overhead; fixed exact workspace
-and O(rank) coordinate state are also admitted. Input/table reads use authorized zero-copy Root windows over source storage; the operation does not
-create a dense copy of the complete table merely to collect it. Root accounts
-actual retained owners and provided windows. The operator retains no per-output certificates, rows or
-lookup table. Output costs dtype_bytes*M, regardless of requested coverage.
+## Acceptance
 
-The complete axis uses endpoint-weighted RN64 coordinates. One caller-preserving
-floating environment covers axis reconstruction and curve evaluation; unresolved
-accelerated bounds still use the same exact fallback. Work/cancellation is checked
-in axis generation, input reads, lookup and exact arithmetic, and before publishing.
-Resource failure never authorizes skipping axis validation or weaker arithmetic.
-Unpublished output/workspace is released; the output Result transaction is
-all-or-nothing.
-Numeric InvalidDomain/ArithmeticOverflow failures have Run scope. Typed, upstream,
-resource, stale, backend and cancellation failures retain their categories.
-complete-input does not expose per-value fallback counters; report those as unavailable.
+For table=[[0,10],[2,8]], axis=[0,1,1] and input=[[0,1],[0.25,0.5]], expect [[0,8],[0.5,9]]. This detects sharing a query/index across channels. Compare selected channels against independent scalar CRV-05A evaluation using exact rational coordinates and interpolation. Include both directions, every domain mode, mixed dtypes, signed zero, subnormals and singleton tables.
 
-Each channel may have a different input query; sharing a row prefix does not
-permit sharing the selected table index. Apply the unchanged scalar formula
-with that channel's coordinates and entries. No color conversion is inferred.
-
-## Acceptance and implementation status
-
-Conceptual fixture: table=[[0,10],[2,8]], axis=[0,1,1],
-input=[[0,1],[0.25,0.5]] -> values=[[0,8],[0.5,9]]. This detects an incorrect
-implementation that shares a query/index across all channels in an input row.
-Use independent per-channel exact rational interpolation and coordinate checks.
-Strict matches result bits; accelerated results meet the shared FP32 bound; run shared endpoint, signed-zero,
-domain, singleton-table, descending-axis and mixed-dtype cases for each channel.
-
-Compare selected channels with independent scalar CRV-05A nodes and check exact
-read/dirty witnesses. Include C=1, single vector input, large sparse logical
-arrays, wrong C, remote bad table columns, shared bad axis, fragmented/strided
-sources, low budgets, cancellation, cache-off and owner lifetime. The public
-WorkflowDocument fixture must connect a multi-function CRV-04 table/axis and
-inspect requested output channels through Compiler/ExecutionContext.
-
-The maintained constructor preserves the channel shape, including C=1 and rank-1 vectors, in the six complete-input Result profile keys. Manual channel coverage includes independent queries and table columns, all-port reversed unaligned layouts, zero strides, mixed dtypes, explicitly bound validation of an invalid unrequested alpha, upstream failure propagation and all six CRV-04 baking chains.
-
-Sparse demand returns requested tile coverage and full internal ownership, while dirty mapping follows the recorded query region. Replacing source Results retains the static preparation.
-
-Channel acceptance cases include batch shape [2,2,2], custom Result schemas,
-independent Fraction goldens and axis/query/table failure precedence. Include
-the 1 MiB sparse-output and zero-stride resource cases in the family contract.
-
-An L=1,048,576 dynamic axis grid succeeds with the 8*L-byte grid charged to
-Metadata and no dense table copy charged to Payload. A sparse output request with
-2^39 channels is rejected at the LUT node with `CapacityLimit`. A retained
-channel Result and authorized read window share one 16-byte Payload owner after
-all sources and the execution context retire; releasing them returns Root
-resources to zero. See the
-[family verification section](CRV-05_apply_lut1d.md#maintained-implementation-and-validation)
-for test identities and run evidence.
+Check rank-1 `[C]`, C=1, complete sample shape with batch axes, ordinary/atomic source tile closure, independent query values, huge sparse C, reversed/unaligned/zero strides, concurrent Runs, compatible rebinding, Empty and malformed static/prepare descriptions. Inspect exact table-column reads and schema-only singleton input/axis edges. Connect the multi-function interpolation CRV-04 templates and verify source requirements over the selected table rows/columns. Exercise resource rejection, cancellation and retained owner lifetime. See the [family validation section](CRV-05_apply_lut1d.md#maintained-implementation-and-validation).
 
 - [Family decisions](CRV-05_apply_lut1d.md).
 - [Operator template](../../00-foundation/spec-template.md).

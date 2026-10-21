@@ -15,23 +15,26 @@ struct LowpassParameters {
 // Kernel evaluation encloses mathematical coefficients, never rounded NUM
 // outputs. The caller owns/admit this fixed arena and supplies
 // work/cancellation.
-struct DirectedLowpassKernel {
-  DirectedFunctions functions{SequenceProfile::Strict};
-  using Interval = DirectedInterval::Interval;
-  using Frame = DirectedInterval::Frame;
+struct CheckedLowpassKernel {
+  DirectedFunctionsStorage<true> functions{SequenceProfile::Strict};
+  using Math = typename DirectedFunctionsStorage<true>::Math;
+  using Interval = typename Math::Interval;
+  using Frame = typename Math::Frame;
   // sin/cos on |x|<=2: after n>=2 both term magnitudes decrease. The next
   // omitted term bounds the alternating real remainder, with directed input
   // uncertainty retained separately by each interval operation.
   void sincos_small(Interval sine, Interval cosine, Interval input) {
     auto& m = functions.math;
+    if (!m.active())
+      return;
     Frame frame(m);
     auto bound = m.interval();
     m.integer(bound, 2);
     if (m.compare(input.high, bound.high) > 0)
-      throw DirectedInterval::Unresolved{};
+      return functions.unresolved();
     m.negate(bound, bound);
     if (m.compare(input.low, bound.low) < 0)
-      throw DirectedInterval::Unresolved{};
+      return functions.unresolved();
     auto square = m.interval(), st = m.interval(), ct = m.interval(),
          ss = m.interval(), cs = m.interval();
     m.multiply(square, input, input);
@@ -42,6 +45,8 @@ struct DirectedLowpassKernel {
     m.integer(cs, 1);
     bool sd = false, cd = false;
     for (unsigned n = 1; n < m.precision + 64; ++n) {
+      if (!m.active())
+        return;
       if (!sd) {
         m.multiply(st, st, square);
         m.divide_small(st, st, (2 * n) * (2 * n + 1));
@@ -64,10 +69,12 @@ struct DirectedLowpassKernel {
         return;
       }
     }
-    throw DirectedInterval::Unresolved{};
+    return functions.unresolved();
   }
   void sincos_pi(Interval sine, Interval cosine, Interval phase) {
     auto& m = functions.math;
+    if (!m.active())
+      return;
     Frame frame(m);
     auto doubled = m.interval(), multiple = m.interval(), delta = m.interval(),
          pi = m.interval(), s = m.interval(), c = m.interval();
@@ -87,6 +94,8 @@ struct DirectedLowpassKernel {
   }
   void sinc_pi(Interval output, Interval phase) {
     auto& m = functions.math;
+    if (!m.active())
+      return;
     Frame frame(m);
     auto angle = m.interval(), pi = m.interval(), one = m.interval();
     m.constant(pi, true);
@@ -108,6 +117,8 @@ struct DirectedLowpassKernel {
   // destination underflow classification; the tap remains logically present.
   void negative_exponential(Interval output, Interval input) {
     auto& m = functions.math;
+    if (!m.active())
+      return;
     Frame frame(m);
     auto limit = m.interval();
     m.integer(limit, -static_cast<std::int64_t>(m.precision));
@@ -121,10 +132,10 @@ struct DirectedLowpassKernel {
     m.scale(limit, limit, -4);
     unsigned squarings = 0;
     m.copy(reduced, input);
-    while (m.compare(reduced.low, limit.low) < 0) {
+    while (m.active() && m.compare(reduced.low, limit.low) < 0) {
       m.scale(reduced, reduced, -1);
       if (++squarings > 32)
-        throw DirectedInterval::Unresolved{};
+        return functions.unresolved();
     }
     // Clamp roundoff above zero only using the caller's exact x<=0 proof.
     if (!reduced.high.negative)
@@ -132,6 +143,8 @@ struct DirectedLowpassKernel {
     m.integer(term, 1);
     m.integer(sum, 1);
     for (unsigned n = 1; n < m.precision + 64; ++n) {
+      if (!m.active())
+        return;
       m.multiply(term, term, reduced);
       m.divide_small(term, term, n);
       const auto top = std::max(m.top(term.low), m.top(term.high));
@@ -146,13 +159,15 @@ struct DirectedLowpassKernel {
       }
       m.add(sum, sum, term);
     }
-    throw DirectedInterval::Unresolved{};
+    return functions.unresolved();
   }
   // I0(sqrt(4z)) = sum z^n/(n!)^2, z>=0. No rounded sqrt is used.
   // Once z/(n+1)^2 <= 1/2, all following term ratios are <=1/2;
   // the omitted positive tail is at most twice the next term.
   void bessel_series(Interval output, Interval z) {
     auto& m = functions.math;
+    if (!m.active())
+      return;
     Frame frame(m);
     auto term = m.interval(), sum = m.interval(), ratio = m.interval(),
          half = m.interval();
@@ -161,6 +176,8 @@ struct DirectedLowpassKernel {
     m.integer(half, 1);
     m.scale(half, half, -1);
     for (unsigned n = 1; n <= 16384; ++n) {
+      if (!m.active())
+        return;
       m.multiply(term, term, z);
       m.divide_small(term, term, static_cast<std::uint64_t>(n) * n);
       m.divide_small(ratio, z, static_cast<std::uint64_t>(n + 1) * (n + 1));
@@ -176,13 +193,15 @@ struct DirectedLowpassKernel {
       }
       m.add(sum, sum, term);
     }
-    throw DirectedInterval::Unresolved{};
+    return functions.unresolved();
   }
   // Positive binary inputs: divide significands before applying their exact
   // exponent difference, avoiding a rounded-to-zero tiny denominator.
   void binary_ratio(Interval output, std::uint64_t numerator,
                     std::uint64_t denominator) {
     auto& m = functions.math;
+    if (!m.active())
+      return;
     Frame frame(m);
     const auto a = BinaryParts::decode(numerator, false);
     const auto b = BinaryParts::decode(denominator, false);
@@ -196,6 +215,8 @@ struct DirectedLowpassKernel {
   // from the whole normalized expression; omit that common divisor exactly.
   void coefficient(Interval output, Interval u, const LowpassParameters& p) {
     auto& m = functions.math;
+    if (!m.active())
+      return;
     Frame frame(m);
     auto square = m.interval(), parameter = m.interval(), radius = m.interval(),
          argument = m.interval(), one = m.interval(), window = m.interval();

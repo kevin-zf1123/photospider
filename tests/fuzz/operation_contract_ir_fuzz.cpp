@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "photospider/compiler/compiler.hpp"
-#include "photospider/plugin/result_operation_plugin_api.h"
+#include "photospider/plugin/operation_program.hpp"
 
 namespace {
 
@@ -80,15 +80,12 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   ByteReader reader(data, size);
   auto operations = std::make_shared<ps::OperationRegistry>();
   ps::OperationTraits traits;
-  // The C++ trait schema and the C plugin table have independent versions.
   traits.version = reader.next();
   const auto element_type = static_cast<ps::ElementType>(
-      (reader.next() % 7U) + PS_RESULT_ELEMENT_UINT8_V7);
+      (reader.next() % 7U) + static_cast<unsigned>(ps::ElementType::UInt8));
   const std::uint64_t extent = 1U + reader.next() % 16U;
   const auto atomic_axes = reader.next() % 3U;
   auto& output = traits.outputs[0];
-  output.continuation_bytes = 1;
-  output.maximum_dependency_stages = 1;
   ps::SchemaTemplate schema;
   schema.id = "fuzz.output";
   schema.version = 1;
@@ -119,15 +116,25 @@ OperationContractIrStage exercise_operation_contract_ir_input(
         key, static_cast<ps::OperationParameterType>((reader.next() % 6U) + 1U),
         reader.next() % 2U != 0U});
   }
-  const auto start = [](const ps::ResultProgramQuery&,
-                        const ps::BufferAllocator&) {
-    return ps::Result<ps::ResultContinuation>(ps::Status::failure(
-        ps::ErrorCode::OperationFailed, "fuzz operation is not run"));
+  const auto lower = [](const ps::OperationLowering& query) {
+    ps::OperationProgramBuilder builder(query);
+    for (std::uint32_t port = 0; port < query.requests.size(); ++port)
+      for (const auto& member : query.requests[port].members)
+        for (auto tile : member.second) {
+          auto task = builder.add_task("source", "fuzz-source-v1");
+          if (!task.ok())
+            return ps::Result<ps::OperationProgram>(task.status());
+          auto status =
+              builder.write_output(task.value(), port, member.first, tile);
+          if (!status.ok())
+            return ps::Result<ps::OperationProgram>(status);
+        }
+    return builder.finish();
   };
   ps::OperationDefinition definition;
   definition.key = "fuzz.operation";
   definition.traits = traits;
-  definition.start_result = start;
+  definition.lower = lower;
   const ps::Status registered =
       operations->register_operation(std::move(definition));
   if (!registered.ok()) {
@@ -143,7 +150,7 @@ OperationContractIrStage exercise_operation_contract_ir_input(
       ps::OperationDefinition control;
       control.key = "fuzz.control";
       control.traits = std::move(traits);
-      control.start_result = start;
+      control.lower = lower;
       if (operations->register_operation(std::move(control)).ok())
         return OperationContractIrStage::DuplicateSchemaRejected;
     }
@@ -172,8 +179,7 @@ OperationContractIrStage exercise_operation_contract_ir_input(
 }  // namespace ps::fuzz_testing
 
 /**
- * @brief Fuzzes Result C++ traits, schema templates and typed IR
- * gates.
+ * @brief Fuzzes C++ traits, schema templates, typed IR and physical lowering.
  * @param data Arbitrary libFuzzer bytes.
  * @param size Exact byte count.
  * @return Always zero after bounded validation/compile attempts.

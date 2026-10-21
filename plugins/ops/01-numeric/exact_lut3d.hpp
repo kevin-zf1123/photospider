@@ -5,6 +5,7 @@
 #include <functional>
 
 #include "01-numeric/exact_polynomial.hpp"
+#include "photospider/core/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // All local coordinates share the positive product H0*H1*H2 denominator.
@@ -113,7 +114,7 @@ class ExactLut3d final {
   Result<Support> support(const Cell& cell,
                           const std::array<std::uint64_t, 3>& query,
                           bool tetrahedral,
-                          const std::function<Status(std::uint64_t)>& consume) {
+                          const core_internal::WorkConsumer& consume) {
     math_.begin(consume);
     struct End {
       ExactPolynomial& math;
@@ -128,7 +129,7 @@ class ExactLut3d final {
       const Cell& cell, const std::array<std::uint64_t, 3>& query,
       bool tetrahedral,
       const std::array<std::array<std::uint64_t, 3>, 8>& colors, bool narrow,
-      const std::function<Status(std::uint64_t)>& consume) {
+      const core_internal::WorkConsumer& consume) {
     using Answer = Result<std::array<std::uint64_t, 3>>;
     math_.begin(consume);
     struct End {

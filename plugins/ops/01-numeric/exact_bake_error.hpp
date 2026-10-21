@@ -2,7 +2,6 @@
 
 #include <array>
 #include <cstdint>
-#include <functional>
 
 #include "01-numeric/exact_ratio.hpp"
 
@@ -21,7 +20,7 @@ struct ExactBakeError {
   }
   Result<bool> check(std::uint64_t reference, std::uint64_t value,
                      std::uint64_t atol, std::uint64_t rtol,
-                     const std::function<Status(std::uint64_t)>& consume) {
+                     const core_internal::WorkConsumer& consume) {
     auto charged = consume(1024);
     if (!charged.ok())
       return Result<bool>(charged);
@@ -40,8 +39,8 @@ struct ExactBakeError {
     threshold.add(product);
     return Result<bool>(compare(difference, threshold) <= 0);
   }
-  Result<std::uint64_t> upward(
-      unsigned component, const std::function<Status(std::uint64_t)>& consume) {
+  Result<std::uint64_t> upward(unsigned component,
+                               const core_internal::WorkConsumer& consume) {
     auto work = consume(256);
     if (!work.ok())
       return Result<std::uint64_t>(work);

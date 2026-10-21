@@ -72,8 +72,12 @@ struct ChannelReplacement final {
  * or selectors return `InvalidArgument`; incompatible shape or dtype returns
  * `TypeMismatch`. Expansion is transactional on returned errors and allocation
  * exceptions. Callers serialize document writes. The returned edge is owned by
- * the document. Execution copies exact bits over requested regions and honors
- * cancellation.
+ * the document. Execution uses fixed mapped-copy tasks and scalar providers.
+ * Complete selected output tiles determine source closure; scalar-only
+ * requests omit base payload only if those tiles contain no base-backed slots.
+ * Auto/materialize copy to independent storage; nonempty view is schema-only
+ * and fails. Tasks use zero scratch and poll cancellation between at most 256
+ * samples.
  */
 PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> swizzle_channels(
     WorkflowDocument& document, const std::vector<ChannelEditInput>& inputs,

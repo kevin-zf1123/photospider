@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - alpha.unassociate_strict
@@ -18,11 +18,11 @@ registered_operation_keys:
 # FMT-04B: import premultiplied numeric samples as straight
 
 The default registry provides `alpha.unassociate_<profile>` for the three CPU
-profiles. The operation uses Result ABI 6 and preserves the declared tensor
+profiles. The operation uses fixed invocation ABI 8 and preserves the declared tensor
 shape, dtype and channel positions. The specification remains Proposed. Validate the public operation with temporary independent numerical and ownership checks when changing it.
 
 Inherit the complete [FMT-04 boundary contract](FMT-04_alpha_association_contract.md).
-The operation accepts one single-tensor Result , with optional second input only for raw explicit plane/scalar weights.
+The operation accepts one single-tensor Result, with optional second input only for raw explicit plane/scalar weights.
 
 ## Interface and representation
 
@@ -41,11 +41,10 @@ inherit the family. No semantic external alpha source or retained binding exists
 
 ## Mathematical specialization
 
-For requested p and internal a, read both; require finite p and finite a in
-[0,1]. At a=+0/-0, require p=+0/-0 and output +0. Nonzero p with zero alpha fails
-InvalidDomain. For every a>0, output RN_t(p/a) in strict, or the inherited NUM
-profile result. No epsilon or clipping is permitted. Nonfinite semantic output
-fails ArithmeticOverflow; gradual underflow and signed zeros follow NUM.
+For each evaluated p and internal a, read both. The caller supplies finite p
+and finite a in [0,1]. At a=+0/-0, p must also be signed zero; output is +0. For every a>0, output RN_t(p/a) in strict, or the inherited NUM
+profile result. No epsilon or clipping is permitted. The caller guarantees a finite rounded semantic result; gradual underflow
+and signed zeros follow NUM.
 
 Copy alpha and other components exactly. Lost hidden colors cannot be recovered
 from zero premultiplied samples. Encoded payloads are unassociated as stored;
@@ -58,38 +57,33 @@ image or change association interpretation merely because division occurred.
 
 ## Dependencies, resources and failures
 
-Each requested converted component reads itself and mapped alpha, including at
-alpha=0/1. No other color peers join validation. Pass-through alpha/AOV requests
-copy only their requested source samples; static representation/shape checks
-still apply. Alpha dirty support fans out to observed selected components;
-external/scalar raw weights have the family maps. There is no source snapshot
-lookup through result metadata.
+Each complete retained output tile declares original participating colors and
+mapped alpha, including at alpha=0/1. Pass-through slots declare their own source
+only. The input-grid closures may grant larger source tiles without evaluating
+extra peers. Static checks remain mandatory; numerical validity belongs to the
+caller. The family's fixed allocations, scratch and ordered retirement apply.
 
-If B consumes A in a DAG, B's requested color makes an explicit request for both
-A's corresponding color and A's alpha channel. If the input is a detached partial
-payload without alpha coverage, fail by normal missing-coverage rules. Never
-reuse the alpha that A originally read through hidden metadata. Apply the family
-materialization, resources, cancellation, cache and error contracts. Saturation
-and automatic straight pass-through are not fallback modes.
+When B consumes A, its color dependency explicitly requires A's corresponding
+color and alpha output tiles. Missing detached coverage fails through normal
+binding rules. No previous input alpha is recovered through metadata. Output
+Results retain their independent allocations after context retirement.
 
 ## Independent fixtures and acceptance
 
 Premultiplied Float32 samples [-1,0.25,2,0.5] yield straight [-2,0.5,4,0.5].
 For p=-0 and a=-0, output color is +0 and copied alpha remains -0. For p=0.25
-and a=0, semantic evaluation fails InvalidDomain. Requested nonfinite p/alpha
-or alpha outside [0,1] fails even if raw division would yield a finite value.
+and a=0, the semantic caller precondition is violated. Nonfinite participating
+p/alpha or alpha outside [0,1] likewise lies outside the semantic domain.
 
-Float32 p=a=2^-149 gives 1; p=1, a=2^-149 fails semantic ArithmeticOverflow,
+Float32 p=a=2^-149 gives 1; p=1, a=2^-149 violates the finite semantic-result premise,
 whereas raw succeeds with +Inf. Repeat Float64 at 2^-1074. At a=1, preserve
-finite p and signed-zero bits after validation. Tiny positive alpha is never
+finite p and signed-zero bits. Tiny positive alpha is never
 routed through the zero-alpha branch.
 
-For alpha=0 with p_R=0 and unrequested p_G=0.25, R-only succeeds with +0;
-a subsequent G request fails locally without revoking completed R. Required
-upstream complete-input work retains its original scope. Check alpha-only and AOV-only
-copies, noncanonical channel positions, exact A->B demands and detached missing
-alpha failure. Check produced coverage and final owner release after context
-retirement, without expecting unproduced samples to reappear.
+For alpha=0 and evaluated p=0, semantic output is +0. Every participating
+coordinate in a retained output tile must satisfy the premise, including peers
+added by tile closure. Check alpha/AOV-only copy tasks, noncanonical placement,
+explicit A-to-B dependencies and detached missing-alpha failures.
 
 Raw +1/-0 -> -Inf, 0/0 -> NUM NaN, both-operand NaN priority and successful
 floating overflow use the independent NUM bit oracle. Semantic zero predicates

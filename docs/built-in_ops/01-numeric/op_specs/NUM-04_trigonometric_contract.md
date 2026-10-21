@@ -75,12 +75,9 @@ only a rounded pi or 2*pi is not a sufficient full-range algorithm. Publish
 verified backend/library versions and covered reduction domains; otherwise use
 strict. Correct-rounding reference work can refine directed enclosures until
 rounding is resolved, with explicit treatment of exact boundaries and landmarks.
-All precision growth, reduction work and fallback is host-accounted; exhaustion
-is ResourceExhausted rather than an inaccurate result or a silent range limit.
+Precision growth uses fixed admitted scratch. Unresolved refinement returns `ResourceExhausted`.
 
-The common ROI, typed-validation, owner/cache, cancellation and diagnostic
-requirements apply. Work is per full-input sample plus actual reduction/refinement
-cost, with actual temporary capacities charged. Platform-specific keys do not
+The common fixed-view, ownership and cancellation requirements apply. Work is per selected sample plus reduction/refinement, with fixed scratch admitted before issue. Platform-specific keys do not
 execute on incompatible platforms. No GPU/Metal or private worker pool is added.
 
 ## Shared acceptance
@@ -96,7 +93,7 @@ For pi multiples, test positive/negative large integers, half/quarter-integers
 and neighboring representable values. Check that radian pi rounded to dtype is
 not silently treated as the exact pi-multiple input 1. Validate actual strict
 fallback for unsupported fast argument ranges and common public execution,
-complete-input demand and lifetime/resource cases. Implementation evidence is recorded
+fixed tile demand and lifetime/resource cases. Implementation evidence is recorded
 separately below; Proposed specification status does not imply missing runtime keys.
 
 LLVM libc provides a CPU `sinpif` entry point delegating to its internal
@@ -130,7 +127,4 @@ SLEEF binary64 kernels and conservative final-error checks within the
 [admitted ranges](NUM_accelerated_contract.md#image-budget-and-extended-domains).
 Pi and rational-pi arguments undergo exact quadrant reduction before approximation.
 Rejected candidates use strict evaluation . Unresolved
-strict rounding may return `ResourceExhausted`. Nonempty requests use Run-shared complete-input computation with full-input typed validation,
-complete packed output allocation and Run-scoped arithmetic errors. Empty requests
-read no payload. Per-value fallback/evaluation diagnostics are unavailable (N/A)
-on this callback path; numerical fallback behavior is unchanged.
+strict rounding may return `ResourceExhausted`. Each requested output tile uses a fixed CPU task with declared intersecting inputs and preallocated dense output/scratch. Empty requests emit no tasks or payload reads. Per-value numerical diagnostics are unavailable; numerical refinement behavior follows the stated profile contract.

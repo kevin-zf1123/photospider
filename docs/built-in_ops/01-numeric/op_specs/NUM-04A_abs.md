@@ -28,7 +28,7 @@ and in the named family contract take precedence.
 
 Compute per-element absolute value, preserving input shape and dtype. Inherit
 the [NUM-04 common contract](NUM-04_unary_contract.md) for ports, generic output,
-complete-input data/validation demand, NaN handling, ownership, budgets and public
+fixed tile reads and structural preparation, NaN handling, ownership, budgets and public
 acceptance. There are no static operation parameters.
 
 ## Selected mathematical and type contract
@@ -36,7 +36,7 @@ acceptance. There are no static operation parameters.
 | Input dtype | Exact output behavior |
 | --- | --- |
 | UInt8 | Identity bit copy |
-| Int64 | x if x>=0, otherwise mathematical -x; INT64_MIN fails because its positive magnitude does not fit Int64 |
+| Int64 | x if x>=0, otherwise mathematical -x; the caller excludes INT64_MIN because its magnitude does not fit Int64 |
 | Float32/Float64 | Absolute value, clearing the sign bit; quiet an input signaling NaN while preserving its payload |
 
 Floating -0 becomes +0, negative infinity becomes positive infinity, and NaNs
@@ -44,10 +44,7 @@ have a cleared sign and set quiet bit. Finite float magnitudes do not change,
 including subnormals. No clipping or saturating integer mode is included.
 All three versions have identical logical result bits and semantic failures.
 
-An Int64-minimum failure is OperationFailed/ArithmeticOverflow with Run scope
-and no Atom key. It fails the complete complete-input invocation, including when the
-offending coordinate lies outside the consumer projection. UInt8 cannot produce an arithmetic error, and floating NaN/Inf is a
-successful numeric result subject to any preexisting typed-input obligations.
+Representable integer magnitude is an unchecked caller precondition. UInt8 is valid across its full range; floating NaN and infinity follow the specified successful numeric rules.
 
 ## Reference algorithm and resource difference
 
@@ -65,8 +62,7 @@ fallback is required.
 ## Acceptance
 
 - UInt8: all 256 inputs return identical bits.
-- Int64: `[-7,0,7,INT64_MAX]` gives `[7,0,7,INT64_MAX]`; INT64_MIN fails only
-  anywhere in a nonempty complete-input invocation, without saturation or wraparound.
+- Int64: `[-7,0,7,INT64_MAX]` gives `[7,0,7,INT64_MAX]`; INT64_MIN violates the representable-magnitude precondition.
 - Float32: raw `0x80000000` -> `0x00000000`, `0xff800000` -> `0x7f800000`,
   and signaling NaN `0xff812345` -> quiet `0x7fc12345`.
 - Float64: `0xfff0000000000042` -> `0x7ff8000000000042`; normal/subnormal
@@ -74,7 +70,7 @@ fallback is required.
 - Idempotence: abs(abs(x)) has the same output bits as abs(x), including quieted
   NaNs. All three implementations match the independent integer/bit-mask oracle.
 - Run the inherited public workflow/lifetime/resource tests with a source
-  containing a remote INT64_MIN and NaN payloads; inspect actual ROI reads.
+  containing representable integers and NaN payloads; inspect actual fixed tile reads.
 
 Conceptual public fixture: bind Int64 `[-3,0,4]` to input, compile the selected
 abs key, request values, and check `[3,0,4]`; repeat with nonzero regions and
@@ -82,15 +78,10 @@ changed bindings. The delivery must provide the actual executable/command.
 
 ## Current implementation difference
 
-The current `numeric.abs` accepts only finite Float32/64, preserves shape/dtype,
-and uses Elementwise registration. Its shared reader/writer rejects NaN/Inf;
-the new target adds UInt8/Int64 and the selected nonfinite/payload semantics.
-
-- [Current registration/callback](../../../../plugins/ops/01-numeric/numeric_abs.cpp).
+The unsuffixed `numeric.abs` uses fixed CPU tile tasks and an unchecked finite Float32/Float64 domain. The suffixed keys retain the IEEE and integer semantics above.
 
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
-atomic failure for the complete invocation. Its numerical path follows
+exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.xyz_to_rgb_strict
@@ -18,7 +18,7 @@ registered_operation_keys:
 # FMT-10B: XYZ to linear RGB
 
 Inherit the complete [FMT-10 family](FMT-10_rgb_basis_contract.md) and
-[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 6
+[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered fixed invocation ABI 8
 operations under the strict, accelerated Apple Silicon and accelerated x86-64
 CPU profiles.
 
@@ -38,8 +38,8 @@ the same target inverse matrix; it does not map source white to target white.
 To adapt, call C first. Raw B ignores source color interpretation and does not
 accept an unused white_handling field; explicit target geometry remains valid.
 
-For each requested transformed row i, output RN_dtype(sum_j inverse(M)[i,j]*XYZ[j]+0).
-A nonidentity request reads and validates all source X/Y/Z in semantic mode;
+For each transformed row i in a retained output tile, output RN_dtype(sum_j inverse(M)[i,j]*XYZ[j]+0).
+A nonidentity row reads all source X/Y/Z; semantic callers guarantee finite consumed triples and rounded outputs;
 raw applies NUM's full three-term behavior. Source unit/reference scale stays
 unchanged. Write linear R/G/B into the original X/Y/Z slots. The target basis
 and source scale define the numerical interpretation; callers pass that
@@ -48,12 +48,11 @@ configuration downstream explicitly. Neither path attaches a description.
 ## Dependencies, storage and errors
 
 Inherit native exact-I copy exceptions, nonidentity tuple/bypass support,
-pointwise or triple-fanout dirty mapping and auto/view/materialize. An explicit
+source-grid tile closure and auto/view/materialize. An explicit
 preserve_xyz choice does not authorize a view of a nonidentity inverse matrix.
 Default white mismatch and incompatible source/model/reference are preflight
 errors; geometry and source assertions are checked even for Empty/bypass-only
-requests. Negative/out-of-gamut RGB is legal; requested nonfinite semantic
-input/output fails without clipping. Resource, cancellation and ownership rules
+requests. Negative/out-of-gamut RGB is legal; finite semantic input/output is an unchecked caller precondition. Resource, cancellation and ownership rules
 remain those of the family.
 
 ## Independent fixtures
@@ -71,9 +70,7 @@ remain those of the family.
    white input [1,1,2] then yields [1,1,1] for the chosen fully adapted white.
    Test the stages and metadata independently, including rejection without C.
 5. A diagonal inverse row still consumes its zero-coefficient peers. A NaN Y
-   makes a requested raw R NaN and semantic R fail. Alpha-only is an exact copy
-   and requires no XYZ samples. Dirty changes to any selected XYZ component
-   invalidate all observed nonidentity RGB rows at that pixel.
+   makes a retained raw R NaN and is outside the semantic input precondition. A tile containing only alpha copies exactly; no color evaluation is needed. Input-grid closure may still grant extra samples.
 
 Use the installed `format::xyz_to_rgb` helper to append B. For unequal whites,
 choose explicit `preserve_xyz` or append C before B. Connect FMT-09B separately

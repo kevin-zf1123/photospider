@@ -1,9 +1,9 @@
-#include "01-numeric/numeric_algorithms.hpp"
+#include "01-numeric/fixed_pointwise.hpp"
 #include "common/registry.hpp"
 
 namespace ps::plugin_internal {
 Status register_numeric_divide(OperationRegistry* registry) {
-  return registry->register_operation(
-      numeric_ops::finite_arithmetic("numeric.divide", 3));
+  return registry->register_operation(numeric_ops::fixed_pointwise(
+      "numeric.divide", numeric_ops::Pointwise::Divide));
 }
 }  // namespace ps::plugin_internal

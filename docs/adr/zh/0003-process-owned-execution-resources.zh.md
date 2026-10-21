@@ -1,6 +1,7 @@
 # ADR 0003：ExecutionContext 拥有本地执行资源
 
 - 状态：已接受
+- 实现边界（2026-10-20）：Context 所有权决策保持。下文 API/配置示例为历史记录；当前 package 0.39 使用固定 Plan 的 `prepare`/`submit`/`join`、有界 CPU/GPU 准入和逐 Run metadata observation。Payload/result cache 与隐式 backend fallback 已移除。参见[当前执行契约](../../kernel-architecture/zh/Compiler-and-Execution.zh.md)与[托管资源](../../kernel-architecture/zh/Managed-Resources.zh.md)。
 
 ## 1. 核心摘要 (TL;DR)
 `ExecutionContext` 拥有有界的本地 worker、callback 准入、缓存和资源记账。每次调用创建私有 Run 状态，并将绑定与结果和其他调用隔开。资源共享因此显式可见，worker 数量也不会随 graph 数量增加。

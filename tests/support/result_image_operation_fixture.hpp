@@ -16,9 +16,42 @@ struct Driver {
   ExecutionContextConfig config;
   std::unique_ptr<ExecutionContext> context;
   ResourceBudget root;
-  bool native = false;
-  explicit Driver(bool gpu = false) : native(gpu) {
-    config.gpu_enabled = gpu;
+  std::shared_ptr<PlannerRegistry> planners =
+      std::make_shared<PlannerRegistry>();
+  Driver() {
+    const auto defaults = make_default_planner_registry();
+    const auto definition = *defaults->find("static-tiles");
+    require(planners->add(definition).ok(), "default planner registration");
+    require(planners
+                ->add({"broadcast-inputs", "1", "Explicit zero-stride inputs",
+                       [lower = definition.plan](
+                           const ValidatedIR& ir, PlanBuilder& builder,
+                           const PlanningOptions& options) {
+                         auto status = lower(ir, builder, options);
+                         if (!status.ok())
+                           return status;
+                         auto& program = builder.program();
+                         for (auto input : program.inputs)
+                           for (auto ti : program.values[input].tiles) {
+                             auto& tile = program.tiles[ti];
+                             auto layout = program.layouts[tile.layout];
+                             layout.strides.fill(0);
+                             layout.byte_offset = 0;
+                             tile.layout = static_cast<physical::Id>(
+                                 program.layouts.size());
+                             program.layouts.push_back(layout);
+                             tile.bytes =
+                                 TensorSpan::element_size(layout.element_type);
+                             for (auto& task : program.tasks)
+                               for (auto& read : task.reads)
+                                 if (read.tile == ti)
+                                   read.layout = tile.layout;
+                           }
+                         return physical::finalize_program(&program);
+                       }})
+                .ok(),
+            "broadcast planner registration");
+    planners->freeze();
     config.managed_resources = ResourceLimits{};
     context = std::make_unique<ExecutionContext>(registry, config);
     root = take(context->resource_budget());
@@ -52,9 +85,8 @@ struct Driver {
     document.nodes.push_back(std::move(node));
     document.outputs = {{"out", 1, output}};
     auto graph = std::make_shared<GraphContext>(document);
-    planning.execution_mode =
-        native ? ExecutionMode::NativeGpu : ExecutionMode::CpuExact;
-    auto compiled = take(Compiler(registry).compile(*graph, planning));
+    auto compiled =
+        take(Compiler(registry, {}, planners).compile(*graph, planning));
     return {std::move(graph),
             std::move(compiled.plan.value()),
             {std::move(inputs)}};
@@ -65,7 +97,7 @@ struct Driver {
                 const std::string& output = "value") {
     auto prepared =
         prepare(operation, std::move(inputs), std::move(parameters), output);
-    return take(context->execute(prepared.plan, prepared.bindings))
+    return take(multi_result::run(*context, prepared.plan, prepared.bindings))
         .results.at("out");
   }
 };

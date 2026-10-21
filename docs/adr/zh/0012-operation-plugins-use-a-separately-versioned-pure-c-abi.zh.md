@@ -1,44 +1,45 @@
-# ADR 0012：Operation Plugin 使用版本化 C 契约
+# ADR 0012：Operation 插件使用版本化 C 契约
 
 - 状态：已接受
-- 提议中的后继：[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md) 以前缀协商取代精确大小规则，并让内置算子使用同一条 C 导入路径。在该提案接受并实现前，当前接口为 exact-size Result ABI 7。
+- 实现说明（2026-10-20）：纯 C 边界保持为已接受决策。Package 0.39.0 实现 operation module ABI 8 与 fixed invocation ABI 8。[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md) 保持为历史 Proposed continuation 设计；其 staged record 和 prefix negotiation 提议不是当前 ABI。
 
-## 当前实现：静态映射
+## 1. 核心摘要
 
-Package 0.37.0 使用精确大小的 Result ABI 7。Operation table 增加
-`map_dependencies`，planner 通过 `ps_result_static_query_v7` 与同步 mapping sink
-调用它。Host 将输入和共享 stage reads 复制、校验为固定 Plan grants。
-C mapping callback 为 NULL 时采用完整输入 baseline；成功 hook 未输出 read
-则表示空 mapping。运行时 Need 仅检查这些授权。Query 和 sink 记录只借用到
-mapping callback 返回，不能保留。此扩展仍使用版本化 C 契约，未实现 ADR 0022
-提议的前缀协商。
+Operation 插件通过版本化 C 接口跨越 kernel 边界。Host 在发布 registry entry 前校验并复制声明。C module 与 C++ operation 使用相同的静态 lowering、物理 Plan 校验和固定 invocation 契约。Native plugin 仍处于 host 进程及其信任域内。
 
-## 1. 核心摘要 (TL;DR)
+当前契约见 [Plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md) 与 [Compiler、Plan 和 Executor](../../kernel-architecture/zh/Compiler-and-Execution.zh.md)。实现状态不改变完整 physical-execution 提议的正式决策状态。
 
-Operation plugin 通过版本化 C 接口跨越 kernel 边界。Host 在发布 registry 记录前校验并复制 descriptor，使编译元数据不依赖 plugin C++ 对象布局。Native plugin 仍在 host 进程和信任域内执行。
+## 2. 所有权与阶段
 
-## 2. 架构心智模型
+启动加载先校验 module table，再将 trait、schema 与参数契约复制到私有 registry candidate。发布是原子的；compiler 与 executor 使用前冻结 registry。
 
-宿主加载库、校验完整表、复制 traits/schema，并在 compiler 与 Run 使用前冻结 registry。Module 的 destroy callback 在卸载前执行。Host 拥有复制后的元数据，校验 Need 和 Result 发布。Callback 服务表只借用到返回；显式保留的窗口和状态 handle 遵循自己的 release 生命周期。
+静态 preparation 特化 schema，捕获不可变 state 和声明的 resource。Lowering 构造固定 task、read、write、placement 和 scratch，不接触 sample payload。显式执行 preparation 链接 kernel 与 native pipeline，不改变拓扑。CPU invocation 结束全部访问后才返回；已接受的 GPU invocation 持有借用 view，直至恰好一次 terminal completion。
 
-## 3. 正式契约与 API
+只要 definition、static preparation 或 prepared kernel 仍需要 module code，动态库就保持映射。Release callback 先于 module destroy callback 与 native unload。Prepared kernel 持有静态 state 与 resource；Run 在取消排空期间保留 preparation。Query/service record 仅在回调内借用，需要保留的数据必须复制到 provider 自己的 state。
+
+## 3. 契约规约
 
 ```c
-#define PS_RESULT_OPERATION_ABI_VERSION_7 7U
-const ps_result_operation_plugin_api_v7 *
-ps_result_operation_plugin_get_api_v7(void);
+#include "photospider/plugin/operation_module_api.h"
+
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
+ps_operation_module_get_api_v8(void);
 ```
 
-该表声明 Result 端口、静态 Tensor 成员、成员区间 Need、共享 stage callback 和事务发布。`publish_tensor_view` 必须提供非 NULL 的显式 transform；`publish_tensor_view_pieces` 接受 1..16 条精确大小的 piece envelope，禁止在 pieces 中 reshape，并将完整、互斥的目标分区原子提交。单源 view 的 `reshape=1, source_rank=0, axes=NULL` 仍合法。跨 Root 发布视图保留来源 Result，而不在目标 Root 重复计入来源 Payload。当前不提供 data-provider C table。详细布局、C metadata sink 和 callback 契约见 [Plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)。
+独立 C11 header 定义 exact-size module ABI 8，并包含 fixed invocation ABI 8。OperationTraits 为 30。Native shader preparation 使用独立版本化的 native kernel service ABI 2。当前没有 data-provider C table。
 
-Loader 校验精确 ABI 版本和结构大小、自然对齐、pointer/count 配对、数量与 key 长度、UTF-8、受检运算、封闭 enum/flag、必需 callback、schema、参数和恰好一次的 destroy 所有权。多记录注册使用 copy-then-swap，失败不发布前缀。库 guard 在拒绝路径调用可安全读取的 destroy 后再关闭库。
+Module 声明 operation 契约，以及 static prepare、resource validation、lowering、kernel preparation 回调。Host 校验版本与 record size、alignment、pointer/count pair、有界字符串/数组、封闭 enum/flag、checked arithmetic、必要回调及清理所有权。先校验 module header，再接管 destroy hook 并读取嵌套记录。全部声明在私有 candidate 中验证；非法声明、重复 key 或 freeze 竞争不会发布部分 registry 更新。
 
-运行时检查成员 tile Need、输入投影、授权、发布覆盖、冻结依赖证据、资源、取消和后端同步。普通 tile 必须一次完整发布；共享 stage 可以跨 poll 提交完整 tile。GPU token 与拥有型窗口保留 backing 到显式释放或相应 callback 退役。服务失败保持 sticky，不能通过 callback 返回成功掩盖。
+Lowering 分别记录 schema-only 与 payload read、唯一输出 producer、私有 SSA 中间值、显式 COPY，以及每个 effectful call 恰好一个 terminal effect task。Kernel preparation 校验实际编译得到的 invocation view、参数、scratch 和 placement，随后返回 unchecked 直接入口。执行期间不进行 continuation polling、运行时依赖扩展、publication grant、数值认证或 backend retry。
 
-## 4. 非目标与明确边界
+异步提交被拒绝时，owner 留在 coordinator，不产生 callback；接受后保留 input/output/scratch、参数及 module owner，直到匹配 completion 确认停止访问与可见性，取消也遵循这一规则。Completion 可以 inline 发生。Callback 与 release function 遵守不抛异常契约；非法 completion key 不能结算其他 submission。
 
-ABI 校验不提供沙箱、签名认证、插件隔离或崩溃防护。Daemon IPC 不属于 operation ABI。数值和领域解释由算子负责，kernel 不根据 schema 或通道数绑定默认合规 validator。
+## 4. 边界
 
-## 5. 影响
+ABI 校验不提供 sandbox、签名校验、package 准入或 crash isolation。Native code 仍可能使 host 崩溃或挂起。Daemon IPC 不将 operation-plugin 加载暴露为能力。
 
-版本或布局不匹配时在注册发布前拒绝。Callback 异常受边界栅栏处理，但 native 崩溃或挂起仍可能影响 host。外部模块必须按匹配的 package 和头文件重新构建，不提供旧 ABI 兼容层。ABI 7 不兼容 ABI 1 至 6 的记录大小或 getter，也不会对缺失的 view transform 推断隐式映射；ADR 0022 仍是未实现的 Proposed 后继。
+当前 table 没有 ABI 1–7 getter、prefix-size adapter、staged continuation shim 或自动转换。外部 consumer 必须使用匹配 header 与 package 重建。
+
+## 5. 后果
+
+每个公共边界维护独立兼容版本。Module 不匹配时，在 registry 发布前拒绝加载。Compiler artifact 保存静态契约与物理表，不包含 native pointer；artifact import 与显式 device preparation 保持分离。内核开发阶段暂停安装消费测试，通过 focused C11 module、loader、preparation 和固定执行检查验证该边界。

@@ -2,51 +2,49 @@
 
 ## Current contract
 
-Package 0.38.0 uses SameMinorVersion compatibility. C++ consumers and external C operation modules must rebuild against the matching headers. Result ABI 7 requires exact table/record sizes and provides no compatibility shim; modules built for ABI 1 through 6 are rejected. The prefix-negotiated frozen ABI in ADR 0022 remains Proposed.
+Package 0.39.0 uses SameMinorVersion compatibility and SOVERSION `0.39`. C++ consumers and external C operation modules must rebuild against matching headers. Operation module ABI 8 and fixed invocation ABI 8 require exact record sizes. The loader requires `ps_operation_module_get_api_v8`; a missing entry returns `TypeMismatch`, while a malformed module version or size returns `InvalidArgument`.
 
 | Contract | Version |
 | --- | --- |
-| Package | 0.38.0 |
+| Package | 0.39.0 |
 | WorkflowDocument | 7 |
-| OperationTraits | 29 |
-| Result operation C ABI | 7, exact-size |
-| CPU parallel / tiles service ABI | 2 / 2 |
-| Native GPU service ABI | 1 |
-| `.psir` / `.psxp` text format | 4 |
+| OperationTraits | 30 |
+| Operation module C ABI | 8, exact-size |
+| Fixed kernel invocation C ABI | 8, exact-size |
+| Native kernel preparation service ABI | 2 |
+| `.psir` / `.psxp` text format | 5 |
 | Result schema encoding | `photospider.result-schema.v6` |
-| Validated IR | `validated-ssa-ir-v26` |
+| Validated IR | `ordered-retirement-ir-v5` |
 | Example optimizer | `optimize@1` (provenance only) |
-| Physical plan | `static-tile-program-v27` |
-| Plan cache key | `plan-cache-key-v20` |
-| Saved operation contract | `artifact-static-operation-contract-v2` |
-| Step dependency template | `photospider.dependency-static.v4` |
-| Fixed grant / block input proof | `photospider.fixed-grant-cache.v2` / `photospider.fixed-block-inputs.v2` |
-| Ops TensorDescription codecs | TDM4/TDM5 |
+| Physical plan | `physical-task-program-v5` |
+| Saved operation contract | `fixed-operation-contract-v3` |
 
-These axes are independent. Package `0.38.0` uses SOVERSION `0.38`. `SchemaTemplate` defines structural members and scopes; `ResultTensorSpec` defines shape, dtype, batch/atomic axes and optional spatial layout. `ResultViewAxis` uses anchored affine coordinates and signed steps. `TileGrid::from_schema` returns `Result<TileGrid>`; `OperationRegistry::prepare_operation` prepares the static contract. `ExecutionContext` uses `ResourceBudget` for Root admission, while snapshot reservations have an independent bounded budget. External C DSOs export `ps_result_operation_plugin_get_api_v7` with ABI 7's exact sizes, an optional static `map_dependencies` hook as the last member of each operation record, explicit non-NULL tensor-view transforms, and a 1..16-piece C transaction service. A module that also exports any `_v1` through `_v6` getter fails with `TypeMismatch`; a version or record-size mismatch is rejected during import. Renaming the getter or changing `abi_version` alone does not make an ABI 6 module valid, because the operation record layout and the meaning of run-time Needs changed. ADR 0022 remains a Proposed, unimplemented separate contract. Current authoritative definitions are the public headers, CMake package declaration and compiler canonical encoders.
+These version axes are independent. The module ABI describes static preparation, physical lowering and kernel preparation. The invocation ABI describes immutable inputs, exclusive outputs and scratch, cancellation and completion. Native service 2 prepares Metal or Vulkan kernels over Shared and Device storage; explicit GPU COPY tasks also support Host endpoints through admitted Shared staging. Its availability depends on the build and selected device. See the [plugin ABI](../kernel-architecture/Plugin-ABI.md) for ownership, sizes and supported domains.
 
 ## Compiler stages and artifacts
 
-Frontend/`bind_ir`, optional named optimizers, and artifact import publish the same immutable `ValidatedIR`. Planner accepts legal DependencyPaths or ControlFlow directly. For dependency paths it deduplicates Call IDs in a private lowering copy without invoking an optimizer. Existing CFG loops retain their activation semantics. The default compile pipeline has zero optimizer invocations. Ordered invocations, including duplicate names, create numbered versions; content identity excludes producer history, so a no-op can preserve its digest.
+Frontend/`bind_ir`, optional named optimizers and artifact import publish the same immutable `ValidatedIR`. The planner accepts DependencyPaths or ControlFlow. For dependency paths it deduplicates Call IDs in a private lowering copy. CFG loops retain their dynamic activation semantics. The default compile pipeline has zero optimizer invocations. Ordered optimizer invocations, including duplicate names, create numbered revisions; content identity excludes producer history, so a no-op can preserve its digest.
 
-Artifact v4 uses `stage ir` and explicit program form for `.psir`; `.psxp` saves lowered CFG and complete physical instructions, with its actual input IR identity as parent. Both raw and transformed IR can be imported and planned directly. Versions 1–3 are rejected with a re-export message. Plan import links and validates saved code without optimization, mapper calls or replanning. Registry/resource matching and currentness checks remain. Operation manifest digests describe contracts, not code authentication. See [tools](Compiler-Tools.md), [formats](Compiler-Tool-Formats.md) and [compiler architecture](../kernel-architecture/Compiler-and-Execution.md).
+Artifact v5 uses `stage ir` and explicit program form for `.psir`; `.psxp` saves lowered CFG and complete physical task tables, with its actual input IR identity as parent. Both raw and transformed IR can be imported and planned directly. Plan import links and validates saved tables without lowering again. Registry/resource matching and currentness checks remain. Operation manifest digests describe contracts, not code authentication. See [tools](Compiler-Tools.md), [formats](Compiler-Tool-Formats.md) and [compiler architecture](../kernel-architecture/Compiler-and-Execution.md).
 
-This is a breaking C++ API/artifact change: `SemanticGraphIR`, `OptimizedGraphIR`, their split digests and the `ImportedIR` variant are removed without aliases. `CompiledWorkflow` has ordered IR revisions and optional Plan; `ExecutionPlan::input_ir_digest()` names its actual parent. Rebuild consumers and re-export artifacts. Document schema 7, OperationTraits 29 and C operation ABI 7 are unchanged.
+`CompiledWorkflow` contains ordered IR revisions and an optional Plan. `ExecutionPlan::input_ir_digest()` identifies its parent IR. Consumers must rebuild for the current public API and re-export artifacts written in versions 1–4. Artifact import rejects those versions.
 
 ## Workflow inputs and operation execution
 
-Workflow declarations require static Result schemas. Bindings supply owning ResultRef objects by exact name. A Run fixes plan, binding snapshot and generation. Each output/member has a grid under one plan-wide tile extent, default 128. Static mappers return member-slot reads with compact intervals at planning time; descriptor-only reads are explicit, and empty payload sets do nothing. The plan stores these as fixed grants.
+Workflow declarations require static Result schemas. Bindings supply owning `ResultRef` objects by exact name. The Plan fixes schemas, tile geometry, placements, task dependencies, kernel symbols and block control flow. Its tile extent defaults to 128. Lowering converts requested outputs and explicit input reads into physical tasks; shared computation is represented by tasks and private values within the call.
 
-Continuations may span polls, but a poll-time Need only asserts compiled grants. Shared-stage reads require explicit static mapping entries. Stages reached through those reads or mandatory roots share one producer per call, stage and block activation, even across multiple outputs. Ordinary tile instructions publish one complete member tile. Fixed bundle/prefix visibility is compiled into read closures. Each call's produced outputs are certified after its instructions and before the next call starts. Mandatory roots and cancellation follow the execution contract.
+`ExecutionContext::prepare` links the Plan into a `PreparedPlan`, resolves kernels and prepares native capacities. `submit` creates a Run with its own binding snapshot, cancellation and dynamic activation state. CPU kernels return synchronously; accepted GPU kernels finish through their completion callback. Ready tasks may execute across calls. CallGroups retire in IR order, and final RET exposes the selected Results after preceding calls have retired. Failure and cancellation drain accepted work before its borrowed storage can be released.
 
 ## Result and image interface
 
-A Result has 1..16 named static Tensor members. Dtype, positive shape, rank, batch/atomic axes and topology are fixed before execution, including statically derived extents. Runtime counts and masks are ordinary payload inside fixed capacity. There are no dynamic field rows, End protocol, numeric port kind, failure-delivery selector or kernel scalar-bounds field.
+A Result has 1..16 named static Tensor members. Dtype, positive shape, rank, batch/atomic axes and topology are fixed before execution, including statically derived extents. Runtime counts and masks are ordinary payload inside fixed capacity.
 
-Tensor unifies backing, fragments and view access. Host allocation defaults to tiled planar. Legal signed/zero strides, external owners and sparse physical coverage remain supported. Owning windows expose actual runs; explicit collection and packing consume capacity and work. Ordinary images default to straight alpha in operation implementations and helpers, without a kernel compliance validator.
+Tensor backing supports fragments, legal signed/zero strides, external owners and sparse physical coverage. Owning windows expose actual runs; explicit collection and packing consume capacity and work. The Plan's input layout contract determines the representation accepted by a Run. CPU COPY tasks can explicitly connect Host and Shared tiles. Image numerical semantics belong to operation implementations and helpers.
 
-C metadata resolution supplies schemas, selected resources and static shared-stage declarations; the C mapping hook supplies static reads. Retained windows have explicit retain/release lifetimes. Query and service tables expire at callback return. The kernel validates addresses, authorization, owners and synchronization without interpreting pixel values.
+Static C callbacks provide schemas, selected resources and a physical operation program. Runtime kernels borrow fixed views and scratch for the invocation lifetime. The host validates structural contracts during compilation, preparation and binding preflight; kernels own numerical correctness and must stay within their declared accesses.
 
 ## Identity and runtime matching
 
-Canonical compiler identities include the program form, program identifiers, prepared operation contracts, static schemas, parameters, selected resources, input projections, shared-stage definitions, relevant backend choices and, for plans, every instruction and grant. Renumbering calls or values therefore changes IR and plan digests. Content cache identities exclude physical node, step and plan identifiers. Raw pointers, padding and allocation addresses do not define identity. C import rejects wrong ABI or size; native service availability also depends on build and device. Compiler artifacts are editable versioned text and carry no native pointers, library paths, device handles, Run state or cache content.
+Canonical IR identities include program form, identifiers, prepared operation contracts, static schemas, parameters, selected resources and control flow. Plan identity additionally includes layouts, placements, task reads/writes, dependencies, scratch requirements, CallGroups, block reservations, return signatures and output selection. Renumbering calls or values changes these identities. Raw pointers, padding and allocation addresses do not define identity.
+
+Compiler artifacts are editable versioned text. They contain neither native pointers nor library paths, device handles, Run state or cache contents. Runtime module/device ownership remains in the linked `PreparedPlan` and its kernels.

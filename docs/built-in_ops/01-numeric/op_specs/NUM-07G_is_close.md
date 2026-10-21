@@ -38,7 +38,7 @@ nonfinite or negative tolerance at compile/preflight. No other static numeric
 parameters, implicit cast or broadcast is provided.
 
 Inherit the [comparison execution contract](NUM-07_comparison_contract.md) for
-both-input support, typed validation, errors, resources, mapping and lifetime.
+fixed two-input tile support, structural preparation, errors, resources, mapping and lifetime.
 
 ## Exact predicate and special cases
 
@@ -46,14 +46,12 @@ Finite inputs and tolerances denote their exact binary rational values. Compare
 the entire formula exactly, including the equality boundary, with no intermediate
 floating rounding, overflow or underflow. All three profiles yield identical
 UInt8 bits. Decode significands/exponents and use exact scaled-integer comparison
-or a certified equivalent; charge actual arithmetic work and scratch to budgets.
+or a certified equivalent. The Plan reserves fixed scratch before issue; the invocation queries cancellation between batches of at most four samples.
 
 Before the finite formula: any NaN yields 0; same-sign infinities yield 1;
 otherwise an infinity paired with any different value yields 0. Both signed
 zeros yield 1. NaN payloads do not affect this boolean output. All generic
-numeric inputs produce successful results unless execution/validation/resources
-fail; no floating domain Status is introduced. Typed input validation still
-applies, and both operands are read even when classification decides the result.
+numeric inputs produce successful results unless an operational failure occurs; no floating domain Status is introduced. Both operands remain declared reads even when classification decides the result.
 
 ## Acceptance
 
@@ -67,12 +65,9 @@ subnormal differences and products. No epsilon is added to the comparison.
 
 Exercise a public WorkflowDocument with static tolerances, both inputs and
 requested output coordinates when implemented. Apply the inherited strided,
-disjoint, typed-validation, lifetime, cache and budget/cancellation cases;
+disjoint, structural-validation, lifetime and budget/cancellation cases;
 resource exhaustion must fail rather than guess a near-threshold predicate.
 
-The default registry implements all three profile keys using a bounded exact
-4352-bit predicate workspace with complete-input input/output execution.
-The specification remains Proposed; these are manual checks outside integration
-tests, with no performance claim.
+All three profile definitions use a bounded exact 4352-bit predicate workspace within fixed CPU tile invocations. Prepare decodes the static tolerances once into immutable binary parts. Output is UInt8 and retains only requested tiles. The specification remains Proposed; acceptance uses temporary public checks with independent rational references and carries no performance claim.
 
-Current Run-shared complete-input computation, capacity and validation: [NUM-07 measurements](../comparison-whole.md).
+See [NUM-07 fixed execution](../comparison-execution.md).

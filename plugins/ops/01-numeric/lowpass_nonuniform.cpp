@@ -12,10 +12,10 @@
 
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/lowpass_nonuniform_math.hpp"
-#include "01-numeric/numeric_tensor_program.hpp"
+#include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
+#include "common/tensor_program.hpp"
 #include "photospider/core/resource_allocator.hpp"
-#include "photospider/plugin/whole_stage.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -40,173 +40,231 @@ LowpassParameters parameters(
     result.beta = raw(std::get<double>(input.at("beta")));
   return result;
 }
-struct NonuniformState {
-  LowpassParameters parameters;
-  unsigned axis;
-  std::string boundary;
-  numeric_ops::NonuniformLowpassMath arithmetic;
-  ResourceVector<std::uint64_t> positions;
-  ResourceVector<numeric_ops::LowpassPiece> pieces;
-  const ResultProgramPhase& phase;
-  std::array<numeric_ops::MathTensorReader, 2> inputs;
-  std::function<Status(std::uint64_t)> consume;
-  NonuniformState(LowpassParameters p, unsigned dimension,
-                  std::string extension, const ResultProgramPhase& invocation)
-      : parameters(p),
-        axis(dimension),
-        boundary(std::move(extension)),
-        positions(ResourceAllocator<std::uint64_t>(invocation.resources)),
-        pieces(
-            ResourceAllocator<numeric_ops::LowpassPiece>(invocation.resources)),
-        phase(invocation),
-        inputs{numeric_ops::MathTensorReader(invocation.tensors->at({0, 0}),
-                                             invocation.query.cancellation),
-               numeric_ops::MathTensorReader(invocation.tensors->at({1, 0}),
-                                             invocation.query.cancellation)},
-        consume(invocation.consume_work) {}
-  Status failure(const char* message,
-                 FailureReason reason = FailureReason::InvalidDomain) const {
-    return {ErrorCode::OperationFailed,
-            message,
-            reason,
-            {FailureOrigin::Domain, FailureScope::Run}};
-  }
-  Result<std::uint64_t> read(unsigned port,
-                             const std::vector<std::uint64_t>& at) {
-    auto charged = consume(at.size() + 1);
-    if (!charged.ok())
-      return Result<std::uint64_t>(charged);
-    const bool narrow = phase.query.inputs[port]
-                            .result_schema->tensors[0]
-                            .descriptor.element_type == ElementType::Float32;
-    std::uint64_t bits = inputs[port].bits(at);
-    auto value = BinaryParts::decode(bits, narrow);
-    if (value.nan || value.infinite)
-      return Result<std::uint64_t>(
-          failure("nonfinite nonuniform lowpass input"));
-    if (!port && narrow) {
-      const auto sign = (bits >> 31) << 63;
-      if (!value.magnitude) {
-        bits = sign;
-      } else {
-        const auto top = 63 - __builtin_clzll(value.significand);
-        bits = sign |
-               (static_cast<std::uint64_t>(value.exponent + top + 1023) << 52) |
-               ((value.significand << (52 - top)) & UINT64_C(0xfffffffffffff));
-      }
-    }
-    return Result<std::uint64_t>(bits);
-  }
-  Status partition(std::uint64_t center) {
-    pieces.clear();
-    auto& m = arithmetic.kernel.functions.math;
-    m.used = 0;
-    m.precision = 1074;
-    m.consume = &consume;
-    struct End {
-      numeric_ops::DirectedInterval& m;
-      ~End() {
-        m.consume = nullptr;
-        m.used = 0;
-      }
-    } end{m};
-    try {
-      numeric_ops::LowpassGeometry geometry(m);
-      geometry.partition(&pieces, positions.data(), positions.size(), center,
-                         parameters.radius, boundary);
-      return Status::success();
-    } catch (const Status& status) {
-      return status;
-    }
-  }
-  Status execute(const ResultTensorWriteWindow& window) {
-    positions.resize(
-        phase.query.inputs[0].result_schema->tensors[0].sample_shape()[0]);
-    for (unsigned i = 0; i < positions.size(); ++i) {
-      auto value = read(0, {i});
-      if (!value.ok())
-        return value.status();
-      positions[i] = value.value();
-      if (i && BinaryParts::decode(positions[i - 1], false).order_key() >=
-                   BinaryParts::decode(positions[i], false).order_key())
-        return failure("nonuniform positions require strict increase");
-    }
-    const auto& tensor = phase.query.output.result_schema->tensors[0];
-    const auto& descriptor = tensor.descriptor;
-    const auto shape = tensor.sample_shape();
-    numeric_ops::MathTensorWriter output(window);
-    const bool narrow = descriptor.element_type == ElementType::Float32;
-    const unsigned width = narrow ? 4 : 8;
-    std::uint64_t count = 1;
-    for (auto extent : shape)
-      count *= extent;
-    std::vector<std::uint64_t> coordinate(shape.size()), at(shape.size());
-    for (std::uint64_t row = 0; row < count; ++row) {
-      auto status = partition(coordinate[axis]);
-      if (!status.ok())
-        return status;
-      at = coordinate;
-      for (auto& piece : pieces) {
-        status = consume(1);
-        if (!status.ok())
-          return status;
-        if (piece.first == UINT64_MAX)
-          continue;
-        at[axis] = piece.first;
-        auto first = read(1, at);
-        if (!first.ok())
-          return first.status();
-        piece.first_value = first.value();
-        at[axis] = piece.last;
-        auto last = read(1, at);
-        if (!last.ok())
-          return last.status();
-        piece.last_value = last.value();
-      }
-      auto value = arithmetic.evaluate(pieces, positions[coordinate[axis]],
-                                       parameters, narrow, consume);
-      if (!value.ok())
-        return value.status();
-      const auto bits = value.value();
-      if (BinaryParts::decode(bits, narrow).infinite)
-        return failure("nonuniform lowpass output overflow",
-                       FailureReason::ArithmeticOverflow);
-      status = consume(1);
-      if (!status.ok())
-        return status;
-      std::memcpy(output.address(coordinate), &bits, width);
-      for (auto i = shape.size(); i; --i) {
-        if (++coordinate[i - 1] < shape[i - 1])
-          break;
-        coordinate[i - 1] = 0;
-      }
-    }
-    auto status = consume(1);
-    return status;
-  }
-};
 struct NonuniformPrepared final {
   LowpassParameters parameters;
   unsigned axis;
   std::string boundary;
   SequenceProfile profile;
+  std::shared_ptr<const SchemaTemplate> output_schema;
 };
-struct NonuniformKernel final {
-  Status write(const ResultProgramPhase& phase,
-               const ResourceVector<ResultTensorWriteWindow>& writers) {
-    const auto& prepared =
-        *static_cast<const NonuniformPrepared*>(phase.query.prepared->state());
-    auto memory = numeric_ops::math_take(
-        phase.allocator.allocate(sizeof(NonuniformState)));
-    static_assert(alignof(NonuniformState) <= alignof(std::max_align_t));
-    std::unique_ptr<NonuniformState, void (*)(NonuniformState*)> state(
-        new (memory.data()) NonuniformState(prepared.parameters, prepared.axis,
-                                            prepared.boundary, phase),
-        [](auto* value) { value->~NonuniformState(); });
-    return state->execute(writers[0]);
+using NonuniformScratch = numeric_ops::NonuniformLowpassMath;
+constexpr const char* nonuniform_contract = "nonuniform-lowpass-fixed-v1";
+std::array<Region, 2> input_regions(const NonuniformPrepared& state,
+                                    const Region& output, std::uint64_t count) {
+  auto values = output.dimensions();
+  values[state.axis] = {0, count};
+  return {Region({{0, count}}), Region(std::move(values))};
+}
+Status check_tile_count(const TileGrid& grid, const Region& region,
+                        std::uint64_t maximum) {
+  std::uint64_t count = 1;
+  for (unsigned axis = 0; axis < grid.rank(); ++axis) {
+    const auto d = region.dimensions()[axis];
+    std::uint64_t extent = 1;
+    if (grid.batch_axis_mask() & (1U << axis))
+      extent = d.extent;
+    else if (axis == grid.width_axis() || axis == grid.height_axis())
+      extent = (d.offset + d.extent - 1) / grid.tile_extent() -
+               d.offset / grid.tile_extent() + 1;
+    if (extent > maximum / count)
+      return {ErrorCode::ResourceExhausted, "nonuniform read tile limit"};
+    count *= extent;
   }
+  return Status::success();
+}
+Result<OperationProgram> lower(const OperationLowering& query) {
+  using Answer = Result<OperationProgram>;
+  const auto& state =
+      *static_cast<const NonuniformPrepared*>(query.static_state);
+  auto output = TileGrid::from_schema(*state.output_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  std::array<TileGrid, 2> grids;
+  for (unsigned port = 0; port < 2; ++port) {
+    auto grid = TileGrid::from_schema(*query.inputs[port].result_schema,
+                                      query.tile_extent);
+    if (!grid.ok())
+      return Answer(grid.status());
+    grids[port] = grid.take_value();
+  }
+  ResourceLimits limits;
+  limits.maximum_work = query.limits.maximum_work;
+  ResourceBudget budget(limits);
+  OperationProgramBuilder builder(query);
+  for (const auto& member : query.requests[0].members)
+    for (auto index : member.second) {
+      auto output_region = output.value().region(index);
+      if (!output_region.ok())
+        return Answer(output_region.status());
+      const auto regions =
+          input_regions(state, output_region.value(), grids[0].shape()[0]);
+      auto task = builder.add_task("nonuniform-lowpass", nonuniform_contract,
+                                   {}, {sizeof(NonuniformScratch), 0, 0});
+      if (!task.ok())
+        return Answer(task.status());
+      for (unsigned port = 0; port < 2; ++port) {
+        auto status = check_tile_count(grids[port], regions[port],
+                                       query.limits.maximum_records);
+        if (!status.ok())
+          return Answer(status);
+        auto tiles = sdk::tiles_for_region(budget, grids[port], regions[port]);
+        if (!tiles.ok())
+          return Answer(tiles.status());
+        for (auto tile : tiles.value()) {
+          status = budget.consume({1});
+          if (status.ok())
+            status = builder.read_input(task.value(), port, 0, tile);
+          if (!status.ok())
+            return Answer(status);
+        }
+      }
+      auto status = builder.write_output(task.value(), 0, member.first, index);
+      if (!status.ok())
+        return Answer(status);
+    }
+  return builder.finish();
+}
+struct NonuniformKernel final {
+  const NonuniformPrepared* program;
+  fixed_tensor::PointInputs<2> inputs;
+  bool position_narrow, value_narrow;
 };
-using NonuniformProgram = numeric_ops::WholeTensorProgram<NonuniformKernel>;
+void invoke(const ps_kernel_invocation_v8* invocation,
+            ps_kernel_status_v8* status) noexcept {
+  const auto& state =
+      *static_cast<const NonuniformKernel*>(invocation->prepared_context);
+  const auto& program = *state.program;
+  const auto consume = [invocation](std::uint64_t) {
+    return invocation->cancellation.is_cancelled &&
+                   invocation->cancellation.is_cancelled(
+                       invocation->cancellation.context)
+               ? Status{ErrorCode::Cancelled, {}}
+               : Status::success();
+  };
+  const auto accept = [status](const Status& result) {
+    if (!result.ok())
+      *status =
+          kernel_failure(result.code, result.message.c_str(), result.reason);
+    return result.ok();
+  };
+  if (!accept(consume(0)))
+    return;
+  FloatingEnvironment environment;
+  if (!environment.active()) {
+    *status = kernel_failure(ErrorCode::OperationFailed,
+                             "nonuniform numeric environment");
+    return;
+  }
+  auto* work = new (invocation->scratch[0].allocation) NonuniformScratch;
+  struct Lifetime {
+    NonuniformScratch* value;
+    ~Lifetime() { value->~NonuniformScratch(); }
+  } lifetime{work};
+  fixed_tensor::PointReader<2> reader{state.inputs, *invocation};
+  const auto positions = [&](unsigned index) {
+    std::array<std::uint64_t, 8> at{};
+    at[0] = index;
+    auto bits = reader.bits(0, at, state.position_narrow ? 4 : 8);
+    if (state.position_narrow) {
+      const auto value = BinaryParts::decode(bits, true);
+      const auto sign = (bits >> 31) << 63;
+      if (!value.magnitude)
+        return sign;
+      const auto top = 63 - __builtin_clzll(value.significand);
+      bits = sign |
+             (static_cast<std::uint64_t>(value.exponent + top + 1023) << 52) |
+             ((value.significand << (52 - top)) & UINT64_C(0xfffffffffffff));
+    }
+    return bits;
+  };
+  const auto& output = invocation->outputs[0];
+  const auto& layout = *output.layout;
+  const auto width = state.value_narrow ? 4U : 8U;
+  std::uint64_t count = 1;
+  for (unsigned axis = 0; axis < layout.rank; ++axis)
+    count *= layout.shape[axis];
+  const auto k = static_cast<unsigned>(state.inputs.grids[0].shape()[0]);
+  for (std::uint64_t point = 0; point < count; ++point) {
+    if (!accept(consume(1)))
+      return;
+    std::array<std::uint64_t, 8> at{};
+    auto index = point;
+    for (unsigned axis = layout.rank; axis-- > 0;) {
+      at[axis] = layout.origin[axis] + index % layout.shape[axis];
+      index /= layout.shape[axis];
+    }
+    const auto center = static_cast<unsigned>(at[program.axis]);
+    const auto values = [&](std::uint64_t source) {
+      at[program.axis] = source;
+      return reader.bits(1, at, width);
+    };
+    auto result =
+        work->evaluate(positions, values, k, center, program.boundary,
+                       program.parameters, state.value_narrow, consume);
+    if (!accept(result.status()) || !accept(consume(1)))
+      return;
+    const auto bits = result.value();
+    std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
+                    output.byte_offset + point * width,
+                &bits, width);
+  }
+  *status = {};
+}
+Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
+  using Answer = Result<ps_prepared_kernel_v8>;
+  const auto invalid = [] {
+    return Answer(
+        {ErrorCode::TypeMismatch, "invalid nonuniform lowpass signature"});
+  };
+  const auto* state =
+      static_cast<const NonuniformPrepared*>(query.static_state);
+  if (!state || query.inputs.size() != 2 || query.outputs.size() != 1 ||
+      query.writes.size() != 1 || !query.task_parameters.empty() ||
+      !query.outputs[0].result_schema ||
+      !query.outputs[0].result_schema->same_schema(*state->output_schema) ||
+      query.scratch !=
+          std::array<std::uint64_t, 3>{sizeof(NonuniformScratch), 0, 0})
+    return invalid();
+  auto output = TileGrid::from_schema(*state->output_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  auto region = output.value().region(query.writes[0].tile_index);
+  if (!region.ok())
+    return Answer(region.status());
+  auto prepared = std::make_unique<NonuniformKernel>();
+  prepared->program = state;
+  const auto regions = input_regions(
+      *state, region.value(),
+      query.inputs[0].result_schema->tensors[0].sample_shape()[0]);
+  for (unsigned port = 0; port < 2; ++port) {
+    auto grid = TileGrid::from_schema(*query.inputs[port].result_schema,
+                                      query.tile_extent);
+    if (!grid.ok())
+      return Answer(grid.status());
+    auto status =
+        check_tile_count(grid.value(), regions[port], query.reads.size());
+    if (!status.ok())
+      return Answer(status);
+  }
+  auto valid =
+      fixed_tensor::prepare_point_inputs(query, &prepared->inputs, &regions);
+  if (!valid.ok())
+    return Answer(valid);
+  prepared->position_narrow =
+      query.inputs[0].result_schema->tensors[0].descriptor.element_type ==
+      ElementType::Float32;
+  prepared->value_narrow =
+      query.writes[0].layout.element_type == ElementType::Float32;
+  ps_prepared_kernel_v8 kernel{};
+  kernel.struct_size = sizeof(kernel);
+  kernel.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  kernel.context = prepared.release();
+  kernel.invoke_cpu = invoke;
+  kernel.release = [](const void* context) {
+    delete static_cast<const NonuniformKernel*>(context);
+  };
+  return Answer(kernel);
+}
 
 OperationDefinition operation(const std::string& name, LowpassKernel kernel,
                               SequenceProfile profile) {
@@ -228,10 +286,9 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
     traits.parameter_schema.push_back(
         {"beta", OperationParameterType::Float64});
   traits.requires_metadata_specialization = true;
-  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
-                                       sizeof(NonuniformProgram));
   traits.outputs[0].key = "samples";
-  traits.workspace_bytes = sizeof(NonuniformState);
+  traits.outputs[0].output_schema = tensor_ops::port();
+  traits.outputs[0].result_schema = tensor_ops::scalar_schema();
   definition.prepare_static = [kernel, profile](const auto& inputs,
                                                 const auto& p) {
     using Answer = Result<OperationPreparation>;
@@ -250,6 +307,11 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
            input.result_schema->tensors[0].descriptor.element_type !=
                ElementType::Float64))
         return Answer(mismatch("nonuniform lowpass Float32/64 inputs"));
+    for (const auto& input : inputs) {
+      auto valid = tensor_ops::check_tensor(input);
+      if (!valid.ok())
+        return Answer(valid);
+    }
     if (inputs[0].result_schema->tensors[0].sample_shape().size() != 1)
       return Answer(mismatch("nonuniform positions rank one"));
     const auto k = inputs[0].result_schema->tensors[0].sample_shape()[0];
@@ -285,20 +347,36 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization resolved;
-    resolved.metadata.result_schema = std::make_shared<const SchemaTemplate>(
-        numeric_ops::numeric_tensor_schema(tensor.descriptor.element_type,
-                                           shape));
+    auto schema = tensor_ops::scalar_schema();
+    schema.tensors[0].descriptor = {tensor.descriptor.element_type, shape};
+    resolved.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(std::move(schema));
     OperationPreparation prepared;
     prepared.outputs.push_back(std::move(resolved));
-    prepared.state = std::make_shared<const NonuniformPrepared>(
-        NonuniformPrepared{parameters(kernel, p), static_cast<unsigned>(axis),
-                           boundary, profile});
+    prepared.state =
+        std::make_shared<const NonuniformPrepared>(NonuniformPrepared{
+            parameters(kernel, p), static_cast<unsigned>(axis), boundary,
+            profile, prepared.outputs[0].metadata.result_schema});
     return Answer(std::move(prepared));
   };
-  definition.start_result = [](const auto&, const auto& allocator) {
-    return ResultContinuation::make<NonuniformProgram>(allocator);
+  definition.lower = lower;
+  definition.prepare_kernel =
+      [](const physical::KernelDesc& kernel,
+         const physical::Placement& placement, const KernelPreparation& query,
+         const ResourceSet&,
+         const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    if (kernel.symbol != "nonuniform-lowpass" ||
+        kernel.contract != nonuniform_contract)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::TypeMismatch, "invalid nonuniform lowpass kernel"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::BackendUnavailable,
+           "nonuniform lowpass requires CPU Host"});
+    return prepare_kernel(query);
   };
-  return sdk::with_whole_stage(std::move(definition), UINT64_C(1) << 48);
+  return definition;
 }
 }  // namespace
 Status register_nonuniform_lowpass(OperationRegistry* registry) {

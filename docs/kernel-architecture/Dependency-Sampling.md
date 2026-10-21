@@ -2,7 +2,7 @@
 
 ## Scope and execution paths
 
-Operations own algorithms and sample interpretation. Each operation also owns a static mapper (`OperationDefinition::map_dependencies`) that the planner calls once per output tile or shared-stage target. The mapper receives the fixed output query, schemas, tile grids, parameters, resource identities and publication target, and returns the input and shared-stage tiles that the tile may read. The planner merges and validates those reads into the instruction's fixed grants; the VM binds them before the first poll and commits immutable outputs. A data-dependent read, such as a gather whose addresses come from another input, must declare a finite static superset: the mapper returns every tile the data could address, and the callback chooses samples inside that grant at run time. A frontend that needs to skip whole branches based on runtime data expresses that choice with an explicit IR conditional jump. No data/control role or sample-level relation is encoded in the kernel protocol.
+Operations own algorithms and sample interpretation. Their pure `OperationDefinition::lower` callback emits fixed task reads, writes and scratch before execution. The compiler validates the physical program; preparation binds immutable kernels and Run admission supplies allocation owners. A data-dependent gather declares every tile its input data could address, then selects samples within those fixed reads during invocation. Runtime branch selection uses explicit IR conditional jumps.
 
 ## STMap Result contract
 
@@ -29,20 +29,20 @@ Arithmetic uses Float64 accumulation and narrows to Float32 output. A zero weigh
 
 A rounding witness with opaque alpha uses u=2^-56, v=0.5, wrap, and a 1-by-2 source with red values [1,-1]. Float64 `(u-0.5)` rounds to -0.5, both horizontal weights are 0.5, and the Float32 red output is +0 (bits 0x00000000), while exact rational weights would give 2^-55. Preserve this independent numerical reference when checking all four caller rounding modes; temporary check programs follow the test retention policy.
 
-### Publication and parallel arithmetic
+### Fixed tasks and parallel arithmetic
 
-The `image.stmap` mapper grants, for each output tile, the map tiles that cover the tile's output pixels and every tile of the source member. UV values are only known at run time, so the complete source is the finite superset; the callback reads its map tiles, computes the bilinear taps, and reads only the taps it needs from that grant, all within one poll. Every existing tap, including a zero-weight tap, is read from the source grant. Mathematical tap precision does not imply sample-level authorization or invalidation.
+Each selected output tile emits one `stmap-bilinear-fixed-v1` CPU task. Source reads cover the complete H/W domain of the selected output batch coordinates. Map reads cover the same output Y/X region and both UV components; an unbatched map omits the batch prefix. Each region closes on its input's own TileGrid, including maps whose UV components occupy different tiles. Dynamic UV values select samples within these fixed reads. Every present tap, including a zero-weight tap, is read; constant-boundary absent taps contribute transparent zero.
 
-The coordinator prepares bounded pixel spans and writes through Result write windows. Large admitted work can use the CPU staged tile service; work-item geometry is separate from plan payload tiles. Tile workers read retained immutable inputs and write disjoint prepared spans. Allocation, input reads, work admission and publication stay with the coordinator, which joins workers before committing. Operations establish their numerical environment inside each executing callback; the kernel only saves and restores thread state.
+The executor schedules independent output tiles and preallocates their dense RGBA storage. The operation uses fixed local arrays, declares zero scratch and performs no nested worker scheduling. Every invocation establishes nearest rounding with gradual underflow and restores the caller's floating environment. Its arithmetic preserves the top-left, top-right, bottom-left, bottom-right accumulation order and separate binary64 rounding steps.
 
-### Map coordinate storage
+### Views and ownership
 
-Input windows preserve actual affine/fragmented mappings. A representable map row can retain its owner and stride; required row copies are explicit and charged. Neither full input coverage nor default tiled storage implies a contiguous canvas or an implicit full-array copy.
+Kernel preparation verifies exact sorted read slots, dtype, complete regions, the single output tile, empty task parameters and zero scratch. Invocation borrows immutable affine input views, including signed/zero strides and unaligned addresses, through completion. Input views need not share one allocation. DenseHost bindings use the compiler's explicit import COPY tasks. Successful output Results own independent dense tile allocations and can outlive the Run and context.
 
 ### Errors and resources
 
-State, windows, workspace, output and work are Root-accounted. Invalid UV fails with OperationFailed; incompatible structure fails with TypeMismatch; an invalid boundary parameter fails with InvalidArgument. Cancellation and resource exhaustion keep their status categories. The tile transaction publishes no partial payload or incomplete evidence on failure.
+Lowering bounds source tile enumeration and cumulative read references before expanding each region. The operation builder rejects aggregate record/reference exhaustion before appending entries; final validation also checks derived graph edges. Source directories scale with the statically reachable spatial domain, while output allocation scales with selected tiles.
 
-## Generic tuple observations and numeric diagnostics
+Before converting UV to integer addresses, each pixel checks that both coordinates are finite and within +/-2^40. Invalid used coordinates return `OperationFailed`; coordinates outside the selected output pixels are not scanned. Incompatible structure returns `TypeMismatch`, and an invalid boundary parameter returns `InvalidArgument`. Cancellation is polled before each pixel and returns without publishing that task's output. Resource failures retain their category. Final RET publication and observer ownership follow the fixed executor's ordered-retirement contract.
 
-Ops SDK `NumericDiagnostics` reports arithmetic attempts and implementation-specific counters through bounded generic diagnostic services. The kernel transports and merges reports without assigning pixel semantics. `computed_elements` counts newly committed Tensor samples, not dynamic rows; cache hits add no computation. Saturating counters and timing observations do not establish numerical accuracy or native device execution.
+The independent reference in `oracle/ops/transform/geo06/reference.hpp` defines boundary mapping and straight-alpha resampling with explicit rounding after every arithmetic operation. Temporary public/direct checks compare raw output bits, including transparent colors, partial constant boundaries and the rounding witness above. These checks do not establish GPU execution or compatibility with normalized third-party STMap formats.

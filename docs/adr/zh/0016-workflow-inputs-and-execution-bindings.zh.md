@@ -2,47 +2,26 @@
 
 - 状态：Accepted
 
-## 当前实现：固定授权与 CFG 返回
+## 决策
 
-静态 Plan 在执行前固定每项输入读取。运行时 payload 可以选择 CFG 后继或
-已编译授权内的样本，不能增加 producer task 或扩大授权。Bindings 仍由每个
-Run 持有，不写入产物文件。导入 Plan 保留相同的 binding preflight 规则，并
-必须使用其链接的冻结 registry 执行。
+Workflow declaration 提供名称与 Result schema；每个 Run 按精确名称绑定 owning
+`ResultRef`。编译器在执行前固定输入读取、物理 layout、内存 domain、COPY task
+和控制流。Payload owner 不进入编译产物与 identity。
 
-下文 DAG workflow output 的限制适用于 `WorkflowDocument`。直接构造
-`IRProgram` 的前端可以返回 schema 匹配的 SSA value，包括输入或 block
-parameter。命名返回使用 synthetic dependency record；消费者应读取
-`plan.output(name).record_index`，不能把返回索引当作物理 step。允许部分校验的
-独立输出 tile 在认证完成时通知 observer，包括 cache hit；bundle/prefix 和
-完整校验闭包在所需 coverage 就绪后通知。Observer 的 Result 与最终返回的投影
-不保证拥有相同 ObjectId。
+当前 operation module 与 fixed invocation 均使用 ABI 8。算子 lower 为物理 task，
+并 prepare 不可变 kernel。Invocation 借用 Plan 固定的 input/output view 和
+scratch；payload 不能增加 producer task 或扩大已编译读取。
 
-## 1. 核心摘要 (TL;DR)
+## 声明与绑定契约
 
-工作流声明提供名称和 Result schema；每次执行按名称绑定一个 owning `ResultRef`。Tensor shape 与 layout 保留在 Result schema 中，payload owners 不进入 compiler identity。每个 operation 都通过 staged Result continuation protocol 执行。
+`WorkflowDocument` schema 7 保存 declarations、operation nodes 和具名 outputs。
+Declaration ID 唯一且非零；名称是唯一、区分大小写、无空格的可打印 ASCII 字符串，
+长度为 1 至 128 字节。每份 document 最多有 4096 个 declarations，每项恰好绑定
+一次，包括图未消费的声明。
 
-## 2. 架构心智模型 (Mental Model & Intuition)
-
-```text
-WorkflowDocument                         每次 execute 调用
-  names + Result schemas                       Result bindings
-          |                                         |
-          v                                         v
-       analyze -> optimize -> plan           schema/name preflight
-                                      +----------+-----------+
-                                      |          |           |
-                                  Result A   Result B   Result C
-                                      |          |           |
-                                      +----------+-----------+
-                                                 v
-                                      Result continuations
-                                                 |
-                                   certified outputs 或 failure
-```
-
-声明固定 workflow port 需要的 input name 和 Result schema。每次 `execute` 调用提供 schema 对应的 `ResultRef`。Result 在 execution 或返回的 view 仍需要时保留 tensor backing 和 resource owners；并发调用可以复用同一个 plan，同时使用不同的 immutable bindings。
-
-## 3. 契约规约与接口 (Formal Contracts & APIs)
+声明固定所有具名静态 Tensor 成员、dtype、cell shape、batch/atomic 轴和拓扑。
+输入结构变化后须重新 preparation 和 compilation。以下片段展示绑定字段，完整
+API 以公开头文件为准：
 
 ```cpp
 struct WorkflowInputDeclaration final {
@@ -53,37 +32,61 @@ struct WorkflowInputDeclaration final {
 
 struct ExecutionBinding final {
   std::string name;
-  ResultRef result = {};
+  ResultRef result;
 };
 
-struct ExecutionOptions final {
-  std::function<Status(ValueRef, const ResultRef&)> result_publication = {};
-};
-
-struct ExecutionResult final {
-  ResourceMap<ResultRef> results = {};
+struct ExecutionBindings final {
+  std::vector<ExecutionBinding> inputs;
 };
 ```
 
-这些片段展示 binding 与 publication 相关的公开字段。当前 `WorkflowDocument` schema 为 7，保存 declarations、operation nodes 和具名 outputs。Declaration id 唯一且非零；name 为唯一、精确、区分大小写的可打印 ASCII 字符串，长度为 1 至 128 字节且不含空格。每份 document 最多包含 4096 个 declarations，每个 declaration 恰好绑定一次，包括未被图消费的声明。
+Vector 保留重复名称，供 preflight 拒绝。缺少、多余、重复或非法绑定返回
+`InvalidArgument`；Result schema 不兼容返回 `TypeMismatch`。输入 payload 必须
+已经覆盖已编译 tile view，并符合其物理 layout 和 domain。Layout 适配必须使用
+显式编译的 COPY task；preflight 不进行数值样本校验或隐式 repacking。
 
-声明固定所有具名静态 Tensor 成员及其 dtype、cell shape、batch/atomic 轴和拓扑。输入结构改变后重新 preparation 和 compile。每个 Run 固定 plan、binding snapshot 和 generation。Payload 地址不进入编译 identity；schema、traits、stage 声明和规范化成员请求进入相应 identity。
+`ExecutionContext::prepare` 将 Plan 绑定到具体 kernel 和 device，不执行 payload
+工作。`submit(prepared, bindings, cancellation, options)` 复制 binding snapshot，
+返回 `RunHandle`；复制期间调用方不得修改 binding 容器。并发 Run 可共享一个
+`PreparedPlan`，同时持有不同的不可变 bindings。导入 Plan 使用相同 preflight
+规则，并使用其链接的冻结 registry。
 
-`ExecutionBinding` 按名称匹配一个 declaration，并持有 Result reference。Executor 按多重集合验证名称，因此重复 binding 会被保留并在校验时失败，不会被静默覆盖。Executor 在调度 operation work 前验证 Result schema 兼容性。Run 会将 binding snapshot 和已准入 input owners 保留到 callbacks 退出。`ExecutionContext::execute` 在 callbacks 退出，且 cancellation 与 graph-currentness checks 允许完成后，将具名 Results 放在 `ExecutionResult::results` 中返回。
+## 结果与有序通知
 
-`ExecutionOptions::result_publication` 是每次调用独立的 certified Result prefix observer。每个 caller 有独立的串行通知流。Caller 可在 callback 返回后继续保留 owning `ResultRef`。Prefix 不代表整个执行成功；observer 失败停止 Run，此前已认证 prefix 继续有效。Callback exceptions 转换为 typed execution failures；cancellation 和 callback retirement 遵循 Run 现有顺序。
+`WorkflowDocument` 输出选择 operation-node output。直接构造 `IRProgram` 的
+前端可返回 schema 匹配的 SSA value，包括输入和 block parameter。具名返回对应
+物理 CFG 的 return values 与 Plan return signature。
 
-## 4. 负面清单与边界 (Non-Goals & Explicit Boundaries)
+Task 完成的 tile 可在所属 call 退休前满足内部后继。每个 `CallGroup` 在其 tasks
+settle 后按 IR call 顺序退休。`ExecutionOptions::on_call_retired` 在独立串行
+lane 接收 owning `CallRecord`。其 `values` 以物理 value ID 为 key，成功时包含
+call 声明的 exports；失败和 elided call 没有 values。Callback 可保留 Result
+owner，超过 Run 或 context 寿命。Callback 抛异常会关闭 delivery，并在已接受
+工作排空后 abort Run。Callback 不得 join 自身 Run 或销毁自身 context。
 
-- Workflow declarations 不加载文件，也不保留调用方 payload。
-- Bindings 没有 optional/default values，也不执行隐式 schema conversion、resize 或 layout repacking。
-- Runtime input data 不会成为 compile-time parameters 或 literal nodes。
-- Workflow output 选择 operation-node output；输入直接透传不是 workflow output 形式。
-- Result tensor backing layout 不改变逻辑 sample authorization。Planar storage 不等同于 interleaved storage。
-- Result C operation table 保持 ABI 7。本 ADR 描述 C++ workflow binding contract，不描述独立 C++ Tensor operation protocol。
+`RunHandle::join` 等待 task quiescence 和 delivery settlement。最终取消及源图
+currentness 检查成功后，具名返回才进入 `ExecutionResult::results`。后续 call
+失败时，先前已退休的 call export 仍然有效。Observer 与最终 RET 独立持有结果，
+其 Result 不保证拥有相同 ObjectId。
 
-## 5. 后果与代价 (Consequences)
+## 身份与生命周期
 
-声明或绑定名称非法返回 InvalidArgument，schema 不兼容返回 TypeMismatch，均发生在 callback 前。每个输入成员都有独立 tile 网格，按成员 tile 请求和比较。同一 backing 可服务不同 tile extent 的 plan。增加生产覆盖或 revision 本身不表示内容编辑。调用方不得在 execute 复制 binding 时修改其容器。
+Schema、traits、规范化 selection、固定 reads、layout、placement 和不可变
+resource identity 参与对应编译 identity；payload 地址和 binding owner 不参与。
+每个 Run 保留 binding snapshot 和已准入 owner，直到已接受的 CPU/GPU 工作完成，
+包括取消后的 drain。每个成员有独立 tile grid，见
+[ADR 0023](0023-track-dependencies-between-fixed-tiles.zh.md)。
 
-Cancellation 采用协作方式。Executor 会等待已进入的 callbacks 退出后再释放借用 phases 和 owners。每个 Run 拥有自己的 producer；取消一个 Run 会停止并退休该 Run 的工作，不影响其他 Run。输入 Results 保留各自的 backing owners；Root 计费的工作状态、outputs 和 transfers 会持续计费到最后一个 owner 退出。
+取消停止新发射并排空已接受工作，不会取消共享同一 Plan 的其他 Run。输出和
+owning read window 在 context 销毁后继续持有 backing 及其资源计费，最后一个
+owner 释放资源。执行器没有跨 Run 的 Result 或 checkpoint cache。
+
+## 边界
+
+- Declaration 不加载文件，也不保留调用方 payload。
+- Binding 没有 optional/default value 或隐式 schema conversion。
+- Runtime input data 不作为编译期参数或 literal。
+- 逻辑样本授权与 backing storage layout 分开定义。
+- Preparation 不能把失败的固定 placement 改到其他 backend 重试。
+- 本 ADR 定义 C++ workflow binding 和所有权；operation ABI 由公开的 fixed
+  invocation 与 module 头文件定义。

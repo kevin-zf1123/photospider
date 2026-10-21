@@ -129,7 +129,7 @@ int main() {
   auto plan = compiler.plan(ir.value());
   PS_REQUIRE_OK(plan);
   ps::ExecutionContext execution(operations);
-  auto executed = execution.execute(plan.value());
+  auto executed = multi_result::run(execution, plan.value());
   PS_REQUIRE_OK(executed);
   PS_CHECK(ps::test::named_scalar(executed.value(), "result") == 7);
   auto encoded = ps::CompilerArtifact::export_ir(ir.value());

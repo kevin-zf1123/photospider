@@ -28,7 +28,7 @@ and in the named family contract take precedence.
 
 Compute 1/x on Float32/Float64, preserving dtype and shape. Inherit the
 [NUM-04 common contract](NUM-04_unary_contract.md) for the parameter-free
-input/values interface, generic output, complete-input and typed-validation support,
+input/values interface, generic output, fixed tile reads and structural preparation,
 NaN handling, ownership, budgets and public acceptance. Integer input rejects
 with TypeMismatch and requires explicit conversion.
 
@@ -55,13 +55,12 @@ reciprocal is a strict oracle.
 
 Conceptual public fixture: `[2,-4,+0,-0,+Inf,-Inf]` ->
 `[0.5,-0.25,+Inf,-Inf,+0,-0]`. Run through a compiled public workflow with actual
-bindings, then apply common nonzero/disjoint ROI, read-witness, cache/owner,
+bindings, then apply common nonzero/disjoint ROI, fixed-read, owner,
 cancellation and resource tests. There is no implementation of these new keys
 claimed here; executable targets, commands and platform evidence are delivery work.
 
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
-atomic failure for the complete invocation. Its numerical path follows
+exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

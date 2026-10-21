@@ -8,16 +8,16 @@ The installed `Photospider::kernel` target provides:
 
 - schema-7 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
 - immutable validated IR with optional ordered optimization;
-- Result operation C ABI 7 and OperationTraits 29 with closed typed parameter schemas, optimization, and member-tile-demand-aware local physical planning;
-- CPU-required and GPU-optional local execution;
+- operation module ABI 8, fixed invocation ABI 8 and OperationTraits 30, with closed typed parameters and immutable physical Task/Tile/Call/Block planning;
+- CPU-required and GPU-optional fixed execution through `prepare`, `submit` and `join`, with dependency-driven issue and ordered call retirement;
 - operation support is defined by each registered contract; see [image operations](docs/kernel-architecture/Image-Operations.md) and the [built-in operations index](docs/built-in_ops/README.md);
-- static `Result` members and unified `Tensor`, explicit operation-bound validation, rank-general `Region`, strided layout, immutable bytes, Metal shared storage and bounded local caches;
-- cooperative cancellation, local resource accounting, fallback, and stale completion rejection;
+- static `Result` members and unified `Tensor`, explicit operation-bound validation, rank-general `Region`, affine layout, immutable bytes, native Shared/Device storage and explicit COPY tasks;
+- cooperative cancellation with accepted-work drain, stale-state checks, bounded admission and independent Run payload/metadata observations;
 - raw compile/plan/execute diagnostics, timing, counters, resource observations and non-security digests.
 
 Independent `GraphContext` and `ExecutionContext` instances may run concurrently. The kernel defines no daemon Session, Job queue, network service, durable work, process-worker supervisor, policy DSO, plugin security product, durable result object, or release-evidence profile.
 
-Operation DSOs are trusted in-process extensions configured at startup. Their exact ABI version/size, alignment, pointer/count, bounded text/count/rank, closed trait vocabulary, output type/shape/bytes, overflow, required/exact parameter type, planned input demand, exception, and cleanup validation remains a correctness boundary.
+Operation DSOs are trusted in-process extensions configured at startup. Their exact ABI version/size, alignment, pointer/count, bounded text/count/rank, closed trait vocabulary, output type/shape/bytes, overflow, required/exact parameter type, static read/write contracts, fixed completion ownership, exception, and cleanup validation remains a correctness boundary.
 
 ## Build
 
@@ -29,7 +29,7 @@ cmake --build build --target photospider -j 8
 # Build affected test targets, then run a focused CTest expression.
 ```
 
-CPU exact execution is the default. `ExecutionMode::NativeGpu` grants native placement to operations whose traits declare a GPU implementation; `ExecutionContextConfig::gpu_enabled` enables the context's configured Metal or Vulkan backend. The mode selects placement, while each operation/profile defines its numerical behavior, and traits govern CPU fallback. Apple builds use Metal/Foundation privately; set `PHOTOSPIDER_ENABLE_METAL=OFF` for the CPU configuration. See [Compiler and Execution](docs/kernel-architecture/Compiler-and-Execution.md) for the current execution contracts.
+CPU exact execution is the default. `ExecutionMode::NativeGpu` selects GPU lowering for operations that advertise GPU support and CPU lowering for CPU-only operations. A lowering may explicitly mix CPU/GPU tasks within a call when its registered capabilities permit them. The resulting Plan fixes every placement and explicit COPY edge. `maximum_gpu_submissions` bounds native submission credits; zero rejects preparation of GPU tasks. Numerical behavior belongs to each operation/profile. Preparation and execution do not retry a failed GPU placement on CPU. Apple builds use Metal/Foundation privately; set `PHOTOSPIDER_ENABLE_METAL=OFF` for the CPU configuration. See [Compiler and Execution](docs/kernel-architecture/Compiler-and-Execution.md) for the current execution contracts.
 
 `PHOTOSPIDER_BUILD_BENCHMARK_TOOLS` defaults to `OFF`. Its optional
 `Photospider::benchmark_tools` target depends only on public kernel APIs. The
@@ -38,9 +38,9 @@ acceptance follow [Testing and Validation](docs/development/Testing-and-Validati
 
 ## Compiler and executor tools
 
-`PHOTOSPIDER_BUILD_TOOLS=ON` builds `psc` and `psx` by default. `psc input.json -o output.psxp` validates and plans directly without optimization. Add `-O optimize` explicitly for the optional example pass; `--emit ir` and `--save-ir N=PATH` select and preserve IR versions. `psx output.psxp --bindings inputs.json -o output.results` executes saved instructions and exports actual Tensor coverage. Built-in operations register by default when ops are enabled; otherwise use `--load-ops`.
+`PHOTOSPIDER_BUILD_TOOLS=ON` builds `psc` and `psx` by default. `psc input.json -o output.psxp` validates and plans directly without optimization. Add `-O optimize` explicitly for the optional example pass; `--emit ir` and `--save-ir N=PATH` select and preserve IR versions. `psx output.psxp --bindings inputs.json -o output.results` executes saved physical tables and exports actual Tensor coverage. Built-in operations register by default when ops are enabled; otherwise use `--load-ops`.
 
-See [CLI usage](docs/development/Compiler-Tools.md), [file formats](docs/development/Compiler-Tool-Formats.md), and [中文说明](docs/development/zh/Compiler-Tools.zh.md). Artifacts use v4; earlier formats require re-export.
+See [CLI usage](docs/development/Compiler-Tools.md), [file formats](docs/development/Compiler-Tool-Formats.md), and [中文说明](docs/development/zh/Compiler-Tools.zh.md). Artifacts use v5; earlier formats require recompilation/re-export.
 
 ## Install and consume
 
@@ -52,7 +52,7 @@ cmake --install build --prefix /desired/photospider-prefix
 ```
 
 ```cmake
-find_package(Photospider 0.38 CONFIG REQUIRED COMPONENTS kernel)
+find_package(Photospider 0.39 CONFIG REQUIRED COMPONENTS kernel)
 target_link_libraries(app PRIVATE Photospider::kernel)
 ```
 
@@ -74,7 +74,7 @@ SDK target `Photospider::ops_sdk`, which uses only kernel public interfaces.
 not supply compiled implementations on its own.
 
 ```cmake
-find_package(Photospider 0.38 CONFIG REQUIRED COMPONENTS kernel ops)
+find_package(Photospider 0.39 CONFIG REQUIRED COMPONENTS kernel ops)
 target_link_libraries(app PRIVATE Photospider::ops)
 ```
 

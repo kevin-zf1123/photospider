@@ -1,247 +1,121 @@
 # Plugin ABI and ownership
 
-## 1. Core summary (TL;DR)
+[Chinese reader version](zh/Plugin-ABI.zh.md).
 
-Photospider loads trusted operation modules through an exact-size versioned C table and copies declarations before publishing them; built-in operations register through the C++ `OperationRegistry` instead. The structured Result C ABI uses one Result object per port, and every Result is a static directory of 1..16 typed Tensor members that carry numeric and image samples. A Result stores structure and data only. The planner calls each operation's pure static mapping hook to fix, per output tile, the member tiles it may read; at run time callbacks read only those compiled grants, and the host records each executed tile's dependencies outside the Result. Package 0.38.0 uses the Result operation C ABI 7 and OperationTraits 29. ABI 7 provides member-local tile intervals, a synchronous static mapping sink, static publication scopes, Run-shared stages, validator and diagnostic registration, explicit resource selection during metadata resolution, authorized validation reads, and `fail_domain`; Result records carry no facet or domain metadata.
+## Scope and ownership
 
-## 2. Mental model & intuition
+Trusted native modules export operation module ABI 8. The loader copies static declarations into `OperationRegistry`; C modules and C++ `OperationDefinition` callbacks then use the same `OperationProgram` builder, physical Plan validator and fixed invocation ABI. OperationTraits uses version 30.
 
-```mermaid
-sequenceDiagram
-    participant Host
-    participant Module
-    participant Callback
-    participant Services
-    Host->>Module: Read Result operation table
-    Host->>Host: Validate and copy declarations
-    Host->>Host: Publish immutable definition and library lease
-    Note over Host,Callback: Planning
-    Host->>Callback: map_dependencies(static query, mapping sink)
-    Callback->>Host: add_input and add_shared records
-    Host->>Host: Validate and store fixed grants in the plan
-    Note over Host,Callback: Execution
-    Host->>Callback: Lend query and phase-scoped services with bound grants
-    Callback->>Services: Result facts, tensor reads, optional grant assertions
-    Services-->>Callback: Return authorized reads and owning windows
-    Callback-->>Host: Return status, a Need yield, or a publication
-    Host->>Host: Check cancellation, sticky failures, and publication
-    Host->>Host: Record the tile's dependencies as a TileRecord
-```
+The registry retains the module while definitions, static preparations or prepared kernels need its code. The compiler owns static metadata and the physical task graph. `PreparedPlan` owns linked kernels and resources; each Run owns its bindings, output allocations, scratch and completion state. CPU kernels receive fixed affine views and write preallocated outputs under the [unchecked execution contract](Compiler-and-Execution.md).
 
-The registry owns each immutable definition and its dynamic-library lease. An invocation snapshot retains the definition while callbacks run. The planner resolves named outputs, input projections, mapped input tiles, shared stages, and backend placement into fixed instructions. The Result coordinator binds those grants, supplies backend services, and records the dependencies of each executed tile in a `TileRecord`. The Result owns the schema and tensor storage; a tensor may use tiled CPU storage, affine CPU storage, or another backing described by its physical layout.
-
-## 3. Formal contracts & APIs
-
-### Entry points and core model
+## Module and declaration records
 
 ```c
-#include "photospider/plugin/result_operation_plugin_api.h"
+#include "photospider/plugin/operation_module_api.h"
 
-typedef struct ps_result_operation_plugin_api_v7 {
-  uint32_t struct_size, abi_version;
-  const ps_result_operation_v7* operations;
-  uint32_t operation_count;
-  void* context;
-  void (*destroy)(void*);
-  const ps_result_validation_definition_v7* validators;
-  uint32_t validator_count;
-  const ps_result_diagnostic_definition_v7* diagnostics;
-  uint32_t diagnostic_count;
-} ps_result_operation_plugin_api_v7;
-
-const ps_result_operation_plugin_api_v7*
-ps_result_operation_plugin_get_api_v7(void);
+/* The module supplies this function and an immutable table. */
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
+ps_operation_module_get_api_v8(void);
 ```
 
-`result_operation_plugin_api.h` is the standalone C11 operation-plugin header. It owns the Result element-type and parameter-type enums, parameter descriptor/value records, schema, tensor, tile-grid, tile-Need, tile-selection, static-query, mapping-sink and shared-stage records, extension identity and resource identity/view records, validator and diagnostic definitions, and capability flags. `PS_RESULT_EXPORT` is defined here and uses the shared `PHOTOSPIDER_OPERATION_PLUGIN_BUILD` producer switch. Native GPU declarations come from the separate `native_gpu_api.h` and use their own ABI version. The C tile helpers in `result_tile_helpers.h` build member tile intervals from borrowed grid records.
+`operation_module_api.h` is a standalone C11 header. It includes `fixed_invocation_api.h` for status, layout, invocation and prepared-kernel records. Define `PHOTOSPIDER_OPERATION_PLUGIN_BUILD` when building the producer. `Photospider::operation_sdk` supplies the include directory and requires no kernel linkage for a C producer.
 
-```cpp
-#include <utility>
-#include "photospider/data/result.hpp"
+The module table contains its exact `struct_size`, `abi_version = 8`, 1..1024 operation records, a context and a required `destroy` callback. Each operation declares its key, capability flags, input contracts, output prototypes, scalar parameter vocabulary, optional static preparation and resource validation, mandatory lowering, and optional kernel preparation. COPY-only or entirely elided operations may omit kernel preparation.
 
-ps::SchemaTemplate schema;
-ps::ResultTensorSpec pixels;
-pixels.key = "pixels";
-pixels.batch_axes = {2, 3};
-pixels.descriptor = {ps::ElementType::Float32, {4, 1080, 1920}};
-pixels.layout.spatial = true;
-pixels.layout.channel_axis = 0;
-pixels.layout.height_axis = 1;
-pixels.layout.width_axis = 2;
-schema.tensors.push_back(std::move(pixels));
-```
-
-A Result schema declares 1..16 Tensor members and optional publication scopes. A tensor descriptor describes cell axes and element type; `batch_axes` prefixes those axes to form its complete sample shape, whose rank is at most eight. Spatial axis indices in `ResultTensorLayout` are cell-relative. Every batch and cell extent must be positive and every member shape is fixed before execution; schema validation does not require a dense byte allocation or a representable product of all extents.
-
-Result object identity, schema, captured descriptor facts, and tensor members belong to an owning Result reference. Operation resources belong to the prepared operation and plan, not to the Result. Dependency facts belong to the execution's `TileRecord` table, which records the compiled reads of each executed tile. `ResultObjectInputs` and grant-authorized tensor capabilities retain actual input Results; a retained read window or published view directly owns the required source backing. Result object identity is distinct from dependency proof and physical owner retention.
-
-Result operation ABI 7 is an independent C table, and a module exports `ps_result_operation_plugin_get_api_v7`. Before calling it, the loader looks up the older Result getters `ps_result_operation_plugin_get_api_v1` through `_v6` and the planar image getters; a module that exports any of them fails with `TypeMismatch`, even when it also exports the ABI 7 getter.
-
-The loader then calls the ABI 7 getter and checks for a non-NULL table, its alignment, exact `struct_size`, and `abi_version == 7` before attaching the table destroy hook; a failed check returns `InvalidArgument`. No compatibility header or forwarding entry point exists, and older record layouts have no compatibility prefix.
-
-Import validates pointer/count pairs and alignment, record sizes (the outer record size is checked before any nested pointer is read), operation constraints, and bounded strict UTF-8 operation and parameter names. A repeated input with `repeated_maximum` set is rejected when both `repeated_match` and `resolve_metadata` are absent.
-
-Validator and diagnostic definitions in the table are registered together with the operations. Each port's `validators` array, each shared stage's `validators` array, and each operation's `diagnostics` array name extension identities (key, version, implementation) that must resolve to a definition in the same import or in the registry; a missing identity or a version/implementation conflict rejects the import.
-
-The loader imports and validates every record into a private registry candidate before it swaps the complete candidate into the live registry. Any validation or duplicate-key failure leaves the live registry unchanged.
-
-Successful imported definitions retain the plugin table owner while their records may be used; the table destroy callback runs when that retained lifetime ends. A failed import, duplicate key, or owner allocation releases the attached table through its destroy hook before closing the native library. C++ and C operation interfaces both use Result ports and the same static mapping and fixed-grant model.
-
-### Outputs, shared stages, and metadata
-
-Each `ps_result_output_v7` declares its name, Result port, input projection, flags, and payload bound. Every output executes as one plan instruction per member tile of its compiled grid; there is no execution-granularity field. C import sets `cacheable` only when both purity flags are present. An operation without the side-effect-free flag must declare at least one mandatory shared stage, and it is then uncached. Input ports constrain Result schemas or selected tensor-member predicates.
-
-`ps_result_shared_stage_v7` declares one Run-shared stage: key, schema, sorted input projection, backend, `mandatory`, cumulative `state_bytes`, `workspace_bytes`, `maximum_work`, `maximum_output_payload_bytes`, `maximum_stages`, and validators. A stage has no public output identity. The host copies these declarations during registration and preparation. The planner emits stage instructions only for stages that a mapper names or that are mandatory, and the VM keeps at most one stage state per call and stage within one block activation; re-entering the block starts a fresh activation. The `start` and `poll` callbacks select a stage through `ps_result_query_v7::shared_stage`; a tile callback sees `UINT32_MAX` there. A stage callback ignores `output_index`, `tensor_slot`, and `tile_unit`. The executor's stage contract is described in [Run-shared stages](Global-Results.md#run-shared-stages).
-
-The optional `resolve_metadata` callback receives borrowed compiled input metadata, parameters, and output prototypes. It calls the synchronous metadata sink once per output index; the sink copies and validates nested schema records before returning. The resolver may refine a Result port/schema but cannot change the output flags or payload bound. `set_shared_stages` replaces all stage prototypes once with owned static declarations. `set_resources` lists the `ps_result_resource_identity_v7` entries (byte length and SHA-256) that the operation needs; the compiler selects them from the caller's `ResourceSet`, `map_dependencies` sees only the identities, and `start`, `poll`, and validator `prepare` later receive those bytes as borrowed `ps_result_resource_view_v7` records. There is no ambient resource lookup. Sink failures are sticky, and preparation fails if an output is omitted. Operation keys, output names and projections, Result schema identity, and declared constraints remain fixed.
-
-`PS_RESULT_OUTPUT_PAYLOAD_BOUND_V7` is the only output flag. It enables `maximum_output_payload_bytes`; an explicit zero bound permits borrowed storage only. Unknown bits are rejected. If the flag is clear, the byte field must be zero. The host counts unique physical owners once per output per Run, cumulatively across its tile instructions, and excludes input and shared-stage owners. Root still accounts for source backing, workspace, metadata, and operation resources. The check occurs at publication, so it does not prevent earlier callback allocations.
-
-### Static dependency mapping
-
-```c
-typedef struct ps_result_static_query_v7 {
-  uint32_t struct_size, output_index, backend, tensor_slot, shared_stage;
-  uint64_t tile_unit, tile_extent;
-  const ps_result_port_v7* inputs;
-  uint32_t input_count;
-  const ps_result_tile_grids_v7* input_tile_grids;
-  const ps_result_output_v7* output;
-  const ps_result_tile_grids_v7* output_tile_grids;
-  const ps_result_shared_stage_v7* shared_stages;
-  uint32_t shared_stage_count;
-  const ps_result_parameter_value_v7* parameters;
-  uint32_t parameter_count;
-  const ps_result_tile_selection_v7* publication;  /* complete target */
-  uint32_t publication_count;
-  const ps_result_resource_identity_v7* resource_ids;
-  uint32_t resource_count;
-} ps_result_static_query_v7;
-
-typedef struct ps_result_static_mapping_sink_v7 {
-  uint32_t struct_size;
-  void* context;
-  int (*add_input)(void*, const ps_result_tile_need_v7*);
-  int (*add_shared)(void*, uint32_t stage, uint32_t all_members,
-                    const ps_result_tile_selection_v7*, uint32_t member_count);
-} ps_result_static_mapping_sink_v7;
-
-/* Last member of ps_result_operation_v7. */
-int (*map_dependencies)(void* user, const ps_result_static_query_v7*,
-                        const ps_result_static_mapping_sink_v7*);
-```
-
-The planner calls `map_dependencies` once for each output tile or shared-stage target it emits; calls for different targets may run concurrently. The query carries fixed metadata only: ports, compiled grids, the selected output or stage, parameters, the complete publication target, and resource identities without resource bytes. No payload, execution service, continuation or I/O is available, and operation state must not be used. All nested views expire when the hook returns.
-
-The hook reports each read through the sink, which copies nested records before returning. `add_input` takes a `ps_result_tile_need_v7`; a descriptor-only record uses `tensor_slot=0` and no intervals. `add_shared(stage, 1, NULL, 0)` selects a complete stage, `add_shared(stage, 0, NULL, 0)` explicitly requests no stage payload, and otherwise the selection lists member intervals. At most 65,536 records and 65,536 intervals may be supplied across one call. Sink errors are sticky, only the entry thread may call the sink, and the hook must not retain it.
-
-A NULL `map_dependencies` selects the complete projected original inputs, the same baseline as C++ `complete_input_dependencies`. Shared-stage edges are never implicit: a consumer of a stage must call `add_shared`. A non-NULL hook that returns success without any sink call declares that the target reads nothing. Plan import and execution use the saved mapping and never call this hook. For a GPU placement with CPU fallback, the planner calls the hook a second time with `backend` set to CPU to prove that the CPU reads fit inside the GPU grants.
-
-### Queries and grant assertions
-
-A `start` or `poll` callback receives a `ps_result_query_v7` with resolved ports, the selected output index, backend, the selected member `tensor_slot`, `tile_unit` and `tile_extent`, the shared-stage selector and declarations, one compiled grid group per input plus the output grid group, parameters, and selected resource views. A grid group holds one `ps_result_tile_grid_v7` per member in schema order. A grid record gives the member's full shape, batch rank and `batch_axis_mask`, the height and width axes (the rank value marks a missing tiled axis), the tile extent, tile rows and columns, and the tile count. The instruction's compiled grants are bound before the first poll, so `read_tensor`, `result_descriptor` and window acquisition work immediately inside those grants. Retained tensor handles preserve their certified tensor capability until release or operation-state destruction.
-
-A callback may still call `need_tiles` and return `PS_RESULT_NEED_V7`:
-
-```c
-typedef struct ps_result_tile_interval_v7 {
-  uint64_t begin, end;
-} ps_result_tile_interval_v7;
-
-typedef struct ps_result_tile_need_v7 {
-  uint32_t struct_size, input, tensor_slot, descriptor_only;
-  const ps_result_tile_interval_v7* intervals;
-  uint64_t interval_count;
-} ps_result_tile_need_v7;
-```
-
-| Form | Meaning at run time |
+| Record | Static meaning |
 | --- | --- |
-| `descriptor_only = 0`, `interval_count > 0` | Asserts that the listed member tiles lie inside a compiled payload grant for that input and slot. |
-| `descriptor_only = 0`, `interval_count = 0` | No-op. No dependency, grant or work is created. |
-| `descriptor_only = 1` | Asserts a compiled descriptor or payload grant for the input. `tensor_slot` must be zero and there are no intervals. |
+| `ps_schema_v8` | Schema identity/version, 1..16 tensor members and optional schema publication metadata |
+| `ps_tensor_spec_v8` | Element type, cell shape, batch axes, atomic trailing axes and spatial layout; complete rank is at most eight |
+| `ps_port_contract_v8` | Schema identity and optional member dtype/rank predicates |
+| `ps_parameter_spec_v8` | Exact Int64, Float64, Bool or String type, required flag and optional numeric bounds |
+| `ps_operation_output_v8` | Output name, complete prototype and optional original-input projection |
+| `ps_resource_id_v8` | Immutable resource byte length and SHA-256 |
 
-Intervals are half-open local tile indices in the producer member's compiled grid. One call accepts at most 65,536 intervals. Overlapping and adjacent intervals coalesce; a reversed or out-of-grid interval fails. The host validates the complete envelope and fails with a sticky protocol `InvalidArgument` if any request falls outside the compiled grants. A valid assertion only lets the next poll proceed: it starts no producer, narrows no grant and never converts descriptor-only access into payload access. The same records serve as `add_input` records during mapping. C modules derive intervals from the borrowed grid records, and C++ operations can use `photospider/plugin/tile_helpers.hpp`.
+C strings carry explicit byte lengths. Empty strings use `{NULL, 0}`. Keys are strict UTF-8; parameter string values are arbitrary bytes. Operation keys allow 1024 bytes; other declaration keys, kernel symbols, contracts and placement strings allow 128 bytes. Arrays use naturally aligned nonnull pointers exactly when their count is nonzero. Records with `struct_size` require an exact size match.
 
-`result_tile_helpers.h` provides `ps_result_need_descriptor_v7`, `ps_result_to_whole_v7` (all members as complete intervals), and `ps_result_need_regions_v7` (tiles intersecting explicit rectangles of one member). `ps_result_need_regions_v7` closes atomic axes, turns contiguous rows and batches into intervals, and admits at most 65,536 intervals before scratch allocation. When every supplied rectangle is empty, it submits a zero-interval Need, which is a no-op. `ps_result_output_region_v7` resolves the selected output member tile. Because grants are already bound, a callback that uses `ps_result_to_whole_v7` and returns Need finds the same grants on the next poll, and it can also read directly in the first poll. The C API provides tile publication through window acquire/retain/release and `publish_tensor_view`; it has no `ps_result_to_tile_v7` convenience function.
+An operation has at most 1024 inputs, 64 outputs and 128 parameter declarations. Repeated inputs add one trailing homogeneous contract after the fixed input prefix, with explicit minimum/maximum bounds. `input_count = UINT32_MAX` and a null projection pointer select all original inputs; zero selects no payload inputs. Static preparation can narrow the registered projection. Schema-only dependence is declared separately during lowering.
 
-### Shared-stage services
+`load_plugin(path)` accepts an explicit path of 1..4096 bytes with no embedded NUL. Missing ABI 8 entry points fail `TypeMismatch`. A null, misaligned, wrong-size or wrong-version module table fails `InvalidArgument`. The loader checks the module header before attaching its destroy hook and reading nested records. It validates every declaration in a private candidate registry, then publishes all operations atomically. Malformed declarations, duplicate keys or a concurrent freeze leave the registry unchanged.
 
-`need_shared_stage(stage)` asserts that the instruction's compiled shared grant covers every member tile of a prepared stage. `need_shared_tiles(stage, slot, intervals, count)` asserts member-local stage tile intervals within that grant; repeat it for distinct members. A call with zero intervals is a no-op. Neither call starts the stage or adds stage work; the stage instructions ran earlier in the block. The two calls cannot both name the same stage in one poll, and a repeated or unknown ordinal fails. `acquire_shared_window(stage, slot, region, ...)` returns a retained window from a supplied stage Result. It grants no access to the stage's original inputs, and the window follows the ordinary retain and release lifetime. When the current target is itself a shared stage, the planner checks each mapped read against that stage's prepared `input_indices` projection.
+## Static preparation and resources
 
-### Explicit zero-copy view services (ABI 7)
+For C++ operations, `OperationTraits` declares input arity and port constraints, repeated-input rules, named output prototypes and projections, parameter types/bounds, purity, supported backends and extension identities. `OperationPreparation` returns output specializations, required resource identities and immutable state. These static contracts enter compiler identities; callback addresses and mutable invocation state do not.
+
+Lowering declares each task's scratch by memory domain and each output tile's allocation contract. Shared intermediate computation uses private SSA values and task edges. An operation with `side_effect_free = false` must lower exactly one terminal effect task; the planner retains that call even when its outputs are unselected. Block admission derives output capacity and per-lane scratch from the physical tables before executing kernels.
+
+`ps_operation_v8::prepare` receives `ps_static_query_v8`, synchronous preparation services and an initially empty `ps_operation_state_v8` output. The host copies input schemas before entering static callbacks and preserves parameter values, including floating-point bit patterns. The callback may set each output once, retain its default prototype by omitting it, and declare resource identities through `require_resource`.
+
+The returned state is immutable and shared across output selections, lowering, kernel preparation and concurrent Runs. A nonnull context requires a release callback. A null context may still have a release callback and retains its cleanup owner. Ownership of a populated state transfers to the host on both success and failure; the host releases it exactly once. Retained callback inputs must be copied into operation-owned storage.
+
+After schema specialization, the host resolves declared resource identities from the supplied `ResourceSet`. Missing resources reject preparation. An optional `validate_resources` callback inspects only those immutable bytes and the static state, once per preparation, including Empty output demand and artifact rebinding. Kernel preparation receives borrowed views of the same retained resources. Lowering has no resource bytes or sample payload.
+
+Preparation services copy supplied metadata before returning. They accept calls only on the callback thread and retain the first failure. An ignored service failure takes precedence over a later callback status or exception. The preparation sink permits at most 1,048,576 calls and 4096 resource declarations; schema and output bounds apply independently.
+
+## Lowering into a physical Plan
+
+`ps_operation_v8::lower` receives resolved input/output schemas, parameters, static state, tile extent, backend, member grids, selected output tile intervals and construction limits. Each grid names its original port/member and gives its full shape, tile count, rows, columns and batch-axis mask. The requested intervals are half-open member-local tile indices.
+
+`ps_operation_builder_v8` exposes the checked construction operations:
+
+- `add_task` declares a kernel symbol/contract, placement, scratch by memory domain and an optional terminal effect.
+- `add_copy` declares an explicit transfer with one matching read and write. Its backend is chosen independently of numerical tasks: a native GPU Plan may contain CPU COPY tasks for Host/Shared transfers. A CpuExact request requires CPU tasks. GPU lowering may explicitly mix CPU/GPU numerical tasks when the operation advertises the respective capabilities; Device endpoints require GPU COPY placement. The builder declares one dense Shared scratch segment per Host endpoint of a GPU COPY, sized to its output bytes. This declaration participates in serialized Plan validation and per-lane admission.
+- `add_temporary`, `write_temporary` and `read_tile` connect private SSA tiles within the call.
+- `read_input`, `read_input_schema` and `write_output` declare payload reads, metadata dependence and exclusive output tiles.
+- `depends_on` adds an ordering edge; `set_parameters` copies opaque task parameter bytes.
+
+IDs are local to the call's builder. Every materialized output is a complete fixed-grid tile with one producer. The host validates output coverage, topology, call membership, placement and allocation bounds before publishing the Plan. Builder failures are sticky. Service calls and aggregate parameter bytes are bounded by `maximum_work`; table records and references use the builder's record/edge limits. A successful callback cannot override a failed builder operation.
+
+Private tasks provide shared intermediate computation. Their tile edges determine readiness, while call order determines retirement. Schema-only reads create no payload dependency. Serialized Plan import restores the saved tables and rebinds static preparation; it does not call lowering.
+
+## Kernel preparation and invocation
 
 ```c
-// Excerpts from result_operation_plugin_api.h.
-typedef struct ps_result_tensor_transform_v7 {
-  uint32_t struct_size, reshape, source_rank;
-  const ps_result_view_axis_v7* axes;
-} ps_result_tensor_transform_v7;
-typedef struct ps_result_tensor_view_piece_v7 {
-  uint32_t struct_size;
-  uint64_t window_handle;
-  ps_result_region_v7 region;
-  ps_result_tensor_transform_v7 transform;
-} ps_result_tensor_view_piece_v7;
+/* Signature of ps_operation_v8::prepare_kernel. */
+ps_kernel_status_v8 prepare_kernel(
+    void* user_data, const ps_kernel_preparation_v8* query,
+    ps_prepared_kernel_v8* result);
 ```
 
-`ps_result_tensor_transform_v7` contains an exact `struct_size`, `reshape`, `source_rank` and the `axes` pointer. Each `ps_result_view_axis_v7` supplies `output_axis`, `source_origin`, signed `step` and `output_origin`. For affine publication, it provides one map for each full source axis, including batch axes, using the anchored absolute-coordinate mapping in [Result views](Global-Results.md#explicit-tensor-views-and-publication-ownership).
+The query contains the kernel symbol/contract, exact placement, complete static metadata, actual read/write views, task parameter bytes, scratch bounds, resources and the native-service pointer. Each view includes its original port/member, tile index, domain, compiled tile byte extent, byte offset and signed affine layout. Private writes use `port = UINT32_MAX`. A Device input may bind a subview of a larger allocation; its runtime capacity and offset include the checked allocation base. The declared layout still limits sample access.
 
-`publish_tensor_view` requires a non-NULL explicit transform even for an identity view. The single-source reshape form `reshape=1, source_rank=0, axes=NULL` is valid: the implementation checks equal logical sample counts and physical affine feasibility. A physically unrepresentable but logically valid view can report `PS_RESULT_VIEW_UNAVAILABLE_V7` for an explicit copy retry.
+The C++ `KernelPreparation` query borrows its operation name, input metadata, scalar parameter map and encoded task parameter vector from immutable owners. Its output metadata and read/write view arrays are temporary preparation storage. All remain valid through the callback; copying the query preserves the borrowed references and does not extend their lifetime. Retained provider state must copy the individual values it needs. C bridge arrays retain their existing callback-scoped lifetime.
 
-`ps_result_tensor_view_piece_v7` contains an exact `struct_size`, an acquired `window_handle`, a target-coordinate `region` and an explicit `ps_result_tensor_transform_v7`. The C service `publish_tensor_view_pieces` accepts 1..16 records, each with an exact nested transform size and `reshape=0`. Pieces form a disjoint, complete partition of the supplied total region. **The total region and the union of pieces must satisfy atomic closure; individual pieces may split an atomic tuple.** For a `[1,2]` target with an atomic final channel axis, pieces for channels `[0,1)` and `[1,2)` together publish one complete tuple.
+The module validates its invocation signature here and returns an immutable prepared context with direct CPU and/or GPU entry points. A nonnull kernel context requires release. A populated kernel output transfers to the host even when preparation reports failure; failed preparation and malformed returned ABI records release that context. Successful kernel owners retain the static preparation, resource backing and defining module.
 
-The bridge retains the window records and borrowed axis metadata for the entire synchronous call. The builder validates the full logical envelope, maps physical spans, checks cycles among all source owners and publishes coverage once. Published Results retain source backing after C window-handle release and callback retirement; backing remains charged to the original Root.
+CPU invocation borrows inputs, exclusive outputs, scratch, task parameters and a cancellation query until synchronous return. Success means every declared output sample has been initialized and all accesses have ended. The host restores the callback's floating-point environment. Kernels are reentrant; mutable state belongs to the invocation's scratch or output allocations.
 
-An unrepresentable *physical* view may report the nonsticky `PS_RESULT_VIEW_UNAVAILABLE_V7` so the caller can explicitly materialize. An absent/expired handle, NULL transform, wrong record size, source authorization or partition failure, owner cycle, resource failure, and cancellation cannot be treated as a copy retry. A failed transaction does not advance coverage or revision or expose an early piece; ordinary service errors are sticky.
+`ps_kernel_status_v8` carries an operational code, reason, optional domain code and a bounded NUL-terminated message. Status values come from `fixed_invocation_api.h`; for example, `NotFound = 2` and `Cancelled = 6`. Unknown codes/reasons or unterminated messages become `Internal`. Runtime sample validation is outside this protocol.
 
-### Status, fallback, and publication
+The executor also links asynchronous GPU entry points over Host, Shared or Device storage and arms a completion slot before submission. Acceptance retains invocation views and scratch through the matching terminal callback; rejection transfers no borrowing. Inline completion is valid. Context-wide GPU credits return only after completion or local rejection settlement. Native Shared buffers are allocated before block issue and may be accessed by CPU kernels or explicit COPY tasks. Native preparation links Metal MSL or Vulkan SPIR-V kernels over Shared and Device storage. Device allocations expose opaque identities and remain unmapped; completed outputs retain their owners through Result publication. The executor prepares COPY tasks internally, without calling an operation kernel callback.
 
-Ordinary Result C callbacks and services return `int` values defined by `ps_result_status_v7`: codes 0 through 6 mean success, failure, cancellation, backend unavailable, resource exhausted, type mismatch, and invalid argument. Poll yield codes (`PS_RESULT_NEED_V7`, `PS_RESULT_PUBLISH_V7`) and `PS_RESULT_VIEW_UNAVAILABLE_V7` follow their respective service contracts. Native GPU services use their separate GPU result codes. Operation capability flags are `PS_RESULT_FLAG_DETERMINISTIC_V7`, `PS_RESULT_FLAG_SIDE_EFFECT_FREE_V7`, `PS_RESULT_FLAG_CPU_V7`, `PS_RESULT_FLAG_GPU_V7`, `PS_RESULT_FLAG_CPU_FALLBACK_V7`, and `PS_RESULT_FLAG_SHARE_BLOCKS_ACROSS_OUTPUTS_V7`. The fallback flag requires both CPU and GPU capability flags.
+`ps_kernel_completion_v8::report_timing` is an optional timing request and receiver. A nonnull receiver may be called once, serially before `finish`, with a borrowed fixed-size `ps_kernel_device_timing_v8`; rejection must not report timing. The host copies the record into the armed slot without allocation. Reporting never settles the task or releases borrowing, and invalid keys or duplicate reports cannot settle another submission. Unavailable timing is omitted or uses clock domain zero; a failed timing query does not change task success. Metal uses system mach nanoseconds. Vulkan reports raw ticks, valid bits, nanoseconds per tick and a process-local clock instance. Compute the pair's delta modulo the valid bits; cross-submission Vulkan comparisons require calibration beyond this interface. Neither clock is the Run's host steady clock. Native implementations report command intervals after quiescence; the existing completion/visibility contract remains in force.
 
-CPU fallback is compiled into the plan. The planner sets `cpu_fallback` on a GPU tile instruction only when the operation declares `PS_RESULT_FLAG_CPU_FALLBACK_V7` with CPU and GPU support, is deterministic and side-effect-free, has no shared-stage reads, and its CPU mapping fits inside the GPU grants. Both Result C table callbacks, `start` and `poll`, execute within the structured executor's fallback gate. A retry requires that compiled flag and a retry-safe attempt with no published output, input read, checkpoint, block or discovery callback, native dispatch, non-retryable sticky operation/service failure, cancellation, or stale-state failure. Other errors remain terminal. A retry discards the attempt's continuation and failure owners, then restarts the same tile instruction on CPU with the same grants; spent Root work remains charged. The retried tile is fallback-tainted and does not enter the checkpoint, block-state, or completed-result caches. Shared-stage computation is never retried; that path needs explicit IR control flow. The separate C++ `OperationRegistry::start_result` entry point validates the operation's declared backend support before it creates a continuation; it does not determine whether an execution context has a usable GPU lane or device. During structured execution, the coordinator checks GPU lane and device availability before entering a GPU-targeted start factory, then handles `BackendUnavailable` through its ordinary fallback rules. After successful tensor, view, or Result publication, a callback return of `BackendUnavailable` is converted to `OperationFailed`; `begin_result` alone does not count as publication. `publish_result` accepts only `complete` values 0 or 1 and permits one successful publication per poll; a shared-stage continuation can publish another prefix on a later poll. An ordinary tile publication must be complete and cover exactly its selected member tile, with other members empty. A valid duplicate in one poll latches `OperationFailed`. An earlier invalid service failure remains sticky if the callback then attempts a valid publication or reports success. Actual host cancellation may supersede a valid duplicate-publication failure at the execution boundary; a callback-returned `Cancelled` does not.
+## Native kernel preparation
 
-### Callback lifetime, resources, and execution
+Include `photospider/plugin/native_kernel_api.h` to use `ps_native_gpu_service_v2` from the kernel preparation query. Check the service version and backend before calling `prepare(context, program, query, result)`. The service is borrowed for the enclosing preparation callback. A successful call transfers one immutable `ps_prepared_kernel_v8` owner; a failed call leaves a valid output record empty.
 
-The query and service table are borrowed for one `start` or `poll` callback. A saved phase context expires when that callback returns; C services are callable only during that callback. The poll lease invalidates its translated service handles at callback return and keeps tombstones until the continuation is destroyed, so stale handles can be rejected without reusing their addresses. Operation state remains owned by the continuation and is destroyed before the retained operation definition releases its DSO lease. Retained tensor windows keep their own explicit release and destruction lifetimes. Entry-thread services run on the callback entry thread. CPU range and tile workers may call `cancelled` and write admitted scratch; owning window `row` and `rectangle` access may also run concurrently on CPU workers without reentering execution services. Window data pointers remain valid until the final corresponding handle is released; release follows worker completion. The metadata sink is borrowed only during resolver entry. The host keeps service failures sticky even if the callback later reports success.
+`ps_native_program_v2` describes one dispatch with source, entry point, bindings, constants, a three-dimensional grid and optional group dimensions. Metal accepts MSL source of 1..262144 bytes and a UTF-8 entry of 1..128 bytes. Up to 31 distinct buffer indexes are available, including the separate constant index when constants are present; constants occupy at most 4096 bytes. Grid dimensions are positive and bounded by `UINT32_MAX`. Zero group dimensions request device-selected sizing; an explicit group requires three positive dimensions within device and pipeline limits. Explicit groups round up the dispatched grid, so the shader must guard padded invocations.
 
-C++ Result operation factories and scalar poll callbacks are exception-fenced at their registry and continuation boundaries. `std::bad_alloc` becomes `ResourceExhausted`; a standard exception becomes `OperationFailed` with `HostException` and its `what()` text, or an empty message when `what()` is null. A non-standard exception becomes `OperationFailed` with a fixed `HostException` diagnostic. A failure already recorded by phase services takes precedence; exceptions from a host failure observer do not replace that selected failure. A direct shared-stage continuation whose validator rejects a later tile retires its projected producer with the final guarded poll failure; an escaped earlier prefix reports that failure through `production_status()` and still reads its certified tiles.
+Vulkan accepts aligned SPIR-V 1.0..1.5 modules containing 20..262144 bytes in complete words. The selected compute entry must declare a positive fixed `LocalSize`. Zero group dimensions select that module size; explicit dimensions must match it. Preparation checks device group, grid, descriptor and buffer-range limits. Constants are copied into one immutable coherent uniform buffer during preparation, and its actual native capacity remains charged to the device root for the prepared owner's lifetime.
 
-`ResultProgramPhase::acquire_native_tensor` and the C service `acquire_native_tensor_window` expose a region of the current GPU callback's compiled payload grant as an owning window backed for native access. The GPU callback then binds its row or rectangle to a native dispatch; the API does not dispatch on the caller's behalf. Without a GPU lane, acquisition returns `BackendUnavailable`. Missing slots, uncovered regions, and descriptor-only authorization fail as sticky `InvalidArgument` protocol errors. CPU or incompatible-device backing is packed as needed and uploaded under Root accounting. A compatible same-device affine backing can be reused without upload. Fragmented backing may require both materialization and upload, which are counted separately. The window keeps the source Result owner, schema, descriptor, cancellation state, and native storage alive across callback phases and external owner release. C callers release the returned handle through the ordinary window release service. Native upload reuse and caching are described in [Native GPU input access](Global-Results.md#native-gpu-input-access).
+Each binding selects an input, output or scratch view from the fixed invocation. Input/output `view` is an invocation array index; scratch `view` is its memory-domain code. Both native adapters accept Shared views and Device handles and check domains and ranges against the preparation signature. Device byte offsets select positions inside the native buffer without arithmetic on the opaque identity. Every output must be bound exactly once over its full accessible range. Input data remains immutable. Shader code must obey these declarations and initialize all output samples.
 
-Ordinary CPU poll callbacks can use the CPU range service, `ps_cpu_parallel_service_v2`. CPU-staged coordinators submit tile computations through `ps_cpu_tiles_service_v2`; CPU tile callbacks run as indivisible tile tasks. CPU tile workers and GPU callbacks do not receive the range service. Parallel work completes before its service call returns, and nested parallel submission is prohibited. Kernel callbacks inherit the floating-point environment of their worker and restore it on return; numeric operations establish their own environment inside executing workers. When a native GPU lane is available, callbacks receive its native services subject to the operation capability. GPU calls run on the active callback thread, and dispatch retains referenced owners until completion. C++ `ResultProgramPhase::gpu_status` reads the active invocation's host status and expires with the phase.
+Preparation compiles the pipeline and copies binding records, constants and dispatch dimensions. Metal uses MSL 2.4, disables fast math and prefixes the source with `#pragma clang fp contract(off)`. The returned kernel retains the pipeline and device independently of the pipeline cache and caller-owned descriptor memory. Submission resolves actual device-owned buffers and commits one command buffer. Metal uses a command-buffer completion handler. Vulkan allocates independent command, descriptor and fence objects for each submission; one device completion worker drains accepted nodes in queue order. It releases submission resources before delivering the terminal completion. Both paths establish visibility before ending the borrowed invocation. A device command failure makes the device unavailable and aborts the Run; accepted submissions retain their owners until their own terminal completion.
 
-The execution Root accounts admitted work, stages, metadata, payload capacity, and retained owners. A callback that exceeds a bound receives a resource or stage failure; issued work is not refunded. Result publication validates schema, sample coordinates, cancellation, and resource ownership before exposing an immutable result.
+Native pipeline keys and prepared context blocks are charged to the device's explicit metadata root. A caller's thread-local allocation scope does not change that owner; an unmanaged device stays unmanaged. Pipeline-cache construction and context allocation can each evict cached pipelines and retry admission once under metadata pressure. Prepared kernels retain their pipeline independently, so eviction can make room for another context without invalidating accepted work. Exhaustion after reclamation returns `ResourceExhausted` with no transferred kernel owner.
 
-Owning tensor-window reads also debit the captured execution Root. C row and rectangle services charge an upper bound computed by `ResultWindowAccess::read_work` before reading; a row uses factor 1 and a rectangle factor 2. This is Root-lifetime work because a retained window outlives the borrowed poll phase. It is separate from the per-run dependency/program work limit configured for one execution.
+`test_fixed_native` uses a C11 operation module and real Metal shaders to exercise prepared pipelines, dependent and independent tile tasks, Plan import, output selection, concurrent input bindings and explicit Host/Shared COPY chains. Its direct service checks cover malformed descriptors, a prepared pipeline surviving cache eviction, Shared scratch, padded three-dimensional groups and copying the full 4096-byte constant payload. `test_fixed_async` separately exercises controlled rejection, malformed completion, cancellation drain and backend failure. Its backend-failure cases retain accepted work until completion, stop further issue and preserve GPU placement even when a CPU entry exists. These cases use controlled completion rather than native-device fault injection. `test_native_gpu` checks device-root accounting, cache reclamation, full threadgroups with barriers, the Metal contraction policy and completion visibility after accepted work is cancelled. `test_fragment_atlas_gpu` runs fixed native kernels against sparse atlas payloads and checks sample bits and holes at ranks 1, 3 and 8. `test_vulkan_gpu` covers independent SPIR-V inputs and outputs, three-dimensional dispatch, concurrent reuse of prepared kernels, constant capacity, metadata reclamation and rollback, allocation rollback, fixed Plan execution and Device destruction from its completion callback.
 
-### C validators, diagnostics, and domain failures
+## Lifetime and failure boundaries
 
-A `ps_result_validation_definition_v7` supplies an extension identity, `scratch_bytes`, `requires_complete`, and three callbacks. `prepare` receives a `ps_result_validation_preparation_v7` (output flag, port, shared-stage ordinal, schema, parameters, selected resource views) and returns an owned state pointer; `destroy_prepared` releases it, including after a failed `prepare`, and always runs before the module owner retires. `validate` receives a `ps_result_validation_context_v7` whose services exist only on the entry thread until the call returns: `tensor_regions` describes the newly authorized coverage of a member, `read_tensor` copies at most 65,536 bytes per call in logical order, and `consume_work`/`cancelled` connect to the host budget. `complete` reports whether the validated coverage is complete, as defined in [Port validators](Global-Results.md#port-validators-and-diagnostic-reports). A read outside the authorized coverage fails and stays sticky even if the callback ignores the return code. The C bridge preserves the first service or `fail_domain` failure over a later callback status or exception.
+| Owner | Release condition |
+| --- | --- |
+| Callback input arrays and service tables | Callback return; retaining these borrowed addresses is invalid |
+| Static operation state | Last preparation/kernel owner releases, after kernel context cleanup |
+| Prepared kernel context | Last kernel owner releases after all borrowing invocations complete |
+| Module table/code | Last definition/static/kernel lease releases; module destroy precedes native unload |
+| Input/output/resource backing | Last owning handle releases, independently of registry lifetime |
 
-A `ps_result_diagnostic_definition_v7` declares a fixed `payload_bytes` record with `validate` and `merge` callbacks; `merge` writes a complete destination and must not modify its inputs. An operation lists the diagnostic identities it may emit in `ps_result_operation_v7::diagnostics` and reports through `report_diagnostic(type_index, bytes, size)` on its run services.
+The host fences preparation/lowering exceptions and converts allocation failures to `ResourceExhausted`. C callbacks and release functions must obey their nonthrowing contract. Service failure selection and cleanup remain active on rejected preparations. A callback that never returns can prevent drain; cancellation requires cooperation and does not authorize early release.
 
-`fail_domain(status_code, domain_code)` on the run services and on the validation context records the first domain failure with a nonzero status code and an opaque 64-bit domain code. The host copies the code into `FailureDetail::domain_code` without interpreting it.
-
-### SDK targets
-
-The shared `Photospider::operation_sdk` target provides C++ Result helpers, including `ps::plugin::element_type_value`, `tile_helpers.hpp`, `tensor_helpers.hpp` (`sdk::to_whole`, `sdk::to_tile`, `sdk::collect`, `sdk::publish_dense_tensor`), and `whole_stage.hpp` (`sdk::with_whole_stage`, `sdk::shared_result_tile`). These helpers are described in [SDK acquisition helpers](Global-Results.md#sdk-acquisition-helpers). The Result operation table remains a standalone C11 interface, and its DSO callbacks do not require C++. Native GPU services are separately declared in `native_gpu_api.h` under ABI 1, and the CPU parallel and CPU tiles services are ABI 2. Callback outcome codes do not carry C-supplied error strings; host status, timing, and count diagnostics remain separate from the bounded reports supplied through `report_diagnostic`.
-
-`Photospider::ops_sdk` is the operations-domain SDK. It links only `Photospider::kernel` and installs public headers under `include/photospider/ops/` (export macro `PHOTOSPIDER_OPS_SDK_API`): color descriptions and ICC/OCIO resources, explicit `TensorColorGroup` configuration, transfer/RGB/white codecs, exact domain arithmetic, description editing, the `ops.scalar-range` validator, the 3D LUT bake contract and quality reports, numeric diagnostics, and the Layer composite type. CMake option `PHOTOSPIDER_BUILD_OPS_SDK` defaults to the value of `PHOTOSPIDER_BUILD_OPS`; bundled operations require it. `PHOTOSPIDER_BUILD_OPS` defaults to `OFF`, so a default kernel-only configuration builds neither. The kernel itself contains none of these domain types.
-
-## 4. Non-goals & explicit boundaries
-
-- Operation modules are trusted in-process code. ABI validation does not sandbox or authenticate them.
-- C++ consumers build against the installed package 0.38.0 headers. Resource facilities are declared in `photospider/core/`: `core/cancellation.hpp`, `core/resources.hpp`, and `core/resource_allocator.hpp`. WorkflowDocument schema 7 and OperationTraits 29 define the current compiler contract. The Result operation C table is ABI 7. The C import boundary rejects invalid external records, and internal execution states are represented only after validation.
-- Built-in operations register through the unfrozen C++ `OperationDefinition` registration path in the installed headers, and the C importer accepts only exact ABI 7 structure sizes. A C operation has no persistent operation-owned preparation state. Its metadata resolver can replace static shared-stage declarations, including their input projections and workspace bounds, through `set_shared_stages`. C validators keep their own prepared state. [ADR 0022](../adr/0022-freeze-operation-c-abi-v3.md) (Proposed) records the target: one prefix-negotiated C ABI shared by built-in and external modules, separately versioned service tables, and a module-side header-only C++ SDK.
-- The ABI carries no semantic kind, facet, or attached description. Domain interpretation is an operation parameter or operation-domain configuration, and domain legality is a bound validator.
-- The ABI has no whole-result execution mode, no runtime member count, no dynamic tile End, and no run-time dependency expansion. Complete-input algorithms map every member tile or read a shared stage; data-dependent reads declare a finite static superset.
-- Production image operation availability follows the source and registry classifications in [Image operations](Image-Operations.md).
-- GPU execution requires a native-backend build and an available device. A table or capability declaration alone does not prove hardware execution.
-- The Result C table exposes Result ports and tensor members only. IPC plugin loading and daemon protocol remain outside this ABI.
-
-## 5. Consequences
-
-Malformed or incompatible tables fail before registry publication. A module built against an earlier Result ABI (versions 1 through 6) is rejected and must be rebuilt against the ABI 7 header. Changing the exported getter name or `abi_version` alone is insufficient: `ps_result_operation_v7` gains the trailing `map_dependencies` member, which changes its `struct_size`, and run-time Needs now only assert compiled grants, so a module that relied on Needs to obtain inputs must declare those reads in its mapping hook or accept the complete-input baseline. A module rejected after native loading releases its library owner. A published definition keeps the library loaded until its final invocation or state owner retires. Service, resource, and cancellation failures remain terminal. Backend failures also remain terminal except for the explicitly opted-in, retry-safe GPU `BackendUnavailable` case described above.
-
-Synchronous native dispatch retains input owners until device completion, so cancellation can wait for an in-flight call. Long CPU callbacks must observe cancellation through the services. Native modules run with host-process privileges, so only trusted code should be loaded.
+Modules execute with host-process privileges. The ABI provides no sandbox, signature admission, IPC loading, runtime dependency discovery, continuation polling, implicit transfers, numerical certification or backend retry. Backend selection and COPY topology belong to compilation. The [compiler and executor contract](Compiler-and-Execution.md) defines ordered call retirement, final RET publication and cancellation drain.

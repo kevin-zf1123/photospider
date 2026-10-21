@@ -9,7 +9,7 @@
 #include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
-/** @brief Finite sampling outside the anchor interval rejects or clamps x. */
+/** @brief Requires an in-domain query or clamps to an endpoint value. */
 enum class BezierDomain { Reject, Clamp };
 /** @brief Authors a quadratic/cubic single-valued Bezier function sampler.
  * @param id Nonzero workflow node id.
@@ -35,23 +35,33 @@ enum class BezierDomain { Reject, Clamp };
  * Output `values` is `photospider.tensor` v1/member `samples`, [count],
  * selected dtype, ordinary data. Output `axis` uses the same schema/member,
  * Float64 [3], atomic_trailing_axes=1, ordinary data.
- * Independent Run-shared stages acquire their
- * active input tensors. Values validates global x topology and all generated
- * coordinates, computes every value once per Run and publishes requested tiles
- * in global sample coordinates. A mathematical knot or clamp reads only that
- * anchor's y and preserves its signed zero; generic y outside every evaluated
- * stencil is numerically unused. Axis reads no controls. Count=1 excludes end:
- * values reads anchors/handles/start; axis reads only start. Empty reads no
- * payload. Each output publishes through its own all-or-nothing Result
- * transaction. Complete typed validation and upstream failures apply to active
- * inputs. Numeric domain/overflow failures have Run scope; other categories are
- * preserved. Active input edits dirty values; controls never dirty axis. Output
- * owners survive context lifetime. Sampling uses exact weighted endpoints
- * rounded to Float64. Interior results correctly round the mathematical inverse
- * Bx(t)=x and By(t) after RN64 control reconstruction. Exact solving can
- * exhaust work/capacity; failure publishes no partial result. Caller fenv is
- * preserved; no y clipping or implicit handle repair is applied. Interior exact
- * zero is +0. Whole exposes no per-value numeric counters.
+ * Each selected values tile has one fixed CPU task reading complete controls,
+ * start and, for count>1, end. Axis is an independent scalar-only task; count=1
+ * excludes end and uses zero scratch for axis. All schemas remain checked.
+ * Values use fixed preallocated ExactBezier/ExactSampling scratch, direct
+ * anchor search and selected-segment RN64 reconstruction. Only selected output
+ * tiles are computed and allocated. Empty reads no payload.
+ *
+ * Active endpoints must be finite and distinct for count>1. Axis selection
+ * requires finite nonzero correctly directed step; values selection requires
+ * each selected RN64 coordinate to differ from its valid neighbors. Values
+ * additionally require globally finite/increasing anchor x and finite x
+ * offsets/reconstructions, nonnegative segment x derivatives, valid reject
+ * domain, finite used y/reconstructions and representable finite outputs.
+ * These are unchecked caller preconditions. Axis-only imposes no control or
+ * selected-coordinate separation requirements. Declared upstream tiles still
+ * obey their producer's own contract, including mathematically unused y.
+ *
+ * Exact anchor/clamp converts one y and preserves zero sign. Interiors solve
+ * the mathematical Bx(t)=q and round By(t) once after RN64 control
+ * construction; exact interior zero is +0. Refinement/capacity guards remain
+ * operational errors. Caller fenv is preserved; cancellation is checked per
+ * value/search and in exact arithmetic. Prepared views are borrowed during
+ * invocation. Runs share immutable preparation and own scratch/output. Required
+ * tasks share one call's ordered publication result, including joint
+ * values/axis. Retained owners survive context teardown. Compatible rebinding
+ * reuses preparation; content caching and repeated Result identity are outside
+ * this contract. No per-value solver counters or y clipping are provided.
  */
 inline Result<WorkflowNode> sample_bezier_function_node(
     std::uint64_t id, WorkflowInput anchors, WorkflowInput handles,
@@ -102,22 +112,31 @@ inline Result<WorkflowNode> sample_bezier_function_node(
  * input shapes/types and all logical products <=2^40 without reading payload.
  * @note Pure/concurrent-safe authoring. Output `values` is a Result using
  * schema photospider.tensor v1/member samples, shape [N,D], selected dtype and
- * ordinary data. A Run-shared stage acquires all input tensors, validates all
- * query rows before arithmetic, and evaluates every row/component even for a
- * local request. Requested tiles borrow the complete stage result in global
- * coordinates; the association records source ObjectIds. Empty reads no
- * payload. Mathematical endpoints use one anchor; interiors use their full
- * local control stencil. Generic controls outside evaluated stencils are
- * numerically unused. Controls reconstruct with RN64; the exact polynomial
- * rounds once to dtype. Interior exact zero is -0 only if every reconstructed
- * control is -0; nonzero underflow keeps its sign. Caller fenv is preserved.
- * Invalid segment/t fails InvalidArgument/InvalidDomain; used nonfinite
- * controls fail OperationFailed/InvalidDomain; actual reconstruction/output
- * overflow fails ArithmeticOverflow. Numeric failures have Run scope.
- * Typed/upstream/resource/cancellation errors retain categories. Any input edit
- * invalidates output demand. Output owner survives context teardown. Complete
- * output/workspace is admitted even for one requested cell; work/capacity
- * exhaustion fails explicitly. No geometry/color role is inferred.
+ * ordinary axes. Each selected output tile has one fixed CPU task, reading
+ * its segment/t rows and all anchor/handle rows for its selected columns,
+ * closed through each source grid. Dynamic segment indices retain a constant-
+ * time address guard; invalid indices fail InvalidArgument/InvalidDomain.
+ * Finite t in [0,1], finite consumed controls, finite RN64 reconstructions and
+ * finite representable selected outputs are unchecked caller preconditions.
+ * Endpoints numerically use one anchor; interiors use their local controls.
+ * Generic unused controls have no additional finite requirement. Declared
+ * upstream producer tiles must still satisfy their own contracts, including
+ * handles even when every t selects an endpoint.
+ *
+ * Float32 inputs widen exactly. Each absolute handle reconstructs with RN64,
+ * then the whole polynomial rounds once to dtype. Interior exact zero is -0
+ * only when every reconstructed control is -0; nonzero underflow keeps its
+ * sign. Current profiles use the same exact arithmetic. Fenv is preserved.
+ * Each invocation borrows prepared views and owns fixed preallocated
+ * ExactPolynomial/ExactSampling scratch. It computes and allocates only
+ * selected output tiles. Runs share immutable preparation and have separate
+ * scratch/output. Cancellation is checked per row/component and in arithmetic.
+ * Static, binding, backend, resource and cancellation errors retain their
+ * categories; numerical precondition violations have no promised diagnostic.
+ * Successful public call publication waits for all required tasks and ordered
+ * retirement. Empty reads no payload. Retained output owners survive context
+ * teardown. Compatible rebinding reuses preparation; content caching and
+ * repeated Result identity are outside this contract.
  */
 inline Result<WorkflowNode> evaluate_bezier_node(
     std::uint64_t id, WorkflowInput anchors, WorkflowInput handles,

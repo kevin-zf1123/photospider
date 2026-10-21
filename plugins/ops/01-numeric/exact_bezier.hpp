@@ -54,33 +54,6 @@ class ExactBezier final {
            (static_cast<std::uint64_t>(value.exponent + top + 1023) << 52) |
            ((value.significand << (52 - top)) & UINT64_C(0xfffffffffffff));
   }
-  Result<bool> monotone(const std::array<std::uint64_t, 4>& x, unsigned degree,
-                        const std::function<Status(std::uint64_t)>& consume) {
-    math_.begin(consume);
-    End end{math_};
-    std::array<Index, 4> p{};
-    for (unsigned i = 0; i <= degree; ++i)
-      p[i] = math_.binary(x[i]);
-    const auto u = math_.add(p[1], p[0], true);
-    const auto v = math_.add(p[2], p[1], true);
-    bool result = math_.sign(u) >= 0;
-    if (degree == 2) {
-      result = result && math_.sign(v) >= 0;
-    } else {
-      const auto w = math_.add(p[3], p[2], true);
-      result = result && math_.sign(w) >= 0;
-      const auto a = math_.add(math_.add(u, math_.shift(v, 1), true), w);
-      const auto b = math_.shift(math_.add(v, u, true), 1);
-      if (result && math_.sign(a) > 0 && math_.sign(b) < 0 &&
-          math_.compare_magnitude(b, math_.shift(a, 1)) < 0) {
-        const auto minimum = math_.add(math_.shift(math_.multiply(a, u), 2),
-                                       math_.multiply(b, b), true);
-        result = math_.sign(minimum) >= 0;
-      }
-    }
-    return math_.status().ok() ? Result<bool>(result)
-                               : Result<bool>(math_.status());
-  }
   Result<std::uint64_t> inverse(
       const std::array<std::uint64_t, 4>& x,
       const std::array<std::uint64_t, 4>& y, unsigned degree,

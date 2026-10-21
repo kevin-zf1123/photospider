@@ -17,7 +17,7 @@ implemented_operation_keys:
 
 # FMT-02A: assemble single components along a new channel axis
 
-The default C++ `OperationRegistry` registers this member's `strict`, `accelerated_apple_silicon` and `accelerated_x86_64` CPU variants as Result operations. External C modules use Result C ABI 6, which is separate from the built-in C++ registration path. Public authoring helpers are installed in `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT specification remains Proposed independently of the registered implementation.
+The default C++ `OperationRegistry` registers this member's `strict`, `accelerated_apple_silicon` and `accelerated_x86_64` CPU variants as Result operations. These built-ins execute through fixed invocation ABI 8. Public authoring helpers are installed in `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT specification remains Proposed independently of the registered implementation.
 
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md).
 The implemented keys are separate default-registry primitives.
@@ -37,7 +37,7 @@ Y[j] = X[j[a]][erase(j,a)]
 
 The operation copies element bytes exactly, without casting, broadcast, resampling, transfer, color conversion or alpha association. The `auto`, `view` and `materialize` policies follow the family storage contract.
 
-For spatial output, the implementation builds explicit multi-piece Result views. Independently owned source planes are eligible when their mapped pieces collectively cover the target and each passes source authorization and physical representability checks. For generic nonspatial output, the family requires a single storage owner and a single affine address expression.
+Auto/materialize write independent dense output tiles. Nonempty view fails with schema-only dependencies, as specified by the family.
 
 ## Interface and regional specialization
 
@@ -49,12 +49,7 @@ cell-axis Int64 `axis` in [0,r].
 The axis excludes the Result batch prefix; batch plus cell rank must be at most 8. There is no
 keepdims or implicit squeeze. Same dtype and exact nonchannel sizes are required.
 
-For requested Q, input i Data is exactly erase(Q intersect channel i, a).
-Its descriptor contributes to Descriptor support; there is no Control or sample
-Validation payload. Dirty input coordinates insert i at axis a, intersected with
-observed output. Unrequested planes are not read or given pixel-domain validation.
-Use the family's reference algorithm, resource accounting, errors and performance
-cases. Materialized images reserve the full result span but publish only Q.
+For each complete selected output tile, input i logically supplies its channel-i intersection with the output axis removed. Lowering closes that mapped region through the source grid. Unselected ports are schema-only; static validation covers every connected input. Source and output grid closure may cover additional channels, so sample-local equations do not imply single-channel physical grants.
 
 ## Independent analytic fixture
 
@@ -74,8 +69,7 @@ With axis=2, output shape is [2,2,3] and the logical values are:
 ```
 
 With axis=0, shape is [3,2,2] and the logical planes appear in input-list order.
-Requesting only (1,0,1) with axis=2 returns G[1,0]=22 and requests no R/B
-payload. Changing R[1,0] does not dirty this observation; changing G[1,0] does.
+At output (1,0,1), the copied value is G[1,0]=22. R/B payloads are omitted only when the selected output tiles contain no R/B destinations.
 An independent oracle enumerates output coordinates, chooses the input with
 j[a], removes that axis and compares element bytes using a separate source
 address evaluator. It must not call the production assembly mapper.
@@ -85,8 +79,7 @@ FMT-02A -> named tensor`.
 For n=1 and X0=[7,9], axis=1 yields shape [2,1] with samples [[7],[9]].
 Extracting that singleton channel with keepdims=false recovers [7,9] exactly.
 Full split/reassemble identity also requires original ordering; any grouping is
-restated by the next consumer's description. Byte identity does not guarantee view representability for
-independently processed or copied inputs. Arbitrary source/destination mapping
+restated by the next consumer's description. Outputs retain independently owned copies. Arbitrary source/destination mapping
 belongs to FMT-02C; A retains its ordered assembly behavior.
 
 For an interpretation fixture, assemble R/G/B above (which the caller regards

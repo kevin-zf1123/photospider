@@ -48,22 +48,22 @@ Each intermediate keeps dtype, shape and slots and retains bypass alpha/AOV data
 
 ## Observable computation and storage
 
-D retains each constituent rounding and required validation/failure. It is not
+D retains each constituent rounding, caller sample preconditions and operational failures. It is not
 RN(inverse(Mt)*K*Ms*input) with one final rounding. Equal bases do not remove A/B,
 and an overall product I does not enable the native identity-copy exception.
 A transformation/optimization must prove identical bits, metadata, input support
 and failure outcomes before deleting stages. No such generic fusion is selected.
 
-Requests and dirty sets compose the actual nodes. A B row of a nonidentity target
+Retained output tiles and source-grid closures compose the actual nodes. A B row of a nonidentity target
 inverse requires all three intermediate XYZ components, even if it has zeros.
-Those A/C outputs must exist and pass their semantic checks. AOV-only bypass
+Those A/C outputs must exist and meet the caller preconditions of their consumers. AOV-only bypass
 requests avoid color arithmetic, but do not waive any static parameter checks.
-Resource accounting includes intermediate reservations/backing/read windows and
+Resource accounting includes intermediate allocations, fixed read views, scratch and
 exact matrix preparation. Errors retain constituent attribution and ordinary
 observation scope; D does not manufacture success after an intermediate failure.
 
 Auto/materialize/view apply per generated node. A forced view requires every
-constituent to be its own exact-I/legal-backing case. Normal equal-source/target
+constituent to pass the static exact-I check; a nonempty exact-I view task then fails ViewUnavailable using only schema. Normal equal-source/target
 RGB conversion still traverses nonidentity A/B and therefore fails forced view.
 The no-conversion path is an explicitly retained input edge, not a mathematical
 simplification silently performed by D.
@@ -75,10 +75,7 @@ simplification silently performed by D.
    [0x3f800000,0xb1356c32,0xaf63dc5c]. The small negative G/B values demonstrate
    why A->B is not an identity-copy contract. Reproduce with an independent
    rational solver and independently certified RN32 at both stage boundaries.
-2. For the custom-axis basis white=(0.25,0.25), M=diag(1,1,2). Semantic input
-   [1,0,max_finite], source=target, requested final R: A's required Z overflows
-   because B retains all three input terms, so D fails. A requested alone at X
-   succeeds. A fused identity would hide this required error and is forbidden.
+2. For custom-axis white=(0.25,0.25), M=diag(1,1,2), raw input [1,0,max_finite] and source=target, A's required Z becomes Inf. B retains all three terms, so final R is canonical NaN from 0*Inf. A fused identity would produce 1. The semantic version violates the intermediate finite-output precondition and has no promised sample error.
 3. Use source custom-axis white Ws=(1,1,2), target Wt=(2,1,1), input RGB [1,1,1].
    preserve_xyz yields [0.5,1,2]; adapt via any of the four admitted methods
    yields [1,1,1]. Omitted policy rejects unequal whites. Use exact dyadic whites
@@ -90,7 +87,7 @@ simplification silently performed by D.
    hidden-color cases. Forced view of ordinary same-basis conversion fails.
    Authoring invalid geometry/policy leaves graph exports and node IDs unchanged.
 6. Changing only a geometry/method/policy descriptor requires reinference;
-   ordinary numeric input changes propagate through the generated tuple support.
+   each execution uses the generated fixed tuple dependencies.
    Source/context lifetime, low budgets, intermediate failures and cancellation
    are checked on the actual expanded graph.
 

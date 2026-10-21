@@ -121,6 +121,80 @@ void affine_source_views() {
             "last view retirement releases the independently charged source");
   }
 }
+void rank_eight_reshape() {
+  for (const auto radix : {2U, 3U}) {
+    ResourceBudget root;
+    {
+      SchemaTemplate schema;
+      schema.id = "reshape.rank8";
+      ResultTensorSpec member;
+      member.key = "samples";
+      member.descriptor = {ElementType::UInt8,
+                           std::vector<std::uint64_t>(8, 2)};
+      schema.tensors.push_back(member);
+      StridedLayout layout;
+      layout.origin.resize(8);
+      layout.byte_strides.resize(8);
+      std::uint64_t stride = 1, last = 0;
+      for (unsigned axis = 8; axis-- > 0;) {
+        layout.byte_strides[axis] = stride;
+        last += stride;
+        stride *= radix;
+      }
+      auto buffer = take(root.allocator().allocate(last + 1));
+      for (unsigned sample = 0; sample < 256; ++sample) {
+        std::uint64_t offset = 0;
+        for (unsigned axis = 0; axis < 8; ++axis)
+          offset += ((sample >> (7 - axis)) & 1) * layout.byte_strides[axis];
+        buffer.data()[offset] = static_cast<std::uint8_t>(sample);
+      }
+      auto storage = std::move(buffer).freeze();
+      auto source = take(ResultBuilder::start(root, schema, "reshape.source"));
+      for (unsigned half = 0; half < 2; ++half) {
+        std::vector<RegionDimension> dims(8, {0, 2});
+        dims[0] = {half, 1};
+        require(
+            source.publish_tensor(0, Region(std::move(dims)), layout, storage)
+                .ok(),
+            "rank8 fragmented source publishes");
+      }
+      auto original = take(source.seal());
+      auto window =
+          take(original.acquire_tensor(take(original.descriptor()), 0,
+                                       Region::whole(member.descriptor.shape)));
+      // Radix two merges all eight factors; radix three retains eight chunks.
+      auto output_shape = radix == 2 ? std::vector<std::uint64_t>{16, 16}
+                                     : member.descriptor.shape;
+      schema.tensors[0].descriptor.shape = output_shape;
+      auto target = take(ResultBuilder::start(root, schema, "reshape.target"));
+      ResultTensorViewTransform transform;
+      transform.reshape = true;
+      require(target
+                  .publish_tensor_view(0, Region::whole(output_shape), window,
+                                       transform)
+                  .ok(),
+              "rank8 factor bounds preserve affine reshape");
+      auto result = take(target.seal());
+      auto output = take(result.acquire_tensor(take(result.descriptor()), 0,
+                                               Region::whole(output_shape)));
+      for (unsigned sample = 0; sample < 256; ++sample) {
+        std::vector<std::uint64_t> at(output_shape.size());
+        auto remaining = sample;
+        for (auto axis = at.size(); axis-- > 0;) {
+          at[axis] = remaining % output_shape[axis];
+          remaining /= output_shape[axis];
+        }
+        require(
+            *take(output.row_run(at)).data == static_cast<std::uint8_t>(sample),
+            "rank8 reshape preserves every source sample");
+      }
+    }
+    require(root.statistics().allocated_metadata_bytes == 0,
+            "rank8 reshape releases metadata");
+    for (auto live : root.statistics().live.values)
+      require(live == 0, "rank8 reshape releases reservations");
+  }
+}
 void affine_view_failures() {
   ResourceBudget root;
   SchemaTemplate schema;
@@ -238,7 +312,7 @@ void affine_view_failures() {
                   take(fragmented_window.row_run({1})).data,
           "fragmented view publishes no dense copy");
 }
-void identity_retains_fragmented_input() {
+void identity_copies_fragmented_input() {
   ResultRef retained;
   {
     auto registry = ps::test::kernel_registry();
@@ -272,9 +346,11 @@ void identity_retains_fragmented_input() {
     document.nodes = {{1, "core.identity", {WorkflowInputReference{1}}, {}}};
     document.outputs = {{"out", 1, "value"}};
     GraphContext graph(document);
-    auto plan = take(Compiler(registry).compile(graph)).plan.value();
-    retained =
-        take(context.execute(plan, {{{"input", source}}})).results.at("out");
+    PlanningOptions planning;
+    planning.tile_extent = 1;
+    auto plan = take(Compiler(registry).compile(graph, planning)).plan.value();
+    retained = take(multi_result::run(context, plan, {{{"input", source}}}))
+                   .results.at("out");
     auto result_window = take(retained.acquire_tensor(
         take(retained.descriptor()), 0, Region::whole({2})));
     auto source_window = take(source.acquire_tensor(take(source.descriptor()),
@@ -282,8 +358,8 @@ void identity_retains_fragmented_input() {
     for (std::uint64_t index = 0; index < 2; ++index) {
       auto output = take(result_window.row_run({index}));
       require(*output.data == expected[index] &&
-                  output.data == take(source_window.row_run({index})).data,
-              "identity retains exact bits from fragmented owners");
+                  output.data != take(source_window.row_run({index})).data,
+              "identity copies exact bits into independent tile allocations");
     }
   }
   std::uint8_t value = 0;
@@ -467,8 +543,9 @@ void large_view() {
 int main() {
   try {
     affine_source_views();
+    rank_eight_reshape();
     affine_view_failures();
-    identity_retains_fragmented_input();
+    identity_copies_fragmented_input();
     view_graph_and_growth();
     large_view();
     return 0;

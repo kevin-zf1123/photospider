@@ -9,26 +9,24 @@
 #include "photospider/ops/numeric/diagnostics.hpp"
 
 namespace ps::numeric {
-/** @brief Explicit immutable view or complete packed-copy representation. */
-enum class ArrayLayout { View, Dense };
-/** @brief Creates a scalar-filled array node; default view and strict CPU.
- * Pure concurrent-safe authoring with no payload access. Shape has 1..8
- * positive extents and at most 2^40 elements. Writes canonical shape and
- * explicit layout strings; source dtype/scalar shape are checked by Compiler.
- * Output is named values, preserves input bits/dtype and has ordinary data.
- * View execution through execute_fragments owns one scalar-sized copy with
- * zero strides. Ordinary/direct execution preserves a single covering view;
- * all nonempty requests use a Run-shared stage before tile publication. Dense
- * owns product(shape)*sizeof(dtype) bytes even for partial output. Empty reads
- * no payload; input changes invalidate the complete output. Work/capacity and
- * cancellation failures release unpublished storage.
- * Returns InvalidArgument/InvalidDomain/Schema for invalid authoring arguments.
- * Returned node owns its strings/metadata; allocation may throw bad_alloc.
+/** @brief Authors a scalar-filled array with fixed dense output tiles.
+ * The source has complete sample shape [1]; all seven numeric dtypes and every
+ * raw bit are preserved. Target shape has rank 1..8, positive extents and at
+ * most 2^40 elements. The helper emits canonical shape metadata, with output
+ * values in photospider.tensor/samples using ordinary target axes.
+ * Each selected output tile has one fixed CPU task, one scalar read and an
+ * independent dense allocation. Empty emits no task or payload dependency.
+ * Runtime uses no payload scratch and checks cancellation before reading and
+ * between copies of at most 64 KiB. Partial selection allocates only selected
+ * tiles. Input offsets/negative/zero strides obey physical bounds validation.
+ * Pure/concurrent-safe authoring returns owned metadata without reading data.
+ * Invalid authoring parameters return InvalidArgument; incompatible source
+ * metadata returns TypeMismatch. Allocation may throw bad_alloc. Accepted work
+ * retains owners through drain; successful output owners outlive the context.
  */
 inline Result<WorkflowNode> constant_node(
     std::uint64_t id, WorkflowInput value,
     const std::vector<std::uint64_t>& shape,
-    ArrayLayout layout = ArrayLayout::View,
     CpuNumericProfile profile = CpuNumericProfile::Strict) {
   const auto invalid = [](const char* message) {
     return Result<WorkflowNode>(
@@ -49,17 +47,6 @@ inline Result<WorkflowNode> constant_node(
       encoded += ',';
     encoded += std::to_string(extent);
   }
-  const char* layout_name = nullptr;
-  switch (layout) {
-    case ArrayLayout::View:
-      layout_name = "view";
-      break;
-    case ArrayLayout::Dense:
-      layout_name = "dense";
-      break;
-    default:
-      return invalid("unsupported array layout");
-  }
   const char* suffix = nullptr;
   switch (profile) {
     case CpuNumericProfile::Strict:
@@ -74,30 +61,29 @@ inline Result<WorkflowNode> constant_node(
     default:
       return invalid("unsupported numeric profile");
   }
-  return Result<WorkflowNode>(WorkflowNode{
-      id,
-      std::string("numeric.constant") + suffix,
-      {std::move(value)},
-      {{"shape", std::move(encoded)}, {"layout", std::string(layout_name)}}});
+  return Result<WorkflowNode>(
+      WorkflowNode{id,
+                   std::string("numeric.constant") + suffix,
+                   {std::move(value)},
+                   {{"shape", std::move(encoded)}}});
 }
-/** @brief Creates an explicitly axis-mapped broadcast node.
- * axis_map lists one distinct output axis for each source axis. Compiler
- * checks its length against the source rank and requires each source extent
- * to equal the target extent or be one. Permutation and singleton expansion
- * preserve source bits. Whole validates the complete source and keeps one
- * covering original input TensorSpan for View, including offset/signed/zero
- * strides. Multiple source owners return InvalidArgument/InvalidDomain
- * ViewUnavailable; Dense may collect and owns the full target output. Any
- * source change invalidates all output observations. Other ownership/error
- * rules match constant_node.
+/** @brief Authors a bit-preserving broadcast with explicit axis mapping.
+ * axis_map names one distinct target axis per complete source axis. Each source
+ * extent is one or equals the mapped target extent. Permutation, singleton
+ * expansion and unmapped target axes preserve source bits. Each output tile
+ * declares only the source tiles intersecting its mapped region. Prepare
+ * validates the complete read signature and dense output before invocation.
+ * Runtime uses bounded stack coordinates and a 32-byte copy buffer, with
+ * cancellation checks every 64 samples and no scratch payload. Immutable
+ * prepared state can be reused by concurrent Runs. Output allocation, helper
+ * errors and ownership follow constant_node.
  */
 inline Result<WorkflowNode> broadcast_node(
     std::uint64_t id, WorkflowInput input,
     const std::vector<std::uint64_t>& shape,
     const std::vector<std::uint32_t>& axis_map,
-    ArrayLayout layout = ArrayLayout::View,
     CpuNumericProfile profile = CpuNumericProfile::Strict) {
-  auto authored = constant_node(id, std::move(input), shape, layout, profile);
+  auto authored = constant_node(id, std::move(input), shape, profile);
   if (!authored.ok())
     return authored;
   std::string encoded;

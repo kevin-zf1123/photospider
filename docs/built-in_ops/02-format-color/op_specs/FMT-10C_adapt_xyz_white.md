@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu_result_abi_4
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - color.adapt_xyz_white_strict
@@ -18,7 +18,7 @@ registered_operation_keys:
 # FMT-10C: adapt an XYZ reference white
 
 Inherit the complete [FMT-10 family](FMT-10_rgb_basis_contract.md) and
-[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 6
+[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered fixed invocation ABI 8
 operations under the strict, accelerated Apple Silicon and accelerated x86-64
 CPU profiles.
 
@@ -41,7 +41,7 @@ preserves the reference/unit scale and adapts to the target white. It does not
 ensure unchanged Y for arbitrary colored samples. Callers provide the target
 configuration downstream; no description is attached in either path.
 
-For nonidentity K, evaluate each requested row as one exact dot plus +0 before
+For nonidentity K, evaluate each row in the retained output tiles as one exact dot plus +0 before
 rounding, with all three source coordinates read. Do not evaluate and round an
 intermediate cone-space image. Source samples may be signed/HDR; positivity of
 white parameters is not a sample constraint.
@@ -49,15 +49,12 @@ white parameters is not a sample constraint.
 ## Identity, scope and resources
 
 Exact K=I uses bit-copy identity after all static parameter checks. Equal source
-and target whites yield this case. Only requested components are read/validated;
-raw retains all bits, including signaling NaNs and signed zeros. Semantic identity
-still rejects requested nonfinite samples. A method with invalid white responses
+and target whites yield this case. Each retained coordinate reads its matching source sample; raw retains all bits, including signaling NaNs and signed zeros. Semantic callers guarantee finite selected samples copied into retained tiles. A method with invalid white responses
 cannot become legal by asking for identity, Empty or alpha-only output.
 
-Auto/view/materialize, exact output coverage, normal owners and page preparation
+Auto/view/materialize, complete output tile coverage, allocation ownership and scratch preparation
 follow the family. Nonidentity XYZ Scaling is still a full three-input row under
-NUM special-value semantics, despite its diagonal coefficients. Dirty maps and
-failure scope retain those peers. No channel-dependent approximation, hidden
+NUM special-value semantics, despite its diagonal coefficients. Fixed input tile closure retains those peers. No channel-dependent approximation, hidden
 fallback method or metadata-only adaptation is permitted.
 
 ## Independent fixtures
@@ -75,9 +72,9 @@ fallback method or metadata-only adaptation is permitted.
    XYZ Scaling or epsilon. Method-specific rejection is observable.
 4. For valid equal whites, raw source [NaN,-0,1] queried only at the first
    component preserves its exact NaN bits. Semantic request of only the third
-   returns 1 without reading NaN; requesting the first then fails.
+   returns 1 when its complete output tile excludes the first component. Including the first component violates the semantic finite-input precondition.
 5. For unequal-white XYZ Scaling, a requested X with NaN Y must read it and
-   return quieted NaN in raw or fail semantically. No static-zero peer pruning.
+   return quieted NaN in raw; this sample is outside the semantic precondition. No static-zero peer pruning.
 6. With absolute input 100*Ws, the result is 100*Wt under all four methods;
    reference-white Y remains 100 cd/m² without a peak-luminance parameter.
    Other non-neutral Y values need not be preserved by Bradford/CAT matrices.

@@ -11,10 +11,17 @@
 #include <type_traits>
 #include <utility>
 
+#include "core/resource_observation.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
 namespace ps::gpu_internal {
+template <class T, class = void>
+struct HasOutcome : std::false_type {};
+template <class T>
+struct HasOutcome<T, std::void_t<decltype(std::declval<const T&>().ok())>>
+    : std::true_type {};  // NOLINT(whitespace/indent_namespace)
+
 // Fixed device bootstrap state. Dynamic blocks retain this explicit root;
 // unmanaged devices never inherit a caller's thread-local allocation scope.
 struct MetadataAccount final {
@@ -25,8 +32,27 @@ struct MetadataAccount final {
     if (!budget)
       return operation();
     try {
-      ResourceAllocationScope recoverable(*budget);
-      return operation();
+      // Suppress recovered attempts, but propagate a returned failure after
+      // the attempt scope ends. Both Status/Result and allocator pointers are
+      // used here; only outcome-bearing return types have an ok() predicate.
+      ResourceAdmissionFailure attempted;
+      bool rejected = false;
+      auto attempt = [&]() -> decltype(operation()) {
+        core_internal::ResourceAdmissionScope admission(*budget, &attempted,
+                                                        &rejected);
+        ResourceAllocationScope recoverable(*budget);
+        return operation();
+      };
+      if constexpr (std::is_void_v<decltype(operation())>) {
+        attempt();
+        return;
+      } else {
+        decltype(auto) result = attempt();
+        if constexpr (HasOutcome<decltype(result)>::value)
+          if (!result.ok() && rejected)
+            core_internal::ResourceAdmissionScope::record(*budget, attempted);
+        return result;
+      }
     } catch (const std::bad_alloc&) {
       if (reclaim)
         reclaim();

@@ -18,7 +18,7 @@ clarification_status: complete
 
 # CRV-06H: color_ramp_ycbcr
 
-Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member , under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -69,54 +69,31 @@ when the selected table is constant.
 Required static String parameters are color_description, dtype, out_of_domain.
 The description explicitly declares YCbCr NCL, underlying RGB primaries/white/
 transfer, matrix coefficients/preset, unbiased floating coordinate units and no
-alpha. Existing attached colors metadata must match. No matrix default silently
-fills a missing required description. The output retains that complete description.
+alpha. No matrix default silently fills a missing required description. Output coordinates use that interpretation without attaching it to the Result.
 
 For each component c, interpolate RN_dtype((1-w)*c0+w*c1), using the exact
 stop-derived w and only one final rounding for strict. Accelerated results obey
 the shared final FP32 bound. Hit/clamp/K=1 directly converts the selected row. Direct/identical-row
 paths preserve signed zero; genuine interpolation exact zero is +0; nonzero
-underflow preserves sign. Demanded components and final results must be finite.
+underflow preserves sign. Mathematically selected source components and final results must be finite.
 
-All formal strict and accelerated keys use Run-shared Result programs. A nonempty
-Run declares ordinary payload tile Needs  for every input, so
-typed and upstream validation covers complete tensor members. The executor reads
-authorized windows directly; the callback does not collect or copy complete input
-arrays. It validates all stops, then every input position, before color arithmetic.
-Each position uses one exact hit/clamp/singleton row or two enclosing rows for its
-mathematics. Generic color rows outside all evaluated stencils remain numerically
-unused, while their typed/upstream validation still applies. Empty reads no sample
-payload after static preparation.
+All profiles use the [fixed execution contract](CRV-06_color_ramp.md#fixed-execution-and-caller-preconditions). Each selected complete-color output tile has one CPU task. Its reads cover the corresponding query region and all stops/colors/p/q tiles, each closed on its own source grid. Runtime selection uses one exact-hit/clamp/singleton row or two enclosing rows. Generic unselected colors and denominators are numerically unused; upstream failures still propagate through declared tile dependencies.
 
-The `values` port publishes an immutable `photospider.tensor` v1 Result with `samples` shape `sample_shape(input)+[C]`, `atomic_trailing_axes=1`. The shared stage publishes the full internal output transactionally; the shared stage retains full internal coverage; public actors expose only requested complete tiles and global coordinates. Fragments expose requested regions while retaining the full output owner.
+The `values` Result uses `photospider.tensor` v1/member `samples`, descriptor shape `sample_shape(input)+[C]`, and `atomic_trailing_axes=1`. It carries no color description or input batch-axis partition. The kernel writes only selected dense output tiles, borrowing affine source views and owning fixed arithmetic scratch. Empty emits no task or sample read. Successful call publication follows required task completion in retirement order, and output storage survives context teardown.
 
-Arbitrary immutable source strides, offsets and unaligned storage are supported. Selected operation resources remain owned by preparation and execution; the output retains its data backing. Input edits invalidate complete recorded output demand. Numeric errors have Run scope; failed callbacks publish no color subset. Upstream, resource and cancellation errors retain their categories.
-
-Lookup work remains O(K+N log K), plus exact or certified arithmetic. Full output
-payload is N*C*sizeof(dtype), even for a small request. Account source owners/windows,
-fixed arithmetic workspace, the Root-owned ResourceVector stop index (8K element
-bytes plus allocator/metadata overhead), output and retained descriptors/resources.
-No per-output dependency records or point-state array is retained. Work/capacity and
-cancellation checks apply during scans, lookup, arithmetic and before publication;
-incomplete certification fails ResourceExhausted. No reduced-precision fallback is added.
+Finite ordered stops, finite queries, selected complete-color model/association validity, selected rational q>0, reject-domain membership and representable final output are unchecked caller preconditions. Lookup costs O(P log K) for P selected query points, plus exact/certified arithmetic; the kernel searches source stops directly without an O(K) copy. Static schemas, parameters, resources and kernel signatures remain checked. Cancellation and capacity failures stop execution without approximate substitution.
 
 ## Failure and acceptance
 
-Malformed description, matrix/domain parameters or unsupported representation
-fail preflight with InvalidArgument/InvalidDomain; shape/dtype or attached
-description mismatch uses TypeMismatch. Nonfinite demanded floats, invalid stops
-or rejected positions use OperationFailed/InvalidDomain. Final overflow uses
-OperationFailed/ArithmeticOverflow. Preserve resource/cancellation/upstream error
-categories and fail the complete-input run; no partly valid tuple is published.
+Malformed static parameters or descriptions fail preparation with InvalidArgument; incompatible port schemas, shapes or dtypes use TypeMismatch. Numerical conditions are caller preconditions, including finite destination results. Operational resource, backend, cancellation, stale-plan and upstream failures preserve their status; a failed required task prevents successful call publication.
 
 Fixture: stops=[0,1], colors=[[0,0,0],[1,0.5,-0.5]], input=[0.5]
 returns [[0.5,0.25,-0.25]] with unchanged declared YCbCr description. Include
 finite Y' outside [0,1], large signed chroma, descriptor mismatches, custom matrix
 validation, all float dtype combinations and signed zeros. Use independent exact
 rational interpolation/rounding as the numeric oracle. Apply CRV-06C's full
-partial-request, dirty, stride, budget, cancellation and owner-lifetime acceptance.
-The maintained public Compiler/ExecutionContext workflow and current runtime evidence
-are linked below; the document remains Proposed.
+sparse-request, stride, budget, cancellation and owner-lifetime acceptance.
+Use temporary Compiler/ExecutionContext workflows and the independent family oracle; the document remains Proposed.
 
 - [Ramp family](CRV-06_color_ramp.md).
 - [Color-array description](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).

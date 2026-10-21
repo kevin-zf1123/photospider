@@ -16,12 +16,6 @@ using numeric_ops::numeric_double;
 using numeric_ops::numeric_down;
 using numeric_ops::numeric_up;
 using numeric_ops::SequenceProfile;
-Status domain(const char* message) {
-  return {ErrorCode::OperationFailed,
-          message,
-          FailureReason::InvalidDomain,
-          {FailureOrigin::Domain, FailureScope::Atom}};
-}
 Fast interval(RationalMath& math, const Rational& value) {
   if (RationalMath::zero(value))
     return Fast::point(value.negative ? -0.0 : 0.0);
@@ -44,6 +38,8 @@ Matrix inverse(RationalMath& math, const Matrix& a) {
                                math.subtract(math.multiply(a[1][j], a[2][k]),
                                              math.multiply(a[1][k], a[2][j]))));
   }
+  if (!math.active())
+    return result;
   if (RationalMath::zero(determinant))
     throw Status{ErrorCode::Internal, "FMT-11 singular fixed matrix"};
   for (unsigned row = 0; row < 3; ++row)
@@ -174,9 +170,7 @@ Result<std::shared_ptr<const Constants>> prepare_constants(
   using Answer = Result<std::shared_ptr<const Constants>>;
   try {
     plugin_internal::FloatingEnvironment environment;
-    const RationalMath::Work work = [](std::uint64_t) {
-      return Status::success();
-    };
+    const auto work = [](std::uint64_t) { return Status::success(); };
     RationalMath math(SequenceProfile::Strict);
     math.bind(work);
     auto result = std::make_shared<Constants>();
@@ -242,23 +236,121 @@ Result<std::shared_ptr<const Constants>> prepare_constants(
         out.first_fast[i][j] = interval(math, out.first[i][j]);
         out.second_fast[i][j] = interval(math, out.second[i][j]);
       }
+    if (!math.active())
+      return Answer(math.status());
     return Answer(std::move(result));
   } catch (const Status& status) {
     return Answer(status);
   }
 }
 ModelMath::ModelMath(const MathConfig& config, const Constants& constants,
-                     const RationalMath::Work& work)
+                     RationalMath::Work work)
     : config_(config),
       constants_(constants),
-      work_(work),
       exact_(config.profile),
-      directed_(config.profile),
-      certified_(config.algorithm == Algorithm::Reference
-                     ? SequenceProfile::Strict
-                     : config.profile) {
-  exact_.bind(work_);
-  directed_.functions.math.consume = &work_;
+      directed_(config.profile) {
+  exact_.bind(work);
+  directed_.functions.math.consume = &interval_work_;
+}
+bool ModelMath::active() {
+  const auto& math = directed_.functions.math;
+  if (math.fault == Math::Fault::Failure)
+    exact_.fail(math.failure_code, math.failure_reason);
+  return exact_.active() && math.active();
+}
+bool ModelMath::refine(unsigned precision) {
+  // A precision retry may clear an unresolved enclosure, never a cancelled or
+  // exhausted computation. Frames from the previous attempt have unwound.
+  active();
+  if (!exact_.work(1))
+    return false;
+  auto& math = directed_.functions.math;
+  math.reset();
+  math.precision = precision;
+  return true;
+}
+std::uint64_t ModelMath::angle(std::uint64_t y_raw, std::uint64_t x_raw) {
+  const auto y = BinaryParts::decode(y_raw, config_.narrow);
+  const auto x = BinaryParts::decode(x_raw, config_.narrow);
+  const auto sign = UINT64_C(1) << (config_.narrow ? 31 : 63);
+  std::optional<unsigned> quarters;
+  if (!y.magnitude)
+    quarters = x.negative ? 4 : 0;
+  else if (y.infinite)
+    quarters = x.infinite ? (x.negative ? 3 : 1) : 2;
+  else if (!x.magnitude)
+    quarters = 2;
+  else if (x.infinite)
+    quarters = x.negative ? 4 : 0;
+  if (quarters) {
+    if (!*quarters)
+      return y_raw & sign;
+    auto value = exact_.fraction(*quarters, 4);
+    value.negative = y.negative;
+    return config_.output_pi ? exact_.rounded(value, config_.narrow)
+                             : times_pi(value);
+  }
+  if (config_.algorithm != Algorithm::Reference &&
+      config_.profile != SequenceProfile::Strict) {
+    const double a = numeric_double(y_raw, config_.narrow);
+    const double b = numeric_double(x_raw, config_.narrow);
+    if (numeric_ops::accelerated_math_domain(11, a, b)) {
+      double candidate = 0;
+      photospider_sleef_evaluate(11, &a, &b, &candidate, 1);
+      auto bound = numeric_ops::accelerated_math_enclosure(candidate);
+      if (config_.output_pi) {
+        bound = bound / Fast{numeric_down(0x1.921fb54442d18p1),
+                             numeric_up(0x1.921fb54442d18p1)};
+        candidate /= 0x1.921fb54442d18p1;
+      }
+      const auto accepted = bound.accepted(candidate, config_.narrow);
+      if (accepted)
+        return *accepted;
+    }
+  }
+  auto& math = directed_.functions.math;
+  for (unsigned precision = 128; precision <= 4096; precision *= 2) {
+    if (!refine(precision))
+      return 0;
+    Frame frame(math);
+    const bool swap = y.magnitude > x.magnitude;
+    const auto& large = swap ? y : x;
+    const auto& small = swap ? x : y;
+    const int scale = large.exponent + 63 - __builtin_clzll(large.significand);
+    auto lower = math.interval(), higher = math.interval(),
+         ratio = math.interval(), pi = math.interval(),
+         output = math.interval();
+    math.dyadic(lower, small.significand, small.exponent - scale);
+    math.dyadic(higher, large.significand, large.exponent - scale);
+    math.divide(ratio, lower, higher);
+    directed_.functions.arctangent(output, ratio);
+    math.constant(pi, true);
+    if (swap) {
+      auto half = math.interval();
+      math.scale(half, pi, -1);
+      math.subtract(output, half, output);
+    }
+    if (x.negative)
+      math.subtract(output, pi, output);
+    if (config_.output_pi)
+      math.divide(output, output, pi);
+    if (y.negative)
+      math.negate(output, output);
+    const auto low = math.rounded(output.low, config_.narrow);
+    const auto high = math.rounded(output.high, config_.narrow);
+    if (!active())
+      continue;
+    if (low == high)
+      return low;
+    if (!(low & ~sign) && !(high & ~sign)) {
+      if (math.top(output.high) < 0 && output.low.negative)
+        return sign;
+      if (math.top(output.low) < 0 && !output.high.negative)
+        return 0;
+    }
+  }
+  exact_.capacity();
+  return 0;
 }
 Rational ModelMath::dot(const std::array<Rational, 3>& row,
                         const std::array<Rational, 3>& input, unsigned mask) {
@@ -320,11 +412,10 @@ std::uint64_t ModelMath::root_sum(const std::array<RootTerm, 3>& roots,
     return exact_.rounded(classified, config_.narrow);
   auto& math = directed_.functions.math;
   for (unsigned precision = 128; precision <= 4096; precision *= 2) {
-    ++counters_.refinements;
-    exact_.work(1);
-    math.precision = precision;
+    if (!refine(precision))
+      return 0;
     Frame frame(math);
-    try {
+    {
       auto result = math.interval(), factor = math.interval(),
            term = math.interval();
       exact_.enclose(math, result, bias);
@@ -338,21 +429,20 @@ std::uint64_t ModelMath::root_sum(const std::array<RootTerm, 3>& roots,
       }
       const auto low = math.rounded(result.low, config_.narrow);
       const auto high = math.rounded(result.high, config_.narrow);
-      if (low == high)
+      if (active() && low == high)
         return low;
-    } catch (const numeric_ops::DirectedInterval::Unresolved&) {
     }
   }
-  RationalMath::capacity();
+  exact_.capacity();
+  return 0;
 }
 std::uint64_t ModelMath::times_pi(const Rational& value) {
   if (!RationalMath::finite(value) || RationalMath::zero(value))
     return exact_.rounded(value, config_.narrow);
   auto& math = directed_.functions.math;
   for (unsigned precision = 128; precision <= 4096; precision *= 2) {
-    ++counters_.refinements;
-    exact_.work(1);
-    math.precision = precision;
+    if (!refine(precision))
+      return 0;
     Frame frame(math);
     auto result = math.interval(), pi = math.interval();
     exact_.enclose(math, result, exact_.absolute(value));
@@ -360,11 +450,12 @@ std::uint64_t ModelMath::times_pi(const Rational& value) {
     math.multiply(result, result, pi);
     const auto low = math.rounded(result.low, config_.narrow);
     const auto high = math.rounded(result.high, config_.narrow);
-    if (low == high)
+    if (active() && low == high)
       return low |
              (value.negative ? UINT64_C(1) << (config_.narrow ? 31 : 63) : 0);
   }
-  RationalMath::capacity();
+  exact_.capacity();
+  return 0;
 }
 
 std::uint64_t ModelMath::inverse_polar(const std::array<Rational, 3>& in,
@@ -412,15 +503,14 @@ std::uint64_t ModelMath::inverse_polar(const std::array<Rational, 3>& in,
   auto& math = directed_.functions.math;
   const auto decoded = BinaryParts::decode(bits[2], config_.narrow);
   for (unsigned precision = 128; precision <= 4096; precision *= 2) {
-    ++counters_.refinements;
-    exact_.work(1);
-    math.precision = precision;
+    if (!refine(precision))
+      return 0;
     Frame frame(math);
-    try {
+    {
       auto s = math.interval(), c = math.interval();
       if (config_.input_pi) {
-        // CertifiedMath::pi_pair uses its own interval pool, so perform the
-        // exact dyadic reduction here and use this operation's admitted pool.
+        // Exact dyadic reduction and the trigonometric enclosure share the
+        // operation's admitted interval pool.
         auto reduced = math.interval(), angle = math.interval();
         auto r = exact_.modulo(exact_.absolute(hue), 2);
         const auto nearest = exact_.small_floor(exact_.add(
@@ -436,7 +526,7 @@ std::uint64_t ModelMath::inverse_polar(const std::array<Rational, 3>& in,
         directed_.functions.sincos(s, c, decoded);
       }
       auto trig = sine ? s : c;
-      if (math.includes_zero(trig))
+      if (!active() || math.includes_zero(trig))
         continue;
       const bool negative = trig.low.negative;
       if (RationalMath::infinity(chroma))
@@ -451,12 +541,12 @@ std::uint64_t ModelMath::inverse_polar(const std::array<Rational, 3>& in,
       math.multiply(result, trig, factor);
       const auto low = math.rounded(result.low, config_.narrow);
       const auto high = math.rounded(result.high, config_.narrow);
-      if (low == high)
+      if (active() && low == high)
         return low | ((chroma.negative != negative) ? sign : 0);
-    } catch (const numeric_ops::DirectedInterval::Unresolved&) {
     }
   }
-  RationalMath::capacity();
+  exact_.capacity();
+  return 0;
 }
 
 unsigned ModelMath::radian_sector(Interval q, std::uint64_t raw) {
@@ -477,10 +567,12 @@ unsigned ModelMath::radian_sector(Interval q, std::uint64_t raw) {
   auto& upper = math.number();
   math.shift(lower, q.low, -static_cast<int>(math.precision), true);
   math.shift(upper, q.high, -static_cast<int>(math.precision), true);
-  if (math.compare(lower, upper) != 0)
-    throw numeric_ops::DirectedInterval::Unresolved{};
+  if (math.compare(lower, upper) != 0) {
+    math.retry();
+    return 0;
+  }
   unsigned residue = 0;
-  for (std::size_t i = numeric_ops::DirectedInterval::kWords; i-- > 0;)
+  for (std::size_t i = Math::kWords; i-- > 0;)
     residue =
         static_cast<unsigned>(((static_cast<unsigned __int128>(residue) << 64) +
                                lower.magnitude.words[i]) %
@@ -535,13 +627,14 @@ std::uint64_t ModelMath::inverse_hue(const std::array<Rational, 3>& in,
                           config_.narrow);
   auto& math = directed_.functions.math;
   for (unsigned precision = 128; precision <= 4096; precision *= 2) {
-    ++counters_.refinements;
-    exact_.work(1);
-    math.precision = precision;
+    if (!refine(precision))
+      return 0;
     Frame frame(math);
-    try {
+    {
       auto q = math.interval();
       const auto sector = radian_sector(q, bits[0]);
+      if (!active())
+        continue;
       const auto index = selection[sector][component];
       if (index != 1)
         return exact_.rounded(
@@ -570,12 +663,12 @@ std::uint64_t ModelMath::inverse_hue(const std::array<Rational, 3>& in,
       math.add(q, q, base);
       const auto low = math.rounded(q.low, config_.narrow);
       const auto high = math.rounded(q.high, config_.narrow);
-      if (low == high)
+      if (active() && low == high)
         return low;
-    } catch (const numeric_ops::DirectedInterval::Unresolved&) {
     }
   }
-  RationalMath::capacity();
+  exact_.capacity();
+  return 0;
 }
 
 std::uint64_t ModelMath::reference(const std::array<std::uint64_t, 3>& bits,
@@ -585,6 +678,8 @@ std::uint64_t ModelMath::reference(const std::array<std::uint64_t, 3>& bits,
   for (unsigned i = 0; i < 3; ++i)
     if (mask & (1u << i))
       in[i] = exact_.binary(bits[i], config_.narrow);
+  if (!exact_.active())
+    return 0;
   const auto zero = exact_.integer(0), one = exact_.integer(1),
              two = exact_.integer(2);
   const auto finish = [&](const Rational& value) {
@@ -630,16 +725,7 @@ std::uint64_t ModelMath::reference(const std::array<std::uint64_t, 3>& bits,
                                    config_.narrow);
       if (RationalMath::zero(in[1]) && RationalMath::zero(in[2]))
         return 0;
-      {
-        auto answer = certified_.evaluate(
-            config_.output_pi ? numeric_ops::CertifiedKind::Atan2pi
-                              : numeric_ops::CertifiedKind::Atan2,
-            config_.narrow ? ElementType::Float32 : ElementType::Float64,
-            bits[2], bits[1], work_, [] { return Status::success(); }, true);
-        if (!answer.ok())
-          throw answer.status();
-        return answer.value();
-      }
+      return angle(bits[2], bits[1]);
     case Kind::LchToLab:
     case Kind::OklchToOklab:
       return inverse_polar(in, bits, component);
@@ -664,13 +750,10 @@ std::uint64_t ModelMath::reference(const std::array<std::uint64_t, 3>& bits,
         if (RationalMath::zero(in[0]) && RationalMath::zero(in[1]) &&
             RationalMath::zero(in[2]))
           return finish(constants_.white_xy[component]);
-        throw domain("XYZ to xyY has non-black zero tristimulus sum");
       }
       return finish(exact_.divide(in[component], total));
     }
     case Kind::XyyToXyz:
-      if (config_.semantic && RationalMath::zero(in[1]))
-        throw domain("xyY to XYZ requires nonzero chromaticity y");
       return finish(exact_.divide(
           exact_.multiply(
               component == 0
@@ -695,8 +778,6 @@ std::uint64_t ModelMath::reference(const std::array<std::uint64_t, 3>& bits,
             hsl ? exact_.subtract(one,
                                   exact_.absolute(exact_.subtract(sum, one)))
                 : maximum;
-        if (config_.semantic && RationalMath::zero(denominator))
-          throw domain("non-gray RGB has a zero saturation denominator");
         return finish(exact_.divide(difference, denominator));
       }
       const auto sector = indices[2];
@@ -728,7 +809,8 @@ std::uint64_t ModelMath::reference(const std::array<std::uint64_t, 3>& bits,
     case Kind::ColorToGray:
       break;  // Selection/copy handling precedes arithmetic dispatch.
   }
-  throw Status{ErrorCode::Internal, "FMT-11 unreachable arithmetic member"};
+  exact_.fail(ErrorCode::Internal);
+  return 0;
 }
 
 std::optional<Fast> ModelMath::fast(const std::array<std::uint64_t, 3>& bits,
@@ -865,78 +947,53 @@ Result<std::uint64_t> ModelMath::evaluate(
     const std::array<std::uint64_t, 3>& bits, unsigned component,
     std::optional<double> candidate) {
   using Answer = Result<std::uint64_t>;
-  try {
-    if (component > 2)
-      return Answer(
-          Status{ErrorCode::Internal, "FMT-11 component outside arity"});
-    exact_.work(1);
-    const auto mask = support(config_.kind, component, config_.gray);
-    bool all_finite = true;
-    for (unsigned i = 0; i < 3; ++i) {
-      if (!(mask & (1u << i)))
-        continue;
-      const auto value = BinaryParts::decode(bits[i], config_.narrow);
-      all_finite = all_finite && !value.nan && !value.infinite;
-      if (config_.semantic && (value.nan || value.infinite))
-        return Answer(domain("FMT-11 semantic component must be finite"));
-    }
-    if (config_.kind == Kind::BinaryToGray) {
-      const auto x = BinaryParts::decode(bits[0], config_.narrow);
-      const auto one =
-          config_.narrow ? UINT64_C(0x3f800000) : UINT64_C(0x3ff0000000000000);
-      if (x.magnitude != 0 && bits[0] != one)
-        return Answer(
-            domain("BlackWhite selector must be exactly zero or one"));
-      return Answer(config_.levels[x.magnitude ? 1 : 0]);
-    }
-    const int copy = copied_component(config_.kind, component, config_.gray);
-    if (copy >= 0)
-      return Answer(bits[static_cast<unsigned>(copy)]);
-    if (copy == -2)
-      return Answer(UINT64_C(0));
-    if (config_.kind != Kind::Threshold) {
-      for (unsigned i = 0; i < 3; ++i)
-        if ((mask & (1u << i)) &&
-            BinaryParts::decode(bits[i], config_.narrow).nan)
-          return Answer(numeric_ops::converted_nan(
-              bits[i],
-              config_.narrow ? ElementType::Float32 : ElementType::Float64,
-              config_.narrow ? ElementType::Float32 : ElementType::Float64));
-    }
-    if (config_.semantic && (config_.kind == Kind::LchToLab ||
-                             config_.kind == Kind::OklchToOklab)) {
-      const auto c = BinaryParts::decode(bits[1], config_.narrow);
-      if (c.negative && c.magnitude)
-        return Answer(domain("semantic polar chroma must be nonnegative"));
-    }
-    if (all_finite && config_.algorithm != Algorithm::Reference) {
-      const auto bound = fast(bits, component);
-      if (bound) {
-        const auto accepted = accept(*bound, candidate);
-        if (accepted) {
-          ++counters_.accepted;
-          return Answer(*accepted);
-        }
+  if (component > 2)
+    return Answer(
+        Status{ErrorCode::Internal, "FMT-11 component outside arity"});
+  exact_.reset();
+  directed_.functions.math.reset();
+  if (!exact_.work(1))
+    return Answer(exact_.status());
+  const auto mask = support(config_.kind, component, config_.gray);
+  bool all_finite = true;
+  for (unsigned i = 0; i < 3; ++i) {
+    if (!(mask & (1u << i)))
+      continue;
+    const auto value = BinaryParts::decode(bits[i], config_.narrow);
+    all_finite = all_finite && !value.nan && !value.infinite;
+  }
+  if (config_.kind == Kind::BinaryToGray) {
+    const auto x = BinaryParts::decode(bits[0], config_.narrow);
+    return Answer(config_.levels[x.magnitude ? 1 : 0]);
+  }
+  const int copy = copied_component(config_.kind, component, config_.gray);
+  if (copy >= 0)
+    return Answer(bits[static_cast<unsigned>(copy)]);
+  if (copy == -2)
+    return Answer(UINT64_C(0));
+  if (config_.kind != Kind::Threshold) {
+    for (unsigned i = 0; i < 3; ++i)
+      if ((mask & (1u << i)) &&
+          BinaryParts::decode(bits[i], config_.narrow).nan)
+        return Answer(numeric_ops::converted_nan(
+            bits[i],
+            config_.narrow ? ElementType::Float32 : ElementType::Float64,
+            config_.narrow ? ElementType::Float32 : ElementType::Float64));
+  }
+  if (all_finite && config_.algorithm != Algorithm::Reference) {
+    const auto bound = fast(bits, component);
+    if (bound) {
+      const auto accepted = accept(*bound, candidate);
+      if (accepted) {
+        return Answer(*accepted);
       }
     }
-    ++counters_.reference;
-    const auto result = reference(bits, component);
-    if (config_.semantic) {
-      const auto classified = BinaryParts::decode(result, config_.narrow);
-      if (classified.infinite || classified.nan)
-        return Answer(Status{ErrorCode::OperationFailed,
-                             "FMT-11 semantic result is not finite",
-                             FailureReason::ArithmeticOverflow,
-                             {FailureOrigin::Domain, FailureScope::Atom}});
-    }
-    return Answer(result);
-  } catch (const Status& status) {
-    return Answer(status);
-  } catch (const numeric_ops::DirectedInterval::Unresolved&) {
-    return Answer(
-        Status{ErrorCode::ResourceExhausted,
-               "FMT-11 could not certify rounding within bounded precision",
-               FailureReason::CapacityLimit});
   }
+  const auto result = reference(bits, component);
+  if (!active()) {
+    exact_.capacity();
+    return Answer(exact_.status());
+  }
+  return Answer(result);
 }
 }  // namespace ps::plugin_internal::model_ops

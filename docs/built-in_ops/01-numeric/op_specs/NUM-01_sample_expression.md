@@ -17,225 +17,49 @@ implementation_status: implemented
 
 # NUM-01: sample_expression
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+This Proposed specification defines three explicit CPU profiles: strict, accelerated Apple Silicon and accelerated x86-64. The unsuffixed `numeric.sample_expression` has its own static start/step and indexed-coefficient interface. It is not an alias for this family.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+The operation samples a real-valued function of one variable on an endpoint-inclusive grid. It returns named `values` and `axis` Results, usable independently by downstream numeric consumers or LUT authoring. Count, expression, coefficient names and output dtype are static; endpoint and coefficient payloads can change between Runs.
 
-This specification records the selected expression contract. Its Proposed status
-is independent of the maintained implementation and validation recorded below.
+## Inputs and outputs
 
-## 1. Confirmed purpose
+Inputs are ordered start, end, then named coefficients in bytewise sorted order. Each Result contains exactly one tensor member, under any schema ID or member key, with complete sample shape `[1]` and dtype Float32 or Float64. Dtypes may mix. Float32 widens exactly to Float64. Static checks cover every input even when its payload is excluded.
 
-Generate numeric inputs for other workflow operations by sampling a real-valued
-function of one variable. The initial requirement names polynomial, trigonometric,
-exponential and natural-logarithm expressions, a sampling interval, and a
-one-dimensional array output. LUT construction is an explicit use case.
+| Output | Schema and member | Shape and dtype |
+| --- | --- | --- |
+| values | photospider.tensor v1 / samples | ordinary `[count]`, Float32 or Float64 |
+| axis | photospider.tensor v1 / samples | atomic Float64 `[3]`, `[start,end,step]` |
 
-Confirmed scope: evaluate one scalar function `y = f(x)` on a uniform sampling
-axis and return one rank-1 numeric array `[N]` as the main output. A separate
-named axis output carries sampling information so downstream consumers can
-recover the independent-variable coordinates.
-Multi-function/channel output and an arbitrary query-position input are outside
-this operator's scope. Output dtype and axis transport are specified in section 4.
+Count is required in `[1,1048576]`. The helper defaults dtype to Float64 and writes it explicitly; direct nodes supply the required string. Output sample axes inherit no input batch axes or physical units. Function arguments use radians where applicable.
 
-The separately requested control-point curve generator receives its own operator
-specification after this operator is clarified. The maintainer clarified the
-original `spine` wording as a one-dimensional `y=f(x)` adjustment curve. Geometric
-paths, path parameterization and skeletal animation are outside this requirement.
+## Sampling coordinates
 
-## 2. Confirmed sampling contract
-
-Sampling is specified by `start`, `end`, and integer `count = N`. Both endpoints
-are included. The supported count is `1 <= N <= 1048576`. `count` must be
-specified explicitly; no domain-dependent inference or floating-point loop
-determines the output length. For `N >= 2`, the mathematical sampling rule is
+For N=count>1, let input endpoint bits denote exact binary rational values. With RN64 meaning round-to-nearest, ties-to-even:
 
 ```text
-step = (end - start) / (N - 1)
-x_i = start + i * step,  i = 0, ..., N - 1
+d = (exact(end)-exact(start))/(N-1)
+axis = [start,end,RN64(d)]
+x_0 = start
+x_(N-1) = end
+x_i = RN64(((N-1-i)*exact(start)+i*exact(end))/(N-1))
 y_i = f(x_i)
 ```
 
-`step` is derived from the supplied endpoints; it is not an input parameter.
+Intermediate subtraction/product overflow must not alter these formulas. Interior coordinates use both endpoints and their global index, without accumulating rounded axis.step. Both ascending and descending intervals are supported. Endpoints must differ for N>1. A selected axis requires a finite, nonzero rounded step with the corresponding sign. A selected values coordinate must differ from each valid adjacent coordinate. These numerical conditions are caller preconditions; runtime performs no neighbor scan or rejection guarantee.
 
-For `N = 1`, return `[f(start)]` and ignore `end` when choosing the sample
-coordinate. There is no requirement that `end == start`. Emit
-`axis = [start, start, +0]`. Do not request or numerically validate the `end`
-payload or execute its upstream producer solely for this generator. An invalid
-or failing unused `end` producer cannot fail this generator's requested outputs.
-Static graph/schema validation still checks the declared end edge, following
-the binding convention in section 5. The two-endpoint rule applies to `N >= 2`.
+For N=1, x=start and axis is `[start,start,+0]`. Neither output reads end's payload or executes its producer solely for this call. The end schema remains checked. For larger counts both endpoints are active even when only an endpoint values tile is selected. Only computed tile coordinates are evaluated; unselected expression samples impose no expression-domain requirement.
 
-For `N >= 2`, both `start < end` and `start > end` are supported. Samples follow
-the supplied direction; a descending interval has a negative derived step.
-Equal endpoints are excluded for `N >= 2` by the selected interval policy.
-Reversing the interval changes sample order and sampling metadata, not the
-definition of `f`.
+## Numeric evaluation
 
-The coordinate contract is common to strict and accelerated versions. Let
-`RN64` denote round-to-nearest/ties-to-even to Float64. Treat the input Float64
-endpoints as exact binary rational numbers when applying this definition:
+Active inputs, evaluated intermediates and computed outputs must be finite and within the applicable real mathematical domains as unchecked caller preconditions. Float32 outputs require a representable final narrowing. Underflow to subnormal or signed zero is valid. Domain violations have no guaranteed diagnostic, sample index or source-span report. Operational failures still prevent successful call publication.
 
-```text
-d = (exact(end) - exact(start)) / (N - 1)
-axis.step = RN64(d)
-x_0 = start
-x_(N-1) = end
-x_i = RN64(((N-1-i)*exact(start) + i*exact(end)) / (N-1)),  0 < i < N-1
-```
+Strict evaluates every primitive in left-to-right postorder with RN64 before its parent. The complete expression is not reassociated into one exact-real calculation: `(a+b)-a` retains both rounding boundaries. Decimal literals convert once from the complete token using RN64. Mathematical functions use correctly rounded primitives, with bounded directed refinement where necessary. Unresolved refinement returns ResourceExhausted rather than an uncertified value. Float32 output is one further RN conversion of the final Float64 result.
 
-This specifies rounding of coordinates, not an expression-language operation
-sequence. An implementation must avoid intermediate subtraction/product
-overflow in these definitions. The rounded `axis.step` must be finite and
-nonzero with the declared direction for `N>=2`; otherwise sampling fails.
-An interior coordinate is derived from both endpoints and its global index,
-not by accumulating the rounded step. Consumers reconstructing the same grid
-must use both endpoint fields and N; `start+i*axis.step` is not the exact rule.
-Singleton coordinates preserve the supplied start, and endpoint coordinates
-preserve endpoint bits, including a signed zero where the interval is legal.
+Accelerated profiles enclose the complete strict stepwise reference and apply the shared [final FP32-scaled four-ULP contract](NUM_accelerated_contract.md), including Float64 outputs. They process up to four selected samples together. A sample whose final bound cannot be accepted replays strictly. Internal interval/domain checks serve accuracy selection, not a general domain-validation contract. Unavailable platform keys return BackendUnavailable; they do not select another operation key. Arithmetic normalizes and restores floating modes and exception flags.
 
-Adjacent sampled coordinates must remain distinguishable in Float64. For each
-index `i` in a nonempty complete-input values request, compute its coordinate and the valid neighbor coordinates
-`i-1` and `i+1` for this validation only. Reject equality with either neighbor
-as insufficient sampling-coordinate precision. Neighbor function values are
-not evaluated by the neighbor check. complete-input values evaluates all N samples
-before projection; axis-only performs no coordinate-distinctness scan. The same rule applies to ascending and descending intervals.
+The caller ensures nonzero divisors, nonnegative sqrt operands, positive ln operands and valid real powers. `0^0=1`; a negative nonzero base requires an integer Float64 exponent, and zero to a negative exponent is outside the domain. Every evaluated subtree must satisfy the preconditions even under min/max or algebraic cancellation. Basic operations retain nearest-even signed-zero rules. `sin(-0)`, `tan(-0)` and `sqrt(-0)` return -0; cos(±0)=exp(±0)=1 and ln(1)=+0. A negative-zero base to an odd positive integer power returns -0, otherwise a positive power returns +0. Tan uses the actual Float64 argument without an epsilon pole test.
 
-## 3. Dynamic workflow inputs
-
-Coefficients, `start`, and `end` must accept upstream numeric outputs and may
-change between executions of the same compiled workflow. The expression
-structure and `count` remain static for this design; output shape stays `[N]`.
-Each coefficient has a name and its own upstream scalar connection. For example,
-`a*x+b` binds `a` and `b` independently, allowing separate upstream statistics
-outputs to drive them. An indexed coefficient-array interface is outside this
-selected design. Binding conventions are defined in section 5.
-
-Every numeric input (`start`, `end`, and each coefficient) is a Result with one
-tensor member under any member key. Its `sample_shape()` is `[1]` and its dtype
-is Float32 or Float64. Ports may use different floating dtypes.
-Float32 values widen exactly to Float64 before arithmetic. Integer inputs
-require an explicit upstream cast; there is no implicit integer conversion.
-complete-input input preparation requests ordinary payload tile Needs for
-each active input. Domain units are explicit configuration and no domain description is
-propagated to outputs.
-Valid immutable signed-stride, offset and unaligned `[1]` views are supported.
-
-Sampling coordinates, generated values, and sampling-axis metadata must reflect
-the current execution's inputs together. Reusing a previous run's origin or
-step after changing the interval is invalid. Fixed shape alone does not make
-sampling metadata static. Exact metadata transport and downstream validation
-must obey the named-output contract in section 4.
-
-## 4. Numeric representation
-
-The output dtype is a static choice of `Float32` or `Float64`, defaulting to
-`Float64`. Expression evaluation uses Float64 in both modes; Float32 output
-requires a final conversion. All evaluated intermediates and final output
-samples must be finite. Invalid function domains, division by zero and numeric
-overflow fail this evaluation, with the sample index, sampling coordinate and
-failing subexpression identified. No partial successful array is returned and
-there is no automatic clipping or NaN/Inf preservation mode. This also applies
-when Float64 evaluation is finite but the selected Float32 result overflows.
-
-For example, `ln(x)` at zero and `1/x` at zero fail. A failing intermediate in
-`min(exp(1000), 1)` cannot be hidden by the outer minimum. Every requested input
-scalar must be finite. Gradual underflow is enabled: subnormals and a correctly
-rounded zero are allowed, with no flush-to-zero mode. Float32 narrowing uses
-round-to-nearest/ties-to-even. Restore the caller's floating-point environment.
-
-Power uses the selected convention `0^0 = 1`. A negative base with a noninteger
-exponent is outside the real domain; a zero base with a negative exponent also
-fails. These checks apply to the actual Float64 operands. The convention keeps
-`x^0` equal to one at zero, without suppressing failures in either operand's
-evaluated subexpression.
-
-### Strict and accelerated versions
-
-The selected family has a strict version and independently named accelerated
-versions for each supported platform. The keys in this draft are
-`numeric.sample_expression_strict`,
-`numeric.sample_expression_accelerated_apple_silicon`, and
-`numeric.sample_expression_accelerated_x86_64`.
-Both accelerated versions are CPU implementations; SIMD and multithreading are
-permitted. Metal/GPU execution is outside the selected platform scope.
-There is no target generic accelerated dispatcher key or runtime `mode` switch.
-The unsuffixed `numeric.sample_expression` key is a separate legacy operation,
-not an alias for the three suffixed operations defined here.
-
-All versions share the selected sampling, binding, output and failure contracts
-unless an explicit numerical-profile difference is documented.
-
-- `strict`: fixed stepwise Float64 round-to-nearest/ties-to-even, including
-  correctly rounded mathematical functions, giving identical result bits across
-  supported CPU implementations. Each primitive consumes already rounded
-  Float64 operands. This is not exact-real evaluation of the complete expression
-  followed by one final rounding; `(a+b)-a` retains both arithmetic roundings.
-- `accelerated`: platform-specific SIMD implementations with a final-output
-  bound of four FP32-scaled ULP under the shared acceleration contract, including
-  Float64 outputs. The reference is the complete strict stepwise RN64 AST.
-  Propagate conservative enclosures through each node and final dtype conversion.
-  Reject an uncertain domain, zero-denominator or overflow decision and replay
-  the affected sample strictly. Internal FMA or mixed precision is permitted
-  only when the enclosure still covers the strict reference.
-
-An accelerated mathematical step that cannot guarantee its error bound for the
-actual operands may use strict evaluation. Report the selected accelerated
-platform and strict-step fallback. A call to a platform-specific accelerated key
-on a mismatched platform returns `BackendUnavailable`; it does not silently
-select another operator. Cancellation, allocation/work failure and upstream
-failure are not capability fallback conditions and retain their original errors.
-complete-input Result executions retain their explicit operation/profile identities but do not
-expose per-atom strict-call or fallback counters. Such counters are unavailable;
-do not infer them from successful output count. Numerical core diagnostics may
-be collected by a separate targeted driver without changing public outputs.
-
-The final output uses the shared FP32-scaled bound. The reference consumes the
-original input bits and applies each strict RN64 step. Sensitive expressions
-such as `1/(exp(x)-a)` preserve strict failure classification: uncertainty
-triggers strict replay of the affected sample.
-
-For deterministic signed-zero behavior, `sin(-0)`, `tan(-0)` and `sqrt(-0)`
-return `-0`; `cos(±0)=1`, `exp(±0)=1`, and `ln(1)=+0`. A zero base to a positive
-power returns `-0` only for a negative-zero base and an odd integer exponent,
-and `+0` otherwise. Basic arithmetic uses nearest-even signed-zero rules.
-`tan` receives the actual Float64 angle; there is no epsilon-based pole test
-around a rounded approximation of pi/2.
-
-The dtype default is supplied by the authoring constructor, which writes
-`dtype="float64"` explicitly. Direct WorkflowDocument nodes supply dtype;
-the target does not depend on implicit registry insertion of this default.
-Scalar input dtype acceptance and widening are specified in section 3.
-
-### Named outputs
-
-The operation exposes two independently connectable Result outputs:
-
-| Port key | Result schema and tensor member | Shape and meaning |
-| --- | --- | --- |
-| `values` | `photospider.tensor` / `samples` | `[N]`; samples `f(x_i)` in the selected Float32/Float64 dtype |
-| `axis` | `photospider.tensor` / `samples` | Atomic Float64 `[3]`; `[start, end, step]` for `N >= 2`; `[start, start, +0]` for `N = 1` |
-
-Both shapes are known at compilation. The axis tensor marks its trailing three
-components as one atomic tuple. Runtime sampling coordinates are payload data in
-`axis`, not Result facets. Numeric consumers can
-connect only `values`; sampling-aware consumers connect both outputs.
-The axis dtype is always Float64. The zero singleton step describes the lack of
-a sample interval; consumers use `count` when interpreting that tuple.
-
-Both outputs are generic numeric arrays with no attached domain description. The generator does
-not infer or propagate pixel, time, arc-length, color, width or other physical
-units. Interpretation belongs to the workflow author and consuming operation.
-Trigonometric function arguments are interpreted as radians. No unit labels or
-dimensional-analysis mode are included.
-
-## 5. Expression language
+## Expression language
 
 The selected language is a bounded pure mathematical expression, with one
 independent variable `x` and separately bound named scalar coefficients.
@@ -283,8 +107,7 @@ script execution, loop, file I/O, implicit time input or randomness.
 - Power uses `^`, is right-associative and binds above unary signs; then follow
   `* /`, then `+ -`, with left associativity for the latter two levels.
   Thus `-2^2=-4`, `2^-2=0.25`, `2^3^2=512`.
-- Evaluate the AST in left-to-right postorder. Do not remove a potentially
-  failing subtree through algebraic simplification. `min`/`max` evaluate both
+- Evaluate the AST in left-to-right postorder. Preserve the specified evaluation order; algebraic simplification must not change its stepwise result. `min`/`max` evaluate both
   arguments. Mixed signed-zero ties return -0 for min and +0 for max;
   same-sign zeros retain that sign, matching NUM-05 minimum/maximum. Other
   numerical ties return the common value; `abs(-0)` is `+0`. This does not
@@ -306,254 +129,50 @@ No count, endpoint or coefficient value is implicitly synthesized by the
 registry. Changing expression, names, count or dtype requires compilation;
 changing numeric input values does not.
 
-## 6. Run-shared complete-input computation
+## Fixed execution and dependency scope
 
-A nonempty values request collects all active scalar inputs and computes all N
-samples before projecting the immutable Result to the requested global indices.
-Every coordinate and expression must satisfy sections 2 and 4. A positive-only
-projection of `ln(x)` therefore fails if another coordinate in the full domain
-is zero. No partially successful values output is published.
+Static preparation parses once and retains an immutable AST across the call's outputs and independent Runs. It checks expression/names/count/dtype and all input schemas. Registration permits up to 258 inputs; the 256-node AST bound can impose a smaller reachable coefficient count. A balanced sum of 128 coefficients has 255 nodes and 130 declared ports.
 
-`prepare_static` parses the expression once and shares the immutable AST between
-the two output programs and later dynamic executions. It validates all input
-schemas, member shapes and numeric dtypes before runtime projection. For runtime
-needs, the complete-input program sends input requests in envelopes of at most 64 ports.
-Registration declares up to 258 input slots (start, end and a ceiling of 256
-coefficient slots) and reserves five input Need stages plus publication, six
-stages total. The AST node limit can reject a source before its declared
-coefficient ceiling is reachable. Current focused coverage exercises a balanced
-128-coefficient expression (255 AST nodes, height 8) across 130 declared ports,
-with count=1 selecting 129 active inputs across three Need stages.
+Each selected values tile has one fixed CPU task reading its active scalar inputs and writing an independent dense tile. Axis has one separate atomic task. Excluded inputs retain schema-only references. Input values remain active even when the expression is constant or a named coefficient cancels algebraically.
 
-Axis remains independently requestable. Syntax validates statically, but axis
-runtime skips coefficients, expression evaluation and coordinate-distinctness
-scanning. For count=1, both outputs exclude end at runtime; values also activates
-all coefficients, while axis activates only start. Their schemas still validate
-at compilation. Constant expressions still validate their interval when the
-relevant endpoints are active, and algebraically cancelled coefficients still
-participate in values input reads.
-
-| Selected output | Complete runtime input set | Validation/computation |
+| Selection | Payload inputs | Computation |
 | --- | --- | --- |
-| values, N>=2 | start/end and all named coefficients | finite scalars, interval and all N coordinate/expression results |
-| values, N=1 | start and all named coefficients | start/coefficient finite, one expression result |
-| axis, N>=2 | start/end | finite interval and representable nonzero step |
-| axis, N=1 | start | finite start, `[start,start,+0]` |
-| Empty | none | static metadata and parameter checks only |
+| values, N>1 | start, end, all coefficients | only selected tile coordinates and their AST values |
+| values, N=1 | start, all coefficients | f(start) |
+| axis, N>1 | start, end | complete axis tuple |
+| axis, N=1 | start | `[start,start,+0]` |
+| Empty | none | no task |
 
-### Invalidation, ownership and cache
+Axis evaluates no AST and reads no coefficients. Axis-only selection therefore imposes no expression or coefficient numerical precondition. Values and axis are independently selectable, but selected tasks share one IR call's success/failure outcome. When both are selected, a values task or its required producer failing prevents successful publication of that call's outputs.
 
-An active endpoint change invalidates all observations of the selected output.
-A coefficient edit invalidates all values and never axis; count=1 end edits
-invalidate neither output. Static projections enter compiled identity. Transitive
-upstream witnesses remain authoritative even if numbers coincide after an edit.
+Preparation verifies both public output schemas, the selected canonical Host write, exact ordered scalar read slots, empty task parameters and scratch. Structural validation remains checked. Input views may have permitted offsets, unaligned addresses and singleton signed/zero strides when the Plan's physical layout admits them.
 
-Values retain their `[N]` sample coordinates and axis retains one trailing-axis atomic tuple. Each output Result has its own Result ObjectId. The two outputs have no additional identity that pairs them; workflows connect the intended named outputs explicitly. Consumers receive requested global Regions without rebasing coordinates. Both outputs have no attached domain description.
+## Resources, concurrency and errors
 
-Partial requests own count*4/8 bytes for values or 24 bytes for axis, plus fixed arithmetic workspace. Published storage survives invocation/context lifetime; unpublished output and scratch release on failure/cancellation.
+Values scratch is `sizeof(SampleState<true>)`, containing fixed scalar, four-lane, exact-sampling and certified-math state. Axis uses `sizeof(SampleState<false>)`. Runtime constructs both in preallocated invocation memory, with no dynamic AST or payload allocation. Values storage is the sum of selected tile bytes; axis is 24 bytes. Root reserves the maximum task scratch per CPU lane, selected output storage and executor metadata. Static preparation is bounded host metadata outside Run scratch admission.
 
-Scalar inputs accept legal offset, signed/zero-stride and unaligned layouts.
-Cache identity retains exact parameters, metadata and active input witnesses.
-Profiles remain separate. Cache-off preserves ownership and arithmetic. Numeric
-failure uses Domain/Run with no Atom, retaining failing global sample, x and AST
-span text. Upstream, capacity/work, cancellation and stale status retain their
-original categories. Failure is limited to the selected complete-input output; an axis
-success does not certify values success.
+For K coefficients, A AST nodes and M computed samples per task, ordinary work is O(K+M*A); coordinate and refinement costs are additional bounded arithmetic. Cancellation is queried per scalar, coordinate/batch, AST node and refinement step. There is no per-value numeric reporting, sample work counter or content cache in this execution path.
 
-### Reference algorithms, resources and cancellation
+Concurrent Runs share only immutable preparation; scratch and output allocations are private. Successful Result owners can outlive ExecutionContext. Accepted tasks drain before failed outputs are released. Invalid static syntax, bindings and complexity limits return InvalidArgument; incompatible schema/dtype or task signatures return TypeMismatch. Resource exhaustion, unavailable backend, source failure, cancellation and stale Plan retain their operational statuses. Numerical precondition violations have no promised error classification.
 
-Compile the bounded grammar once into an immutable AST with canonical name
-binding and source spans for diagnostics. Coordinate computation uses bounded
-exact binary-rational arithmetic or an equivalent implementation that proves
-the same RN64 result. Validate active scalars once, then per sample compute x and
-neighbor coordinates, then evaluate the AST in the specified order into a
-Float64 scratch table and convert the final value once.
+## Implementation and acceptance
 
-Strict mathematical functions require a correctly rounded implementation.
-One permissible reference strategy refines outward-rounded high-precision bounds
-until both bounds round to the same Float64 result; exact boundary cases require
-their own resolution. Fixed high precision or an unchanged residual alone is not
-a correct-rounding proof. Refinement work and storage remain budgeted and may
-fail ResourceExhausted rather than guess a rounded value.
+`numeric_expression.cpp` registers the three keys and implements the public `sample_expression_node` helper. The iterative parser bounds source bytes, node count and AST height. Decimal parsing uses 16384-bit compile-time ratio scratch, including late digits in a 4096-byte literal. Sampling uses the exact endpoint machinery, and arithmetic uses the shared elementary and certified backend. Four-lane profile evaluation certifies complete strict-stepwise results and replays uncertain samples. See [fixed expression execution](../expression-execution.md) and [mathematical implementation](../math-implementation.md).
 
-Accelerated CPU implementations can evaluate all N independent samples in
-SIMD lanes and scheduled batches. Each platform publishes its concrete math
-implementation/version, supported operand domains, error justification and
-strict fallback predicates. Unverified argument domains use strict evaluation.
-SIMD tails must not evaluate indices beyond N. No private thread
-pool or unaccounted persistent per-run cache is introduced.
+Use an independent Fraction/MPFR reference for coordinates, literal conversion and each primitive. A fixed-precision approximation without a rounding decision is insufficient for hard-to-round cases. Compare strict result bits and accelerated final bounds separately from graph-equivalence checks.
 
-Let N be the complete sample count, A<=256 AST nodes, K<=256 coefficients, and b=4 or 8
-output bytes. The ordinary expression traversal is O(K+N*A); coordinate
-and strict-math precision/refinement costs are separate measured and budgeted
-terms. Excluding external consumers, plan storage and upstream ownership:
-
-| Storage/work | Bound or accounting rule |
+| Fixture | Expected behavior |
 | --- | --- |
-| complete-input values payload | `b*N`; full output at maximum N is 4 MiB or 8 MiB |
-| Axis payload | 24 bytes if requested |
-| Scalar/evaluation scratch per active sample or admitted lane | `8*(K+2)+8*A <= 4112` bytes, plus coordinate state |
-| Shared packed input scalars | At most `8*(K+2)` bytes when deduplicated; no sharing is required for correctness |
-| Coordinate arithmetic | Charge every actual temporary capacity; bounded by binary64 operand exponents and the count bound |
-| Correct-rounding fallback | Charge actual limb buffers and every refinement/primitive work unit to the existing root budget |
-| Scheduler/stage/certificate metadata | Existing host limits apply; not included in the payload-only numbers above |
+| `2*x+1`, [0,1], N=5 | values `[1,1.5,2,2.5,3]`, axis `[0,1,0.25]` |
+| Same expression, [1,0] | values reversed, axis step -0.25 |
+| `x*x`, start=2, N=1 | value 4; failing end producer omitted |
+| `a*x+b`, mixed dtypes | changing coefficients reuses preparation and changes values, preserving axis |
+| `(a+b)-a`, a=2^53,b=1 | two RN64 boundaries produce zero |
+| `ln(x)`, [0,1], sparse positive tiles | only selected positive coordinates evaluate; omitted zero endpoint imposes no function-domain check |
+| axis-only with failing coefficients | coefficient producers omitted, complete axis returned |
+| max count, sparse tail | global coordinate formula and selected storage capacity |
+| precedence and literals | `-2^2=-4`, `2^-2=.25`, `2^3^2=512`, `0^0=1`; correct long midpoint literal conversion |
 
-Reserve before allocation, account old/new buffers simultaneously when growing,
-and bound live batch width by the admitted resources. No temporary disk backing
-or persistent runtime state is required by this Result operator. Every nonempty
-values projection requires complete output capacity, so a small ROI cannot avoid
-that payload admission. No universal RSS bound is claimed. The complete-input program
-sends active input Needs in envelopes of at most 64 ports, then publishes the
-output. Values needs at most five input stages and one publication stage. Host
-limits never permit silently truncating count, expression or coefficient set.
+Exercise both dtypes, signed zero, subnormals, sensitive cancellation, negative intervals, nonzero origins and short SIMD tails. Include a balanced 128-coefficient sum, exact source/node/height limits and one-past rejection, malformed syntax, missing/extra/reserved names and invalid excluded-input schemas. Verify scalar offsets and strides, artifact round trips, independent concurrent Runs, rebinding, cancellation, resource admission, malformed preparation and retained output owners. Empty selection performs no payload work. Performance and platform claims require actual runtime evidence for the specified profile and hardware.
 
-Poll cancellation before input work, at least every 32 AST nodes, between
-coordinate/mathematical refinement steps and before publication. SIMD/batch size
-must preserve this bounded polling obligation. Host read/allocation/work/stage
-failures are sticky and are never converted into an accelerated fallback success.
-
-### Error contract
-
-| Trigger | Phase and Status |
-| --- | --- |
-| Bad/missing static parameters, grammar, binding names or declared complexity limits | Compile/direct preflight; `InvalidArgument`, schema origin |
-| Unsupported numeric input dtype/shape or invalid output inference | Compile/direct preflight; `TypeMismatch`; malformed structural schemas retain their validation status |
-| Nonfinite demanded input, equal N>=2 endpoints, zero/unrepresentable step or duplicate adjacent coordinate | Request; `OperationFailed`, `InvalidDomain` or `ArithmeticOverflow` as applicable |
-| Divide by ±0 or zero to a negative power | Requested AST evaluation; `OperationFailed` / `DivideByZero` |
-| sqrt negative, ln nonpositive, negative-base noninteger power | Requested AST evaluation; `OperationFailed` / `InvalidDomain` |
-| Nonfinite intermediate or final dtype overflow | Request; `OperationFailed` / `ArithmeticOverflow` |
-| Wrong accelerated platform | Capability check; `BackendUnavailable` |
-| Capacity/work/stage exhaustion | `ResourceExhausted` with the corresponding existing reason |
-| Cancellation or stale input/plan | Preserve the existing cancellation/stale status and origin |
-| Upstream failure | Preserve upstream node/input identity, code, reason and scope |
-
-Numeric failure has Domain origin and Run scope for the selected complete-input output.
-Diagnostics retain the failing global sample index and exact-round-trip x when
-available, together with AST source span/function or input name. Pre-coordinate
-errors state x unavailable. No partial values are published. Bounded status text
-may truncate detail; structured origin/scope remains authoritative.
-
-## 7. Maintained implementation and numerical boundary
-
-`plugins/ops/01-numeric/numeric_expression.cpp` registers all three selected
-keys. `photospider/ops/numeric/expression.hpp` provides `sample_expression_node`;
-it validates the free-name/connection map and writes all four static parameters.
-Zero coefficients use a fixed start prefix plus a repeated `[end,coefficients...]`
-group. Pure metadata preparation accepts mixed floating scalar dtypes.
-
-The bounded iterative parser retains left-to-right postorder, source spans and
-canonical names. Decimal literals are converted from their complete token using
-16384-bit exact ratio scratch, including a nonzero digit at the far end of a
-4096-byte midpoint literal. This compile-time scratch is not per-sample storage.
-A registry-sealed `PreparedOperation` owns one immutable AST across the compiled
-node's outputs and dynamic executions. Direct invocation without a handle prepares once; execution reuses the sealed
-plan owner without reparsing. Static preparation storage is outside runtime scratch admission;
-its source/node bounds are explicit. There is no global AST cache.
-
-Runtime coordinates use the exact NUM-02 limb machinery, with NUM-01's stricter
-interval and neighbor validation. Mixed Float32 inputs widen by IEEE fields,
-and final Float32 conversion rounds once. The strict evaluator uses the shared exact
-and certified mathematical backend at each Float64 primitive. Every intermediate
-is checked before its parent executes. Accelerated evaluation batches four consecutive samples and propagates RN64
-reference enclosures through the AST, using SLEEF 3.9.0 on admitted domains
-for ln, sin, cos, tan and power. Exp replays through the strict RN64 evaluator
-after removal of direct SLEEF exp; the Float32 IQK primitive is not used for
-these binary64 intermediates.
-Rejected samples replay through the strict evaluator when the final bound is not certified. See
-[mathematical implementation](../math-implementation.md) for rounding proofs and
-fixed-refinement resource limits.
-
-Static preparation sets the values input projection to all active scalars and
-axis to its active endpoints. Both outputs execute through Run-shared Result programs;
-the axis program requests an atomic tuple. There are no per-sample requests or
-custom dependency pieces. Axis allocates its smaller exact-coordinate state
-without the transcendental arena; the common workspace admission reserves the
-maximum values state. Work/capacity/cancellation checks remain within exact
-arithmetic and before publication. The unsuffixed legacy operation remains a
-separate interface. Specification status remains Proposed.
-
-## 8. Acceptance contract
-
-Strict acceptance uses an independent correctly rounded per-primitive oracle,
-including exact rational sampling coordinates and literal conversion. Compare
-strict result bits, metadata/axis bits and the first failing AST span in the
-specified evaluation order. A fixed-precision approximation with no rounding
-resolution is insufficient for hard-to-round fixtures.
-
-For accelerated expressions, compare the final output with the independent
-strict stepwise reference under the shared FP32-scaled bound. Primitive checks
-are additional diagnostics, not a replacement for final-error acceptance.
-Test exact zeros, sensitive cancellation and subnormal boundaries explicitly.
-
-| ID | Fixture and independent expected behavior |
-| --- | --- |
-| T01 | `2*x+1`, start=0, end=1, N=5: values `[1,1.5,2,2.5,3]`, axis `[0,1,0.25]` |
-| T02 | Same expression, start=1, end=0: values `[3,2.5,2,1.5,1]`, axis `[1,0,-0.25]` |
-| T03 | `x*x`, N=1, start=2: values `[4]`, axis `[2,2,0]`; a failing end producer is never invoked |
-| T04 | `a*x+b`, mixed Float32/Float64 scalar ports; reuse one compiled plan with a=2,b=1 then a=3,b=-1; check both runs and unchanged axis |
-| T05 | `x*x`, interval [0,1], N=3: `[0,0.25,1]`; hypothetical linear table query .25 gives .125, whereas direct continuous evaluation gives .0625 |
-| T06 | N=2 exact endpoint bits; extreme opposite endpoints with N=3 avoid intermediate subtraction overflow; an unrepresentable derived step fails explicitly |
-| T07 | start=1, end=nextafter(1,+inf), N=3: coordinate rounding creates adjacent equality and the complete values request fails; axis-only request does not scan values |
-| T08 | `ln(x)`, [0,1], N=3: any nonempty values request fails at sample=0, x=0 with Run scope; axis-only execution reads no coefficient/function data |
-| T09 | Both dtypes, final Float32 overflow, subnormal/zero conversion, signed-zero rules and caller rounding-mode restoration |
-| T10 | Precedence examples, `0^0=1`, exp(0), ln(1), sin(0), cos(0), unary nesting, exact AST/source limits and one-past-limit rejection |
-| T11 | Missing/extra/duplicate/reserved coefficient names, zero coefficients, wrong shape/dtype, malformed syntax and direct/compiled parity |
-| T12 | `1/0`, `sqrt(-1)`, `ln(0)`, `(-1)^0.5`, `min(exp(1000),1)`; verify code/reason/source span and no successful failing sample publication |
-| T13 | Nonzero ROI and disjoint indices equal corresponding full-result bits within one numeric profile; SIMD tails preserve the full-domain result before projection |
-| T14 | Dirty/cache tests: coefficient changes affect values only; N=1 end changes affect neither; N>=2 endpoint changes affect both; profile changes cannot reuse another profile's numeric entry |
-| T15 | Small ROI requires full values capacity; rejected allocation/work limits; cancellation during AST and strict refinement; all unpublished ownership released |
-| T16 | Cache-off, multiple consumers, context destruction with live output Results, and release by the final owner |
-| T17 | Strict bit equality on supported Apple Silicon and x86-64 builds; accelerated final FP32-scaled ULP checks, input-domain fallback, wrong-platform BackendUnavailable and unavailable complete-input counters |
-| T18 | Sensitive `1/(exp(x)-a)` boundary: require strict-equivalent failure classification and final-error acceptance |
-
-All three operation keys require public WorkflowDocument -> Compiler ->
-ExecutionContext coverage. Use declared
-input bindings and named output edges, request both full and regional results,
-and inspect actual producer read counts and returned bytes.
-
-### Public workflow example
-
-The public helper authors workflows with this DAG:
-
-```text
-start: Float32[1] = [0] ----+
-end:   Float64[1] = [1] ---+
-a:     Float64[1] = [2] --+|
-b:     Float32[1] = [1] -+||
-                        |||
-numeric.sample_expression_strict
-  expression = "a*x+b"
-  coefficient_names = "a b"
-  ordered inputs = [start, end, a, b]
-  count = 5
-  dtype = "float64"
-  values -> numeric consumer or returned result: [1,1.5,2,2.5,3]
-  axis   -> sampling-aware consumer or returned result: [0,1,0.25]
-```
-
-Changing only a to 3 and b to -1 yields `[-1,-0.25,0.5,1.25,2]` with the same
-axis and plan. Use the appropriate accelerated key on its supported CPU target.
-
-Performance acceptance records hardware, OS/compiler, math library/profile, N,
-AST, dtype, requested M, cache state, admitted resources and timing distribution.
-For the current complete-input Result benchmark, `invocations` counts operation polls and
-`computed_elements` reports the full output count even for an ROI; per-value
-evaluation, strict-math and fallback counters are N/A. Report the cumulative
-Root Payload peak separately from Referenced input storage and RSS. Compare
-against strict on polynomial and transcendental fixtures at N=256, 65536 and
-1048576, including small ROIs. No platform speedup claim is accepted without
-measurement on that platform; a numeric success alone does not demonstrate
-acceleration.
-
-### Current focused validation
-
-Temporary acceptance should check preparation shared across outputs and dynamic runs, mixed dtypes, a balanced 128-coefficient expression with 255 AST nodes and height 8 across 130 declared ports, and atomic axis publication. Cover failures outside requested values, duplicate coordinates with axis-only behavior, N=1 end-producer exclusion, invalid scalar schemas, Float32 overflow, Empty queries, caller/worker floating environments, work limits, cancellation and output lifetime. See [NUM-01 Run-shared complete-input computation](../expression-whole.md) for the execution behavior and validation scope.
-
-## 9. Related requirements
-
-- [Numeric category and NUM-01](../core.md).
-- [Curve and LUT category](../curves.md).
-- [Operator specification template](../../00-foundation/spec-template.md).
-- [Common data and execution contracts](../../00-foundation/contracts.md).
-
-Run-shared complete-input computation: [expression complete-input](../expression-whole.md).
+Related contracts: [Numeric category](../core.md), [curve/LUT category](../curves.md), [operator template](../../00-foundation/spec-template.md).

@@ -16,9 +16,10 @@
 #include <utility>
 #include <vector>
 
+#include "core/resource_observation.hpp"
 #include "data/affine_view.hpp"
 #include "data/footprint_index.hpp"
-#include "data/result_host_access.hpp"
+#include "data/result_device_access.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
@@ -27,6 +28,23 @@
 #include "photospider/data/result.hpp"
 
 namespace ps {
+ResultTensorReadWindow& ResultTensorReadWindow::operator=(
+    ResultTensorReadWindow&& other) noexcept {
+  if (this != &other) {
+    ResultTensorReadWindow replaced(std::move(other));
+    using std::swap;
+    swap(lease_, replaced.lease_);
+    swap(owner_, replaced.owner_);
+    owners_.swap(replaced.owners_);
+    source_leases_.swap(replaced.source_leases_);
+    swap(slot_, replaced.slot_);
+    swap(region_, replaced.region_);
+    swap(cancellation_, replaced.cancellation_);
+    affine_.swap(replaced.affine_);
+    swap(affine_canonical_, replaced.affine_canonical_);
+  }
+  return *this;
+}
 namespace {
 struct WindowWorkFailure {
   Status status;
@@ -134,11 +152,12 @@ Result<ResultTensorReadWindow> execution_internal::ResultWindowAccess::compose(
   auto& first = windows.front();
   if (!first.valid() || !first.owner_.owned_by(budget))
     return Answer(data_internal::invalid_schema());
-  const auto shape = first.spec().sample_shape();
+  const data_internal::SampleDescriptor sample(first.spec());
+  const auto& shape = sample.value.shape;
   FootprintLimits limits;
   limits.cancellation = cancellation;
   limits.consume_work = [budget](auto n) { return budget.consume({n}); };
-  auto requested = Footprint::from_regions(shape, {region}, limits);
+  auto requested = Footprint::from_region(shape, region, limits);
   auto covered = Footprint::none(shape, limits);
   if (!requested.ok() || !covered.ok())
     return Answer(requested.ok() ? covered.status() : requested.status());
@@ -154,7 +173,7 @@ Result<ResultTensorReadWindow> execution_internal::ResultWindowAccess::compose(
       return Answer(charged);
     if (!window.owner_.schema().same_schema(first.owner_.schema()))
       return Answer(data_internal::invalid_schema());
-    auto part = Footprint::from_regions(shape, {window.region_}, limits);
+    auto part = Footprint::from_region(shape, window.region_, limits);
     if (!part.ok())
       return Answer(part.status());
     auto outside = part.value().subtract(requested.value(), limits);
@@ -184,6 +203,9 @@ Result<ResultTensorReadWindow> execution_internal::ResultWindowAccess::compose(
   result.owner_ = first.owner_;
   result.slot_ = first.slot_;
   result.region_ = region;
+  core_internal::ResourceMetadataAccess::commit(
+      result.lease_,
+      result.region_.dimensions().capacity() * sizeof(RegionDimension));
   result.cancellation_ = cancellation;
   result.owners_ =
       ResourceVector<ResultRef>{ResourceAllocator<ResultRef>(budget)};
@@ -200,6 +222,11 @@ Result<ResultTensorReadWindow> execution_internal::ResultWindowAccess::compose(
     else
       for (auto& owner : window.owners_)
         result.owners_.push_back(std::move(owner));
+    const auto region_bytes =
+        window.region_.dimensions().capacity() * sizeof(RegionDimension);
+    window.region_ = {};
+    core_internal::ResourceMetadataAccess::withdraw(window.lease_,
+                                                    region_bytes);
     result.source_leases_.push_back(std::move(window.lease_));
     for (auto& prior : window.source_leases_)
       result.source_leases_.push_back(std::move(prior));
@@ -245,9 +272,6 @@ Result<bool> execution_internal::ResultWindowAccess::visit_backing_regions(
     return Answer(Status{ErrorCode::Stale, {}});
   if (window.affine_.size() <= 1)
     return Answer(false);
-  auto scratch = budget.reserve(ResourceCapacity::host(512, 512));
-  if (!scratch.ok())
-    return Answer(scratch.status());
   const auto visit = [&](const Region& region) {
     if (window.cancellation_.cancelled())
       return Status{ErrorCode::Cancelled, {}};
@@ -305,6 +329,7 @@ Result<TensorSpan> execution_internal::ResultWindowAccess::affine(
     return Result<TensorSpan>(Status{ErrorCode::Cancelled, {}});
   if (window.affine_.size() != 1)
     return Result<TensorSpan>(Status{ErrorCode::NotFound, {}});
+  ResourceAllocationScope scope(window.owner_.impl_->budget);
   return window.affine_[0].view(window.region_);
 }
 Result<std::optional<TensorSpan>>
@@ -317,9 +342,24 @@ execution_internal::ResultWindowAccess::input_view(
     return Answer(Status{ErrorCode::Cancelled, {}});
   if (window.affine_.empty())
     return Answer(std::optional<TensorSpan>{});
+  ResourceAllocationScope scope(window.owner_.impl_->budget);
+  auto scratch =
+      window.owner_.impl_->budget.reserve(ResourceCapacity::host(4096, 4096));
+  if (!scratch.ok())
+    return Answer(scratch.status());
+  core_internal::MetadataAllocation allocation(scratch.value());
+  const auto& spec = window.spec();
+  TensorDescriptor descriptor;
+  descriptor.element_type = spec.descriptor.element_type;
+  descriptor.shape.reserve(spec.batch_axes.size() +
+                           spec.descriptor.shape.size());
+  allocation.commit(descriptor.shape.capacity() * sizeof(std::uint64_t));
+  descriptor.shape.insert(descriptor.shape.end(), spec.batch_axes.begin(),
+                          spec.batch_axes.end());
+  descriptor.shape.insert(descriptor.shape.end(), spec.descriptor.shape.begin(),
+                          spec.descriptor.shape.end());
   return input_internal::join_affine_view(
-      {window.spec().descriptor.element_type, window.spec().sample_shape()},
-      window.region_, window.affine_, limits);
+      descriptor, window.region_, window.affine_, limits, scratch.value());
 }
 namespace {
 bool inside(const Region& region, const std::vector<std::uint64_t>& at) {
@@ -334,7 +374,7 @@ bool inside(const Region& region, const std::vector<std::uint64_t>& at) {
 }
 }  // namespace
 Status ResultTensorReadWindow::copy_to(std::uint8_t* destination,
-                                       std::uint64_t bytes) const {
+                                       std::uint64_t bytes) const try {
   if (!valid() || !destination)
     return {ErrorCode::InvalidArgument, {}};
   auto count = region_.element_count();
@@ -342,7 +382,15 @@ Status ResultTensorReadWindow::copy_to(std::uint8_t* destination,
   if (!count.ok() || !core_internal::can_multiply(count.value(), width) ||
       bytes != count.value() * width)
     return {ErrorCode::InvalidArgument, "tensor copy byte count mismatch"};
+  const auto metadata_bytes = region_.rank() * sizeof(std::uint64_t);
+  auto scratch = owner_.impl_->budget.reserve(
+      ResourceCapacity::host(metadata_bytes, metadata_bytes));
+  if (!scratch.ok())
+    return scratch.status();
+  core_internal::MetadataAllocation allocation(scratch.value());
   std::vector<std::uint64_t> at;
+  at.reserve(region_.rank());
+  allocation.commit(at.capacity() * sizeof(std::uint64_t));
   for (const auto& axis : region_.dimensions())
     at.push_back(axis.offset);
   for (std::uint64_t sample = 0; sample < count.value(); ++sample) {
@@ -363,6 +411,8 @@ Status ResultTensorReadWindow::copy_to(std::uint8_t* destination,
     }
   }
   return Status::success();
+} catch (const std::bad_alloc&) {
+  return {ErrorCode::ResourceExhausted, {}};
 }
 Result<ResultTensorRun> ResultTensorReadWindow::row_run(
     const std::vector<std::uint64_t>& at) const {
@@ -394,10 +444,6 @@ Result<ResultTensorRun> ResultTensorReadWindow::row_run(
     // The validated TensorSpan span guarantees this product, including
     // broadcasts.
     const auto bytes = (samples - 1) * magnitude + width;
-    auto observed =
-        data_internal::ResultHostAccessScope::observe(value.storage());
-    if (!observed.ok())
-      return Result<ResultTensorRun>(observed);
     return Result<ResultTensorRun>(ResultTensorRun{
         value.bytes().data() + address.value(), samples, bytes, stride});
   }
@@ -524,7 +570,8 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
       slot >= impl_->schema.tensors.size())
     return Answer(Status{ErrorCode::Stale, "invalid image descriptor"});
   const auto& spec = impl_->schema.tensors[slot];
-  if (region.empty() || !region.validate(spec.sample_shape()).ok())
+  const data_internal::SampleDescriptor sample(spec);
+  if (region.empty() || !region.validate(sample.value.shape).ok())
     return Answer(Status{ErrorCode::InvalidArgument,
                          "image window requires one frame/layer rectangle"});
   FootprintLimits limits;
@@ -532,8 +579,7 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
   limits.consume_work = [budget = impl_->budget](auto n) {
     return budget.consume({n});
   };
-  auto requested =
-      Footprint::from_regions(spec.sample_shape(), {region}, limits);
+  auto requested = Footprint::from_region(sample.value.shape, region, limits);
   if (!requested.ok())
     return Answer(requested.status());
   auto missing = requested.value().subtract(facts.tensors_[slot], limits);
@@ -541,6 +587,17 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
     return Answer(missing.status());
   if (!missing.value().empty())
     return Answer(data_internal::unavailable());
+  for (const auto& span : impl_->tensors[slot].device) {
+    auto charged = impl_->budget.consume({region.rank() + 1});
+    if (!charged.ok())
+      return Answer(charged);
+    if (cancellation.cancelled())
+      return Answer(Status{ErrorCode::Cancelled, {}});
+    if (data_internal::regions_overlap(region, span.region()))
+      return Answer(
+          Status{ErrorCode::BackendUnavailable,
+                 "Device Result requires an explicit COPY to CPU storage"});
+  }
   auto lease = impl_->budget.reserve(ResourceCapacity::host(
       sizeof(ResultTensorReadWindow) + region.rank() * sizeof(RegionDimension),
       sizeof(ResultTensorReadWindow) +
@@ -555,13 +612,19 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
         ResourceCapacity::host(sizeof(Capture), sizeof(Capture)));
     if (!admitted.ok())
       return Answer(admitted.status());
-    auto capture = std::make_shared<Capture>();
-    capture->lease = admitted.take_value();
+    auto owned = std::make_unique<Capture>();
+    owned->lease = admitted.take_value();
+    core_internal::ResourceMetadataAccess::commit(owned->lease,
+                                                  sizeof(Capture));
+    auto capture = std::shared_ptr<Capture>(std::move(owned));
     capture->descriptor = facts;
     result.owner_.captured_ = std::move(capture);
   }
   result.slot_ = slot;
   result.region_ = region;
+  core_internal::ResourceMetadataAccess::commit(
+      result.lease_,
+      result.region_.dimensions().capacity() * sizeof(RegionDimension));
   result.affine_ =
       ResourceVector<TensorSpan>(ResourceAllocator<TensorSpan>(impl_->budget));
   result.cancellation_ = cancellation;
@@ -584,19 +647,17 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
     for (std::size_t axis = 0; axis < region.rank(); ++axis)
       at[axis] = region.dimensions()[axis].offset;
     std::uint64_t levels = 1;
-    for (auto n = backing.tensor.fragments().size(); n; n >>= 1)
+    for (auto n = backing.affine.size(); n; n >>= 1)
       levels += 2;
     auto charged = impl_->budget.consume({levels * region.rank()});
     if (!charged.ok())
       return Answer(charged);
     const auto index = footprint_internal::containing(
-        backing.tensor.fragments().size(), region.rank(), at.data(),
-        [&](auto i) -> const Region& {
-          return backing.tensor.fragments()[i].region();
-        },
+        backing.affine.size(), region.rank(), at.data(),
+        [&](auto i) -> const Region& { return backing.affine[i].region(); },
         [] {});
-    if (index != backing.tensor.fragments().size()) {
-      const auto& value = backing.tensor.fragments()[index];
+    if (index != backing.affine.size()) {
+      const auto& value = backing.affine[index];
       bool contained = true;
       for (std::size_t axis = 0; axis < region.rank(); ++axis) {
         const auto a = region.dimensions()[axis],
@@ -614,14 +675,16 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
     // Distinct canonical values are disjoint. The authorization check already
     // proved this entire request covered, so clip each backing once instead of
     // repeatedly subtracting its prefix from a growing set of remaining boxes.
-    charged = impl_->budget.consume(
-        {backing.tensor.fragments().size() * (region.rank() + 1)});
+    charged =
+        impl_->budget.consume({backing.affine.size() * (region.rank() + 1)});
     if (!charged.ok())
       return Answer(charged);
-    for (const auto& value : backing.tensor.fragments()) {
+    for (const auto& value : backing.affine) {
       if (cancellation.cancelled())
         return Answer(Status{ErrorCode::Cancelled, {}});
+      core_internal::MetadataAllocation allocation(scratch.value());
       auto dims = region.dimensions();
+      allocation.commit(dims.capacity() * sizeof(RegionDimension));
       bool overlaps = true;
       for (std::size_t axis = 0; axis < dims.size(); ++axis) {
         const auto other = value.region().dimensions()[axis];
@@ -644,8 +707,8 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
     return Answer(std::move(result));
   }
   auto remaining = requested.take_value();
-  if (!impl_->tensors[slot].tensor.fragments().empty()) {
-    for (const auto& value : impl_->tensors[slot].tensor.fragments()) {
+  if (!impl_->tensors[slot].affine.empty()) {
+    for (const auto& value : impl_->tensors[slot].affine) {
       if (remaining.empty())
         break;
       if (cancellation.cancelled())
@@ -666,8 +729,8 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
       if (!overlaps)
         continue;
 
-      auto available = Footprint::from_regions(spec.sample_shape(),
-                                               {value.region()}, limits);
+      auto available =
+          Footprint::from_region(sample.value.shape, value.region(), limits);
       if (!available.ok())
         return Answer(available.status());
       auto covered = remaining.intersect(available.value(), limits);
@@ -703,7 +766,7 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
 Status ResultRef::read_tensor(const ResultDescriptor& facts, std::uint32_t slot,
                               const std::vector<std::uint64_t>& at,
                               void* destination, std::size_t bytes,
-                              const CancellationToken& cancellation) const {
+                              const CancellationToken& cancellation) const try {
   if (!impl_)
     return Status{ErrorCode::Stale, {}};
   if (!destination || slot >= schema().tensors.size() ||
@@ -712,11 +775,19 @@ Status ResultRef::read_tensor(const ResultDescriptor& facts, std::uint32_t slot,
     return Status{ErrorCode::InvalidArgument, "invalid image read"};
   if (slot >= facts.tensor_count() || !facts.tensor_coverage(slot).contains(at))
     return Status{ErrorCode::InvalidArgument, "unauthorized image sample"};
+  const auto metadata_bytes = at.size() * sizeof(RegionDimension);
+  auto scratch = impl_->budget.reserve(
+      ResourceCapacity::host(metadata_bytes, metadata_bytes));
+  if (!scratch.ok())
+    return scratch.status();
+  core_internal::MetadataAllocation allocation(scratch.value());
   std::vector<RegionDimension> dimensions;
+  dimensions.reserve(at.size());
+  allocation.commit(dimensions.capacity() * sizeof(RegionDimension));
   for (auto n : at)
     dimensions.push_back({n, 1});
-  auto window =
-      acquire_tensor(facts, slot, Region(std::move(dimensions)), cancellation);
+  const Region region(std::move(dimensions));
+  auto window = acquire_tensor(facts, slot, region, cancellation);
   if (!window.ok())
     return window.status();
   auto work = impl_->budget.consume({1});
@@ -727,5 +798,7 @@ Status ResultRef::read_tensor(const ResultDescriptor& facts, std::uint32_t slot,
     return run.status();
   std::memcpy(destination, run.value().data, bytes);
   return Status::success();
+} catch (const std::bad_alloc&) {
+  return {ErrorCode::ResourceExhausted, {}};
 }
 }  // namespace ps

@@ -10,10 +10,11 @@
 #include "execution/native_gpu.hpp"
 #include "photospider/photospider.hpp"
 #include "photospider/plugin/fragment_atlas_msl.h"
-#include "support/test_support.hpp"
+#include "support/fixed_native_fixture.hpp"
+#include "support/status_check.hpp"
 
 namespace {
-// MSL continuation strings are not namespace indentation.
+// MSL source strings are not namespace indentation.
 // NOLINTBEGIN(whitespace/indent_namespace)
 constexpr char shader[] = PS_FRAGMENT_ATLAS_MSL_V11
     "kernel void lookup(device const uchar* data [[buffer(0)]],\n"
@@ -87,21 +88,31 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
   auto indices = allocator.allocate(coordinates.size() * 8).take_value();
   std::memcpy(indices.data(), coordinates.data(), coordinates.size() * 8);
   auto output = allocator.allocate(queries.size() * 16).take_value();
-  gpu_internal::Invocation invocation(device, {});
-  const auto* service = invocation.service();
-  std::array<ps_gpu_buffer_binding_v1, 4> buffers{};
+  std::array<ps_native_binding_v2, 4> buffers{};
   const std::uint8_t* pointers[]{atlas.payload.bytes().data(),
-                                 atlas.directory.bytes().data(), indices.data(),
-                                 output.data()};
+                                 atlas.directory.bytes().data(),
+                                 indices.data()};
   const std::uint64_t sizes[]{atlas.payload.bytes().size(),
                               atlas.directory.bytes().size(), indices.size(),
                               output.size()};
+  std::array<ps_kernel_view_spec_v8, 4> specifications{};
+  std::array<ps_kernel_const_view_v8, 3> reads{};
   for (unsigned i = 0; i < 4; ++i) {
-    std::uint64_t token = 0;
-    PS_CHECK(service->buffer(service->context, pointers[i], sizes[i], i == 3,
-                             &token) == 0);
-    buffers[i] = {
-        sizeof(ps_gpu_buffer_binding_v1), i, token, 0, sizes[i], i == 3};
+    buffers[i] = {i, i == 3 ? PS_NATIVE_OUTPUT_V2 : PS_NATIVE_INPUT_V2,
+                  i == 3 ? 0 : i, 0, sizes[i]};
+    auto& spec = specifications[i];
+    spec.domain = PS_KERNEL_DOMAIN_SHARED_V8;
+    spec.bytes = sizes[i];
+    spec.layout.element_type = static_cast<std::uint32_t>(ElementType::UInt8);
+    spec.layout.rank = 1;
+    spec.layout.shape[0] = sizes[i];
+    spec.layout.strides[0] = 1;
+    if (i < 3) {
+      reads[i].allocation = pointers[i];
+      reads[i].bytes = sizes[i];
+      reads[i].domain = spec.domain;
+      reads[i].layout = &spec.layout;
+    }
   }
   std::array<std::uint64_t, 20> config{};
   config[0] = shape.size();
@@ -112,23 +123,40 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
     config[4 + axis] = shape[axis];
     config[12 + axis] = atlas.tile_shape[axis];
   }
-  ps_gpu_dispatch_v1 command{};
+  ps_native_program_v2 command{};
   command.struct_size = sizeof(command);
-  command.source = shader;
-  command.source_size = sizeof(shader) - 1;
-  command.entry = "lookup";
-  command.entry_size = 6;
-  command.buffers = buffers.data();
-  command.buffer_count = buffers.size();
+  command.source = {shader, sizeof(shader) - 1};
+  command.entry = {"lookup", 6};
+  command.bindings = buffers.data();
+  command.binding_count = buffers.size();
   command.constants = config.data();
-  command.constant_size = sizeof(config);
+  command.constant_bytes = sizeof(config);
   command.constant_index = 4;
   command.grid[0] = queries.size();
   command.grid[1] = command.grid[2] = 1;
-  const auto code = service->execute(service->context, &command, 1);
-  if (code)
-    std::cerr << invocation.status().message << '\n';
-  PS_CHECK(code == 0 && invocation.statistics().dispatches == 1);
+  ps_kernel_preparation_v8 preparation{};
+  preparation.struct_size = sizeof(preparation);
+  preparation.placement.backend = PS_BACKEND_GPU_V8;
+  preparation.placement.domain = PS_KERNEL_DOMAIN_SHARED_V8;
+  preparation.reads = specifications.data();
+  preparation.read_count = 3;
+  preparation.writes = &specifications[3];
+  preparation.write_count = 1;
+  test::NativeKernel kernel;
+  PS_REQUIRE_OK(kernel.prepare(device, command, preparation));
+  ps_kernel_mutable_view_v8 write{};
+  write.allocation = output.data();
+  write.bytes = output.size();
+  write.domain = PS_KERNEL_DOMAIN_SHARED_V8;
+  write.layout = &specifications[3].layout;
+  ps_kernel_invocation_v8 invocation{};
+  invocation.inputs = reads.data();
+  invocation.input_count = reads.size();
+  const std::array<std::uint64_t, 3> identities{1, 2, 3};
+  invocation.input_object_ids = identities.data();
+  invocation.outputs = &write;
+  invocation.output_count = 1;
+  PS_REQUIRE_OK(kernel.run(invocation));
   for (std::size_t i = 0; i < queries.size(); ++i) {
     std::uint64_t found = 0, bits = 0;
     std::memcpy(&found, output.data() + i * 16, 8);
@@ -143,7 +171,7 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
 int main() {
   auto device = ps::gpu_internal::Device::create();
   if (!device || !device->available() ||
-      device->backend() != PS_GPU_BACKEND_METAL_V1) {
+      device->backend() != PS_NATIVE_METAL_V2) {
     std::cout << "SKIP: native Metal unavailable\n";
     return 77;
   }

@@ -40,17 +40,14 @@ through the six registered keys while this specification remains Proposed.
 
 Each dynamic input is a Result containing one tensor member under any schema id and member key; `sample_shape()` gives x[K], y[K] and query[N]. x is finite and strictly increasing;
 y is finite and either strictly increasing or strictly decreasing globally.
-Reject plateaus/repeated y values. query contains target y values, may repeat or
-be unordered. Every nonempty request validates all x/y for the required topology;
-this global validation is stronger than forward interpolation's local y reads.
+Plateaus/repeated y values violate the caller contract. Query contains target y values and may repeat or be unordered. Global x/y topology is a caller precondition, stronger than forward interpolation's local finite-y requirement.
 
 Static out_of_domain is reject/clamp, default reject. Compare query against the
 actual numeric range of y; clamp selects the corresponding x endpoint, accounting
 for y direction. No inverse of extrapolated linear/PCHIP tails is provided.
 
 x/y/query independently accept Float32/Float64 and may mix. Output port `values` is a Result with schema `photospider.tensor`, member `samples`, shape [N], no attached domain description and static Float32/Float64 dtype, default Float64. K is 2..65536; N is
-1..2^40. Every nonempty request reads all three inputs and computes the complete output. Every query and final x must be finite; an invalid query or output
-overflow anywhere fails the run, including outside the delivered footprint.
+1..2^40. Each selected output tile reads complete x/y and its query row range. Consumed queries and selected final x values must be finite; final representability is a caller precondition.
 
 Strict inverts the forward mathematical curve before destination rounding, then
 correctly rounds x directly to output dtype. It does not invert the many-to-one
@@ -63,8 +60,7 @@ Exact y-knot hits and clamp directly convert corresponding x knots, preserving
 zero sign on every profile. Other mathematical zero results are +0; nonzero
 underflow preserves sign. PCHIP accelerated falls back to strict
 when error, segment range, zero classification or monotonicity cannot be ensured.
-Only final x is checked for representability; an unreturned segment
-endpoint narrowing to infinity does not independently reject a finite root.
+Representability is required for selected final x values. An unreturned segment endpoint narrowing to infinity does not invalidate a finite root.
 
 ## Exact formulas and algorithms
 
@@ -100,48 +96,32 @@ mapping as a function of query; sorting one output batch does not satisfy this.
 The range is between selected x endpoints converted to the destination, and
 classification/sign must match strict. No GPU implementation is specified.
 
-## Demand, dirty propagation and storage
+## Fixed execution, resources and caller preconditions
 
-Empty Q reads no payload. All six formal profile keys use complete-input. Nonempty Q collects complete x/y/query Results with ordinary payload tile Needs, validates global x/y topology, then prechecks every query control before inverse arithmetic. The unchanged
-linear pair or PCHIP stencil is selected from complete inputs. Any input change
-invalidates the complete output. Full typed/upstream validation can fail even
-outside delivered Q. Dynamic numerical failures have Domain/Run scope.
+Each selected output tile lowers to one fixed CPU Host invocation. It declares complete x and y support and only the corresponding query row interval, closed through each source's own tile grid. Atomic source axes can enlarge the physical read set. Query values may be unordered or repeated. The task searches y directly through borrowed views, using the direction of its first two knots; it passes the original x/y stencil to the exact inverse algorithm.
 
-Cache identity includes method, dtype, policy, profile and complete inputs. The program publishes one immutable dense Result with complete internal coverage, with public coverage restricted to requested tiles; sample coordinates remain global rather than being rebased to Q. Arbitrary legal strides, offsets, unaligned and zero/negative strides are supported. Output ownership survives context destruction.
+The entire x and y arrays must be finite, x must strictly increase, and y must be globally strictly increasing or decreasing without plateaus. Consumed query values must be finite and within the closed numeric y range under `reject`. Selected final outputs must be finite and representable. These are unchecked caller preconditions. Preparation checks schemas, static parameters, canonical outputs, exact read membership and scratch; runtime performs no full-array topology or query-validation scan.
 
-Lookup work is O(K+N log K) plus exact arithmetic/refinement. Promoted x/y use
-16*K element bytes plus allocator/metadata overhead. Fixed arithmetic workspace
-and per-root state replace per-output dependency records; complete output uses
-N*sizeof(dtype), and collected input storage is also budgeted. Sparse demand can
-therefore exhaust capacity that regional execution previously accepted. Work and
-cancellation checks cover topology/query scans, search, each root refinement and
-publication. Failure releases temporary storage and publishes no partial output.
-DependencySession numeric/fallback counters are unavailable for complete-input callbacks;
-N/A is not a claim of zero fallback. Scalar/NEON/AVX2 math paths remain available.
+Only selected global output coordinates are evaluated and allocated. Each invocation constructs its own `ExactCurve` in preallocated Host scratch of `sizeof(ExactCurve)`, including the 96-slot arena and ratio workspace. No promoted x/y arrays or per-query certificates are retained. Search costs `O(R log K)` for R rows of a task, plus local inverse arithmetic/refinement. Input tile owners, selected output allocations and granted-lane scratch require admission; the full logical output need not fit in memory.
+
+Empty selection emits no payload task while static metadata remains checked. Rebinding reuses immutable preparation and creates independent Run-owned output; there is no content-cache or repeated-demand identity guarantee. Legal immutable signed/zero strides and unaligned offsets are supported through the compiled views. Result owners survive context destruction. Successful task tiles can feed internal dependencies; public call Results appear only after all required tasks succeed and ordered retirement occurs.
+
+Cancellation is polled during binary search, output traversal and exact root/limb operations. Internal arena, product, shift and zero-denominator guards remain active. PCHIP lattice comparison retains its segment-interior bounds, exact infinity-boundary midpoints and finite termination rules. Accelerated candidates require the existing unique-rounding certificate; otherwise exact evaluation proceeds. Fixed invocations do not expose per-value fallback counters.
 
 ## Errors and acceptance
 
-Malformed static parameters/count limits fail compile/preflight with
-InvalidArgument/InvalidDomain; dtype/shape mismatch uses TypeMismatch. Nonfinite
-x/y, invalid global monotonicity, nonfinite query or reject-domain
-failure uses OperationFailed/InvalidDomain. Final narrowing overflow uses
-OperationFailed/ArithmeticOverflow. ResourceExhausted, BackendUnavailable,
-cancellation, stale and upstream errors retain their shared categories/provenance.
-complete-input output publication is atomic. A final output overflow anywhere fails the run;
-an unused endpoint that would narrow to infinity does not reject a finite root.
+Malformed static parameters fail compile/preparation with `InvalidArgument`; incompatible dtype, rank, shape or size returns the corresponding metadata failure (`TypeMismatch` or `InvalidArgument`). Resource exhaustion, unavailable backends, cancellation, stale inputs and required upstream task failures retain their operational categories. Numerical finite-value, topology, reject-domain and output-representability preconditions have no promised rejection diagnostic. A failed call publishes no partial successful Result.
 
 Linear fixture x=[0,1,3],y=[0,2,4],query=[3,1,3] -> [2,0.5,2]. PCHIP fixture
 x=[0,1,2],y=[0,1,4],query=[0.3125,2.1875] -> [0.5,1.5]. Negating y and query
 keeps these x results. These exact dyadic examples must pass across all versions.
 Use independent rational/certified-polynomial references, zero derivative near
-endpoints, extreme scales, narrow x intervals, midpoint roots, K=2, y plateaus,
-both y directions, clamp, signed zeros, mixed dtype and output overflow tests.
+endpoints, extreme scales, narrow x intervals, midpoint roots, K=2, both strict y directions, clamp, signed zeros, mixed dtype and finite roots whose unselected endpoints exceed the destination range.
 Forward(inverse(query)) need not recover query bits after both outputs round.
 
 Validate PCHIP 4-ULP x bounds, classifications, segment bounds and cross-fallback
 monotonicity for all supported profiles, independent of request order/partition.
-Test global versus local failure support, strides, exact dirty witnesses, cache-off,
-low budgets, cancellation and owner lifetime. A temporary public workflow should bind
+Inspect full x/y and selected-query tile support. Test strides, concurrent Runs, rebinding, low budgets, cancellation and owner lifetime. A temporary public workflow should bind
 x/y/query and static dtype/policy through Compiler/ExecutionContext. Create this check for the current change and remove it after validation.
 
 - [Linear inverse](CRV-10A_invert_linear.md).
@@ -152,10 +132,6 @@ x/y/query and static dtype/policy through Compiler/ExecutionContext. Create this
 
 ## Maintained implementation and validation
 
+`plugins/ops/01-numeric/curve_inverse.cpp` registers six fixed CPU Result keys through `fixed_curve.hpp`; the public constructors are `invert_linear_node` and `invert_pchip_node` in [`inverse_curves.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/inverse_curves.hpp). Strict and Float64 linear inversion use exact rational evaluation; PCHIP uses the exact polynomial/lattice algorithm. Accelerated Float32 linear and PCHIP may first use certified bracket refinement and accept only a uniquely rounded result. Unresolved cases use their exact rational or polynomial/lattice paths. Exact cross products reduce collinear PCHIP stencils to linear inversion; K=2, knot and clamp paths remain direct. Scalar integer comparison temporarily selects the strict inverse math profile and restores the surrounding numeric profile afterward. The execution floating-environment guard independently preserves the caller environment.
 
-
-`plugins/ops/01-numeric/curve_inverse.cpp` registers the six complete-input Result keys; the public constructors are `invert_linear_node` and `invert_pchip_node` in [`inverse_curves.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/inverse_curves.hpp). Linear inversion uses an exact rational path across profiles. Strict and general Float64 PCHIP use the exact polynomial/lattice algorithm. Accelerated Float32 PCHIP uses a certified bracket and accepts only a uniquely rounded result, otherwise it falls back to the strict scalar solver. Exact cross products reduce collinear PCHIP stencils to linear inversion; K=2, knot and clamp paths remain direct. Scalar integer comparison temporarily selects the strict inverse math profile and restores the surrounding numeric profile afterward. The execution floating-environment guard independently preserves the caller environment.
-
-For temporary validation, bind immutable source Results and read outputs through authorized windows. Cover caller/worker floating environments, mixed dtypes, negative/zero strides, dirty scope, knot/clamp signed zero, preparation reuse and repeated-demand identity. Include Empty without polling a failing producer, SampledSignal errors attributed to input 2, cancellation and source-owner retirement.
-
-A three-element Float32/Float64 output and its windows retain 12/24 Payload bytes after source retirement; releasing the last window releases that payload. A constant View with N=2^40 must fail `ResourceExhausted/CapacityLimit` when complete complete-input output storage exceeds the configured Payload cap. This case checks admission, not numerical execution at that logical size.
+Temporary validation binds immutable source Results and reads selected outputs through the public Result API. Compare the independent Fraction/polynomial oracle in `oracle/ops/numeric/crv10/reference.py`, using valid caller-domain inputs. Cover caller/worker floating environments, mixed dtypes, signed/zero strides, knot/clamp signed zero, sparse and empty selections, preparation reuse, current bindings, cancellation, static signature rejection and source-owner retirement. At large logical N, bind only the selected query tiles and verify admission against selected output plus fixed scratch, separately from insufficient-budget rejection. Retain the independent oracle and delete temporary runtime checkers after validation.

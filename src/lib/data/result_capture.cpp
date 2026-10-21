@@ -16,8 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/resource_observation.hpp"
 #include "data/affine_view.hpp"
-#include "data/result_host_access.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
@@ -36,8 +36,11 @@ Result<ResultRef> ResultRef::capture() const {
   if (!admitted.ok())
     return Result<ResultRef>(admitted.status());
   try {
-    auto capture = std::shared_ptr<Capture>(new Capture());
-    capture->lease = admitted.take_value();
+    auto owned = std::make_unique<Capture>();
+    owned->lease = admitted.take_value();
+    core_internal::ResourceMetadataAccess::commit(owned->lease,
+                                                  sizeof(Capture));
+    auto capture = std::shared_ptr<Capture>(std::move(owned));
     auto& facts = capture->descriptor;
     facts.object_ = impl_->object;
     facts.revision_ = impl_->revision;
@@ -45,7 +48,7 @@ Result<ResultRef> ResultRef::capture() const {
     facts.tensor_count_ = impl_->schema.tensors.size();
 
     for (uint32_t i = 0; i < facts.tensor_count_; ++i) {
-      facts.tensors_[i] = impl_->tensors[i].tensor.coverage();
+      facts.tensors_[i] = impl_->tensors[i].coverage;
     }
     ResultRef result = *this;
     result.captured_ = std::move(capture);
@@ -89,7 +92,7 @@ Result<ResultDescriptor> ResultRef::descriptor(bool require_complete) const {
   facts.tensor_count_ =
       static_cast<std::uint32_t>(impl_->schema.tensors.size());
   for (std::uint32_t i = 0; i < facts.tensor_count_; ++i)
-    facts.tensors_[i] = impl_->tensors[i].tensor.coverage();
+    facts.tensors_[i] = impl_->tensors[i].coverage;
   return Result<ResultDescriptor>(facts);
 }
 }  // namespace ps

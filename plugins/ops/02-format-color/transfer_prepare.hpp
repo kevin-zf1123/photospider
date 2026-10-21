@@ -45,9 +45,10 @@ struct Preparation final {
   SequenceProfile profile = SequenceProfile::Strict;
   std::optional<std::uint32_t> axis, sample_axis;
   std::string layout;
+  std::shared_ptr<const SchemaTemplate> output_schema;
 
   std::vector<std::uint64_t> components;
-  bool all = false, semantic = true, materialize = false, narrow = true;
+  bool all = false, semantic = true, narrow = true;
   bool selected(std::uint64_t index) const {
     return all ||
            std::binary_search(components.begin(), components.end(), index);
@@ -203,7 +204,6 @@ inline Result<OperationPreparation> prepare(
   if (layout != "auto" && layout != "view" && layout != "materialize")
     return R(invalid("layout"));
   state->semantic = p.count("input_description") != 0;
-  state->materialize = layout == "materialize";
   state->layout = layout;
   std::optional<TensorDescription> description;
   if (state->semantic) {
@@ -362,10 +362,9 @@ inline Result<OperationPreparation> prepare(
   auto schema = *inputs[0].result_schema;
   auto& output_tensor = schema.tensors[0];
   output_tensor.atomic_trailing_axes = 0;
-  if (output_tensor.layout.spatial &&
-      (!state->program.identity || state->materialize))
   output.metadata.result_schema =
-      std::make_shared<SchemaTemplate>(std::move(schema));
+      std::make_shared<const SchemaTemplate>(std::move(schema));
+  state->output_schema = output.metadata.result_schema;
   OperationPreparation result;
   result.outputs.push_back(std::move(output));
   result.state = std::move(state);

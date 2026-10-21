@@ -46,25 +46,14 @@ Finite constants retain bits when all contributing extended samples match.
 Follow the shared IEEE NaN/Inf ordering and skip only mathematical zero taps.
 Do not drop underflowed approximate coefficients from logical dependencies.
 
-All three formal keys use Run-shared Result programs. Nonempty requests declare Data,
-Validation and Descriptor needs  for the complete input member. Typed and
-upstream validation covers the full tensor; authorized windows feed the callback
-directly without collecting or copying full input. complete-input computes all outputs.
-Input changes invalidate complete recorded output demand; empty demand reads no
-payload after static preflight. The Result writer publishes the complete same-
-shape/dtype output in one transaction, with full coverage and global coordinates.
-The Root accounts source windows, the full N*sizeof(dtype) output, and bounded
-coefficient/tap workspace. Legal strides remain supported; the output owner
-survives context teardown. Failure or cancellation publishes no partial output
-and releases temporary state. The shared contract defines the unchanged
-mathematical tap selection, boundary mapping, NaN/Inf order and zero signs.
+All three keys use the [fixed execution and resource contract](CRV-11_uniform_lowpass_contract.md#demand-mapping-resources-and-error-contract). Each selected output tile has one CPU task with the exact mapped nonzero-tap source closure and private preallocated arithmetic scratch. Only selected outputs are computed and allocated; global coordinates and IEEE tap order are preserved. Empty selection emits no task. Preparation checks the complete invocation signature, and the executor publishes the call after its writes succeed and retire.
 
 ## Acceptance and implementation status
 
 Use the shared certified coefficient/whole-sum oracle, impulse/DC/sine response,
 both dtypes and all CPU profiles, zero taps, signed zero and IEEE exceptions.
 Test both full signals and sparse/ROI requests, short signals, every boundary,
-strides, complete dirty support, low budgets, cancellation and post-context owners.
+affine views, exact source-tile closure, low budgets, cancellation and post-context owners.
 The frequency response and target-downsampling attenuation require independent
 measurement; this primitive never claims ideal cutoff or zero aliasing.
 
@@ -74,11 +63,4 @@ does not claim ideal cutoff or zero-aliasing behavior.
 
 ## Maintained implementation and validation
 
-This primitive is registered in the five-kernel uniform low-pass family.
-Exact tap support precedes numerical evaluation. Accelerated keys cache certified
-coefficient enclosures per complete-input invocation and propagate convolution/normalization
-error to the final output gate. Unresolved coefficients or outputs use strict
-whole-sum evaluation, with complete-input fallback counters unavailable. Support and special-value
-shortcuts remain exact.
-Certified precision is bounded to 128..4096 bits; unresolved
-capacity or rounding may return `ResourceExhausted`. See [CRV-11 umbrella](CRV-11_resample_signal.md).
+This primitive uses the uniform family's fixed CPU adapter. Exact tap support precedes numerical evaluation. Accelerated keys prepare certified coefficient enclosures once per selected tile invocation and propagate convolution/normalization error to the final output gate. Numerical uncertainty uses strict whole-sum evaluation; operational failures return directly. Special-value and constant shortcuts retain the positive-normalizer proof. Certified precision is bounded to 128..4096 bits; unresolved capacity or rounding may return `ResourceExhausted`. See [CRV-11 umbrella](CRV-11_resample_signal.md).

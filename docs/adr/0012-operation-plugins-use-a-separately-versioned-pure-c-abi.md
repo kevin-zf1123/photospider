@@ -1,53 +1,45 @@
 # ADR 0012: Operation Plugins Use Versioned C Contracts
 
 - Status: Accepted
-- Proposed successor: [ADR 0022](0022-freeze-operation-c-abi-v3.md) replaces the exact-size table rule with prefix negotiation and moves built-in operations onto the same C import path. This ADR describes ABI 7 until ADR 0022 is accepted and implemented.
+- Implementation note (2026-10-20): the pure C boundary remains the accepted decision. Package 0.39.0 implements operation module ABI 8 and fixed invocation ABI 8. [ADR 0022](0022-freeze-operation-c-abi-v3.md) remains a historical Proposed continuation design; its staged records and prefix-negotiation proposal are not the current ABI.
 
-## Current implementation: static mapping
+## 1. Core summary
 
-Package 0.37.0 uses exact-size Result ABI 7. Its operation table adds
-`map_dependencies`, called synchronously by the planner with
-`ps_result_static_query_v7` and a mapping sink. The host copies and validates
-input/shared reads into fixed Plan grants. A NULL C mapping callback selects the
-complete-input baseline; a successful hook that emits no reads declares an
-empty mapping. At runtime, Need only checks those grants. Query and sink records
-are borrowed for the mapping callback and cannot be retained. This extends the
-versioned C contract without implementing ADR 0022's proposed prefix negotiation.
+Operation plugins cross the kernel boundary through versioned C interfaces. The host validates and copies declarations before publishing registry entries. C modules and C++ operations use the same static lowering, physical Plan validation and fixed invocation contracts. Native plugins remain in the host process and trust domain.
 
-## 1. Core Summary (TL;DR)
-Operation plugins cross the kernel boundary through versioned C interfaces. The host validates and copies descriptors before making registry entries available. This keeps compiler metadata independent from plugin C++ object layouts while leaving native plugins in the host process and trust domain.
+The current contracts are specified in [Plugin ABI](../kernel-architecture/Plugin-ABI.md) and [Compiler, Plan and Executor](../kernel-architecture/Compiler-and-Execution.md). Their implementation status does not change the formal status of the broader physical-execution proposal.
 
-## 2. Mental Model & Intuition
+## 2. Ownership and stages
 
-```text
-startup configuration --> load library --> validate exact table --> copy traits/schemas
-                                                   |
-                                      registry frozen for compiler and runs
-                                                   |
-                                          synchronous callback
-                                                   |
-                                      host validates/copies output
-```
+Startup loading validates the module table and copies traits, schemas and parameter contracts into a private registry candidate. Publication is atomic; the registry is frozen before compiler and executor use.
 
-Library-owned tables remain mapped while their destroy callback runs. The host owns copied metadata and validates Result schemas and publication. C++ dependency programs can retain authorized input-owner handles until explicit release or state destruction; per-poll pointers remain borrowed. Result tensor windows and native GPU tokens retain backing owners until release or callback retirement. These lifetimes are detailed in [Plugin ABI](../kernel-architecture/Plugin-ABI.md).
+Static preparation specializes schemas and captures immutable state and declared resources. Lowering constructs fixed tasks, reads, writes, placement and scratch; it never receives sample payload. Explicit execution preparation links kernels and native pipelines without changing topology. CPU invocation returns only after access ends; accepted GPU invocation owns its borrowed views through exactly one terminal completion.
 
-## 3. Formal Contracts & APIs
+Module code remains mapped while any definition, static preparation or prepared kernel needs it. Release callbacks run before the module's destroy callback and native unload. Prepared kernels retain static state and resources, and a Run retains preparation through cancellation drain. Query/service records are borrowed for their callback; retained data must be copied into the provider's own state.
+
+## 3. Formal contracts
 
 ```c
-#define PS_RESULT_OPERATION_ABI_VERSION_7 7U
-const ps_result_operation_plugin_api_v7 *
-ps_result_operation_plugin_get_api_v7(void);
+#include "photospider/plugin/operation_module_api.h"
+
+PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
+ps_operation_module_get_api_v8(void);
 ```
 
-The operation-plugin C contract is the standalone Result ABI 7 table. It declares Result ports, static Tensor members, member-interval Needs, shared-stage callbacks, and Result publication. Its `publish_tensor_view` service requires a non-NULL explicit transform, while `publish_tensor_view_pieces` accepts 1..16 exact-size piece envelopes, forbids reshape in pieces, and commits a complete disjoint target partition atomically. `reshape=1, source_rank=0, axes=NULL` remains valid for a single-source view. These forms retain source Results across Roots without duplicating source Payload charges in the publishing Root. There is no current data-provider C table. See [Plugin ABI](../kernel-architecture/Plugin-ABI.md) for the current table layout and callback contract.
+The standalone C11 header defines exact-size module ABI 8 and includes fixed invocation ABI 8. OperationTraits version is 30. Native shader preparation uses the separately versioned native kernel service ABI 2. There is no current data-provider C table.
 
-The loader checks exact Result ABI version and structure size, natural pointer/array alignment, pointer/count pairs, bounded counts and key lengths, strict UTF-8 keys, checked arithmetic, closed enum/flag combinations, required callbacks, input/output schema constraints, parameter bounds and exactly-once destroy ownership. Runtime publication checks actual member tile coverage. Multi-record updates use copy-then-swap, so allocation failure or a later invalid record cannot publish a valid prefix. A library guard acquires ownership immediately and invokes any safely readable destroy callback before closing each rejected library. Published plugin tables are destroyed before unload.
+A module declares operation contracts and static prepare/resource-validation/lowering/kernel-preparation callbacks. The host validates versions and record sizes, alignment, pointer/count pairs, bounded strings and arrays, closed enum/flag combinations, checked arithmetic, required callbacks and cleanup ownership. The module header is checked before attaching its destroy hook and reading nested records. All declarations validate in a private candidate; a malformed declaration, duplicate key or freeze race publishes no partial registry update.
 
-Result callbacks receive borrowed query and phase-service records. The host checks Needs, frozen evidence, publication coverage, resource limits, cancellation, and backend fallback before exposing a Result. GPU allocation tokens and owning tensor windows retain backing ownership until release or callback retirement; ordinary service pointers expire when the callback returns. The registry is frozen before compiler and executor use.
+Lowering records schema-only and payload reads separately, unique output producers, private SSA intermediates, explicit COPY tasks and at most one terminal effect task per effectful call. Kernel preparation validates the actual compiled invocation views, parameters, scratch and selected placement before returning an unchecked direct entry point. Execution performs no continuation polling, runtime dependency expansion, publication grants, numerical certification or backend retry.
 
-## 4. Non-Goals & Explicit Boundaries
-- ABI validation is not a sandbox, signature verification, package admission, or crash isolation.
-- The daemon does not load operation plugins as an IPC capability.
+A rejected asynchronous submission keeps ownership with the coordinator and emits no callback. Acceptance retains input/output/scratch, parameter and module owners until matching completion establishes quiescence and visibility, including cancellation. Completion may occur inline. Callbacks and release functions obey their nonthrowing contract; malformed keys cannot settle another submission.
+
+## 4. Boundaries
+
+ABI validation is not sandboxing, signature verification, package admission or crash isolation. Native code can still crash or hang the host. Daemon IPC does not expose operation-plugin loading as a capability.
+
+The current tables have no ABI 1–7 getter, prefix-size adapter, staged continuation shim or automatic translation. External consumers must rebuild against the matching headers and package.
 
 ## 5. Consequences
-A version or layout mismatch rejects loading/registration before publication. Malformed descriptors publish no prefix of a registry update. Callback exceptions are fenced at the boundary, but a crash or hang in native code can still affect the host process. ABI changes require rebuilding external consumers against the matching headers and package. ABI 7 has no prefix-size compatibility with ABI versions 1 through 6, no old getter shim, and no automatic interpretation of a missing view transform; ADR 0022 remains an unimplemented Proposed successor.
+
+Each public boundary carries its own compatibility version. Loading rejects a mismatched module before registry publication. Compiler artifacts preserve static contracts and physical tables but contain no native pointers. Artifact import and explicit device preparation remain separate. Installed-consumer testing is suspended during kernel development; focused C11 module, loader, preparation and fixed-execution checks exercise this boundary.

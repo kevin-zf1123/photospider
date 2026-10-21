@@ -68,22 +68,22 @@ inline Result<WorkflowNode> with_dtype(Result<WorkflowNode> result,
 }  // namespace reduction_detail
 /** @brief Authors exact sum over nonempty axes with fixed keepdims=true.
  * Source rank is 1..8 and logical count <=2^40. Reduced extents become one;
- * output values has ordinary data. input_type is an authoring hint for the
- * default destination (Int64 for integers, Float64 for floats), not a runtime
- * parameter. The compiler validates actual source/destination domains. Explicit
- * output_type may select UInt8/Int64 for integer inputs or Float32/64 for
- * floats. Source terms sum exactly with only final range checking or IEEE
- * RN-even. Whole reads/validates every input group for nonempty demand and
- * computes complete dense output before projection; Empty reads nothing.
- * Any source edit invalidates all output observations. All helpers are
- * pure/concurrent-safe and return owned node metadata. Invalid authoring
- * arguments return InvalidArgument/InvalidDomain/Schema; allocation may throw
- * bad_alloc. Runtime source/resource/cancellation errors are preserved; integer
- * final overflow is Domain/Run OperationFailed/ArithmeticOverflow at its
- * output, including an unrequested group. Whole reads authorized Result
- * windows and owns the complete output plus fixed exact state; it does not
- * first pack the full input. Results retain immutable owned backing after the
- * execution context retires.
+ * output values has ordinary axes. input_type selects the default destination
+ * (Int64 for integers, Float64 for floats) and is not a runtime parameter.
+ * The compiler validates the actual source/destination domains. output_type
+ * may select UInt8/Int64 for integer inputs or Float32/64 for floating inputs.
+ * Each selected output tile becomes one fixed CPU task, declaring the input
+ * tiles for its complete reduction groups. Empty selections issue no task.
+ * Source terms sum exactly with one final conversion. Representability of an
+ * integer total is an unchecked caller precondition; floating results follow
+ * IEEE rounding and the specified NaN/infinity/zero rules. Prepare validates
+ * views and scratch before invocation. Each invocation owns preallocated exact
+ * state and writes separate dense tiles; immutable prepared state is shared.
+ * Helpers are pure/concurrent-safe and return owned metadata. Invalid static
+ * parameters return InvalidArgument; incompatible schemas return TypeMismatch.
+ * Allocation may throw bad_alloc. Operational cancellation/resource failures
+ * discard unpublished output, and accepted work retains owners through drain.
+ * Successful Results retain their allocations beyond context destruction.
  */
 inline Result<WorkflowNode> reduce_sum_node(
     std::uint64_t id, WorkflowInput input, std::vector<std::uint64_t> axes,
@@ -130,12 +130,13 @@ inline Result<WorkflowNode> reduce_mean_node(
                              std::move(axes), profile),
       dtype);
 }
-/** @brief Metadata-only exact Int64 group count; no numeric input is read.
- * Specialization validates the input schema and axes, then removes the input
- * from the runtime projection. Count creates no source observation or
- * association, and does not schedule an upstream sample producer. It owns one
- * 8-byte zero-stride complete output. Input-byte changes do not invalidate
- * counts; schema shape/type and axes determine the result.
+/** @brief Metadata-only exact Int64 group count; no input sample is read.
+ * Specialization validates the input schema and axes. Lowering records a
+ * schema-only dependency and leaves upstream sample producers elided when no
+ * other task needs them. Each selected output tile is a separate dense Int64
+ * allocation filled with the static group count, with zero arithmetic scratch.
+ * Input samples do not affect the count; schema and parameters determine it.
+ * Empty selections emit no task. Shape/error/ownership rules match sum.
  */
 inline Result<WorkflowNode> reduce_count_node(
     std::uint64_t id, WorkflowInput input, std::vector<std::uint64_t> axes,

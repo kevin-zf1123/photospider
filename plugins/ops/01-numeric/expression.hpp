@@ -4,8 +4,8 @@
 #include <string>
 #include <vector>
 
-#include "photospider/core/cancellation.hpp"
 #include "photospider/core/status.hpp"
+#include "photospider/plugin/fixed_invocation_api.h"
 
 namespace ps::expression_internal {
 enum class Kind : std::uint8_t {
@@ -43,8 +43,10 @@ Result<Expression> parse(const std::string& source, std::uint64_t coefficients);
 /** @brief Evaluates postorder nodes into caller-owned 256-double byte scratch.
  * Coefficient scratch holds 256 doubles; read/write use memcpy, no alignment
  * requirement. Parsed node references are bounded and never retain Run data.
+ * The caller supplies finite coefficients/intermediates and valid math domains;
+ * cancellation is queried through the borrowed fixed-invocation token.
  */
 Result<double> evaluate(const Expression& expression, double x,
                         const std::uint8_t* coefficients, std::uint8_t* scratch,
-                        const CancellationToken& cancellation);
+                        const ps_kernel_cancellation_v8& cancellation);
 }  // namespace ps::expression_internal

@@ -10,13 +10,12 @@
 
 namespace ps {
 struct ResultRef::Impl : data_internal::ResultPublicationState {
-  using StorageOwners =
-      std::set<const CpuStorage*, std::less<const CpuStorage*>,
-               ResourceAllocator<const CpuStorage*>>;
+  using StorageOwners = std::set<const void*, std::less<const void*>,
+                                 ResourceAllocator<const void*>>;
   explicit Impl(ResourceBudget root)
       : ResultPublicationState(root),
-        storage_owners(std::less<const CpuStorage*>{},
-                       ResourceAllocator<const CpuStorage*>(root)) {}
+        storage_owners(std::less<const void*>{},
+                       ResourceAllocator<const void*>(root)) {}
   // Non-owning identities remain valid while tensor fragments retain storage.
   // Publication merges preallocated nodes only at its commit barrier.
   StorageOwners storage_owners;

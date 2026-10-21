@@ -12,22 +12,20 @@
 
 所有逻辑 extent 都为正。空 Footprint 不选择样本，也不改变 schema。数据依赖的有效数量是静态容量 schema 内的普通 payload 成员。Padding、空洞和未提交样本不可读。拥有型读窗口保留实际的负、零或正 stride，并在物理和授权边界截断 run。
 
-## 请求、执行与状态
+## 选择与执行
 
-Payload 请求使用成员 slot 和紧凑 tile 区间。算法可以先通过普通 Need 读取控制值，再选择后续 tile Need。内核记录这些 payload 依赖，不使用 data/control 角色标签。Descriptor-only 请求必须显式提出，不授予样本，也不启动 payload producer。空 payload 集合不建立依赖或授权。
+输出选择指定成员 slot 和紧凑 tile 区间。编译时，算子把选中的输出 tile 降低为声明了读取、写入与 scratch 的固定 task 图。完整输入算法声明全部所需输入 tile。只读取元数据时需要输入 schema，无须执行 payload producer。空 payload 选择省略纯输出 task；控制流条件和 mandatory 副作用仍作为根保留。
 
-要求完整覆盖的输入 validator 仅在算子请求完整授权范围后运行，不扩大 Need。完整输入算法使用 `sdk::to_whole`；全局工作可以在 Run 共享 stage 内执行一次。完整覆盖不构成另一种执行模式。
-
-Dirty 表示可能受到影响，不表示数值必然不同。成员 tile 记录和冻结的共享证据决定失效传播。增加已提交覆盖属于生产进度，不属于内容编辑。精确样本 Footprint 仍用于窗口和 view，依赖与失效粒度为成员 tile。
+Plan 在执行前记录物理依赖。运行时控制流选择已编译分支或重复已编译 block。数值回调接收固定 view，不能请求额外的 producer 工作。精确样本 Footprint 描述外部 Result 与读窗口的覆盖；task 调度使用 Plan 的 tile 和依赖表。
 
 ## Tile 投影运算
 
-正 tile extent `T` 和逻辑 extent `E` 对应 tile 数 `E / T + (E % T != 0)`，避免 `E + T - 1` 溢出。Plan 要求 T 为二次幂，默认 128。乘积、tile 索引和区间端点都检查溢出。完整覆盖保持为紧凑区间，实际任务按有界批次展开。
+正 tile extent `T` 和逻辑 extent `E` 对应 tile 数 `E / T + (E % T != 0)`，避免 `E + T - 1` 溢出。Plan 要求 T 为二次幂，默认 128。乘积、tile 索引和区间端点都检查溢出。输出选择紧凑保存完整 tile 区间；lowering 在显式编译上限内展开物理 task。
 
-逻辑网格独立于 backing 几何。同一 backing 可用于不同 T 的 plan，逻辑授权随之改变，不必仅为匹配 tile 边界而重新打包。
+逻辑网格独立于 backing 几何。执行 preflight 要求每个选中的物理 tile 满足其声明布局与分配范围。因此不同 tile 网格可能需要显式 COPY task 来适配已有 backing。
 
 ## 限制与错误处理
 
-越界索引、未授权读取、不兼容的重叠写入和不完整的普通 tile 发布均失败。普通发布必须完整，恰好覆盖所选成员 tile，其他成员为空。共享 stage 可以逐步发布多个完整 tile。固定 bundle 可见性可延迟公开并主动调度兄弟 tile；见 [Global Results](Global-Results.zh.md)。
+数据层检查发布区域、重叠写入、仿射地址范围和读窗口授权。编译与 Run preflight 检查声明的 schema、layout 与存储范围。可信数值 kernel 必须遵守全部声明读取，并在成功前初始化全部声明输出样本；执行器不检查其样本访问或数值。Result 所有权与有序 call 导出见 [Global Results](Global-Results.zh.md#执行发布与生命周期)。
 
-取消、资源耗尽和过期 generation 保留各自错误状态。失败事务不安装部分 payload 或不完整依赖证据。此前已提交 tile 保持不可变。显式空输出 demand 不执行 payload 工作；mandatory 副作用遵循 [Global Results](Global-Results.zh.md) 中普通执行与显式 DemandQuery 的区别。
+失败的 ResultBuilder 事务不增加覆盖，先前发布的区域保持不可变。取消在释放借用存储前排空已接受 task。空输出选择保留实际执行路径中的已编译控制流和 mandatory 副作用，具体契约见[编译器与执行](Compiler-and-Execution.zh.md)。

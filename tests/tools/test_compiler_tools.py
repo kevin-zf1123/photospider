@@ -1,5 +1,6 @@
 """Behavior of the actual compiler/executor processes and their file contracts."""
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 psc, psx, plugin, builtins = sys.argv[1:]
 checks = 0
@@ -27,6 +29,8 @@ def write(path, value):
 
 
 # Compiler diagnostics are accepted only by the compiler driver.
+for tool in [psc, psx]:
+    assert b"fixed invocation ABI 8; operation module ABI 8" in run(tool, "--version").stdout
 warning_flags = ["-Wall", "-Wextra", "-Werror", "-Wno-error",
                  "-Wunused-optimizer", "-Wno-unused-optimizer",
                  "-Werror=unused-optimizer", "-Wno-error=unused-optimizer"]
@@ -79,18 +83,18 @@ with tempfile.TemporaryDirectory(prefix="photospider-cli-") as directory:
     assert b"unknown JSON field: height_axis" in rejected.stderr
     runtime = common + ["--bindings", "bindings.json"]
     run(psc, "input.json", *common, "--tile-extent", 2, "--save-ir", "0=raw.psir", "-o", "plain.psxp")
-    assert Path("raw.psir").read_text().startswith("psir 4")
+    assert Path("raw.psir").read_text().startswith("psir 5")
     run(psc, "input.json", *common, "--planner", "static-tiles", "--tile-extent", 2,
         "-o", "explicit.psxp")
     assert Path("explicit.psxp").read_bytes() == Path("plain.psxp").read_bytes()
     pipeline = run(psc, "input.json", "--planner=static-tiles", "--print-pipeline")
-    assert b"planner: static-tiles@1 -> validate Plan" in pipeline.stdout
+    assert b"planner: static-tiles@2 -> validate Plan" in pipeline.stdout
     assert b"--planner NAME" in run(psc, "--help").stdout
     for query in [["--list-planners"], ["--help-planner", "static-tiles"]]:
         info = run(psc, *query, "--load-ops", "absent-library")
-        assert b"static-tiles@1" in info.stdout
+        assert b"static-tiles@2" in info.stdout
         assert b"dependency_paths" in info.stdout and b"control_flow" in info.stdout
-    assert b"--max-instructions" in run(psc, "--help-planner=static-tiles").stdout
+    assert b"--max-tasks" in run(psc, "--help-planner=static-tiles").stdout
     assert b"unknown planner" in run(psc, "--help-planner", "missing", code=2).stderr
     run(psc, "--help-planner", code=2)
 
@@ -138,12 +142,14 @@ with tempfile.TemporaryDirectory(prefix="photospider-cli-") as directory:
     run(psx, "plain.psxp", *runtime, "--requests", "requests.json", "-o", "partial.results")
     assert values("partial.results") == {"second": {2: 27., 3: 36.}}
     run(psc, "input.json", *common, "--tile-extent", 2, "--requests", "requests.json", "-o", "partial.psxp")
+    run(psx, "partial.psxp", *runtime, "-o", "compiled-partial.results")
+    assert values("compiled-partial.results") == {"second": {2: 27., 3: 36.}}
     requests["outputs"][0]["members"][0]["intervals"] = [[0, 2]]
     write("requests.json", requests)
     run(psx, "partial.psxp", *runtime, "--requests", "requests.json", "-o", "invalid.results", code=1)
     assert not Path("invalid.results").exists()
     run(psx, "plain.psxp", *runtime, "-o", "plain.results", code=4)
-    run(psx, "plain.psxp", *runtime, "--check", "--max-live-bytes", 4096, "--cache-bytes", 8192, code=2)
+    run(psx, "plain.psxp", *runtime, "--check", "--max-live-bytes", 0, code=2)
     run(psx, "plain.psxp", *runtime, "--check", "--max-live-bytes", 1, code=1)
     run(psx, "plain.psxp", *common, "--check")
     run(psx, "plain.psxp", *common, code=1)
@@ -201,11 +207,11 @@ with tempfile.TemporaryDirectory(prefix="photospider-cli-") as directory:
     assert {"PS-STAGE", "PS-IR-RELEASE"} <= event_ids
 
     result = run(psc, "input.json", *common, "--emit", "ir", "-o", "-", "--time-report", "--diagnostic-format", "json")
-    assert result.stdout.startswith(b"psir 4")
+    assert result.stdout.startswith(b"psir 5")
     assert all(json.loads(line)["version"] == 1 for line in result.stderr.splitlines())
     run(psc, "-", *common, "--emit", "ir", code=2, data=json.dumps(dag).encode())
     run(psc, "-", *common, "--emit", "ir", "-o", "stdin.psir", data=json.dumps(dag).encode())
-    Path("old.psir").write_text(Path("raw.psir").read_text().replace("psir 4", "psir 3", 1))
+    Path("old.psir").write_text(Path("raw.psir").read_text().replace("psir 5", "psir 3", 1))
     assert b"re-export" in run(psc, "old.psir", *common, code=1).stderr
     for text, reason in [('{"format":1,"format":2}', b'duplicate JSON key'),
                          ('{"x":"\\ud800"}', b'JSON 1:'),
@@ -227,21 +233,58 @@ with tempfile.TemporaryDirectory(prefix="photospider-cli-") as directory:
         checks += 1
         # A blocked named-file open must honor SIGINT as well as stdin polling.
         os.mkfifo("blocked.fifo")
-        process = subprocess.Popen([psc, "blocked.fifo", "--check", "--time-report",
-                                    "--diagnostic-format=json"],
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            assert json.loads(process.stderr.readline())["id"] == "PS-TIME"
-            process.send_signal(signal.SIGINT)
-            _, errors = process.communicate(timeout=5)
-            assert process.returncode == 130, errors
-            assert json.loads(errors)["id"] == "PS-Cancelled"
-            checks += 1
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-            process.stdout.close(); process.stderr.close()
+        # Repeat immediate cancellation across the check-to-open race; also
+        # hold a connected FIFO empty to exercise cancellation during reads.
+        for connected in [False] * 32 + [True]:
+            writer = os.open("blocked.fifo", os.O_RDWR | os.O_NONBLOCK) if connected else None
+            process = subprocess.Popen([psc, "blocked.fifo", "--check", "--time-report",
+                                        "--diagnostic-format=json"],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                assert json.loads(process.stderr.readline())["id"] == "PS-TIME"
+                if connected:
+                    time.sleep(0.03)
+                process.send_signal(signal.SIGINT)
+                _, errors = process.communicate(timeout=5)
+                assert process.returncode == 130, errors
+                assert json.loads(errors)["id"] == "PS-Cancelled"
+                checks += 1
+            finally:
+                if writer is not None:
+                    os.close(writer)
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                process.stdout.close(); process.stderr.close()
+        # A reader opened before its writer must still consume bytes and EOF.
+        for data, expected_code in [(json.dumps(dag).encode(), 0), (b"", 1)]:
+            process = subprocess.Popen([psc, "blocked.fifo", *common, "--check",
+                                        "--time-report", "--diagnostic-format=json"],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            writer = None
+            try:
+                assert json.loads(process.stderr.readline())["id"] == "PS-TIME"
+                deadline = time.monotonic() + 5
+                while writer is None:
+                    try:
+                        writer = os.open("blocked.fifo", os.O_WRONLY | os.O_NONBLOCK)
+                    except OSError as error:
+                        assert error.errno == errno.ENXIO, error
+                        assert process.poll() is None and time.monotonic() < deadline
+                        time.sleep(0.01)
+                assert os.write(writer, data) == len(data)
+                os.close(writer)
+                writer = None
+                _, errors = process.communicate(timeout=5)
+                assert process.returncode == expected_code, errors
+                checks += 1
+            finally:
+                if writer is not None:
+                    os.close(writer)
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                process.stdout.close(); process.stderr.close()
     imprecise = copy.deepcopy(dag); imprecise["nodes"][0]["parameters"]["sha256"] = {"type": "f64", "value": 9007199254740993}
     write("imprecise.json", imprecise)
     assert b'cannot be represented exactly' in run(psc, "imprecise.json", *common, "--check", code=1).stderr
@@ -260,18 +303,18 @@ with tempfile.TemporaryDirectory(prefix="photospider-cli-") as directory:
     write("many-requests.json", requests)
     run(psx, "plain.psxp", *runtime, "--requests", "many-requests.json", "-o", "many.results")
     errors = run(psc, "input.json", *common, "--save-ir", "0=missing-a/raw.psir",
-                 "--save-ir", "0=missing-b/raw.psir", "--max-instructions", 1,
+                 "--save-ir", "0=missing-b/raw.psir", "--max-tasks", 1,
                  "-o", "unpublished.psxp", "--diagnostic-format=json", code=4)
     events = [json.loads(line) for line in errors.stderr.splitlines()]
     assert len([event for event in events if event["severity"] == "error"]) == 3
     assert {event["stage"] for event in events} == {"snapshot", "planner"}
     errors = run(psc, "input.json", *common, "--save-ir", "0=missing-a/raw.psir",
-                 "--save-ir", "0=missing-b/raw.psir", "--max-instructions", 1,
+                 "--save-ir", "0=missing-b/raw.psir", "--max-tasks", 1,
                  "-o", "unpublished.psxp", "--error-limit", 1,
                  "--diagnostic-format=json", code=4)
     assert len(errors.stderr.splitlines()) == 1
     for _ in range(3):
-        run(psc, "input.json", *common, "-O", "optimize", "--save-ir", "0=missing/snapshot.psir", "--max-instructions", 1, "-o", "absent.psxp", code=4)
+        run(psc, "input.json", *common, "-O", "optimize", "--save-ir", "0=missing/snapshot.psir", "--max-tasks", 1, "-o", "absent.psxp", code=4)
         assert not Path("absent.psxp").exists()
     bad = copy.deepcopy(bindings); bad["inputs"][0]["tensors"][0]["dtype"] = "i64"
     write("bad-bindings.json", bad)
@@ -285,7 +328,7 @@ with tempfile.TemporaryDirectory(prefix="photospider-cli-") as directory:
     run(psc, "input.json", *common, "--save-ir", "0=missing/snapshot.psir", "-o", "main.psxp", code=4)
     assert Path("main.psxp").read_text() == "preserve"
     kept = run(psc, "input.json", *common, "--save-ir", "0=saved.psir",
-               "--max-instructions", 1, "-o", "main.psxp", "--diagnostic-format=json", code=1)
+               "--max-tasks", 1, "-o", "main.psxp", "--diagnostic-format=json", code=1)
     assert any(json.loads(line)["id"] == "PS-SNAPSHOT-SAVED" for line in kept.stderr.splitlines())
     assert Path("saved.psir").exists() and Path("main.psxp").read_text() == "preserve"
     kept = run(psc, "input.json", *common, "--save-ir", "0=kept-on-io.psir",

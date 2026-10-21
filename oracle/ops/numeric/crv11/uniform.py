@@ -4,6 +4,7 @@ Exact logical support/IEEE ordering uses Fraction; finite coefficients and the
 entire normalized sum use MPFR enclosures. No Float64-rounded coefficient is
 used as the reference. Kaiser uses a positive I0 series with a geometric tail.
 """
+import ctypes as C
 import math
 import random
 from fractions import Fraction as F
@@ -43,8 +44,17 @@ class Bounds:
         self.o = oracle
     def rational(self, value):
         value = F(value)
-        a,b = self.o.integer(value.numerator),self.o.integer(value.denominator)
-        return (self.o.binary('div',a,b,self.o.downward),self.o.binary('div',a,b,self.o.upward))
+        def integer(n, mode):
+            result = self.o.value()
+            self.o.lib.mpfr_set_str(C.byref(result), str(n).encode(), 10, mode)
+            return result
+        # Fraction's integers can exceed the working precision even when its
+        # quotient is small. Enclose both imports before directed division.
+        a = (integer(value.numerator, self.o.downward),
+             integer(value.numerator, self.o.upward))
+        b = (integer(value.denominator, self.o.downward),
+             integer(value.denominator, self.o.upward))
+        return multiply_bounds(self.o, a, b, divide=True)
     def add(self,a,b):
         return (self.o.binary('add',a[0],b[0],self.o.downward),self.o.binary('add',a[1],b[1],self.o.upward))
     def multiply(self,a,b):

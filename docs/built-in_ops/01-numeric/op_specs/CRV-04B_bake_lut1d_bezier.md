@@ -22,7 +22,7 @@ range/fallback rules. Discrete results, copies, selected endpoints and special
 values remain exact.
 
 Inherit the [baking template contract](CRV-04_bake_lut1d.md) in full for authoring
-profile/defaults, count/dtype, named outputs, Run-shared complete-input computation, resources, errors,
+profile/defaults, count/dtype, named outputs, fixed source execution, resources, errors,
 owner lifetime and public graph-equivalence acceptance. This is a workflow
 construction template; its name is not an OperationRegistry key.
 
@@ -47,15 +47,21 @@ Float64 [3]. For count=1 it is [start,start,0]
 and no end payload is evaluated. The source's remaining domain, finite-value,
 precision and query-support restrictions are not normalized or weakened.
 
+## Fixed execution and consumer requirements
+
+Values and axis are independently selected fixed tasks of the same source call. Axis-only excludes controls; count one excludes end from both outputs and uses zero scratch for axis. Values compute only selected tiles with fixed arithmetic scratch and declare complete controls. Global x topology, selected numerical domains, reconstruction/output representability and sampling precision are caller preconditions from CRV-02. Joint selection shares the call's publication outcome.
+
+When connected to CRV-05 with L>1, the consumer declares all table rows, so baking must satisfy its requirements across every selected producer row even for a sparse LUT query. L=1 can omit the sampler's axis task and end payload; its values still require controls and start. Consumers retain their own axis and domain preconditions. Discrete baking supplies no error bound relative to the continuous function.
+
 ## Acceptance and status
 
-Executed analytic fixture: quadratic anchors=[[0,0],[1,1]], handles=[[[0.5,0]]], start=[0], end=[1], count=3 -> values=[0,0.25,1], axis=[0,1,0.5].
+Analytic fixture: quadratic anchors=[[0,0],[1,1]], handles=[[[0.5,0]]], start=[0], end=[1], count=3 -> values=[0,0.25,1], axis=[0,1,0.5].
 
 Construct this template and its explicit expansion with the same bindings,
 parameters and output demands. Compare descriptors, numerical quality and exact
-read/dirty witnesses according to the source spec. Repeat each valid profile,
+physical read support according to the source spec. Repeat each valid profile,
 values-only/axis-only/joint requests, changed source bindings, singleton count,
-partial output, low shared budgets, cancellation, cache-off and exported-owner
+partial output, explicit resource budgets, cancellation and exported-owner
 lifetime. Templates do not compute on construction, freeze results or create files.
 Use source mathematical fixtures independently of graph equivalence, which alone
 could reproduce a shared numerical bug.

@@ -15,8 +15,51 @@ def bits(value, dtype=3):
     return ieee_round(F(value), 32 if dtype == 4 else 64, False)
 
 
-def reference(mode, method, dtype, model, shape, axis, extra, atol, rtol):
-    source_type = 3
+def geometry_reference(kind, shape, axis=(), extra=(), colors=(),
+                       input_dtype=3, output_dtype=3):
+    """Fixed geometry on valid caller inputs, preserving raw endpoint zeros.
+
+    Grid knots are RN64 endpoint-weighted coordinates. Cell centers average
+    those rounded knots, then round once more. Color conversion rounds directly
+    from the actual source dtype; same-dtype copies retain the original bits.
+    """
+    if kind == 'axis':
+        return list(axis)
+    if kind == 'color':
+        if input_dtype == output_dtype:
+            return list(colors)
+        sign = 31 if input_dtype == 4 else 63
+        return [ieee_round(number(v, input_dtype),
+                           32 if output_dtype == 4 else 64, bool(v >> sign))
+                for v in colors]
+    def weighted(a, b, wa, wb, divisor):
+        value = (number(a, 3)*wa+number(b, 3)*wb)/divisor
+        return ieee_round(value, 64, bool(a >> 63 and b >> 63))
+    grids = []
+    for d, n in enumerate(shape):
+        a, b = axis[3*d:3*d+2]
+        grids.append([a]+[weighted(a,b,n-1-i,i,n-1)
+                          for i in range(1,n-1)]+[b])
+    if kind == 'grid':
+        return [v for row in itertools.product(*grids) for v in row]
+    assert kind in ('points', 'points_extra')
+    result = [weighted(grids[d][cell[d]],grids[d][cell[d]+1],1,1,2)
+              for cell in itertools.product(*(range(n-1) for n in shape))
+              for d in range(3)]
+    if kind == 'points_extra':
+        result.extend(v for row in extra for v in row)
+    return result
+
+
+def reference(mode, method, dtype, model, shape, axis, extra, atol, rtol,
+              source_type=3):
+    """Float64 pointwise source, optionally followed by an explicit Float32 cast.
+
+    Table conversion follows the source's actual dtype. Every arithmetic source
+    operation rounds to Float64 before the optional cast, matching that explicit
+    graph rather than contracting two rounding steps into one.
+    """
+    assert source_type in (3, 4)
     grids = []
     for d, n in enumerate(shape):
         a, b, step = (number(v, 3) for v in axis[d*3:d*3+3])
@@ -28,21 +71,25 @@ def reference(mode, method, dtype, model, shape, axis, extra, atol, rtol):
         grids.append(grid)
     if model in (4, 5) and any(number(x, 3) < 0 for x in grids[1]):
         return 'domain'
+    def convert(raw, source, target):
+        if raw is None:
+            return None
+        return ieee_round(number(raw, source), 32 if target == 4 else 64,
+                          bool(raw >> (31 if source == 4 else 63)))
     def source(query):
-        values = [number(x, 3) for x in query]
-        if mode == 1:
-            values = [x*x for x in values]
-        elif mode == 6:
-            values[0] *= values[0]
-        elif mode == 5:
-            values = [values[i]*values[(i+1)%3] for i in range(3)]
-        return [bits(x, source_type) for x in values]
+        raw = list(query)
+        components = range(3) if mode in (1, 5) else (0,) if mode == 6 else ()
+        for i in components:
+            j = (i+1) % 3 if mode == 5 else i
+            value = number(query[i], 3) * number(query[j], 3)
+            raw[i] = ieee_round(value, 64, bool((query[i] ^ query[j]) >> 63))
+        return raw if source_type == 3 else [convert(x, 3, source_type) for x in raw]
     table = []
     for query in itertools.product(*grids):
         for raw in source(query):
             if raw is None:
                 return 'overflow'
-            encoded = bits(number(raw, source_type), dtype)
+            encoded = convert(raw, source_type, dtype)
             if encoded is None:
                 return 'overflow'
             table.append(encoded)
@@ -69,8 +116,8 @@ def reference(mode, method, dtype, model, shape, axis, extra, atol, rtol):
             failed += 1
             if first < 0:
                 first, first_input = ordinal, query
-                first_reference = [bits(number(v, source_type)) for v in ref]
-                first_lut = [bits(number(v, dtype)) for v in values]
+                first_reference = [convert(v, source_type, 3) for v in ref]
+                first_lut = [convert(v, dtype, 3) for v in values]
     upward = []
     for value in maximum:
         raw = bits(value)

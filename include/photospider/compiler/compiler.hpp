@@ -158,9 +158,8 @@ class PHOTOSPIDER_API Compiler final {
    * paths to control flow. Saved placements bypass backend selection; callers
    * validate the completed instructions before computing Plan/cache identities.
    */
-  Result<ExecutionPlan> link_plan(
-      const ValidatedIR& ir, const PlanningOptions& options,
-      const std::vector<Backend>* placements = nullptr) const;
+  Result<ExecutionPlan> link_plan(const ValidatedIR& ir,
+                                  const PlanningOptions& options) const;
   Status select_plan(ExecutionPlan* plan) const;
   Status finalize_plan(ExecutionPlan* plan) const;
   Status validate_plan(const ExecutionPlan& plan) const;

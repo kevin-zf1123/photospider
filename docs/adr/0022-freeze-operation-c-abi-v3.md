@@ -1,6 +1,7 @@
 # ADR 0022: Freeze One Prefix-Negotiated C ABI for All Operations
 
 - Status: Proposed
+- Implementation boundary (2026-10-20): This remains a historical Proposed design, not the current binary contract. Package 0.39 implements exact-size operation module ABI 8, fixed invocation ABI 8 and native kernel service ABI 2. Its static lowering and fixed completion model replaces the staged continuation surface below; prefix negotiation and the proposed universal import policy are not implied. See [Plugin ABI](../kernel-architecture/Plugin-ABI.md).
 - Reader mirror: [Chinese](zh/0022-freeze-operation-c-abi-v3.zh.md)
 - Related: [ADR 0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md), [ADR 0014](0014-compiler-document-and-plan-versions-are-independent.md), [ADR 0015](0015-breaking-product-boundary-scope-reset.md), [ADR 0016](0016-workflow-inputs-and-execution-bindings.md), [ADR 0023](0023-track-dependencies-between-fixed-tiles.md)
 
@@ -41,7 +42,7 @@ Inside a module, C++ is allowed. STL objects, exceptions and unstable kernel C++
 
 ## 3. Formal contracts and APIs
 
-The concrete header of the frozen ABI is a later design step, and its version number is assigned when it is frozen. The shape below shows only the negotiation rules; it is a target, not a declaration in any current header, and its field and type names are illustrative. The current exact-size ABI 6 declarations are in `photospider/plugin/result_operation_plugin_api.h` and are described in [Plugin ABI](../kernel-architecture/Plugin-ABI.md).
+The concrete header of the frozen ABI is a later design step, and its version number is assigned when it is frozen. The shape below shows only the negotiation rules; it is a target, not a declaration in any current header, and its field and type names are illustrative. The current exact-size ABI 8 declarations are in `photospider/plugin/operation_module_api.h` and are described in [Plugin ABI](../kernel-architecture/Plugin-ABI.md).
 
 ```c
 /* Illustrative target shape; not declared in any current header. */

@@ -1,287 +1,181 @@
-#include <array>
 #include <atomic>
-#include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
-#include <mutex>
+#include <new>
 
-#include "photospider/plugin/result_operation_plugin_api.h"
-#include "photospider/plugin/result_tile_helpers.h"
+#include "photospider/plugin/operation_module_api.h"
 
 namespace {
-struct Observations {
-  std::uint32_t mode = 0;
-  std::atomic<std::uint32_t> gpu{0}, cpu{0}, bits{UINT32_MAX}, waiting{0};
-};
-std::array<Observations, 15> observations;
 std::atomic<std::uint32_t> destroy_count{0};
-struct CancellationGate {
-  std::mutex mutex;
-  std::condition_variable changed;
-  bool entered = false, released = false;
-} cancellation_gate;
-struct State {
-  bool requested = false;
-};
-const ps_result_region_v7 scalar_region = [] {
-  ps_result_region_v7 value{};
-  value.struct_size = sizeof(value);
-  value.rank = 1;
-  value.extent[0] = 1;
+ps_kernel_status_v8 status(std::uint32_t code = PS_KERNEL_OK_V8) {
+  ps_kernel_status_v8 value{};
+  value.code = code;
   return value;
-}();
-const ps_result_tensor_spec_v7 tensor = [] {
-  ps_result_tensor_spec_v7 value{};
+}
+const ps_tensor_spec_v8 tensor = [] {
+  ps_tensor_spec_v8 value{};
   value.struct_size = sizeof(value);
-  value.key = "number";
-  value.key_size = 6;
-  value.element_type = PS_RESULT_ELEMENT_FLOAT64_V7;
+  value.key = {"number", 6};
+  value.element_type = 3;
   value.rank = 1;
   value.shape[0] = 1;
-  value.channel_axis = PS_RESULT_NO_CHANNEL_V7;
+  value.channel_axis = UINT32_MAX;
   return value;
 }();
-const ps_result_schema_v7 schema = [] {
-  ps_result_schema_v7 value{};
+const ps_schema_v8 schema = [] {
+  ps_schema_v8 value{};
   value.struct_size = sizeof(value);
-  value.id = "fixture.scalar";
-  value.id_size = 14;
+  value.id = {"fixture.scalar", 14};
   value.version = 1;
   value.tensors = &tensor;
   value.tensor_count = 1;
   return value;
 }();
-const ps_result_port_v7 port = [] {
-  ps_result_port_v7 value{};
+const ps_port_contract_v8 port = [] {
+  ps_port_contract_v8 value{};
   value.struct_size = sizeof(value);
-  value.schema = &schema;
+  value.schema_id = schema.id;
+  value.schema_version = 1;
+  value.rank = 1;
+  value.element_type = 3;
   return value;
 }();
-const ps_result_output_v7 output = [] {
-  ps_result_output_v7 value{};
+const ps_operation_output_v8 output = [] {
+  ps_operation_output_v8 value{};
   value.struct_size = sizeof(value);
-  value.key = "value";
-  value.key_size = 5;
-  value.port = port;
+  value.key = {"value", 5};
+  value.contract = port;
+  value.prototype = &schema;
   value.input_count = UINT32_MAX;
   return value;
 }();
-const ps_result_parameter_descriptor_v7 scale = {
-    sizeof(scale), "scale", 5, PS_RESULT_PARAMETER_FLOAT64_V7,
-    1};  // NOLINT(whitespace/indent_namespace)
-int resolve(void* user, const ps_result_port_v7* inputs, std::uint32_t count,
-            const ps_result_parameter_value_v7*, std::uint32_t,
-            const ps_result_port_v7*, std::uint32_t,
-            const ps_result_metadata_sink_v7* sink) {
-  if (count != 1 || !inputs[0].schema || inputs[0].schema->tensor_count != 1)
-    return 5;
-  auto result_schema = *inputs[0].schema;
-  auto result_tensor = result_schema.tensors[0];
-  if (result_tensor.element_type != PS_RESULT_ELEMENT_FLOAT64_V7 ||
-      result_tensor.rank != 1 || result_tensor.shape[0] != 1 ||
-      result_tensor.batch_rank)
-    return 5;
-  if (!user)
-    result_tensor.atomic_trailing_axes = 2;
-  result_schema.tensors = &result_tensor;
-  auto result = inputs[0];
-  result.schema = &result_schema;
-  return sink->set_output(sink->context, 0, &result);
+// NOLINTBEGIN(whitespace/indent_namespace)
+const ps_parameter_spec_v8 scale = {
+    sizeof(scale), {"scale", 5}, PS_PARAMETER_FLOAT64_V8, 1, 0, 0, 0};
+// NOLINTEND
+ps_kernel_status_v8 prepare(void*, const ps_static_query_v8* query,
+                            const ps_preparation_sink_v8* sink,
+                            ps_operation_state_v8*) {
+  if (query->input_count != 1 || query->parameter_count != 1 ||
+      query->inputs[0].tensor_count != 1)
+    return status(PS_KERNEL_TYPE_MISMATCH_V8);
+  const auto& input = query->inputs[0].tensors[0];
+  if (input.element_type != 3 || input.rank != 1 || input.shape[0] != 1 ||
+      input.batch_rank || input.atomic_trailing_axes != 1)
+    return status(PS_KERNEL_TYPE_MISMATCH_V8);
+  return sink->set_output(sink->context, 0, &query->inputs[0], nullptr,
+                          UINT32_MAX);
 }
-int start(void* user, void* raw, const ps_result_query_v7* query,
-          const ps_result_services_v7* services) {
-  *static_cast<State*>(raw) = {};
-  if (!user)
-    return 0;
-  auto& observed = *static_cast<Observations*>(user);
-  observed.bits.store(UINT32_MAX);
-  observed.waiting.store(0);
-  if (services->cancelled(services->context))
-    return 2;
-  (query->backend == 2 ? observed.gpu : observed.cpu).fetch_add(1);
-  if (query->backend == 2 && observed.mode >= 1 && observed.mode <= 3)
-    return observed.mode == 1 ? 3 : observed.mode == 2 ? 1 : 99;
-  return 0;
-}
-int publish(const ps_result_services_v7* services, double value, unsigned bad) {
-  // The extra byte exercises the Result publication's exact payload envelope.
-  std::array<std::uint8_t, 9> bytes{};
-  std::memcpy(bytes.data(), &value, sizeof(value));
-  if (services->begin_result(services->context))
-    return 1;
-  const int written =
-      services->publish_tensor(services->context, bad == 1 ? 99 : 0,
-                               &scalar_region, bytes.data(), bad == 2 ? 9 : 8);
-  return written ? written : services->publish_result(services->context, 1);
-}
-int poll(void* user, void* raw, const ps_result_query_v7* query,
-         const ps_result_services_v7* services) {
-  auto& state = *static_cast<State*>(raw);
-  auto& observed = *static_cast<Observations*>(user);
-  if (!state.requested) {
-    state.requested = true;
-    return ps_result_to_whole_v7(services, query, 0) ? 1 : PS_RESULT_NEED_V7;
-  }
-  std::uint64_t coordinate = 0;
-  double number = 0;
-  if (services->read_tensor(services->context, 0, 0, &coordinate, 1, &number,
-                            sizeof(number)))
-    return 1;
-  if (observed.mode == 0) {
-    const auto& spec = query->inputs[0].schema->tensors[0];
-    if (spec.atomic_trailing_axes != 1)
-      return 1;
-    number *= query->parameters[0].float64_value;
-  }
-  if (observed.mode == 14) {
-    static_cast<void>(publish(services, number, 2));
-    return PS_RESULT_PUBLISH_V7;
-  }
-  if (observed.mode >= 6) {
-    const int first = observed.mode == 11
-                          ? services->publish_result(nullptr, 1)
-                          : publish(services, number, observed.mode == 7);
-    const int second = observed.mode == 11
-                           ? publish(services, number, false)
-                           : services->publish_result(services->context, 1);
-    observed.bits.store((first == 0 ? 2U : 0U) | (second == 0 ? 1U : 0U));
-    if (observed.mode == 8)
-      return 3;
-    if (observed.mode == 9)
-      return 1;
-    if (observed.mode == 10)
-      return 99;
-    if (observed.mode == 13)
-      return 2;
-    if (observed.mode == 12) {
-      observed.waiting.store(1, std::memory_order_release);
-      std::unique_lock<std::mutex> lock(cancellation_gate.mutex);
-      cancellation_gate.entered = true;
-      cancellation_gate.changed.notify_all();
-      const bool released = cancellation_gate.changed.wait_for(
-          lock, std::chrono::seconds(15),
-          [&] { return cancellation_gate.released; });
-      lock.unlock();
-      const bool cancelled = services->cancelled(services->context) != 0;
-      if (!released || !cancelled) {
-        observed.waiting.store(0, std::memory_order_release);
-        return 1;
-      }
-      observed.waiting.store(0, std::memory_order_release);
-    }
-    return PS_RESULT_PUBLISH_V7;
-  }
-  if (query->backend == 2 && (observed.mode == 4 || observed.mode == 5)) {
-    static_cast<void>(publish(services, number, observed.mode == 5));
-    return 3;
-  }
-  return publish(services, number, false) ? 1 : PS_RESULT_PUBLISH_V7;
-}
-void destroy_state(void*, void*) {}
-void destroy_plugin(void*) {
-  destroy_count.fetch_add(1);
-}
-const auto operations = [] {
-  std::array<ps_result_operation_v7, 16> result{};
-  const std::array<const char*, 16> keys = {
-      "fixture.double",
-      "fixture.bad_atomic_axis",
-      "fixture.gpu_fallback",
-      "fixture.gpu_failure",
-      "fixture.gpu_unknown",
-      "fixture.gpu_output_unavailable",
-      "fixture.gpu_bad_output_unavailable",
-      "fixture.duplicate_success",
-      "fixture.duplicate_invalid_success",
-      "fixture.gpu_duplicate_unavailable",
-      "fixture.gpu_duplicate_failure",
-      "fixture.gpu_duplicate_unknown",
-      "fixture.null_context_then_valid",
-      "fixture.duplicate_cancelled",
-      "fixture.gpu_duplicate_callback_cancelled",
-      "fixture.bad_bytes"};
-  for (std::size_t i = 0; i < result.size(); ++i) {
-    auto& op = result[i];
-    op.struct_size = sizeof(op);
-    op.key = keys[i];
-    op.key_size = std::strlen(keys[i]);
-    op.flags = PS_RESULT_FLAG_CPU_V7 | PS_RESULT_FLAG_DETERMINISTIC_V7 |
-               PS_RESULT_FLAG_SIDE_EFFECT_FREE_V7;
-    op.inputs = &port;
-    op.input_count = 1;
-    op.outputs = &output;
-    op.output_count = 1;
-    op.state_bytes = sizeof(State);
-    op.maximum_stages = 3;
-    op.resolve_metadata = resolve;
-    op.start = start;
-    op.poll = poll;
-    op.destroy = destroy_state;
-    if (i != 1) {
-      const auto mode = i ? i - 1 : 0;
-      observations[mode].mode = mode;
-      op.user_data = &observations[mode];
-    }
-    if (i >= 2 && i <= 14)
-      op.flags |= PS_RESULT_FLAG_GPU_V7 | PS_RESULT_FLAG_CPU_FALLBACK_V7;
-    if (!i) {
-      op.parameters = &scale;
-      op.parameter_count = 1;
+ps_kernel_status_v8 lower(void*, const ps_lowering_query_v8* query,
+                          const ps_operation_builder_v8* builder) {
+  const ps_placement_v8 placement{PS_BACKEND_CPU_V8,
+                                  PS_KERNEL_DOMAIN_HOST_V8,
+                                  {"cpu", 3},
+                                  {nullptr, 0}};
+  const std::uint64_t scratch[3]{};
+  for (std::uint32_t i = 0; i < query->request_count; ++i) {
+    const auto& request = query->requests[i];
+    for (auto tile = request.begin; tile < request.end; ++tile) {
+      std::uint32_t task = 0;
+      auto result = builder->add_task(builder->context, {"scale", 5},
+                                      {"scale-f64-v1", 12}, &placement, scratch,
+                                      0, &task);
+      if (!result.code)
+        result = builder->read_input(builder->context, task, 0, 0, tile,
+                                     PS_KERNEL_DOMAIN_HOST_V8);
+      if (!result.code)
+        result = builder->write_output(builder->context, task, request.output,
+                                       request.member, tile);
+      if (result.code)
+        return result;
     }
   }
-  return result;
+  return status();
+}
+bool scalar(const ps_kernel_view_spec_v8& view) {
+  return view.port == 0 && view.member == 0 && view.tile_index == 0 &&
+         view.domain == PS_KERNEL_DOMAIN_HOST_V8 && view.bytes == 8 &&
+         view.byte_offset == 0 && view.layout.rank == 1 &&
+         view.layout.element_type == 3 && view.layout.shape[0] == 1 &&
+         view.layout.origin[0] == 0 && view.layout.strides[0] == 8;
+}
+ps_kernel_status_v8 prepare_kernel(void*, const ps_kernel_preparation_v8* query,
+                                   ps_prepared_kernel_v8* result) {
+  if (query->placement.backend != PS_BACKEND_CPU_V8 ||
+      query->placement.domain != PS_KERNEL_DOMAIN_HOST_V8 ||
+      query->symbol.size != 5 || std::memcmp(query->symbol.data, "scale", 5) ||
+      query->contract.size != 12 ||
+      std::memcmp(query->contract.data, "scale-f64-v1", 12) ||
+      query->read_count != 1 || query->write_count != 1 ||
+      query->facts.parameter_count != 1 ||
+      query->facts.parameters[0].type != PS_PARAMETER_FLOAT64_V8 ||
+      !scalar(query->reads[0]) || !scalar(query->writes[0]) ||
+      query->parameter_bytes || query->scratch[0] || query->scratch[1] ||
+      query->scratch[2])
+    return status(PS_KERNEL_INVALID_ARGUMENT_V8);
+  auto* multiplier =
+      new (std::nothrow) double{query->facts.parameters[0].float64_value};
+  if (!multiplier)
+    return status(PS_KERNEL_RESOURCE_EXHAUSTED_V8);
+  *result = {};
+  result->struct_size = sizeof(*result);
+  result->abi_version = 8;
+  result->context = multiplier;
+  result->release = [](const void* state) {
+    delete static_cast<const double*>(state);
+  };
+  result->invoke_cpu = [](const ps_kernel_invocation_v8* invocation,
+                          ps_kernel_status_v8* result) {
+    *result = status();
+    if (invocation->cancellation.is_cancelled &&
+        invocation->cancellation.is_cancelled(
+            invocation->cancellation.context)) {
+      *result = status(PS_KERNEL_CANCELLED_V8);
+      return;
+    }
+    double value;
+    std::memcpy(
+        &value,
+        static_cast<const std::uint8_t*>(invocation->inputs[0].allocation) +
+            invocation->inputs[0].byte_offset,
+        sizeof(value));
+    value *= *static_cast<const double*>(invocation->prepared_context);
+    std::memcpy(static_cast<std::uint8_t*>(invocation->outputs[0].allocation) +
+                    invocation->outputs[0].byte_offset,
+                &value, sizeof(value));
+  };
+  return status();
+}
+void destroy(void*) {
+  ++destroy_count;
+}
+const ps_operation_v8 operation = [] {
+  ps_operation_v8 value{};
+  value.struct_size = sizeof(value);
+  value.key = {"fixture.double", 14};
+  value.flags = PS_OPERATION_CPU_V8 | PS_OPERATION_DETERMINISTIC_V8 |
+                PS_OPERATION_PURE_V8;
+  value.inputs = &port;
+  value.input_count = 1;
+  value.outputs = &output;
+  value.output_count = 1;
+  value.parameters = &scale;
+  value.parameter_count = 1;
+  value.prepare = prepare;
+  value.lower = lower;
+  value.prepare_kernel = prepare_kernel;
+  return value;
 }();
-const ps_result_operation_plugin_api_v7 api = {
-    sizeof(api),       PS_RESULT_OPERATION_ABI_VERSION_7,
-    operations.data(), operations.size(),
-    nullptr,           destroy_plugin};  // NOLINT(whitespace/indent_namespace)
+// NOLINTBEGIN(whitespace/indent_namespace)
+const ps_operation_module_v8 api{sizeof(api), 8,       &operation,
+                                 1,           nullptr, destroy};
+// NOLINTEND
 }  // namespace
-extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v7*
-ps_result_operation_plugin_get_api_v7(void) {
+extern "C" PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
+ps_operation_module_get_api_v8(void) {
   return &api;
 }
-extern "C" PS_RESULT_EXPORT std::uint32_t ps_operation_fixture_destroy_count() {
+extern "C" PS_OPERATION_MODULE_EXPORT std::uint32_t
+ps_operation_fixture_destroy_count() {
   return destroy_count.load();
-}
-extern "C" PS_RESULT_EXPORT std::uint32_t
-ps_operation_fixture_gpu_invocation_count(std::uint32_t mode) {
-  return mode < observations.size() ? observations[mode].gpu.load() : 0;
-}
-extern "C" PS_RESULT_EXPORT std::uint32_t
-ps_operation_fixture_cpu_invocation_count(std::uint32_t mode) {
-  return mode < observations.size() ? observations[mode].cpu.load() : 0;
-}
-extern "C" PS_RESULT_EXPORT std::uint32_t
-ps_operation_fixture_publish_result_bits(std::uint32_t mode) {
-  return mode < observations.size() ? observations[mode].bits.load()
-                                    : UINT32_MAX;
-}
-extern "C" PS_RESULT_EXPORT std::uint32_t
-ps_operation_fixture_awaiting_cancellation(std::uint32_t mode) {
-  return mode < observations.size()
-             ? observations[mode].waiting.load(std::memory_order_acquire)
-             : 0;
-}
-
-// Private fixture synchronization; these symbols are outside the operation ABI.
-extern "C" PS_RESULT_EXPORT void ps_operation_fixture_arm_cancellation_gate() {
-  std::lock_guard<std::mutex> lock(cancellation_gate.mutex);
-  cancellation_gate.entered = false;
-  cancellation_gate.released = false;
-}
-extern "C" PS_RESULT_EXPORT std::uint32_t
-ps_operation_fixture_wait_cancellation_entered(std::uint32_t timeout_ms) {
-  std::unique_lock<std::mutex> lock(cancellation_gate.mutex);
-  return cancellation_gate.changed.wait_for(
-             lock, std::chrono::milliseconds(timeout_ms),
-             [&] { return cancellation_gate.entered; })
-             ? 1U
-             : 0U;
-}
-extern "C" PS_RESULT_EXPORT void
-ps_operation_fixture_release_cancellation_gate() {
-  std::lock_guard<std::mutex> lock(cancellation_gate.mutex);
-  cancellation_gate.released = true;
-  cancellation_gate.changed.notify_all();
 }

@@ -12,164 +12,23 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_manual_acceptance
+implementation_status: implemented
 ---
 
 # NUM-03A: constant
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Constant consumes a dynamic scalar Result with complete sample shape `[1]` and fills a statically declared target shape. The Result contains one tensor under any schema/member key. UInt8, Int8, UInt16, Int16, Int64, Float32 and Float64 are supported. Output preserves every scalar bit, including signaling/quiet NaN payloads, infinities and signed zeros. No arithmetic or conversion is performed; all three CPU profiles have identical raw-bit semantics.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Required static String `shape` is a canonical comma-separated list of 1..8 positive extents, with product at most 2^40. Dtype is inferred from the scalar. Output port `values` uses `photospider.tensor`/`samples` with ordinary target axes. The old layout policy is removed from direct nodes and the SDK; `constant_node` accepts profile immediately after shape.
 
-The maintainer selected constant as a separate operator from NUM-03B broadcast.
-It consumes one scalar and fills a specified output shape. The three independently
-named strict/CPU-accelerated versions follow the common NUM bit-equivalence rule.
-Input `value` is a dynamic scalar Tensor of shape `[1]`, with UInt8, Int64,
-Float32 or Float64 dtype. Output preserves the input dtype and every scalar bit,
-including floating NaN payloads, infinities and signed zero. No arithmetic or
-implicit conversion is performed. This draft does not authorize implementation
-or ADR changes.
+## Fixed tasks and storage
 
-Target shape is a static parameter with rank 1..8 and positive extents. Empty
-axes and runtime shape changes are outside this version. Dtype is inferred from
-the scalar input; each node's output descriptor is known at compilation.
-The product of all extents must be at most 2^40, checked without integer overflow.
+Every selected output tile becomes one CPU task that reads scalar index zero once and fills a separate preallocated dense allocation. It initializes one element, grows the initialized prefix and then copies blocks of at most 64 KiB. Each memcpy source/target interval is disjoint and confined to that output tile. Empty selection emits no task or payload read.
 
-The static `layout` choice is `view` or `dense`, defaulting to view. View output
-has zero stride on all axes and only one immutable scalar backing the logical
-array. Dense output copies the scalar into packed storage for the complete output before consumer projection. Neither layout changes the logical dtype or any element bits.
+Only selected output tiles are allocated and filled. A sparse request over a 2^40-element logical shape can remain small; a full request must admit the full selected dense payload. There is no scalar-backed zero-stride output path. Negative/zero strides and unaligned scalar offsets are supported after physical validation. Output owners do not retain the scalar's source allocation and outlive context destruction.
 
-## Static parameters and outputs
+Preparation checks metadata, all input/output views, empty task parameters and zero scratch. Runtime uses bounded stack state and allocates no payload. Cancellation is checked before reading and between copies of at most 64 KiB. Operational resource/cancellation failures prevent successful call publication. Unsupported profiles fail before invocation. Invalid shape/parameters return InvalidArgument; incompatible scalar metadata returns TypeMismatch. Per-sample diagnostics, work counters and content caches are unavailable.
 
-The node has one input, `value`, and one named output, `values`. Shape is encoded
-as a required canonical comma-separated decimal String, for example `"480,640,4"`.
-There are 1..8 positive extents, no empty entries, signs or implicit dimensions,
-and no inferred element count. The authoring constructor accepts a shape vector
-and writes this canonical parameter. Required String `layout` is `view` or
-`dense`; the constructor writes `view` by default. Direct nodes supply both.
-There is no output dtype parameter because it is exactly the input dtype.
+## Acceptance
 
-Output is a generic tensor Result with no attached description. The port checks
-scalar dtype/shape; required upstream failures and explicit port validators
-retain their normal scope. Copying numeric storage preserves every bit,
-including signaling/quiet NaN payloads, without floating conversion, arithmetic
-or isfinite-based rejection. Logical contents are always
-`values[index] = bitcopy(value[0])`.
-
-## Demand and representation
-
-Every nonempty request reads scalar index zero once per admitted computation;
-empty demand reads nothing. Output shape/dtype are statically known. There is
-no output-coordinate-dependent source lookup or numeric failure. Input changes
-invalidate the complete logical output; retain its exact scalar and transitive
-validation witness. Shape/layout changes produce a new compiled identity.
-
-The default view path can return a complete-input logical Tensor backed by one owned
-scalar-sized copy, with byte offset zero, origin zero and all byte strides zero.
-It does not allocate or enumerate the logical element count. Any requested
-subregion addresses the same copied bits. Full logical coverage on this path
-does not mean dense execution or dense storage, and the output must not claim
-`requires_dense_output`. The scalar-sized owned copy avoids requiring retention
-of an arbitrarily large source allocation solely because the input was a view.
-
-Dense mode uses one CPU complete-input callback and fills the complete output before
-projection to the requested global Region. Even sparse requests allocate and
-compute the full packed output. Constant View owns one scalar copy and retains
-its whole-array Atomic tuple identity, without enumerating the logical count.
-
-Both layouts are immutable. Do not expose a writable alias, and do not assume
-that backing byte length equals shape product for view output. Published owners
-survive the invocation/context and release storage at the final owner. Source
-views with offsets, unaligned data, negative/zero strides are read by their
-validated logical scalar address. Unpublished allocations are released on error.
-
-## Execution, budgets and numerical versions
-
-All three operation keys are bitwise equivalent in logical elements. The selected
-layout contract also applies to all three; acceleration cannot quiet NaNs,
-canonicalize zeros, clamp infinities or change dtype. The view path only needs
-a byte copy; accelerated dense paths can use vectorized repeated-byte/element
-fills with no floating arithmetic and no out-of-coverage stores. There is no
-need for a numerical tolerance or approximate fallback. Incompatible platform
-keys return BackendUnavailable rather than silently switching keys.
-
-For element size b, view output payload is b bytes plus O(rank) descriptor/layout
-metadata. Dense output payload is b*N for N total elements, including partial consumer requests. The maximum
-logical byte count is 2^40*b, but is not a reservation in view mode. Scalar
-transport, descriptors, fragments, certificates and retained upstream owners
-remain subject to actual host resource accounting. View work is O(rank+b);
-dense work is O(N*b). Fragment/scheduling overhead is separately charged.
-
-Reserve before allocation, use existing host workers and work/admission limits,
-and check all byte/count products before dense allocation. Poll cancellation
-before reading, before publication and after at most 64 KiB of copied bytes or
-smaller admitted fill block. Resource failures stay sticky and do not silently
-switch a requested dense result to view. Cache identity includes key/profile,
-shape, layout, input metadata and all scalar bits (including NaN payload/sign).
-Cache-off changes neither active owner lifetime nor representation semantics.
-No disk backing, private thread pool or mutable global scalar cache is required.
-
-## Errors and acceptance
-
-Bad/missing shape/layout parameters or total elements above 2^40 use
-InvalidArgument during compile/direct preflight. Unsupported input dtype or
-shape other than `[1]` uses TypeMismatch. Input metadata/typed validation retains
-existing statuses. Generic NaN/Inf does not constitute an error. Preserve
-upstream source identity, cancellation/stale errors and ResourceExhausted
-capacity/work/stage reasons; no partial failed array is reported as success.
-
-| Test | Expected behavior |
-| --- | --- |
-| C01 | Int64 `[7]`, shape `[2,3]`: six logical sevens; view stores one 8-byte scalar with zero strides |
-| C02 | Same fixture with dense layout: packed 48-byte result; nonzero ROI still owns the full output |
-| C03 | Exhaustive UInt8 values, Int64 extrema, Float32/64 ±0, infinities and multiple NaN payloads preserve exact bits |
-| C04 | Output dtype matches the scalar; all output carries no domain description; invalid scalar structure is rejected |
-| C05 | Rank 1 and 8, singleton axes, product exactly 2^40 and one above; zero/negative/malformed shape parameters reject |
-| C06 | Large view succeeds within scalar-sized payload budget; full dense request fails an insufficient budget without fallback to view |
-| C07 | Changed scalar bits invalidate all output; identical numeric NaNs with different payloads do not share the wrong cached bits |
-| C08 | Strided/offset source scalar, context destruction with live output, final-owner release and no retained oversized source backing through the output copy |
-| C09 | Empty demand performs no input read; view/dense and three platform keys agree logically; cancellation and resource failure release unpublished buffers |
-
-The target public workflow declares a scalar binding, creates the selected
-constant key with shape/layout, compiles, executes and inspects logical values,
-byte strides and owned storage sizes. Repeat with dense and a nonzero region;
-do not test a view by assuming its raw bytes contain a dense repeated array.
-Implementation delivery provides real build/run commands and measured results.
-
-## Current implementation status
-
-The three keys are registered with per-node metadata specialization. The
-specializer parses and validates `shape` and `layout`, infers the input dtype
-and concrete output shape, and exposes the view payload bound to the planner.
-`constant_node` in `photospider/ops/numeric/arrays.hpp` is the public authoring
-helper and emits the same explicit operation key and parameters.
-
-The strict implementation performs an exact byte copy of the scalar. The two
-accelerated keys use the same bit-copy semantics and report their selected
-profile key; complete-input per-atom counters are unavailable; unsupported hosts return `BackendUnavailable`. Local Clang execution
-has checked an Int64 shape `[1048576,1048576]` backed by one 8-byte payload with
-zero strides, including result ownership after context destruction, and dense
-`[2,3]` execution.
-
-The following acceptance and regional implementation record predates complete-input.
-Coverage includes all UInt8 values, integer extrema and IEEE bit patterns,
-view/dense output, shape errors, cancellation during collection, StageLimit,
-metadata/output capacity, semantic validation, oversized unaligned source release,
-NaN-payload cache updates and owner lifetime. Dense execution reads the scalar once
-per region session and fills admitted 32-byte blocks through memcpy, NEON or AVX2;
-short tails use exact bounded byte copies. The accompanying
-mapping checks use an independent finite-set oracle. No performance benchmark or
-new integration-test registration is included. This does not change the Proposed
-status of this specification.
-
-- [NUM-03 category](../core.md).
-- [Generation specification](../../03-generation/op_specs/GEN-01A_constant_tensor.md).
-- [Operator template](../../00-foundation/spec-template.md).
-
-Current complete-input validation and timing: [array complete-input](../arrays-whole.md).
+For Int64 scalar 7 and shape `[2,3]`, expect six sevens in selected independent dense tiles. Temporary checks cover all 256 UInt8 values, all seven dtypes, integer extrema and raw IEEE specials, rank one/eight, sparse requests at the 2^40 limit, malformed shapes and scalar metadata, source strides/offsets, concurrent Runs, artifact roundtrips, cancellation and owner lifetime. Include a tile exceeding 64 KiB to exercise the bounded copy loop. See [fixed array execution](../arrays-execution.md). This execution contract overrides the [NUM baseline](NUM_common_contract.md); specification status remains Proposed.

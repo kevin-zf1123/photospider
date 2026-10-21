@@ -3,12 +3,12 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "photospider/data/tensor.hpp"
 
 namespace ps {
-class ResultTensorInput;
 /** @brief Fixed slot layout consumed by CPU and GPU lookup implementations.
  * @note Each slot is 80 little-endian bytes: eight uint64 tile coordinates,
  * uint64 valid mask, uint64 payload byte offset. A zero mask denotes an empty
@@ -24,6 +24,18 @@ inline constexpr std::uint64_t kFragmentAtlasSlotBytes = 80;
  * NotFound; it is never a zero sample or a per-fragment clamp.
  */
 struct PHOTOSPIDER_API FragmentAtlas final {
+ private:
+  ResourceLease metadata_;
+
+ public:
+  FragmentAtlas() = default;
+  /** @brief Copy geometry into caller-owned arrays and share packed storage.
+   * Ordinary copies do not retain the source geometry reservation.
+   */
+  FragmentAtlas(const FragmentAtlas& other);
+  FragmentAtlas(FragmentAtlas&&) noexcept = default;
+  FragmentAtlas& operator=(const FragmentAtlas& other);
+  FragmentAtlas& operator=(FragmentAtlas&& other) noexcept;
   TensorDescriptor descriptor;
   std::vector<std::uint64_t> tile_shape;
   std::uint64_t slot_count = 0, payload_bytes = 0;
@@ -32,6 +44,10 @@ struct PHOTOSPIDER_API FragmentAtlas final {
    */
   Result<std::uint64_t> address(
       const std::vector<std::uint64_t>& coordinate) const;
+
+ private:
+  friend class FragmentAtlasPlan;
+  void swap(FragmentAtlas& other) noexcept;
 };
 /** @brief Immutable transport plan with exact allocation sizes and no pixels.
  * @note Prepare and materialize are separately bounded. The plan stores only
@@ -53,21 +69,6 @@ class PHOTOSPIDER_API FragmentAtlasPlan final {
   static Result<FragmentAtlasPlan> prepare(
       const Tensor& input, std::vector<std::uint64_t> tile_shape = {},
       const FootprintLimits& limits = {});
-  /** @brief Builds a plan from a Result tensor capability's sample coverage.
-   * @details This overload uses the capability's schema and coverage but does
-   * not read source samples or retain the source Result. It shares the generic
-   * directory-planning algorithm and work bounds. A descriptor-only capability
-   * can describe an empty plan, but materialization still requires a
-   * payload-authorized Need. An Empty payload Need produces a valid empty plan.
-   * @param tile_shape Positive rank-sized extents with product <=64. Empty
-   * chooses a deterministic geometry with at most 64 samples per tile.
-   * @param limits Bounds tile discovery and probes; consume_work precharges
-   * work before the corresponding traversal steps. Cancellation is checked.
-   */
-  static Result<FragmentAtlasPlan> prepare(
-      const ResultTensorInput& input,
-      std::vector<std::uint64_t> tile_shape = {},
-      const FootprintLimits& limits = {});
   bool valid() const noexcept { return impl_ != nullptr; }
   /** @brief Required physical payload sizes; Empty uses one inert payload byte
    * and a two-slot empty directory. These are not authorized source samples.
@@ -77,17 +78,12 @@ class PHOTOSPIDER_API FragmentAtlasPlan final {
   std::uint64_t directory_allocation_bytes() const;
   std::uint64_t occupied_tiles() const;
   /** @brief Reports generic geometry-planning work.
-   * @note For the Tensor overload, callers retain their existing
-   * convention of charging this report externally. The ResultTensorInput
-   * prepare overload also calls FootprintLimits::consume_work directly.
+   * @note Callers charge this report to their execution work budget.
    * @throws std::logic_error If this plan is invalid.
    */
   std::uint64_t preparation_work() const;
   /** @brief Reports generic packing work for the matching input coverage.
-   * @note The ResultTensorInput materialize overload additionally charges
-   * window acquisition and read-bound work through consume_work; this report
-   * is not its complete charge. Tensor keeps its caller-charged work
-   * convention.
+   * @note Callers charge this report to their execution work budget.
    * @throws std::logic_error If this plan is invalid.
    */
   std::uint64_t materialization_work() const;
@@ -95,28 +91,12 @@ class PHOTOSPIDER_API FragmentAtlasPlan final {
    * @note Input dtype/domain/coverage must match the plan. Actual bits are read
    * now, preserving signed strides and fragment authorization. Input values and
    * Batch topology is not retained. Limits bound packing work; errors publish
-   * nothing.
+   * nothing. The active ResourceAllocationScope admits temporary coordinates
+   * and returned geometry. Moves transfer that geometry reservation; ordinary
+   * copies own their geometry independently. Allocation failure returns
+   * ResourceExhausted.
    */
   Result<FragmentAtlas> materialize(const Tensor& input,
-                                    const BufferAllocator& allocator,
-                                    const FootprintLimits& limits = {}) const;
-  /** @brief Packs the exact samples authorized by a Result tensor Need.
-   * @details Input type, sample shape, and coverage must match this plan. The
-   * method acquires owning windows for those samples and uses their row runs,
-   * including signed or broadcast strides and fragmented physical windows.
-   * It calls limits.consume_work directly for window lookup bounds and packing
-   * work. An unauthorized descriptor-only capability fails with the sticky
-   * InvalidArgument read-protocol status. An Empty payload Need returns an
-   * atlas with one inert payload byte and a two-slot empty directory without
-   * reading source samples.
-   * The returned atlas owns packed payload and directory storage but retains
-   * no source Result or read window.
-   * @param input Need-authorized tensor capability matching this plan.
-   * @param allocator Owns the atlas's packed buffers.
-   * @param limits Bounds sample reads and packing; consume_work precharges
-   * each bounded phase before its work. Errors publish no atlas.
-   */
-  Result<FragmentAtlas> materialize(const ResultTensorInput& input,
                                     const BufferAllocator& allocator,
                                     const FootprintLimits& limits = {}) const;
 

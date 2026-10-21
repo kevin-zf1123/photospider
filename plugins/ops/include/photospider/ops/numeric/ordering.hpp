@@ -35,24 +35,23 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
 }
 }  // namespace ordering_detail
 /** @brief Authors stable ascending per-axis sort with values and indices.
- * Input UInt8/Int64/Float32/64 has rank 1..8, positive extents and at most
- * 2^40 logical values. Both generic outputs retain its shape; values retains
- * source dtype/bits, indices is Int64 with original axis positions. NaNs sort
- * last, signed zeros compare equal, all ties retain original axis order.
- * Any nonempty demand requests complete source support with Data, Validation
- * and Descriptor roles, reads authorized Result windows, and computes the
- * complete selected output. Any source edit invalidates all recorded output
- * observations; failures affect the Run. Empty reads nothing. Each output has
- * an independent Whole callback; the unrequested public output is not
- * allocated. Per-line key/permutation scratch has 16*L element bytes plus
- * allocator overhead charged as metadata. The selected full output and fixed
- * state use Payload; the callback reads source samples through authorized
- * windows and uses per-line state. Helpers return owned node metadata and may
- * be called concurrently. Invalid helper arguments return
- * InvalidArgument/InvalidDomain/Schema; allocation may throw bad_alloc.
- * Compiler validates the actual axis/rank/type. Runtime resource/upstream/typed
- * and cancellation failures retain their categories; no partial failed output
- * is published. Returned immutable owners can outlive ExecutionContext.
+ * Source UInt8/Int64/Float32/64 has complete sample rank 1..8, positive extents
+ * and at most 2^40 samples. Both ordinary outputs retain the full shape;
+ * values preserves source bits, indices is Int64 with original axis positions.
+ * NaNs sort last, signed zeros compare equal and ties retain source order.
+ * Selected tiles with identical non-axis regions share one fixed CPU task,
+ * including tiles from both output ports. Each task reads the complete axis
+ * lines intersecting that region and sorts each line once. It writes only
+ * declared output tiles, with independent dense allocations. Empty selections
+ * read no payload. Preallocated per-invocation scratch contains 16*L bytes for
+ * keys/permutation and fixed comparison state. Preparation checks schemas,
+ * canonical writes, complete reads and scratch; runtime checks cancellation
+ * during classification, comparisons and output writes. Task failure prevents
+ * successful publication of the call. Immutable outputs can outlive context.
+ * Helpers return owned metadata and permit concurrent calls. Invalid helper
+ * arguments return InvalidArgument/InvalidDomain/Schema; allocation can throw
+ * bad_alloc. Compilation checks the actual type/rank/axis. Operational source,
+ * resource and cancellation failures retain their status categories.
  */
 inline Result<WorkflowNode> sort_node(
     std::uint64_t id, WorkflowInput input, std::int64_t axis,
@@ -60,19 +59,21 @@ inline Result<WorkflowNode> sort_node(
   return ordering_detail::node(id, "array.sort", std::move(input), axis,
                                profile);
 }
-/** @brief Authors one exact quantile per source axis line, keeping its
- * extent 1. The q input is an independent Float32/64 [1] Result tensor. For
- * N>=2 Whole requests source and q with Data, Validation and Descriptor roles
- * and reads through authorized Result windows. q must be finite in [0,1], else
- * Domain/Run InvalidArgument/InvalidDomain with InvalidQuantileProbability.
- * Source failure may precede q validation. For N=1 static q schema checks
- * remain, but runtime q has no payload Need or observation. Stable order,
- * exact h=(N-1)*q and exact linear interpolation precede one Float32/64
- * rounding (default Float64); integers never convert prematurely. The first
- * source-line NaN in original order wins and is quieted with the reduction
- * payload mapping. Source lines are fully read even for endpoint q, including
- * unrequested lines. Values has ordinary data. Ownership, helper errors,
- * resource and typed-validation rules follow sort_node.
+/** @brief Authors one exact quantile per selected source axis line.
+ * The output keeps rank with axis extent 1 and Float32/64 dtype (Float64 by
+ * default). The independent q tensor must have complete sample shape [1]
+ * and Float32/64 dtype. When L>1 the caller supplies finite q in [0,1]; this
+ * numerical precondition has no guaranteed out-of-domain diagnostic. L=1
+ * checks q schema but reads no q payload or producer. Each selected output
+ * tile reads its complete source lines and, when active, the q scalar.
+ * Stable ordering and exact h=(L-1)*q precede exact interpolation and one final
+ * RN conversion; integers never convert prematurely. The first NaN in source
+ * axis order wins even at endpoint q, quieted with the reduction payload rule.
+ * All IEEE source values are valid; finite Float64-to-Float32 conversion may
+ * overflow to signed infinity. Scratch adds fixed exact arithmetic state to
+ * sort_node's 16*L bytes. It is reused across lines within one invocation.
+ * Ownership, concurrency, static validation and operational failure rules
+ * follow sort_node. Empty selections emit no task or payload dependency.
  */
 inline Result<WorkflowNode> quantile_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput q, std::int64_t axis,

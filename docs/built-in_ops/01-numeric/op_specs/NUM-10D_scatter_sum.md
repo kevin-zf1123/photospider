@@ -11,68 +11,15 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_manual_acceptance
+implementation_status: implemented
 ---
 
 # NUM-10D: scatter_sum
 
-The strict key follows its exact numeric reference. Accelerated floating
-results follow the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md)
-where arithmetic applies; raw copies and discrete results remain exact.
+Inherit the [fixed scatter contract](NUM-10_scatter_contract.md) for ports, shape/dtype rules, full index validation, task dependencies, numerical classification, scratch and lifetime. Each input Result contains one tensor; output `values` uses ordinary base axes in `photospider.tensor`/`samples`. Empty selection emits no tasks.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements. The rules below
-specify the NUM-10 behavior.
+Sum base and all matching updates exactly, then perform one destination conversion. Integer final representability is an unchecked caller precondition; intermediate totals may exceed range. For base INT64_MAX and matching updates [1,-1], return INT64_MAX. Floating overflow produces infinity; finite cancellation is evaluated before rounding. No unordered floating atomic accumulation is used.
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+If no update hits a coordinate, copy base bits without arithmetic, including signaling NaNs. Every nonempty call validates all indices once in a shared task. Output tasks compute only selected tiles and read the shared stable index table, their base region and all possible update positions for their non-axis region. Base remains immutable. Invalid indices and operational resource/cancellation failures prevent successful call publication.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
-
-Inherit the [scatter contract](NUM-10_scatter_contract.md) for ports, shapes,
-complete-input demand, index validation, storage and shared exceptional-value rules.
-Every input is a Result with exactly one tensor member at an unrestricted key;
-its `sample_shape()` includes batch axes. The `values` output is a Result using
-`photospider.tensor` / `samples`, with full ordinary output shape and no attached domain description
-or batch topology. Nonempty demand reads complete `base`, `indices` and `updates`
-with data, validation and descriptor support ; Empty demand reads no
-payload and performs no sample arithmetic. The kernel computes the complete
-output before consumer projection. The base is immutable.
-
-## Update semantics
-
-Sum base and all matching updates as exact mathematical numbers, with one final
-round-to-nearest/ties-even conversion to Float32/Float64 or final UInt8/Int64
-range check. Do not round or reject intermediate partial sums. Integer overflow
-is based only on the final result; floating overflow returns signed infinity.
-Use an exact accumulator or certified equivalent, with actual limb/work capacity
-charged to host budgets. No unordered floating atomic accumulation is allowed.
-
-If no update matches, copy base without arithmetic, including signaling-NaN
-bits. For aggregate variants with matching updates, use the shared exceptional
-value priority and zero rules. Only matching contributors enter arithmetic, but
-an upstream or typed-validation failure from any active input can fail complete-input
-preparation.
-
-## Acceptance and implementation status
-
-Conceptual public fixture: base=[10,20,30], indices=[1,1,2], updates=[2,3,4],
-axis=0 -> [10,25,34]. Use independent index grouping and the specified exact
-numeric or bit-selection oracle; verify each port's actual read footprint.
-Include duplicated targets, unhit sNaN base, selected and unselected failures,
-NaN payload precedence, infinities, signed zeros, integer extrema, source strides,
-index changes, global invalid-index rejection and shared resource/lifetime tests.
-
-For Int64, base=INT64_MAX with matching updates [1,-1] must return INT64_MAX
-without a partial-sum overflow failure. The same grouping principle applies to
-finite floating cancellation; compare exact sums with one final rounding.
-
-The public workflow checks all four scatter variants, exact cancellation and
-final integer overflow. See
-[NUM-10 Run-shared complete-input computation](../indexing-whole.md) for runnable commands and
-evidence boundaries.
+For base `[10,20,30]`, indices `[1,1,2]`, updates `[2,3,4]` and axis 0, expect `[10,25,34]`. Temporary acceptance uses independent grouping and raw-bit or exact arithmetic references. Cover duplicate order, no-hit signaling NaNs, first-NaN precedence, infinities, zero signs, integer boundaries, partial/empty output, changing indices, source strides, precise read sets, artifacts and concurrent Runs. See [fixed indexing execution](../indexing-execution.md). Specification status remains Proposed.

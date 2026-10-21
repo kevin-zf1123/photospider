@@ -9,15 +9,12 @@
 namespace ps::compiler_internal {
 inline constexpr std::size_t kMaximumArtifactBytes = 64U * 1024U * 1024U;
 inline constexpr std::size_t kMaximumIRNodes = 65536;
-inline constexpr std::size_t kMaximumPlanSteps = kMaximumIRNodes * 64;
+inline constexpr std::size_t kMaximumPhysicalRecords = kMaximumIRNodes * 64;
 
-/** @brief Portable records; runtime-owned members of node/step remain empty. */
+/** @brief Portable records; runtime-owned members of node/binding remain empty.
+ */
 struct IRRecord final {
   SemanticNode node;
-  std::vector<ResourceIdentity> resources;
-};
-struct PlanRecord final {
-  PlanStep step;
   std::vector<ResourceIdentity> resources;
 };
 struct ArtifactData final {
@@ -31,8 +28,8 @@ struct ArtifactData final {
   std::vector<IRBlock> blocks;
   IRBlockId entry = 0;
   IRForm form = IRForm::ControlFlow;
-  std::map<IRBlockId, std::vector<PlanTileInstruction>> code;
-  std::vector<PlanRecord> steps;
+  physical::Program physical;
+  std::vector<PlanCallBinding> bindings;
   std::map<std::string, std::size_t> plan_outputs;
   PlanningOptions options;
 };

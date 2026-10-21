@@ -1,16 +1,16 @@
 # Pack sparse fragments into an atlas
 
+[Chinese reader version](zh/Fragment-Atlas.zh.md).
+
 ## Scope and ownership
 
-The plan retains descriptor-domain metadata, exact sample coverage and occupied tile coordinates. Materialized payload and directory TensorSpans own packed bytes through the supplied allocator; a Result-backed atlas retains no source Result or read window. A native host keeps each device view alive until the synchronous invocation drains. Atlas support for all scalar widths is transport support only; it does not imply GPU arithmetic support for a dtype.
+`FragmentAtlasPlan` is a data-layer transport utility for a `Tensor`. Preparation records its descriptor, exact coverage and occupied tile coordinates. Materialization copies the covered sample bits into independently owned payload and directory buffers. The plan retains no source storage; the materialized atlas remains valid after the input Tensor is released.
 
-The atlas packs Tensor sample bits into a payload and sparse transport directory. Input is either a Tensor or an authorized ResultTensorInput. The Result overload reads owning windows under the instruction's compiled grant; neither path broadens authorization or interprets image semantics. Data-layer Tensor packing and plugin-layer capability packing share geometry and preserve holes.
+Atlas transport supports all built-in scalar widths. This does not establish GPU arithmetic support. The fixed executor passes the views declared in its physical Plan; atlas packing is an explicit data operation, outside the fixed kernel invocation service table.
 
-## Core data structures and memory layout
+## Public interface
 
 ```cpp
-class ResultTensorInput;
-
 struct FragmentAtlas final {
   TensorDescriptor descriptor;
   std::vector<std::uint64_t> tile_shape;
@@ -25,26 +25,21 @@ class FragmentAtlasPlan final {
   static Result<FragmentAtlasPlan> prepare(
       const Tensor& input, std::vector<std::uint64_t> tile_shape = {},
       const FootprintLimits& limits = {});
-  static Result<FragmentAtlasPlan> prepare(
-      const ResultTensorInput& input,
-      std::vector<std::uint64_t> tile_shape = {},
-      const FootprintLimits& limits = {});
   Result<FragmentAtlas> materialize(
       const Tensor& input, const BufferAllocator& allocator,
-      const FootprintLimits& limits = {}) const;
-  Result<FragmentAtlas> materialize(
-      const ResultTensorInput& input, const BufferAllocator& allocator,
       const FootprintLimits& limits = {}) const;
 };
 ```
 
-`FragmentAtlasPlan` prepares transport metadata from exact coverage and materializes it through a caller-supplied allocator. It supports rank 1..8 and every built-in `ElementType` (UInt8, Int64, Float64, Float32, Int8, UInt16 and Int16) without converting sample bits. The plan retains domain, coverage and tile masks, but no source data owners. The `ResultTensorInput` overload acquires owning windows for the grant-authorized samples and copies them through `row_run()`. It supports signed strides, zero-stride broadcasts, fragmented windows and batch-prefixed spatial tensors without filling holes or bounding boxes. Once packed, the atlas remains valid independently of the input Result, poll and execution context. When the capability grants no payload read, materialization still routes through `input.read`, so the attempt latches `UnauthorizedRead` exactly as a direct read would.
+These declarations omit size/work accessors and private state; the complete API is in [`fragment_atlas.hpp`](../../include/photospider/data/fragment_atlas.hpp). A materialization input must match the prepared dtype, shape and coverage. Its current sample values are read at materialization, so one plan may pack different values with the same static geometry.
 
-`preparation_work()` reports the generic directory-planning work. `materialization_work()` reports the generic packing work. The `ResultTensorInput` overload precharges window acquisition and read-bound work through `FootprintLimits::consume_work`, so `materialization_work()` is not its complete charge. The generic `Tensor` overloads preserve their caller-charged work convention; their `consume_work` callback is not invoked.
+Packing preserves UInt8, Int64, Float64, Float32, Int8, UInt16 and Int16 bits. Tensor reads support fragmented, signed-stride and broadcast storage. Missing samples remain holes. Lookup of a hole returns `NotFound`; an out-of-domain coordinate returns `InvalidArgument`.
 
-A `ResultTensorInput` may represent one source Result. Atlas preparation and materialization use only the capability's granted sample coverage. The input windows retain their original Result owners while the atlas packs the requested samples; the atlas owns its packed buffers independently afterward. This path handles tensor grants; it does not aggregate object or field support.
+## Geometry and wire format
 
-The directory has a power-of-two slot count, at least two and at least twice the occupied tile count. Slots use open addressing with linear probing. Each slot is 80 little-endian bytes:
+Rank is 1..8. Each transport tile contains at most 64 logical samples. Explicit tile extents must be positive, match the rank and have a product at most 64. Empty geometry selects a deterministic layout by filling the rightmost axes first. Atlas transport tiles are independent of physical Plan tiles.
+
+Only occupied tiles enter the directory. Global shape products need not fit uint64: lookup uses per-axis coordinates. The directory has a power-of-two slot count, at least two and at least twice the occupied tile count. Slots use open addressing with linear probing. Each slot is 80 little-endian bytes:
 
 | Bytes | Meaning |
 | --- | --- |
@@ -52,36 +47,18 @@ The directory has a power-of-two slot count, at least two and at least twice the
 | 64..71 | uint64 valid-sample mask; zero means an empty slot |
 | 72..79 | uint64 start byte offset in the packed payload |
 
-The public `FragmentAtlas::address` and the C-compatible SDK macro `PS_FRAGMENT_ATLAS_MSL_V11` implement matching lookup. The latter defines `ps_atlas_address` for a Metal shader. The host supplies actual binding spans, slot count, shape, tile extents and payload byte count. Only payload and directory buffers are needed regardless of fragment count. Boundary mapping must occur in global coordinates before lookup. An absent mask bit/slot is an explicit missing sample, never a zero value or per-fragment clamp.
+The hash is FNV-1a over the rank coordinate words, low byte first, with offset basis 14695981039346656037 and prime 1099511628211. Local row-major coordinates select a mask bit. A present sample's payload offset is the tile byte offset plus its preceding set-bit count times dtype width. Payload is ordered by tile key and increasing valid mask bit. Holes occupy no payload samples.
 
-## Execution and resource state machine
+An empty Tensor uses one inert payload byte and a two-slot empty directory. It contains no readable samples. Boundary mapping belongs to the sampling algorithm and must occur in global coordinates before lookup.
 
-A `ResultTensorInput` atlas packs only samples authorized by that compiled tensor grant. The grant is fixed by the planner, so an atlas can only select within it: a data-dependent kernel receives the finite static superset its mapper declared, and the atlas adds no plan instruction, dependency or read outside that superset. Preparation retains descriptor, coverage and occupied tile coordinates; materialization copies sample bytes into Root-accounted payload and directory buffers. The resulting atlas owns those buffers but does not retain the source Result or read windows. The atlas does not grant additional reads, and support for transporting a scalar type does not imply GPU arithmetic support for that type.
+The C-compatible SDK macro `PS_FRAGMENT_ATLAS_MSL_V11` defines `ps_atlas_address` for a Metal shader with the same directory format and hash. The shader helper accepts only 1-, 4- and 8-byte samples; it rejects the 2-byte width used by UInt16 and Int16. CPU packing and `FragmentAtlas::address` support those two types. Its host must supply valid buffer spans, shape, tile extents, slot count and payload byte count. The fixed executor links GPU placements through native kernel preparation and asynchronous completion. Atlas packing remains explicit: the operation declares the packed buffers and their fixed read views. `test_fragment_atlas_gpu` executes the Metal address helper against sparse atlas payloads at ranks 1, 3 and 8; public physical Plan integration is separately exercised by `test_fixed_native`.
 
-Native callbacks use the configured synchronous invocation. The host keeps native views alive until submitted dispatches drain, then releases poll-scoped resources. Missing samples remain holes in the directory. An absent directory entry returns `NotFound`. A hole in a fragmented grant stays a hole in the atlas: when the grant covers tiles `[0,2)` and `[4,6)`, a lookup of a sample in tile 3 returns `NotFound` rather than a zero value. A CPU-phase call, absent grant or descriptor-only grant cannot widen the grant. Cancellation, allocation failure and sticky service errors prevent publication and retire newly owned buffers.
+## Resource bounds and failures
 
-The C Result bridge uses the same grant-scoped atlas. Atlas buffer tokens and dispatch services are borrowed for the active poll; releasing either member of the token pair retires the pair, and a later acquisition returns new handles. The host freezes transferred output scratch on publication, so a previously writable token cannot modify published bytes. Each Result output still records its own current association and dependency evidence.
+`payload_allocation_bytes()` and `directory_allocation_bytes()` report exact logical allocation sizes before packing. A device host must admit each rounded physical capacity separately. Payload and directory retain the allocator's storage owners.
 
-Synchronous GPU attempts may retry on CPU only when the instruction carries a compiled `cpu_fallback` flag and the failure is an eligible `BackendUnavailable` before any input read or native dispatch. Acquiring an atlas reads input payload and therefore vetoes the retry for that attempt. The GPU invocation drains before its views retire or the CPU attempt starts. Cancellation, stale state, protocol errors, published output and other non-retryable failures do not become CPU retries. Result cache retention remains separate from this fallback decision.
+`maximum_boxes` bounds occupied tiles. `maximum_work` bounds metadata scanning, sample discovery, hashing, probing and packing. `preparation_work()` and `materialization_work()` report the corresponding work estimates for caller accounting. The Tensor entry points enforce their local limits and cancellation token but do not invoke `FootprintLimits::consume_work`.
 
-Current integration sources exercise the transport and failure boundaries:
+Invalid inputs, geometry or materialization mismatches fail without publishing an atlas. Work/capacity exhaustion and cancellation release newly allocated owners, including cancellation after either allocation. Size/work accessors on an invalid plan throw `std::logic_error`; `valid()` returns false.
 
-- [`test_gpu_fragment_execution.cpp`](../../tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp) compares real native lookup and output against an independent coordinate oracle. It covers rank, width, sparse holes, fragment packing, grant enforcement and Root admission.
-- [`test_gpu_c_abi_execution.cpp`](../../tests/integration/kernel/gpu/test_gpu_c_abi_execution.cpp) loads [`gpu_result_c_plugin.c`](../../tests/fixtures/gpu_result_c_plugin.c) and checks C atlas handles, stale tokens, publication revocation, malformed requests, errors and native dispatch. Its budget cases account native physical capacity: allocations above 16 KiB round up independently, so the 16,644-byte compact atlas payload and the 20,480-byte directory each occupy 32,768 bytes.
-- [`test_fragment_atlas_gpu.cpp`](../../tests/unit/kernel/test_fragment_atlas_gpu.cpp) exercises the lower-level atlas SDK with native buffer capacity and readback checks.
-- [`test_gpu_sync_fallback.cpp`](../../tests/integration/kernel/gpu/test_gpu_sync_fallback.cpp) checks CPU retry, cancellation and retained producer behavior.
-
-These native tests return the configured skip code when the required device is unavailable. Protocol mocks and CPU fallback do not establish native execution.
-## Algorithms and wire format
-
-Each tile has at most 64 logical samples. Callers can specify positive rank-sized tile extents with product at most 64, or use the deterministic default geometry that fills the rightmost axes first. Only occupied tiles enter the directory. Global shape products need not fit uint64: lookup uses per-axis tile coordinates, never a flattened global index. The generic packer accepts Tensor coverage as supplied. The Result overload packs only the captured grant-authorized coverage. Atlas transport tiles are independent of plan payload tiles; packing grants no new sample access.
-
-The hash is FNV-1a over the rank coordinate words, low byte first, with offset basis 14695981039346656037 and prime 1099511628211. Local row-major coordinates select a mask bit. A present sample's payload offset is the tile byte offset plus its preceding set-bit count times dtype width. Payload is ordered by tile key and increasing valid mask bit. No hole occupies a payload sample. An empty port uses one inert payload byte and a two-slot empty directory; neither authorizes samples.
-
-`prepare` reports exact logical allocation sizes for payload and directory before materialization. A GPU host must round each separately to actual device capacity before admission. `maximum_boxes` bounds occupied tiles, while `maximum_work` bounds metadata scanning, sample discovery, hashing/probing and packing. Entry cancellation and metadata precharges precede cardinality/equality scans. `preparation_work()` reports generic geometry-planning work and `materialization_work()` reports generic packing work. The `ResultTensorInput` overload precharges its work through `FootprintLimits::consume_work`; Result materialization additionally precharges window acquisition and read-bound work that `materialization_work()` does not include. The `Tensor` overloads preserve the existing caller-charged convention. Cancellation after either allocation, including an empty input, retires all newly owned buffers and publishes no atlas.
-
-## Limits and failure handling
-
-The generic atlas unit suite is registered as `test_fragment_atlas` from [`tests/unit/kernel/test_fragment_atlas.cpp`](../../tests/unit/kernel/test_fragment_atlas.cpp). The native SDK suite uses [`tests/unit/kernel/test_fragment_atlas_gpu.cpp`](../../tests/unit/kernel/test_fragment_atlas_gpu.cpp); the Result callback integration path uses [`tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp`](../../tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp). These sources cover wire layout, coordinate lookup, sparse holes, signed and zero strides, rank and dtype transport, buffer admission, cancellation and native readback. Native tests may skip when the required Metal device is unavailable.
-
-The `Tensor` overload preserves its accepted Tensor coverage. The `ResultTensorInput` overload reads only samples authorized by its compiled tensor grant. Both packers preserve holes, return `NotFound` for missing directory samples, and fail plans that exceed tile or work limits. Cancellation retires newly allocated owners. Device hosts must admit rounded payload and directory capacities separately; atlas lookup does not trigger additional reads or provide a CPU fallback.
+[`test_fragment_atlas.cpp`](../../tests/unit/kernel/test_fragment_atlas.cpp) checks the data utility's bytes, sparse lookup, geometry, strides, ownership, bounds and cancellation. Native SDK tests are a separate validation surface; a successful CPU test does not establish device execution.

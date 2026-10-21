@@ -90,8 +90,8 @@ NaN payload priority, huge and subnormal ratios, quadrant boundaries, diagonal
 neighbors and hard rounding cases. Use an independent high-precision angle
 oracle with direct destination rounding and separately explicit special bits.
 
-Exercise shared disjoint demand, both upstream dependencies, typed-validation
-closure, cache/lifetime, resource exhaustion, cancellation and actual fallback
+Exercise shared disjoint demand, both upstream dependencies, structural-validation
+closure, lifetime, resource exhaustion, cancellation and actual fallback
 through public WorkflowDocument execution. The maintained implementation and
 actual validation are recorded below.
 
@@ -99,8 +99,7 @@ actual validation are recorded below.
 
 The three keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/ops/numeric/binary.hpp`.
-The shared Run-shared adapter retains and validates both complete inputs, including
-when a numeric identity determines a result.
+The fixed adapter declares both intersecting input tile sets, including when a numeric identity determines a result.
 Floating elementary operations use controlled correctly rounded hardware
 arithmetic after exact special-value classification, with exact fallback; integer
 operations retain checked exact arithmetic. Accelerated ordinary positive-base

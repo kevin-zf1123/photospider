@@ -4,18 +4,24 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "photospider/data/result.hpp"
 #include "photospider/data/tiles.hpp"
-#include "photospider/plugin/tile_helpers.hpp"
-#include "support/multi_output_result_fixture.hpp"
+#include "photospider/plugin/tile_geometry.hpp"
 #include "support/test_support.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
+template <class T>
+T take(Result<T> result) {
+  if (!result.ok())
+    throw std::runtime_error(result.status().message);
+  return result.take_value();
+}
 SchemaTemplate schema(std::vector<std::uint64_t> shape,
                       std::vector<std::uint64_t> batch = {}) {
   SchemaTemplate result;
@@ -98,7 +104,6 @@ int geometry() {
   return 0;
 }
 int storage_tiles() {
-  using multi_result::take;
   ResourceBudget root;
   for (bool chw : {false, true}) {
     auto image = schema(chw ? std::vector<std::uint64_t>{2, 3, 5}
@@ -265,68 +270,6 @@ int sdk_conversion() {
     PS_CHECK(live == 0);
   return 0;
 }
-int sdk_needs() {
-  ResourceBudget root;
-  ResultProgramMetadata metadata;
-  metadata.inputs.resize(1);
-  metadata.inputs[0].result_schema =
-      std::make_shared<const SchemaTemplate>(schema({129, 257, 4}, {2}));
-  std::map<std::string, ParameterValue> parameters;
-  ResultProgramQuery query(metadata, parameters);
-  auto samples = Footprint::from_regions(
-      {2, 129, 257, 4}, {Region({{1, 1}, {127, 2}, {255, 2}, {2, 1}})});
-  PS_REQUIRE_OK(samples);
-  auto selected =
-      sdk::tile_need_for_samples(root, query, 0, 0, samples.value());
-  PS_REQUIRE_OK(selected);
-  PS_CHECK(selected.value().tensor_slot == 0 &&
-           !selected.value().descriptor_only);
-  PS_CHECK(std::vector<TileIndex>(selected.value().tiles.begin(),
-                                  selected.value().tiles.end()) ==
-           std::vector<TileIndex>({7, 8, 10, 11}));
-  metadata.input_tile_grids.push_back(
-      TileGrid::members(*metadata.inputs[0].result_schema, 64).take_value());
-  selected = sdk::tile_need_for_samples(root, query, 0, 0, samples.value());
-  PS_REQUIRE_OK(selected);
-  PS_CHECK(std::vector<TileIndex>(selected.value().tiles.begin(),
-                                  selected.value().tiles.end()) ==
-           std::vector<TileIndex>({23, 24, 28, 29}));
-  auto empty = Footprint::none({2, 129, 257, 4}).take_value();
-  auto empty_need = sdk::tile_need_for_samples(root, query, 0, 0, empty);
-  PS_REQUIRE_OK(empty_need);
-  PS_CHECK(empty_need.value().tiles.empty() &&
-           !empty_need.value().descriptor_only);
-  auto descriptor = sdk::tile_need_for_samples(root, query, 0, 0, empty, true);
-  PS_REQUIRE_OK(descriptor);
-  PS_CHECK(descriptor.value().descriptor_only &&
-           descriptor.value().tiles.empty());
-  PS_CHECK(sdk::tile_need_for_samples(root, query, 1, 0, empty, true)
-               .status()
-               .code == ErrorCode::InvalidArgument);
-  PS_CHECK(sdk::tile_need_for_samples(root, query, 0, 1, empty, true)
-               .status()
-               .code == ErrorCode::InvalidArgument);
-  auto ordinary = schema({8});
-  ordinary.tensors[0].layout.spatial = false;
-  ordinary.tensors[0].layout.channel_axis.reset();
-  metadata.inputs[0].result_schema =
-      std::make_shared<const SchemaTemplate>(ordinary);
-  metadata.input_tile_grids.clear();
-  auto point = Footprint::from_regions({8}, {Region({{3, 1}})}).take_value();
-  auto selected_point = sdk::tile_need_for_samples(root, query, 0, 0, point);
-  PS_REQUIRE_OK(selected_point);
-  PS_CHECK(selected_point.value().tiles.size() == 1 &&
-           selected_point.value().tiles.contains(0));
-  ResourceLimits exhausted;
-  exhausted.maximum_work = 0;
-  ResourceBudget no_work(exhausted);
-  metadata.inputs[0].result_schema =
-      std::make_shared<const SchemaTemplate>(schema({129, 257, 4}, {2}));
-  PS_CHECK(sdk::tile_need_for_samples(no_work, query, 0, 0, samples.value())
-               .status()
-               .reason == FailureReason::WorkLimit);
-  return 0;
-}
 int planning() {
   auto operations = std::make_shared<OperationRegistry>();
   auto spatial = schema({129, 257, 4}, {2});
@@ -341,12 +284,37 @@ int planning() {
     port.result_schema_id = std::string(spatial.id);
     port.result_schema_version = spatial.version;
     definition.traits.input_schema = {port};
-    definition.traits.outputs = {multi_result::output(
-        "value", definition.key == "test.ordinary" ? ordinary : spatial)};
-    definition.start_result = [](const ResultProgramQuery&,
-                                 const BufferAllocator& allocator) {
-      return ResultContinuation::make<multi_result::Program>(allocator, -1,
-                                                             0.0);
+    auto& output = definition.traits.outputs[0];
+    output.output_schema = port;
+    output.result_schema =
+        definition.key == "test.ordinary" ? ordinary : spatial;
+    definition.lower = [](const OperationLowering& query) {
+      OperationProgramBuilder builder(query);
+      auto grids =
+          TileGrid::members(*query.inputs[0].result_schema, query.tile_extent);
+      if (!grids.ok())
+        return Result<OperationProgram>(grids.status());
+      for (const auto& member : query.requests[0].members)
+        for (auto tile : member.second) {
+          auto task = builder.add_task("tile", "tile-v1");
+          if (!task.ok())
+            return Result<OperationProgram>(task.status());
+          const auto first = query.operation == "test.ordinary" ? 0 : tile;
+          const auto end = query.operation == "test.ordinary"
+                               ? grids.value()[member.first].tile_count()
+                               : tile + 1;
+          for (auto input = first; input < end; ++input) {
+            auto status =
+                builder.read_input(task.value(), 0, member.first, input);
+            if (!status.ok())
+              return Result<OperationProgram>(status);
+          }
+          auto status =
+              builder.write_output(task.value(), 0, member.first, tile);
+          if (!status.ok())
+            return Result<OperationProgram>(status);
+        }
+      return builder.finish();
     };
     const auto registered =
         operations->register_operation(std::move(definition));
@@ -357,7 +325,8 @@ int planning() {
   PS_CHECK(operations->freeze().ok());
   Compiler compiler(operations);
   WorkflowDocument document;
-  document.inputs = {multi_result::declaration(1, "source", spatial)};
+  document.inputs = {
+      {1, "source", std::make_shared<const SchemaTemplate>(spatial)}};
   document.nodes = {{1, "test.tiled", {WorkflowInputReference{1}}, {}},
                     {2, "test.second", {WorkflowNodeOutput{1, "value"}}, {}},
                     {3, "test.ordinary", {WorkflowNodeOutput{2, "value"}}, {}}};
@@ -370,14 +339,18 @@ int planning() {
   const auto& plan = compiled.value().plan.value();
   PS_CHECK(plan.tile_extent() == 128 && plan.input_tile_grids().size() == 1 &&
            plan.input_tile_grids()[0][0].tile_count() == 12);
-  PS_CHECK(plan.steps()[0].tile_grids[0].tile_count() == 12);
-  PS_CHECK(plan.steps()[1].tile_grids[0].tile_count() == 12);
-  PS_CHECK(plan.steps()[2].tile_grids[0].tile_count() == 1);
-  const auto& metadata = *plan.steps()[1].structured_metadata;
-  ResultProgramQuery query(metadata, plan.steps()[1].parameters);
-  PS_CHECK(query.input_tile_grids.size() == 1 &&
-           query.input_tile_grids[0][0].tile_count() == 12 &&
-           query.output_tile_grids[0].tile_count() == 12);
+  PS_CHECK(plan.output("spatial").tile_grids[0].tile_count() == 12);
+  PS_CHECK(plan.output("second").tile_grids[0].tile_count() == 12);
+  PS_CHECK(plan.output("value").tile_grids[0].tile_count() == 1);
+  const auto& program = plan.program();
+  PS_CHECK(program.calls.size() == 3 && program.tasks.size() == 25);
+  PS_CHECK(program.calls[0].tasks.size() == 12 &&
+           program.calls[1].tasks.size() == 12 &&
+           program.calls[2].tasks.size() == 1);
+  const auto& aggregate = program.tasks[program.calls[2].tasks[0]];
+  PS_CHECK(aggregate.reads.size() == 12 && aggregate.predecessors.size() == 12);
+  for (const auto& read : aggregate.reads)
+    PS_CHECK(program.tiles[read.tile].value == plan.calls()[1].outputs[0]);
   PlanningOptions options;
   options.tile_extent = 64;
   auto smaller =
@@ -385,8 +358,7 @@ int planning() {
   PS_REQUIRE_OK(smaller);
   PS_CHECK(smaller.value().input_tile_grids()[0][0].tile_count() == 30 &&
            smaller.value().digest().value != plan.digest().value);
-  PS_CHECK(smaller.value().structured_templates() !=
-           plan.structured_templates());
+  PS_CHECK(smaller.value().program().tasks.size() == 61);
   ResourceBudget root;
   const TileRequest selected{
       {{0, TileSet::from_indices(root, {0, 11}).take_value()}}};
@@ -399,26 +371,31 @@ int planning() {
            narrowed.value().output_requests().at("second") == selected &&
            narrowed.value().output_requests().at("value").size() == 1);
   const TileRequest last{{{0, TileSet::from_indices(root, {11}).take_value()}}};
-  auto subset = narrowed.value().tile_plan("spatial", last);
+  auto subset = narrowed.value().select_outputs({{"spatial", last}});
   PS_REQUIRE_OK(subset);
   PS_CHECK(subset.value().outputs().size() == 1 &&
            subset.value().output_requests().at("spatial") == last &&
            subset.value().digest().value != narrowed.value().digest().value);
-  PS_CHECK(narrowed.value().tile_plan("spatial", {}).ok());
-  PS_CHECK(
-      narrowed.value()
-          .tile_plan("spatial",
-                     {{{0, TileSet::from_indices(root, {1}).take_value()}}})
-          .status()
-          .code == ErrorCode::InvalidArgument);
+  PS_CHECK(subset.value().program().tasks.size() == 1 &&
+           subset.value().program().calls[1].tasks.empty() &&
+           subset.value().program().calls[2].tasks.empty());
+  const auto& selected_task = subset.value().program().tasks[0];
+  PS_CHECK(subset.value().program().tiles[selected_task.writes[0]].tile_index ==
+           11);
+  PS_CHECK(narrowed.value().select_outputs({{"spatial", {}}}).ok());
   PS_CHECK(narrowed.value()
-               .tile_plan("second", last)
+               .select_outputs(
+                   {{"spatial", {{{0, take(TileSet::range(root, 1, 2))}}}}})
+               .status()
+               .code == ErrorCode::InvalidArgument);
+  PS_CHECK(narrowed.value()
+               .select_outputs({{"second", last}})
                .value()
                .output_requests()
                .at("second") == last);
-  PS_CHECK(narrowed.value().tile_plan("value", last).status().code ==
+  PS_CHECK(narrowed.value().select_outputs({{"value", last}}).status().code ==
            ErrorCode::InvalidArgument);
-  PS_CHECK(narrowed.value().tile_plan("missing", {}).status().code ==
+  PS_CHECK(narrowed.value().select_outputs({{"missing", {}}}).status().code ==
            ErrorCode::InvalidArgument);
   for (const auto& invalid : std::vector<std::map<std::string, TileRequest>>{
            {{"spatial",
@@ -447,5 +424,5 @@ int planning() {
 }  // namespace
 int main() {
   return geometry() || storage_tiles() || sets_and_needs() ||
-         sdk_conversion() || sdk_needs() || planning();
+         sdk_conversion() || planning();
 }

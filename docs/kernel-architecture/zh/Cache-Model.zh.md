@@ -70,6 +70,8 @@ Reservation 属于 block，其他 Run 不得撤回。Tile 释放的容量在 blo
 
 这些是布局计算，不含 incoming/export 值、scratch、metadata、allocation padding 和 driver 开销，不是 RSS 或耗时测量。临时 tile 可在最后使用后释放物理 buffer，而所属 block 仍持有预留预算。因此按[诊断契约](Parallel-Execution-Model.zh.md#诊断与检查)分别报告 reserved/live bytes、allocation count 和 admission failure detail。
 
+[2026-10-20 原生测量](Parallel-Execution-Model.zh.md#原生测量)在 Metal/Vulkan 上比较了相同四阶段、每阶段 4 MiB 的单 block 与四 block 链。合并时 Shared backing peak 为 16 MiB，拆分后为 8 MiB。12 MiB Payload 上限使合并 block 在零 task、零 backing allocation 时拒绝，拆分版本则成功准入。测量部分分别报告耗时分布、metadata、COPY 与 drain。
+
 合并 DAG 路径 block 会扩大调度空间，也可能增加准入工作集。对相同 workflow 比较合并 block 与较小合法 block，分别记录容量拒绝、排队延迟和退休延迟。基线保持全 block reservation；按容量划分需要实际收益与明确 compiler 策略，不引入存活 tile 别名或 payload 多级缓存。
 
 ## Identity 与缓存边界

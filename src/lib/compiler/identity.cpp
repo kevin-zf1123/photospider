@@ -129,15 +129,6 @@ void append_ids(DigestBuilder* d, const Values& values) {
   for (auto value : values)
     d->integer(value);
 }
-void append_input(DigestBuilder* d, const PlanInput& input) {
-  d->integer(input.index());
-  if (const auto* value = std::get_if<PlanStepInput>(&input))
-    d->integer(value->step_index);
-  else if (const auto* value = std::get_if<PlanWorkflowInput>(&input))
-    d->integer(value->declaration_index);
-  else
-    d->integer(std::get<PlanArgumentInput>(input).parameter_index);
-}
 void append_request(DigestBuilder* d, const TileRequest& request) {
   d->integer(request.members.size());
   for (const auto& member : request.members) {
@@ -149,41 +140,15 @@ void append_request(DigestBuilder* d, const TileRequest& request) {
     }
   }
 }
-void append_samples(DigestBuilder* d, const Footprint& samples) {
-  d->integer(samples.valid());
-  if (!samples.valid())
-    return;
-  append_ids(d, samples.shape());
-  d->integer(samples.boxes().size());
-  for (const auto& box : samples.boxes()) {
-    d->integer(box.rank());
-    for (const auto& dimension : box.dimensions()) {
-      d->integer(dimension.offset);
-      d->integer(dimension.extent);
-    }
-  }
-}
-void append_sample_members(DigestBuilder* d,
-                           const std::vector<Footprint>& members) {
-  d->integer(members.size());
-  for (const auto& samples : members)
-    append_samples(d, samples);
-}
 void append_edge(DigestBuilder* d, const IREdge& edge) {
   d->integer(edge.target);
   append_ids(d, edge.arguments);
-}
-void append_edge(DigestBuilder* d, const PlanEdge& edge) {
-  d->integer(edge.target);
-  d->integer(edge.arguments.size());
-  for (const auto& input : edge.arguments)
-    append_input(d, input);
 }
 }  // namespace
 
 std::string ir_digest(const IRProgram& program) {
   DigestBuilder digest;
-  digest.text("validated-ssa-ir-v26");
+  digest.text("ordered-retirement-ir-v5");
   digest.integer(static_cast<std::uint64_t>(program.form));
   append_declarations(&digest, program.input_declarations);
   digest.integer(program.input_bindings.size());
@@ -244,115 +209,145 @@ std::string ir_digest(const IRProgram& program) {
   return digest.finish();
 }
 std::string physical_digest(const ExecutionPlan& plan) {
-  DigestBuilder digest;
-  digest.text("static-tile-program-v27");
-  digest.text(plan.input_ir_digest().value);
-  digest.integer(plan.tile_extent());
-  digest.integer(static_cast<std::uint32_t>(plan.execution_mode()));
-  append_declarations(&digest, plan.input_declarations());
-  digest.integer(plan.parameters().size());
-  for (const auto& parameter : plan.parameters()) {
-    digest.integer(parameter.value);
-    digest.integer(parameter.block);
-    digest.text(parameter.result_schema->canonical());
+  DigestBuilder d;
+  d.text("physical-task-program-v5");
+  d.text(plan.input_ir_digest().value);
+  d.integer(static_cast<std::uint32_t>(plan.execution_mode()));
+  append_declarations(&d, plan.input_declarations());
+  const auto& p = plan.program();
+  d.integer(p.entry);
+  d.integer(p.tile_extent);
+  d.integer(p.schemas.size());
+  for (const auto& schema : p.schemas)
+    d.text(schema->canonical());
+  d.integer(p.layouts.size());
+  for (const auto& layout : p.layouts) {
+    d.integer(static_cast<std::uint32_t>(layout.element_type));
+    d.integer(layout.rank);
+    append_ids(&d, layout.shape);
+    append_ids(&d, layout.origin);
+    append_ids(&d, layout.strides);
+    d.integer(layout.byte_offset);
   }
-  digest.integer(plan.steps().size());
-  for (const auto& step : plan.steps()) {
-    digest.integer(step.node_id);
-    digest.integer(step.block);
-    digest.integer(step.value);
-    digest.integer(step.output_index);
-    digest.text(step.operation);
-    digest.integer(static_cast<std::uint32_t>(step.backend));
-    contract_internal::append_traits(&digest, step.traits);
-    digest.integer(step.parameters.size());
-    for (const auto& parameter : step.parameters) {
-      digest.text(parameter.first);
-      append_parameter(&digest, parameter.second);
+  d.integer(p.tiles.size());
+  for (const auto& tile : p.tiles) {
+    d.integer(tile.value);
+    d.integer(tile.member);
+    d.integer(tile.layout);
+    d.integer(tile.producer);
+    d.integer(static_cast<std::uint32_t>(tile.domain));
+    d.integer(tile.tile_index);
+    d.integer(tile.bytes);
+    d.integer(tile.alignment);
+  }
+  d.integer(p.values.size());
+  for (const auto& value : p.values) {
+    d.integer(value.source_value);
+    d.integer(value.schema);
+    d.integer(value.owner);
+    d.integer(static_cast<std::uint32_t>(value.kind));
+    d.integer(value.import_source);
+    d.integer(static_cast<std::uint32_t>(value.input_layout));
+    append_ids(&d, value.tiles);
+  }
+  d.integer(p.placements.size());
+  for (const auto& placement : p.placements) {
+    d.integer(static_cast<std::uint32_t>(placement.backend));
+    d.integer(static_cast<std::uint32_t>(placement.domain));
+    d.text(placement.profile);
+    d.text(placement.queue);
+  }
+  d.integer(p.kernels.size());
+  for (const auto& kernel : p.kernels) {
+    d.text(kernel.operation);
+    d.text(kernel.symbol);
+    d.text(kernel.contract);
+    d.integer(kernel.abi_version);
+  }
+  d.integer(p.tasks.size());
+  for (const auto& task : p.tasks) {
+    d.integer(static_cast<std::uint32_t>(task.kind));
+    d.integer(task.call);
+    d.integer(task.kernel);
+    d.integer(task.placement);
+    d.integer(task.reads.size());
+    for (const auto& read : task.reads) {
+      d.integer(read.port);
+      d.integer(read.tile);
+      d.integer(read.layout);
     }
-    digest.integer(step.inputs.size());
-    for (const auto& input : step.inputs)
-      append_input(&digest, input);
-    digest.text(step.output_result_schema->canonical());
-    digest.integer(step.prepared->resource_ids().size());
-    for (const auto& resource : step.prepared->resource_ids()) {
-      digest.integer(resource.byte_length);
-      digest.bytes(resource.sha256.data(), resource.sha256.size());
+    append_ids(&d, task.writes);
+    append_ids(&d, task.schema_reads);
+    append_ids(&d, task.parameters);
+    append_ids(&d, task.explicit_dependencies);
+    append_ids(&d, task.predecessors);
+    append_ids(&d, task.successors);
+    append_ids(&d, task.scratch);
+  }
+  d.integer(p.calls.size());
+  for (const auto& call : p.calls) {
+    d.integer(call.source_call);
+    d.integer(call.block);
+    d.integer(call.ordinal);
+    d.integer(call.effect_task);
+    append_ids(&d, call.tasks);
+    append_ids(&d, call.returns);
+  }
+  d.integer(p.blocks.size());
+  for (const auto& block : p.blocks) {
+    d.integer(block.source_block);
+    append_ids(&d, block.tasks);
+    append_ids(&d, block.calls);
+    append_ids(&d, block.arguments);
+    append_ids(&d, block.live_ins);
+    d.integer(static_cast<std::uint32_t>(block.end));
+    d.integer(block.condition);
+    d.integer(block.edges.size());
+    for (const auto& edge : block.edges) {
+      d.integer(edge.target);
+      append_ids(&d, edge.arguments);
+      append_ids(&d, edge.live_values);
+    }
+    append_ids(&d, block.return_values);
+    append_ids(&d, block.reservation.outputs);
+    for (const auto& scratch : block.reservation.scratch)
+      append_ids(&d, scratch);
+  }
+  append_ids(&d, p.inputs);
+  append_ids(&d, p.return_schemas);
+  d.integer(plan.calls().size());
+  for (const auto& call : plan.calls()) {
+    d.text(call.operation);
+    append_ids(&d, call.inputs);
+    append_ids(&d, call.outputs);
+    contract_internal::append_traits(&d, call.prepared->traits());
+    d.integer(call.parameters.size());
+    for (const auto& parameter : call.parameters) {
+      d.text(parameter.first);
+      append_parameter(&d, parameter.second);
+    }
+    d.integer(call.prepared->resource_ids().size());
+    for (const auto& resource : call.prepared->resource_ids()) {
+      d.integer(resource.byte_length);
+      d.bytes(resource.sha256.data(), resource.sha256.size());
     }
   }
-  digest.integer(plan.return_signature().size());
+  d.integer(plan.return_signature().size());
   for (const auto& output : plan.return_signature()) {
-    digest.text(output.name);
-    digest.text(output.result_schema->canonical());
+    d.text(output.name);
+    d.text(output.result_schema->canonical());
   }
-  digest.integer(plan.outputs().size());
-  for (const auto& named : plan.outputs()) {
-    digest.text(named.first);
-    digest.integer(named.second);
-    append_request(&digest, plan.output_requests().at(named.first));
+  d.integer(plan.outputs().size());
+  for (const auto& output : plan.outputs()) {
+    d.text(output.first);
+    d.integer(output.second);
+    append_request(&d, plan.output_requests().at(output.first));
   }
-  digest.integer(plan.entry());
-  digest.integer(plan.blocks().size());
-  for (const auto& block : plan.blocks()) {
-    digest.integer(block.id);
-    append_ids(&digest, block.parameters);
-    append_ids(&digest, block.calls);
-    digest.integer(block.instructions.size());
-    for (const auto& instruction : block.instructions) {
-      digest.integer(instruction.step_index);
-      digest.integer(instruction.shared_stage);
-      digest.integer(instruction.tensor_slot);
-      digest.integer(instruction.tile_unit);
-      digest.integer(instruction.cpu_fallback);
-      append_ids(&digest, instruction.dependencies);
-      append_request(&digest, instruction.publication);
-      append_sample_members(&digest, instruction.publication_samples);
-      digest.integer(instruction.tensor_outputs.has_value());
-      if (instruction.tensor_outputs)
-        append_samples(&digest, *instruction.tensor_outputs);
-      digest.integer(instruction.inputs.size());
-      for (const auto& read : instruction.inputs) {
-        digest.integer(read.input);
-        digest.integer(read.tensor_slot);
-        digest.integer(read.descriptor_only);
-        TileRequest request;
-        request.members.emplace(read.tensor_slot, read.tiles);
-        append_request(&digest, request);
-        append_samples(&digest, read.samples);
-      }
-      digest.integer(instruction.shared_inputs.size());
-      for (const auto& read : instruction.shared_inputs) {
-        digest.integer(read.stage);
-        append_request(&digest, read.tiles);
-        append_sample_members(&digest, read.samples);
-      }
-    }
-    digest.integer(block.terminator.index());
-    if (const auto* jump = std::get_if<PlanJump>(&block.terminator)) {
-      append_edge(&digest, jump->edge);
-    } else if (const auto* branch =
-                   std::get_if<PlanConditionalJump>(&block.terminator)) {
-      append_input(&digest, branch->condition);
-      append_edge(&digest, branch->if_true);
-      append_edge(&digest, branch->if_false);
-    } else {
-      const auto& returned = std::get<PlanReturn>(block.terminator);
-      digest.integer(returned.values.size());
-      for (const auto& value : returned.values)
-        append_input(&digest, value);
-    }
-  }
-  return digest.finish();
-}
-std::string plan_cache_key(const std::string& plan) {
-  DigestBuilder digest;
-  digest.text("plan-cache-key-v20");
-  digest.text(plan);
-  return digest.finish();
+  return d.finish();
 }
 std::string operation_digest(const OperationTraits& traits) {
   DigestBuilder digest;
-  digest.text("artifact-static-operation-contract-v2");
+  digest.text("fixed-operation-contract-v3");
   contract_internal::append_traits(&digest, traits);
   return digest.finish();
 }

@@ -1,6 +1,7 @@
 # ADR 0017: Execute Regional Work with Bounded CPU Storage
 
 - Status: Accepted
+- Implementation boundary (2026-10-20): The tile geometry and bounded-resource intent remain; the continuation, polling, shared-stage and publication-grant execution below is historical. Package 0.39 replaces it with fixed tasks, private SSA intermediates, explicit COPY and full-block admission. See the [physical Plan contract](../kernel-architecture/Compiler-and-Execution.md).
 - Reader mirror: [Chinese](zh/0017-cpu-regional-execution-and-storage.zh.md)
 
 ## 1. Core summary (TL;DR)

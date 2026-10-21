@@ -2,26 +2,59 @@
 
 ## Scope and ownership
 
-A node may expose several named Result outputs. Each output has a static Tensor-only schema, an input projection, a visibility policy and its own demand. A workflow edge names the node and output port. `ExecutionResult::results` holds named Result owners; there is no separate numeric port kind.
+A node can expose several named Result outputs. Each output has a static
+Tensor-only schema, an input projection and its own selection. Workflow edges
+use `WorkflowNodeOutput{node, port}`; public outputs use
+`WorkflowOutput{name, node, port}`. The default port name is `value`.
+Multiple node outputs are distinct from the named Tensor members within one
+Result. `ExecutionResult::results` owns the selected named returns.
 
-`WorkflowNodeOutput` identifies `source_node` and `source_port`; `WorkflowOutput` identifies the public `name`, `node_id` and `port`. The default port name is `value`. A Result may itself contain multiple named static Tensor members. These are distinct from multiple node outputs.
+## Fixed lowering and selection
 
-## Output selection and dependency
+`OperationTraits::outputs` declares the output contracts.
+`OperationLowering::requests` supplies one normalized TileRequest per output.
+`OperationProgramBuilder` creates fixed tasks and explicit input reads, schema
+reads, output writes and private values. Reads identify the input port, member,
+tile and physical layout; they cannot expand during invocation.
 
-`OperationTraits::outputs` declares outputs. `select_operation_output` selects their traits; `ResultStaticQuery::output_index` and `ResultProgramQuery::output_index` identify the output in a mapper and a callback. Mapped reads separately select each Result member's `tensor_slot` and local tile indices.
+The Plan retains every IR call and its output value declarations. Executable
+tasks are the closure of selected returns, branch conditions, edge arguments
+and mandatory effects. An unselected pure output may therefore have no tasks.
+`ExecutionPlan::select_outputs` restricts existing coverage and rebuilds
+dependencies, call membership, liveness and resource bounds without invoking
+operation lowering again. All writes of a retained task remain part of that
+task's fixed invocation.
 
-The plan separates declarations from executable work. `ExecutionPlan::steps()` contains one `PlanStep` for every output of every call, whether or not anything reads it. Instructions exist only for the tiles that a root (a named return in the selected request, a branch condition, an edge argument, a side-effecting call or a mandatory stage) reaches through mapped reads. An unselected sibling output therefore keeps its step declaration and has no instructions, and filtering with `select_outputs` can remove the instructions of one sibling while keeping the other's.
+A call's outputs can share producer tasks and private intermediate values.
+Those dependencies are ordinary physical edges. A shared computation runs once
+per block activation, and its storage is independent in another Run or loop
+activation. Input projections constrain which ports an output may read;
+explicit reads still determine the actual payload closure.
 
-Only prepared input projections are readable for an output. Shared-stage declarations have their own prepared projections and dependencies. All outputs of one call share its stages: the planner canonicalizes a stage unit to the call's first step, so the outputs of one call reach the same stage instructions and the VM keeps one stage state per call, stage and block activation. An algorithm needing joint computation can publish a multi-member stage Result, from which output tile instructions publish authorized tile views. A pure stage that no mapper names produces no instructions; mandatory stages are compiled as effect roots.
+## Visibility and identity
 
-All sample reads, including control values, require compiled payload grants. Consumers inherit frozen evidence from the shared commits they consume and add the evidence of their own grants. Inherited evidence does not authorize reading the stage's inputs. Visibility to a consumer follows certification: an independent output tile becomes readable once its instruction is certified, while a `CompleteBundle`, `StablePrefix` or complete-validation output becomes readable only after its certification closure has executed.
+Publication policies contribute to the compiled closure. `CompleteBundle`
+can require sibling member tiles; `StablePrefix` can require an earlier
+member-local prefix. The kernel preserves those static requirements without
+runtime dependency discovery. Storage layout alone does not create a bundle.
 
-## Identity and resource effects
+A successful task completion makes its tiles available to internal successors.
+Public call exports are delivered through `on_call_retired` only when the
+CallGroup settles and reaches the IR retirement head. Failed and elided calls
+export no values. Named RET values are projected after successful control-flow
+completion and delivery settlement. Call exports and final returns own their
+Results independently and need not share an ObjectId.
 
-Output contracts, stage declarations, parameters, resources and input schemas enter prepared operation identity. An ordinary tile instruction's key includes its selected output, member and tile. Active shared state is never reused across Runs. Optional completed-result, checkpoint and block caches have separate purity and instruction eligibility rules; see [Global Results](Global-Results.md).
+Output contracts, schemas, parameters, resources, fixed reads/writes and
+physical selections participate in compiler identity. Active intermediate
+state belongs to its Run. There is no completed-Result, checkpoint or block
+cache across Runs. See [Global Results](Global-Results.md) and
+[the execution contract](Compiler-and-Execution.md).
 
-Every tile commits payload, coverage and dependency evidence transactionally. `CompleteBundle` uses a prepared fixed member scope, and the planner compiles all required sibling tiles into the reader's closure; `StablePrefix` follows explicit member-local tile order, and a read of tile `k` depends on tiles `0..k`. A bundle can enlarge the work compiled for one request. A named return is projected from the call's certified value; the projected return object and an object delivered earlier through `result_publication` need not share an `object_id`, so consumers compare coverage, content and owner semantics instead. Default storage layout does not create a bundle.
+## Validation
 
-## Executable fixture
-
-Current behavior registrations are defined in `cmake/KernelTests.cmake`; retained regressions include shared-stage and member-tile execution cases. These registrations are not evidence of a particular run. Test lifetime follows [Testing and Validation](../development/Testing-and-Validation.md).
+Kernel behavior checks cover independent output selection, shared physical
+producers, member tile closures, ordered retirement and final ownership.
+Registrations in `cmake/KernelTests.cmake` identify the retained checks; a
+registration is not evidence that a particular run passed. Bundled numerical
+checkers follow [Testing and Validation](../development/Testing-and-Validation.md).

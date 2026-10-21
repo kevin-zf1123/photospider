@@ -1,10 +1,11 @@
 # ADR 0018: Retain Immutable Inputs and Reuse Exact Local Results
 
 - Status: Accepted
+- Implementation boundary (2026-10-20): Immutable input ownership remains. The completed-result/checkpoint/block cache and evidence-reuse design below is historical and has been removed from package 0.39. Current execution uses distinct per-activation tile allocations without payload reuse; see [tile storage](../kernel-architecture/Cache-Model.md) and the [physical Plan contract](../kernel-architecture/Compiler-and-Execution.md).
 - Reader mirror: [Chinese](zh/0018-local-result-caches.zh.md)
-- Current boundary: in 0.36.0 the snapshot facets and the import rejection of image, color-array, `ImagePlane` and `Mask` Values of the original decision are superseded. Snapshots validate structure only; run data is bound as Result static Tensor members.
+- Historical boundary: in 0.36.0 the snapshot facets and the import rejection of image, color-array, `ImagePlane` and `Mask` Values of the original decision are superseded. Snapshots validate structure only; run data is bound as Result static Tensor members.
 
-## Current implementation: content identity and call activation
+## Historical implementation: content identity and call activation
 
 In the static Plan implementation, a completed-result key includes the operation,
 parameters, fixed schemas, resources, output member/tile, backend/mode and fixed

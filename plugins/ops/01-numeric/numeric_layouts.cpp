@@ -1,327 +1,575 @@
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <limits>
+#include <functional>
+#include <map>
 #include <memory>
-#include <new>
-#include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/array_profiles.hpp"
-#include "01-numeric/numeric_tensor_program.hpp"
-#include "common/floating_environment.hpp"
+#include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
-#include "photospider/core/resource_allocator.hpp"
-#include "photospider/ops/numeric/diagnostics.hpp"
-#include "photospider/plugin/tile_helpers.hpp"
-#include "photospider/plugin/whole_stage.hpp"
+#include "common/tensor_program.hpp"
 
 namespace ps::plugin_internal {
 namespace {
 using numeric_ops::SequenceProfile;
 enum class LayoutKind { Reshape, Transpose, Slice };
-struct LayoutProgram final {
+struct LayoutMetadata final {
+  TensorDescriptor source, output;
+  std::array<std::uint64_t, 8> permutation{};
+  bool steps = false;
+};
+const char* parameter_name(LayoutKind kind) {
+  return kind == LayoutKind::Reshape     ? "shape"
+         : kind == LayoutKind::Transpose ? "permutation"
+                                         : "counts";
+}
+Result<LayoutMetadata> metadata(
+    LayoutKind kind, const std::vector<OperationMetadata>& inputs,
+    const std::map<std::string, ParameterValue>& parameters) {
+  using Answer = Result<LayoutMetadata>;
+  const auto invalid = [](const char* message) {
+    return Answer(Status{ErrorCode::TypeMismatch, message});
+  };
+  if (inputs.empty())
+    return invalid("layout requires a source");
+  for (const auto& input : inputs) {
+    auto valid = tensor_ops::check_tensor(input);
+    if (!valid.ok())
+      return Answer(valid);
+  }
+  const auto& member = inputs[0].result_schema->tensors[0];
+  LayoutMetadata result;
+  result.source = {member.descriptor.element_type, member.sample_shape()};
+  if (result.source.shape.empty() || result.source.shape.size() > 8)
+    return invalid("layout source rank outside 1..8");
+  std::uint64_t count = 1;
+  for (auto size : result.source.shape) {
+    if (!size || size > (UINT64_C(1) << 40) / count)
+      return invalid("layout source exceeds 2^40 elements");
+    count *= size;
+  }
+  auto parsed = numeric_ops::parse_array_list(
+      std::get<std::string>(parameters.at(parameter_name(kind))),
+      kind != LayoutKind::Transpose);
+  if (!parsed.ok())
+    return Answer(parsed.status());
+  result.output = {result.source.element_type, parsed.value()};
+  auto& shape = result.output.shape;
+  if (kind == LayoutKind::Reshape) {
+    std::uint64_t target_count = 1;
+    for (auto size : shape)
+      target_count *= size;
+    if (target_count != count)
+      return Answer(numeric_ops::array_parameter_error(
+          "reshape element products must match"));
+  } else {
+    if (shape.size() != result.source.shape.size())
+      return invalid("layout parameter rank differs from input");
+    if (kind == LayoutKind::Transpose) {
+      unsigned used = 0;
+      for (unsigned axis = 0; axis < shape.size(); ++axis) {
+        auto source = parsed.value()[axis];
+        if (source >= shape.size() || (used & (1U << source)))
+          return Answer(numeric_ops::array_parameter_error(
+              "transpose axes must form a permutation"));
+        used |= 1U << source;
+        result.permutation[axis] = source;
+        shape[axis] = result.source.shape[source];
+      }
+    } else {
+      for (unsigned axis = 0; axis < shape.size(); ++axis) {
+        if (shape[axis] > result.source.shape[axis])
+          return Answer(numeric_ops::array_parameter_error(
+              "slice count exceeds source extent"));
+        result.steps |= shape[axis] > 1;
+      }
+      if (inputs.size() != 3 && (result.steps || inputs.size() != 2))
+        return invalid("slice requires starts and used steps");
+      for (unsigned port = 1; port < inputs.size(); ++port) {
+        const auto& control = inputs[port].result_schema->tensors[0];
+        if (control.descriptor.element_type != ElementType::Int64 ||
+            control.sample_shape() != std::vector<std::uint64_t>{shape.size()})
+          return invalid("slice controls must be Int64[input rank]");
+      }
+    }
+  }
+  if (kind != LayoutKind::Slice && inputs.size() != 1)
+    return invalid("layout requires one input");
+  return Answer(std::move(result));
+}
+// Partition a row-major linear interval into aligned boxes without enumerating
+// samples. At each level only the two partial boundary chunks recurse.
+void linear_boxes(const std::vector<std::uint64_t>& shape, unsigned axis,
+                  std::uint64_t begin, std::uint64_t end,
+                  std::vector<RegionDimension>* dimensions,
+                  const std::function<void(const Region&)>& emit) {
+  if (axis + 1 == shape.size()) {
+    (*dimensions)[axis] = {begin, end - begin};
+    emit(Region(*dimensions));
+    return;
+  }
+  std::uint64_t chunk = 1;
+  for (unsigned j = axis + 1; j < shape.size(); ++j)
+    chunk *= shape[j];
+  const auto first = begin / chunk, last = (end - 1) / chunk;
+  if (first == last) {
+    (*dimensions)[axis] = {first, 1};
+    linear_boxes(shape, axis + 1, begin % chunk, (end - 1) % chunk + 1,
+                 dimensions, emit);
+    return;
+  }
+  if (begin % chunk) {
+    (*dimensions)[axis] = {first, 1};
+    linear_boxes(shape, axis + 1, begin % chunk, chunk, dimensions, emit);
+  }
+  const auto middle_begin = first + (begin % chunk != 0);
+  const auto middle_end = end / chunk;
+  if (middle_begin < middle_end) {
+    (*dimensions)[axis] = {middle_begin, middle_end - middle_begin};
+    for (unsigned j = axis + 1; j < shape.size(); ++j)
+      (*dimensions)[j] = {0, shape[j]};
+    emit(Region(*dimensions));
+  }
+  if (end % chunk) {
+    (*dimensions)[axis] = {end / chunk, 1};
+    linear_boxes(shape, axis + 1, 0, end % chunk, dimensions, emit);
+  }
+}
+Result<std::vector<TileIndex>> source_tiles(
+    LayoutKind kind, const LayoutMetadata& description, const Region& output,
+    const TileGrid& input, const ResourceBudget& budget,
+    std::size_t maximum_tiles = SIZE_MAX) try {
+  std::set<TileIndex> tiles;
+  const auto emit = [&](const Region& region) {
+    auto charge = budget.consume({1});
+    if (!charge.ok())
+      throw charge;
+    auto selected = sdk::tiles_for_region(budget, input, region);
+    if (!selected.ok())
+      throw selected.status();
+    if (selected.value().size() > maximum_tiles)
+      throw Status{ErrorCode::TypeMismatch,
+                   "layout source read set is incomplete"};
+    for (auto tile : selected.value()) {
+      auto status = budget.consume({1});
+      if (!status.ok())
+        throw status;
+      tiles.insert(tile);
+      if (tiles.size() > maximum_tiles)
+        throw Status{ErrorCode::TypeMismatch,
+                     "layout source read set is incomplete"};
+    }
+  };
+  const auto& shape = description.source.shape;
+  auto dimensions = Region::whole(shape).dimensions();
+  const auto& out = output.dimensions();
+  if (kind == LayoutKind::Transpose) {
+    for (unsigned axis = 0; axis < out.size(); ++axis)
+      dimensions[description.permutation[axis]] = out[axis];
+    emit(Region(std::move(dimensions)));
+  } else if (kind == LayoutKind::Slice) {
+    // For valid full-slice endpoints, positive-step possibilities are nested
+    // in step=+1 and negative-step possibilities in step=-1. Each axis thus
+    // needs at most two intervals, independently of runtime control values.
+    const auto visit = [&](const auto& self, unsigned axis) -> void {
+      if (axis == shape.size()) {
+        emit(Region(dimensions));
+        return;
+      }
+      const auto count = description.output.shape[axis], size = shape[axis];
+      if (count == 1) {
+        dimensions[axis] = {0, size};
+        self(self, axis + 1);
+        return;
+      }
+      const auto u = out[axis].offset, e = out[axis].extent;
+      auto a = RegionDimension{u, size - count + e};
+      auto b = RegionDimension{count - u - e, size - count + e};
+      if (b.offset < a.offset)
+        std::swap(a, b);
+      if (a.offset + a.extent >= b.offset) {
+        dimensions[axis] = {a.offset, b.offset + b.extent - a.offset};
+        self(self, axis + 1);
+      } else {
+        dimensions[axis] = a;
+        self(self, axis + 1);
+        dimensions[axis] = b;
+        self(self, axis + 1);
+      }
+    };
+    visit(visit, 0);
+  } else {
+    const auto& target = description.output.shape;
+    unsigned split = static_cast<unsigned>(target.size() - 1);
+    while (split && !out[split].offset && out[split].extent == target[split])
+      --split;
+    std::uint64_t suffix = 1;
+    for (unsigned axis = split + 1; axis < target.size(); ++axis)
+      suffix *= target[axis];
+    const auto visit = [&](const auto& self, unsigned axis,
+                           std::uint64_t ordinal) -> void {
+      if (axis == split) {
+        const auto begin = (ordinal * target[axis] + out[axis].offset) * suffix;
+        linear_boxes(shape, 0, begin, begin + out[axis].extent * suffix,
+                     &dimensions, emit);
+        return;
+      }
+      for (auto coordinate = out[axis].offset;
+           coordinate < out[axis].offset + out[axis].extent; ++coordinate) {
+        auto status = budget.consume({1});
+        if (!status.ok())
+          throw status;
+        self(self, axis + 1, ordinal * target[axis] + coordinate);
+      }
+    };
+    visit(visit, 0, 0);
+  }
+  return Result<std::vector<TileIndex>>(
+      std::vector<TileIndex>(tiles.begin(), tiles.end()));
+} catch (const Status& status) {
+  return Result<std::vector<TileIndex>>(status);
+}
+Result<OperationProgram> lower_layout(LayoutKind kind,
+                                      const OperationLowering& query) {
+  using Answer = Result<OperationProgram>;
+  auto parsed = metadata(kind, query.inputs, query.parameters);
+  if (!parsed.ok())
+    return Answer(parsed.status());
+  auto output =
+      TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  std::vector<TileGrid> inputs;
+  for (const auto& input : query.inputs) {
+    auto grid = TileGrid::from_schema(*input.result_schema, query.tile_extent);
+    if (!grid.ok())
+      return Answer(grid.status());
+    inputs.push_back(grid.take_value());
+  }
+  ResourceLimits limits;
+  limits.maximum_work = query.limits.maximum_work;
+  ResourceBudget budget(limits);
+  OperationProgramBuilder builder(query);
+  for (const auto& member : query.requests[0].members)
+    for (auto tile : member.second) {
+      auto task = builder.add_task(parameter_name(kind), "layout-copy-v1");
+      if (!task.ok())
+        return Answer(task.status());
+      auto region = output.value().region(tile);
+      if (!region.ok())
+        return Answer(region.status());
+      auto selected =
+          source_tiles(kind, parsed.value(), region.value(), inputs[0], budget);
+      if (!selected.ok())
+        return Answer(selected.status());
+      for (unsigned port = 0; port < inputs.size(); ++port) {
+        if (port == 2 && !parsed.value().steps) {
+          auto status = builder.read_input_schema(task.value(), port);
+          if (!status.ok())
+            return Answer(status);
+          continue;
+        }
+        if (port) {
+          auto controls = sdk::tiles_for_region(
+              budget, inputs[port],
+              Region::whole(
+                  query.inputs[port].result_schema->tensors[0].sample_shape()));
+          if (!controls.ok())
+            return Answer(controls.status());
+          selected = Result<std::vector<TileIndex>>(std::vector<TileIndex>(
+              controls.value().begin(), controls.value().end()));
+        }
+        for (auto source : selected.value()) {
+          auto status = builder.read_input(task.value(), port, 0, source);
+          if (!status.ok())
+            return Answer(status);
+        }
+      }
+      auto status = builder.write_output(task.value(), 0, member.first, tile);
+      if (!status.ok())
+        return Answer(status);
+    }
+  return builder.finish();
+}
+template <std::size_t Ports>
+struct LayoutState final {
   LayoutKind kind;
   SequenceProfile profile;
-  Footprint output;
-  std::array<uint64_t, 8> permutation{};
-  std::array<int64_t, 8> starts{}, steps{};
-  LayoutProgram(LayoutKind kind, SequenceProfile profile)
-      : kind(kind), profile(profile) {}
-  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
-    using namespace numeric_ops;  // NOLINT(build/namespaces)
-    auto scratch =
-        math_take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));
-    const auto& source = phase.query.inputs[0].result_schema->tensors[0];
-    const auto source_shape = source.sample_shape();
-    const auto& schema = *phase.query.output.result_schema;
-    const auto& target_shape = schema.tensors[0].descriptor.shape;
-    const bool singleton = std::all_of(target_shape.begin(), target_shape.end(),
-                                       [](auto n) { return n == 1; });
-    output = phase.query.tensor_outputs
-                 ? *phase.query.tensor_outputs
-                 : math_take(Footprint::all(target_shape));
-
-    auto builder = math_take(ResultBuilder::start(
-        phase.resources, schema, phase.query.semantic_key, {}));
-    const auto count = math_take(schema.tensors[0].sample_count());
-    if (output.empty())
-      return Result<ResultProgramPoll>(
-          ResultPublication{math_take(builder.seal()), true});
-    math_require(phase.consume_work(source_shape.size() + target_shape.size()));
-    ResultTensorViewTransform transform;
-    transform.reshape = kind == LayoutKind::Reshape;
-    if (kind == LayoutKind::Transpose) {
-      auto parsed = math_take(parse_array_list(
-          std::get<std::string>(phase.query.parameters.at("permutation")),
-          false));
-      std::copy(parsed.begin(), parsed.end(), permutation.begin());
-      transform.source_axes.resize(source_shape.size());
-      for (size_t axis = 0; axis < target_shape.size(); ++axis)
-        transform.source_axes[permutation[axis]].output_axis = axis;
-    } else if (kind == LayoutKind::Slice) {
-      MathTensorReader start(phase.tensors->at({1, 0}),
-                             phase.query.cancellation);
-      std::optional<MathTensorReader> step;
-      if (!singleton)
-        step.emplace(phase.tensors->at({2, 0}), phase.query.cancellation);
-      transform.source_axes.resize(source_shape.size());
-      for (size_t axis = 0; axis < source_shape.size(); ++axis) {
-        math_require(phase.consume_work(8));
-        const auto start_bits = start.bits({axis});
-        std::memcpy(&starts[axis], &start_bits, 8);
-        if (target_shape[axis] > 1) {
-          const auto step_bits = step->bits({axis});
-          std::memcpy(&steps[axis], &step_bits, 8);
-        }
-        const auto last =
-            static_cast<__int128>(starts[axis]) +
-            static_cast<__int128>(target_shape[axis] - 1) * steps[axis];
-        if (starts[axis] < 0 ||
-            static_cast<uint64_t>(starts[axis]) >= source_shape[axis] ||
-            (target_shape[axis] > 1 && !steps[axis]) || last < 0 ||
-            last >= source_shape[axis])
-          return Result<ResultProgramPoll>(
-              Status{ErrorCode::InvalidArgument,
-                     "InvalidSlice: axis=" + std::to_string(axis) +
-                         " start=" + std::to_string(starts[axis]) +
-                         " step=" + std::to_string(steps[axis]),
-                     FailureReason::InvalidDomain,
-                     {FailureOrigin::Domain, FailureScope::Run}});
-        // Singleton axes have no meaningful physical stride, including a
-        // source INT64_MIN stride with a numerically ignored negative step.
-        transform.source_axes[axis] = {
-            static_cast<int32_t>(axis), static_cast<uint64_t>(starts[axis]),
-            target_shape[axis] > 1 ? steps[axis] : 0};
-      }
-    }
-    const auto& layout =
-        std::get<std::string>(phase.query.parameters.at("layout"));
-    bool viewed = false;
-    if (layout != "dense") {
-      auto window = math_take(phase.tensors->at({0, 0}).acquire(
-          Region::whole(source_shape), phase.query.cancellation));
-      auto status =
-          builder.publish_tensor_view(0, Region::whole(target_shape), window,
-                                      transform, phase.query.cancellation);
-      math_require(phase.consume_work(1));
-      if (status.ok()) {
-        viewed = true;
-      } else if (status.reason != FailureReason::ViewUnavailable) {
-        return Result<ResultProgramPoll>(status);
-      } else if (layout == "view") {
-        return Result<ResultProgramPoll>(
-            Status{ErrorCode::InvalidArgument,
-                   "ViewUnavailable: complete output is not one affine owner",
-                   FailureReason::InvalidDomain,
-                   {FailureOrigin::Domain, FailureScope::Run}});
-      }
-    }
-    if (!viewed) {
-      MathTensorReader reader(phase.tensors->at({0, 0}),
-                              phase.query.cancellation);
-      math_require(sdk::publish_dense_tensor(
-          phase, builder, 0, Region::whole(target_shape),
-          [&](const auto& writers) {
-            return math_callback(phase, [&]() -> Status {
-              if (writers.size() != 1)
-                return Status{ErrorCode::OperationFailed,
-                              "layout requires one packed output window"};
-              MathTensorWriter writer(writers[0]);
-              std::vector<uint64_t> coordinate(target_shape.size(), 0),
-                  source_coordinate(source_shape.size(), 0);
-              const auto width =
-                  TensorSpan::element_size(source.descriptor.element_type);
-              std::array<uint8_t, 32> block{};
-              std::array<uint8_t*, 32> destinations{};
-              size_t buffered = 0;
-              const auto flush = [&] {
-                const auto lanes = buffered / width;
-                bool packed = true;
-                for (size_t lane = 1; lane < lanes; ++lane)
-                  packed = packed &&
-                           destinations[lane] == destinations[0] + lane * width;
-                if (packed) {
-                  array_copy_block(destinations[0], block.data(), buffered,
-                                   profile);
-                } else {
-                  for (size_t lane = 0; lane < lanes; ++lane)
-                    std::memcpy(destinations[lane], block.data() + lane * width,
-                                width);
-                }
-                buffered = 0;
-              };
-              for (uint64_t i = 0; i < count; ++i) {
-                auto status = phase.consume_work(source_shape.size() +
-                                                 target_shape.size() + width);
-                if (!status.ok())
-                  return status;
-                if (kind == LayoutKind::Reshape) {
-                  auto ordinal = i;
-                  for (size_t axis = source_shape.size(); axis-- > 0;) {
-                    source_coordinate[axis] = ordinal % source_shape[axis];
-                    ordinal /= source_shape[axis];
-                  }
-                } else if (kind == LayoutKind::Transpose) {
-                  for (size_t axis = 0; axis < target_shape.size(); ++axis)
-                    source_coordinate[permutation[axis]] = coordinate[axis];
-                } else {
-                  for (size_t axis = 0; axis < source_shape.size(); ++axis)
-                    source_coordinate[axis] = static_cast<uint64_t>(
-                        static_cast<__int128>(starts[axis]) +
-                        static_cast<__int128>(coordinate[axis]) * steps[axis]);
-                }
-                const auto bits = reader.bits(source_coordinate);
-                std::memcpy(block.data() + buffered, &bits, width);
-                destinations[buffered / width] = writer.address(coordinate);
-                buffered += width;
-                if (buffered == block.size())
-                  flush();
-                math_next(coordinate, target_shape);
-              }
-              if (buffered)
-                flush();
-              return phase.consume_work(1);
-            });
-          },
-          phase.query.cancellation));
-    }
-    if (phase.report_diagnostic) {
-      NumericDiagnostics report;
-      report.profile =
-          static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-      const auto* implementation = array_implementation(profile, viewed);
-      const auto size = std::strlen(implementation);
-      if (size >= report.implementation.size())
-        return Result<ResultProgramPoll>(Status{
-            ErrorCode::OperationFailed, "layout diagnostic identity overflow"});
-      std::memcpy(report.implementation.data(), implementation, size + 1);
-      if (viewed)
-        report.view_elements = count;
-      else
-        report.copied_elements = count;
-      math_require(report_numeric(phase, report));
-    }
-    return Result<ResultProgramPoll>(
-        ResultPublication{math_take(builder.seal()), true});
-  } catch (const Status& status) {
-    numeric_ops::math_record_failure(phase, status);
-    return Result<ResultProgramPoll>(status);
-  } catch (const std::bad_alloc&) {
-    auto failure = Status{ErrorCode::ResourceExhausted,
-                          {},
-                          FailureReason::CapacityLimit,
-                          {FailureOrigin::Resource, FailureScope::Run}};
-    numeric_ops::math_record_failure(phase, failure);
-    return Result<ResultProgramPoll>(failure);
-  }
+  LayoutMetadata description;
+  fixed_tensor::PointInputs<Ports> inputs;
 };
+template <std::size_t Ports>
+void layout_invoke(const ps_kernel_invocation_v8* query,
+                   ps_kernel_status_v8* status) noexcept {
+  const auto& state =
+      *static_cast<const LayoutState<Ports>*>(query->prepared_context);
+  const auto& description = state.description;
+  const auto cancelled = [&] {
+    return query->cancellation.is_cancelled &&
+           query->cancellation.is_cancelled(query->cancellation.context);
+  };
+  if (cancelled()) {
+    *status = kernel_failure(ErrorCode::Cancelled);
+    return;
+  }
+  fixed_tensor::PointReader<Ports> reader{state.inputs, *query};
+  std::array<std::int64_t, 8> starts{}, steps{};
+  std::array<std::uint64_t, 8> coordinate{}, source{};
+  if constexpr (Ports > 1) {
+    for (unsigned axis = 0; axis < description.source.shape.size(); ++axis) {
+      coordinate[0] = axis;
+      auto bits = reader.bits(1, coordinate, 8);
+      std::memcpy(&starts[axis], &bits, 8);
+      if constexpr (Ports == 3) {
+        if (description.output.shape[axis] > 1) {
+          bits = reader.bits(2, coordinate, 8);
+          std::memcpy(&steps[axis], &bits, 8);
+        }
+      }
+      const auto last =
+          static_cast<__int128>(starts[axis]) +
+          static_cast<__int128>(description.output.shape[axis] - 1) *
+              steps[axis];
+      if (starts[axis] < 0 ||
+          static_cast<std::uint64_t>(starts[axis]) >=
+              description.source.shape[axis] ||
+          (description.output.shape[axis] > 1 && !steps[axis]) || last < 0 ||
+          last >= description.source.shape[axis]) {
+        *status = kernel_failure(ErrorCode::InvalidArgument,
+                                 "invalid slice endpoints",
+                                 FailureReason::InvalidDomain);
+        return;
+      }
+    }
+  }
+  const auto& output = query->outputs[0];
+  const auto& layout = *output.layout;
+  auto* destination =
+      static_cast<std::uint8_t*>(output.allocation) + output.byte_offset;
+  const auto width = TensorSpan::element_size(description.source.element_type);
+  std::uint64_t count = 1;
+  for (unsigned axis = 0; axis < layout.rank; ++axis)
+    count *= layout.shape[axis];
+  std::array<std::uint8_t, 32> block{};
+  unsigned buffered = 0;
+  for (std::uint64_t index = 0; index < count; ++index) {
+    if (index % 64 == 0 && cancelled()) {
+      *status = kernel_failure(ErrorCode::Cancelled);
+      return;
+    }
+    auto remainder = index;
+    for (unsigned axis = layout.rank; axis-- > 0;) {
+      coordinate[axis] = layout.origin[axis] + remainder % layout.shape[axis];
+      remainder /= layout.shape[axis];
+    }
+    if (state.kind == LayoutKind::Reshape) {
+      std::uint64_t ordinal = 0;
+      for (unsigned axis = 0; axis < layout.rank; ++axis)
+        ordinal = ordinal * description.output.shape[axis] + coordinate[axis];
+      for (unsigned axis = description.source.shape.size(); axis-- > 0;) {
+        source[axis] = ordinal % description.source.shape[axis];
+        ordinal /= description.source.shape[axis];
+      }
+    } else if (state.kind == LayoutKind::Transpose) {
+      for (unsigned axis = 0; axis < layout.rank; ++axis)
+        source[description.permutation[axis]] = coordinate[axis];
+    } else {
+      for (unsigned axis = 0; axis < layout.rank; ++axis)
+        source[axis] = static_cast<std::uint64_t>(
+            static_cast<__int128>(starts[axis]) +
+            static_cast<__int128>(coordinate[axis]) * steps[axis]);
+    }
+    const auto bits = reader.bits(0, source, width);
+    std::memcpy(block.data() + buffered, &bits, width);
+    buffered += width;
+    if (buffered == block.size() || index + 1 == count) {
+      numeric_ops::array_copy_block(destination, block.data(), buffered,
+                                    state.profile);
+      destination += buffered;
+      buffered = 0;
+    }
+  }
+  *status = {};
+}
+template <std::size_t Ports>
+Result<ps_prepared_kernel_v8> prepare_layout(LayoutKind kind,
+                                             SequenceProfile profile,
+                                             const KernelPreparation& query) {
+  using Answer = Result<ps_prepared_kernel_v8>;
+  const auto invalid = [] {
+    return Answer({ErrorCode::TypeMismatch, "invalid layout invocation"});
+  };
+  if ((query.inputs.size() != Ports &&
+       !(Ports == 2 && query.inputs.size() == 3)) ||
+      query.outputs.size() != 1 || query.writes.size() != 1 ||
+      !query.task_parameters.empty() ||
+      query.scratch != std::array<std::uint64_t, 3>{})
+    return invalid();
+  auto parsed = metadata(kind, query.inputs, query.parameters);
+  if (!parsed.ok())
+    return Answer(parsed.status());
+  if (Ports !=
+      (kind == LayoutKind::Slice ? (parsed.value().steps ? 3U : 2U) : 1U))
+    return invalid();
+  auto state = std::make_unique<LayoutState<Ports>>();
+  state->kind = kind;
+  state->profile = profile;
+  state->description = parsed.take_value();
+  const auto& target = query.outputs[0].result_schema->tensors[0];
+  if (target.sample_shape() != state->description.output.shape ||
+      target.descriptor.element_type != state->description.output.element_type)
+    return invalid();
+  auto output =
+      TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  const auto& write = query.writes[0];
+  auto region = output.value().region(write.tile_index);
+  if (!region.ok())
+    return Answer(region.status());
+  if (write.port || write.member || write.domain != physical::Domain::Host ||
+      write.layout.element_type != state->description.output.element_type ||
+      !fixed_tensor::matches_region(write.layout, region.value()))
+    return invalid();
+  // Recomputing imported signatures uses the same finite work ceiling as
+  // default physical validation, and cannot enumerate more unique tiles than
+  // the task actually declared. No payload allocation is involved.
+  ResourceLimits limits;
+  limits.maximum_work = physical::ValidationLimits{}.maximum_work;
+  ResourceBudget budget(limits);
+  std::size_t slot = 0;
+  for (unsigned port = 0; port < Ports; ++port) {
+    auto grid = TileGrid::from_schema(*query.inputs[port].result_schema,
+                                      query.tile_extent);
+    if (!grid.ok())
+      return Answer(grid.status());
+    state->inputs.grids[port] = grid.take_value();
+    auto selected = Result<std::vector<TileIndex>>(std::vector<TileIndex>{});
+    if (!port) {
+      selected =
+          source_tiles(kind, state->description, region.value(),
+                       state->inputs.grids[0], budget, query.reads.size());
+    } else {
+      auto controls = sdk::tiles_for_region(
+          budget, state->inputs.grids[port],
+          Region::whole(
+              query.inputs[port].result_schema->tensors[0].sample_shape()));
+      if (!controls.ok())
+        return Answer(controls.status());
+      selected = Result<std::vector<TileIndex>>(std::vector<TileIndex>(
+          controls.value().begin(), controls.value().end()));
+    }
+    if (!selected.ok())
+      return Answer(selected.status());
+    if (selected.value().size() > query.reads.size() - slot)
+      return invalid();
+    for (auto tile : selected.value()) {
+      const auto& read = query.reads[slot];
+      auto expected = state->inputs.grids[port].region(tile);
+      if (!expected.ok())
+        return Answer(expected.status());
+      if (read.port != port || read.member || read.tile_index != tile ||
+          read.domain != physical::Domain::Host ||
+          read.layout.element_type != query.inputs[port]
+                                          .result_schema->tensors[0]
+                                          .descriptor.element_type ||
+          !fixed_tensor::matches_region(read.layout, expected.value()))
+        return invalid();
+      state->inputs.slots[port].push_back(
+          {tile, static_cast<std::uint32_t>(slot++)});
+    }
+  }
+  if (slot != query.reads.size())
+    return invalid();
+  ps_prepared_kernel_v8 result{};
+  result.struct_size = sizeof(result);
+  result.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  result.context = state.release();
+  result.invoke_cpu = layout_invoke<Ports>;
+  result.release = [](const void* context) {
+    delete static_cast<const LayoutState<Ports>*>(context);
+  };
+  return Answer(result);
+}
 OperationDefinition layout_operation(const std::string& key, LayoutKind kind,
                                      SequenceProfile profile) {
   OperationDefinition operation;
   operation.key = key;
   auto& traits = operation.traits;
-  traits.diagnostics = {numeric_diagnostic_identity()};
-  // Physical viewability depends on source owner/stride partitioning. Current
-  // disposable content caches cannot witness that partition, so do not reuse
-  // these results across executions. Pure active-Run sharing remains valid.
-  traits.cacheable = false;
   traits.requires_metadata_specialization = true;
   traits.input_count = kind == LayoutKind::Slice ? 3 : 1;
   traits.input_schema.resize(traits.input_count);
-  for (auto& input : traits.input_schema) {
+  for (auto& input : traits.input_schema)
     input.element_type_mask = 127;
-  }
   for (unsigned port = 1; port < traits.input_count; ++port) {
     traits.input_schema[port].element_type_mask = 0;
     traits.input_schema[port].rank = 1;
     traits.input_schema[port].element_type =
         static_cast<std::uint32_t>(ElementType::Int64);
   }
-  const std::string parameter = kind == LayoutKind::Reshape     ? "shape"
-                                : kind == LayoutKind::Transpose ? "permutation"
-                                                                : "counts";
-  traits.parameter_schema = {{parameter, OperationParameterType::String},
-                             {"layout", OperationParameterType::String}};
-  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
-                                       sizeof(LayoutProgram));
-  operation.specialize_metadata =
-      [kind, profile, parameter](const auto& inputs, const auto& parameters)
+  traits.parameter_schema = {
+      {parameter_name(kind), OperationParameterType::String}};
+  traits.outputs[0].key = "values";
+  traits.outputs[0].output_schema = tensor_ops::port();
+  traits.outputs[0].result_schema = tensor_ops::scalar_schema();
+  operation.specialize_metadata = [kind, profile](const auto& inputs,
+                                                  const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
-    const auto mismatch = [](const char* message) {
-      return Answer(Status{ErrorCode::TypeMismatch,
-                           message,
-                           FailureReason::None,
-                           {FailureOrigin::Schema, FailureScope::Unspecified}});
-    };
-    const auto& member = inputs[0].result_schema->tensors[0];
-    const TensorDescriptor input{member.descriptor.element_type,
-                                 member.sample_shape()};
-    std::uint64_t source_count = 1;
-    for (auto size : input.shape) {
-      if (!size || size > (UINT64_C(1) << 40) / source_count)
-        return mismatch("layout source exceeds 2^40 elements");
-      source_count *= size;
-    }
-    auto parameters_list = numeric_ops::parse_array_list(
-        std::get<std::string>(parameters.at(parameter)),
-        kind != LayoutKind::Transpose);
-    if (!parameters_list.ok())
-      return Answer(parameters_list.status());
-    auto shape = parameters_list.value();
-    if (kind == LayoutKind::Transpose) {
-      if (shape.size() != input.shape.size())
-        return mismatch("transpose permutation rank differs from input");
-      unsigned used = 0;
-      for (std::size_t j = 0; j < shape.size(); ++j) {
-        const auto axis = parameters_list.value()[j];
-        if (axis >= shape.size() || (used & (1U << axis)))
-          return Answer(numeric_ops::array_parameter_error(
-              "transpose axes must form a permutation"));
-        used |= 1U << axis;
-        shape[j] = input.shape[axis];
-      }
-    } else if (kind == LayoutKind::Reshape) {
-      std::uint64_t count = 1;
-      for (auto size : shape)
-        count *= size;
-      if (count != source_count)
-        return Answer(numeric_ops::array_parameter_error(
-            "reshape element products must match"));
-    } else {
-      if (shape.size() != input.shape.size())
-        return mismatch("slice counts rank differs from input");
-      for (unsigned port = 1; port < 3; ++port)
-        if (inputs[port].result_schema->tensors[0].sample_shape() !=
-            std::vector<std::uint64_t>{shape.size()})
-          return mismatch("slice controls must be Int64[input rank]");
-    }
-    const auto& layout = std::get<std::string>(parameters.at("layout"));
-    if (layout != "view" && layout != "auto" && layout != "dense")
-      return Answer(numeric_ops::array_parameter_error(
-          "layout must be auto, view or dense"));
+    auto parsed = metadata(kind, inputs, parameters);
+    if (!parsed.ok())
+      return Answer(parsed.status());
     auto available = numeric_ops::sequence_profile_available(profile);
     if (!available.ok())
       return Answer(available);
+    auto schema = tensor_ops::scalar_schema();
+    schema.tensors[0].descriptor = parsed.value().output;
     OperationOutputSpecialization result;
-    result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
-        numeric_ops::numeric_tensor_schema(input.element_type, shape));
-    if (kind == LayoutKind::Slice &&
-        std::all_of(shape.begin(), shape.end(),
-                    [](auto size) { return size == 1; }))
+    result.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(std::move(schema));
+    if (kind == LayoutKind::Slice && !parsed.value().steps)
       result.input_indices = std::vector<std::uint32_t>{0, 1};
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.start_result = [kind, profile](const auto&, const auto& allocator) {
-    return ResultContinuation::make<LayoutProgram>(allocator, kind, profile);
+  operation.lower = [kind](const auto& query) {
+    return lower_layout(kind, query);
   };
-  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
+  operation.prepare_kernel =
+      [kind, profile](
+          const physical::KernelDesc& kernel,
+          const physical::Placement& placement, const KernelPreparation& query,
+          const ResourceSet&,
+          const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    using Answer = Result<ps_prepared_kernel_v8>;
+    if (kernel.symbol != parameter_name(kind) ||
+        kernel.contract != "layout-copy-v1")
+      return Answer(
+          {ErrorCode::TypeMismatch, "invalid layout kernel contract"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Answer({ErrorCode::BackendUnavailable,
+                     "layout requires CPU Host placement"});
+    auto available = numeric_ops::sequence_profile_available(profile);
+    if (!available.ok())
+      return Answer(available);
+    if (kind != LayoutKind::Slice)
+      return prepare_layout<1>(kind, profile, query);
+    auto parsed = metadata(kind, query.inputs, query.parameters);
+    if (!parsed.ok())
+      return Answer(parsed.status());
+    return parsed.value().steps ? prepare_layout<3>(kind, profile, query)
+                                : prepare_layout<2>(kind, profile, query);
+  };
+  return operation;
 }
 }  // namespace
 Status register_numeric_layouts(OperationRegistry* registry) {

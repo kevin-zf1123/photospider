@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -17,12 +16,14 @@ namespace ps::plugin_internal::model_ops {
 // is used here. All arithmetic is caller-owned and every long loop is charged.
 // A zero denominator represents infinity (numerator=1) or generated NaN (0).
 // Source NaN payload selection is performed before entering this field.
+// Arithmetic records the first operational failure and stops consuming work.
+// Results are usable only while active(); reset starts a new evaluation.
 class RationalMath final {
  public:
   static constexpr unsigned kWords = 256;
   using Integer = numeric_ops::FixedInteger<kWords>;
   using Workspace = numeric_ops::ExactRatioWorkspace<kWords>;
-  using Work = std::function<Status(std::uint64_t)>;
+  using Work = core_internal::WorkConsumer;
   struct Rational final {
     Integer n, d;
     bool negative = false;
@@ -31,7 +32,9 @@ class RationalMath final {
 
  private:
   Workspace rounding_;
-  const Work* consume_ = nullptr;
+  Work consume_;
+  mutable ErrorCode failure_code_ = ErrorCode::Ok;
+  mutable FailureReason failure_reason_ = FailureReason::None;
   static int top(const Integer& v) { return Workspace::top(v); }
   static unsigned trailing(const Integer& v) {
     for (unsigned i = 0; i < kWords; ++i)
@@ -47,14 +50,16 @@ class RationalMath final {
   int compare(const Integer& a, const Integer& b) const {
     const int highest = std::max(top(a), top(b));
     const unsigned count = static_cast<unsigned>((highest + 64) / 64);
-    work(count + 1);
+    if (!work(count + 1))
+      return 0;
     for (unsigned j = count; j; --j)
       if (a.words[j - 1] != b.words[j - 1])
         return a.words[j - 1] < b.words[j - 1] ? -1 : 1;
     return 0;
   }
   void right(Integer* v, unsigned bits) const {
-    work(kWords);
+    if (!work(kWords))
+      return;
     if (!bits)
       return;
     const unsigned whole = bits / 64, tail = bits % 64;
@@ -66,34 +71,45 @@ class RationalMath final {
     }
   }
   Integer left(const Integer& v, unsigned bits) const {
-    work(kWords);
     Integer result;
+    if (!work(kWords))
+      return result;
     if (!Workspace::shift(v, bits, &result))
       capacity();
     return result;
   }
   Integer product(const Integer& a, const Integer& b) const {
     Integer result;
-    const auto status = numeric_ops::multiply_fixed(a, b, &result, *consume_);
+    if (!active())
+      return result;
+    const auto status = numeric_ops::multiply_fixed(a, b, &result, consume_);
     if (!status.ok())
-      throw status;
+      fail(status.code, status.reason);
     return result;
   }
   Integer sum(Integer a, const Integer& b) const {
-    work(kWords);
-    if (std::max(top(a), top(b)) + 1 >= static_cast<int>(kWords * 64))
+    if (!work(kWords))
+      return {};
+    if (std::max(top(a), top(b)) + 1 >= static_cast<int>(kWords * 64)) {
       capacity();
+      return {};
+    }
     a.add(b);
     return a;
   }
   Integer difference(Integer a, const Integer& b) const {
-    work(kWords);
+    if (!work(kWords))
+      return {};
     a.subtract(b);
     return a;
   }
   std::pair<Integer, Integer> divmod(const Integer& a, const Integer& b) const {
-    if (top(b) < 0)
+    if (!active())
+      return {};
+    if (top(b) < 0) {
       capacity();
+      return {};
+    }
     Integer quotient, remainder = a;
     if (one(b))
       return {a, quotient};
@@ -103,7 +119,8 @@ class RationalMath final {
     auto shifted = left(b, static_cast<unsigned>(bits));
     const auto words = static_cast<unsigned>((top(a) + 64) / 64);
     for (int bit = bits; bit >= 0; --bit) {
-      work(3 * words + 1);
+      if (!work(3 * words + 1))
+        return {};
       int order = 0;
       for (unsigned j = words; j; --j)
         if (remainder.words[j - 1] != shifted.words[j - 1]) {
@@ -132,10 +149,16 @@ class RationalMath final {
   // GCD-local active lengths avoid scanning/copying all 256 limbs at every
   // binary-Euclid step. Limbs at or above each length stay zero throughout.
   void right_active(Integer* value, unsigned bits, unsigned* count) const {
-    work(kWords);  // Retain the former conservative proof-fuel accounting.
+    if (!work(kWords))
+      return;
     if (!bits)
       return;
     const unsigned whole = bits / 64, tail = bits % 64;
+    if (whole >= *count) {
+      value->words.fill(0);
+      *count = 0;
+      return;
+    }
     const unsigned remaining = *count - whole;
     for (unsigned i = 0; i < remaining; ++i) {
       const unsigned j = i + whole;
@@ -150,7 +173,8 @@ class RationalMath final {
       --*count;
   }
   void subtract_active(Integer* a, const Integer& b, unsigned* count) const {
-    work(kWords);
+    if (!work(kWords))
+      return;
     std::uint64_t borrow = 0;
     for (unsigned i = 0; i < *count; ++i) {
       const auto sub = static_cast<unsigned __int128>(b.words[i]) + borrow;
@@ -163,6 +187,8 @@ class RationalMath final {
       --*count;
   }
   Integer gcd(Integer a, Integer b) const {
+    if (!active())
+      return {};
     unsigned a_count = static_cast<unsigned>((top(a) + 64) / 64);
     unsigned b_count = static_cast<unsigned>((top(b) + 64) / 64);
     if (!a_count)
@@ -176,7 +202,8 @@ class RationalMath final {
     // Binary Euclid retains bounded progress and a fuel/cancellation check
     // for every iteration. No floating estimate participates in this loop.
     while (true) {
-      work(std::max(a_count, b_count) + 1);
+      if (!work(std::max(a_count, b_count) + 1))
+        return {};
       int order = a_count < b_count ? -1 : a_count > b_count ? 1 : 0;
       if (!order) {
         for (unsigned j = a_count; j; --j)
@@ -197,6 +224,8 @@ class RationalMath final {
     }
   }
   Integer quotient(const Integer& a, const Integer& b) const {
+    if (!active())
+      return {};
     if (one(b))
       return a;
     if (power_two(b)) {
@@ -206,11 +235,11 @@ class RationalMath final {
     }
     auto result = divmod(a, b);
     if (top(result.second) >= 0)
-      throw Status{ErrorCode::Internal, "FMT-11 non-exact internal division"};
+      fail(ErrorCode::Internal);
     return std::move(result.first);
   }
   void reduce(Rational* v) const {
-    if (!finite(*v))
+    if (!active() || !finite(*v))
       return;
     if (zero(*v)) {
       v->d.words.fill(0);
@@ -230,6 +259,8 @@ class RationalMath final {
     v->d = quotient(v->d, common);
   }
   std::optional<Integer> integer_cube_root(const Integer& value) const {
+    if (!active())
+      return {};
     if (top(value) < 0)
       return Integer{};
     const auto zeros = trailing(value);
@@ -248,7 +279,8 @@ class RationalMath final {
       return {};
     Integer root;
     for (int bit = top(odd) / 3; bit >= 0; --bit) {
-      work(1);
+      if (!work(1))
+        return {};
       auto candidate = root;
       candidate.words[static_cast<unsigned>(bit) / 64] |= UINT64_C(1)
                                                           << (bit % 64);
@@ -265,15 +297,29 @@ class RationalMath final {
  public:
   explicit RationalMath(numeric_ops::SequenceProfile profile)
       : rounding_(profile) {}
-  void bind(const Work& work) { consume_ = &work; }
-  void work(std::uint64_t amount) const {
-    const auto status = (*consume_)(amount);
-    if (!status.ok())
-      throw status;
+  void bind(Work work) { consume_ = std::move(work); }
+  void reset() {
+    failure_code_ = ErrorCode::Ok;
+    failure_reason_ = FailureReason::None;
   }
-  [[noreturn]] static void capacity() {
-    throw Status{ErrorCode::ResourceExhausted, "FMT-11 exact rational capacity",
-                 FailureReason::CapacityLimit};
+  bool active() const { return failure_code_ == ErrorCode::Ok; }
+  Status status() const { return {failure_code_, {}, failure_reason_}; }
+  void fail(ErrorCode code, FailureReason reason = FailureReason::None) const {
+    if (active()) {
+      failure_code_ = code;
+      failure_reason_ = reason;
+    }
+  }
+  bool work(std::uint64_t amount) const {
+    if (!active())
+      return false;
+    const auto& status = consume_(amount);
+    if (!status.ok())
+      fail(status.code, status.reason);
+    return active();
+  }
+  void capacity() const {
+    fail(ErrorCode::ResourceExhausted, FailureReason::CapacityLimit);
   }
   static bool finite(const Rational& a) { return top(a.d) >= 0; }
   static bool zero(const Rational& a) { return finite(a) && top(a.n) < 0; }
@@ -300,6 +346,8 @@ class RationalMath final {
     return result;
   }
   Rational binary(std::uint64_t bits, bool narrow = false) const {
+    if (!active())
+      return {};
     const auto parts = numeric_ops::BinaryParts::decode(bits, narrow);
     if (parts.nan)
       return invalid();
@@ -328,13 +376,16 @@ class RationalMath final {
     }
     const auto ten = integer(10);
     for (; offset < text.size(); ++offset) {
-      work(1);
+      if (!work(1))
+        return {};
       if (text[offset] == '.') {
         fractional = true;
         continue;
       }
-      if (text[offset] < '0' || text[offset] > '9')
-        throw Status{ErrorCode::Internal, "FMT-11 invalid fixed coefficient"};
+      if (text[offset] < '0' || text[offset] > '9') {
+        fail(ErrorCode::Internal);
+        return {};
+      }
       result.n = sum(product(result.n, ten.n), integer(text[offset] - '0').n);
       if (fractional)
         result.d = product(result.d, ten.n);
@@ -351,6 +402,8 @@ class RationalMath final {
     return a;
   }
   Rational add(const Rational& a, const Rational& b) const {
+    if (!active())
+      return {};
     if (nan(a) || nan(b))
       return invalid();
     if (infinity(a) || infinity(b)) {
@@ -387,6 +440,8 @@ class RationalMath final {
     return add(a, negate(b));
   }
   Rational multiply(const Rational& a, const Rational& b) const {
+    if (!active())
+      return {};
     if (nan(a) || nan(b) || (zero(a) && infinity(b)) ||
         (zero(b) && infinity(a)))
       return invalid();
@@ -402,6 +457,8 @@ class RationalMath final {
     return result;
   }
   Rational divide(const Rational& a, const Rational& b) const {
+    if (!active())
+      return {};
     if (nan(a) || nan(b) || (zero(a) && zero(b)) ||
         (infinity(a) && infinity(b)))
       return invalid();
@@ -421,6 +478,8 @@ class RationalMath final {
   Rational cube(const Rational& a) const { return multiply(multiply(a, a), a); }
   // NaNs are unordered. Every caller handles them before asking for ordering.
   int order(const Rational& a, const Rational& b) const {
+    if (!active())
+      return 0;
     if (a.negative != b.negative && !(zero(a) && zero(b)))
       return a.negative ? -1 : 1;
     if (infinity(a) || infinity(b)) {
@@ -433,6 +492,8 @@ class RationalMath final {
     return a.negative ? -result : result;
   }
   Rational modulo(const Rational& a, unsigned period) const {
+    if (!active())
+      return {};
     if (!finite(a))
       return invalid();
     const auto divisor = product(a.d, integer(period).n);
@@ -446,11 +507,17 @@ class RationalMath final {
     return result;
   }
   unsigned small_floor(const Rational& a) const {
-    if (!finite(a) || a.negative)
+    if (!active())
+      return 0;
+    if (!finite(a) || a.negative) {
       capacity();
+      return 0;
+    }
     const auto result = divmod(a.n, a.d).first;
-    if (top(result) > 31)
+    if (top(result) > 31) {
       capacity();
+      return 0;
+    }
     return static_cast<unsigned>(result.words[0]);
   }
   std::optional<Rational> perfect_cube_root(const Rational& a) const {
@@ -469,6 +536,8 @@ class RationalMath final {
     return result;
   }
   std::uint64_t rounded(const Rational& a, bool narrow) {
+    if (!active())
+      return 0;
     const auto sign = UINT64_C(1) << (narrow ? 31 : 63);
     if (nan(a))
       return narrow ? UINT64_C(0x7fc00000) : UINT64_C(0x7ff8000000000000);
@@ -480,12 +549,16 @@ class RationalMath final {
     rounding_.numerator = a.n;
     rounding_.denominator = a.d;
     rounding_.negative = a.negative;
-    auto result = rounding_.round(narrow, *consume_, 0);
-    if (!result.ok())
-      throw result.status();
+    auto result = rounding_.round(narrow, consume_, 0);
+    if (!result.ok()) {
+      fail(result.status().code, result.status().reason);
+      return 0;
+    }
     return result.value();
   }
   std::uint64_t rounded_sqrt(const Rational& a, bool narrow) {
+    if (!active())
+      return 0;
     if (nan(a) || (a.negative && !zero(a)))
       return rounded(invalid(), narrow);
     if (infinity(a) || zero(a))
@@ -494,18 +567,22 @@ class RationalMath final {
     rounding_.denominator = a.d;
     rounding_.negative = false;
     auto result =
-        numeric_ops::round_sqrt_ratio(&rounding_, narrow, 0, *consume_);
-    if (!result.ok())
-      throw result.status();
+        numeric_ops::round_sqrt_ratio(&rounding_, narrow, 0, consume_);
+    if (!result.ok()) {
+      fail(result.status().code, result.status().reason);
+      return 0;
+    }
     return result.value();
   }
   // Import a normalized positive ratio and return its separate binary scale.
   // Normalization prevents tiny finite inputs from disappearing at low working
   // precision and prevents large rational limbs from overflowing interval math.
-  int normalized(numeric_ops::DirectedInterval& math,
-                 numeric_ops::DirectedInterval::Interval out,
+  int normalized(numeric_ops::CheckedDirectedInterval& math,
+                 numeric_ops::CheckedDirectedInterval::Interval out,
                  const Rational& a) const {
-    using Frame = numeric_ops::DirectedInterval::Frame;
+    if (!active())
+      return 0;
+    using Frame = numeric_ops::CheckedDirectedInterval::Frame;
     Frame frame(math);
     auto n = math.interval(), d = math.interval();
     const auto import = [&](auto output, const Integer& value, int highest) {
@@ -518,34 +595,52 @@ class RationalMath final {
       } else {
         shifted = left(value, static_cast<unsigned>(bits));
       }
+      if (!active())
+        return;
       math.clear(output.low);
-      for (unsigned j = numeric_ops::DirectedInterval::kWords; j < kWords; ++j)
-        if (shifted.words[j])
+      for (unsigned j = numeric_ops::CheckedDirectedInterval::kWords;
+           j < kWords; ++j)
+        if (shifted.words[j]) {
           capacity();
-      std::copy_n(shifted.words.begin(), numeric_ops::DirectedInterval::kWords,
+          return;
+        }
+      std::copy_n(shifted.words.begin(),
+                  numeric_ops::CheckedDirectedInterval::kWords,
                   output.low.magnitude.words.begin());
       math.copy(output.high, output.low);
       if (discarded)
         math.increment(output.high.magnitude);
     };
     const int nt = top(a.n), dt = top(a.d);
-    if (nt < 0 || dt < 0)
+    if (nt < 0 || dt < 0) {
       capacity();
+      return 0;
+    }
     import(n, a.n, nt);
+    if (!active())
+      return 0;
     import(d, a.d, dt);
+    if (!active())
+      return 0;
     math.divide(out, n, d);
     return nt - dt;
   }
-  void enclose(numeric_ops::DirectedInterval& math,
-               numeric_ops::DirectedInterval::Interval out,
+  void enclose(numeric_ops::CheckedDirectedInterval& math,
+               numeric_ops::CheckedDirectedInterval::Interval out,
                const Rational& a) const {
-    if (!finite(a))
-      throw numeric_ops::DirectedInterval::Unresolved{};
+    if (!active())
+      return;
+    if (!finite(a)) {
+      math.retry();
+      return;
+    }
     if (zero(a)) {
       math.integer(out, 0);
       return;
     }
     const int exponent = normalized(math, out, a);
+    if (!active())
+      return;
     math.scale(out, out, exponent);
     if (a.negative)
       math.negate(out, out);

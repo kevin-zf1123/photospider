@@ -28,8 +28,8 @@ and in the named family contract take precedence.
 
 For each observed Float32/Float64 x, compute the natural exponential e^x and
 preserve dtype/shape. Inherit [NUM-04 common requirements](NUM-04_unary_contract.md)
-for the parameter-free input/values interface, generic output, complete-input
-and typed-validation demand, NaN bits, lifetime, resource accounting and public
+for the parameter-free input/values interface, generic output, fixed tile execution,
+and structural-validation demand, NaN bits, lifetime, resource accounting and public
 acceptance. Integer inputs require explicit conversion.
 
 ## Numeric profile
@@ -47,7 +47,7 @@ results. There is no domain Status failure for a generic floating input.
 
 An accelerated argument range without an established bound/classification path
 falls back to strict. Formal keys retain profile identity, but per-value
-evaluation/fallback counters are unavailable (N/A) in complete-input callbacks. Resource/cancellation/upstream failure cannot be erased
+evaluation/fallback counters are unavailable (N/A) in fixed invocations. Resource/cancellation/upstream failure cannot be erased
 by a mathematical fallback. Fixed profile, inputs and dtype must give identical
 bits across batching/SIMD widths and scheduling; platform profiles can differ
 within the accepted tolerance.
@@ -59,13 +59,12 @@ correct rounding, using proved correctly rounded math or high-precision directed
 enclosures with explicit tie handling. Range reduction and overflow/underflow
 classification must avoid constructing an enormous exp value merely to recognize
 an out-of-range result. Fixed precision and measured residual alone are not a
-correct-rounding proof. Charge every refinement and allocated limb buffer; stop
-with ResourceExhausted rather than guess if the available budget cannot resolve it.
+correct-rounding proof. Use the admitted fixed limb workspace and query cancellation during refinement. Return `ResourceExhausted` if the bounded precision cannot resolve rounding.
 
 Accelerated implementations publish their actual library/algorithm/version and
 supported argument ranges with accuracy justification; no blanket std::exp or
 vector-library name establishes the four-ULP bound. Unverified cases take strict
-fallback. Work is per full-input sample plus actual reduction/refinement cost;
+fallback. Work is per selected sample plus actual reduction/refinement cost;
 scratch and temporary growth remain under inherited host budgets. SIMD tails do not read beyond the complete logical input.
 
 ## Independent acceptance
@@ -79,7 +78,7 @@ Include hard-to-round inputs and forced input-range fallback.
 
 Use a public WorkflowDocument fixture binding `[0,-Inf,+Inf]`; values must be
 `[1,+0,+Inf]`, with no attached domain description. Also execute nonzero/disjoint regions,
-changed NaN payloads, altered host rounding settings and common cache/lifetime/
+changed NaN payloads, altered host rounding settings and common lifetime/
 budget/cancellation cases. An independent high-precision interval oracle is
 required; calling the production function twice is not acceptance.
 
@@ -88,8 +87,7 @@ The maintained implementation and public run command are documented below; local
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
-atomic failure for the complete invocation. Its numerical path follows
+exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 Other inputs retain strict evaluation; the Float32 certificate does not admit

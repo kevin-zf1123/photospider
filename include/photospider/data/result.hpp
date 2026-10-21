@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "photospider/core/resource_allocator.hpp"
@@ -13,14 +14,11 @@
 #include "photospider/data/tensor_span.hpp"
 
 namespace ps {
-namespace plugin_internal {
-class ResultPayloadBound;
-}
+namespace data_internal {
+class ResultIdentity;
+class ResultDeviceAccess;
+}  // namespace data_internal
 namespace execution_internal {
-class StructuredExecution;
-class ResultPublicationValidator;
-class ResultCache;
-class StructuredResultCache;
 class ResultWindowAccess;
 }  // namespace execution_internal
 /** @brief Tensor topology, independent of physical storage.
@@ -38,6 +36,14 @@ struct ResultTensorLayout final {
  * allocation or representable full-domain product is required by this schema.
  */
 struct PHOTOSPIDER_API ResultTensorSpec final {
+  ResultTensorSpec() = default;
+  /** @brief Copy values; the ordinary shape copy owns no source reservation.
+   * Use SchemaTemplate::managed_copy to admit shape storage under a Root.
+   */
+  ResultTensorSpec(const ResultTensorSpec& other);
+  ResultTensorSpec(ResultTensorSpec&&) noexcept = default;
+  ResultTensorSpec& operator=(const ResultTensorSpec& other);
+  ResultTensorSpec& operator=(ResultTensorSpec&& other) noexcept;
   ResourceLease metadata_owner;
   ResourceString key;
   ResourceVector<std::uint64_t> batch_axes;
@@ -50,6 +56,9 @@ struct PHOTOSPIDER_API ResultTensorSpec final {
   Result<std::uint64_t> sample_count() const;
   Result<Footprint> close_samples(const Footprint& samples,
                                   const FootprintLimits& limits = {}) const;
+
+ private:
+  void swap(ResultTensorSpec& other) noexcept;
 };
 /** @brief Visibility rule, independent of callback scheduling. */
 enum class ResultPublicationPolicy : std::uint32_t {
@@ -114,7 +123,7 @@ class PHOTOSPIDER_API ResultDescriptor final {
 
  private:
   friend class ResultRef;
-  friend class execution_internal::StructuredExecution;
+  friend class data_internal::ResultDeviceAccess;
   std::uint64_t object_ = 0, revision_ = 0;
   std::uint32_t tensor_count_ = 0;
   std::array<Footprint, 16> tensors_{};
@@ -152,6 +161,8 @@ class PHOTOSPIDER_API ResultRef final {
   Status production_status() const;
   /** @brief Reads one certified sample from a captured descriptor. The owning
    * descriptor and Result retain coverage/backing; no production is started.
+   * Device-backed samples return BackendUnavailable and require an explicit
+   * COPY into CPU-accessible storage.
    */
   Status read_tensor(const ResultDescriptor& descriptor, std::uint32_t slot,
                      const std::vector<std::uint64_t>& coordinate,
@@ -167,6 +178,9 @@ class PHOTOSPIDER_API ResultRef final {
    * Missing
    * certified coverage returns NotFound; stale facts return Stale. Admission
    * and lock waiting observe cancellation. Concurrent immutable reads are safe.
+   * A requested rectangle intersecting Device backing returns
+   * BackendUnavailable. Other CPU-backed rectangles in that member remain
+   * accessible; this method performs no transfer.
    */
   Result<ResultTensorReadWindow> acquire_tensor(
       const ResultDescriptor& descriptor, std::uint32_t slot,
@@ -174,29 +188,10 @@ class PHOTOSPIDER_API ResultRef final {
 
  private:
   friend class ResultBuilder;
-  friend class ResultContinuation;
-  friend class plugin_internal::ResultPayloadBound;
+  friend class data_internal::ResultDeviceAccess;
   friend class ResultTensorReadWindow;
   friend class execution_internal::ResultWindowAccess;
   friend class WeakResultRef;
-  friend class execution_internal::StructuredExecution;
-  friend class execution_internal::ResultPublicationValidator;
-  friend class execution_internal::ResultCache;
-  friend class execution_internal::StructuredResultCache;
-  struct CacheStorage {
-    const void* owner = nullptr;
-    std::uint64_t bytes = 0;
-    bool native = false;
-    std::weak_ptr<const CpuStorage> lifetime;
-  };
-  Result<ResourceVector<CacheStorage>> cache_storage(
-      const std::function<Status(std::uint64_t)>& work,
-      bool require_complete = true) const;
-  Result<ResultRef> rebind_cached(
-      std::string_view scope, const CancellationToken& cancellation,
-      const std::function<Status(std::uint64_t)>& work) const;
-  void retire_producer(const Status& failure) const noexcept;
-  void bind_producer(std::uint64_t node) const noexcept;
 
   struct Impl;
   struct Capture;
@@ -245,8 +240,7 @@ class PHOTOSPIDER_API ResultTensorReadWindow final {
  public:
   ResultTensorReadWindow() = default;
   ResultTensorReadWindow(ResultTensorReadWindow&&) noexcept = default;
-  ResultTensorReadWindow& operator=(ResultTensorReadWindow&&) noexcept =
-      default;
+  ResultTensorReadWindow& operator=(ResultTensorReadWindow&& other) noexcept;
   ResultTensorReadWindow(const ResultTensorReadWindow&) = delete;
   ResultTensorReadWindow& operator=(const ResultTensorReadWindow&) = delete;
   bool valid() const noexcept { return owner_.valid(); }
@@ -296,12 +290,12 @@ class PHOTOSPIDER_API ResultTensorReadWindow final {
   friend class execution_internal::ResultWindowAccess;
   friend class ResultRef;
   friend class ResultBuilder;
+  ResourceLease lease_;
   ResultRef owner_;
   ResourceVector<ResultRef> owners_;
   ResourceVector<ResourceLease> source_leases_;
   std::uint32_t slot_ = 0;
   Region region_;
-  ResourceLease lease_;
   CancellationToken cancellation_;
   ResourceVector<TensorSpan> affine_;
   bool affine_canonical_ = false;
@@ -417,12 +411,13 @@ class PHOTOSPIDER_API ResultBuilder final {
   /** @brief Adopt an immutable affine tensor block without copying payload.
    * Only the supplied region is certified. Signed/zero strides are checked
    * against the actual retained storage span; cell and batch axes share this
-   * one layout. Errors
-   * are sticky and all admission precedes publication. This low-level storage
-   * entry does not create a second operation input/output contract.
+   * one layout. The layout is borrowed for the call; retained metadata is
+   * admitted and copied internally. Errors are sticky and all admission
+   * precedes publication. This low-level storage entry does not create a second
+   * operation input/output contract.
    */
   Status publish_tensor(std::uint32_t slot, const Region& region,
-                        StridedLayout layout,
+                        const StridedLayout& layout,
                         std::shared_ptr<const CpuStorage> storage,
                         const CancellationToken& cancellation = {});
   Status publish_tensor(std::uint32_t slot, const Region& region,
@@ -478,31 +473,35 @@ class PHOTOSPIDER_API ResultBuilder final {
           Status(const ResourceVector<ResultTensorWriteWindow>&)>& write,
       const CancellationToken& cancellation = {});
   /** @brief Atomically write an exact set of disjoint tensor rectangles.
-   * A singleton uses the spatial/affine path above. Multiple rectangles share
-   * one private packed allocation and one publication transaction. The callback
-   * receives one affine window per canonical box, in boxes() order; holes are
-   * never allocated or certified. Failure, cancellation, and reentrant mutation
-   * retain the same rollback and sticky-error rules as the Region overload.
+   * Rectangles share one private packed allocation and one publication
+   * transaction. Each canonical box is split at member tile and batch
+   * boundaries. The callback receives those windows in boxes() order, then
+   * logical chunk order within each box. Holes are never allocated or
+   * certified. The Region overload delegates to this path with one box.
+   * Failure, cancellation, and reentrant mutation retain the same rollback
+   * and sticky-error rules for both overloads.
    */
   Status publish_tensor_kernel(
       std::uint32_t slot, const Footprint& samples,
       const std::function<
           Status(const ResourceVector<ResultTensorWriteWindow>&)>& write,
       const CancellationToken& cancellation = {});
-  /** @brief Closes structural publication constraints.
-   * The host checks member coverage and registered validators against the
-   * current execution contract.
+  /** @brief Seal the current published coverage and its backing owners.
+   * Partial member coverage remains partial. Further producer writes fail;
+   * existing captures and owning read windows remain valid.
    */
   Result<ResultRef> seal();
   void fail(Status status) noexcept;
 
  private:
-  friend class execution_internal::StructuredExecution;
-  // Only the coordinator may seal an unstarted empty request. Static member
-  // domains stay in the schema while their returned coverage remains empty.
-  Result<ResultRef> seal_empty();
+  friend class data_internal::ResultIdentity;
+  friend class data_internal::ResultDeviceAccess;
+  static Result<ResultBuilder> start_reserved(
+      data_internal::ResultIdentity identity, ResourceBudget budget,
+      const SchemaTemplate& schema, std::string_view scope,
+      ResultGrowthLimits limits, std::uint64_t tile_extent);
   Status publish_tensor_storage(std::uint32_t slot, const Region& region,
-                                StridedLayout layout,
+                                const StridedLayout& layout,
                                 std::shared_ptr<const CpuStorage> storage,
                                 const CancellationToken& cancellation,
                                 ResourceVector<ResultRef> sources);

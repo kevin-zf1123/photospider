@@ -5,7 +5,6 @@
 #include <string>
 #include <vector>
 
-#include "01-numeric/expression.hpp"
 #include "common/floating_environment.hpp"
 
 namespace ps::plugin_internal::expression_result {
@@ -28,10 +27,6 @@ Status validate_expression_metadata(
         output.shape[0] > 1048576)
       return {ErrorCode::TypeMismatch,
               "expression coefficient/output descriptor outside limits"};
-    auto parsed = expression_internal::parse(
-        std::get<std::string>(parameters.at("expression")), input.shape[0]);
-    if (!parsed.ok())
-      return parsed.status();
   } else if (inputs.size() != 2 || input.element_type != ElementType::Float32 ||
              output.element_type != ElementType::Float32 ||
              output.shape != input.shape ||

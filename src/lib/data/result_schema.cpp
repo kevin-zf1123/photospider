@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/resource_observation.hpp"
 #include "data/result_support.hpp"
 #include "data/tensor_validation.hpp"
 #include "photospider/core/checked_math.hpp"
@@ -29,8 +30,40 @@ bool key_valid(std::string_view key, std::size_t maximum) {
                      [](unsigned char c) { return c >= 0x21 && c <= 0x7e; });
 }
 }  // namespace
+ResultTensorSpec::ResultTensorSpec(const ResultTensorSpec& other)
+    : key(other.key),
+      batch_axes(other.batch_axes),
+      atomic_trailing_axes(other.atomic_trailing_axes),
+      descriptor(other.descriptor),
+      layout(other.layout) {}  // NOLINT(whitespace/indent_namespace)
+void ResultTensorSpec::swap(ResultTensorSpec& other) noexcept {
+  using std::swap;
+  swap(metadata_owner, other.metadata_owner);
+  key.swap(other.key);
+  batch_axes.swap(other.batch_axes);
+  swap(atomic_trailing_axes, other.atomic_trailing_axes);
+  swap(descriptor, other.descriptor);
+  swap(layout, other.layout);
+}
+ResultTensorSpec& ResultTensorSpec::operator=(const ResultTensorSpec& other) {
+  if (this != &other) {
+    ResultTensorSpec replaced(other);
+    swap(replaced);
+  }
+  return *this;
+}
+ResultTensorSpec& ResultTensorSpec::operator=(
+    ResultTensorSpec&& other) noexcept {
+  if (this != &other) {
+    ResultTensorSpec replaced(std::move(other));
+    swap(replaced);
+  }
+  return *this;
+}
 std::vector<std::uint64_t> ResultTensorSpec::sample_shape() const {
-  std::vector<std::uint64_t> shape(batch_axes.begin(), batch_axes.end());
+  std::vector<std::uint64_t> shape;
+  shape.reserve(batch_axes.size() + descriptor.shape.size());
+  shape.insert(shape.end(), batch_axes.begin(), batch_axes.end());
   shape.insert(shape.end(), descriptor.shape.begin(), descriptor.shape.end());
   return shape;
 }
@@ -45,14 +78,26 @@ Result<std::uint64_t> ResultTensorSpec::sample_count() const {
   auto valid = data_internal::tensor_topology(*this);
   if (!valid.ok())
     return Result<std::uint64_t>(valid);
-  return Region::whole(sample_shape()).element_count();
+  std::uint64_t count = 1;
+  const auto multiply = [&](std::uint64_t extent) {
+    if (!core_internal::can_multiply(count, extent))
+      return false;
+    count *= extent;
+    return true;
+  };
+  if (!std::all_of(batch_axes.begin(), batch_axes.end(), multiply) ||
+      !std::all_of(descriptor.shape.begin(), descriptor.shape.end(), multiply))
+    return Result<std::uint64_t>(Status::failure(
+        ErrorCode::ResourceExhausted, "Region element count overflows uint64"));
+  return Result<std::uint64_t>(count);
 }
 Result<Footprint> ResultTensorSpec::close_samples(
     const Footprint& samples, const FootprintLimits& limits) const {
   auto valid = data_internal::tensor_topology(*this);
   if (!valid.ok())
     return Result<Footprint>(valid);
-  if (!samples.valid() || samples.shape() != sample_shape())
+  const data_internal::SampleDescriptor sample(*this);
+  if (!samples.valid() || samples.shape() != sample.value.shape)
     return Result<Footprint>(data_internal::invalid_schema());
   ResourceLease bridge;
   if (const auto* root = resource_internal::metadata_budget()) {
@@ -64,10 +109,13 @@ Result<Footprint> ResultTensorSpec::close_samples(
       return Result<Footprint>(admission.status());
     bridge = admission.take_value();
   }
+  core_internal::MetadataAllocation allocation(bridge);
   std::vector<Region> boxes;
   boxes.reserve(samples.boxes().size());
+  allocation.commit(boxes.capacity() * sizeof(Region));
   for (const auto& box : samples.boxes()) {
     auto dimensions = box.dimensions();
+    allocation.commit(dimensions.capacity() * sizeof(RegionDimension));
     if (!box.empty()) {
       for (std::size_t axis = descriptor.shape.size() - atomic_trailing_axes;
            axis < descriptor.shape.size(); ++axis)
@@ -75,7 +123,7 @@ Result<Footprint> ResultTensorSpec::close_samples(
     }
     boxes.emplace_back(std::move(dimensions));
   }
-  return Footprint::from_regions(sample_shape(), boxes, limits);
+  return Footprint::from_regions(sample.value.shape, boxes, limits);
 }
 const Footprint& ResultDescriptor::tensor_coverage(std::uint32_t slot) const {
   if (slot >= tensor_count_)
@@ -249,19 +297,23 @@ Result<SchemaTemplate> SchemaTemplate::managed_copy(
         ResourceAllocator<ResultTensorSpec>(budget));
     copy.tensors.reserve(tensors.size());
     for (const auto& image : tensors) {
-      std::uint64_t bytes =
-          (image.descriptor.shape.size() + image.batch_axes.size()) *
-          sizeof(std::uint64_t);
+      const auto bytes = image.descriptor.shape.size() * sizeof(std::uint64_t);
       auto lease = budget.reserve(ResourceCapacity::host(bytes, bytes));
       if (!lease.ok())
         return Result<SchemaTemplate>(lease.status());
-      auto target = image;
+      ResultTensorSpec target;
+      target.metadata_owner = lease.take_value();
+      target.descriptor = image.descriptor;
+      core_internal::ResourceMetadataAccess::commit(
+          target.metadata_owner,
+          target.descriptor.shape.capacity() * sizeof(std::uint64_t));
+      target.atomic_trailing_axes = image.atomic_trailing_axes;
+      target.layout = image.layout;
       target.key = ResourceString(image.key.data(), image.key.size(),
                                   ResourceAllocator<char>(budget));
       target.batch_axes = ResourceVector<std::uint64_t>(
           image.batch_axes.begin(), image.batch_axes.end(),
           ResourceAllocator<std::uint64_t>(budget));
-      target.metadata_owner = lease.take_value();
       copy.tensors.push_back(std::move(target));
     }
     copy.publication_scopes = ResourceVector<ResultPublicationScope>(

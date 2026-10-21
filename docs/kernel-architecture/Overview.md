@@ -1,43 +1,36 @@
 # Architecture Overview
 
-## 1. Core summary (TL;DR)
+## 1. Core summary
 
-Photospider is an embeddable C++17 kernel that validates local workflows, compiles them through independent IR and plan stages into a fixed tile instruction program, and executes that program against caller-supplied Result bindings. A `GraphContext` owns source revisions; an `ExecutionContext` owns bounded workers, operation definitions, optional cache retention, and resource accounting. The daemon consumes the installed kernel API and owns its own sessions and process lifecycle.
+Photospider is an embeddable C++17 kernel that compiles local workflows into immutable physical Plans and executes them against caller-supplied Result bindings. A Plan fixes CFG, Task/Tile/Call tables, dependencies, placement, explicit COPY and resource bounds. Its coordinator issues ready work concurrently and retires calls in IR order. CPU and native Metal/Vulkan execution share fixed invocation/completion ownership contracts.
 
-## 2. Mental model and intuition
+A `GraphContext` owns source revisions. An `ExecutionContext` owns bounded workers, GPU credits, fair admission, a frozen operation registry and its resource root. The daemon consumes the public installed package and separately owns Session, Job and process lifecycle.
 
-```text
-WorkflowDocument -> GraphContext -> GraphSnapshot      IRProgram (other frontend)
-                                    |                         |
-                                    v                         v
-                         analyze -----------------> ValidatedIR <---- .psir
-                                                          |
-                                                          v
-                                     optional optimize + validate -> ValidatedIR <---- .psir
-                                                          |
-                                                          v
-                                   plan: static mapping, tile expansion,
-                                   fixed grants, CFG of instruction blocks
-                                                          |
-                                                          v
-                                                    ExecutionPlan <---- .psxp
-                                                          |
-ExecutionBindings --------------------------------------> Run
-                                                          |
-                                     sequential VM: pc -> block -> instructions
-                                                          |
-                                  +-----------------------+---------------------+
-                                  |                                             |
-                     CPU callback on the context pool            native callback on the
-                     (range or tile service inside it)           configured GPU lane
-                                  +-----------------------+---------------------+
-                                                          |
-                                         named Result outputs + diagnostics
+## 2. Compilation, preparation and execution
+
+```mermaid
+flowchart TD
+  S["Workflow snapshot or IRProgram"] --> IR["ValidatedIR"]
+  I["Imported .psir"] --> IR
+  IR --> O["Optional named optimizer"]
+  O --> IR
+  IR --> P["Physical ExecutionPlan"]
+  A["Imported .psxp"] --> P
+  P --> K["PreparedPlan"]
+  K --> R["Run coordinator"]
+  B["Immutable ExecutionBindings"] --> R
+  R --> CPU["Fixed CPU invocation"]
+  R --> GPU["Async GPU invocation / COPY"]
+  CPU --> C["Reserved completion records"]
+  GPU --> C
+  C --> R
+  R --> OUT["Ordered call exports and final RET"]
 ```
 
-The compiler owns static validation, dependency mapping and planning. Each Run owns its program counter, block values, bound grants, Result producers, cancellation state, dependency recorder, and diagnostics; it executes one plan instruction at a time. Parallelism comes from separate Runs sharing the context's pools and from CPU range, CPU tile and GPU work inside one operation callback. Returned Results keep their backing and leases alive independently.
+The compiler expands reads and dependencies statically and validates the physical tables. Preparation links concrete devices, kernels, resources and module owners without changing topology. Each Run owns independent activations, dependency counters, ready queues, call retirement, cancellation and diagnostics. Task completion can release successors before call retirement. Call exports and final RET have separate owning Result holds; returned storage and observations may outlive the Run and context.
 
-Planner accepts the initial ValidatedIR directly; the optimizer edge is optional.
+The planner accepts the initial `ValidatedIR` directly or an optionally optimized version.
+
 
 ## 3. Contracts and interfaces
 
@@ -63,20 +56,26 @@ class CompilerArtifact {
 
 class ExecutionContext {
  public:
-  Result<ExecutionResult> execute(
-      const ExecutionPlan&, ExecutionBindings = {},
-      const CancellationToken& = CancellationToken(),
-      const ExecutionOptions& = {});
+  Result<PreparedPlan> prepare(const ExecutionPlan&) const;
+  Result<RunHandle> submit(const PreparedPlan&, ExecutionBindings = {},
+                          const CancellationToken& = {},
+                          ExecutionOptions = {});
+};
+// RunHandle::join() returns Result<ExecutionResult> after task drain and
+// ordered observer settlement.
+class RunHandle {
+ public:
+  Result<ExecutionResult> join() const;
 };
 ```
 
 These are abbreviated public signatures; unrelated members are omitted. Each stage returns a complete immutable value or a typed failure. `analyze` expands the DAG from named outputs into `DependencyPaths`, preserving shared ancestors in every referencing path with the same Call and SSA IDs. `optimize` keeps the first request for each call, removes empty chains and connects the retained chains as executable `ControlFlow`. For example, raw `ABG / AB / AC / DE / F` becomes `ABG / C / DE / F`. `bind_ir` also accepts explicit ControlFlow, including loops and conditional branches on one `UInt8` sample; that form is preserved by optimization.
 
-`plan` calls each operation's static mapper, expands the reachable output tiles into deduplicated instructions with fixed read grants, and validates the result. Its tile deduplication tracks work already scheduled in the plan independently of runtime caches. Execution checks plan currentness and the frozen operation-registry identity before callbacks, then follows the instructions and CFG. Each call's produced outputs are certified before the next call starts. `analyze` accepts an immutable `ResourceSet` of content-addressed resources; each operation's preparation selects the identities it needs, such as an ICC profile named by an explicit color parameter. Result and Tensor carry structure and data only; domain interpretation is an explicit operation parameter, and the kernel performs no label matching on connections.
+`plan` invokes each operation's static lowerer and merges its fixed task, tile, layout, dependency and private-value tables. The compiler validates the complete physical program and its per-block resource bounds. Tasks issue when their dependencies and credits permit; successful completion enables internal consumers immediately, while CallGroups retire in IR order. `prepare` resolves the immutable kernel contracts, `submit` captures bindings and starts one Run, and `join` waits for accepted work and ordered observer settlement before returning final RET owners. `analyze` accepts an immutable content-addressed `ResourceSet`; operations select explicit resource identities during preparation. Result and Tensor carry structure and data; domain interpretation remains an operation parameter.
 
-`CompilerArtifact` saves and loads v4 text (`.psir` for unified IR, `.psxp` for complete Plans). Raw and transformed IR may use dependency paths or CFG; Plans save their privately lowered CFG. v1–v3 require re-export. Loaded values are independent of the original GraphContext but still require matching frozen registry/resources. Plan import invokes no optimizer, mapper or planner. See [Compiler and execution](Compiler-and-Execution.md#compiler-artifacts).
+`CompilerArtifact` saves and loads v5 text (`.psir` for unified IR, `.psxp` for complete physical Plans). Raw and transformed IR may use dependency paths or CFG. Plans retain their lowered CFG, task placements, read/write views, call order and resource bounds. Versions 1–4 are rejected and require re-export. Loaded values are independent of the original GraphContext but require matching frozen registry/resources. Plan import validates and links saved tables without running lowering. See [Compiler and execution](Compiler-and-Execution.md#compiler-artifacts).
 
-`CpuExact` is the default execution mode. `NativeGpu` permits placement only for operations that declare a native implementation and match the configured backend. CPU work uses the fixed context pool; native callbacks use the configured backend lane. Cancellation is cooperative, and callbacks already entered may finish before the Run returns.
+`CpuExact` is the default and requires CPU tasks. `NativeGpu` statically selects GPU lowering for GPU-capable operations and CPU lowering for CPU-only operations. GPU lowering may include CPU tasks when traits support them; placement is fixed for every task. Explicit COPY tasks connect memory domains. CPU work uses the context worker pool, and native tasks use bounded backend submission credits. Cancellation closes admission and drains accepted work before releasing its borrowed owners.
 
 ## 4. Non-goals and boundaries
 
@@ -90,6 +89,6 @@ These are abbreviated public signatures; unrelated members are omitted. Each sta
 
 ## 5. Consequences
 
-Complete dependency-path expansion can grow exponentially with DAG sharing. The frontend limits raw IR to 1,048,576 call occurrences and 65,536 chains, returning `ResourceExhausted` when expansion exceeds either bound. Fewer executable blocks reduce block transitions, but shared-stage state remains alive until the next block activation; block compaction alone does not guarantee lower memory use.
+Complete dependency-path expansion can grow exponentially with DAG sharing. The frontend bounds raw IR at 1,048,576 call occurrences and 65,536 chains. The planner coalesces eligible path blocks while preserving call order. Full-block reservation admits all selected outputs and usable scratch lanes before issue; coalescing can therefore increase peak capacity even when it improves scheduling freedom. [Measured capacity comparisons](Parallel-Execution-Model.md#native-measurements) show this tradeoff.
 
-Plans can be reused with new bindings, saved and reloaded, but runtime input addresses are not part of a plan. Planning cost and plan size grow with the number of reachable output tiles; `PlanningOptions` bounds instructions and dependency edges, and a very large logical output should be planned with a sparse request rather than filtered afterward. Queue admission and resource limits can reject a Run when configured bounds are exhausted; callers should use the returned status as the authoritative outcome. Retaining a Result retains its storage lease, so callers control how long that capacity remains charged. Native placement, compiled fallback, transfers, and optional completed-result retention can change the work and memory cost of a Run. Block-state cache-hit counts are implementation observations, not performance guarantees.
+Plans share immutable storage and can be reused with new bindings or saved and reloaded. Runtime input addresses are captured per Run. `PlanningOptions` bounds tasks, records, dependency edges and planning work; sparse output requests limit the compiled closure. Queue or resource exhaustion returns a typed failure. Returned Results retain their storage charges until their final owner releases them. The executor performs no completed-result reuse, runtime placement rewrite or implicit transfer.

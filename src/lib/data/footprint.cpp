@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "core/radix_sort.hpp"
+#include "core/resource_observation.hpp"
 #include "data/footprint_index.hpp"
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
@@ -18,6 +19,14 @@ namespace {
 using Box = ResourceVector<RegionDimension>;
 using Boxes = ResourceVector<Box>;
 enum class Combine { Union, Intersection, Difference };
+struct Regions {
+  const Region* data = nullptr;
+  std::size_t size = 0;
+  Regions() = default;
+  Regions(const std::vector<Region>& regions)  // NOLINT(runtime/explicit)
+      : data(regions.data()), size(regions.size()) {}
+  explicit Regions(const Region& region) : data(&region), size(1) {}
+};
 struct Normalized {
   ResourceLease lease;
   std::vector<Region> boxes;
@@ -258,9 +267,8 @@ Status shape_status(const std::vector<std::uint64_t>& shape) {
   return Status::success();
 }
 
-Result<Normalized> combine(const std::vector<std::uint64_t>& shape,
-                           const std::vector<Region>& a,
-                           const std::vector<Region>& b, Combine operation,
+Result<Normalized> combine(const std::vector<std::uint64_t>& shape, Regions a,
+                           Regions b, Combine operation,
                            const FootprintLimits& limits,
                            std::uint64_t* consumed = nullptr,
                            std::uint64_t retained_bytes = 0) {
@@ -273,9 +281,10 @@ Result<Normalized> combine(const std::vector<std::uint64_t>& shape,
     Work work(limits, consumed);
     Boxes left, right;
     for (int operand = 0; operand < 2; ++operand) {
-      const auto* regions = operand == 0 ? &a : &b;
+      const auto regions = operand == 0 ? a : b;
       auto& target = operand == 0 ? left : right;
-      for (const auto& region : *regions) {
+      for (std::size_t i = 0; i < regions.size; ++i) {
+        const auto& region = regions.data[i];
         work.tick();
         status = region.validate(shape);
         if (!status.ok())
@@ -305,9 +314,15 @@ Result<Normalized> combine(const std::vector<std::uint64_t>& shape,
       result.lease = admitted.take_value();
     }
     result.boxes.reserve(normalized.size());
-    for (auto& box : normalized)
+    core_internal::ResourceMetadataAccess::commit(
+        result.lease, result.boxes.capacity() * sizeof(Region));
+    for (auto& box : normalized) {
       result.boxes.emplace_back(
           std::vector<RegionDimension>(box.begin(), box.end()));
+      core_internal::ResourceMetadataAccess::commit(
+          result.lease, result.boxes.back().dimensions().capacity() *
+                            sizeof(RegionDimension));
+    }
     return Result<Normalized>(std::move(result));
   } catch (const Stop& stop) {
     return Result<Normalized>(stop.status);
@@ -318,7 +333,7 @@ Result<Normalized> combine(const std::vector<std::uint64_t>& shape,
 }  // namespace
 
 struct Footprint::Impl {
-  ResourceLease lease;
+  ResourceLease lease, shape_lease;
   std::optional<ResourceBudget> budget;
   std::vector<std::uint64_t> shape;
   std::vector<Region> boxes;
@@ -333,56 +348,109 @@ const std::vector<Region>& Footprint::boxes() const noexcept {
 }
 Result<Footprint> Footprint::make(std::vector<std::uint64_t> shape,
                                   std::vector<Region> boxes,
-                                  ResourceLease lease) {
+                                  ResourceLease lease,
+                                  ResourceLease shape_lease) {
   try {
+    // A valid incoming lease already counts combine's canonical box arrays.
+    // Callers retain an alias through argument construction and failure unwind.
+    const bool counted_boxes = lease.valid();
     if (!lease.valid()) {
       if (auto* root = resource_internal::metadata_budget()) {
-        std::uint64_t bytes = sizeof(Impl) +
-                              shape.capacity() * sizeof(std::uint64_t) +
-                              boxes.capacity() * sizeof(Region);
+        std::uint64_t bytes =
+            sizeof(Impl) +
+            (shape_lease.valid() ? 0
+                                 : shape.capacity() * sizeof(std::uint64_t)) +
+            boxes.capacity() * sizeof(Region);
         for (const auto& box : boxes)
-          bytes += box.rank() * sizeof(RegionDimension);
+          bytes += box.dimensions().capacity() * sizeof(RegionDimension);
         auto admitted = root->reserve(ResourceCapacity::host(bytes, bytes));
         if (!admitted.ok())
           return Result<Footprint>(admitted.status());
         lease = admitted.take_value();
       }
     }
-    auto storage = std::make_shared<Impl>();
+    auto storage = std::make_unique<Impl>();
     if (auto* root = resource_internal::metadata_budget())
       storage->budget = *root;
     storage->lease = std::move(lease);
+    storage->shape_lease = std::move(shape_lease);
     storage->shape = std::move(shape);
     storage->boxes = std::move(boxes);
+    core_internal::ResourceMetadataAccess::commit(
+        storage->lease, sizeof(Impl) + (storage->shape_lease.valid()
+                                            ? 0
+                                            : storage->shape.capacity() *
+                                                  sizeof(std::uint64_t)));
+    if (!counted_boxes) {
+      core_internal::ResourceMetadataAccess::commit(
+          storage->lease, storage->boxes.capacity() * sizeof(Region));
+      for (const auto& box : storage->boxes)
+        core_internal::ResourceMetadataAccess::commit(
+            storage->lease,
+            box.dimensions().capacity() * sizeof(RegionDimension));
+    }
     Footprint result;
-    result.impl_ = std::move(storage);
+    result.impl_ = std::shared_ptr<Impl>(std::move(storage));
     return Result<Footprint>(std::move(result));
   } catch (const std::bad_alloc&) {
     return Result<Footprint>(Status{ErrorCode::ResourceExhausted, {}});
   }
 }
-Result<Footprint> Footprint::from_regions(std::vector<std::uint64_t> shape,
-                                          const std::vector<Region>& boxes,
-                                          const FootprintLimits& limits,
-                                          std::uint64_t* consumed_work) {
+Result<Footprint> Footprint::make_copy(const std::vector<std::uint64_t>& shape,
+                                       std::vector<Region> boxes,
+                                       ResourceLease lease) {
+  try {
+    std::vector<std::uint64_t> owned_shape(shape);
+    core_internal::ResourceMetadataAccess::commit(
+        lease, owned_shape.capacity() * sizeof(std::uint64_t));
+    // combine admitted the retained shape. The second alias marks its already
+    // committed bytes, so make only commits Impl and never counts shape twice.
+    return make(std::move(owned_shape), std::move(boxes), lease, lease);
+  } catch (const std::bad_alloc&) {
+    return Result<Footprint>(Status{ErrorCode::ResourceExhausted, {}});
+  }
+}
+Result<Footprint> Footprint::from_regions(
+    const std::vector<std::uint64_t>& shape, const std::vector<Region>& boxes,
+    const FootprintLimits& limits, std::uint64_t* consumed_work) {
   auto normalized = combine(shape, boxes, {}, Combine::Union, limits,
-                            consumed_work, sizeof(Impl) + shape.capacity() * 8);
+                            consumed_work, sizeof(Impl) + shape.size() * 8);
   if (!normalized.ok())
     return Result<Footprint>(normalized.status());
   auto result = normalized.take_value();
-  return make(std::move(shape), std::move(result.boxes),
-              std::move(result.lease));
+  return make_copy(shape, std::move(result.boxes), result.lease);
 }
-Result<Footprint> Footprint::all(std::vector<std::uint64_t> shape,
+Result<Footprint> Footprint::from_region(
+    const std::vector<std::uint64_t>& shape, const Region& box,
+    const FootprintLimits& limits, std::uint64_t* consumed_work) {
+  auto normalized = combine(shape, Regions(box), {}, Combine::Union, limits,
+                            consumed_work, sizeof(Impl) + shape.size() * 8);
+  if (!normalized.ok())
+    return Result<Footprint>(normalized.status());
+  auto result = normalized.take_value();
+  return make_copy(shape, std::move(result.boxes), result.lease);
+}
+Result<Footprint> Footprint::all(const std::vector<std::uint64_t>& shape,
                                  const FootprintLimits& limits) {
   auto status = shape_status(shape);
   if (!status.ok())
     return Result<Footprint>(status);
-  return from_regions(shape, {Region::whole(shape)}, limits);
+  ResourceLease temporary;
+  if (const auto* root = resource_internal::metadata_budget()) {
+    const auto bytes = shape.size() * sizeof(RegionDimension);
+    auto admission = root->reserve(ResourceCapacity::host(bytes, bytes));
+    if (!admission.ok())
+      return Result<Footprint>(admission.status());
+    temporary = admission.take_value();
+  }
+  const auto box = Region::whole(shape);
+  core_internal::ResourceMetadataAccess::commit(
+      temporary, box.dimensions().capacity() * sizeof(RegionDimension));
+  return from_region(shape, box, limits);
 }
-Result<Footprint> Footprint::none(std::vector<std::uint64_t> shape,
+Result<Footprint> Footprint::none(const std::vector<std::uint64_t>& shape,
                                   const FootprintLimits& limits) {
-  return from_regions(std::move(shape), {}, limits);
+  return from_regions(shape, {}, limits);
 }
 bool Footprint::contains(
     const std::vector<std::uint64_t>& coordinate) const noexcept {
@@ -420,8 +488,7 @@ Result<Footprint> Footprint::unite(const Footprint& other,
   if (!boxes.ok())
     return Result<Footprint>(boxes.status());
   auto normalized = boxes.take_value();
-  return make(shape(), std::move(normalized.boxes),
-              std::move(normalized.lease));
+  return make_copy(shape(), std::move(normalized.boxes), normalized.lease);
 }
 Result<Footprint> Footprint::intersect(const Footprint& other,
                                        const FootprintLimits& limits) const {
@@ -452,8 +519,7 @@ Result<Footprint> Footprint::intersect(const Footprint& other,
   if (!boxes.ok())
     return Result<Footprint>(boxes.status());
   auto normalized = boxes.take_value();
-  return make(shape(), std::move(normalized.boxes),
-              std::move(normalized.lease));
+  return make_copy(shape(), std::move(normalized.boxes), normalized.lease);
 }
 Result<Footprint> Footprint::subtract(const Footprint& other,
                                       const FootprintLimits& limits) const {
@@ -477,8 +543,7 @@ Result<Footprint> Footprint::subtract(const Footprint& other,
   if (!boxes.ok())
     return Result<Footprint>(boxes.status());
   auto normalized = boxes.take_value();
-  return make(shape(), std::move(normalized.boxes),
-              std::move(normalized.lease));
+  return make_copy(shape(), std::move(normalized.boxes), normalized.lease);
 }
 bool Footprint::operator==(const Footprint& other) const noexcept {
   if (this->shape() != other.shape() ||
@@ -518,25 +583,34 @@ Result<Footprint> Footprint::tile_cover(
       !shape_status(geometry).ok())
     return Result<Footprint>(
         Status::failure(ErrorCode::InvalidArgument, "invalid tile geometry"));
-  ResourceLease bridge;
-  if (const auto* root = resource_internal::metadata_budget()) {
-    const auto bytes =
-        this->boxes().size() *
-            (sizeof(Region) + this->shape().size() * sizeof(RegionDimension)) +
-        this->shape().size() * 8;
-    auto admitted = root->reserve(ResourceCapacity::host(bytes, bytes));
-    if (!admitted.ok())
-      return Result<Footprint>(admitted.status());
-    bridge = admitted.take_value();
-  }
-  std::vector<std::uint64_t> shape;
-  shape.reserve(this->shape().size());
-  for (std::size_t axis = 0; axis < this->shape().size(); ++axis)
-    shape.push_back(this->shape()[axis] / geometry[axis] +
-                    (this->shape()[axis] % geometry[axis] != 0));
-  std::vector<Region> boxes;
-  boxes.reserve(this->boxes().size());
   try {
+    ResourceLease bridge, shape_lease;
+    if (const auto* root = resource_internal::metadata_budget()) {
+      const auto bytes =
+          this->boxes().size() *
+          (sizeof(Region) + this->shape().size() * sizeof(RegionDimension));
+      auto admitted = root->reserve(ResourceCapacity::host(bytes, bytes));
+      if (!admitted.ok())
+        return Result<Footprint>(admitted.status());
+      bridge = admitted.take_value();
+      const auto shape_bytes = this->shape().size() * sizeof(std::uint64_t);
+      admitted =
+          root->reserve(ResourceCapacity::host(shape_bytes, shape_bytes));
+      if (!admitted.ok())
+        return Result<Footprint>(admitted.status());
+      shape_lease = admitted.take_value();
+    }
+    std::vector<std::uint64_t> shape;
+    shape.reserve(this->shape().size());
+    core_internal::ResourceMetadataAccess::commit(
+        shape_lease, shape.capacity() * sizeof(std::uint64_t));
+    for (std::size_t axis = 0; axis < this->shape().size(); ++axis)
+      shape.push_back(this->shape()[axis] / geometry[axis] +
+                      (this->shape()[axis] % geometry[axis] != 0));
+    std::vector<Region> boxes;
+    boxes.reserve(this->boxes().size());
+    core_internal::ResourceMetadataAccess::commit(
+        bridge, boxes.capacity() * sizeof(Region));
     Work work(limits);
     for (const auto& box : this->boxes()) {
       work.tick();
@@ -550,10 +624,21 @@ Result<Footprint> Footprint::tile_cover(
       }
       boxes.emplace_back(
           std::vector<RegionDimension>(dimensions.begin(), dimensions.end()));
+      core_internal::ResourceMetadataAccess::commit(
+          bridge,
+          boxes.back().dimensions().capacity() * sizeof(RegionDimension));
     }
     auto remaining = limits;
     remaining.maximum_work = work.remaining;
-    return from_regions(std::move(shape), boxes, remaining);
+    auto normalized = combine(shape, boxes, {}, Combine::Union, remaining,
+                              nullptr, sizeof(Impl));
+    if (!normalized.ok())
+      return Result<Footprint>(normalized.status());
+    auto canonical = normalized.take_value();
+    // Lease aliases protect both array owners through argument construction
+    // and failure unwind. The shape moves without a second allocation.
+    return make(std::move(shape), std::move(canonical.boxes), canonical.lease,
+                shape_lease);
   } catch (const Stop& stop) {
     return Result<Footprint>(stop.status);
   } catch (const std::bad_alloc&) {
@@ -611,8 +696,11 @@ Status Footprint::visit(
           return admission.status();
         coordinate_lease = admission.take_value();
       }
-      auto status = visitor(std::vector<std::uint64_t>(
-          cursor.coordinate.begin(), cursor.coordinate.end()));
+      const std::vector<std::uint64_t> coordinate(cursor.coordinate.begin(),
+                                                  cursor.coordinate.end());
+      core_internal::ResourceMetadataAccess::commit(
+          coordinate_lease, coordinate.capacity() * sizeof(std::uint64_t));
+      auto status = visitor(coordinate);
       if (!status.ok())
         return status;
       for (std::size_t axis = this->shape().size(); axis-- > 0;) {

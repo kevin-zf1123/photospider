@@ -1,31 +1,41 @@
 # 表达式与一维 LUT 算子
 
-默认 registry 提供未带后缀的 Result 算子 `numeric.sample_expression`、带 profile 后缀的 `numeric.sample_expression_<profile>` 算子族，以及 Result 算子 `lut.apply_1d`。未带后缀的采样器可将数值查询连接到一维 LUT 操作。接受的组合边界见 [ADR 0020](../../adr/0020-composable-operation-foundations.md)；本页说明当前注册的 key。[英文镜像](../Expression-and-LUT-Operations.md) 为权威说明。
+`numeric.sample_expression`、三个 `numeric.sample_expression_<profile>` key 和 `lut.apply_1d` 使用固定 CPU task。未带后缀的采样器可为 LUT 操作生成查询。每个选中输出 tile 有独立 dense 分配；preparation 在执行前确定精确 read slots 与 scratch。[英文文档](../Expression-and-LUT-Operations.md) 为权威契约。
 
 ## 未带后缀的表达式采样器
 
-`numeric.sample_expression` 接收一个 Result 输入，其中恰有一个 tensor。该 tensor 可使用任意结构有效的 schema id、version 和 member key；其无 batch Float64 sample shape 为 `[K]`，其中 `1 <= K <= 256`。必需静态参数为 String `expression`、范围 `[1,1048576]` 的 Int64 `count`、Float64 `start` 和正 Float64 `step`。输出端口 `value` 是使用 `photospider.tensor` v1/member `samples` 的 Result，dtype 为 Float32、shape 为 `[count]`。给定 start 和 step 定义本次调用执行的采样，不附着到输出。构造端不会自动提供默认值。
+`numeric.sample_expression` 接收恰含一个 tensor 的 Result，schema ID／version／member key 可为任意合法值。Tensor 为无 batch 的 Float64 `[K]`，`1 <= K <= 256`。必填参数为 String `expression`、`[1,1048576]` 内的 Int64 `count`、Float64 `start` 和 Float64 `step`。Start 有限，step 有限且为正；count>1 时，`fma(count-1,step,start)` 须有限且大于 start。这些静态条件在 preparation 检查。输出端口 `value` 使用 `photospider.tensor` v1/member `samples`，普通 Float32 `[count]`，不附着采样标签。
 
-表达式语法允许十进制或科学计数法数字、`x`、`c[index]`、括号、一元 `+`、`-`，二元 `+ - * / ^`，一元 `abs`、`sqrt`、`exp`、`log`、`sin`、`cos`，二元 `min`、`max`。幂运算右结合且优先级高于一元负号：`-2^2` 为 `-4`，`2^-2` 为 `0.25`，`2^3^2` 为 `512`；`0^0` 为 `1`。任意标识符、十六进制字面量、NaN/Infinity 名称、错误的系数下标和函数调用都会被拒绝。源码最多 4096 字节，AST 最多 256 个节点且高度不超过 32；括号不增加 AST 节点。
+有界语法接受十进制／科学计数法字面量、`x`、`c[index]`、括号、一元符号、二元 `+ - * / ^`，一元 `abs`、`sqrt`、`exp`、`log`、`sin`、`cos`，二元 `min`、`max`。幂右结合且优先级高于一元符号：`-2^2=-4`、`2^-2=.25`、`2^3^2=512`，`0^0=1`。静态 parser 按 K 检查每个系数索引，拒绝其他标识符、错误函数调用、十六进制／NaN／Inf 字面量、超过 4096 字节的 source、超过 256 个 AST 节点或高度超过 32 的表达式。括号不增加节点。
 
-该操作使用 Run-shared complete-input computation。非空请求对完整系数 tensor 请求 普通成员 tile Need 的 payload 覆盖；Empty 只执行静态准备，不读取 payload。静态准备将表达式解析为 immutable AST，后续 run 可在提供新系数时复用准备状态。算子校验所有系数，包括表达式未使用的项，并由 Root resource allocator 计费其 4096 字节 evaluator workspace 和输出。`start` 必须有限，`step` 必须有限且为正。`count > 1` 时，`fma(count-1,step,start)` 必须有限且大于 `start`。采样器按 `fma(i,step,start)` 计算坐标，并在受控 Float64 nearest-even、gradual-underflow 环境内求值。每个子表达式都必须有限；除零和函数定义域错误会失败，最终结果须能表示为有限 Float32。求值过程中及发布前检查取消；失败时丢弃未发布输出并恢复调用方浮点环境。
+Preparation 解析一次并持有不可变 AST。每个选中输出 tile 读取完整系数 tensor，包括 AST 未引用的项。Task 使用 4096 字节预分配 workspace，其中前 2048 字节容纳最多 256 个系数，后 2048 字节保存 postorder 中间值。它只计算所选坐标，使用全局 `fma(i,step,start)`，按源顺序执行 Float64 运算，最后转换为 Float32。基本运算和超越函数使用主机 Float64 实现；本 key 不承诺跨平台严格正确舍入。执行使用 nearest-even 和 gradual underflow。
+
+系数、求值中间量及结果有限，且数学定义域合法，均为调用方前提。运行时不扫描系数、不校验除零／函数域，也不做最终有限范围检查；域外没有诊断保证。绑定替换复用 AST，各 Run 生成独立输出。Empty 无 task 或 payload 读取。复制系数时检查取消，AST 最多每 32 个节点检查一次，输出最多每 256 个样本检查一次。
 
 ## 带 profile 的具名系数采样器
 
-`numeric.sample_expression_strict`、`numeric.sample_expression_accelerated_apple_silicon` 和 `numeric.sample_expression_accelerated_x86_64` 接收动态标量 `[1]` 输入。输入 0 是 `start`，输入 1 是 `end`，之后每个输入对应必需 String `coefficient_names` 中的一个名称。辅助函数 `ps::numeric::sample_expression_node` 根据表达式和具名系数输入映射构造这种节点。
+带后缀族接受动态标量 start／end 和独立具名系数，必填静态参数为 `expression`、`coefficient_names`、`count`、`dtype`。Values 是普通 Float32/64 `[count]`，axis 是原子 Float64 `[3]`。每个选中 values tile 有固定 task，axis 有单独 task。Count 为一时排除 end payload、保留 schema；axis 排除所有系数 payload。所有 schema 仍校验。
 
-必需静态参数为 String `expression`、String `coefficient_names`、范围 `[1,1048576]` 的 Int64 `count` 和 String `dtype`（`float32` 或 `float64`）。`values` 输出使用 `photospider.tensor` v1/member `samples`，shape 为 `[count]`，dtype 为所选类型；`axis` 使用相同 schema/member，dtype 为 Float64、shape 为 `[3]`，count 大于 1 时依次存储 start、end 和计算得到的 step；count 为 1 时输出 `[start,start,0]`，并声明一个 atomic trailing axis。count 为 1 的 values 请求不读取 end，但仍读取表达式所需的系数。count 大于 1 的 values 请求要求端点有限且不相等、相邻采样坐标可表示；实际求值的 coefficients 必须有限。两个输出均使用 Run-shared complete-input computation，并通过 Root 准入的 Result transaction 发布。只请求 axis 时跳过系数求值；空请求跳过 payload 处理。
+其独立语法额外支持 pi／e、tan 和具名标识符，使用 `ln`，未带后缀 key 使用 `log`。Strict 对每个原语做 RN64 后传给父节点。Accelerated 四 lane 批次包围完整 strict 参考值，对不确定样本严格重算，保证最终 FP32-scaled 误差界。数值域和所选坐标精度是 unchecked 调用方前提。选中输出共享一个 IR call 的发布结果。
 
-该算子族有独立的 parser 与函数集合。它允许十进制/科学计数法字面量、`x`、`pi`、`e`、具名系数标识符、括号、一元 `+ -`、二元 `+ - * / ^`，一元 `abs`、`sqrt`、`exp`、`ln`、`sin`、`cos`、`tan`，以及二元 `min`、`max`。未带后缀 Result key 使用函数名 `log`；profile key 使用 `ln`，并额外支持 `tan`、`pi` 和 `e`。后缀选择 CPU numeric profile。主机不支持指定 profile 时，准备阶段失败。Strict 按从左到右的 Float64 表达式顺序求值，再一次性舍入到输出 dtype。Accelerated profile 将候选结果按固定 strict 结果进行认证，对不确定样本回退到 strict evaluator。complete-input 和 Region 请求使用相同 profile 结果。这些 key 有两个命名输出和动态端点绑定；输入形式不同于未带后缀 Result 采样器的系数向量，也不同于其静态 start/step 参数。
-
-公开 workflow helper 定义于 [`numeric/expression.hpp`](../../../plugins/ops/include/photospider/ops/numeric/expression.hpp)。使用方通过 `Photospider::ops` 以 `photospider/ops/numeric/expression.hpp` 引入它；该目标依赖 SDK 与 kernel。它生成带 `values` 和 `axis` 输出的普通 `WorkflowNode`。Helper 按字节序排序 free coefficient 名称，并在追加节点前拒绝缺失、未使用或重复名称。
+公开 helper 为 [`sample_expression_node`](../../../plugins/ops/include/photospider/ops/numeric/expression.hpp)，用于构造 WorkflowNode 并规范化准确的名称／连接映射。完整采样、数值和资源契约见 [NUM-01](../../built-in_ops/01-numeric/op_specs/NUM-01_sample_expression.md) 与[固定表达式执行](../../built-in_ops/01-numeric/expression-execution.md)。
 
 ## 线性 LUT application
 
-`lut.apply_1d` 接收两个 Result 输入，每个都恰含一个 tensor。两个输入可使用任意结构有效的 schema id、version 和 tensor member key。输入 0 是 Float32 查询 tensor；其 sample shape 可含 batch axes 和多个通道。输入 1 是无 batch 的 Float32 rank-1 表。表至少含两个样本。必需静态参数是 Float64 `sample_origin`、Float64 `sample_step` 和 String `out_of_domain`（`reject` 或 `clip`）。Origin 必须有限，step 必须有限且为正。调用者为查询和表提供一致的坐标尺度；算子不读取或匹配附着的单位与采样标签。输出端口 `value` 是使用 `photospider.tensor` v1/member `samples` 的 Result，dtype 为 Float32，保留查询的 sample shape 和 batch axes。
+`lut.apply_1d` 接收 Float32 query Result，以及至少两个样本的无 batch Float32 rank-one table Result。每个 Result 恰有一个 tensor，schema／member key 可为任意合法值。Query shape 可包含 batch axes 和多个通道。必填静态参数为 Float64 `sample_origin`、有限正 Float64 `sample_step` 和 String `out_of_domain`（`reject` 或 `clip`）。Origin 和 `fma(N-1,step,origin)` 须有限，后者须大于 origin。输出 `value` 使用 `photospider.tensor` v1/member `samples`，保留 query 的 cell shape 与 batch axes；cell axes 为普通轴，不继承 spatial／atomic facets。
 
-该操作使用 Run-shared complete-input computation。非空请求对两个完整输入请求 普通成员 tile Need 的 payload 覆盖；Empty 不读取 payload。静态准备校验查询和表结构及显式采样参数，并准备 immutable operation state。Result transaction 仅在求值成功后发布完整输出。表 domain 要求 origin 有限、sample step 有限且为正，并且 `fma(N-1,step,origin)` 得到有限递增的端点。端点查询精确返回表端点，定义域内部使用带补偿的 Float64 插值。插值 index 大于等于 `2^53`、算术不可表示，或丢弃的补偿量大于 Float32 ULP 的八分之一时，操作会在写入输出前拒绝。`reject` 会拒绝越域查询；`clip` 返回最近表端点。支持有符号和 HDR 表值；该操作不裁剪颜色 gamut，也不会在结果中建立表值语义 metadata。
+每个选中输出 tile 按 query 自身 grid 声明相交 query tiles，并声明全部 table tiles。运行时数据决定 table index，因此完整 table 是静态地址上界。实际算术只读取选中端点或相邻一对，不收集或数值扫描整表。多个 task 共享不可变输入 owner。每个 LUT invocation 使用零 scratch 和有界栈状态；`scratch_count=0` 时允许 scratch 数组为空指针。Empty 不声明 payload task。
 
-## 错误与校验
+Query 和实际消费的 table 值有限是调用方前提。`reject` 要求 query 在闭合 table domain 内，域外不保证诊断；`clip` 对有限越域查询返回最近端点。端点查询保留端点值及 signed zero。内部查询使用补偿 Float64 插值，保留整数转换前的有限 `[0,2^53)` position guard、有界相邻 segment 修正、有限可表示候选值检查，以及丢弃补偿不超过 Float32 ULP 八分之一的限制。这些地址／精度检查在无法确定结果时可返回 OperationFailed，区别于通用样本定义域校验。支持 signed／HDR table 值，不赋予色域含义。
 
-表达式语法错误和静态参数非法返回 `InvalidArgument`。类型或 shape 不匹配返回 `TypeMismatch`。Generic expression 系数在求值时检查，因此非有限系数返回 `OperationFailed`；数学未定义、坐标塌缩、插值精度不足和输出溢出也返回 `OperationFailed`，适用时附样本下标。LUT 算子请求 complete-input 授权，但只读取选中的端点或插值 stencil 表值。非有限查询或实际消费得到的非有限结果返回 `OperationFailed`；未消费的表样本不自动接受领域扫描。该算子没有绑定领域校验器。Empty demand 跳过 payload validation。取消和资源耗尽保留各自状态码。宿主在 payload execution 前校验 Result 结构和 operation 声明。领域解释由算子参数提供。
+## 准备、所有权与错误
+
+Preparation 检查静态 schema 和参数、canonical Host 输出、准确完整的 input tile 集合、空 task 参数和 scratch 大小。物理 view 遵循 Plan 已检查的 offset／stride 契约；raw 读取支持兼容的负／零 stride 与非对齐存储。运行时不创建 payload buffer。Root 在发射前准入所选输出、每 CPU lane 的最大 scratch 和执行器 metadata。稀疏 LUT query 仍需要完整声明的 table；稀疏 expression 只分配所选输出 tiles。
+
+一个 call 的所有 task 共享发布结果。Source、资源、backend 和取消失败阻止成功发布，并保留操作状态类别。已接受工作排空后释放未发布存储。并发 Run 只共享不可变 preparation 和输入，输出分配与 expression scratch 各自独立。成功 Result owner 可存活超过 ExecutionContext。Invocation 恢复浮点模式和异常 flags。本路径不保证内容缓存或重复请求的结果身份。
+
+语法或静态参数错误返回 InvalidArgument；dtype、shape 或 task signature 不兼容返回 TypeMismatch。输入／输出结构仍必须校验。数值前提违反没有诊断保证，LUT 地址和精度 guard 仍是可失败算术。不添加自动样本 validator 或隐式布局转换。
+
+## 行为验证
+
+临时公开检查应将 sampler 算术与独立逐步参考比较，将 LUT 输出与精确有理插值比较。覆盖语法／AST／index 上限、全局索引、稀疏最大 count、完整系数／table 依赖、batch／atomic query 几何、端点／raw zero、取消和畸形 preparation。验证实际 sampler-to-LUT 组合、绑定替换、artifact 往返、并发 Run、低资源拒绝、零 scratch 空指针 ABI 调用，以及 context 销毁后的输出 owner。数值证据与平台性能结论分别报告。

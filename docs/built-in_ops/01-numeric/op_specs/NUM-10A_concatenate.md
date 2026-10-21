@@ -11,80 +11,17 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_manual_acceptance
+implementation_status: implemented
 ---
 
 # NUM-10A: concatenate
 
-The strict key follows its exact numeric reference. Accelerated floating
-results follow the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md)
-where arithmetic applies; raw copies and discrete results remain exact.
+Concatenate an ordered sequence of 2..256 single-tensor Results along required static Int64 `axis`. Tensor schema/member names may vary. Complete sample shapes include batch axes, have rank 1..8, positive extents and at most 2^40 elements. Inputs share UInt8/Int64/Float32/Float64 dtype, rank and all non-axis extents. Output axis length is the sum of input lengths, checked against the same output count limit. Output `values` uses `photospider.tensor`/`samples` with ordinary axes.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements. The rules below
-specify the NUM-10 behavior.
+For input lengths L[k] and prefixes P[k], output coordinate o selects the unique k with `P[k] <= o[axis] < P[k]+L[k]`; its source coordinate is o with axis replaced by `o[axis]-P[k]`. All element bits are copied, including signaling NaNs. No casts or broadcasting occur. All three CPU profiles have identical bitwise semantics.
 
-Concatenate an ordered sequence of 2..256 Results along a static axis. Every
-input Result contains exactly one tensor member; its key is unrestricted. All
-members share one dtype (UInt8, Int64, Float32 or Float64), rank 1..8, and equal
-extents on every non-concatenation axis. Their `sample_shape()` includes any
-batch prefix. Each input and the output has at most 2^40 elements. The output
-port `values` is a Result with schema `photospider.tensor`, member `samples`,
-and the complete ordinary output shape. It has no batch topology.
+Each selected output tile lowers to one fixed CPU task. Its reads are the input tiles intersecting the output/slab intersections, using each input's own grid and local coordinates. Unselected slabs have no payload or producer dependency, although all static schemas are checked. Empty selection emits no task. Output tiles own separate dense allocations; the old layout policy is removed from direct nodes and the helper. The helper accepts profile immediately after axis.
 
-`axis` is a required static Int64 in `[0, rank)`. `layout` is a required static
-String with values `view` and `dense`. There are no casts, broadcasting, or
-inserted axes. The selected output extent is the checked sum of input extents.
-All element bits, including signaling NaNs, are copied without arithmetic.
+Prepare checks the complete invocation signature. Runtime uses bounded coordinates and a 32-byte copy buffer with no payload scratch. Negative/zero input strides and unaligned offsets remain supported. Cancellation/resource failures prevent successful call publication; successful output storage outlives context destruction. No view fallback or content cache is used.
 
-## Mapping and demand
-
-Let `L[k]` be input k's extent on the concatenation axis and
-`P[k] = sum(L[j] for j < k)`, with `P[0] = 0`. For output coordinate `o`,
-choose the unique input `k` where `P[k] <= o[axis] < P[k] + L[k]`. Read that
-input at `s[axis] = o[axis] - P[k]` and `s[j] = o[j]` for every other axis.
-
-Static schemas and parameters are checked during specialization. For nonempty
-complete-input demand, the program requests every input with complete data, validation and
-descriptor support , triggering typed-payload validation before
-publication. A request that selects one output slab still prepares every port.
-An active source edit dirties the complete output; Empty demand reads no payload
-and performs no sample copying. Port reuse does not change the ordered mapping.
-
-## Layout and resource rules
-
-Dense copies the complete output into packed owned storage, costing
-`N * element_size` bytes. View proves that all complete inputs form one global
-affine map over the same physical owner. Compatible same-owner fragments may
-join; singleton dimensions do not constrain strides, and the implementation can
-infer a stride from neighboring anchors when the concatenation axis is
-singleton in every input. Negative and zero global strides are valid when the
-complete mapping is affine. The proof covers all inputs regardless of consumer
-projection. An independent owner or incompatible map returns Domain/Run
-`ViewUnavailable`; choose Dense when copying is intended. The view retains its
-source storage owners and allocates no output payload. Both layouts read through
-authorized input windows; Dense does not first pack each complete input.
-
-Viewability depends on physical storage and cannot be established from content
-identity, so concatenate is not content-cacheable. Dense and View share checked
-static shape inference and complete-input source support. The continuation accumulates
-owning input capabilities in a Root-accounted map across Need envelopes, while
-each poll borrows its phase tensor map only for that call. Each Need contains at
-most 64 original ports; the five-stage bound allows four Need envelopes and the
-final publication for 256 inputs. Work and cancellation are charged during
-mapping and copying. A failed publication exposes no partial output.
-
-## Errors and acceptance
-
-Preflight rejects fewer than two or more than 256 inputs, dtype/rank/non-axis
-shape mismatch, invalid axis or layout, and output element count above 2^40.
-Source, typed-validation, resource and cancellation failures preserve their
-status categories. `ViewUnavailable` reports a physical View geometry failure;
-it does not imply that Dense copying is invalid.
-
-Temporary public Result acceptance should cover same-owner affine View and Dense
-outputs, independent owners, unselected-input failures, escaped Result/window
-lifetime, singleton-fragment stride inference, negative global strides, reordered
-inputs under partial demand, Empty and 65-/256-input repeated-reference cases.
-These bounded cases do not cover every dtype, owner arrangement or geometry.
-See [NUM-10 Run-shared complete-input computation](../indexing-whole.md) for execution behavior.
+Temporary acceptance compares an independent ordered coordinate mapping, including nonleading axes, partial tiles crossing input boundaries, repeated references, 65/256 ports, all four dtypes, stride variants, empty selection, artifact roundtrips and concurrent Runs. A failing producer for an unselected slab must remain elided. See [fixed indexing execution](../indexing-execution.md). This fixed execution contract overrides the [NUM baseline](NUM_common_contract.md); specification status remains Proposed.

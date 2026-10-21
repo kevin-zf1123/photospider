@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: complete
 registered_operation_keys:
   - alpha.associate_strict
@@ -18,11 +18,11 @@ registered_operation_keys:
 # FMT-04A: export one group as premultiplied numeric samples
 
 The default registry provides `alpha.associate_<profile>` for the three CPU
-profiles. The operation uses Result ABI 6 and preserves the declared tensor
+profiles. The operation uses fixed invocation ABI 8 and preserves the declared tensor
 shape, dtype and channel positions. The specification remains Proposed. Validate the public operation with temporary independent numerical and ownership checks when changing it.
 
 Inherit the complete [FMT-04 boundary contract](FMT-04_alpha_association_contract.md).
-The operation accepts one single-tensor Result , with optional second input only for raw explicit plane/scalar weights.
+The operation accepts one single-tensor Result, with optional second input only for raw explicit plane/scalar weights.
 
 ## Interface and representation
 
@@ -41,10 +41,9 @@ already premultiplied selected group fails preflight.
 
 ## Mathematical specialization
 
-Read each requested color x and internal a, requiring finite x and finite a in
-[0,1]. At either signed zero alpha, output color +0; otherwise strict output is
-RN_t(x*a). Copy alpha and nonparticipating samples bit-for-bit. Do not skip x
-validation at alpha=0. Signed/HDR colors are legal and no [0,a] clamp applies.
+For each evaluated color coordinate, read x and internal a. The caller supplies
+finite x and finite a in [0,1]. At either signed zero alpha, output color +0; otherwise strict output is
+RN_t(x*a). Copy alpha and nonparticipating samples bit-for-bit. The finite-color premise also applies at alpha=0. Signed/HDR colors are legal and no [0,a] clamp applies.
 Encoded C=0.5 with a=0.5 produces P=0.25 without transfer decoding. Hidden color
 at zero alpha is lost in this boundary conversion; no auxiliary capture is made.
 A binary Gray stored-value guarantee cannot generally survive multiplication.
@@ -56,35 +55,34 @@ Raw output carries no description or sample-validity guarantee.
 
 ## Dependencies, resources and failures
 
-Requested converted samples read exactly their own source component plus alpha;
-pass-through-only samples read only themselves. Both operands are required even
-at alpha=0/1. Dirty alpha fans out to observed selected-group components; raw
-scalar alpha affects all observed selected samples. All group/state/shape checks
-remain static. The family's materialized storage, bounded algorithm, NUM error
-attribution, cancellation and cache policy apply without additional exceptions.
+Each complete retained output tile declares its participating source components
+and mapped alpha in their own source grids. Pass-through components declare only
+their original samples. Both operands remain required at alpha=0/1. Static group,
+state and shape checks apply to every call, including Empty. Output allocations
+are independent and become public at successful ordered call retirement.
 
-A downstream description must refer to the output alpha slot. R-only production does
-not publish alpha, and it does not retain an external alpha reference. Downstream
-work must explicitly demand the result alpha channel. Missing detached coverage
-remains missing. Normal owned samples/read windows survive context retirement.
+The output retains its alpha slot structurally. A downstream call explicitly
+requests the result's alpha when needed. A selected output tile can include more
+channels than an original sample request; missing detached coverage remains an
+ordinary missing-coverage error. No hidden input-alpha binding is retained.
 
 ## Independent fixtures and acceptance
 
 Straight Float32 RGBA [-2,0.5,4,0.5] yields boundary samples [-1,0.25,2,0.5].
 For the same finite colors and alpha=-0, color outputs are +0 and alpha remains
--0. Requested NaN color at alpha=0 fails; unrequested NaN peers do not add a
-failure to a valid requested component.
+-0. A participating NaN color at alpha=0 violates the caller preconditions.
+Additional source-tile samples outside evaluated components add no premises.
 
 For Float32 x=1 and a=2^-149, output is 2^-149. For x=0.5 with that alpha,
 ties-to-even yields +0; x=-0.5 yields -0. Repeat Float64 at 2^-1074. At a=1,
-finite samples including -0 preserve bits after validation. These products can
+finite samples including -0 preserve bits. These products can
 underflow and later unassociation need not recover their original colors.
 
 For a Gray+alpha tensor with samples [8,0.25] and [2,1], output samples are
 [2,0.25] and [2,1]. Keep the internal alpha channel in the shape;
 external alpha must first be explicitly assembled. Check a deliberately
 noncanonical axis/channel map and R-only, alpha-only and AOV-only requests.
-Alpha-only copy may preserve a NaN bit pattern without color-domain validation.
+A copy-only output tile may preserve a NaN bit pattern without color-domain validation.
 
 Raw fixtures include Inf*0 -> NUM NaN, -0*1 -> -0, operand-order NaN priority
 and weights outside [0,1]. Semantic and raw results cannot share an incorrect

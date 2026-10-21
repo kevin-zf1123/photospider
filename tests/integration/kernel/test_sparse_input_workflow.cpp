@@ -38,7 +38,11 @@ void data_workflow() {
       {"result",
        {{{0, checked(TileSet::from_indices(planning_root, {1, width - 2}))}}}}};
   const auto compiled = checked(Compiler(operations).compile(graph, options));
-  ExecutionContext execution(operations, {1, false, 8, 65536});
+  ExecutionContextConfig config;
+  config.cpu_workers = 1;
+  config.maximum_queued_tasks = 8;
+  config.maximum_live_bytes = 65536;
+  ExecutionContext execution(operations, config);
   const auto root = checked(execution.resource_budget());
   auto builder =
       checked(ResultBuilder::start(root, schema, "dependency.sparse", {}, 1));
@@ -58,10 +62,9 @@ void data_workflow() {
   const auto coverage = checked(Footprint::from_regions(
       {1, width},
       {Region({{0, 1}, {1, 1}}), Region({{0, 1}, {width - 2, 1}})}));
-  auto run_plan = compiled.plan.value();
+  auto run_plan = checked(compiled.plan->select_outputs({{"result", request}}));
   ExecutionBindings run_bindings = {{source}};
-  auto result = checked(execution.execute_fragments(run_plan, run_bindings,
-                                                    {{"result", request}}));
+  auto result = checked(multi_result::run(execution, run_plan, run_bindings));
   const auto& fragments = result.results.at("result");
   require(multi_result::number(fragments, {0, 1}) == 1 &&
               multi_result::number(fragments, {0, width - 2}) == 999999998,
@@ -73,21 +76,16 @@ void data_workflow() {
                       .code == ErrorCode::InvalidArgument &&
               hole == 7,
           "hole was materialized");
-  ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
-  changes.push_back({PlanWorkflowInput{0}, 0, 0,
-                     checked(TileSet::from_indices(root, {1})), false});
-  const auto dirty = checked(result.dependencies.dirty_units(changes));
-  require(dirty.size() == 2 && dirty[0] == TileUnit{0, 0, 0, 1} &&
-              dirty[1] == TileUnit{compiled.plan->output("result").record_index,
-                                   0, 0, 1},
-          "identity invalidates exactly its call tile and named return");
-  for (auto tile : {UINT64_C(1), width - 2}) {
-    auto record = checked(result.dependencies.tile_record({0, 0, 0, tile}));
-    require(record && record->inputs.size() == 1 &&
-                record->inputs[0].tensor_slot == 0 &&
-                record->inputs[0].tiles ==
-                    checked(TileSet::from_indices(root, {tile})),
-            "identity records only its actual source tile");
+  const auto& physical = run_plan.program();
+  require(physical.tasks.size() == 2, "sparse plan materialized extra tasks");
+  for (const auto& task : physical.tasks) {
+    require(task.reads.size() == 1 && task.writes.size() == 1,
+            "identity COPY must have one source and one destination");
+    const auto& input = physical.tiles[task.reads[0].tile];
+    const auto& output = physical.tiles[task.writes[0]];
+    require(input.tile_index == output.tile_index &&
+                (input.tile_index == 1 || input.tile_index == width - 2),
+            "identity reads only the selected source tile");
   }
   require(root.statistics().peak[ResourceKind::Payload] <= 4096,
           "sparse source exceeded the payload budget");
@@ -106,7 +104,7 @@ void data_workflow() {
   require(checked(snapshot.content_identity(original.region())).size() == 64,
           "generic snapshot identity missing");
   std::cout << "data: values=[1,999999998], source_samples=2, hole=rejected, "
-               "transpose={1}, generic_snapshot=ok\n";
+               "static_reads=2, generic_snapshot=ok\n";
 }
 }  // namespace
 int main() {

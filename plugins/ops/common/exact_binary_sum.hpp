@@ -8,7 +8,7 @@ namespace ps::core_internal {
 /**
  * Exact signed sum of weighted binary64 inputs, in units of 2^-1074.
  * 68 base-2^32 limbs cover 2098 binary64 bits plus a 20-bit count and carry.
- * Storage is inline, so a containing host continuation owns all retained limbs.
+ * Storage is inline; the containing caller-owned state retains all limbs.
  * Every loop has a fixed bound, independent of exponent gaps or sample count.
  */
 struct ExactBinarySum final {
@@ -85,7 +85,7 @@ struct ExactBinarySum final {
 
   /** Destructively divides by a positive count and rounds directly to IEEE
    * bits. No floating operation or ambient rounding mode participates.
-   * Callers reject exponent-all-ones when their output is finite-only.
+   * Finite-only callers must satisfy their output-range precondition.
    */
   std::uint64_t rounded_bits(std::uint32_t divisor, bool binary32,
                              bool negative_exact_zero = false) {

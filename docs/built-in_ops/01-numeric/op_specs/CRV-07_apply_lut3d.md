@@ -66,15 +66,9 @@ CMYK's four input dimensions and alpha are separate from this initial scope.
 
 ## Confirmed grid coordinates
 
-Dynamic axis is Float64[3,3]. Rows correspond to input components 0,1,2 and each contains
-[start,end,step]. Reconstruct each axis using its table extent N0,N1,N2 and
-the exact Float64 coordinate and step-consistency rules of CRV-05. Globally
-validate every reconstructed coordinate on all three axes for strict order;
-each axis independently supports increasing or decreasing coordinates.
-Each axis extent is 2..256; unequal N0,N1,N2 are supported. Singleton axes are
-not accepted. The largest table has 256^3*3 values, 384 MiB at Float64. A complete-input
-request validates the complete table with typed/upstream support; sample access
-uses authorized Root windows rather than requiring a dense table copy.
+Dynamic axis is Float64[3,3]. Each row is [start,end,step] for one input component. Each extent Ni is 2..256, independently ascending or descending. The caller guarantees finite endpoints and step, distinct endpoints, and step bits equal to RN64((end-start)/(Ni-1)), with a finite nonzero result of the correct direction. Interior knots are RN64(((Ni-1-i)*start+i*end)/(Ni-1)); the first and last knots preserve endpoint bits. Every reconstructed knot must be strictly ordered numerically, so -0 and +0 cannot form separate knots.
+
+These numerical conditions are unchecked caller preconditions. The fixed kernel reconstructs knots from the six endpoints. The redundant step column does not contribute to interpolation. Unequal extents are supported; the largest table has 256^3*3 values, or 384 MiB at Float64.
 
 ## Confirmed color spaces
 
@@ -98,9 +92,7 @@ is supported in this initial contract.
 
 input and table independently accept Float32/Float64, axis is Float64, and static
 output dtype is Float32/Float64; the public helper defaults it from the explicit
-authoring `input_type` hint, independently of the bound Result dtype. All demanded color
-components and final outputs must be finite and obey the relevant model's
-legality rules. In particular CIELCh/OKLCh require C>=0; HSL S/L and other signed/
+authoring `input_type` hint, independently of the bound Result dtype. Consumed query components, positive-weight table colors and final outputs must be finite and obey the relevant model's legality rules as unchecked caller preconditions. Original query colors must be legal before clamp; complete positive-weight table colors must be legal in the output description. In particular CIELCh/OKLCh require C>=0; HSL S/L and other signed/
 HDR coordinates retain the finite extensions selected in CRV-06. No automatic
 hue normalization or nominal-range clipping occurs.
 
@@ -121,24 +113,11 @@ use the SDK ColorArray parameter codec. They define the same-model input and
 table/output interpretation explicitly; no description is read from or attached
 to a Result. `dtype` and `out_of_domain` remain explicit parameters.
 
-Each input is a Result containing one tensor member under any schema id/version
-and member key. Use its complete `sample_shape()`: input [...,3] rank 2..8,
-table [N0,N1,N2,3], and axis [3,3]. The Run-shared Result program requests all three
-with ordinary payload tile Needs, including full typed validation
-and upstream failures. Typed/upstream failures can precede callback numeric
-checks. Callback validation checks all axes first, then every original input
-color/query before clamp, applies clamp to valid original coordinates, then runs
-selected-vertex table arithmetic. Only exact positive-weight vertices enter the numerical
-formula: at most eight for trilinear or four for tetrahedral. Generic invalid
-zero-weight vertices remain mathematically unused; typed invalid data or an
-upstream failure there still fails the run. Each contributing vertex is a
-complete three-component color.
+Each input is a Result containing one tensor member under any schema id/version and member key. Shapes use complete `sample_shape()`: input [...,3] has rank 2..8 and logical element count <=2^40, table is [N0,N1,N2,3], and axis is [3,3]. A single query color uses [1,3]. Static preparation validates schemas, dtypes, extents and both descriptions.
 
-The output port `values` is a Result using `photospider.tensor` v1/member `samples`, with the complete input shape, selected Float32/Float64 dtype, `atomic_trailing_axes=1`. It publishes a packed immutable output with complete internal coverage, with public coverage restricted to requested tiles and global sample coordinates. Any input edit invalidates the recorded output demand; dirty support follows that demand. Empty reads no payload. Each key has one all-or-nothing Result transaction; numeric failure scope is Run.
+The output `values` uses a fresh `photospider.tensor` v1 schema with member `samples`, the complete input sample shape as its descriptor shape, selected Float32/Float64 dtype, and `atomic_trailing_axes=1`. It carries no ColorArray description and does not preserve the input's batch-axis partition. Each selected output tile therefore contains complete three-component colors.
 
-Input `sample_shape()` has rank 2..8, last extent 3 and logical element count
-<=2^40. A single color uses [1,3]. The observation domain is the remaining input
-axes, rank 1..7.
+Lowering declares the query region corresponding to that output tile, the complete table, and axis region [0:3,0:2]. Each region closes to complete tiles on that input's own grid; a granted source tile may contain unused samples or the step column. Table closure is conservative because vertex addresses depend on runtime queries. Upstream failures in required table tiles propagate even when a vertex would have zero weight. The LUT kernel itself reads only exact positive-weight complete vertices, at most eight for trilinear and four for tetrahedral. Numerical conditions on unused table vertices are outside this consumer's preconditions.
 
 ## Interpolation formulas
 
@@ -161,8 +140,7 @@ so cell/split classification never depends on floating evaluation order.
 
 Both formulas are convex within the cell. A table's hue components are ordinary
 unnormalized numeric values in their declared output unit; there is no circular
-interpolation or implicit periodic domain. Input/output model constraints are
-checked before/after these formulas, including required chroma nonnegativity.
+interpolation or implicit periodic domain. Input/output model constraints, including chroma nonnegativity, are caller preconditions on original queries, contributing table colors and final outputs.
 
 ## Parameters, demand and output mapping
 
@@ -174,46 +152,17 @@ white/primaries/transfer and hue/coordinate units. Generic arrays may be interpr
 by these declarations; table values use the output description. No extra interpolation
 mode is accepted because the methods are independent operations.
 
-Empty Q has no payload reads; static Result schemas and descriptions are still
-preflight validated. Nonempty requests request complete inputs with ordinary tile Needs before
-the callback. Typed/upstream errors can therefore precede callback numeric
-validation. Among callback numeric checks, axis validation precedes every
-original input color check, input validation precedes clamp, and all query/domain
-checks precede table arithmetic. No per-output dependency or point arrays remain.
+Empty Q emits no tasks and reads no payload; static schemas and descriptions are still validated. Every nonempty selected output tile has one fixed CPU invocation. The Plan fixes its input slots, dense output allocation and scratch size. Preparation checks the kernel symbol/contract, exact output schema, read closure, output region, dtypes, Host placement and scratch requirements. Affine source views may be offset, unaligned, negative-stride or zero-stride when their address ranges are valid.
 
-Any input edit invalidates the complete recorded output demand; dirty support
-follows that demand. Cache identity retains method, descriptions, grid, dtype,
-policy and complete typed/upstream support. The immutable packed Result contains no attached domain description and marks the trailing extent-3 component axis atomic with
-`atomic_trailing_axes=1`.
-Local requests still return complete internal coverage, with public coverage restricted to requested tiles in global sample coordinates.
-Legal unaligned, offset, negative/zero-stride input/table layouts remain accepted,
-and output owners survive context teardown.
+The kernel borrows its input views and exclusively writes its selected output tile. It does not allocate a complete output for unselected positions. The executor publishes the call's selected Results after all required tasks succeed in retirement order; retained Result owners survive context teardown. Immutable preparation can be shared across Runs, while each invocation owns its mutable scratch.
 
 ## Resource and failure contract
 
-For M=product(input.sample_shape())/3 colors, grid validation is O(N0+N1+N2),
-lookup O(M*sum(log Ni)), and arithmetic uses at most 8 or 4 contributing
-vertices per color. Output payload is 3*M*sizeof(dtype). `UniformAxis` stores
-Root-owned Float64 grids costing 8*(N0+N1+N2) bytes plus allocator/metadata
-overhead. Budget exact workspace, authorized source windows/retained owners, one
-current vertex/weight set, full packed output and descriptors. Input/table access
-uses zero-copy Root windows; no dense copy of the full source table is required.
-The 384 MiB maximum table payload is logical size and does not guarantee that all
-active windows and output fit a particular Root budget.
+For P query colors in an output tile, knot reconstruction costs O(N0+N1+N2), lookup O(P*sum(log Ni)), and exact arithmetic uses at most eight or four vertices per color. Each invocation reserves fixed scratch containing 3*256 Float64 knot slots, ExactSampling, a 96-slot polynomial arena of 40960-bit integers, and current cell/query/color state. Scratch size is independent of query count and grid extents. Only selected output tiles are allocated. The kernel borrows source tiles without copying the complete table; Plan metadata, retained source allocations and any declared input COPY tasks have separate costs. Lowering bounds the required read-tile count before enumeration.
 
-Inherit CRV-06A's bounded cancellation polling and host capacity/work
-obligations, with polls in axis scans, lookup batches and exact-arithmetic work.
-Release temporary state after success/failure/cancellation and retain only owned
-result state. Unsupported platform keys fail BackendUnavailable; resource limits
-fail ResourceExhausted, never return an approximate interpolation.
+Cancellation is polled during knot reconstruction, query processing and exact arithmetic. Mutable scratch is destroyed at synchronous return, and the caller's floating environment is restored. The arithmetic borrows a synchronous work callback and allocates no heap storage during invocation. Unsupported CPU profiles fail BackendUnavailable; structural and resource failures retain their operational status. Insufficient capacity never substitutes approximate interpolation.
 
-Malformed static descriptions/parameters or extents outside supported ranges
-fail compile/preflight with InvalidArgument/InvalidDomain; shape/dtype or attached
-description mismatch uses TypeMismatch. Invalid axes (including derived overflow,
-duplicate coordinates or step mismatch), nonfinite/model-invalid demanded colors
-and reject-domain violations fail OperationFailed/InvalidDomain. Final component
-narrowing overflow fails OperationFailed/ArithmeticOverflow. Preserve upstream,
-typed, stale, cancellation and resource categories and provenance. Numeric failure scope is Run; no partial output survives a failed callback.
+Malformed descriptions/parameters or extents outside supported ranges fail static preparation with InvalidArgument; incompatible shape/dtype/schema uses TypeMismatch. The caller guarantees axis consistency/order, finite and model-valid original queries and contributing table colors, the closed axis domain under reject, and finite final values in the chosen output dtype. Clamp acts on otherwise valid original queries. Violating these numerical preconditions has no promised domain or overflow diagnostic. Cancellation, stale-plan, upstream, allocation and resource failures remain operational failures; failed tasks do not publish successful call outputs.
 
 ## Independent acceptance and public workflow
 
@@ -232,16 +181,11 @@ For axis rows [0,1,1] and a 2x2x2 table at binary vertices (r,g,b), store
 for this fixture. A polar-model table with hue 0 to 4 retains intermediate hue 2.
 No modulo reduction can be substituted for that fixture.
 
-Verify partial channel requests expand to full colors, zero-weight invalid
-generic vertices remain mathematically unused, typed validation covers all inputs, invalid demanded chroma fails even if domain-clamp would
-hide it, axis errors are global, dirty support covers complete inputs, and all output metadata
-matches the declared model/space. Include strides, owners after context teardown,
-low budgets, cancellation, cache-off and joint versus partitioned requests.
+Verify that output tiles preserve complete colors, that generic zero-weight vertices remain numerically unused, and that dependency closure includes all table tiles and only required query/axis tiles on their respective grids. Use valid original colors under clamp; invalid numerical inputs do not have a runtime-error oracle. Check output schema, arbitrary source strides, source immutability, floating-environment restoration, cancellation, bounded scratch and retained Result lifetime.
 
 The public workflow binds input/table/axis, explicitly supplies both
 descriptions/dtype/policy, evaluates values through Compiler/ExecutionContext,
-and inspects complete colors and output metadata. Actual run commands and
-independently checked expected values are linked in the implementation section.
+and inspects complete colors and output metadata. The implementation section links the independent oracle used for expected values.
 The [CLF v3 interpolation appendix](https://docs.acescentral.com/clf/specification/#appendix-a-interpolation)
 is a method reference, not a claim of full CLF file, domain or bitwise compatibility.
 
@@ -264,16 +208,10 @@ hue components and every supported color model.
 
 ## Maintained implementation and validation
 
-The six operation keys are registered in [`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp), and [`lut3d.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/lut3d.hpp) provides the public trilinear and tetrahedral constructors. Both are Run-shared Result operations. Static preparation validates Result tensor schemas and explicit color parameters, then stores reusable immutable program state.
+The six operation keys are registered in [`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp), and [`lut3d.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/lut3d.hpp) provides the public constructors. They lower to `lut3d` / `lut3d-fixed-v1` kernels using invocation ABI 8. All profiles currently use exact integer weights and a single final rounding. [`ExactLut3d`](../../../../plugins/ops/01-numeric/exact_lut3d.hpp) uses borrowed callbacks and invocation-owned arithmetic state.
 
-Each continuation uses authorized Root read windows for input/table samples. It publishes complete global-coordinate coverage atomically; escaped Results and read windows retain storage after context retirement. `UniformAxis` owns the Root grids, while output and exact-arithmetic workspace use managed Root resources.
+The independent [`CRV-07 oracle`](../../../../oracle/ops/numeric/crv07/reference.py) reconstructs RN64 grids and exact rational cells/weights, then rounds sums with separate IEEE conversion logic. Temporary acceptance should compare valid fixtures through the public Compiler/ExecutionContext path and direct prepared kernels, including sparse requests, different input grids, concurrent Runs, cancellation, strides, allocation counts and owner lifetime. Error fixtures for violated numerical preconditions are not fixed-executor acceptance cases.
 
-The maximum 256^3 Float64 table shape succeeds with an 8-byte backing read
-window under an 8 MiB Root Payload cap, proving that the implementation does
-not make a dense table copy. A separate sparse request requiring 2^38 output
-positions is rejected as `CapacityLimit` at node 1 because the complete output
-exceeds the cap; that case does not establish numerical execution at this size.
-These checks do not establish x86 or native GPU execution. Runtime ColorArray v1 still encodes the
-earlier implicit CIELAB lightness units; the revised `l=L*/100` contract remains
-a known gap, and no silent conversion is performed. Specification acceptance
-remains Proposed.
+Runtime ColorArray v1 retains its existing CIELAB lightness interpretation; the revised `l=L*/100` contract remains a known gap. These CPU implementations do not establish native GPU behavior.
+
+Specification acceptance remains Proposed.

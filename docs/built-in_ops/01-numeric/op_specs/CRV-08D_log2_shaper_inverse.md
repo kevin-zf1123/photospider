@@ -25,54 +25,20 @@ values remain exact.
 
 ## Interface and formula
 
-Ordered inputs are Results named input, lower and upper. Each has one tensor
-member under any schema id/version/key; use its full `sample_shape()`, including
-batch axes. `input` is Float32/64, rank 1..8, positive extents and at most 2^40
-elements. Bounds are same-dtype scalar tensors of shape [1], finite and satisfy
-0<lower<upper. Output port `values` is an immutable Result using
-`photospider.tensor` v1/member `samples`, preserving input shape/dtype with
-no attached domain description. No implicit clipping occurs.
-The mathematical formula is lower*(upper/lower)^input, with whole-expression final rounding.
-The independent operation key selects the CPU profile; there is no additional static mode parameter.
+Ordered inputs are input, lower and upper Results, each with one tensor member under any schema id/version/key. Complete `sample_shape()` includes batch axes. Input is Float32/Float64, rank 1..8, positive extents and <=2^40 elements. Bounds are same-dtype [1] scalars. Output `values` uses `photospider.tensor` v1/member `samples`, preserving complete input shape/dtype as ordinary axes with no domain description.
 
-Inherit the [complete shaper contract](CRV-08_shaper.md) for exact endpoints,
-zero signs, NaN quieting/payloads, infinity/domain extensions and overflow as
-successful IEEE results. Bound validation always precedes source special values.
-Strict correctly rounds the complete formula. Accelerated allows final nonzero finite error <=4 ULP, exact endpoint/classification/sign agreement and monotone nondecreasing results for fixed bounds. The strict path is retained when needed; complete-input counters are unavailable; the combined implementation must remain monotone and partition-independent.
-These operations do not modify a color description or implement tone mapping.
+The exact mathematical formula is lower*(upper/lower)^input, rounded as one expression. There are no static mode, dtype or clipping parameters. Bounds must be finite and satisfy 0<lower<upper as an unchecked caller precondition. Input IEEE special values remain part of the valid numerical interface; overflow/underflow are successful IEEE results.
 
-## Execution and failures
+Inherit the [family contract](CRV-08_shaper.md#mathematical-formulas-and-ieee-results) for exact endpoints, NaN quieting/payload/sign, infinity and zero extensions, monotonicity and profile precision. t=+0/-0 selects lower exactly, t=1 selects upper exactly, -Inf maps to +0 and +Inf maps to +Inf. These transformations do not change a color description or perform tone mapping.
 
-Nonempty complete-input requests all three inputs with payload tile coverage with explicit validation
-, including complete typed/upstream validation. The Result program reads
-authorized windows directly; it does not collect or copy the full input through
-Tensor. Empty reads no payload. Inherit full-output allocation, full dirty scope,
-sparse public delivery, arbitrary input strides, ownership, budgets and
-cancellation from CRV-08.
-Account certified numerical refinement and scratch growth; do not use a separately rounded pow/log pipeline as the strict oracle.
-Invalid bounds use InvalidArgument/InvalidDomain; shape/dtype mismatch uses
-TypeMismatch. Numeric special results succeed. Resource, backend, stale,
-upstream and cancellation failures preserve the shared categories; numeric failures have Run scope.
+## Fixed execution and errors
 
-## Public workflow and acceptance
+Each selected output tile reads its matching input region and both scalar bounds through their source grids. It computes only selected global cells, uses preallocated ExactShaper scratch and writes the declared output tile. Metadata and exact read/write/scratch signatures are verified during preparation. Empty reads no payload. The [fixed family contract](CRV-08_shaper.md#fixed-log-execution) defines layout support, source closure, resource admission, Run ownership and ordered call publication.
 
-lower=1, upper=16, input=[-0.25,0,0.25,0.5,1,1.25] -> [0.5,1,2,4,16,32].
-Bind these ports through the public Compiler/ExecutionContext interface
-using the selected operation key and check named values.
-The maintained public workflow executes this fixture through Compiler/ExecutionContext.
+The engine preserves whole-expression exact/directed arithmetic and uses fixed state for retry, range and terminal failures. Refinement is bounded to 128..4096 fractional bits; unresolved precision or capacity returns ResourceExhausted. Cancellation remains terminal. Numerical bound preconditions have no diagnostic/precedence guarantee; a nonzero-significand guard protects integer decomposition. Shape/dtype mismatch is TypeMismatch, and unsupported profiles fail BackendUnavailable.
 
-Apply the shared independent oracle, endpoint/extreme/subnormal/NaN fixtures,
-partial-request and dirty witnesses, strides, resource limits, cancellation,
-cache-off and lifetime checks. Use certified whole-expression references, 4-ULP and cross-fallback monotonicity checks; forward/inverse rounded round trips are not generally bitwise identities.
-The maintained target command and current validation boundary are linked below; the
-specification remains Proposed.
+## Public acceptance
 
-## Maintained implementation and validation
+L=1,U=16, input=[-0.25,0,0.25,0.5,1,1.25] gives [0.5,1,2,4,16,32]. Author the node with `log2_shaper_inverse_node`, bind Results and execute through Compiler/ExecutionContext. Compare against the independent whole-formula MPFR/Fraction reference, including IEEE payloads, exact landmarks, extremes, subnormal results and monotonic groups. Rounded round trips alone are insufficient.
 
-The public entry point is `log2_shaper_inverse_node` in
-`photospider/ops/numeric/shapers.hpp`. The log primitive uses certified
-whole-expression evaluation with a strict certified scalar fallback, preserves
-monotonicity and partition independence, and may return `ResourceExhausted` when
-128..4096 refinement capacity is unresolved. See [the CRV-08 family contract](CRV-08_shaper.md)
-for arithmetic and validation requirements. Temporary acceptance must cover public
-composition and output lifetime; report only the profiles and sizes actually exercised.
+Check selected reads/allocation, both scalar dependencies, source-grid closure, signed/zero/unaligned layouts, malformed preparation, fenv, concurrent rebinding, resource limits, cancellation and output lifetime. See [family acceptance](CRV-08_shaper.md#acceptance-and-implementation). Keep numerical proof separate from public execution and report profiles actually exercised.

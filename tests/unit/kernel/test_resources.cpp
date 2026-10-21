@@ -13,7 +13,7 @@
 
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/photospider.hpp"
-#include "support/test_support.hpp"
+#include "support/fixed_operation_fixture.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -163,78 +163,31 @@ int referenced_owner() {
   PS_CHECK(third.ok());
   return 0;
 }
-SchemaTemplate resource_schema() {
-  SchemaTemplate schema;
-  schema.id = "test.resource_scalar";
-  ResultTensorSpec tensor;
-  tensor.key = "number";
-  tensor.descriptor = {ElementType::Float64, {1}};
-  schema.tensors.push_back(std::move(tensor));
-  return schema;
-}
-OperationOutputTraits result_output(const SchemaTemplate& schema,
-                                    std::uint64_t state = 0) {
-  OperationOutputTraits output;
-
-  output.output_schema.result_schema_id = schema.id;
-  output.output_schema.result_schema_version = schema.version;
-  output.result_schema = schema;
-  output.continuation_bytes = state;
-  output.maximum_dependency_stages = 2;
-  return output;
-}
-struct ResourceScalar {
-  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    using Poll = Result<ResultProgramPoll>;
-    auto made =
-        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key);
-    if (!made.ok())
-      return Poll(made.status());
-    auto builder = made.take_value();
-    auto buffer = phase.allocator.allocate(8);
-    if (!buffer.ok())
-      return Poll(buffer.status());
-    auto storage = buffer.take_value();
-    const double number = 19;
-    std::memcpy(storage.data(), &number, 8);
-    auto status = builder.publish_tensor(0, Region::whole({1}), {0, {8}},
-                                         std::move(storage).freeze());
-    if (!status.ok())
-      return Poll(status);
-    auto sealed = builder.seal();
-    return sealed.ok() ? Poll(ResultPublication{sealed.take_value(), true})
-                       : Poll(sealed.status());
-  }
-};
 int execution_owner() {
   auto registry = std::make_shared<OperationRegistry>();
-  OperationDefinition definition;
-  definition.key = "resource_scalar";
-  definition.traits.workspace_bytes = 8;
-  definition.traits.outputs[0] =
-      result_output(resource_schema(), sizeof(ResourceScalar));
-  definition.traits.cacheable = false;
-  definition.start_result = [](const ResultProgramQuery&,
-                               const BufferAllocator& allocator) {
-    return ResultContinuation::make<ResourceScalar>(allocator);
-  };
+  auto definition = test::fixed_fixture::operation("resource_scalar", 0);
   PS_CHECK(registry->register_operation(definition).ok());
   PS_CHECK(registry->freeze().ok());
   WorkflowDocument document;
   document.nodes = {{1, "resource_scalar", {}, {}}};
-  document.outputs = {{"value", 1, "value"}};
+  document.outputs = {{"value", 1, "out0"}};
   GraphContext graph(document);
   auto compiled = Compiler(registry).compile(graph);
   PS_CHECK(compiled.ok());
   auto config = ExecutionContextConfig{};
   config.cpu_workers = 1;
+  config.maximum_queued_tasks = 8;
+  config.maximum_runs = 1;
   config.managed_resources = limits(65536);
   auto context = std::make_unique<ExecutionContext>(registry, config);
   auto root = context->resource_budget().take_value();
   ResultRef held;
   {
-    auto result = context->execute(compiled.value().plan.value());
+    auto prepared = context->prepare(compiled.value().plan.value());
+    PS_REQUIRE_OK(prepared);
+    auto submitted = context->submit(prepared.value());
+    PS_REQUIRE_OK(submitted);
+    auto result = submitted.value().join();
     if (!result.ok())
       std::cerr << result.status().message
                 << " code=" << static_cast<unsigned>(result.status().code)
@@ -248,10 +201,10 @@ int execution_owner() {
   auto alias = held;
   PS_CHECK(root.statistics().live[ResourceKind::Host] == retained);
   context.reset();
-  double number = 0;
-  PS_CHECK(held.read_tensor(held.descriptor().take_value(), 0, {0}, &number, 8)
+  std::uint8_t number = 0;
+  PS_CHECK(held.read_tensor(held.descriptor().take_value(), 0, {0}, &number, 1)
                .ok());
-  PS_CHECK(number == 19);
+  PS_CHECK(number == 1);
   held = {};
   alias = {};
   for (auto live : root.statistics().live.values)
@@ -329,6 +282,37 @@ int allocator_ownership() {
     PS_CHECK(live == 0);
   return 0;
 }
+int combined_tokens() {
+  CancellationSource a, b;
+  auto both = CancellationToken::combine({a.token(), b.token()});
+  PS_REQUIRE_OK(both);
+  auto nested = CancellationToken::combine({both.value(), a.token(), {}});
+  PS_REQUIRE_OK(nested);
+  PS_CHECK(!nested.value().cancelled());
+  b.cancel();
+  PS_CHECK(both.value().cancelled() && nested.value().cancelled() &&
+           !a.token().cancelled());
+  std::vector<CancellationSource> sources(65);
+  std::vector<CancellationToken> tokens;
+  for (auto& source : sources)
+    tokens.push_back(source.token());
+  PS_CHECK(CancellationToken::combine(tokens).status().code ==
+           ErrorCode::ResourceExhausted);
+  tokens.pop_back();
+  auto all = CancellationToken::combine(tokens);
+  PS_REQUIRE_OK(all);
+  auto duplicate = CancellationToken::combine({all.value(), tokens[0], {}});
+  PS_REQUIRE_OK(duplicate);
+  PS_CHECK(!all.value().cancelled() && !duplicate.value().cancelled());
+  PS_CHECK(CancellationToken::combine({all.value(), sources.back().token()})
+               .status()
+               .code == ErrorCode::ResourceExhausted);
+  sources[32].cancel();
+  PS_CHECK(all.value().cancelled() && duplicate.value().cancelled() &&
+           !sources[0].token().cancelled() &&
+           !sources.back().token().cancelled());
+  return 0;
+}
 int concurrent() {
   ResourceBudget root(limits(1000));
   std::vector<std::thread> threads;
@@ -390,103 +374,6 @@ int concurrent_references() {
     PS_CHECK(live == 0);
   return 0;
 }
-struct RegionalMetadataProbe {
-  bool requested = false;
-  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    if (!requested) {
-      requested = true;
-      ResultProgramNeed need;
-      need.tiles.push_back(
-          {0, 0, false, TileSet::range(phase.resources, 0, 1).take_value()});
-      return Result<ResultProgramPoll>(std::move(need));
-    }
-    return Result<ResultProgramPoll>(
-        ResultPublication{phase.results.at(0), true});
-  }
-};
-int regional_scope_retention() {
-  auto registry = std::make_shared<OperationRegistry>();
-  auto schema = resource_schema();
-  schema.tensors[0].key = "first";
-  schema.tensors.push_back(schema.tensors[0]);
-  schema.tensors[1].key = "second";
-  OperationDefinition definition;
-  definition.key = "test.regional_metadata";
-  definition.traits.input_count = 1;
-  definition.traits.input_schema.resize(1);
-
-  definition.traits.input_schema[0].result_schema_id = schema.id;
-  definition.traits.input_schema[0].result_schema_version = schema.version;
-  definition.traits.outputs[0] =
-      result_output(schema, sizeof(RegionalMetadataProbe));
-  definition.start_result = [](const auto&, const auto& allocator) {
-    return ResultContinuation::make<RegionalMetadataProbe>(allocator);
-  };
-  PS_CHECK(registry->register_operation(std::move(definition)).ok());
-  PS_CHECK(registry->freeze().ok());
-  ResourceBudget root(ResourceLimits{});
-  ResultProgramMetadata metadata;
-  metadata.inputs.resize(1);
-  metadata.inputs[0].result_schema =
-      std::make_shared<const SchemaTemplate>(schema);
-  metadata.output.result_schema = metadata.inputs[0].result_schema;
-  const std::map<std::string, ParameterValue> parameters;
-  ResultProgramQuery query(metadata, parameters);
-  query.semantic_key = "scope-retention";
-  auto allocator = root.allocator();
-  ResultContinuation continuation;
-  {
-    ResourceAllocationScope scope(root);
-    continuation =
-        registry->start_result("test.regional_metadata", query, allocator)
-            .take_value();
-  }
-  ResultObjectInputs objects;
-  ResultProgramPhase phase{
-      query,
-      objects,
-      allocator,
-      root,
-      [&](std::uint64_t amount) { return root.consume({amount}); },
-      {}};
-  std::optional<ResultProgramPoll> pending;
-  {
-    // Direct hosts establish the poll's metadata allocation domain explicitly.
-    ResourceAllocationScope scope(root);
-    pending.emplace(continuation.poll(phase).take_value());
-  }
-  PS_CHECK(std::get<ResultProgramNeed>(*pending).tiles.size() == 1);
-  PS_CHECK(std::get<ResultProgramNeed>(*pending).tiles.get_allocator().owned_by(
-      root));
-  ResultRef retained;
-  {
-    auto builder =
-        ResultBuilder::start(root, schema, query.semantic_key).take_value();
-    const std::int64_t number = 7;
-    for (unsigned slot = 0; slot < 2; ++slot)
-      PS_CHECK(
-          builder
-              .publish_tensor(
-                  slot, Region::whole({1}),
-                  ByteView(reinterpret_cast<const std::uint8_t*>(&number), 8))
-              .ok());
-    objects.emplace(0, builder.seal().take_value());
-    auto done = continuation.poll(phase).take_value();
-    retained = std::get<ResultPublication>(done).result;
-  }
-  continuation = {};
-  objects.clear();
-  PS_CHECK(root.statistics().live[ResourceKind::Payload] >= 16);
-  PS_CHECK(root.statistics().live[ResourceKind::Metadata] > 0);
-  const auto with_need = root.statistics().live[ResourceKind::Metadata];
-  pending.reset();
-  PS_CHECK(root.statistics().live[ResourceKind::Metadata] > 0);
-  PS_CHECK(root.statistics().live[ResourceKind::Metadata] < with_need);
-  retained = {};
-  for (auto live : root.statistics().live.values)
-    PS_CHECK(live == 0);
-  return 0;
-}
 
 }  // namespace
 int main() {
@@ -499,6 +386,6 @@ int main() {
   PS_CHECK(concurrent() == 0);
   PS_CHECK(concurrent_references() == 0);
   PS_CHECK(allocator_ownership() == 0);
-  PS_CHECK(regional_scope_retention() == 0);
+  PS_CHECK(combined_tokens() == 0);
   return 0;
 }

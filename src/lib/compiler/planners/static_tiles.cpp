@@ -1,500 +1,625 @@
 #include "compiler/planners/static_tiles.hpp"
 
 #include <algorithm>
-#include <functional>
+#include <deque>
 #include <map>
-#include <memory>
-#include <set>
-#include <string>
+#include <optional>
 #include <tuple>
 #include <utility>
 #include <vector>
 
-#include "compiler/plan_support.hpp"
-
 namespace ps::compiler_internal {
-using compiler_internal::plan_support::certification_closure;
-using compiler_internal::plan_support::close_publication;
-using compiler_internal::plan_support::coverage;
-using compiler_internal::plan_support::invalid;
-using compiler_internal::plan_support::Unit;
-
 namespace {
-Status expand(PlanBuilder& plan, const PlanningOptions& options) {
-  if (!options.maximum_instructions || !options.maximum_dependency_edges)
-    return invalid("static planning budgets must be positive");
-  std::map<IRBlockId, std::size_t> block_by_id;
-  std::map<IRCallId, std::size_t> primary;
-  for (std::size_t bi = 0; bi < plan.blocks().size(); ++bi) {
-    block_by_id.emplace(plan.blocks()[bi].id, bi);
-    plan.instructions(bi).clear();
+using Id = physical::Id;
+using Key = std::tuple<Id, std::uint32_t, TileIndex>;
+Status invalid(const char* text) {
+  return {ErrorCode::InvalidArgument, text};
+}
+Status exhausted() {
+  return {ErrorCode::ResourceExhausted, "physical lowering work limit"};
+}
+std::uint64_t records(const physical::Program& p) {
+  return std::uint64_t{p.schemas.size()} + p.layouts.size() + p.tiles.size() +
+         p.values.size() + p.placements.size() + p.kernels.size() +
+         p.tasks.size() + p.calls.size() + p.blocks.size();
+}
+bool room(const physical::Program& p, std::uint64_t added,
+          const PlanningOptions& options) {
+  const auto used = records(p);
+  return used <= options.maximum_records &&
+         added <= options.maximum_records - used;
+}
+Result<TileRequest> request_from_value(const physical::Program& p, Id vi) {
+  TileRequest result;
+  std::map<std::uint32_t, std::vector<TileIndex>> members;
+  for (auto tile : p.values[vi].tiles)
+    members[p.tiles[tile].member].push_back(p.tiles[tile].tile_index);
+  for (const auto& member : members) {
+    auto set = TileSet::from_indices(ResourceBudget{}, member.second);
+    if (!set.ok())
+      return Result<TileRequest>(set.status());
+    result.members.emplace(member.first, set.take_value());
   }
-  for (std::size_t i = 0; i < plan.steps().size(); ++i)
-    primary.emplace(plan.steps()[i].node_id, i);
-  std::map<Unit, unsigned> color;
-  std::map<Unit, std::pair<std::size_t, std::size_t>> locations;
-  std::uint64_t units = 0, edges = 0;
-  auto contract = [&](const Unit& unit) -> const PlanStep& {
-    const auto& step = plan.steps()[std::get<0>(unit)];
-    return std::get<1>(unit) == UINT32_MAX
-               ? step
-               : *step.shared_stages.at(std::get<1>(unit));
+  return Result<TileRequest>(std::move(result));
+}
+
+// Expand external dense views only after operation lowering has fixed its
+// dense tile reads. Imports are local to each block activation; an edge binds
+// their handles to the destination's canonical dense argument tiles.
+Status import_inputs(PlanBuilder& builder, const PlanningOptions& options,
+                     std::uint64_t* work) {
+  auto& p = builder.program();
+  auto charge = [&](std::uint64_t amount) {
+    if (amount > *work)
+      return false;
+    *work -= amount;
+    return true;
   };
-  auto canonical = [&](Unit unit) {
-    if (std::get<1>(unit) != UINT32_MAX) {
-      std::get<0>(unit) = primary.at(plan.steps()[std::get<0>(unit)].node_id);
-      const auto& step = contract(unit);
-      const auto* scope =
-          step.output_result_schema->publication_scope(std::get<2>(unit));
-      if (step.prepared->requires_complete_stage_validation(
-              std::get<1>(unit))) {
-        std::get<2>(unit) = 0;
-        std::get<3>(unit) = 0;
-      } else if (scope &&
-                 scope->policy == ResultPublicationPolicy::CompleteBundle) {
-        std::get<2>(unit) = scope->members[0];
-        std::get<3>(unit) = 0;
+  std::map<Id, physical::TileDesc> dense_tiles;
+  for (auto vi : p.inputs) {
+    if (!charge(1))
+      return exhausted();
+    if (p.values[vi].input_layout != physical::InputLayout::DenseHost)
+      continue;
+    for (auto ti : p.values[vi].tiles) {
+      if (!*work)
+        return exhausted();
+      --*work;
+      auto& tile = p.tiles[ti];
+      dense_tiles.emplace(ti, tile);
+      auto layout = p.layouts[tile.layout];
+      auto shape =
+          p.schemas[p.values[vi].schema]->tensors[tile.member].sample_shape();
+      std::uint64_t bytes = TensorSpan::element_size(layout.element_type);
+      layout.byte_offset = 0;
+      for (unsigned axis = layout.rank; axis-- > 0;) {
+        if (bytes > INT64_MAX || shape[axis] > UINT64_MAX / bytes ||
+            layout.origin[axis] > (UINT64_MAX - layout.byte_offset) / bytes)
+          return exhausted();
+        layout.strides[axis] = static_cast<std::int64_t>(bytes);
+        layout.byte_offset += layout.origin[axis] * bytes;
+        bytes *= shape[axis];
       }
+      if (!room(p, 1, options))
+        return exhausted();
+      tile.bytes = bytes;
+      tile.layout = static_cast<Id>(p.layouts.size());
+      p.layouts.push_back(layout);
     }
-    return unit;
-  };
-  struct Frame {
-    Unit unit;
-    PlanTileInstruction instruction;
-    std::vector<Unit> dependencies;
-    std::size_t next = 0;
-  };
-  auto build = [&](Unit unit) -> Result<Frame> {
-    if (++units > options.maximum_instructions)
-      return Result<Frame>(
-          {ErrorCode::ResourceExhausted, "static instruction limit"});
-    Frame frame;
-    frame.unit = unit;
-    auto& instruction = frame.instruction;
-    instruction.step_index = std::get<0>(unit);
-    instruction.shared_stage = std::get<1>(unit);
-    instruction.tensor_slot = std::get<2>(unit);
-    instruction.tile_unit = std::get<3>(unit);
-    const auto& step = contract(unit);
-    if (instruction.shared_stage != UINT32_MAX &&
-        step.backend == Backend::Gpu &&
-        plan.execution_mode() == ExecutionMode::CpuExact)
-      return Result<Frame>(
-          {ErrorCode::BackendUnavailable,
-           "GPU shared stage is unavailable in CPU execution mode"});
-    if ((step.backend == Backend::Cpu && !step.traits.supports_cpu) ||
-        (step.backend == Backend::Gpu && !step.traits.supports_gpu))
-      return Result<Frame>(
-          {ErrorCode::BackendUnavailable, "compiled backend unavailable"});
-    if (instruction.tensor_slot >= step.tile_grids.size() ||
-        instruction.tile_unit >=
-            step.tile_grids[instruction.tensor_slot].tile_count())
-      return Result<Frame>(invalid("invalid static tile address"));
-    auto tile = TileSet::range(ResourceBudget{}, instruction.tile_unit,
-                               instruction.tile_unit + 1);
-    if (!tile.ok())
-      return Result<Frame>(tile.status());
-    instruction.publication.members.emplace(instruction.tensor_slot,
-                                            tile.take_value());
-    if (instruction.shared_stage != UINT32_MAX) {
-      auto closed = certification_closure(step, instruction.shared_stage,
-                                          instruction.publication);
-      if (!closed.ok())
-        return Result<Frame>(closed.status());
-      instruction.publication = closed.take_value();
-      const auto* scope =
-          step.output_result_schema->publication_scope(instruction.tensor_slot);
-      if (scope && scope->policy == ResultPublicationPolicy::StablePrefix &&
-          instruction.tile_unit)
-        frame.dependencies.push_back(
-            canonical({instruction.step_index, instruction.shared_stage,
-                       instruction.tensor_slot, instruction.tile_unit - 1}));
-    } else {
-      auto samples =
-          coverage(step.tile_grids[instruction.tensor_slot],
-                   instruction.publication.members.at(instruction.tensor_slot));
-      if (!samples.ok())
-        return Result<Frame>(samples.status());
-      instruction.tensor_outputs = samples.take_value();
-    }
-    auto output_samples = coverage(step.tile_grids, instruction.publication);
-    if (!output_samples.ok())
-      return Result<Frame>(output_samples.status());
-    instruction.publication_samples = output_samples.take_value();
-    ResultStaticQuery query{*step.structured_metadata,
-                            step.parameters,
-                            *step.prepared,
-                            step.backend,
-                            plan.tile_extent(),
-                            step.output_index,
-                            instruction.shared_stage,
-                            instruction.tensor_slot,
-                            instruction.tile_unit,
-                            instruction.publication,
-                            instruction.tensor_outputs};
-    auto mapped = step.prepared->map_dependencies(query);
-    if (!mapped.ok())
-      return Result<Frame>(mapped.status());
-    const auto& projection = step.traits.outputs[0].input_indices;
-    std::map<std::pair<std::uint32_t, std::uint32_t>, PlanTensorRead> reads;
-    for (const auto& read : mapped.value().inputs) {
-      if (read.input >= step.inputs.size() ||
-          (projection && std::find(projection->begin(), projection->end(),
-                                   read.input) == projection->end()))
-        return Result<Frame>(invalid("static read violates input projection"));
-      auto resolved = read.resolve(plan.input_grids(step.inputs[read.input]),
-                                   ResourceBudget{});
-      if (!resolved.ok())
-        return Result<Frame>(resolved.status());
-      const auto& item = resolved.value();
-      if (!item.descriptor_only && item.tiles.empty())
-        continue;
-      auto key = std::make_pair(
-          item.input, item.descriptor_only ? UINT32_MAX : item.tensor_slot);
-      auto found = reads.find(key);
-      if (found == reads.end()) {
-        reads.emplace(key, PlanTensorRead{item.input,
-                                          item.tensor_slot,
-                                          item.descriptor_only,
-                                          item.tiles,
-                                          {}});
-      } else {
-        auto joined = found->second.tiles.unite(item.tiles, ResourceBudget{});
-        if (!joined.ok())
-          return Result<Frame>(joined.status());
-        found->second.tiles = joined.take_value();
-      }
-    }
-    std::set<std::uint32_t> full_inputs;
-    for (const auto& item : reads)
-      if (!item.second.descriptor_only &&
-          step.prepared->requires_complete_validation(false, item.second.input))
-        full_inputs.insert(item.second.input);
-    for (auto port : full_inputs) {
-      const auto& grids = plan.input_grids(step.inputs[port]);
-      for (std::uint32_t member = 0; member < grids.size(); ++member) {
-        auto all =
-            TileSet::range(ResourceBudget{}, 0, grids[member].tile_count());
-        if (!all.ok())
-          return Result<Frame>(all.status());
-        reads[{port, member}] =
-            PlanTensorRead{port, member, false, all.take_value(), {}};
-      }
-    }
-    for (auto& pair : reads) {
-      auto& read = pair.second;
-      const auto& input = step.inputs[read.input];
-      auto samples =
-          coverage(plan.input_grids(input)[read.tensor_slot], read.tiles);
-      if (!samples.ok())
-        return Result<Frame>(samples.status());
-      read.samples = samples.take_value();
-      if (!read.descriptor_only) {
-        TileRequest needed;
-        needed.members.emplace(read.tensor_slot, read.tiles);
-        auto closed =
-            close_publication(plan.input_schema(input), plan.input_grids(input),
-                              std::move(needed));
-        if (!closed.ok())
-          return Result<Frame>(closed.status());
-        if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
-          closed = certification_closure(plan.steps()[producer->step_index],
-                                         UINT32_MAX, closed.take_value());
-          if (!closed.ok())
-            return Result<Frame>(closed.status());
-          if (closed.value().size() > options.maximum_dependency_edges - edges)
-            return Result<Frame>(
-                {ErrorCode::ResourceExhausted, "static dependency edge limit"});
-          for (const auto& member : closed.value().members)
-            for (auto tile_index : member.second)
-              frame.dependencies.push_back(
-                  {producer->step_index, UINT32_MAX, member.first, tile_index});
+  }
+  if (dense_tiles.empty())
+    return Status::success();
+  if (!room(p, 1, options))
+    return exhausted();
+  auto placement = static_cast<Id>(p.placements.size());
+  p.placements.push_back({});
+  for (Id bi = 0; bi < p.blocks.size(); ++bi) {
+    if (!charge(1))
+      return exhausted();
+    std::map<Id, Id> imported_values, imported_tiles;
+    auto imported_value = [&](Id source) -> Result<Id> {
+      auto found = imported_values.find(source);
+      if (found != imported_values.end())
+        return Result<Id>(found->second);
+      if (!charge(1) || !room(p, 1, options))
+        return Result<Id>(exhausted());
+      auto vi = static_cast<Id>(p.values.size());
+      physical::ValueDesc value;
+      value.schema = p.values[source].schema;
+      value.owner = bi;
+      value.kind = physical::ValueKind::Imported;
+      value.import_source = source;
+      p.values.push_back(std::move(value));
+      imported_values.emplace(source, vi);
+      return Result<Id>(vi);
+    };
+    auto import = [&](Id raw, Id ci, Id port) -> Result<Id> {
+      auto found = imported_tiles.find(raw);
+      if (found != imported_tiles.end())
+        return Result<Id>(found->second);
+      if (!*work || p.tasks.size() >= options.maximum_tasks)
+        return Result<Id>(exhausted());
+      --*work;
+      auto tile = dense_tiles.at(raw);
+      auto vi = imported_value(tile.value);
+      if (!vi.ok())
+        return vi;
+      if (!room(p, 2, options))
+        return Result<Id>(exhausted());
+      tile.value = vi.value();
+      tile.producer = static_cast<Id>(p.tasks.size());
+      auto ti = static_cast<Id>(p.tiles.size());
+      physical::TaskDesc copy;
+      copy.kind = physical::TaskKind::Copy;
+      copy.call = ci;
+      copy.placement = placement;
+      copy.reads.push_back({port, raw, p.tiles[raw].layout});
+      copy.writes = {ti};
+      p.blocks[bi].tasks.push_back(tile.producer);
+      if (ci != physical::none)
+        p.calls[ci].tasks.push_back(tile.producer);
+      p.tasks.push_back(std::move(copy));
+      p.values[tile.value].tiles.push_back(ti);
+      p.tiles.push_back(tile);
+      imported_tiles.emplace(raw, ti);
+      return Result<Id>(ti);
+    };
+    for (auto ci : p.blocks[bi].calls) {
+      if (!charge(1 + p.calls[ci].tasks.size()))
+        return exhausted();
+      const auto tasks = p.calls[ci].tasks;
+      for (auto ti : tasks)
+        for (std::size_t ri = 0; ri < p.tasks[ti].reads.size(); ++ri) {
+          if (!charge(1))
+            return exhausted();
+          const auto read = p.tasks[ti].reads[ri];
+          if (!dense_tiles.count(read.tile))
+            continue;
+          auto tile = import(read.tile, ci, read.port);
+          if (!tile.ok())
+            return tile.status();
+          p.tasks[ti].reads[ri].tile = tile.value();
         }
-      }
-      instruction.inputs.push_back(std::move(read));
     }
-    std::map<std::uint32_t, TileRequest> shared_reads;
-    for (const auto& read : mapped.value().shared_stages) {
-      const auto& original = plan.steps()[instruction.step_index];
-      if (read.stage >= original.shared_stages.size())
-        return Result<Frame>(invalid("missing static shared stage"));
-      const auto& stage = *original.shared_stages[read.stage];
-      auto selected =
-          read.tiles ? read.tiles->resolve(stage.tile_grids)
-                     : TileRequest::all(stage.tile_grids, ResourceBudget{});
-      if (!selected.ok())
-        return Result<Frame>(selected.status());
-      for (const auto& member : selected.value().members) {
-        auto& target = shared_reads[read.stage].members[member.first];
-        auto joined = target.unite(member.second, ResourceBudget{});
-        if (!joined.ok())
-          return Result<Frame>(joined.status());
-        target = joined.take_value();
-      }
-    }
-    for (const auto& merged : shared_reads) {
-      const ResultSharedNeed read{merged.first, merged.second};
-      const auto& original = plan.steps()[instruction.step_index];
-      if (read.stage >= original.shared_stages.size())
-        return Result<Frame>(
-            invalid("static read references a missing shared stage"));
-      const auto& stage = *original.shared_stages[read.stage];
-      auto selected =
-          read.tiles ? read.tiles->resolve(stage.tile_grids)
-                     : TileRequest::all(stage.tile_grids, ResourceBudget{});
-      if (!selected.ok())
-        return Result<Frame>(selected.status());
-      auto closed =
-          certification_closure(stage, read.stage, selected.take_value());
-      if (!closed.ok())
-        return Result<Frame>(closed.status());
-      PlanSharedRead compiled;
-      compiled.stage = read.stage;
-      compiled.tiles = closed.take_value();
-      auto samples = coverage(stage.tile_grids, compiled.tiles);
-      if (!samples.ok())
-        return Result<Frame>(samples.status());
-      compiled.samples = samples.take_value();
-      if (compiled.tiles.size() > options.maximum_dependency_edges - edges)
-        return Result<Frame>(
-            {ErrorCode::ResourceExhausted, "static shared dependency limit"});
-      for (const auto& member : compiled.tiles.members)
-        for (auto tile_index : member.second)
-          frame.dependencies.push_back(canonical(
-              {instruction.step_index, read.stage, member.first, tile_index}));
-      instruction.shared_inputs.push_back(std::move(compiled));
-    }
-    if (instruction.shared_stage == UINT32_MAX &&
-        step.backend == Backend::Gpu && step.traits.allows_cpu_fallback &&
-        step.traits.supports_cpu && step.traits.deterministic &&
-        step.traits.side_effect_free) {
-      auto cpu_query = query;
-      cpu_query.backend = Backend::Cpu;
-      auto cpu = step.prepared->map_dependencies(cpu_query);
-      if (!cpu.ok())
-        return Result<Frame>(cpu.status());
-      // A permitted retry is optional. Keep the GPU instruction when its
-      // fixed grants cannot prove a compatible CPU retry.
-      bool compatible = instruction.shared_inputs.empty();
-      for (const auto& read : cpu.value().shared_stages) {
-        if (read.stage >= step.shared_stages.size())
-          return Result<Frame>(
-              invalid("CPU fallback references an unknown stage"));
-        auto resolved =
-            read.tiles
-                ? read.tiles->resolve(
-                      step.shared_stages[read.stage]->tile_grids)
-                : TileRequest::all(step.shared_stages[read.stage]->tile_grids,
-                                   ResourceBudget{});
-        if (!resolved.ok())
-          return Result<Frame>(resolved.status());
-        if (!resolved.value().empty())
-          compatible = false;
-      }
-      auto covered = [&](const TileNeed& read) {
-        for (const auto& grant : instruction.inputs)
-          if (grant.input == read.input &&
-              (read.descriptor_only || (!grant.descriptor_only &&
-                                        grant.tensor_slot == read.tensor_slot &&
-                                        grant.tiles.contains(read.tiles))))
-            return true;
-        return !read.descriptor_only && read.tiles.empty();
-      };
-      for (const auto& read : cpu.value().inputs) {
-        if (read.input >= step.inputs.size() ||
-            (projection && std::find(projection->begin(), projection->end(),
-                                     read.input) == projection->end()))
-          return Result<Frame>(
-              invalid("CPU fallback read violates input projection"));
-        const auto& grids = plan.input_grids(step.inputs[read.input]);
-        auto resolved = read.resolve(grids, ResourceBudget{});
-        if (!resolved.ok())
-          return Result<Frame>(resolved.status());
-        if (!covered(resolved.value()))
-          compatible = false;
-        if (!read.descriptor_only && !read.tiles.empty() &&
-            step.prepared->requires_complete_validation(false, read.input)) {
-          for (std::uint32_t member = 0; member < grids.size(); ++member) {
-            auto all =
-                TileSet::range(ResourceBudget{}, 0, grids[member].tile_count());
-            if (!all.ok())
-              return Result<Frame>(all.status());
-            if (!covered({read.input, member, false, all.take_value()}))
-              compatible = false;
-          }
+    auto boundary = [&](Id source, const TileRequest* selection) -> Result<Id> {
+      if (!charge(1))
+        return Result<Id>(exhausted());
+      if (p.values[source].kind != physical::ValueKind::Input ||
+          p.values[source].input_layout != physical::InputLayout::DenseHost)
+        return Result<Id>(source);
+      auto vi = imported_value(source);
+      if (!vi.ok() || (selection && selection->empty()))
+        return vi;
+      // Charge the scan before allocating its stable snapshot. Adding imported
+      // values can reallocate p.values, so references into it cannot survive.
+      if (!charge(p.values[source].tiles.size()))
+        return Result<Id>(exhausted());
+      const auto tiles = p.values[source].tiles;
+      for (auto raw : tiles) {
+        if (selection) {
+          auto member = selection->members.find(p.tiles[raw].member);
+          if (member == selection->members.end() ||
+              !member->second.contains(p.tiles[raw].tile_index))
+            continue;
         }
+        auto tile = import(raw, physical::none, 0);
+        if (!tile.ok())
+          return tile;
       }
-      instruction.cpu_fallback = compatible;
+      return vi;
+    };
+    auto& block = p.blocks[bi];
+    if (block.condition != physical::none) {
+      auto vi = boundary(block.condition, nullptr);
+      if (!vi.ok())
+        return vi.status();
+      block.condition = vi.value();
     }
-    std::sort(frame.dependencies.begin(), frame.dependencies.end());
-    frame.dependencies.erase(
-        std::unique(frame.dependencies.begin(), frame.dependencies.end()),
-        frame.dependencies.end());
-    if (frame.dependencies.size() > options.maximum_dependency_edges - edges)
-      return Result<Frame>(
-          {ErrorCode::ResourceExhausted, "static dependency edge limit"});
-    edges += frame.dependencies.size();
-    return Result<Frame>(std::move(frame));
+    for (auto& edge : block.edges)
+      for (auto& argument : edge.arguments) {
+        auto vi = boundary(argument, nullptr);
+        if (!vi.ok())
+          return vi.status();
+        argument = vi.value();
+      }
+    for (std::size_t i = 0; i < block.return_values.size(); ++i) {
+      TileRequest selection;
+      if (!charge(builder.outputs().size()))
+        return exhausted();
+      for (const auto& output : builder.outputs())
+        if (output.second == i)
+          selection = builder.output_requests().at(output.first);
+      auto vi = boundary(block.return_values[i], &selection);
+      if (!vi.ok())
+        return vi.status();
+      block.return_values[i] = vi.value();
+    }
+  }
+  return Status::success();
+}
+
+Status expand(PlanBuilder& builder, const PlanningOptions& options) {
+  auto& p = builder.program();
+  if (!room(p, 0, options))
+    return exhausted();
+  const auto value_count = p.values.size();
+  const auto call_count = p.calls.size();
+  std::vector<std::vector<TileGrid>> grids;
+  for (const auto& value : p.values) {
+    auto members = TileGrid::members(*p.schemas[value.schema], p.tile_extent);
+    if (!members.ok())
+      return members.status();
+    grids.push_back(members.take_value());
+  }
+  physical::ValidationLimits limits{options.maximum_records,
+                                    options.maximum_dependency_edges,
+                                    options.maximum_work};
+  auto local_limits = limits;
+  local_limits.maximum_records = std::max(
+      limits.maximum_records, physical::ValidationLimits{}.maximum_records);
+  std::uint64_t work = options.maximum_work;
+  auto charge = [&](std::uint64_t amount) {
+    if (amount > work)
+      return false;
+    work -= amount;
+    return true;
   };
-  auto emit = [&](Unit root) -> Status {
-    root = canonical(root);
-    if (color[root] == 2)
-      return Status::success();
-    std::vector<Frame> stack;
-    auto initial = build(root);
-    if (!initial.ok())
-      return initial.status();
-    stack.push_back(initial.take_value());
-    color[root] = 1;
-    while (!stack.empty()) {
-      auto& frame = stack.back();
-      if (frame.next < frame.dependencies.size()) {
-        auto next = canonical(frame.dependencies[frame.next++]);
-        if (color[next] == 1)
-          return {ErrorCode::Cycle, "static tile dependency cycle"};
-        if (color[next] == 2)
-          continue;
-        auto child = build(next);
-        if (!child.ok())
-          return child.status();
-        color[next] = 1;
-        stack.push_back(child.take_value());
-      } else {
-        auto bi = block_by_id.at(plan.steps()[std::get<0>(frame.unit)].block);
-        auto& instructions = plan.instructions(bi);
-        for (auto dependency : frame.dependencies) {
-          auto where = locations.at(canonical(dependency));
-          if (where.first == bi)
-            frame.instruction.dependencies.push_back(where.second);
-        }
-        std::sort(frame.instruction.dependencies.begin(),
-                  frame.instruction.dependencies.end());
-        frame.instruction.dependencies.erase(
-            std::unique(frame.instruction.dependencies.begin(),
-                        frame.instruction.dependencies.end()),
-            frame.instruction.dependencies.end());
-        locations.emplace(frame.unit, std::make_pair(bi, instructions.size()));
-        instructions.push_back(std::move(frame.instruction));
-        color[frame.unit] = 2;
-        stack.pop_back();
+  // Track the final merged records while retaining per-call lowerings. Local
+  // input tiles are references to one global value, so only their copied
+  // layouts contribute here. Incoming global tiles are counted by root().
+  std::uint64_t projected_records = records(p);
+  std::vector<std::uint64_t> contributions(call_count);
+  std::vector<TileRequest> requests(value_count);
+  std::vector<std::vector<Id>> incoming(value_count);
+  for (const auto& block : p.blocks)
+    for (const auto& edge : block.edges)
+      for (std::size_t i = 0; i < edge.arguments.size(); ++i)
+        incoming[p.blocks[edge.target].arguments[i]].push_back(
+            edge.arguments[i]);
+  std::deque<Id> values, calls;
+  std::vector<bool> value_queued(value_count), call_queued(call_count);
+  std::vector<std::optional<OperationProgram>> lowered(call_count);
+  auto enqueue_call = [&](Id ci) {
+    // A larger request may lower to a smaller, different graph. Discard the
+    // obsolete contribution before admitting any newly discovered inputs.
+    if (lowered[ci]) {
+      projected_records -= contributions[ci];
+      contributions[ci] = 0;
+      lowered[ci].reset();
+    }
+    if (!call_queued[ci]) {
+      call_queued[ci] = true;
+      calls.push_back(ci);
+    }
+  };
+  auto root = [&](Id vi, const TileRequest& request) -> Status {
+    if (!charge(1 + request.interval_count()))
+      return exhausted();
+    auto united = requests[vi].unite(request, ResourceBudget{});
+    if (!united.ok())
+      return united.status();
+    if (!(united.value() == requests[vi])) {
+      if (p.values[vi].kind != physical::ValueKind::Produced) {
+        const auto added = united.value().size() - requests[vi].size();
+        if (added > (options.maximum_records - projected_records) / 2)
+          return exhausted();
+        projected_records += 2 * added;
+      }
+      requests[vi] = united.take_value();
+      if (p.values[vi].kind == physical::ValueKind::Produced)
+        enqueue_call(p.values[vi].owner);
+      if (!value_queued[vi]) {
+        value_queued[vi] = true;
+        values.push_back(vi);
       }
     }
     return Status::success();
   };
-  auto root = [&](const PlanInput& input,
-                  const TileRequest* request) -> Status {
-    const auto* source = std::get_if<PlanStepInput>(&input);
-    if (!source)
-      return Status::success();
-    const auto& step = plan.steps()[source->step_index];
-    auto all = request ? request->resolve(step.tile_grids)
-                       : TileRequest::all(step.tile_grids, ResourceBudget{});
-    if (!all.ok())
-      return all.status();
-    auto closed = certification_closure(step, UINT32_MAX, all.take_value());
-    if (!closed.ok())
-      return closed.status();
-    if (closed.value().size() > options.maximum_instructions)
-      return {ErrorCode::ResourceExhausted, "static root instruction limit"};
-    for (const auto& member : closed.value().members)
-      for (auto tile : member.second) {
-        auto status =
-            emit({source->step_index, UINT32_MAX, member.first, tile});
-        if (!status.ok())
-          return status;
-      }
-    return Status::success();
+  auto all = [&](Id vi) -> Status {
+    auto request = TileRequest::all(grids[vi], ResourceBudget{});
+    return request.ok() ? root(vi, request.value()) : request.status();
   };
-  for (const auto& block : plan.blocks()) {
-    std::vector<const PlanEdge*> edges_to_visit;
-    if (const auto* jump = std::get_if<PlanJump>(&block.terminator)) {
-      edges_to_visit.push_back(&jump->edge);
-    } else if (const auto* branch =
-                   std::get_if<PlanConditionalJump>(&block.terminator)) {
-      auto status = root(branch->condition, nullptr);
+  for (const auto& block : p.blocks) {
+    if (block.condition != physical::none) {
+      auto status = all(block.condition);
       if (!status.ok())
         return status;
-      edges_to_visit = {&branch->if_true, &branch->if_false};
-    } else {
-      const auto& returned = std::get<PlanReturn>(block.terminator);
-      for (const auto& named : plan.outputs()) {
-        auto status = root(returned.values[named.second],
-                           &plan.output_requests().at(named.first));
+    }
+    for (const auto& edge : block.edges)
+      for (auto vi : edge.arguments) {
+        auto status = all(vi);
+        if (!status.ok())
+          return status;
+      }
+    if (block.end == physical::EndKind::Return) {
+      for (const auto& output : builder.outputs()) {
+        auto status = root(block.return_values[output.second],
+                           builder.output_requests().at(output.first));
         if (!status.ok())
           return status;
       }
     }
-    for (const auto* edge : edges_to_visit)
-      for (const auto& argument : edge->arguments) {
-        auto status = root(argument, nullptr);
-        if (!status.ok())
-          return status;
-      }
   }
-  for (const auto& pair : primary) {
-    const auto& step = plan.steps()[pair.second];
-    if (!step.traits.side_effect_free) {
-      auto status = root(PlanStepInput{pair.second}, nullptr);
-      if (!status.ok())
-        return status;
-    }
-    for (std::uint32_t si = 0; si < step.shared_stages.size(); ++si) {
-      if (!step.prepared->traits().shared_stages[si].mandatory)
-        continue;
-      const auto& stage = *step.shared_stages[si];
-      for (std::uint32_t member = 0; member < stage.tile_grids.size();
-           ++member) {
-        if (stage.tile_grids[member].tile_count() >
-            options.maximum_instructions)
-          return {ErrorCode::ResourceExhausted,
-                  "mandatory stage instruction limit"};
-        for (TileIndex tile = 0; tile < stage.tile_grids[member].tile_count();
-             ++tile) {
-          auto status = emit({pair.second, si, member, tile});
+  for (Id ci = 0; ci < call_count; ++ci)
+    if (!builder.calls()[ci].prepared->traits().side_effect_free)
+      enqueue_call(ci);
+  while (!values.empty() || !calls.empty()) {
+    while (!values.empty()) {
+      auto vi = values.front();
+      values.pop_front();
+      value_queued[vi] = false;
+      if (!charge(1))
+        return exhausted();
+      if (p.values[vi].kind == physical::ValueKind::Produced) {
+        enqueue_call(p.values[vi].owner);
+      } else if (p.values[vi].kind == physical::ValueKind::Argument) {
+        for (auto source : incoming[vi]) {
+          auto status = root(source, requests[vi]);
           if (!status.ok())
             return status;
         }
       }
     }
-  }
-  // Preserve IR call/effect order while retaining dependency order within each
-  // call's expanded tile and shared-stage program.
-  for (std::size_t bi = 0; bi < plan.blocks().size(); ++bi) {
-    const auto& block = plan.blocks()[bi];
-    auto& code = plan.instructions(bi);
-    std::map<IRCallId, std::size_t> order;
-    for (std::size_t i = 0; i < block.calls.size(); ++i)
-      order.emplace(plan.steps()[block.calls[i]].node_id, i);
-    std::vector<std::size_t> permutation(code.size());
-    for (std::size_t i = 0; i < permutation.size(); ++i)
-      permutation[i] = i;
-    std::stable_sort(
-        permutation.begin(), permutation.end(), [&](auto a, auto b) {
-          return order.at(plan.steps()[code[a].step_index].node_id) <
-                 order.at(plan.steps()[code[b].step_index].node_id);
-        });
-    std::vector<std::size_t> inverse(permutation.size());
-    for (std::size_t i = 0; i < permutation.size(); ++i)
-      inverse[permutation[i]] = i;
-    std::vector<PlanTileInstruction> instructions;
-    for (auto old : permutation) {
-      auto instruction = std::move(code[old]);
-      for (auto& dependency : instruction.dependencies)
-        dependency = inverse[dependency];
-      std::sort(instruction.dependencies.begin(),
-                instruction.dependencies.end());
-      instructions.push_back(std::move(instruction));
+    if (calls.empty())
+      break;
+    auto ci = calls.front();
+    calls.pop_front();
+    call_queued[ci] = false;
+    if (!charge(1))
+      return exhausted();
+    std::vector<TileRequest> selected;
+    for (auto vi : builder.calls()[ci].outputs)
+      selected.push_back(requests[vi]);
+    const auto& prepared = builder.calls()[ci].prepared;
+    // Backend choice is static. A native graph can contain CPU-only calls;
+    // unavailable GPU preparation never retries a CPU implementation.
+    const auto backend = options.execution_mode == ExecutionMode::NativeGpu &&
+                                 prepared->traits().supports_gpu
+                             ? physical::Backend::Gpu
+                             : physical::Backend::Cpu;
+    auto graph =
+        prepared->lower(selected, p.tile_extent, backend, local_limits);
+    if (!graph.ok())
+      return graph.status();
+    const auto& local = graph.value().program;
+    if (local.tasks.size() > options.maximum_tasks)
+      return {ErrorCode::ResourceExhausted, "physical task limit"};
+    if (!charge(local.tasks.size()) || !charge(local.tiles.size()))
+      return exhausted();
+    for (std::size_t port = 0; port < local.inputs.size(); ++port) {
+      auto request = request_from_value(local, local.inputs[port]);
+      if (!request.ok())
+        return request.status();
+      auto status = root(builder.calls()[ci].inputs[port], request.value());
+      if (!status.ok())
+        return status;
     }
-    code = std::move(instructions);
+    std::uint64_t contribution = local.layouts.size() +
+                                 local.placements.size() +
+                                 local.kernels.size() + local.tasks.size();
+    for (const auto& tile : local.tiles)
+      contribution += tile.producer != physical::none;
+    contribution += 2 * (local.values.size() - local.inputs.size() -
+                         graph.value().outputs.size());
+    const auto other = projected_records - contributions[ci];
+    if (contribution > options.maximum_records - other)
+      return exhausted();
+    projected_records = other + contribution;
+    contributions[ci] = contribution;
+    lowered[ci] = graph.take_value();
   }
-  return Status::success();
-}
 
+  std::map<Key, Id> tiles;
+  // Lower operations against canonical dense tiles. A separate compiler pass
+  // expands requested external layouts into raw views and explicit COPYs.
+  for (Id vi = 0; vi < value_count; ++vi) {
+    if (p.values[vi].kind == physical::ValueKind::Produced)
+      continue;
+    if (requests[vi].size() > limits.maximum_records)
+      return exhausted();
+    for (const auto& member : requests[vi].members)
+      for (auto index : member.second) {
+        if (!charge(1))
+          return exhausted();
+        auto region = grids[vi][member.first].region(index);
+        if (!region.ok())
+          return region.status();
+        physical::Layout layout;
+        layout.element_type = p.schemas[p.values[vi].schema]
+                                  ->tensors[member.first]
+                                  .descriptor.element_type;
+        layout.rank = static_cast<std::uint32_t>(region.value().rank());
+        layout.strides.fill(0);
+        std::uint64_t bytes = TensorSpan::element_size(layout.element_type);
+        auto alignment = bytes;
+        for (unsigned axis = layout.rank; axis-- > 0;) {
+          const auto d = region.value().dimensions()[axis];
+          if (bytes > INT64_MAX || d.extent > UINT64_MAX / bytes)
+            return exhausted();
+          layout.strides[axis] = static_cast<std::int64_t>(bytes);
+          layout.origin[axis] = d.offset;
+          layout.shape[axis] = d.extent;
+          bytes *= d.extent;
+        }
+        physical::TileDesc tile;
+        tile.value = vi;
+        if (p.values[vi].kind == physical::ValueKind::Input) {
+          const auto& declaration =
+              builder.input_declarations()[p.values[vi].owner];
+          auto domain = options.input_domains.find(declaration.name);
+          if (domain != options.input_domains.end())
+            tile.domain = domain->second;
+        }
+        tile.member = member.first;
+        tile.tile_index = index;
+        tile.bytes = bytes;
+        tile.alignment = alignment;
+        tile.layout = static_cast<Id>(p.layouts.size());
+        auto ti = static_cast<Id>(p.tiles.size());
+        p.layouts.push_back(layout);
+        p.tiles.push_back(tile);
+        p.values[vi].tiles.push_back(ti);
+        tiles.emplace(Key{vi, member.first, index}, ti);
+      }
+  }
+
+  struct Remap {
+    std::vector<Id> values, tasks, layouts, placements, kernels;
+  };
+  std::vector<Remap> remaps(call_count);
+  for (Id ci = 0; ci < call_count; ++ci) {
+    if (!lowered[ci])
+      continue;
+    const auto& graph = *lowered[ci];
+    const auto& local = graph.program;
+    auto& map = remaps[ci];
+    map.values.assign(local.values.size(), physical::none);
+    for (std::size_t i = 0; i < local.inputs.size(); ++i)
+      map.values[local.inputs[i]] = builder.calls()[ci].inputs[i];
+    for (std::size_t i = 0; i < graph.outputs.size(); ++i)
+      map.values[graph.outputs[i]] = builder.calls()[ci].outputs[i];
+    for (Id vi = 0; vi < local.values.size(); ++vi) {
+      if (map.values[vi] != physical::none)
+        continue;
+      auto v = local.values[vi];
+      if (v.kind != physical::ValueKind::Produced)
+        return invalid("unexpected private incoming value");
+      v.owner = ci;
+      v.schema = static_cast<Id>(p.schemas.size());
+      v.source_value = 0;
+      v.tiles.clear();
+      map.values[vi] = static_cast<Id>(p.values.size());
+      p.schemas.push_back(local.schemas[local.values[vi].schema]);
+      p.values.push_back(std::move(v));
+    }
+    for (const auto& layout : local.layouts) {
+      map.layouts.push_back(static_cast<Id>(p.layouts.size()));
+      p.layouts.push_back(layout);
+    }
+    for (const auto& placement : local.placements) {
+      map.placements.push_back(static_cast<Id>(p.placements.size()));
+      p.placements.push_back(placement);
+    }
+    for (const auto& kernel : local.kernels) {
+      map.kernels.push_back(static_cast<Id>(p.kernels.size()));
+      p.kernels.push_back(kernel);
+    }
+    for (const auto& task : local.tasks) {
+      if (p.tasks.size() >= options.maximum_tasks)
+        return {ErrorCode::ResourceExhausted, "physical task limit"};
+      auto ti = static_cast<Id>(p.tasks.size());
+      map.tasks.push_back(ti);
+      p.tasks.push_back(task);
+      p.calls[ci].tasks.push_back(ti);
+      p.blocks[p.calls[ci].block].tasks.push_back(ti);
+    }
+    if (local.calls[0].effect_task != physical::none)
+      p.calls[ci].effect_task = map.tasks[local.calls[0].effect_task];
+    for (auto exported : local.calls[0].returns)
+      p.calls[ci].returns.push_back(map.values[exported]);
+    for (const auto& source : local.tiles) {
+      if (source.producer == physical::none)
+        continue;
+      auto tile = source;
+      tile.value = map.values[source.value];
+      tile.layout = map.layouts[source.layout];
+      tile.producer = map.tasks[source.producer];
+      const auto ti = static_cast<Id>(p.tiles.size());
+      if (!tiles.emplace(Key{tile.value, tile.member, tile.tile_index}, ti)
+               .second)
+        return invalid("multiple physical tile producers during merge");
+      p.values[tile.value].tiles.push_back(ti);
+      p.tiles.push_back(tile);
+    }
+    if (!charge(local.values.size() + local.tasks.size() + local.tiles.size()))
+      return exhausted();
+  }
+  // CFG arguments rename existing allocations. Resolve their domain from
+  // incoming producers before checking operation reads, including loop edges.
+  std::vector<std::vector<Id>> domain_users(p.tiles.size());
+  std::vector<bool> known_domain(p.tiles.size());
+  std::deque<Id> domain_ready;
+  for (Id id = 0; id < p.tiles.size(); ++id)
+    if (p.values[p.tiles[id].value].kind != physical::ValueKind::Argument) {
+      known_domain[id] = true;
+      domain_ready.push_back(id);
+    }
+  for (Id vi = 0; vi < value_count; ++vi) {
+    if (p.values[vi].kind == physical::ValueKind::Argument) {
+      for (auto id : p.values[vi].tiles)
+        for (auto source : incoming[vi]) {
+          if (!charge(1))
+            return exhausted();
+          const auto& tile = p.tiles[id];
+          auto found = tiles.find({source, tile.member, tile.tile_index});
+          if (found == tiles.end())
+            return invalid("missing incoming argument tile");
+          domain_users[found->second].push_back(id);
+        }
+    }
+  }
+  while (!domain_ready.empty()) {
+    const auto source = domain_ready.front();
+    domain_ready.pop_front();
+    for (auto target : domain_users[source]) {
+      if (!charge(1))
+        return exhausted();
+      if (known_domain[target]) {
+        if (p.tiles[target].domain != p.tiles[source].domain)
+          return invalid("block argument domain requires an explicit COPY");
+      } else {
+        known_domain[target] = true;
+        p.tiles[target].domain = p.tiles[source].domain;
+        domain_ready.push_back(target);
+      }
+    }
+  }
+  for (bool known : known_domain)
+    if (!known)
+      return invalid("unresolved block argument domain");
+  for (Id ci = 0; ci < call_count; ++ci) {
+    if (!lowered[ci])
+      continue;
+    const auto& local = lowered[ci]->program;
+    const auto& map = remaps[ci];
+    std::vector<Id> tile_map;
+    for (const auto& tile : local.tiles) {
+      auto found =
+          tiles.find({map.values[tile.value], tile.member, tile.tile_index});
+      if (found == tiles.end())
+        return invalid("missing compiled producer tile");
+      const auto& actual = p.tiles[found->second];
+      const auto& actual_layout = p.layouts[actual.layout];
+      const auto& required_layout = local.layouts[tile.layout];
+      if (actual.domain != tile.domain)
+        return invalid(
+            "cross-domain operation input requires an explicit COPY");
+      if (actual.bytes < tile.bytes || actual.alignment < tile.alignment ||
+          actual_layout.element_type != required_layout.element_type ||
+          actual_layout.rank != required_layout.rank ||
+          actual_layout.byte_offset != required_layout.byte_offset ||
+          actual_layout.strides != required_layout.strides ||
+          actual_layout.origin != required_layout.origin ||
+          actual_layout.shape != required_layout.shape)
+        return invalid("producer allocation does not satisfy operation input");
+      tile_map.push_back(found->second);
+    }
+    for (Id i = 0; i < local.tasks.size(); ++i) {
+      auto& task = p.tasks[map.tasks[i]];
+      task.call = ci;
+      task.placement = map.placements[task.placement];
+      if (task.kernel != physical::none)
+        task.kernel = map.kernels[task.kernel];
+      for (auto& read : task.reads) {
+        read.tile = tile_map[read.tile];
+        read.layout = map.layouts[read.layout];
+      }
+      for (auto& write : task.writes)
+        write = tile_map[write];
+      for (auto& vi : task.schema_reads)
+        vi = map.values[vi];
+      for (auto& dependency : task.explicit_dependencies)
+        dependency = map.tasks[dependency];
+      task.predecessors.clear();
+      task.successors.clear();
+    }
+  }
+  auto imported = import_inputs(builder, options, &work);
+  if (!imported.ok())
+    return imported;
+  for (auto& value : p.values)
+    std::sort(value.tiles.begin(), value.tiles.end(), [&](auto a, auto b) {
+      return std::tie(p.tiles[a].member, p.tiles[a].tile_index) <
+             std::tie(p.tiles[b].member, p.tiles[b].tile_index);
+    });
+  return physical::finalize_program(&p, limits);
+}
 }  // namespace
 
 PlannerDefinition static_tile_planner() {
   return {
-      "static-tiles", "1", "Demand-driven static tile expansion",
+      "static-tiles", "2",
+      "Fixed task graph expansion with ordered call retirement",
       [](const ValidatedIR&, PlanBuilder& builder,
          const PlanningOptions& options) { return expand(builder, options); }};
 }

@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-// Extracted from test_stmap_tiles.cpp. Evaluate with FE_TONEAREST, gradual
+// Independent straight-alpha bilinear reference. Use FE_TONEAREST, gradual
 // underflow and -fno-fast-math -ffp-contract=off. Coordinates must fit int64_t
 // after floor; source is nonempty packed RGBA with height * width pixels.
 namespace stmap_oracle {
@@ -55,16 +55,32 @@ inline std::array<float, 4> stmap_reference(const std::vector<float>& source,
           values[k][c] = source[(y * width + x) * 4 + c];
       }
     }
-  std::array<float, 4> result{};
-  for (std::size_t c = 0; c < 4; ++c) {
-    double sum = 0;
-    for (std::size_t k = 0; k < 4; ++k) {
-      volatile double product = static_cast<double>(values[k][c]) * weights[k];
-      volatile double next = sum + product;
-      sum = next;
+  std::array<double, 4> sums{};
+  for (std::size_t k = 0; k < 4; ++k) {
+    volatile double alpha_weight =
+        static_cast<double>(values[k][3]) * weights[k];
+    volatile double alpha = sums[3] + alpha_weight;
+    sums[3] = alpha;
+    if (alpha_weight == 0)
+      continue;
+    for (std::size_t c = 0; c < 3; ++c) {
+      volatile double product =
+          static_cast<double>(values[k][c]) * alpha_weight;
+      volatile double next = sums[c] + product;
+      sums[c] = next;
     }
-    volatile float narrowed = static_cast<float>(sum);
-    result[c] = narrowed;
+  }
+  std::array<float, 4> result{};
+  volatile float alpha = static_cast<float>(sums[3]);
+  result[3] = alpha;
+  for (std::size_t c = 0; c < 3; ++c) {
+    if (sums[3] == 0) {
+      result[c] = 0.0F;
+    } else {
+      volatile double straight = sums[c] / sums[3];
+      volatile float narrowed = static_cast<float>(straight);
+      result[c] = narrowed;
+    }
   }
   return result;
 }

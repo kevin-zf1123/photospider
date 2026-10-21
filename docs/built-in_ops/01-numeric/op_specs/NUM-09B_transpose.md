@@ -11,82 +11,23 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_manual_acceptance
+implementation_status: implemented
 ---
 
 # NUM-09B: transpose
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Transpose permutes logical axes of a single-tensor Result with any schema/member key. Its complete `sample_shape()` includes batch axes, has rank 1..8, positive extents and at most 2^40 elements. Required static String `permutation` is a canonical comma-separated list containing each input axis exactly once. For permutation p and input shape I, output shape is `O[j]=I[p[j]]`, and each global output coordinate o reads source `s[p[j]]=o[j]`.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+Output port `values` uses `photospider.tensor` v1/member `samples`, with ordinary axes and unchanged dtype. UInt8, Int8, UInt16, Int16, Int64, Float32 and Float64 are supported. Raw bits, including signaling NaNs and signed zeros, are preserved identically by all three CPU profiles. No image/color roles or arithmetic conversions are inferred.
 
-Permute logical axes of input `input`, a single-tensor Result with any schema
-id/member key. Its complete `sample_shape()` includes batch axes and has positive
-extents, rank 1..8 and logical element count <=2^40. Output `values` is a Result
-tensor with the same dtype and rank. Supported dtypes are UInt8, Int8, UInt16,
-Int16, Int64, Float32 and Float64. Preserve all element bits including
-signaling NaNs, infinities and signed zeros. No image/color/axis semantic metadata
-is inferred; actual-read typed input validation remains required.
+## Fixed task mapping
 
-Required static String `permutation` is a canonical comma-separated list of
-nonnegative decimal input-axis indices. Its length is input rank and each input
-axis occurs exactly once. Output axis j corresponds to input axis permutation[j].
-There are no negative indices, repeated/missing axes, implicit defaults or
-rank changes. Required static String `layout` is auto/view/dense, constructor
-default auto, with the complete-output policy from
-[reshape](NUM-09A_reshape.md). Direct nodes specify both parameters.
+Each selected output tile becomes a CPU gather task with an independent dense output allocation. Its input region is the axis-permuted output rectangle; the task reads every input tile intersecting that region, computed using the input's own grid. Input batch and atomic metadata may produce a different partition from the ordinary output grid. Empty selection emits no tasks or payload reads. Final Result coverage follows selected tiles in global coordinates.
 
-## Shape, mapping and view
-
-For input shape I and permutation p, output shape O[j]=I[p[j]]. At output
-coordinate o, read s with s[p[j]]=o[j]. This exact bijection maps each output
-rectangle to its axis-permuted input rectangle numerically. The compiler
-validates static shape, schema and permutation metadata before runtime. For
-nonempty work, the complete-input program requests the complete input with a Tensor Need
-using ordinary member tile Needs with explicitly bound validators , which triggers
-typed-payload validation. It publishes a complete
-`photospider.tensor`/`samples` Result
-with ordinary axes and no attached domain description/batch metadata. Publication uses global
-output coordinates. A query `Q` limits observed dependencies and downstream
-reads rather than packing the output to an ROI. Empty output has empty coverage
-and support. Source, typed and domain failures remain visible to the Run.
-
-A View permutes strides of one affine input owner; compatible same-owner
-fragments may join after address-map proof. Multiple owners make explicit View
-unavailable. Auto materializes a complete packed output only for an unavailable
-view; Dense always materializes it. Other failures do not trigger Auto
-collection. Negative and zero strides remain valid and raw bits are unchanged.
-Published views retain source storage and resources after context retirement.
-
-Compile-time shape inference parses and validates the node's permutation.
-A registry-wide fixed permutation does not implement this parameterized
-operation. Dtype inference uses input; output schema remains independent of
-runtime layout choices. All three CPU profiles preserve identical values and
-obey explicit layout rules.
+The `layout` node parameter and SDK `TransformLayout` enum are removed. The helper accepts the profile immediately after `permutation`. All outputs use the fixed allocation contract; physical source strides do not choose a runtime view path. Negative/zero strides and unaligned source offsets remain supported after bounds validation.
 
 ## Resources, errors and acceptance
 
-Inherit reshape's owner retention, source-set/typed-validation support, layout
-errors, host budget, cache, cancellation and output publication contracts. Mapping
-cost is O(N*r) for complete dense N-element copies, or region/owner metadata work for views;
-a permutation introduces no arithmetic scratch. Account actual retained source
-owners even when no new output payload is allocated. Shape/parameter violations
-fail compile/preflight; unavailable explicit views fail with diagnostic
-ViewUnavailable. Source, validation, budget and cancellation failures cannot be
-hidden by auto layout selection.
+Inherit [reshape's preparation, ownership and cancellation contract](NUM-09A_reshape.md). Prepare recomputes the exact source tile set and checks all read/write slots, dtype and zero scratch. Runtime copies selected samples using O(rank) coordinate work and bounded stack state. Invalid permutations, schemas and static metadata fail before execution. Operational failures prevent successful publication; output owners outlive context destruction.
 
-Conceptual fixture: input shape [2,3,4] with value 100*i+10*j+k and
-permutation [2,0,1] yields shape [4,2,3], with values[k,i,j]=100*i+10*j+k.
-Use an independent coordinate oracle and source-read logs. Cover identity and
-all rank-2/rank-3 permutations, reverse/zero input strides, fragmented owners,
-sNaN payloads, view/auto/dense choices, disjoint requests and inverse dirty sets.
-The nine formal profile keys use CPU complete-input and disable cross-run content caching
-because content alone does not prove physical owner/stride identity; same-Run
-sharing remains available. See [NUM-09 Run-shared complete-input computation](../layouts-whole.md) for
-the current Result workflow and validation.
+For source `[2,3,4]` with values `100*i+10*j+k` and permutation `[2,0,1]`, output `[4,2,3]` has `values[k,i,j]=100*i+10*j+k`. Temporary checks cover identity, rank-2/rank-3 permutations, rank eight, sparse requests, batch/atomic grids, all raw dtypes and source stride cases. Compare exact declared reads against an independent coordinate mapping. See [fixed layout transforms](../layouts-execution.md). This execution contract overrides the [NUM baseline](NUM_common_contract.md); specification status remains Proposed.

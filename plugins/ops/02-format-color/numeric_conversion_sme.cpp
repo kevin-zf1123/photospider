@@ -3,7 +3,7 @@
 
 #include <cstdint>
 
-#include "photospider/core/cancellation_poll.hpp"
+#include "photospider/plugin/fixed_invocation_api.h"
 
 namespace ps::plugin_internal::format_numeric {
 __arm_locally_streaming std::uint64_t sme_conversion_vector_bytes() {
@@ -18,14 +18,10 @@ __arm_locally_streaming std::uint64_t sme_conversion_vector_bytes() {
 // environment.
 __arm_locally_streaming std::uint64_t sme_f32_u8_tile(
     const std::uint8_t* source, std::uint8_t* target, std::uint64_t count,
-    const core_internal::CancellationPoll& cancellation) {
-  const auto flag_count = cancellation.size;
-  const auto* flags = cancellation.flags.data();
+    const ps_kernel_cancellation_v8& cancellation) {
   const auto cancelled = [&]() {
-    for (std::size_t k = 0; k < flag_count; ++k)
-      if (flags[k]->load(std::memory_order_acquire))
-        return true;
-    return false;
+    return cancellation.is_cancelled &&
+           cancellation.is_cancelled(cancellation.context);
   };
   // Restrict dispatch to a 64-byte streaming vector: four word vectors admit
   // exactly 64 samples; four double vectors convert 32 samples per poll.

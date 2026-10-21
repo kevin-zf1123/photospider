@@ -21,6 +21,7 @@ PHOTOSPIDER_API const ResourceBudget* metadata_budget() noexcept;
 PHOTOSPIDER_API void metadata_failure(const ResourceBudget&,
                                       ErrorCode) noexcept;
 PHOTOSPIDER_API void commit_payload(ResourceLease&, std::uint64_t) noexcept;
+PHOTOSPIDER_API void commit_metadata(ResourceLease&, std::uint64_t) noexcept;
 }  // namespace resource_internal
 /** @brief Thread-local default for metadata containers created by a callback.
  * Explicit allocators retain their chosen root. Nested scopes restore the
@@ -100,6 +101,9 @@ class ResourceAllocator {
       fail();
     }
     new (storage) Header{std::move(lease)};
+    resource_internal::commit_metadata(
+        static_cast<Header*>(storage)->lease,
+        kind_ == ResourceAllocationKind::Payload ? offset : bytes);
     if (kind_ == ResourceAllocationKind::Payload)
       resource_internal::commit_payload(static_cast<Header*>(storage)->lease,
                                         count * sizeof(T));

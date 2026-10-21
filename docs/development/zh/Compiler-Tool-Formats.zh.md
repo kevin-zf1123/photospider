@@ -1,6 +1,6 @@
 # 编译工具文件格式
 
-驱动使用严格 UTF-8 JSON 读取和写出 DAG 及 manifest，要求 `format` 和整数 `version: 1`。Tensor 二进制文件使用小端标量表示。`.psir`、`.psxp` 使用独立的 v4 文本格式。参见[工具用法与边界](Compiler-Tools.zh.md)。
+驱动使用严格 UTF-8 JSON 读取和写出 DAG 及 manifest，要求 `format` 和整数 `version: 1`。Tensor 二进制文件使用小端标量表示。`.psir`、`.psxp` 使用独立的 v5 文本格式。参见[工具用法与边界](Compiler-Tools.zh.md)。
 
 ## DAG JSON
 
@@ -72,7 +72,7 @@ Typed f64 拒绝无法精确表示的整数 token；需要浮点舍入时使用�
 ]}
 ```
 
-例如 Python `struct.pack('<4d', 1, 2, 3, 4)` 产生 32 字节输入。路径以 manifest 目录为基准，raw 文件路径不能为 `-`。每个 Plan 输入和每个 Tensor slot 必须恰好出现一次。字节长度严格等于完整 sample shape 乘积与 dtype 宽度之积，并检查溢出。数据是逻辑 row-major 连续排列。绑定使用执行 context 的 Root，在执行前发布完整 Tensor。
+例如 Python `struct.pack('<4d', 1, 2, 3, 4)` 产生 32 字节输入。路径以 manifest 目录为基准，raw 文件路径不能为 `-`。每个 Plan 输入和每个 Tensor slot 必须恰好出现一次。字节长度严格等于完整 sample shape 乘积与 dtype 宽度之积，并检查溢出。数据是逻辑 row-major 连续排列。工具读取并验证完整文件，然后使用执行 context 的 Root 按保存的 Plan 契约建立绑定。`DirectTiles` 分别分配每个所需 dense Host tile，要求零 byte offset 和匹配的编译容量；未请求的 tile 不保留。`DenseHost` 在 member 有任何所需 tile 时保留一份完整的 dense member allocation；Plan 的显式 COPY task 在执行期间物化独立的选定 tile。不兼容的物理 layout 在 Run 提交前失败，检查模式同样拒绝。C++ `PlanningOptions::input_layouts` API 选择该契约；`psc` 使用默认的 DirectTiles 契约。
 
 ## Results
 
@@ -92,12 +92,12 @@ Typed f64 拒绝无法精确表示的整数 token；需要浮点舍入时使用�
 
 二进制片段保存 9.0、12.0。Tensor 的 `shape` 是静态全形状，fragment 的 `offset`、`shape` 是真实覆盖坐标。片段顺序和拆分是实现细节；片段互不重叠，只覆盖已发布 samples，每片按其区域保存 row-major 小端连续字节。空覆盖不生成二进制文件。消费者必须读取 manifest，不应通过文件名或完整 schema 推断覆盖。Results 是输出文件，不是可恢复执行状态。
 
-## IR 与 Plan 文本 v4
+## IR 与 Plan 文本 v5
 
-`.psir` v4 的前缀如下：
+`.psir` v5 的前缀如下：
 
 ```text
-psir 4
+psir 5
 stage ir
 parent "..."
 producer "optimize" "1"
@@ -106,6 +106,24 @@ parameters { }
 
 `parent` 为来源信息，初始前端/校验输出可为空。生产者的已解析选项使用类型化 parameter 语法。后续保存算子契约与资源 manifest、输入声明/绑定、calls、返回签名、entry、`form dependency_paths|control_flow` 和 blocks。原始及优化 IR 都允许两种形式。导入产生 `ValidatedIR` 并重新计算内容 identity；来源不参与计算。
 
-`.psxp` 以 `psxp 4` 和实际输入 IR digest 的 `parent` 开头，然后保存执行模式、tile extent、私有 lowering CFG、后端 placement、输出选择和完整 `code`。Code 包含发布目标/samples、固定输入/共享授权、指令依赖与 CPU fallback。导入重建网格、链接契约并校验代码，不执行 mapper/optimizer/planner。保存程序必须为 ControlFlow，允许不同于父 IR 的依赖路径形式。
+`.psxp` 以 `psxp 5` 和实际输入 IR digest 的 `parent` 开头，随后保存执行模式、tile extent、lowering 后的 CFG 声明和选定输出请求。`physical` 节保存 entry、输入 ID、返回 schema ID 及以下有序表：
 
-文本支持分号行注释和转义字符串，参数类型为 `i64`、`f64`、`f64_bits`、`bool`、`string`，编码保留 IEEE-754 位。精确有界语法见 `src/lib/compiler/artifact_text.cpp`，往返测试见 `tests/unit/kernel/test_compiler_artifact.cpp`。v1–v3 拒绝并提示重新导出。Identity 检测内容变化，不认证代码或文件。Package、document schema、C ABI、artifact 版本是独立版本轴。
+| 表 | 编码字段 |
+| --- | --- |
+| `schemas` | 结构化 Result schema |
+| `layouts` | 元素类型、rank、字节偏移及八项 shape/origin/有符号 stride |
+| `tiles` | Value、member、layout、producer、domain、tile index、容量与对齐 |
+| `values` | 来源 IR value、schema、owner、kind、import 来源 ID、输入 layout 契约及有序 tile ID |
+| `placements` | Backend、domain、profile 与 queue |
+| `kernels` | Operation、symbol、contract 与 ABI 版本 |
+| `tasks` | Kind、call/kernel/placement ID、读写、schema read、参数字节、显式依赖、前驱、后继与 scratch |
+| `calls` | 来源 call、block、退休序号、effect task、task ID、export 及输入/输出绑定 ID |
+| `blocks` | 来源 block、终止方式、condition、task/call/argument/live-in/return ID、边与资源预留向量 |
+
+Value kind 为 Input（0）、Argument（1）、Produced（2）和 Imported（3）。输入 layout 契约为 DirectTiles（0）和 DenseHost（1）；非 Input value 使用 0。Imported value 的来源 IR value 为零，owner 为 block，`import_source` 为规范 Input ID；其他 kind 的该字段使用无 ID。Imported tile 具有显式 COPY producer。边界 import COPY 使用无 call ID，在全部真实 call 退休后执行。Loader 检查来源关系，并拒绝绕过 import 的 raw DenseHost payload 使用。
+
+表 ID 从零连续编号，`4294967295` 表示无 ID。Task 表顺序不约束依赖顺序。Loader 保留 ID，独立校验邻接表、存活值、资源预留、布局边界及 IR 对应关系。保存的派生表必须与定义一致，加载时不修复。算子 preparation 从已校验 IR 和给定 registry/resources 重建，不调用 lowerer、optimizer 或 planner。保存的 IR 为 ControlFlow，允许不同于父 IR 的依赖路径形式。
+
+产物文本上限为 64 MiB。物理表共享 4194304 条记录上限，物理引用共享 16777216 项上限。Task 参数字节与结构校验共同消耗独立的 268435456 单位 work 预算，不计为依赖边。导入与导出使用同一物理校验契约。
+
+文本支持分号行注释和转义字符串，参数类型为 `i64`、`f64`、`f64_bits`、`bool`、`string`，编码保留 IEEE-754 位。精确有界语法见 `src/lib/compiler/artifact_text.cpp`，往返测试见 `tests/unit/kernel/test_physical_compiler.cpp`。v1–v4 拒绝并提示重新导出。Identity 检测内容变化，不认证代码或文件。Package、document schema、C ABI、artifact 版本是独立版本轴。

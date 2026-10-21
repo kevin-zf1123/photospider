@@ -44,29 +44,9 @@ defines this operator.
 
 Strict correctly rounds the complete integral quotient. Accelerated permits
 <=4 ULP final error, exact constant/zero/sign and finite classification, with
-strict fallback. All values and outputs must be finite; this
-is not the uniform family's IEEE nonfinite aggregation. A precision/work/capacity
-limit fails explicitly instead of publishing unconverged integration.
+strict fallback. Finite strictly increasing positions, finite contributing endpoint values and finite representable selected outputs are caller preconditions. Precision/capacity limits fail explicitly; cancellation and resource failures return before numerical retries.
 
-All three formal keys use Run-shared Result programs. Nonempty requests declare Data,
-Validation and Descriptor needs  for both complete input members. Typed
-and upstream validation covers all inputs. The callback reads positions through authorized windows into Root-owned
-promoted coordinate storage, then reads source values through authorized
-windows without collecting or copying the complete values tensor. It computes every output using the
-same positive-length pieces and exact endpoint values; coefficient cancellation
-does not remove endpoint validation. Input changes invalidate complete recorded
-output demand. Nonfinite samples or overflow, including outside delivery, fail
-Domain/Run. Empty reads no payload after static preflight. The Result writer
-publishes the complete dense output transactionally with full coverage and global
-coordinates. Root accounts the promoted positions vector, one reused piece
-vector, full output and workspaces. Legal strides and owner lifetime follow the
-shared contract; failure/cancellation publishes no partial output and releases
-temporary state.
-
-Use the shared compile/preflight/runtime error categories for malformed parameters,
-type mismatch, invalid positions, nonfinite demanded samples, output overflow,
-resources/backends/cancellation and upstream failures. No failed sample publishes
-partially computed data.
+All three keys use the [fixed execution and resource contract](CRV-11_nonuniform_lowpass_contract.md#algorithm-resources-and-mapping). Each selected output tile has one CPU task reading complete positions and the full filtered values axis for its other-axis rectangle, closed on source grids. The kernel searches source views directly and streams positive-length pieces, retaining two pieces and fixed polynomial/arithmetic scratch. Only selected outputs are computed and allocated. Empty emits no task; successful calls publish after all writes succeed and retire. Source affine views and escaped output ownership follow the shared contract.
 
 ## Acceptance and status
 
@@ -75,14 +55,13 @@ support_radius=0.5: at the middle position, samples is exactly 2.5 for any
 admitted cutoff parameters. Verify collinear-knot insertion invariance against
 independent certified continuous integration. Also test constant/impulse hats,
 unequal spacing, boundaries/seams, extreme parameters, dtype mixing, 4-ULP
-bounds, invalid remote data failures, complete dirty support, budgets/cancellation,
+bounds, local negative-zero support, static source closures, budgets/cancellation,
 strides and source/result lifetime.
 
-The maintained public workflow binds positions/values and statics, then requests
-samples through Compiler/ExecutionContext; the spec does not claim universal antialias rejection.
+Temporary public acceptance binds positions/values and statics, then requests samples through Compiler/ExecutionContext and compares them with the independent continuous oracle.
 
 ## Maintained implementation and validation
 
-This primitive is registered in the five-kernel nonuniform low-pass family. Exact partition and paired-affine integration use global Taylor moments with a rigorous tail bound; this is not local adaptive quadrature, and accelerated keys currently use the strict fallback.
+This primitive uses the nonuniform family's fixed CPU adapter. Exact streaming partition and paired-affine integration use global Taylor moments with a rigorous tail bound and preallocated coefficient storage. Accelerated keys currently use strict arithmetic.
 Certified precision is bounded to 128..4096 bits and order <=512; unresolved
 capacity or rounding may return `ResourceExhausted`. See [CRV-11 umbrella](CRV-11_resample_signal.md).

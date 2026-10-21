@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -8,10 +10,10 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/status_helpers.hpp"
 #include "photospider/ops/tensor_description.hpp"
-#include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -20,12 +22,6 @@ struct LiteralPreparation final {
   std::size_t width = 0;
   bool require_view = false;
 };
-Status unavailable() {
-  return {ErrorCode::InvalidArgument,
-          "ViewUnavailable: absent opaque pixels require generation",
-          FailureReason::InvalidDomain,
-          {FailureOrigin::Domain, FailureScope::Run}};
-}
 // Replicate a bounded register-sized seed. This is bitwise, including sNaNs.
 void fill(const LiteralPreparation& s, std::uint8_t* out, std::uint64_t n) {
   if (!n) {
@@ -38,96 +34,95 @@ void fill(const LiteralPreparation& s, std::uint8_t* out, std::uint64_t n) {
     ready += next;
   }
 }
-using format_result::require;
-using format_result::take;
-using Poll = Result<ResultProgramPoll>;
-ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
-  auto result = take(ResultBuilder::start(
-      phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {}, phase.query.tile_extent));
-
-  return result;
+Result<OperationProgram> lower(const OperationLowering& query) {
+  using Answer = Result<OperationProgram>;
+  OperationProgramBuilder builder(query);
+  for (const auto& member : query.requests[0].members)
+    for (auto tile : member.second) {
+      auto task = builder.add_task("fill", "literal-bits-v1");
+      if (!task.ok())
+        return Answer(task.status());
+      auto status = builder.read_input_schema(task.value(), 0);
+      if (status.ok())
+        status = builder.write_output(task.value(), 0, member.first, tile);
+      if (!status.ok())
+        return Answer(status);
+    }
+  return builder.finish();
 }
-Poll empty_result(const ResultProgramPhase& phase) try {
-  auto result = builder(phase, true);
-  return Poll(ResultPublication{take(result.seal()), true});
-} catch (const Status& status) {
-  return Poll(status);
-}
-struct LiteralState final {
-  LiteralPreparation state;
-  explicit LiteralState(LiteralPreparation value) : state(value) {}
-  Poll poll(const ResultProgramPhase& phase) try {
-    if (state.require_view)
-      return Poll(unavailable());
-    auto scratch =
-        take(phase.resources.reserve(ResourceCapacity::host(8192, 8192)));
-    const auto& tensor = phase.query.output.result_schema->tensors[0];
-    const auto output = phase.query.tensor_outputs
-                            ? *phase.query.tensor_outputs
-                            : take(Footprint::all(tensor.sample_shape()));
-    auto result = builder(phase, false);
-
-    require(format_result::planes(tensor, output, [&](const Region& box) {
-      return result.publish_tensor_kernel(
-          0, box,
-          [&](const auto& writers) {
-            for (const auto& writer : writers) {
-              const auto& dims = writer.region().dimensions();
-              const auto axis = writer.sample_axis();
-              std::vector<std::uint64_t> at;
-              for (auto dim : dims)
-                at.push_back(dim.offset);
-              for (;;) {
-                if (phase.query.cancellation.cancelled())
-                  return Status{ErrorCode::Cancelled, "literal fill cancelled"};
-                auto run = writer.row_run(at);
-                if (!run.ok())
-                  return run.status();
-                const auto n =
-                    std::min<std::uint64_t>(256, run.value().samples);
-                auto status = phase.consume_work(n);
-                if (!status.ok())
-                  return status;
-                if (run.value().sample_stride_bytes ==
-                    static_cast<std::int64_t>(state.width)) {
-                  fill(state, run.value().data, n);
-                } else {
-                  for (std::uint64_t i = 0; i < n; ++i)
-                    std::memcpy(
-                        run.value().data + static_cast<std::ptrdiff_t>(
-                                               static_cast<__int128>(i) *
-                                               run.value().sample_stride_bytes),
-                        state.bits.data(), state.width);
-                }
-                at[axis] += n;
-                if (at[axis] < dims[axis].offset + dims[axis].extent)
-                  continue;
-                at[axis] = dims[axis].offset;
-                bool next = false;
-                for (std::size_t i = dims.size(); i;) {
-                  --i;
-                  if (i == axis)
-                    continue;
-                  if (++at[i] < dims[i].offset + dims[i].extent) {
-                    next = true;
-                    break;
-                  }
-                  at[i] = dims[i].offset;
-                }
-                if (!next)
-                  break;
-              }
-            }
-            return Status::success();
-          },
-          phase.query.cancellation);
-    }));
-    return Poll(ResultPublication{take(result.seal()), true});
-  } catch (const Status& status) {
-    return Poll(status);
+void invoke(const ps_kernel_invocation_v8* invocation,
+            ps_kernel_status_v8* status) noexcept {
+  const auto cancelled = [&] {
+    return invocation->cancellation.is_cancelled &&
+           invocation->cancellation.is_cancelled(
+               invocation->cancellation.context);
+  };
+  if (cancelled()) {
+    *status = kernel_failure(ErrorCode::Cancelled);
+    return;
   }
-};
+  const auto& state =
+      *static_cast<const LiteralPreparation*>(invocation->prepared_context);
+  if (state.require_view) {
+    *status = kernel_failure(
+        ErrorCode::InvalidArgument,
+        "ViewUnavailable: absent opaque pixels require generation",
+        FailureReason::InvalidDomain);
+    return;
+  }
+  const auto& output = invocation->outputs[0];
+  std::uint64_t samples = 1;
+  for (unsigned axis = 0; axis < output.layout->rank; ++axis)
+    samples *= output.layout->shape[axis];
+  auto* destination =
+      static_cast<std::uint8_t*>(output.allocation) + output.byte_offset;
+  // The physical Plan proves dense positive output strides. A constant fills
+  // the complete logical tile linearly, independent of its schema axis order.
+  // Poll between at most 256 bitwise writes, including very long rows.
+  for (std::uint64_t done = 0; done < samples;) {
+    if (cancelled()) {
+      *status = kernel_failure(ErrorCode::Cancelled);
+      return;
+    }
+    const auto count = std::min<std::uint64_t>(256, samples - done);
+    fill(state, destination + done * state.width, count);
+    done += count;
+  }
+  *status = {};
+}
+Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
+  using Answer = Result<ps_prepared_kernel_v8>;
+  const auto invalid = [] {
+    return Answer({ErrorCode::TypeMismatch, "invalid literal fill signature"});
+  };
+  if (!query.static_state || query.inputs.size() != 1 ||
+      query.outputs.size() != 1 || query.writes.size() != 1 ||
+      !query.reads.empty() || !query.task_parameters.empty() ||
+      query.scratch != std::array<std::uint64_t, 3>{})
+    return invalid();
+  const auto& write = query.writes[0];
+  const auto& schema = *query.outputs[0].result_schema;
+  auto grid = TileGrid::from_schema(schema, query.tile_extent);
+  if (!grid.ok())
+    return Answer(grid.status());
+  auto region = grid.value().region(write.tile_index);
+  if (!region.ok())
+    return Answer(region.status());
+  if (write.port || write.member || write.domain != physical::Domain::Host ||
+      write.layout.element_type != schema.tensors[0].descriptor.element_type ||
+      !fixed_tensor::matches_region(write.layout, region.value()))
+    return invalid();
+  ps_prepared_kernel_v8 kernel{};
+  kernel.struct_size = sizeof(kernel);
+  kernel.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  kernel.context = new LiteralPreparation(
+      *static_cast<const LiteralPreparation*>(query.static_state));
+  kernel.invoke_cpu = invoke;
+  kernel.release = [](const void* context) {
+    delete static_cast<const LiteralPreparation*>(context);
+  };
+  return Answer(kernel);
+}
 }  // namespace
 
 Result<OperationPreparation> prepare_channel_literal_like(
@@ -247,7 +242,6 @@ Status register_channel_literal_like(OperationRegistry* registry) {
 
     port.element_type_mask = 127;
     t.input_schema = {port};
-    t.cacheable = false;
     t.requires_metadata_specialization = true;
     for (const auto* key :
          {"bits", "expected_inputs", "layout", "authoring_member"}) {
@@ -260,22 +254,24 @@ Status register_channel_literal_like(OperationRegistry* registry) {
     output.key = "values";
     output.output_schema = port;
     output.result_schema = tensor_ops::scalar_schema();
-    output.continuation_bytes = sizeof(LiteralState);
-    output.maximum_dependency_stages = 2;
     d.prepare_static = [kind = profile.second](const auto& inputs,
                                                const auto& p) {
       return prepare_channel_literal_like(inputs, p, kind);
     };
-    d.map_dependencies = [](const ResultStaticQuery&) {
-      ResultStaticMapping mapping;
-      mapping.inputs.push_back({0, 0, true, {}});
-      return Result<ResultStaticMapping>(std::move(mapping));
-    };
-    d.start_result = [](const ResultProgramQuery& q, const BufferAllocator& a) {
-      if (q.tensor_outputs && q.tensor_outputs->empty())
-        return ResultContinuation::stateless<empty_result>();
-      return ResultContinuation::make<LiteralState>(
-          a, *static_cast<const LiteralPreparation*>(q.prepared->state()));
+    d.lower = lower;
+    d.prepare_kernel =
+        [](const physical::KernelDesc& kernel,
+           const physical::Placement& placement, const KernelPreparation& query,
+           const ResourceSet&,
+           const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+      if (kernel.symbol != "fill" || kernel.contract != "literal-bits-v1")
+        return Result<ps_prepared_kernel_v8>(
+            {ErrorCode::TypeMismatch, "unknown literal fill kernel"});
+      if (placement.backend != physical::Backend::Cpu ||
+          placement.domain != physical::Domain::Host)
+        return Result<ps_prepared_kernel_v8>(
+            {ErrorCode::BackendUnavailable, "literal fill requires CPU Host"});
+      return prepare_kernel(query);
     };
     auto status = registry->register_operation(std::move(d));
     if (!status.ok()) {

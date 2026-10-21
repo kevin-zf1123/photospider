@@ -40,7 +40,7 @@ schema and shape with Int64 elements naming original coordinates on the sorted
 axis. Batch axes become ordinary output axes. Neither output carries a domain
 description.
 
-The values and indices ports are independently selectable public outputs backed by one prepared joint stage. Within a Run, that stage sorts each line once and produces both complete internal tensors, even when only one output is selected. Output actors publish retained views of requested complete tiles. Both internal output allocations are admitted; optional cross-Run reuse does not provide the unique-producer guarantee.
+The two ports are independently selectable. Selected tiles with identical non-axis origins and extents share one fixed CPU task. That task sorts each corresponding complete source line once and writes only declared tiles, including either or both outputs. Each tile owns an independent dense allocation. No complete internal values/indices pair is allocated.
 
 ## Ordering and value preservation
 
@@ -55,44 +55,20 @@ quieted or otherwise changed by sorting. The `indices` output records the
 corresponding source-axis position. All three declared CPU profiles preserve
 these discrete results.
 
-## complete-input demand and execution
+## Fixed execution
 
-Every nonempty selected-output request uses Run-shared complete-input computation. It requests the
-complete source tensor with ordinary member tile Needs with explicitly bound validators, sorts every
-line, writes both complete internal outputs and then satisfies the consumer
-projection. An indices-only request still reads the complete source to build
-the permutation. Any source change invalidates every recorded observation for
-each selected output. An Empty request reads no input payload and performs no
-sample arithmetic; it publishes the declared schema with empty sample
-coverage.
+For each selected tile, keep its non-axis rectangle and expand the sorted axis to the full source interval. Lowering declares source tiles covering that rectangle using the source's own TileGrid. An indices-only request needs the same complete lines to determine order. Source tile rounding can cover additional samples, but those samples are not sorted. Empty selection emits no task or payload reads.
 
-The values and indices ports are independently selectable public outputs backed by one prepared joint stage. Within a Run, that stage sorts each line once and produces both complete internal tensors, even when only one output is selected. Output actors publish retained views of requested complete tiles. Both internal output allocations are admitted; optional cross-Run reuse does not provide the unique-producer guarantee.
+A task may write several sorted-axis tiles and both public ports. Selecting outputs from a saved Plan retains all reads and writes of a retained task; fresh compilation can form smaller groups. All tasks share their IR call's publication outcome. An operational task failure prevents successful publication of that call.
 
 ## Algorithm, resources and errors
 
-The implementation classifies each source sample once to form a numerical key,
-then uses iterative stable heapsort on `(key, original index)`. A line of length
-L takes O(L log L) ordering work. Its key and permutation vectors use 16*L element bytes plus
-allocator headers, alignment and Entries reservations. They are charged as
-Root metadata. Keys are released after sorting; the permutation is released
-after that line is written. Fixed `OrderingState` uses the phase allocator's
-Payload capacity. Authorized input read windows and both full internal output
-payloads coexist with this state; the operation does not first pack the complete
-input.
+The implementation classifies each sample of a visited line once and applies iterative heapsort to `(key, original index)`. Axis length L requires O(L log L) ordering work per line and `16*L + sizeof(StableOrderWorkspace)` bytes of preallocated invocation scratch. The keys and permutation are reused across lines. Runtime allocates no payload or dynamic permutation vector. Root reserves selected output storage and the maximum scratch requirement per CPU lane, plus executor metadata.
 
-Work is O(M log L) for M total input elements and axis length L. The callback
-charges reads, comparisons, permutation construction and output writes to the
-execution Root and observes cancellation through those work calls. Capacity,
-work-limit, cancellation or source failure aborts the transactional complete-input
-writer; unpublished output and ordering state are released, and no partial
-coverage is published.
+Cancellation is checked during classification, comparisons and writes. Source, resource, backend and cancellation failures retain their operational status. Accepted tasks drain before failed outputs are released. Successful output owners can outlive ExecutionContext. Floating modes and exception flags are restored.
 
-Malformed dtype, rank, shape or axis is rejected during metadata specialization
-or static parameter validation. NaNs and infinities are successful sort values.
-Arbitrary valid affine source strides are read through owning tensor windows.
+Metadata validates dtype, complete rank/count and static axis. Prepare validates both output schemas, canonical Host writes and their common non-axis ROI, exact complete source reads, empty task parameters and scratch. Static parameter errors return InvalidArgument; incompatible schemas or invocation signatures return TypeMismatch. All source bit patterns, including NaNs and infinities, are valid.
 
-## Current behavior checks
+## Acceptance
 
- The checks do not claim x86 arithmetic execution, performance
-or complete structural-contract/error/resource coverage. The specification remains
-Proposed.
+Compare with the retained [NUM12 oracle](../../../../oracle/ops/numeric/num12/reference.py). Verify `[3,1,1,2]` produces values `[1,1,2,3]` and indices `[1,2,3,0]`; include signed zeros, signaling NaNs and extreme integers. Check separate and mixed output selection, shared task count, exact source tile closure, non-last axes, tail tiles, rank eight, batch/atomic input geometry and reversed strides. Exercise concurrent Runs, artifact import, rebinding, cancellation, capacity rejection, malformed task signatures and retained output ownership. See [fixed ordering execution](../ordering-execution.md) for resource and selection rules.

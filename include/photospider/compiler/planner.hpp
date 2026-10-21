@@ -12,59 +12,38 @@
 #include "photospider/compiler/plan.hpp"
 
 namespace ps {
-/** @brief Callback-local construction of a physical instruction program.
- * The compiler fixes the linked CFG, input/output signature, prepared operation
- * contracts, placement and normalized output requests before invoking a
- * backend. Backends read those declarations and edit only per-block
- * instructions. Borrowed references are valid for the callback duration and
- * must not escape. Each invocation has its own builder; concurrent reads of
- * linked declarations are safe, while instruction edits require caller
- * synchronization. Allocation and bounds-checked access may throw;
- * Compiler::plan catches callback exceptions. Only the compiler can validate
- * and publish an ExecutionPlan.
+/** @brief Callback-local construction of complete physical tables.
+ * The compiler seeds call/value/CFG metadata from validated IR. A named planner
+ * reads static call bindings and builds the entire task graph, including
+ * intermediate values and explicit transfers. Borrowed references cannot
+ * escape the callback. Only the compiler validates and publishes the result.
  */
 class PHOTOSPIDER_API PlanBuilder final {
  public:
   PlanBuilder(const PlanBuilder&) = delete;
   PlanBuilder& operator=(const PlanBuilder&) = delete;
-  const std::vector<PlanStep>& steps() const noexcept { return plan_.steps(); }
-  const std::vector<PlanBlock>& blocks() const noexcept {
-    return plan_.blocks();
+  physical::Program& program() { return plan_.edit().program_; }
+  const physical::Program& program() const noexcept {
+    return plan_.data().program_;
   }
-  const std::vector<PlanParameter>& parameters() const noexcept {
-    return plan_.parameters();
-  }
-  std::size_t entry() const noexcept { return plan_.entry(); }
-  const std::map<std::string, std::size_t>& outputs() const noexcept {
-    return plan_.outputs();
-  }
-  const std::vector<PlanOutput>& return_signature() const noexcept {
-    return plan_.return_signature();
+  const std::vector<PlanCallBinding>& calls() const noexcept {
+    return plan_.data().calls_;
   }
   const std::vector<WorkflowInputDeclaration>& input_declarations()
       const noexcept {
-    return plan_.input_declarations();
+    return plan_.data().inputs_;
   }
-  const ResourceSet& resources() const noexcept { return plan_.resources(); }
+  const std::vector<PlanOutput>& return_signature() const noexcept {
+    return plan_.data().returns_;
+  }
+  const std::map<std::string, std::size_t>& outputs() const noexcept {
+    return plan_.data().outputs_;
+  }
   const std::map<std::string, TileRequest>& output_requests() const noexcept {
-    return plan_.output_requests();
+    return plan_.data().requests_;
   }
-  std::uint64_t tile_extent() const noexcept { return plan_.tile_extent(); }
-  ExecutionMode execution_mode() const noexcept {
-    return plan_.execution_mode();
-  }
-  const SchemaTemplate& input_schema(const PlanInput& input) const {
-    return plan_.input_schema(input);
-  }
-  const std::vector<TileGrid>& input_grids(const PlanInput& input) const {
-    return plan_.input_grids(input);
-  }
-  /** @brief Mutable instruction sequence for a linked block index.
-   * Initially empty. Throws std::out_of_range for an invalid index. Instruction
-   * references and dependencies are checked after successful callback return.
-   */
-  std::vector<PlanTileInstruction>& instructions(std::size_t block) {
-    return plan_.blocks_.at(block).instructions;
+  const ResourceSet& resources() const noexcept {
+    return plan_.data().resources_;
   }
 
  private:
@@ -75,10 +54,13 @@ class PHOTOSPIDER_API PlanBuilder final {
 
 /** @brief Named trusted in-process physical planning backend.
  * The callback reads the original immutable IR and linked builder declarations,
- * then emits instructions. Return a failure to discard the builder. Successful
- * output is checked for coverage, ordering, grants and instruction budgets;
- * invalid output is Internal. Structural checks do not prove semantic mapping
- * or CPU fallback equivalence, which remain the backend's responsibility.
+ * then emits tasks. Return a failure to discard the builder. Successful
+ * output is checked for coverage, DAG structure, ownership and resource bounds;
+ * invalid output is Internal; validation exhaustion is ResourceExhausted.
+ * Structural checks do not prove semantic mapping
+ * which remains the backend's responsibility.
+ * Callback failures and exceptions identify this planner's name and version
+ * in their diagnostic message; operational status codes are preserved.
  * Callbacks must support concurrent invocations, retain no builder references,
  * and invoke only pure static operation hooks, never runtime callbacks.
  */
@@ -124,7 +106,7 @@ class PHOTOSPIDER_API PlannerRegistry final {
   std::vector<PlannerDefinition> definitions_;
 };
 
-/** @brief Shared frozen catalog containing static-tiles@1.
+/** @brief Shared frozen catalog containing static-tiles@2.
  * Initialization is thread-safe and may throw on allocation failure.
  */
 PHOTOSPIDER_API std::shared_ptr<const PlannerRegistry>

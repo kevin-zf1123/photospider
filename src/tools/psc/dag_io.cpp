@@ -79,7 +79,7 @@ std::string detect(const std::string& text) {
   if (header_token(text, &position) == "psir")
     return "ir";
   throw ToolError(
-      "unrecognized input; expected DAG JSON or psir v4 (legacy YAML is "
+      "unrecognized input; expected DAG JSON or psir v5 (legacy YAML is "
       "unsupported)");
 }
 std::string inspect_input(const std::string& text) {
@@ -91,8 +91,8 @@ std::string inspect_input(const std::string& text) {
   } else {
     std::size_t position = 0;
     header_token(text, &position);
-    if (header_token(text, &position) != "4")
-      throw ToolError("unsupported psir version; re-export using artifact v4");
+    if (header_token(text, &position) != "5")
+      throw ToolError("unsupported psir version; re-export using artifact v5");
   }
   return type;
 }

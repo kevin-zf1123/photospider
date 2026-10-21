@@ -19,7 +19,6 @@ void append_extensions(Digest* digest,
 /** @brief Appends the structural port contract as uint64 fields. */
 template <class Digest>
 void append_port(Digest* digest, const OperationPortConstraint& port) noexcept {
-  append_extensions(digest, port.validators);
   digest->integer(port.element_type);
   digest->integer(port.rank);
   digest->integer(port.element_type_mask);
@@ -38,9 +37,7 @@ void append_port(Digest* digest, const OperationPortConstraint& port) noexcept {
 template <class Digest>
 void append_traits(Digest* digest, const OperationTraits& traits) {
   append_extensions(digest, traits.diagnostics);
-  digest->integer(traits.cpu_staged_tiles);
   digest->integer(traits.requires_metadata_specialization);
-  digest->integer(traits.share_blocks_across_outputs);
 
   digest->integer(traits.outputs.size());
   if (traits.outputs.size() != 1) {
@@ -57,9 +54,6 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
   if (output.result_schema)
     digest->text(output.result_schema->canonical());
   digest->text(output.key);
-  digest->integer(output.maximum_output_payload_bytes.has_value());
-  if (output.maximum_output_payload_bytes)
-    digest->integer(*output.maximum_output_payload_bytes);
   digest->integer(output.input_indices.has_value());
   if (output.input_indices) {
     digest->integer(output.input_indices->size());
@@ -75,26 +69,7 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
   digest->integer(traits.side_effect_free ? 1U : 0U);
   digest->integer(traits.supports_cpu ? 1U : 0U);
   digest->integer(traits.supports_gpu ? 1U : 0U);
-  digest->integer(traits.allows_cpu_fallback ? 1U : 0U);
-  digest->integer(traits.workspace_bytes);
-  digest->integer(traits.shared_stages.size());
-  for (const auto& stage : traits.shared_stages) {
-    digest->text(stage.key);
-    append_extensions(digest, stage.validators);
-    digest->text(stage.result_schema.canonical());
-    digest->integer(stage.input_indices.size());
-    for (auto input : stage.input_indices)
-      digest->integer(input);
-    digest->integer(static_cast<std::uint32_t>(stage.backend));
-    digest->integer(stage.continuation_bytes);
-    digest->integer(stage.workspace_bytes);
-    digest->integer(stage.maximum_work);
-    digest->integer(stage.maximum_output_payload_bytes);
-    digest->integer(stage.maximum_dependency_stages);
-    digest->integer(stage.mandatory);
-  }
   digest->integer(traits.version);
-  digest->integer(traits.cacheable ? 1U : 0U);
   digest->integer(traits.parameter_schema.size());
   for (const OperationParameterSpec& parameter : traits.parameter_schema) {
     digest->text(parameter.key);
@@ -111,8 +86,6 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
   digest->integer(traits.repeated_maximum);
   digest->integer(traits.repeated_resolved);
   digest->integer(traits.repeated_match);
-  digest->integer(traits.outputs[0].continuation_bytes);
-  digest->integer(traits.outputs[0].maximum_dependency_stages);
 }
 
 }  // namespace ps::contract_internal

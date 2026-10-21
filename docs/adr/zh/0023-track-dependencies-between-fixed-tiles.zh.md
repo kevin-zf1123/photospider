@@ -1,8 +1,9 @@
 # ADR 0023：在固定 tile 之间记录依赖
 
 - 状态：Accepted
+- 实现边界（2026-10-20）：固定 grid、member-local tile index 与结构 descriptor 规则保持。下文运行时 Need、dirty propagation、shared stage、certification 与 completed-result reuse 为历史记录。Package 0.39 在执行前编译 read/dependency edge，不在运行时扩展依赖或复用 payload cache；参见[依赖](../../kernel-architecture/zh/Dependency-Data.zh.md)与[物理 Plan 契约](../../kernel-architecture/zh/Compiler-and-Execution.zh.md)。
 - 英文权威文档：[ADR 0023](../0023-track-dependencies-between-fixed-tiles.md)
-- 当前边界：package 0.36.0 实现了 §3 所述的逐成员 tile 网格、成员局部区间 Need 和 Run 共享 stage。生产者的语义 descriptor 是其解析后的静态 Result schema；Result 不携带 facet 或附着的资源身份。
+- 历史边界：package 0.36.0 实现了 §3 所述的逐成员 tile 网格、成员局部区间 Need 和 Run 共享 stage。生产者的语义 descriptor 是其解析后的静态 Result schema；Result 不携带 facet 或附着的资源身份。
 - 相关：[ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)、[ADR 0017](0017-cpu-regional-execution-and-storage.zh.md)、[ADR 0018](0018-local-result-caches.zh.md)、[ADR 0021](0021-independent-node-results.zh.md)、[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md)
 
 ## 1. 核心摘要（TL;DR）

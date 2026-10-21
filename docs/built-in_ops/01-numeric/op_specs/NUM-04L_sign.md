@@ -39,7 +39,7 @@ overflow. All three versions must return the same logical bits.
 Classify integers by comparison without a floating intermediate; classify float
 NaNs/zeros by bits before selecting signed unit output. Avoid formulas x/abs(x)
 that fail on zero, infinity or INT64_MIN. Work is O(M), element scratch O(1), and
-payload M*b plus common mapping and typed-validation support. Every generic
+payload M*b plus common mapping and structural-validation support. Every generic
 numeric input has a defined successful numeric result.
 
 ## Independent acceptance
@@ -50,7 +50,7 @@ numeric input has a defined successful numeric result.
 - Positive/negative NaN payloads survive with quieting; signed subnormals map
   to signed one without flushing to zero. Reapplying sign is bitwise idempotent.
 - Compare platform keys to an independent bit/comparison oracle and run the
-  inherited public ROI/read-witness/cache/lifetime/resource cases.
+  inherited public ROI/fixed-read/lifetime/resource cases.
 
 The conceptual public fixture binds the float vector above, compiles a selected
 sign key and checks output bytes and dtype. The maintained target implementation is documented below;
@@ -59,6 +59,5 @@ the maintained public executable command and current validation boundary are doc
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/ops/numeric/unary.hpp`. It uses a Run-shared complete-input computation, full-input typed validation and
-atomic failure for the complete invocation. Its numerical path follows
+exposed through `photospider/ops/numeric/unary.hpp`. It uses one fixed CPU invocation per selected output tile, validated input views and preallocated output/scratch. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).

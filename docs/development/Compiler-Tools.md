@@ -2,6 +2,8 @@
 
 `psc` is the compilation driver; `psx` loads and executes an already compiled Plan. Frontend, validation, optimization, planning and execution remain independently callable library components. The driver owns file paths, JSON manifests, diagnostics, session retention and output publication. It follows the compiler-driver separation used by Clang: selecting a target determines which library stages run. It does not embed LLVM or use LLVM IR.
 
+The drivers use physical Plan v5 and fixed invocation ABI 8. External operations provide static preparation, task lowering and fixed kernels through [operation module ABI 8](../kernel-architecture/Plugin-ABI.md). Input-only IR can run with an empty operation registry.
+
 ## Build and operation loading
 
 `PHOTOSPIDER_BUILD_TOOLS=ON` (default) builds `psc` and `psx`. Build the two targets in an existing configured directory:
@@ -10,7 +12,7 @@
 cmake --build build/kernel-dev --target psc psx -j 2
 ```
 
-When `PHOTOSPIDER_BUILD_OPS=ON`, both tools register the built-in operation library before loading explicit `--load-ops` libraries. With ops OFF the registry starts empty. Each repeated `--load-ops PATH` loads a trusted in-process ABI-7 library, in command-line order. The registry is then frozen. Duplicate libraries, operation names or incompatible contracts fail. `--list-operations` prints loaded keys, traits versions and CPU/GPU capabilities. Libraries are not named or loaded by artifacts. `--resources` supplies immutable resource identities and bytes; per-run Tensor inputs belong in `psx --bindings`.
+When `PHOTOSPIDER_BUILD_OPS=ON`, both tools register the built-in operation library before loading explicit `--load-ops` libraries. With ops OFF the registry starts empty. Each repeated `--load-ops PATH` loads a trusted in-process ABI 8 module, in command-line order. The registry is then frozen. Duplicate libraries, operation names or incompatible contracts fail. `--list-operations` prints loaded keys, traits versions and CPU/GPU capabilities. Libraries are not named or loaded by artifacts. `--resources` supplies immutable resource identities and bytes; per-run Tensor inputs belong in `psx --bindings`.
 
 The tool-private JSON codec requires yyjson 0.13.0, commit `6447536015f3d600f3d65323b10976103b337ca7`, with its MIT license. Before configuring, follow the [yyjson preparation instructions](../../third_party/YYJSON.md) to place `yyjson.c`, `yyjson.h` and `LICENSE` in `third_party/yyjson/`. This directory is ignored by Git and absent from repository checkouts; CMake does not download the source. Set `PHOTOSPIDER_BUILD_TOOLS=OFF` to disable the tools and their yyjson requirement. yyjson is not a kernel header or exported dependency. No YAML input is supported.
 
@@ -56,20 +58,20 @@ These options are accepted only when generating a Plan:
 | Option | Default / meaning |
 | --- | --- |
 | `--planner NAME` | Registry lookup, default `static-tiles`; the shipped backend expands demanded tiles in dependency order. Unknown names are argument errors; conflicts with `--check` and IR output targets. |
-| `--backend cpu\|gpu` | `cpu`; GPU permits declared GPU placement. CPU-only operations remain on CPU; retry requires the saved operation fallback contract. |
+| `--backend cpu\|gpu` | `cpu`; selects the fixed CPU or GPU lowering target. Preparation must support that exact placement. |
 | `--tile-extent N` | 128, positive power of two. |
 | `--outputs a,b` | Select named outputs and their dependency closure. |
 | `--requests FILE` | Select outputs/member tile intervals; conflicts with `--outputs`. |
-| `--max-instructions N` | 4194304, positive static instruction bound. |
+| `--max-tasks N` | 4194304, positive physical task bound; metadata and incoming tiles have separate structural bounds. |
 | `--max-dependency-edges N` | 16777216, positive static edge bound. |
 
 `psc --list-planners` lists registered names, versions, descriptions and supported IR forms. `psc --help-planner NAME` displays one definition and the shared planning switches. These queries require no input file, load no operation libraries and invoke no planning callbacks. Unknown help names return argument errors. `--print-pipeline` resolves the selected definition and displays its name and version.
 
 Library callers select a name with `PlanningOptions::planner = "static-tiles"`; both `Compiler::plan` and `compile` use this option. Pass a frozen `PlannerRegistry` as the third `Compiler` constructor argument to supply custom backends; omitted registries use the lazy default catalog. Registration rejects duplicate names, missing callbacks and invalid IR forms. `--backend` independently controls CPU/GPU placement.
 
-A `PlannerDefinition` callback receives the original `ValidatedIR`, a callback-local `PlanBuilder` and the shared `PlanningOptions`. The builder exposes linked declarations as read-only data and editable instructions for each block. The compiler fixes CFG, input/output schemas, operation contracts, placement and normalized output selection, then validates generated instructions before publishing a Plan. Backends are responsible for semantic mapping and fallback correctness. See the [planner construction contract](../kernel-architecture/Compiler-and-Execution.md#physical-plan). CLI catalogs contain compiled-in registrations; `--load-ops` registers operation libraries only.
+A `PlannerDefinition` callback receives the original `ValidatedIR`, a callback-local `PlanBuilder` and the shared `PlanningOptions`. The builder exposes read-only linked declarations and editable physical Task/Tile/Call/Block tables. The compiler checks CFG, schemas, operation contracts, placement, normalized output selection and the emitted task count before publishing a Plan. Backends are responsible for semantic mapping. See the [planner construction contract](../kernel-architecture/Compiler-and-Execution.md#physical-plan). CLI catalogs contain compiled-in registrations; `--load-ops` registers operation libraries only.
 
-Control flow, effects and mandatory stages survive output selection. Library `PlanningOptions::output_names` distinguishes all outputs (`nullopt`) from none (empty vector). Missing entries in the library `output_requests` map mean all tiles of a selected output. CLI request manifests explicitly select their named outputs. Runtime requests may only narrow saved coverage.
+Control flow and mandatory effect tasks survive output selection. Library `PlanningOptions::output_names` distinguishes all outputs (`nullopt`) from none (empty vector). Missing entries in the library `output_requests` map mean all tiles of a selected output. CLI request manifests explicitly select their named outputs. Runtime requests may only narrow saved coverage.
 
 ## Execution
 
@@ -78,18 +80,17 @@ psx output.psxp --load-ops ./operations.dylib \
   --resources resources.json --bindings bindings.json -o output.results
 ```
 
-Plan import takes a non-null frozen `OperationRegistry` and explicit resources; it does not require a compiler or optimizer registry from the caller. The caller retains the operation environment for the Plan's lifetime. Import links saved operations/resources and reconstructs derived metadata. It validates saved instructions and backend choices without optimizer, mapper, tile expansion or replanning. Device capability is checked before execution. Required GPU instructions fail on an unavailable device unless the saved instruction permits CPU fallback.
+Plan import takes a non-null frozen `OperationRegistry` and explicit resources; it does not require a compiler or optimizer registry from the caller. The caller retains the operation environment for the Plan's lifetime. Import links saved operations/resources and validates saved physical tables, including derived adjacency, liveness and reservations. It invokes no optimizer, lowerer or planner. `ExecutionContext::prepare` checks the exact placement and kernel invocation contracts; execution uses `submit` and `join`. An unavailable placement fails before Run submission.
 
-Each declared Plan input must be bound exactly once, including inputs that a selected output does not consume. Each static Tensor slot must have one complete raw-le file with exact dtype, full sample shape (batch axes followed by cell shape) and byte count. Tensor storage uses the execution context's ResourceBudget. `--check` loads and validates the Plan, resources and device requirements, then stops before execution/export. Bindings may be omitted in check mode; if a manifest is supplied, every declaration and slot is still checked. Execution always requires all declared inputs.
+Each declared Plan input must be bound exactly once, including inputs that a selected output does not consume. Each static Tensor slot must have one complete raw-le file with exact dtype, full sample shape (batch axes followed by cell shape) and byte count. The binding reader stages the full raw file under the execution context's ResourceBudget. For `DirectTiles`, it copies required regions into separate aligned dense Host tiles with zero byte offset and the compiled capacity. For `DenseHost`, it retains one complete dense member allocation when any member tile is requested; the Plan's explicit COPY tasks materialize selected tiles during execution. Other incompatible physical layouts fail with `TypeMismatch`. `--check` imports and prepares the Plan, linking resources and fixed kernels, then stops before Run submission and export. Bindings may be omitted in check mode; if a manifest is supplied, every declaration and slot is still checked. Execution always requires all declared inputs.
 
 | Option | Default / meaning |
 | --- | --- |
 | `--bindings FILE` | Required for execution if the Plan declares inputs; optional with `--check`. |
 | `--outputs a,b` / `--requests FILE` | Output subset or member intervals contained in the compiled coverage. |
-| `--threads N` | CPU workers; omitted uses the context default. Explicit values must be positive. |
-| `--parallelism N` | Execution maximum parallelism; omitted uses the library default. It does not change the static VM instruction order. |
+| `--threads N` | CPU workers; omitted uses the context default. Explicit range is 1..4096. |
+| `--parallelism N` | Maximum concurrent tasks for this Run, range 1..4096; omitted uses the context worker count. Call retirement remains in Plan order. |
 | `--max-live-bytes N` | 268435456; positive controlled Payload capacity. |
-| `--cache-bytes N` | 0; optional retained-result budget, at most the live-byte limit. |
 | `-o DIRECTORY` | Default current-directory `plan-stem.results`; stdin requires explicit output. Directory must be new. |
 
 `psx` rejects optimization, backend and tile-extent options. Recompile for larger coverage or a different physical target. Output is a result manifest plus little-endian binary fragments with actual coverage. Missing regions are not filled. Logical window copying respects signed/zero strides; bit patterns are retained, including NaNs and signed zero. No persistent execution service or recovery state is created.
@@ -107,7 +108,7 @@ The executable entry points call separate driver libraries. Their parameter sche
 | `src/lib/compiler/optimizer.cpp` | Transformation orchestration, output validation and public-interface preservation. |
 | `src/lib/compiler/optimizer_registry.cpp`, `optimizers/deduplicate.cpp` | Catalog/option schemas and the separate optional example transform. |
 | `src/lib/compiler/planner.cpp`, `planner_registry.cpp`, `planners/static_tiles.cpp` | Named backend dispatch, catalog, result validation and the registered static tile planner. |
-| `src/lib/compiler/plan_linking.cpp`, `plan_validation.cpp`, `plan_selection.cpp` | Saved-Plan linking, instruction verification and coverage narrowing without mapping. |
+| `src/lib/compiler/plan_linking.cpp`, `plan_validation.cpp`, `plan_selection.cpp` | Saved-Plan linking, physical-table verification and coverage narrowing without lowering. |
 
 The common tool library owns neither a compiler session nor an execution context. Constructing a library `Compiler` for binding or planning does not initialize the default optimizer catalog; only an explicit optimization or catalog query needs it.
 

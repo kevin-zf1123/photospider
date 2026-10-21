@@ -17,10 +17,10 @@ implemented_operation_keys:
 
 # FMT-02C: assemble explicitly mapped components
 
-The default C++ `OperationRegistry` registers this member's `strict`, `accelerated_apple_silicon` and `accelerated_x86_64` CPU variants as Result operations. External C modules use Result C ABI 6, which is separate from the built-in C++ registration path. Public authoring helpers are installed in `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT specification remains Proposed independently of the registered implementation.
+The default C++ `OperationRegistry` registers this member's `strict`, `accelerated_apple_silicon` and `accelerated_x86_64` CPU variants as Result operations. These built-ins execute through fixed invocation ABI 8. Public authoring helpers are installed in `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT specification remains Proposed independently of the registered implementation.
 
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md) for
-exact copying, same dtype, spatial agreement, explicit input descriptions, planar storage,
+exact copying, same dtype, spatial agreement, explicit input descriptions, fixed tile storage,
 auto/view/materialize, CPU support, resource accounting and failures. This
 member independently selects sources and destination slots, without assigning output interpretation. Its default-registry keys are independent of the retired `channel.merge`.
 
@@ -99,55 +99,13 @@ configuration for each downstream consumer explicitly; the output has no domain
 description. This operation performs no color conversion, range scaling,
 premultiplication, zero-alpha cleanup or sample-domain validation.
 
-## Exact demand and dirty mapping
+## Fixed dependencies, resources and errors
 
-For each requested output channel k, map its nonchannel footprint through its
-one record. Per-input Data is the exact union of those source footprints. When
-several requested destinations share a source component, deduplicate source
-support without discarding any output contribution. Unselected components and
-unused inputs receive no payload request. Preserve offset/disjoint regions;
-there is no halo, Control payload or extra sample Validation domain.
+For every complete selected output tile, intersect its channel interval with each destination span and map the participating regions to their source coordinates. Deduplicate source tiles per port, preserving disjoint mapped spans before source-grid closure. Omitted ports have only schema dependencies. Atomic/spatial output geometry can include extra destinations; source grids can include extra samples in authorized tiles. The kernel reads only effective mapped coordinates.
 
-Dirty mapping is a relation, not a one-to-one inverse: for each changed source
-sample, enumerate every mapping row that selects that component, insert its
-destination slot and intersect the observed output domain. Changes to omitted
-source channels dirty nothing. Descriptor changes invalidate affected selector,
-mapping, shape or interpretation evidence. Static validation still covers all
-connected inputs; necessary upstream computation/failures retain their scope.
+Preparation resolves selectors once and checks exact read slots, output geometry and zero scratch. Runtime performs a binary destination-span lookup and fixed coordinate projection, then copies bytes into an independent dense output tile. Auto/materialize copy; every nonempty view task fails InvalidArgument/ViewUnavailable without source payload reads. Empty validates static metadata and emits no task. Cancellation polling, call retirement and result ownership follow the family.
 
-Mapped channels require a physical representability check before the operation can publish a view. For nonspatial generic output, sources with different storage owners make the view unavailable, and reordering or duplication does so when no single affine channel stride describes the mapped parts. `view` reports a physically unavailable mapping, while `materialize` prepares output storage directly; equal source bytes alone do not establish an alias.
-
-For spatial output, the operation supplies explicit target-region pieces for each source/destination mapping. Repeated sources may appear in several disjoint destination pieces. The builder validates each source authorization and the union of target coverage, and retains every contributing owner. A source may belong to another Root without copying its backing; the target charges its own metadata. `auto` retries by materializing the requested region only after physical `ViewUnavailable`. Nonspatial generic views retain the single-owner, single-affine-expression constraint defined by the family.
-
-## Reference algorithm, resources and errors
-
-Use the family's validate/map/acquire/prepare/copy/publish algorithm, adding
-static source-selector resolution and a destination-indexed table. Build and
-validate per-input name/role indices once; matching uses exact strings even if
-an implementation accelerates lookup with hashes. A sorted-table reference
-costs O(T log T + M log T) comparisons for T total descriptor entries, plus
-compared string bytes. Positional selectors need only checked O(M) resolution.
-Charge table and string-index capacities; no per-pixel name lookup is allowed.
-
-With n inputs, rank r, M mappings, Nq requested samples and F windows, post-
-resolution mapping/copy work is O(n*r+M+Nq*r+F*r), plus exact footprint unions,
-structural schema and page-set preparation. State is O(n+r+M) plus admitted
-lookup/footprint/window capacity. A reverse source-to-destination index supports
-dirty fan-out and has O(M) entries. Report Nq*d copied bytes separately from
-deduplicated source bytes and retained/provided backing; repeated destinations
-are real output samples even when one input read can serve them.
-
-Use host scheduling only for disjoint destination observations. Duplicate
-source selection cannot cause a write race because destination slots are unique.
-Inherit the 1024-entry/element cancellation polling bound, exact publication,
-rollback, source lifetime, optional-cache policy and page/metadata admission.
-
-Malformed mapping records, incomplete destinations, invalid selectors, name/role
-ambiguity and invalid explicit input descriptions fail compile/direct preflight with
-InvalidArgument / InvalidDomain, schema origin. Rank/dtype/shape mismatches use
-the family TypeMismatch rule; source/resource/cancellation/backend/view failures
-retain their inherited categories. Diagnostics include mapping row, source input
-and destination slot. Out-of-domain pixel values do not fail this copy operation.
+Malformed mappings, incomplete destinations, invalid or ambiguous selectors and invalid descriptions fail static preparation. Shape/dtype mismatches and operational failures retain their documented categories. No sample values are numerically validated; incremental dirty mapping and dynamic view publication are outside this protocol.
 
 ## Independent fixtures and acceptance
 
@@ -165,15 +123,12 @@ Choose output_axis=2. The next consumer may be configured with a Lab D50 group o
 
 Expected shape is [1,2,4]. Expected logical samples are
 `[[[0.5,0.75,0.25,0.2],[0.25,0.5,0.125,0.6]]]`, with each element copied from
-the represented Float32 input bits. X0 alpha is never requested. Requesting only
-output (0,1,2) reads X0(0,1,0)=0.125, and no X1 payload. RGB-to-Lab reference
+the represented Float32 input bits. X0 alpha is not a mapped source sample, though its containing source tile may be retained. Output (0,1,2) copies X0(0,1,0)=0.125; omitting X1 payload requires output tiles with no X1-backed destinations. RGB-to-Lab reference
 values are deliberately irrelevant to this byte-copy oracle.
 
 A separate reuse fixture selects X0 R into destinations 0 and 2 and X0 alpha
 into destination 1, without declaring a complete color group. Its first pixel
-is [0.25,0.8,0.25]. A change to that R sample dirties destinations 0 and 2;
-changes to G/B dirty nothing. Requesting only destination 2 reads R once and
-does not publish destination 0. Reject a duplicate-destination or missing-slot
+is [0.25,0.8,0.25]. R contributes to destinations 0 and 2, while G/B contribute to neither. Runtime selection operates on complete output tiles. Reject a duplicate-destination or missing-slot
 version of this mapping before requesting any input payload.
 
 The independent oracle scatters each selected source coordinate into all of its

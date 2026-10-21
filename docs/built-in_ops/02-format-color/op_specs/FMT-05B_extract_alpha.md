@@ -71,32 +71,33 @@ integer samples retain their bits without normalization.
 For existing alpha, resolve its static index and expand FMT-01A with matching
 axis/keepdims/profile/layout and explicit source description. For opaque, expand
 the exact same-dtype opaque-code constant into the output shape using conforming
-image storage. Preserve static shape/group dependencies without reading input
-pixels. A generic zero-stride constant does not automatically satisfy planar
-image storage. Force view cannot generate absent opaque pixels.
+tile storage. Preserve static shape/group dependencies without reading input pixels. Both existing-alpha extraction and opaque generation use independent dense output tiles; nonempty forced view is unavailable.
 
 Output is an ordinary component tensor with no attached description or persistent
-alpha relationship to the input image. A view can retain the normal backing owner;
-this is storage ownership, not a semantic alpha attachment. Existing sample
-validity is not certified merely by extraction.
+alpha relationship to the input image. Copied output storage has independent ownership. Existing sample validity is not certified merely by extraction.
 
 The helper serializes a per-source `result-v1` assertion with a digest of the
-complete canonical schema plus a separate physical-layout assertion. The
+complete canonical schema plus a separate spatial-topology assertion. The
 canonical schema includes structural identity, dtype, shape, batch/atomic and spatial axes; the layout
-assertion binds physical storage order and row pitch. Compilation/direct
+assertion encodes spatial height/width/channel axes. The physical Plan and Run binding separately validate actual strides, offsets and capacities. Compilation/direct
 preparation checks the producer descriptor, including for forward references.
 Static helper expansion is transactional.
 
-For requested output q, insert the original alpha index at the removed axis
+For auto/materialize requested output q, insert the original alpha index at the removed axis
 (or replace its singleton coordinate when keepdims=true) to obtain the sole
-source coordinate. Dirty input alpha maps inversely; other color channels have
-no sample effect. Opaque has no source pixel dependency. Both paths retain
-static Descriptor dependencies and the inherited upstream failure rules.
+source coordinate. Only selected alpha coordinates contribute to the copied output; other color sample values are not inspected. This sample mapping does not define incremental invalidation. Opaque has no source pixel dependency. Both paths retain
+static schema dependencies. Required payload producers retain their declared failure scope; a nonempty forced-view task reads no payload and reports ViewUnavailable.
 
 Use transactional graph expansion, inherited resource/work accounting, exact
-coverage, context-independent view lifetime, cancellation and errors from the
+coverage, context-independent output lifetime, cancellation and errors from the
 family. An absent alpha with error fails preflight. Opaque fallback only handles
 an absent alpha relation, not an existing alpha channel with missing coverage.
+
+## Fixed opaque generation
+
+The opaque branch uses fixed invocation ABI 8. Each selected output tile lowers to one CPU Host task with an input schema dependency and no payload reads. Static preparation retains complete source assertions and computes the output schema, including batch, cell, atomic and spatial axes. Kernel preparation checks the symbol, output geometry, empty read/task-parameter arrays and zero scratch. An unused source producer can remain elided even when its sample implementation would fail.
+
+Auto and materialize fill preallocated output tiles from the prepared native bytes. Every supported dtype is copied bitwise, including signaling NaNs for direct literal calls. The physical Plan proves dense positive output strides, so invocation fills the logical tile linearly with constant-size local state. It polls cancellation between at most 256 writes and allocates no arithmetic workspace. The Plan admits selected output storage; its size is independent of the unrequested logical extent. View on a nonempty selection returns InvalidArgument/InvalidDomain because absent pixels require generation; Empty still validates static parameters but emits no payload task. Independent Runs share immutable preparation and own their output storage. Retained results survive source and execution-context teardown, and failures publish no partial call result.
 
 ## Independent acceptance
 

@@ -20,7 +20,15 @@ namespace format {
  * geometry. `source_white` is required for raw XYZ adaptation. `layout`
  * defaults to `auto`, and `profile` defaults to `strict`. Inapplicable basis,
  * white or adaptation parameters are rejected. Results retain only structure
- * and samples; callers supply configuration to each downstream operation. */
+ * and samples; callers supply configuration to each downstream operation.
+ * Native nodes use fixed invocation ABI 8. Semantic callers guarantee finite
+ * consumed triples and rounded outputs throughout retained output tiles; for
+ * whole-matrix identity, selected copied samples must be finite. Raw IEEE
+ * behavior is defined by FMT-10. Input reads close over each source tile grid.
+ * auto/materialize write independent dense tiles. Nonidentity view rejects
+ * statically; nonempty exact-I view reads only schema and fails
+ * ViewUnavailable. Empty requests retain static checks and produce no payload
+ * task. */
 struct RgbBasisOptions final {
   std::string group;
   std::optional<std::array<std::uint64_t, 3>> components;
@@ -85,7 +93,9 @@ PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> adapt_xyz_white(
 /** @brief Transactionally append A -> optional C -> B and return B's output.
  *
  * This helper does not create a native D operation. It preserves each stage's
- * rounding, dependency and failure behavior.
+ * rounding, fixed tile dependencies, caller sample preconditions and
+ * operational failures. Semantic validity applies separately at every
+ * intermediate stage.
  *
  * @param document Workflow graph to extend.
  * @param input Existing workflow input edge.

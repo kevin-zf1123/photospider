@@ -1,10 +1,11 @@
 # ADR 0018：保留不可变输入并复用精确局部结果
 
 - 状态：Accepted
+- 实现边界（2026-10-20）：不可变输入所有权保持。下文 completed-result/checkpoint/block cache 与 evidence reuse 为历史设计，已从 package 0.39 移除。当前执行使用独立的逐 activation tile allocation，不复用 payload；参见[tile 存储](../../kernel-architecture/zh/Cache-Model.zh.md)与[物理 Plan 契约](../../kernel-architecture/zh/Compiler-and-Execution.zh.md)。
 - 英文权威文档：[ADR 0018](../0018-local-result-caches.md)
-- 当前边界：0.36.0 中，原决定里的快照 facets，以及 import 拒绝图像、color-array、`ImagePlane` 和 `Mask` Tensor 的规则已被取代。快照只校验结构；运行数据以 Result 静态 Tensor 成员 绑定。
+- 历史边界：0.36.0 中，原决定里的快照 facets，以及 import 拒绝图像、color-array、`ImagePlane` 和 `Mask` Tensor 的规则已被取代。快照只校验结构；运行数据以 Result 静态 Tensor 成员 绑定。
 
-## 当前实现：内容身份与 call activation
+## 历史实现：内容身份与 call activation
 
 静态 Plan 的完整结果键包含 operation、参数、固定 schema、资源、输出
 member/tile、backend/mode、固定读取范围和输入样本内容，排除物理 node、step

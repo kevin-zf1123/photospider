@@ -9,10 +9,11 @@
 #include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/sequence_profiles.hpp"
 #include "common/exact_binary_sum.hpp"
+#include "photospider/core/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Shared finite-input endpoint interpolation, RN64 control reconstruction and
-// direct output conversion. All scratch is part of the caller's continuation.
+// direct output conversion. Scratch belongs to the caller's arithmetic state.
 struct ExactSampling final {
   core_internal::ExactBinarySum first, second;
   std::array<std::uint64_t, 68> products{};
@@ -21,10 +22,11 @@ struct ExactSampling final {
   bool environment_established;
   explicit ExactSampling(SequenceProfile selected, bool normalized = false)
       : profile(selected), environment_established(normalized) {}
-  Result<std::uint64_t> weighted(
-      std::uint64_t a, std::uint64_t b, std::uint32_t wa, std::uint32_t wb,
-      std::uint32_t divisor, bool narrow, bool subtract,
-      const std::function<Status(std::uint64_t)>& consume) {
+  Result<std::uint64_t> weighted(std::uint64_t a, std::uint64_t b,
+                                 std::uint32_t wa, std::uint32_t wb,
+                                 std::uint32_t divisor, bool narrow,
+                                 bool subtract,
+                                 const core_internal::WorkConsumer& consume) {
     auto charged = consume(8192);
     if (!charged.ok())
       return Result<std::uint64_t>(charged);
@@ -71,7 +73,7 @@ struct ExactSampling final {
   Result<std::uint64_t> coordinate(
       std::uint32_t index, std::uint32_t count,
       const std::array<std::uint64_t, 2>& endpoints,
-      const std::function<Status(std::uint64_t)>& consume) {
+      const core_internal::WorkConsumer& consume) {
     if (!index)
       return Result<std::uint64_t>(endpoints[0]);
     if (index + 1 == count)

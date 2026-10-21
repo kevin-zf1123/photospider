@@ -24,6 +24,12 @@ if(PHOTOSPIDER_BUILD_BENCHMARK_TOOLS)
     FILES_MATCHING PATTERN "*.hpp")
 endif()
 if(BUILD_TESTING AND PHOTOSPIDER_BUILD_BENCHMARK_TOOLS)
+  # Explicit manual measurement target; no CTest threshold or install consumer.
+  add_executable(physical_execution_benchmark EXCLUDE_FROM_ALL
+    tests/tools/physical_execution_benchmark.cpp)
+  target_link_libraries(physical_execution_benchmark PRIVATE Photospider::benchmark_tools)
+  target_include_directories(physical_execution_benchmark PRIVATE tests)
+  target_compile_options(physical_execution_benchmark PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_library(photospider_test_benchmark_tools STATIC EXCLUDE_FROM_ALL
     src/tools/benchmark/raw_benchmark.cpp src/tools/benchmark/raw_benchmark_test_hooks.cpp)
   target_compile_features(photospider_test_benchmark_tools PUBLIC cxx_std_17)

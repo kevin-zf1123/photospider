@@ -10,7 +10,6 @@
 #include "compiler/artifact_text.hpp"
 #include "compiler/identity.hpp"
 #include "photospider/compiler/compiler.hpp"
-#include "plugin/dependency_identity.hpp"
 
 namespace ps {
 namespace {
@@ -135,24 +134,27 @@ Result<std::string> CompilerArtifact::export_ir(const ValidatedIR& ir) {
 }
 Result<std::string> CompilerArtifact::export_plan(const ExecutionPlan& plan) {
   try {
-    auto registry = plan.operation_registry_.lock();
+    auto registry = plan.data().operation_registry_.lock();
     if (!registry || !plan.current() || !plan.revision())
       return Result<std::string>({ErrorCode::Stale, "plan is stale"});
+    // Artifact limits are fixed, even if a trusted planner was allowed a
+    // larger in-memory program. Never emit tables our loader cannot accept.
+    auto checked = physical::validate_program(plan.data().program_);
+    if (!checked.ok())
+      return Result<std::string>(checked);
     ArtifactData data;
-    data.parent_digest = plan.input_ir_digest_.value;
-    store_program(&data, plan.linked_program_);
+    data.parent_digest = plan.data().input_ir_.value;
+    store_program(&data, plan.data().source_program_);
     auto dependencies = manifest(ArtifactKind::ExecutionPlan, *registry, data);
     if (!dependencies.ok())
       return Result<std::string>(dependencies.status());
     data.manifest = dependencies.take_value();
-    data.options.tile_extent = plan.tile_extent_;
-    data.options.execution_mode = plan.execution_mode_;
-    data.options.output_requests = plan.output_requests_;
-    data.plan_outputs = plan.outputs_;
-    for (const auto& step : plan.steps_)
-      data.steps.push_back({step, {}});
-    for (const auto& block : plan.blocks_)
-      data.code.emplace(block.id, block.instructions);
+    data.options.tile_extent = plan.data().program_.tile_extent;
+    data.options.execution_mode = plan.data().mode_;
+    data.options.output_requests = plan.data().requests_;
+    data.plan_outputs = plan.data().outputs_;
+    data.physical = plan.data().program_;
+    data.bindings = plan.data().calls_;
     return compiler_internal::encode_artifact(data);
   } catch (const std::bad_alloc&) {
     return Result<std::string>(exhausted());
@@ -219,57 +221,41 @@ Result<ExecutionPlan> CompilerArtifact::import_plan(
     if (!checked.ok())
       return Result<ExecutionPlan>(checked);
     auto validated = bound.take_value();
-    std::vector<Backend> placements;
-    for (const auto& record : data.steps)
-      placements.push_back(record.step.backend);
-    // Bind declarations and stored placements without optimization, backend
-    // selection, tile expansion or an operation dependency-mapping callback.
-    auto linked = compiler.link_plan(validated, data.options, &placements);
+    // Validate serialized derived tables as supplied. Import never repairs
+    // adjacency/reservations and never invokes an operation lowerer.
+    checked = physical::validate_program(data.physical);
+    if (!checked.ok())
+      return Result<ExecutionPlan>(checked);
+    data.options.output_names.emplace();
+    for (const auto& output : data.plan_outputs)
+      data.options.output_names->push_back(output.first);
+    auto linked = compiler.link_plan(validated, data.options);
     if (!linked.ok())
       return linked;
     auto result = linked.take_value();
-    if (data.steps.size() != result.steps_.size() ||
-        data.code.size() != result.blocks_.size())
-      return Result<ExecutionPlan>(
-          invalid("incomplete physical call/code table"));
-    for (std::size_t i = 0; i < data.steps.size(); ++i) {
-      const auto& record = data.steps[i].step;
-      auto& step = result.steps_[i];
-      if (record.node_id != step.node_id ||
-          record.output_index != step.output_index)
-        return Result<ExecutionPlan>(
-            invalid("physical call table order mismatch"));
-      if (result.execution_mode_ == ExecutionMode::CpuExact &&
-          record.backend != Backend::Cpu)
-        return Result<ExecutionPlan>(
-            invalid("CPU plan contains GPU placement"));
-      step.backend = record.backend;
+    if (data.plan_outputs != result.edit().outputs_ ||
+        data.options.output_requests != result.edit().requests_ ||
+        data.bindings.size() != data.physical.calls.size())
+      return Result<ExecutionPlan>(invalid("invalid physical output mapping"));
+    std::map<IRCallId, const SemanticNode*> nodes;
+    for (const auto& node : result.edit().source_program_.calls)
+      nodes.emplace(node.id, &node);
+    for (std::size_t ci = 0; ci < data.bindings.size(); ++ci) {
+      auto found = nodes.find(data.physical.calls[ci].source_call);
+      if (found == nodes.end())
+        return Result<ExecutionPlan>(invalid("unknown physical source call"));
+      auto& binding = data.bindings[ci];
+      binding.operation = found->second->operation;
+      binding.parameters = found->second->parameters;
+      binding.prepared = found->second->prepared;
     }
-    for (auto& block : result.blocks_) {
-      auto found = data.code.find(block.id);
-      if (found == data.code.end())
-        return Result<ExecutionPlan>(invalid("missing physical code block"));
-      block.instructions = std::move(found->second);
-    }
-    for (const auto& named : data.plan_outputs)
-      if (named.second >= result.return_signature_.size() ||
-          result.return_signature_[named.second].name != named.first)
-        return Result<ExecutionPlan>(
-            invalid("invalid physical return mapping"));
-    result.outputs_ = data.plan_outputs;
-    result.output_requests_ = data.options.output_requests;
-    result.input_ir_digest_.value = data.parent_digest;
-    checked = compiler.finalize_plan(&result);
-    if (checked.ok())
-      checked = compiler.validate_plan(result);
+    result.edit().program_ = std::move(data.physical);
+    result.edit().calls_ = std::move(data.bindings);
+    result.edit().input_ir_.value = data.parent_digest;
+    checked = compiler.validate_plan(result);
     if (!checked.ok())
       return Result<ExecutionPlan>(checked);
-    result.digest_.value = compiler_internal::physical_digest(result);
-    result.cache_key_.value =
-        compiler_internal::plan_cache_key(result.digest_.value);
-    auto work = UINT64_MAX;
-    result.structured_templates_ =
-        contract_internal::dependency_cache_templates(result, {}, &work, {});
+    result.edit().digest_.value = compiler_internal::physical_digest(result);
     return Result<ExecutionPlan>(std::move(result));
   } catch (const std::bad_alloc&) {
     return Result<ExecutionPlan>(exhausted());

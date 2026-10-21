@@ -1,0 +1,19 @@
+# NUM-03 fixed constant and broadcast execution
+
+The six `numeric.{constant,broadcast}_{strict,accelerated_apple_silicon,accelerated_x86_64}` keys use ABI 8 CPU tasks. Each selected output tile has one task and its own dense allocation. Input Results contain one tensor under any schema/member key. All seven numeric dtypes are copied bit-for-bit, including signaling NaN payloads, signed zeros and integer extrema. Output port `values` uses `photospider.tensor`/`samples`, with ordinary target axes. Static shape is a canonical list of 1..8 positive extents with product at most 2^40.
+
+The `layout` node parameter and `ArrayLayout` SDK enum are removed. Helpers take `CpuNumericProfile` immediately after shape or axis_map. Sparse requests allocate only selected tiles. A large logical shape can therefore execute a bounded sparse selection, while a full request must admit all selected dense storage. There is no zero-stride output representation or runtime owner-dependent path. Source affine views still support legal negative/zero strides and unaligned offsets.
+
+## Mapping and preparation
+
+Constant requires complete source `sample_shape()` `[1]`. Every output task declares that scalar's input tile and reads the scalar once. It copies one element into the output, then grows the initialized prefix using disjoint copies of at most 64 KiB. The source region is independent of output coordinates. Empty selection emits no task or scalar read.
+
+Broadcast requires an explicit injective axis_map with one target axis per complete source axis, including batch axes. Each source extent must be one or equal the mapped target extent. For a source singleton, the required interval is `[0,1)`; otherwise it is the selected output tile's interval on the mapped axis. Their product forms the exact source rectangle, and the task declares all intersecting input tiles using the source grid. Unmapped target axes replicate source values. Empty selection emits no task or payload read.
+
+Preparation validates static output metadata, the canonical output tile, its actual write view, complete required source tile slots, empty task parameters and zero scratch. It derives the source rectangle from the canonical output grid before examining an imported write's dimensions. Prepared state owns immutable metadata and slot maps; each invocation has its own bounded stack coordinates and copy buffer.
+
+Broadcast maps each global output coordinate to its source coordinate and gathers at most 32 bytes before copying a batch. No floating arithmetic or NaN quieting occurs. Constant checks cancellation at entry and between at-most-64-KiB copies; broadcast checks at entry and every 64 samples. Runtime creates no payload allocation, and both kernels require zero scratch. Operational failures prevent successful call publication; accepted work retains owners through drain. Successful outputs own storage independently of input owners and remain readable after context destruction. There are no per-sample diagnostics, work counters or completed-result caches.
+
+## Validation
+
+Temporary checks cover all seven dtypes, all UInt8 scalar values, integer extrema, raw IEEE specials, source batch/atomic grids, axis permutations, singleton expansion, negative/zero strides, unaligned offsets, full/partial/empty selections and exact source tile sets. Roundtrip artifacts and reuse PreparedPlans across concurrent Runs and scalar rebinding. Include rank eight, sparse selections at the 2^40 logical limit, copy blocks exceeding 64 KiB, malformed static maps/shapes and prepare rejection for incomplete reads or incorrect writes. Compile the affected public helpers, including shaper composition, then remove the temporary checkers. Numerical profile names do not establish execution on unavailable x86 or GPU devices.

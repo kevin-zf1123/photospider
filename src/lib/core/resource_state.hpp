@@ -88,18 +88,33 @@ struct ResourceBudget::Impl {
           std::max(stats.peak.values[i], stats.live.values[i]);
     }
   }
+  void commit_metadata(std::uint64_t bytes) noexcept {
+    stats.allocated_metadata_bytes += bytes;
+    stats.peak_allocated_metadata_bytes = std::max(
+        stats.peak_allocated_metadata_bytes, stats.allocated_metadata_bytes);
+  }
 };
 struct ResourceLease::Impl {
   std::shared_ptr<ResourceBudget::Impl> root;
   ResourceCapacity amount;
   core_internal::PayloadCapture observation;
+  std::weak_ptr<core_internal::MetadataObservation> metadata_observation;
   std::uint64_t committed_payload = 0;
+  std::uint64_t committed_metadata = 0;
   bool quarantined = false;
   ~Impl() {
     if (!root)
       return;
     std::lock_guard<std::mutex> lock(root->mutex);
+    // The bookkeeping object retires even when unverified external storage
+    // remains quarantined. Its reserved capacity remains protected as before.
+    root->stats.allocated_metadata_bytes -= sizeof(Impl);
+    core_internal::ResourceMetadataAccess::update(
+        metadata_observation, 0,
+        quarantined ? 0 : amount[ResourceKind::Metadata], 0,
+        sizeof(Impl) + (quarantined ? 0 : committed_metadata));
     if (!quarantined) {
+      root->stats.allocated_metadata_bytes -= committed_metadata;
       for (std::size_t i = 0; i < amount.values.size(); ++i)
         root->stats.live.values[i] -= amount.values[i];
       core_internal::ResourcePayloadAccess::update(

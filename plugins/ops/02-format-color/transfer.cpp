@@ -1,9 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
-#include <functional>
 #include <memory>
 #include <new>
 #include <optional>
@@ -11,582 +9,440 @@
 #include <utility>
 #include <vector>
 
-#include "02-format-color/result_mapping.hpp"
 #include "02-format-color/transfer_fast.hpp"
 #include "02-format-color/transfer_math.hpp"
 #include "02-format-color/transfer_prepare.hpp"
 #include "02-format-color/transfer_runtime.hpp"
 #include "02-format-color/transfer_simd.hpp"
+#include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
-#include "photospider/data/region_runs.hpp"
-#include "photospider/ops/numeric/diagnostics.hpp"
-#include "photospider/plugin/tile_helpers.hpp"
+#include "photospider/plugin/tile_geometry.hpp"
 
 namespace ps::plugin_internal::transfer_ops {
-using data_internal::format_numeric::ExactWorkFailure;
-using data_internal::format_numeric::ExactWorkScope;
-
-// Allocated lazily, through the observation's bounded host allocator. An
-// alpha-only/copy/identity request creates neither numerical workspace.
-template <class T>
-class Workspace final {
-  MutableBuffer storage_;
-  T* value_ = nullptr;
-
- public:
-  Workspace() = default;
-  Workspace(const Workspace&) = delete;
-  Workspace& operator=(const Workspace&) = delete;
-  ~Workspace() {
-    if (value_) {
-      value_->~T();
-    }
-  }
-  template <class... Args>
-  Result<T*> get(const BufferAllocator& allocator, Args&&... args) {
-    if (!value_) {
-      auto allocated = allocator.allocate(sizeof(T));
-      if (!allocated.ok()) {
-        return Result<T*>(allocated.status());
-      }
-      storage_ = allocated.take_value();
-      static_assert(alignof(T) <= alignof(std::max_align_t));
-      value_ = new (storage_.data()) T(std::forward<Args>(args)...);
-    }
-    return Result<T*>(value_);
-  }
+struct SampleBlock final {
+  std::array<std::uint64_t, 64> source{}, target{}, offsets{};
 };
-inline const char* sample_problem(const Preparation& state,
-                                  std::uint64_t bits) {
-  const auto p = numeric_ops::BinaryParts::decode(bits, state.narrow);
-  if (p.nan || p.infinite) {
-    return "nonfinite participating sample";
-  }
-  const auto& c = state.program;
-  const double x = numeric_double(bits, state.narrow);
-  double lo = 0, hi = 1;
-  if (c.definition.curve == TransferCurve::Bt1886) {
-    if (c.encode) {
-      lo = *c.definition.black_luminance;
-      hi = *c.definition.white_luminance;
-    }
-  } else if (c.definition.curve == TransferCurve::Pq) {
-    if (c.encode) {
-      hi = 10000;
-    }
-  } else if (c.definition.curve != TransferCurve::HlgOetf) {
-    return nullptr;
-  }
-  return x >= lo && x <= hi ? nullptr
-                            : "participating sample outside native domain";
-}
-class Runner final {
-  const Preparation& state_;
-  const BufferAllocator& allocator_;
-  const core_internal::WorkConsumer& consume_;
-  bool environment_active_;
-  Workspace<StrictMath> strict_;
-  Workspace<CompactMath> compact_;
-  Workspace<FastMath> fast_;
-
- public:
-  NumericDiagnostics diagnostics;
-  std::uint64_t failed_lane = 0;
-  Runner(const Preparation& state, const BufferAllocator& allocator,
-         const core_internal::WorkConsumer& consume, bool active)
-      : state_(state),
-        allocator_(allocator),
-        consume_(consume),
-        environment_active_(active) {
-    diagnostics.profile = state.profile == SequenceProfile::Strict
-                              ? CpuNumericProfile::Strict
-                          : state.profile == SequenceProfile::AppleSilicon
-                              ? CpuNumericProfile::AppleSiliconNeon
-                              : CpuNumericProfile::X86Avx2;
-    std::snprintf(
-        diagnostics.implementation.data(), diagnostics.implementation.size(),
-        "FMT09/3;real-DAG;compact-words=8;SLEEF-3.9.0/"
-        "u10;filter=%d;compact=%d;gamma2-simd=%d;%s",
-        PHOTOSPIDER_TRANSFER_FAST_MATH, PHOTOSPIDER_TRANSFER_COMPACT_MATH,
-        PHOTOSPIDER_TRANSFER_GAMMA2_SIMD,
-        numeric_ops::sequence_implementation());
-  }
-  Status span(const std::uint8_t* source, std::int64_t stride,
-              std::uint8_t* target, unsigned count, bool selected) {
-    const unsigned width = state_.narrow ? 4 : 8;
-    auto status = consume_(count);
-    if (!status.ok()) {
-      return status;
-    }
-    if (!selected) {
-      if (target) {
-        if (stride == width) {
-          std::memcpy(target, source, count * width);
-        } else {
-          for (unsigned i = 0; i < count; ++i) {
-            std::memcpy(target + i * width,
-                        source + static_cast<std::int64_t>(i) * stride, width);
-          }
-        }
-        diagnostics.copied_elements += count;
-      } else {
-        diagnostics.view_elements += count;
-      }
-      return Status::success();
-    }
-    const auto& curve = state_.program;
-    if (curve.identity) {
-      unsigned bad = count;
-      if (state_.semantic) {
-        if (stride == width && PHOTOSPIDER_TRANSFER_GAMMA2_SIMD &&
-            numeric_ops::accelerated_math_available()) {
-          bad = first_nonfinite(source, count, state_.narrow);
-        } else {
-          for (unsigned i = 0; i < count; ++i) {
-            std::uint64_t bits = 0;
-            std::memcpy(&bits, source + static_cast<std::int64_t>(i) * stride,
-                        width);
-            if ((bits & ~sign_mask(state_.narrow)) >=
-                infinity_bits(state_.narrow)) {
-              bad = i;
-              break;
-            }
-          }
-        }
-      }
-      diagnostics.evaluated_values += bad == count ? count : bad + 1;
-      if (bad != count) {
-        failed_lane = bad;
-        return sample_error("nonfinite participating sample");
-      }
-      if (target) {
-        if (stride == width) {
-          std::memcpy(target, source, count * width);
-        } else {
-          for (unsigned i = 0; i < count; ++i)
-            std::memcpy(target + i * width,
-                        source + static_cast<std::int64_t>(i) * stride, width);
-        }
-        diagnostics.copied_elements += count;
-      } else {
-        diagnostics.view_elements += count;
-      }
-      return Status::success();
-    }
-    // No DAG arrays, branch gathering or workspace for exact gamma=2. This
-    // path still validates every participating semantic sample before SIMD.
-    if (curve.definition.curve == TransferCurve::PowerGamma &&
-        *curve.definition.gamma == 2 && environment_active_) {
-      if (state_.semantic) {
-        unsigned bad = count;
-        if (stride == width && PHOTOSPIDER_TRANSFER_GAMMA2_SIMD &&
-            numeric_ops::accelerated_math_available()) {
-          bad = first_nonfinite(source, count, state_.narrow);
-        } else {
-          const auto inf = infinity_bits(state_.narrow);
-          for (unsigned i = 0; i < count; ++i) {
-            std::uint64_t bits = 0;
-            std::memcpy(&bits, source + static_cast<std::int64_t>(i) * stride,
-                        width);
-            if ((bits & ~sign_mask(state_.narrow)) >= inf) {
-              bad = i;
-              break;
-            }
-          }
-        }
-        diagnostics.evaluated_values += bad == count ? count : bad + 1;
-        if (bad != count) {
-          failed_lane = bad;
-          return sample_error("nonfinite participating sample");
-        }
-      } else {
-        diagnostics.evaluated_values += count;
-      }
-#if PHOTOSPIDER_TRANSFER_GAMMA2_SIMD
-      if (target && stride == width &&
-          numeric_ops::accelerated_math_available()) {
-        gamma2_simd(source, target, count, state_.narrow, curve.encode);
-        if (state_.semantic && !curve.encode) {
-          // Signed power-gamma accepts finite values outside [0,1]. Squaring
-          // such a value may overflow; semantic output must remain finite.
-          const auto bad = first_nonfinite(target, count, state_.narrow);
-          if (bad != count) {
-            failed_lane = bad;
-            return sample_error("nonfinite rounded result",
-                                FailureReason::ArithmeticOverflow);
-          }
-        }
-        return Status::success();
-      }
-#endif
-      for (unsigned i = 0; i < count; ++i) {
-        failed_lane = i;
-        std::uint64_t bits = 0;
-        std::memcpy(&bits, source + static_cast<std::int64_t>(i) * stride,
-                    width);
-        auto direct = nonfinite(curve, bits, state_.narrow);
-        if (!direct) {
-          const double x = std::abs(numeric_double(bits, state_.narrow));
-          if (state_.narrow) {
-            const float f = static_cast<float>(x);
-            const float y = curve.encode ? std::sqrt(f) : f * f;
-            direct = numeric_bits(y, true);
-          } else {
-            direct = numeric_bits(curve.encode ? std::sqrt(x) : x * x);
-          }
-          *direct |= bits & sign_mask(state_.narrow);
-        }
-        if (state_.semantic) {
-          const auto result =
-              numeric_ops::BinaryParts::decode(*direct, state_.narrow);
-          if (result.nan || result.infinite) {
-            return sample_error("nonfinite rounded result",
-                                FailureReason::ArithmeticOverflow);
-          }
-        }
-        if (target) {
-          std::memcpy(target + i * width, &*direct, width);
-        }
-      }
-      return Status::success();
-    }
-    std::array<std::uint64_t, 64> bits{}, result{};
-    std::array<double, 64> input{};
-    std::array<unsigned, 64> branches{};
-    std::array<bool, 64> done{};
-    const auto& c = state_.program;
-    for (unsigned i = 0; i < count; ++i) {
-      failed_lane = i;
-      std::memcpy(&bits[i], source + static_cast<std::int64_t>(i) * stride,
-                  width);
-      ++diagnostics.evaluated_values;
-      if (state_.semantic) {
-        if (const auto* problem = sample_problem(state_, bits[i])) {
-          return sample_error(problem);
-        }
-      }
-      if (c.identity) {
-        result[i] = bits[i];
-        done[i] = true;
-        continue;
-      }
-      auto direct = nonfinite(c, bits[i], state_.narrow);
-      if (!direct) {
-        direct = anchor(c, bits[i], state_.narrow);
-      }
-      input[i] = numeric_double(bits[i], state_.narrow);
-      if (c.signed_curve) {
-        input[i] = std::abs(input[i]);
-      }
-      if (!direct && !state_.semantic &&
-          c.definition.curve == TransferCurve::Pq && input[i] < 0) {
-        direct = nan_bits(state_.narrow);
-      }
-      if (direct) {
-        result[i] = *direct;
-        done[i] = true;
-        continue;
-      }
-      branches[i] = c.branch(input[i]);
-    }
-    for (unsigned branch = 0; branch < c.branch_count; ++branch) {
-      std::array<unsigned, FastMath::kLanes> indices{};
-      std::array<double, FastMath::kLanes> operands{};
-      unsigned lanes = 0;
-      auto batch = [&]() -> Status {
-        if (!lanes) {
-          return Status::success();
-        }
-        std::array<std::uint64_t, FastMath::kLanes> computed{};
-        std::array<bool, FastMath::kLanes> accepted{};
-        if (PHOTOSPIDER_TRANSFER_FAST_MATH && environment_active_ &&
-            numeric_ops::accelerated_math_available()) {
-          auto w = fast_.get(allocator_);
-          if (!w.ok()) {
-            return w.status();
-          }
-          auto s = w.value()->evaluate(
-              c.branches[branch], branch, operands.data(), lanes, state_.narrow,
-              state_.profile == SequenceProfile::Strict, computed.data(),
-              accepted.data(), consume_, environment_active_);
-          if (!s.ok()) {
-            return s;
-          }
-        }
-        for (unsigned lane = 0; lane < lanes; ++lane) {
-          const auto index = indices[lane];
-          failed_lane = index;
-          if (!accepted[lane]) {
-            if (state_.profile != SequenceProfile::Strict) {
-              ++diagnostics.strict_fallbacks;
-              ++diagnostics.fallback_reasons[static_cast<unsigned>(
-                  NumericFallbackReason::RoundingUnresolved)];
-            }
-            ++diagnostics.strict_math_calls;
-            auto evaluate = [&]() -> Result<std::uint64_t> {
+struct GeneralScratch final {
+  SampleBlock block;
+  StrictMath strict{SequenceProfile::Strict};
 #if PHOTOSPIDER_TRANSFER_COMPACT_MATH
-              const auto& program = c.branches[branch];
-              // The compact tier has no algebraic fallback. Tiny rational
-              // toes lose their input at its initial 128-bit precision and
-              // otherwise pay an exception before repeating the wide path.
-              // Final sqrt already requires that same wide algebraic path.
-              const bool wide_algebraic =
-                  program.final_sqrt ||
-                  (program.rational && std::abs(operands[lane]) < 0x1p-128);
-              if (!wide_algebraic && std::isfinite(operands[lane])) {
-                try {
-                  auto w = compact_.get(allocator_, SequenceProfile::Strict);
-                  if (!w.ok())
-                    return Result<std::uint64_t>(w.status());
-                  return w.value()->evaluate(program, operands[lane],
-                                             state_.narrow, consume_);
-                } catch (const numeric_ops::DirectedCapacityRetry&) {
-                  // Never catch resource, cancellation or Stale statuses here.
-                }
-              }
+  CompactMath compact{SequenceProfile::Strict};
 #endif
-              auto w = strict_.get(allocator_, SequenceProfile::Strict);
-              if (!w.ok())
-                return Result<std::uint64_t>(w.status());
-              return w.value()->evaluate(c.branches[branch], operands[lane],
-                                         state_.narrow, consume_);
-            };
-            auto evaluated = evaluate();
-            if (!evaluated.ok())
-              return evaluated.status();
-            computed[lane] = evaluated.value();
-          }
-          result[index] = computed[lane];
-          if (c.signed_curve)
-            result[index] |= bits[index] & sign_mask(state_.narrow);
-        }
-        lanes = 0;
-        return Status::success();
-      };
-      for (unsigned i = 0; i < count; ++i) {
-        if (!done[i] && branches[i] == branch) {
-          indices[lanes] = i;
-          operands[lanes++] = input[i];
-          if (lanes == indices.size()) {
-            status = batch();
-            if (!status.ok()) {
-              return status;
-            }
-          }
-        }
-      }
-      status = batch();
-      if (!status.ok()) {
-        return status;
-      }
-    }
-    for (unsigned i = 0; i < count; ++i) {
-      failed_lane = i;
-      if (state_.semantic) {
-        const auto p =
-            numeric_ops::BinaryParts::decode(result[i], state_.narrow);
-        if (p.infinite || p.nan) {
-          return sample_error("nonfinite rounded result",
-                              FailureReason::ArithmeticOverflow);
-        }
-      }
-      if (target) {
-        std::memcpy(target + i * width, &result[i], width);
-      }
-    }
-    if (c.identity) {
-      if (target) {
-        diagnostics.copied_elements += count;
-      } else {
-        diagnostics.view_elements += count;
-      }
-    }
-    return Status::success();
-  }
+  FastMath fast;
+  std::array<std::uint64_t, 64> bits{}, result{};
+  std::array<double, 64> input{};
+  std::array<unsigned, 64> branches{};
+  std::array<bool, 64> done{};
+  std::array<unsigned, FastMath::kLanes> indices{};
+  std::array<double, FastMath::kLanes> operands{};
+  std::array<std::uint64_t, FastMath::kLanes> computed{};
+  std::array<bool, FastMath::kLanes> accepted{};
 };
-inline Status located(Status status, const std::vector<std::uint64_t>& at) {
-  if (status.code == ErrorCode::OperationFailed) {
-    status.message += " coordinate=[";
-    for (std::size_t i = 0; i < at.size(); ++i) {
-      if (i) {
-        status.message += ',';
-      }
-      status.message += std::to_string(at[i]);
-    }
-    status.message += ']';
-  }
-  return status;
+bool gamma2(const Preparation& state) {
+  return state.program.definition.curve == TransferCurve::PowerGamma &&
+         *state.program.definition.gamma == 2;
 }
-using tensor_ops::require;
-using tensor_ops::take;
-using Poll = Result<ResultProgramPoll>;
-ResultBuilder result_builder(const ResultProgramPhase& phase, bool /*empty*/) {
-  auto builder = take(ResultBuilder::start(
-      phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {}, phase.query.tile_extent));
-
-  return builder;
+bool calculates(const Preparation& state, const Region& output) {
+  if (state.program.identity || state.layout == "view")
+    return false;
+  if (state.all)
+    return true;
+  const auto channels = output.dimensions()[*state.sample_axis];
+  const auto first = std::lower_bound(state.components.begin(),
+                                      state.components.end(), channels.offset);
+  return first != state.components.end() &&
+         *first - channels.offset < channels.extent;
 }
-Poll empty_result(const ResultProgramPhase& phase) try {
-  auto builder = result_builder(phase, true);
-  return Poll(ResultPublication{take(builder.seal()), true});
-} catch (const Status& status) {
-  return Poll(status);
+std::uint64_t scratch_bytes(const Preparation& state, const Region& output) {
+  return !calculates(state, output) ? 0
+         : gamma2(state)            ? sizeof(SampleBlock)
+                                    : sizeof(GeneralScratch);
 }
-Status evaluate(const ResultProgramPhase& phase, const Preparation& state,
-                Runner* runner, const ResultTensorReadWindow& source,
-                const Region& region, const ResultTensorWriteWindow* writer) {
-  const auto& dims = region.dimensions();
-  const auto sample_axis = source.sample_axis();
-  std::vector<std::uint64_t> at;
-  for (auto d : dims)
-    at.push_back(d.offset);
-  const auto width = state.narrow ? 4U : 8U;
-  for (;;) {
-    if (phase.query.cancellation.cancelled())
-      return {ErrorCode::Cancelled, "FMT-09 cancelled"};
-    const auto read = take(source.row_run(at));
-    const bool split =
-        state.sample_axis && *state.sample_axis == sample_axis && !state.all;
-    const bool selected =
-        state.selected(state.sample_axis ? at[*state.sample_axis] : 0);
-    const bool simple =
-        !selected || state.program.identity ||
-        (state.program.definition.curve == TransferCurve::PowerGamma &&
-         *state.program.definition.gamma == 2);
-    const auto batch = split ? 1U : simple ? 1024U : 64U;
-    auto n =
-        static_cast<unsigned>(std::min<std::uint64_t>(batch, read.samples));
-    n = static_cast<unsigned>(std::min<std::uint64_t>(
-        n,
-        dims[sample_axis].offset + dims[sample_axis].extent - at[sample_axis]));
-    std::uint8_t* target = nullptr;
-    if (writer) {
-      auto write = take(writer->row_run(at));
-      target = write.data;
-      n = static_cast<unsigned>(std::min<std::uint64_t>(n, write.samples));
-      if (write.sample_stride_bytes != static_cast<std::int64_t>(width))
-        n = 1;
-    }
-    auto status =
-        runner->span(read.data, read.sample_stride_bytes, target, n, selected);
-    if (!status.ok()) {
-      at[sample_axis] += runner->failed_lane;
-      return located(status, at);
-    }
-    at[sample_axis] += n;
-    if (at[sample_axis] < dims[sample_axis].offset + dims[sample_axis].extent)
+Status convert_general(const Preparation& state, GeneralScratch* w,
+                       unsigned count,
+                       const core_internal::WorkConsumer& consume) {
+  const auto& c = state.program;
+  const unsigned width = state.narrow ? 4 : 8;
+  w->done.fill(false);
+  for (unsigned i = 0; i < count; ++i) {
+    w->bits[i] = 0;
+    std::memcpy(&w->bits[i],
+                reinterpret_cast<const std::uint8_t*>(w->block.source.data()) +
+                    i * width,
+                width);
+    auto direct = nonfinite(c, w->bits[i], state.narrow);
+    if (!direct)
+      direct = anchor(c, w->bits[i], state.narrow);
+    if (direct) {
+      w->result[i] = *direct;
+      w->done[i] = true;
       continue;
-    at[sample_axis] = dims[sample_axis].offset;
-    bool next = false;
-    for (std::size_t axis = dims.size(); axis;) {
-      --axis;
-      if (axis == sample_axis)
-        continue;
-      if (++at[axis] < dims[axis].offset + dims[axis].extent) {
-        next = true;
-        break;
-      }
-      at[axis] = dims[axis].offset;
     }
-    if (!next)
+    w->input[i] = numeric_double(w->bits[i], state.narrow);
+    if (c.signed_curve)
+      w->input[i] = std::abs(w->input[i]);
+    // This branch is part of PQ's raw IEEE formula, independent of semantic
+    // caller preconditions. Keep negative operands out of fractional powers.
+    if (c.definition.curve == TransferCurve::Pq && w->input[i] < 0) {
+      w->result[i] = nan_bits(state.narrow);
+      w->done[i] = true;
+      continue;
+    }
+    w->branches[i] = c.branch(w->input[i]);
+  }
+  for (unsigned branch = 0; branch < c.branch_count; ++branch) {
+    unsigned lanes = 0;
+    const auto batch = [&]() -> Status {
+      if (!lanes)
+        return Status::success();
+      w->accepted.fill(false);
+      const auto& program = c.branches[branch];
+      if (PHOTOSPIDER_TRANSFER_FAST_MATH &&
+          numeric_ops::accelerated_math_available()) {
+        auto status = w->fast.evaluate(
+            program, branch, w->operands.data(), lanes, state.narrow,
+            state.profile == SequenceProfile::Strict, w->computed.data(),
+            w->accepted.data(), consume, true);
+        if (!status.ok())
+          return status;
+      }
+      for (unsigned lane = 0; lane < lanes; ++lane) {
+        if (!w->accepted[lane]) {
+          bool needs_wide = true;
+          Result<std::uint64_t> result(UINT64_C(0));
+#if PHOTOSPIDER_TRANSFER_COMPACT_MATH
+          result = w->compact.evaluate(program, w->operands[lane], state.narrow,
+                                       consume, &needs_wide);
+          if (!result.ok())
+            return result.status();
+#endif
+          if (needs_wide)
+            result = w->strict.evaluate(program, w->operands[lane],
+                                        state.narrow, consume);
+          if (!result.ok())
+            return result.status();
+          w->computed[lane] = result.value();
+        }
+        const auto index = w->indices[lane];
+        w->result[index] = w->computed[lane];
+        if (c.signed_curve)
+          w->result[index] |= w->bits[index] & sign_mask(state.narrow);
+      }
+      lanes = 0;
       return Status::success();
+    };
+    for (unsigned i = 0; i < count; ++i) {
+      if (!w->done[i] && w->branches[i] == branch) {
+        w->indices[lanes] = i;
+        w->operands[lanes++] = w->input[i];
+        if (lanes == FastMath::kLanes) {
+          auto status = batch();
+          if (!status.ok())
+            return status;
+        }
+      }
+    }
+    auto status = batch();
+    if (!status.ok())
+      return status;
+  }
+  for (unsigned i = 0; i < count; ++i)
+    std::memcpy(
+        reinterpret_cast<std::uint8_t*>(w->block.target.data()) + i * width,
+        &w->result[i], width);
+  return Status::success();
+}
+void convert_gamma2(const Preparation& state, SampleBlock* block,
+                    unsigned count) {
+  auto* source = reinterpret_cast<const std::uint8_t*>(block->source.data());
+  auto* target = reinterpret_cast<std::uint8_t*>(block->target.data());
+#if PHOTOSPIDER_TRANSFER_GAMMA2_SIMD
+  if (numeric_ops::accelerated_math_available()) {
+    gamma2_simd(source, target, count, state.narrow, state.program.encode);
+    return;
+  }
+#endif
+  const unsigned width = state.narrow ? 4 : 8;
+  for (unsigned i = 0; i < count; ++i) {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, source + i * width, width);
+    auto result = nonfinite(state.program, bits, state.narrow);
+    if (!result) {
+      const auto x = std::abs(numeric_double(bits, state.narrow));
+      if (state.narrow) {
+        const float f = static_cast<float>(x);
+        result =
+            numeric_bits(state.program.encode ? std::sqrt(f) : f * f, true);
+      } else {
+        result = numeric_bits(state.program.encode ? std::sqrt(x) : x * x);
+      }
+      *result |= bits & sign_mask(state.narrow);
+    }
+    std::memcpy(target + i * width, &*result, width);
   }
 }
-struct Continuation final {
-  const Preparation* state;
-  Footprint output;
-  explicit Continuation(const Preparation* s) : state(s) {}
-  Poll poll(const ResultProgramPhase& phase) try {
-    const auto& tensor = phase.query.output.result_schema->tensors[0];
-    output = phase.query.tensor_outputs
-                 ? *phase.query.tensor_outputs
-                 : take(Footprint::all(tensor.sample_shape()));
-
-    plugin_internal::FloatingEnvironment environment;
-    if (!environment.active())
-      return Poll(sample_error("floating environment unavailable"));
-    const std::function<Status(std::uint64_t)> consume = [&](std::uint64_t n) {
-      if (phase.query.cancellation.cancelled())
-        return Status{ErrorCode::Cancelled, "FMT-09 cancelled"};
-      return phase.consume_work(n);
-    };
-    ExactWorkScope exact(&consume, &phase.query.cancellation);
-    core_internal::WorkConsumer checkpoint(consume);
-    Runner runner(*state, phase.allocator, checkpoint, environment.active());
-    auto result = [&]() -> Poll {
-      try {
-        auto builder = result_builder(phase, false);
-        std::vector<ResultViewAxis> axes(tensor.sample_shape().size());
-        for (std::size_t i = 0; i < axes.size(); ++i)
-          axes[i].output_axis = static_cast<std::int32_t>(i);
-        require(format_result::planes(tensor, output, [&](const Region& box) {
-          auto source = take(
-              phase.tensors->at({0, 0}).acquire(box, phase.query.cancellation));
-          if (state->program.identity && !state->materialize) {
-            const auto prior_views = runner.diagnostics.view_elements;
-            require(evaluate(phase, *state, &runner, source, box, nullptr));
-            runner.diagnostics.view_elements = prior_views;
-            format_result::PublicationCounts counts;
-            auto status = format_result::publish(
-                phase, &builder, box, source, axes, state->layout, 0, &counts);
-            runner.diagnostics.view_elements += counts.viewed;
-            runner.diagnostics.copied_elements += counts.copied;
-            return status;
-          }
-          return builder.publish_tensor_kernel(
-              0, box,
-              [&](const auto& writers) {
-                try {
-                  for (const auto& writer : writers)
-                    require(evaluate(phase, *state, &runner, source,
-                                     writer.region(), &writer));
-                  return Status::success();
-                } catch (const Status& status) {
-                  return status;
-                } catch (const ExactWorkFailure& failure) {
-                  return failure.status;
-                }
-              },
-              phase.query.cancellation);
-        }));
-        require(consume(1));
-        return Poll(ResultPublication{take(builder.seal()), true});
-      } catch (const Status& status) {
-        return Poll(status);
-      } catch (const ExactWorkFailure& failure) {
-        return Poll(failure.status);
-      }
-    }();
-    if (!result.ok())
-      phase.record_failure(result.status());
-    if (phase.report_diagnostic) {
-      auto reported = report_numeric(phase, runner.diagnostics);
-      if (result.ok() && !reported.ok())
-        return Poll(reported);
-    }
-    return result;
-  } catch (const Status& status) {
-    return Poll(status);
+Result<TileSet> required_tiles(const Preparation& state, const Region& output,
+                               const TileGrid& grid,
+                               const ResourceBudget& budget,
+                               std::uint64_t maximum_tiles) {
+  using Answer = Result<TileSet>;
+  if (state.layout == "view")
+    return Answer(TileSet{});
+  std::uint64_t count = 1;
+  for (unsigned axis = 0; axis < grid.rank(); ++axis) {
+    const auto d = output.dimensions()[axis];
+    std::uint64_t extent = 1;
+    if (grid.batch_axis_mask() & (1U << axis))
+      extent = d.extent;
+    else if (axis == grid.height_axis() || axis == grid.width_axis())
+      extent = (d.offset + d.extent - 1) / grid.tile_extent() -
+               d.offset / grid.tile_extent() + 1;
+    if (extent > maximum_tiles / count)
+      return Answer({ErrorCode::ResourceExhausted, "transfer read tile limit"});
+    count *= extent;
   }
+  return sdk::tiles_for_region(budget, grid, output);
+}
+constexpr const char* transfer_contract = "transfer-fixed-v1";
+Result<OperationProgram> lower(const OperationLowering& query) {
+  using Answer = Result<OperationProgram>;
+  const auto& state = *static_cast<const Preparation*>(query.static_state);
+  auto input =
+      TileGrid::from_schema(*query.inputs[0].result_schema, query.tile_extent);
+  if (!input.ok())
+    return Answer(input.status());
+  auto output =
+      TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
+  if (!output.ok())
+    return Answer(output.status());
+  ResourceLimits limits;
+  limits.maximum_work = query.limits.maximum_work;
+  ResourceBudget budget(limits);
+  OperationProgramBuilder builder(query);
+  for (const auto& member : query.requests[0].members)
+    for (auto tile : member.second) {
+      auto region = output.value().region(tile);
+      if (!region.ok())
+        return Answer(region.status());
+      auto task =
+          builder.add_task("transfer", transfer_contract, {},
+                           {scratch_bytes(state, region.value()), 0, 0});
+      if (!task.ok())
+        return Answer(task.status());
+      auto reads = required_tiles(state, region.value(), input.value(), budget,
+                                  query.limits.maximum_records);
+      if (!reads.ok())
+        return Answer(reads.status());
+      if (reads.value().empty()) {
+        auto status = builder.read_input_schema(task.value(), 0);
+        if (!status.ok())
+          return Answer(status);
+      }
+      for (auto index : reads.value()) {
+        auto charged = budget.consume({1});
+        if (!charged.ok())
+          return Answer(charged);
+        auto status = builder.read_input(task.value(), 0, 0, index);
+        if (!status.ok())
+          return Answer(status);
+      }
+      auto status = builder.write_output(task.value(), 0, member.first, tile);
+      if (!status.ok())
+        return Answer(status);
+    }
+  return builder.finish();
+}
+struct PreparedTransfer final {
+  // PreparedKernel owns the OperationPreparation for the entire context life.
+  const Preparation* state;
+  bool calculates;
+  fixed_tensor::PointInputs<1> inputs;
 };
+void invoke(const ps_kernel_invocation_v8* invocation,
+            ps_kernel_status_v8* status) noexcept {
+  const auto& prepared =
+      *static_cast<const PreparedTransfer*>(invocation->prepared_context);
+  const auto& state = *prepared.state;
+  const auto consume = [invocation](std::uint64_t) {
+    return invocation->cancellation.is_cancelled &&
+                   invocation->cancellation.is_cancelled(
+                       invocation->cancellation.context)
+               ? Status{ErrorCode::Cancelled, {}}
+               : Status::success();
+  };
+  const auto accept = [status](const Status& result) {
+    if (!result.ok())
+      *status =
+          kernel_failure(result.code, result.message.c_str(), result.reason);
+    return result.ok();
+  };
+  if (!accept(consume(0)))
+    return;
+  if (state.layout == "view") {
+    *status = kernel_failure(ErrorCode::InvalidArgument, "ViewUnavailable",
+                             FailureReason::ViewUnavailable);
+    return;
+  }
+  FloatingEnvironment environment;
+  if (prepared.calculates && !environment.active()) {
+    *status = kernel_failure(ErrorCode::OperationFailed,
+                             "transfer numeric environment");
+    return;
+  }
+  SampleBlock* block = nullptr;
+  GeneralScratch* work = nullptr;
+  if (prepared.calculates) {
+    if (gamma2(state)) {
+      block = new (invocation->scratch[0].allocation) SampleBlock;
+    } else {
+      work = new (invocation->scratch[0].allocation) GeneralScratch;
+      block = &work->block;
+    }
+  }
+  struct ScratchLifetime final {
+    GeneralScratch* workspace;
+    ~ScratchLifetime() {
+      if (workspace)
+        workspace->~GeneralScratch();
+    }
+  } lifetime{work};
+  fixed_tensor::PointReader<1> reader{prepared.inputs, *invocation};
+  const auto& output = invocation->outputs[0];
+  const auto& layout = *output.layout;
+  auto* destination = static_cast<std::uint8_t*>(output.allocation);
+  const auto axis = state.sample_axis;
+  const unsigned width = state.narrow ? 4 : 8;
+  const auto first = axis ? layout.origin[*axis] : 0;
+  const auto channels = axis ? layout.shape[*axis] : 1;
+  std::uint64_t points = 1;
+  for (unsigned a = 0; a < layout.rank; ++a)
+    if (!axis || a != *axis)
+      points *= layout.shape[a];
+  for (auto channel = first; channel < first + channels; ++channel) {
+    const bool calculate = !state.program.identity && state.selected(channel);
+    for (std::uint64_t begin = 0; begin < points; begin += 64) {
+      if (!accept(consume(0)))
+        return;
+      const auto count =
+          static_cast<unsigned>(std::min<std::uint64_t>(64, points - begin));
+      for (unsigned lane = 0; lane < count; ++lane) {
+        auto index = begin + lane;
+        std::array<std::uint64_t, 8> at{};
+        std::uint64_t offset = output.byte_offset;
+        for (unsigned a = layout.rank; a-- > 0;) {
+          if (axis && a == *axis) {
+            at[a] = channel;
+          } else {
+            at[a] = layout.origin[a] + index % layout.shape[a];
+            index /= layout.shape[a];
+          }
+          offset += (at[a] - layout.origin[a]) * layout.strides[a];
+        }
+        const auto bits = reader.bits(0, at, width);
+        if (!calculate) {
+          std::memcpy(destination + offset, &bits, width);
+        } else {
+          std::memcpy(reinterpret_cast<std::uint8_t*>(block->source.data()) +
+                          lane * width,
+                      &bits, width);
+          block->offsets[lane] = offset;
+        }
+      }
+      if (calculate) {
+        if (gamma2(state))
+          convert_gamma2(state, block, count);
+        else if (!accept(convert_general(state, work, count, consume)))
+          return;
+        for (unsigned lane = 0; lane < count; ++lane)
+          std::memcpy(
+              destination + block->offsets[lane],
+              reinterpret_cast<const std::uint8_t*>(block->target.data()) +
+                  lane * width,
+              width);
+      }
+    }
+  }
+  *status = {};
+}
+Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
+  using Answer = Result<ps_prepared_kernel_v8>;
+  const auto invalid = [] {
+    return Answer({ErrorCode::TypeMismatch, "invalid transfer signature"});
+  };
+  const auto* state = static_cast<const Preparation*>(query.static_state);
+  if (!state || query.inputs.size() != 1 || query.outputs.size() != 1 ||
+      query.writes.size() != 1 || !query.task_parameters.empty() ||
+      !query.outputs[0].result_schema ||
+      !query.outputs[0].result_schema->same_schema(*state->output_schema))
+    return invalid();
+  const auto& write = query.writes[0];
+  auto grid =
+      TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
+  if (!grid.ok())
+    return Answer(grid.status());
+  auto region = grid.value().region(write.tile_index);
+  if (!region.ok())
+    return Answer(region.status());
+  if (query.scratch !=
+          std::array<std::uint64_t, 3>{scratch_bytes(*state, region.value()), 0,
+                                       0} ||
+      write.port || write.member || write.domain != physical::Domain::Host ||
+      write.layout.element_type !=
+          (state->narrow ? ElementType::Float32 : ElementType::Float64) ||
+      !fixed_tensor::matches_region(write.layout, region.value()))
+    return invalid();
+  auto prepared = std::make_unique<PreparedTransfer>();
+  prepared->state = state;
+  prepared->calculates = calculates(*state, region.value());
+  auto input =
+      TileGrid::from_schema(*query.inputs[0].result_schema, query.tile_extent);
+  if (!input.ok())
+    return Answer(input.status());
+  prepared->inputs.grids[0] = input.take_value();
+  ResourceLimits limits;
+  limits.maximum_work = physical::ValidationLimits{}.maximum_work;
+  auto reads = required_tiles(*state, region.value(), prepared->inputs.grids[0],
+                              ResourceBudget(limits), query.reads.size());
+  if (!reads.ok())
+    return Answer(reads.status());
+  if (reads.value().size() != query.reads.size())
+    return invalid();
+  std::size_t slot = 0;
+  for (auto index : reads.value()) {
+    const auto& read = query.reads[slot];
+    auto expected = prepared->inputs.grids[0].region(index);
+    if (!expected.ok())
+      return Answer(expected.status());
+    if (read.port || read.member || read.tile_index != index ||
+        read.domain != physical::Domain::Host ||
+        read.layout.element_type != write.layout.element_type ||
+        !fixed_tensor::matches_region(read.layout, expected.value()))
+      return invalid();
+    prepared->inputs.slots[0].push_back(
+        {index, static_cast<std::uint32_t>(slot++)});
+  }
+  ps_prepared_kernel_v8 kernel{};
+  kernel.struct_size = sizeof(kernel);
+  kernel.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  kernel.context = prepared.release();
+  kernel.invoke_cpu = invoke;
+  kernel.release = [](const void* context) {
+    delete static_cast<const PreparedTransfer*>(context);
+  };
+  return Answer(kernel);
+}
 OperationDefinition operation(bool encode, SequenceProfile profile,
                               const char* suffix) {
   OperationDefinition d;
   d.key =
       std::string("color.transfer_") + (encode ? "encode" : "decode") + suffix;
   auto& t = d.traits;
-  t.diagnostics = {numeric_diagnostic_identity()};
   t.input_count = 1;
   OperationPortConstraint port;
 
   port.element_type_mask = 127;
   t.input_schema = {port};
-  t.cacheable = false;
   t.requires_metadata_specialization = true;
-  t.workspace_bytes =
-      sizeof(StrictMath) + sizeof(FastMath) +
-      (PHOTOSPIDER_TRANSFER_COMPACT_MATH ? sizeof(CompactMath) : 0);
   t.parameter_schema = {
       {"group", OperationParameterType::String, false},
       {"components", OperationParameterType::String, false},
@@ -602,18 +458,23 @@ OperationDefinition operation(bool encode, SequenceProfile profile,
   out.key = "values";
   out.output_schema = port;
   out.result_schema = tensor_ops::scalar_schema();
-  out.continuation_bytes = sizeof(Continuation);
-  out.maximum_dependency_stages = 2;
   d.prepare_static = [encode, profile](const auto& inputs, const auto& params) {
     return prepare(inputs, params, encode, profile);
   };
-  d.map_dependencies = sdk::pointwise_dependencies;
-  d.start_result = [](const ResultProgramQuery& query,
-                      const BufferAllocator& allocator) {
-    if (query.tensor_outputs && query.tensor_outputs->empty())
-      return ResultContinuation::stateless<empty_result>();
-    return ResultContinuation::make<Continuation>(
-        allocator, static_cast<const Preparation*>(query.prepared->state()));
+  d.lower = lower;
+  d.prepare_kernel =
+      [](const physical::KernelDesc& kernel,
+         const physical::Placement& placement, const KernelPreparation& query,
+         const ResourceSet&,
+         const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    if (kernel.symbol != "transfer" || kernel.contract != transfer_contract)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::TypeMismatch, "invalid transfer kernel"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::BackendUnavailable, "transfer requires CPU Host"});
+    return prepare_kernel(query);
   };
   return d;
 }

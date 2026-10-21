@@ -66,8 +66,7 @@ int tensor_transaction() {
         PS_CHECK(builder.seal().status().code == expected);
       } else {
         check(status);
-        // Data publication may seal sparse coverage. The executor separately
-        // requires complete computation-unit coverage from operation callbacks.
+        // A sealed data object retains exactly the published sparse coverage.
         auto sealed = take(builder.seal());
         double value = 0;
         check(sealed.read_tensor(take(sealed.descriptor()), 0, {0, 2}, &value,

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -11,13 +12,14 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
 #include "photospider/core/content_digest.hpp"
 #include "photospider/core/status_helpers.hpp"
 #include "photospider/core/utf8_validation.hpp"
 #include "photospider/ops/format/channel.hpp"
 #include "photospider/ops/tensor_description.hpp"
-#include "photospider/plugin/tile_helpers.hpp"
+#include "photospider/plugin/tile_geometry.hpp"
 
 namespace ps::format::detail {
 std::string schema_assertion(const SchemaTemplate& schema) {
@@ -220,56 +222,173 @@ Result<OperationPreparation> prepare_extraction(
   return Prepared(std::move(prepared));
 }
 
-using format_result::require;
-using format_result::take;
-using Poll = Result<ResultProgramPoll>;
-ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
-  auto result = take(ResultBuilder::start(
-      phase.resources, *phase.query.output.result_schema,
-      phase.query.semantic_key, {}, phase.query.tile_extent));
-
-  return result;
+Region source_region(const Region& output, const Selection& selected,
+                     std::size_t batch_rank) {
+  auto dimensions = output.dimensions();
+  const auto axis = batch_rank + selected.axis;
+  if (selected.keepdims)
+    dimensions[axis] = {selected.index, 1};
+  else
+    dimensions.insert(dimensions.begin() + axis, {selected.index, 1});
+  return Region(std::move(dimensions));
 }
-Poll empty_result(const ResultProgramPhase& phase) try {
-  auto result = builder(phase, true);
-  return Poll(ResultPublication{take(result.seal()), true});
-} catch (const Status& status) {
-  return Poll(status);
+Result<OperationProgram> lower(const OperationLowering& query) {
+  using ResultProgram = Result<OperationProgram>;
+  const auto& selected =
+      static_cast<const Preparation*>(query.static_state)->selection;
+  const auto& source = query.inputs[0].result_schema->tensors[0];
+  auto input =
+      TileGrid::from_schema(*query.inputs[0].result_schema, query.tile_extent);
+  auto output =
+      TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
+  if (!input.ok())
+    return ResultProgram(input.status());
+  if (!output.ok())
+    return ResultProgram(output.status());
+  ResourceLimits limits;
+  limits.maximum_work = query.limits.maximum_work;
+  ResourceBudget budget(limits);
+  OperationProgramBuilder builder(query);
+  for (const auto& member : query.requests[0].members)
+    for (auto tile : member.second) {
+      auto task = builder.add_task("extract", "channel-copy-v1");
+      if (!task.ok())
+        return ResultProgram(task.status());
+      if (selected.layout == Layout::View) {
+        // Fixed produced tiles own distinct storage. A forced view task reports
+        // the unsupported policy without asking an upstream producer for data.
+        auto status = builder.read_input_schema(task.value(), 0);
+        if (!status.ok())
+          return ResultProgram(status);
+      } else {
+        auto region = output.value().region(tile);
+        if (!region.ok())
+          return ResultProgram(region.status());
+        auto reads = sdk::tiles_for_region(
+            budget, input.value(),
+            source_region(region.value(), selected, source.batch_axes.size()));
+        if (!reads.ok())
+          return ResultProgram(reads.status());
+        for (auto index : reads.value()) {
+          auto status = budget.consume({1});
+          if (status.ok())
+            status = builder.read_input(task.value(), 0, 0, index);
+          if (!status.ok())
+            return ResultProgram(status);
+        }
+      }
+      auto status = builder.write_output(task.value(), 0, member.first, tile);
+      if (!status.ok())
+        return ResultProgram(status);
+    }
+  return builder.finish();
 }
-struct ChannelState final {
+struct PreparedExtraction final {
   Selection selected;
-  explicit ChannelState(Selection value) : selected(value) {}
-  Poll poll(const ResultProgramPhase& phase) try {
-    auto scratch =
-        take(phase.resources.reserve(ResourceCapacity::host(8192, 8192)));
-    const auto& output_spec = phase.query.output.result_schema->tensors[0];
-    const auto& input_spec = phase.query.inputs[0].result_schema->tensors[0];
-    const auto output_shape = output_spec.sample_shape();
-    const auto input_shape = input_spec.sample_shape();
-    const auto output = phase.query.tensor_outputs
-                            ? *phase.query.tensor_outputs
-                            : take(Footprint::all(output_shape));
-    const auto axes = format_result::extraction_axes(
-        input_shape.size(), input_spec.batch_axes.size() + selected.axis,
-        selected.index, selected.keepdims);
-
-    auto result = builder(phase, false);
-    const auto policy = selected.layout == Layout::View          ? "view"
-                        : selected.layout == Layout::Materialize ? "materialize"
-                                                                 : "auto";
-    require(format_result::planes(output_spec, output, [&](const Region& box) {
-      auto window = phase.tensors->at({0, 0}).acquire(
-          format_result::mapped_region(box, axes), phase.query.cancellation);
-      if (!window.ok())
-        return window.status();
-      return format_result::publish(phase, &result, box, window.value(), axes,
-                                    policy);
-    }));
-    return Poll(ResultPublication{take(result.seal()), true});
-  } catch (const Status& status) {
-    return Poll(status);
-  }
+  unsigned axis = 0, source_rank = 0, width = 0;
+  fixed_tensor::PointInputs<1> inputs;
 };
+void invoke(const ps_kernel_invocation_v8* invocation,
+            ps_kernel_status_v8* status) noexcept {
+  const auto cancelled = [&] {
+    return invocation->cancellation.is_cancelled &&
+           invocation->cancellation.is_cancelled(
+               invocation->cancellation.context);
+  };
+  if (cancelled()) {
+    *status = kernel_failure(ErrorCode::Cancelled);
+    return;
+  }
+  const auto& state =
+      *static_cast<const PreparedExtraction*>(invocation->prepared_context);
+  if (state.selected.layout == Layout::View) {
+    *status = kernel_failure(ErrorCode::InvalidArgument,
+                             "ViewUnavailable: fixed extraction requires copy",
+                             FailureReason::InvalidDomain);
+    return;
+  }
+  fixed_tensor::PointReader<1> reader{state.inputs, *invocation};
+  const auto& output = invocation->outputs[0];
+  std::array<std::uint64_t, 8> at{}, source{};
+  std::uint64_t samples = 1;
+  for (unsigned axis = 0; axis < output.layout->rank; ++axis) {
+    at[axis] = output.layout->origin[axis];
+    samples *= output.layout->shape[axis];
+  }
+  auto* destination =
+      static_cast<std::uint8_t*>(output.allocation) + output.byte_offset;
+  for (std::uint64_t sample = 0; sample < samples; ++sample) {
+    if (sample % 256 == 0 && cancelled()) {
+      *status = kernel_failure(ErrorCode::Cancelled);
+      return;
+    }
+    for (unsigned axis = 0; axis < state.source_rank; ++axis)
+      source[axis] =
+          axis == state.axis
+              ? state.selected.index
+              : at[axis - (!state.selected.keepdims && axis > state.axis)];
+    const auto bits = reader.bits(0, source, state.width);
+    std::memcpy(destination + sample * state.width, &bits, state.width);
+    for (unsigned axis = output.layout->rank; axis-- > 0;) {
+      if (++at[axis] < output.layout->origin[axis] + output.layout->shape[axis])
+        break;
+      at[axis] = output.layout->origin[axis];
+    }
+  }
+  *status = {};
+}
+Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
+  using ResultKernel = Result<ps_prepared_kernel_v8>;
+  const auto invalid = [] {
+    return ResultKernel(
+        {ErrorCode::TypeMismatch, "invalid channel extraction signature"});
+  };
+  if (!query.static_state || query.inputs.size() != 1 ||
+      query.outputs.size() != 1 || query.writes.size() != 1 ||
+      !query.task_parameters.empty() ||
+      query.scratch != std::array<std::uint64_t, 3>{})
+    return invalid();
+  const auto& selected =
+      static_cast<const Preparation*>(query.static_state)->selection;
+  const auto& source = query.inputs[0].result_schema->tensors[0];
+  const auto& write = query.writes[0];
+  auto grid =
+      TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
+  if (!grid.ok())
+    return ResultKernel(grid.status());
+  auto region = grid.value().region(write.tile_index);
+  if (!region.ok())
+    return ResultKernel(region.status());
+  if (write.port || write.member || write.domain != physical::Domain::Host ||
+      write.layout.element_type != source.descriptor.element_type ||
+      !fixed_tensor::matches_region(write.layout, region.value()))
+    return invalid();
+  auto state = std::make_unique<PreparedExtraction>();
+  state->selected = selected;
+  state->axis = source.batch_axes.size() + selected.axis;
+  state->source_rank = source.sample_shape().size();
+  state->width = TensorSpan::element_size(source.descriptor.element_type);
+  if (selected.layout == Layout::View) {
+    if (!query.reads.empty())
+      return invalid();
+  } else {
+    const std::array<Region, 1> regions{
+        source_region(region.value(), selected, source.batch_axes.size())};
+    auto status =
+        fixed_tensor::prepare_input_regions(query, &state->inputs, regions);
+    if (!status.ok())
+      return ResultKernel(status);
+  }
+  ps_prepared_kernel_v8 kernel{};
+  kernel.struct_size = sizeof(kernel);
+  kernel.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+  kernel.context = state.release();
+  kernel.invoke_cpu = invoke;
+  kernel.release = [](const void* context) {
+    delete static_cast<const PreparedExtraction*>(context);
+  };
+  return ResultKernel(kernel);
+}
 
 OperationDefinition extraction(const std::string& key, bool named,
                                SequenceProfile profile) {
@@ -281,7 +400,6 @@ OperationDefinition extraction(const std::string& key, bool named,
 
   port.element_type_mask = 127;
   traits.input_schema = {port};
-  traits.cacheable = false;
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = {
       {"axis", OperationParameterType::Int64, false},
@@ -305,48 +423,24 @@ OperationDefinition extraction(const std::string& key, bool named,
   output.key = "values";
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
-  output.continuation_bytes = sizeof(ChannelState);
-  output.maximum_dependency_stages = 2;
   definition.prepare_static = [named, profile](const auto& inputs,
                                                const auto& parameters) {
     return prepare_extraction(inputs, parameters, named, profile);
   };
-  definition.map_dependencies =
-      [](const ResultStaticQuery& compiled) -> Result<ResultStaticMapping> {
-    try {
-      const auto query = sdk::static_query_view(compiled);
-      const auto& selected =
-          static_cast<const Preparation*>(compiled.prepared.state())->selection;
-      const auto& input = query.inputs[0].result_schema->tensors[0];
-      const auto shape = input.sample_shape();
-      const auto output =
-          query.tensor_outputs
-              ? *query.tensor_outputs
-              : take(Footprint::all(
-                    query.output.result_schema->tensors[0].sample_shape()));
-      const auto axes = format_result::extraction_axes(
-          shape.size(), input.batch_axes.size() + selected.axis, selected.index,
-          selected.keepdims);
-      ResultStaticMapping result;
-      auto support = take(Footprint::none(shape));
-      for (const auto& box : output.boxes())
-        support = take(support.unite(take(Footprint::from_regions(
-            shape, {format_result::mapped_region(box, axes)}))));
-      result.inputs.push_back(
-          take(sdk::tile_need_for_samples(compiled, 0, 0, support)));
-      return Result<ResultStaticMapping>(std::move(result));
-    } catch (const Status& status) {
-      return Result<ResultStaticMapping>(status);
-    }
-  };
-  definition.start_result = [](const ResultProgramQuery& query,
-                               const BufferAllocator& allocator) {
-    if (query.tensor_outputs && query.tensor_outputs->empty())
-      return ResultContinuation::stateless<empty_result>();
-    const auto* prepared =
-        static_cast<const Preparation*>(query.prepared->state());
-    return ResultContinuation::make<ChannelState>(allocator,
-                                                  prepared->selection);
+  definition.lower = lower;
+  definition.prepare_kernel =
+      [](const physical::KernelDesc& kernel,
+         const physical::Placement& placement, const KernelPreparation& query,
+         const ResourceSet&,
+         const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    if (kernel.symbol != "extract" || kernel.contract != "channel-copy-v1")
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::TypeMismatch, "unknown channel extraction kernel"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Result<ps_prepared_kernel_v8>(
+          {ErrorCode::BackendUnavailable, "extraction requires CPU Host"});
+    return prepare_kernel(query);
   };
   return definition;
 }

@@ -22,10 +22,10 @@ Inherit the [NUM baseline](NUM_common_contract.md) and [NUM-11 shared contract](
 
 ## Numeric semantics
 
-Sum all elements of a group exactly. Convert or range-check only the final total. Intermediate partial sums outside the destination range do not fail if the exact final total is representable. Integer final overflow is a Domain/Run `OperationFailed` / `ArithmeticOverflow` with the failing linear output group index. Floating overflow returns signed infinity; underflow follows the exact sign.
+Sum all elements of a group exactly and convert only the final total. Intermediate partial sums may exceed the destination range when the exact final total is representable. Integer final representability is an unchecked caller precondition. Floating overflow returns signed infinity; underflow follows the exact sign.
 
 The first NaN in logical row-major order wins and is converted by the shared payload rule. With no NaN, opposite signed infinities produce the fixed positive quiet NaN; otherwise an infinity determines its signed result. Exact zero is negative zero only if every contributor is negative zero, and positive zero otherwise. Singleton groups still apply numeric conversion and quiet an sNaN.
 
-For `input=[[1,2,3],[4,5,6]]` and `axes="1"`, the output is `[[6],[15]]` with shape `[2,1]`. Exact wide cancellation cases include Float64 `[MAX,MAX,-MAX] -> MAX` and Int64 `[INT64_MAX,1,-1] -> INT64_MAX`. UInt8 output must check only the final result; `[100,155]` over axis 0 produces 255.
+For `input=[[1,2,3],[4,5,6]]` and `axes="1"`, the output is `[[6],[15]]` with shape `[2,1]`. Exact wide cancellation cases include Float64 `[MAX,MAX,-MAX] -> MAX` and Int64 `[INT64_MAX,1,-1] -> INT64_MAX`. For UInt8 output, only the exact final total must be representable; `[100,155]` over axis 0 produces 255.
 
-For nonempty demand the complete-input program reads and validates the complete input, computes every group and publishes the complete dense output before projection. An unrequested group's integer overflow or input validation failure fails the selected result. Empty demand reads no payload and performs no arithmetic. Current public fixture coverage and limits are summarized in [NUM-11 Run-shared complete-input computation](../reductions-whole.md).
+Each requested output tile becomes a fixed CPU task covering its complete reduction groups. It reads the intersecting source tiles and writes a separate dense output allocation. Unselected groups perform no arithmetic. Empty selection emits no task. See [fixed reduction execution](../reductions-execution.md).

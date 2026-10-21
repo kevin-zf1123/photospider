@@ -17,8 +17,8 @@
 #include <vector>
 
 #include "core/callback_environment.hpp"
+#include "core/resource_observation.hpp"
 #include "data/affine_view.hpp"
-#include "data/result_host_access.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
@@ -75,14 +75,14 @@ void reserve_append(ResourceVector<T>* values, std::size_t count) {
 
 }  // namespace
 Status ResultBuilder::publish_tensor(std::uint32_t slot, const Region& region,
-                                     StridedLayout layout,
+                                     const StridedLayout& layout,
                                      std::shared_ptr<const CpuStorage> storage,
                                      const CancellationToken& cancellation) {
-  return publish_tensor_storage(slot, region, std::move(layout),
-                                std::move(storage), cancellation, {});
+  return publish_tensor_storage(slot, region, layout, std::move(storage),
+                                cancellation, {});
 }
 Status ResultBuilder::publish_tensor_storage(
-    std::uint32_t slot, const Region& region, StridedLayout layout,
+    std::uint32_t slot, const Region& region, const StridedLayout& layout,
     std::shared_ptr<const CpuStorage> storage,
     const CancellationToken& cancellation,
     ResourceVector<ResultRef> sources) try {
@@ -95,9 +95,9 @@ Status ResultBuilder::publish_tensor_storage(
   }
   ResourceAllocationScope scope(impl_->budget);
   const auto& spec = impl_->schema.tensors[slot];
-  auto span = TensorSpan::from_storage(
-      {spec.descriptor.element_type, spec.sample_shape()}, region,
-      std::move(layout), std::move(storage));
+  const data_internal::SampleDescriptor sample(spec);
+  auto span = TensorSpan::from_storage(sample.value, region, layout,
+                                       std::move(storage));
   if (!span.ok()) {
     fail(span.status());
     return span.status();
@@ -144,13 +144,14 @@ Status ResultBuilder::publish_tensor_spans(
   if (slot >= impl_->schema.tensors.size() || impl_->revision == UINT64_MAX)
     return reject(data_internal::invalid_schema());
   const auto& spec = impl_->schema.tensors[slot];
+  const data_internal::SampleDescriptor sample(spec);
   auto& target = impl_->tensors[slot];
   FootprintLimits limits;
   limits.cancellation = cancellation;
   limits.consume_work = [root = impl_->budget](auto n) {
     return root.consume({n});
   };
-  auto samples = Footprint::from_regions(spec.sample_shape(), {region}, limits);
+  auto samples = Footprint::from_region(sample.value.shape, region, limits);
   if (!samples.ok())
     return reject(samples.status());
   auto closed = spec.close_samples(samples.value(), limits);
@@ -158,17 +159,16 @@ Status ResultBuilder::publish_tensor_spans(
     return reject(closed.status());
   if (closed.value() != samples.value())
     return reject(data_internal::invalid_schema());
-  auto overlap = samples.value().intersect(target.tensor.coverage(), limits);
+  auto overlap = samples.value().intersect(target.coverage, limits);
   if (!overlap.ok())
     return reject(overlap.status());
   if (!overlap.value().empty())
     return reject(data_internal::invalid_schema());
-  auto next = target.tensor.coverage().unite(samples.value(), limits);
+  auto next = target.coverage.unite(samples.value(), limits);
   if (!next.ok())
     return reject(next.status());
-  auto supplied =
-      Tensor::create_view({spec.descriptor.element_type, spec.sample_shape()},
-                          samples.value(), spans.data(), spans.size(), limits);
+  auto supplied = Tensor::create_view(sample.value, samples.value(),
+                                      spans.data(), spans.size(), limits);
   if (!supplied.ok())
     return reject(supplied.status());
   const auto metadata_unit =
@@ -182,8 +182,7 @@ Status ResultBuilder::publish_tensor_spans(
       ResourceAllocator<TensorSpan>(impl_->budget)};
   std::uint64_t growth_bytes = metadata_bytes;
   ResultRef::Impl::StorageOwners new_owners(
-      std::less<const CpuStorage*>{},
-      ResourceAllocator<const CpuStorage*>(impl_->budget));
+      std::less<const void*>{}, ResourceAllocator<const void*>(impl_->budget));
   adopted.reserve(supplied.value().fragments().size());
   for (const auto& span : supplied.value().fragments()) {
     auto storage =
@@ -221,7 +220,7 @@ Status ResultBuilder::publish_tensor_spans(
     impl_->image_budget->release(growth_bytes);
     throw;
   }
-  auto& destination = data_internal::TensorAccess::edit(target.tensor);
+  auto& destination = target.affine;
   reserve_append(&destination, adopted.size());
   reserve_append(&target.affine_owners, sources.size());
   reserve_append(&target.affine_growth, 1);
@@ -234,8 +233,7 @@ Status ResultBuilder::publish_tensor_spans(
     target.affine_owners.push_back(std::move(owner));
   target.affine_growth.push_back(std::move(growth_owner));
   target.affine_canonical = false;
-  data_internal::TensorAccess::commit_coverage(target.tensor,
-                                               next.take_value());
+  target.coverage = next.take_value();
   ++impl_->revision;
   return Status::success();
 } catch (const std::bad_alloc&) {
@@ -270,9 +268,17 @@ Status ResultBuilder::publish_tensor(
   return publish_tensor_kernel(
       slot, region,
       [&](const auto& writers) {
+        auto scratch = impl_->budget.reserve(
+            ResourceCapacity::host(region.rank() * sizeof(std::uint64_t),
+                                   region.rank() * sizeof(std::uint64_t)));
+        if (!scratch.ok())
+          return scratch.status();
         for (const auto& writer : writers) {
+          core_internal::MetadataAllocation allocation(scratch.value());
           const auto& dimensions = writer.region().dimensions();
           std::vector<std::uint64_t> at;
+          at.reserve(dimensions.size());
+          allocation.commit(at.capacity() * sizeof(std::uint64_t));
           for (const auto d : dimensions)
             at.push_back(d.offset);
           for (;;) {
@@ -338,8 +344,9 @@ Status ResultBuilder::publish_tensor_kernel(
   limits.consume_work = [root = impl_->budget](auto n) {
     return root.consume({n});
   };
-  auto samples = Footprint::from_regions(
-      impl_->schema.tensors[slot].sample_shape(), {region}, limits);
+  ResourceAllocationScope scope(impl_->budget);
+  const data_internal::SampleDescriptor sample(impl_->schema.tensors[slot]);
+  auto samples = Footprint::from_region(sample.value.shape, region, limits);
   if (!samples.ok()) {
     fail(samples.status());
     return samples.status();
@@ -388,7 +395,8 @@ Status ResultBuilder::publish_tensor_kernel(
       return reject(data_internal::invalid_schema());
     const auto& spec = owner->schema.tensors[slot];
     auto& target = owner->tensors[slot];
-    if (samples.shape() != spec.sample_shape())
+    const data_internal::SampleDescriptor sample(spec);
+    if (samples.shape() != sample.value.shape)
       return reject(data_internal::invalid_schema());
     owner->kernel_active.store(true);
     ProducerWriteGuard producer_guard{&owner->kernel_active};
@@ -402,12 +410,12 @@ Status ResultBuilder::publish_tensor_kernel(
       return reject(closed.status());
     if (closed.value() != samples)
       return reject(data_internal::invalid_schema());
-    auto overlap = samples.intersect(target.tensor.coverage(), limits);
+    auto overlap = samples.intersect(target.coverage, limits);
     if (!overlap.ok())
       return reject(overlap.status());
     if (!overlap.value().empty())
       return reject(data_internal::invalid_schema());
-    auto coverage = target.tensor.coverage().unite(samples, limits);
+    auto coverage = target.coverage.unite(samples, limits);
     if (!coverage.ok())
       return reject(coverage.status());
     if (samples.empty()) {
@@ -427,7 +435,6 @@ Status ResultBuilder::publish_tensor_kernel(
     if (!copied.ok())
       return reject(copied);
     const auto rank = samples.shape().size();
-    ResourceVector<Region> chunks{ResourceAllocator<Region>(owner->budget)};
     const auto batch_rank = spec.batch_axes.size();
     const auto free_rank =
         spec.descriptor.shape.size() - spec.atomic_trailing_axes;
@@ -464,9 +471,8 @@ Status ResultBuilder::publish_tensor_kernel(
         sizeof(TensorSpan) +
         rank * (sizeof(RegionDimension) + 3 * sizeof(std::uint64_t));
     if (!core_internal::can_multiply(boxes, metadata_unit) ||
-        !core_internal::can_add(
-            boxes, data_internal::TensorAccess::edit(target.tensor).size(),
-            data_internal::TensorAccess::edit(target.tensor).max_size()))
+        !core_internal::can_add(boxes, target.affine.size(),
+                                target.affine.max_size()))
       return reject(
           {ErrorCode::ResourceExhausted, "batch tensor metadata count"});
     const auto metadata_bytes = boxes * metadata_unit;
@@ -483,9 +489,13 @@ Status ResultBuilder::publish_tensor_kernel(
         ResourceCapacity::host(scratch_bytes, scratch_bytes));
     if (!scratch.ok())
       return reject(scratch.status());
+    core_internal::MetadataAllocation publication_metadata(scratch.value());
+    ResourceVector<Region> chunks{ResourceAllocator<Region>(owner->budget)};
     chunks.reserve(boxes);
     for (const auto& box : samples.boxes()) {
+      core_internal::MetadataAllocation temporary_metadata(scratch.value());
       auto dims = box.dimensions();
+      temporary_metadata.commit(dims.capacity() * sizeof(RegionDimension));
       for (;;) {
         auto charged = owner->budget.consume({rank + 1});
         if (!charged.ok())
@@ -508,6 +518,8 @@ Status ResultBuilder::publish_tensor_kernel(
                   : end - dims[axis].offset;
         }
         chunks.emplace_back(dims);
+        publication_metadata.commit(chunks.back().dimensions().capacity() *
+                                    sizeof(RegionDimension));
         bool advanced = false;
         for (std::size_t axis = rank; axis-- > 0;) {
           dims[axis].offset += dims[axis].extent;
@@ -553,40 +565,50 @@ Status ResultBuilder::publish_tensor_kernel(
     layouts.reserve(boxes);
     windows.reserve(boxes);
     values.reserve(boxes);
-    auto& destination = data_internal::TensorAccess::edit(target.tensor);
+    auto& destination = target.affine;
     reserve_append(&destination, boxes);
     reserve_append(&target.affine_growth, 1);
     std::uint64_t offset = 0;
     for (const auto& region : chunks) {
       if (cancellation.cancelled())
         return reject({ErrorCode::Cancelled, {}});
-      ResultTensorWriteWindow window;
+      windows.emplace_back();
+      auto& window = windows.back();
       window.spec_ = &spec;
       window.region_ = region;
+      publication_metadata.commit(window.region_.dimensions().capacity() *
+                                  sizeof(RegionDimension));
       window.affine_data_ = buffer.data() + offset;
       window.affine_strides_.resize(rank);
-      StridedLayout layout;
+      publication_metadata.commit(window.affine_strides_.capacity() *
+                                  sizeof(std::uint64_t));
+      layouts.emplace_back();
+      auto& layout = layouts.back();
       layout.byte_offset = offset;
       layout.byte_strides.resize(rank);
+      publication_metadata.commit(layout.byte_strides.capacity() *
+                                  sizeof(std::int64_t));
       layout.origin.resize(rank);
+      publication_metadata.commit(layout.origin.capacity() *
+                                  sizeof(std::uint64_t));
       std::uint64_t stride = width;
-      std::vector<std::size_t> order;
+      std::array<std::size_t, 8> order{};
+      std::size_t ordered = 0;
       if (x < rank)
-        order.push_back(x);
+        order[ordered++] = x;
       if (y < rank)
-        order.push_back(y);
+        order[ordered++] = y;
       for (std::size_t axis = rank; axis-- > 0;)
         if (axis != x && axis != y)
-          order.push_back(axis);
-      for (auto axis : order) {
+          order[ordered++] = axis;
+      for (std::size_t i = 0; i < ordered; ++i) {
+        const auto axis = order[i];
         window.affine_strides_[axis] = stride;
         layout.byte_strides[axis] = stride;
         layout.origin[axis] = region.dimensions()[axis].offset;
         stride *= region.dimensions()[axis].extent;
       }
       offset += stride;
-      layouts.push_back(std::move(layout));
-      windows.push_back(std::move(window));
     }
     lock.unlock();
     Status written;
@@ -607,19 +629,22 @@ Status ResultBuilder::publish_tensor_kernel(
       return reject(written);
     if (cancellation.cancelled())
       return reject({ErrorCode::Cancelled, {}});
-    windows.clear();
     auto storage = std::move(buffer).freeze();
+    TensorDescriptor descriptor;
+    descriptor.element_type = spec.descriptor.element_type;
+    descriptor.shape = samples.shape();
+    publication_metadata.commit(descriptor.shape.capacity() *
+                                sizeof(std::uint64_t));
     for (std::size_t i = 0; i < boxes; ++i) {
-      auto value = TensorSpan::from_storage(
-          {spec.descriptor.element_type, samples.shape()}, chunks[i],
-          std::move(layouts[i]), storage);
+      auto value =
+          TensorSpan::from_storage(descriptor, chunks[i], layouts[i], storage);
       if (!value.ok())
         return reject(value.status());
       values.push_back(value.take_value());
     }
     ResultRef::Impl::StorageOwners new_owners(
-        std::less<const CpuStorage*>{},
-        ResourceAllocator<const CpuStorage*>(owner->budget));
+        std::less<const void*>{},
+        ResourceAllocator<const void*>(owner->budget));
     new_owners.insert(storage.get());
     if (cancellation.cancelled())
       return reject({ErrorCode::Cancelled, {}});
@@ -627,12 +652,10 @@ Status ResultBuilder::publish_tensor_kernel(
     // All allocations and fallible checks precede this single commit barrier.
     owner->storage_owners.merge(new_owners);
     for (auto& value : values)
-      data_internal::TensorAccess::edit(target.tensor)
-          .push_back(std::move(value));
+      target.affine.push_back(std::move(value));
     target.affine_growth.push_back(std::move(growth_owner));
     target.affine_canonical = canonical;
-    data_internal::TensorAccess::commit_coverage(target.tensor,
-                                                 coverage.take_value());
+    target.coverage = coverage.take_value();
     ++owner->revision;
     return Status::success();
   } catch (const std::bad_alloc&) {
@@ -670,14 +693,15 @@ Result<Footprint> ResultBuilder::validate_tensor_view_target(
       impl_->failure.record(data_internal::invalid_schema());
       return Result<Footprint>(impl_->status());
     }
-    prior = impl_->tensors[slot].tensor.coverage();
+    prior = impl_->tensors[slot].coverage;
   }
   const auto reject = [&](Status status) {
     fail(status);
     return Result<Footprint>(status);
   };
   const auto& spec = impl_->schema.tensors[slot];
-  if (region.empty() || !region.validate(spec.sample_shape()).ok())
+  const data_internal::SampleDescriptor sample(spec);
+  if (region.empty() || !region.validate(sample.value.shape).ok())
     return reject(data_internal::invalid_schema());
   if (cancellation.cancelled())
     return reject({ErrorCode::Cancelled, {}});
@@ -686,7 +710,7 @@ Result<Footprint> ResultBuilder::validate_tensor_view_target(
   limits.consume_work = [root = impl_->budget](auto n) {
     return root.consume({n});
   };
-  auto samples = Footprint::from_regions(spec.sample_shape(), {region}, limits);
+  auto samples = Footprint::from_region(sample.value.shape, region, limits);
   if (!samples.ok())
     return reject(samples.status());
   auto closed = spec.close_samples(samples.value(), limits);
@@ -710,16 +734,17 @@ Status ResultBuilder::validate_tensor_view_source(
     fail(status);
     return status;
   };
-  if (!source.valid() || slot >= impl_->schema.tensors.size() ||
-      region.empty() ||
-      !region.validate(impl_->schema.tensors[slot].sample_shape()).ok())
+  if (!source.valid() || slot >= impl_->schema.tensors.size() || region.empty())
+    return reject(data_internal::invalid_schema());
+  const auto& spec = impl_->schema.tensors[slot];
+  const data_internal::SampleDescriptor sample(spec);
+  if (!region.validate(sample.value.shape).ok())
     return reject(data_internal::invalid_schema());
   if (source.owner_.object_id() == impl_->object)
     return reject(data_internal::invalid_schema());
   if (cancellation.cancelled())
     return reject({ErrorCode::Cancelled, {}});
 
-  const auto& spec = impl_->schema.tensors[slot];
   if (spec.descriptor.element_type != source.spec().descriptor.element_type)
     return reject(data_internal::invalid_schema());
   // Logical validity and exact source authorization precede physical strategy
@@ -805,8 +830,8 @@ Status ResultBuilder::prepare_tensor_view(
   limits.consume_work = [root = impl_->budget](auto n) {
     return root.consume({n});
   };
-  // Metadata for temporary source layouts, rank-bounded coordinates and chunk
-  // factors is admitted before constructing standard-library scratch vectors.
+  // Admit temporary source layouts and rank-bounded coordinates before their
+  // allocation. Reshape chunks and factors use fixed rank-eight stack arrays.
   auto scratch = impl_->budget.reserve(ResourceCapacity::host(4096, 4096));
   if (!scratch.ok()) {
     fail(scratch.status());
@@ -821,7 +846,9 @@ Status ResultBuilder::prepare_tensor_view(
           impl_->budget.consume({source.region_.rank() + region.rank() + 1});
       if (!work.ok())
         return reject(work);
+      core_internal::MetadataAllocation allocation(scratch.value());
       auto dims = region.dimensions();
+      allocation.commit(dims.capacity() * sizeof(RegionDimension));
       bool present = true;
       const auto floor_div = [](__int128 a, __int128 b) {
         auto q = a / b;
@@ -862,8 +889,11 @@ Status ResultBuilder::prepare_tensor_view(
         continue;
       StridedLayout layout;
       layout.byte_strides.resize(region.rank());
+      allocation.commit(layout.byte_strides.capacity() * sizeof(std::int64_t));
       layout.origin.resize(region.rank());
+      allocation.commit(layout.origin.capacity() * sizeof(std::uint64_t));
       std::vector<std::uint64_t> at(source.region_.rank());
+      allocation.commit(at.capacity() * sizeof(std::uint64_t));
       for (std::size_t axis = 0; axis < region.rank(); ++axis)
         layout.origin[axis] = dims[axis].offset;
       for (std::size_t axis = 0; axis < at.size(); ++axis) {
@@ -888,9 +918,19 @@ Status ResultBuilder::prepare_tensor_view(
       if (!address.ok())
         return reject(address.status());
       layout.byte_offset = address.value();
-      auto value = TensorSpan::from_storage(
-          {spec.descriptor.element_type, spec.sample_shape()},
-          Region(std::move(dims)), std::move(layout), piece.storage());
+      TensorDescriptor descriptor;
+      descriptor.element_type = spec.descriptor.element_type;
+      descriptor.shape.reserve(spec.batch_axes.size() +
+                               spec.descriptor.shape.size());
+      allocation.commit(descriptor.shape.capacity() * sizeof(std::uint64_t));
+      descriptor.shape.insert(descriptor.shape.end(), spec.batch_axes.begin(),
+                              spec.batch_axes.end());
+      descriptor.shape.insert(descriptor.shape.end(),
+                              spec.descriptor.shape.begin(),
+                              spec.descriptor.shape.end());
+      const Region mapped_region(std::move(dims));
+      auto value = TensorSpan::from_storage(descriptor, mapped_region, layout,
+                                            piece.storage());
       if (!value.ok())
         return reject(value.status());
       mapped->push_back(value.take_value());
@@ -898,7 +938,7 @@ Status ResultBuilder::prepare_tensor_view(
   } else {
     auto joined = input_internal::join_affine_view(
         source.affine_.front().descriptor(), source.region_, source.affine_,
-        limits);
+        limits, scratch.value());
     if (!joined.ok())
       return reject(joined.status());
     if (!joined.value())
@@ -908,32 +948,41 @@ Status ResultBuilder::prepare_tensor_view(
         {source.affine_.size() * source.region_.rank() + region.rank()});
     if (!work.ok())
       return reject(work);
+    core_internal::MetadataAllocation allocation(scratch.value());
     StridedLayout layout;
     layout.byte_strides.resize(region.rank(), 0);
+    allocation.commit(layout.byte_strides.capacity() * sizeof(std::int64_t));
     layout.origin.resize(region.rank());
+    allocation.commit(layout.origin.capacity() * sizeof(std::uint64_t));
     std::vector<std::uint64_t> source_at;
+    source_at.reserve(source.region_.rank());
+    allocation.commit(source_at.capacity() * sizeof(std::uint64_t));
     for (auto d : source.region_.dimensions())
       source_at.push_back(d.offset);
     struct Chunk {
-      std::vector<std::uint64_t> factors;
+      std::array<std::uint64_t, 8> factors{};
+      std::size_t factor_count = 0;
       std::int64_t stride = 0;
     };
-    std::vector<Chunk> chunks;
+    std::array<Chunk, 8> chunks{};
+    std::size_t chunk_count = 0;
     for (std::size_t axis = source.region_.rank(); axis;) {
       --axis;
       const auto extent = source.region_.dimensions()[axis].extent;
       if (extent == 1)
         continue;
       const auto stride = common.value().layout().byte_strides[axis];
-      bool merge = !chunks.empty();
-      if (merge && chunks.back().stride == 0) {
+      bool merge = chunk_count != 0;
+      if (merge && chunks[chunk_count - 1].stride == 0) {
         merge = stride == 0;
       } else if (merge) {
-        const auto inner = chunks.back().stride;
+        const auto inner = chunks[chunk_count - 1].stride;
         const auto magnitude =
             inner < 0 ? -static_cast<__int128>(inner) : inner;
         std::uint64_t product = 1;
-        for (auto factor : chunks.back().factors) {
+        const auto& chunk = chunks[chunk_count - 1];
+        for (std::size_t i = 0; i < chunk.factor_count; ++i) {
+          const auto factor = chunk.factors[i];
           std::uint64_t next = 0;
           if (!core_internal::checked_multiply(product, factor, &next) ||
               !core_internal::can_multiply(
@@ -945,17 +994,29 @@ Status ResultBuilder::prepare_tensor_view(
         }
         merge = merge && static_cast<__int128>(product) * inner == stride;
       }
-      if (merge)
-        chunks.back().factors.push_back(extent);
-      else
-        chunks.push_back({{extent}, stride});
+      if (!merge)
+        chunks[chunk_count++].stride = stride;
+      auto& chunk = chunks[chunk_count - 1];
+      chunk.factors[chunk.factor_count++] = extent;
     }
     std::size_t axis = region.rank();
-    const auto shape = spec.sample_shape();
-    for (auto& chunk : chunks) {
+    TensorDescriptor descriptor;
+    descriptor.element_type = spec.descriptor.element_type;
+    descriptor.shape.reserve(spec.batch_axes.size() +
+                             spec.descriptor.shape.size());
+    allocation.commit(descriptor.shape.capacity() * sizeof(std::uint64_t));
+    descriptor.shape.insert(descriptor.shape.end(), spec.batch_axes.begin(),
+                            spec.batch_axes.end());
+    descriptor.shape.insert(descriptor.shape.end(),
+                            spec.descriptor.shape.begin(),
+                            spec.descriptor.shape.end());
+    const auto& shape = descriptor.shape;
+    for (std::size_t i = 0; i < chunk_count; ++i) {
+      auto& chunk = chunks[i];
       std::uint64_t assigned = 1;
       auto remaining = [&] {
-        return std::any_of(chunk.factors.begin(), chunk.factors.end(),
+        return std::any_of(chunk.factors.begin(),
+                           chunk.factors.begin() + chunk.factor_count,
                            [](auto n) { return n != 1; });
       };
       while (axis && (remaining() || shape[axis - 1] == 1)) {
@@ -967,7 +1028,8 @@ Status ResultBuilder::prepare_tensor_view(
           return unavailable();
         layout.byte_strides[axis] = static_cast<std::int64_t>(stride);
         auto needed = extent;
-        for (auto& factor : chunk.factors) {
+        for (std::size_t j = 0; j < chunk.factor_count; ++j) {
+          auto& factor = chunk.factors[j];
           const auto divisor = std::gcd(factor, needed);
           factor /= divisor;
           needed /= divisor;
@@ -992,9 +1054,8 @@ Status ResultBuilder::prepare_tensor_view(
     layout.byte_offset = offset.value();
     // Chunk factor cancellation proves equal logical sizes without requiring
     // their full-domain product to fit uint64. Zero strides remain zero.
-    auto reshaped = TensorSpan::from_storage(
-        {spec.descriptor.element_type, spec.sample_shape()}, region,
-        std::move(layout), common.value().storage());
+    auto reshaped = TensorSpan::from_storage(descriptor, region, layout,
+                                             common.value().storage());
     if (!reshaped.ok())
       return reject(reshaped.status());
     mapped->push_back(reshaped.take_value());
@@ -1122,7 +1183,7 @@ Status ResultBuilder::publish_tensor_view(
     if (!valid.ok())
       return valid;
     auto samples =
-        Footprint::from_regions(target.value().shape(), {piece.region}, limits);
+        Footprint::from_region(target.value().shape(), piece.region, limits);
     if (!samples.ok())
       return reject(samples.status());
     auto outside = samples.value().subtract(target.value(), limits);

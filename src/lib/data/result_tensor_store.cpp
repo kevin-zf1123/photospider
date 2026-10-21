@@ -3,7 +3,7 @@
 #include <memory>
 #include <utility>
 
-#include "data/tensor_access.hpp"
+#include "data/result_support.hpp"
 
 namespace ps::data_internal {
 Status ResultTensorBacking::initialize(const ResourceBudget& budget,
@@ -11,16 +11,17 @@ Status ResultTensorBacking::initialize(const ResourceBudget& budget,
                                        std::uint64_t tile_extent) {
   affine_owners =
       ResourceVector<ResultRef>(ResourceAllocator<ResultRef>(budget));
-  TensorAccess::edit(tensor) =
-      ResourceVector<TensorSpan>(ResourceAllocator<TensorSpan>(budget));
+  affine = ResourceVector<TensorSpan>(ResourceAllocator<TensorSpan>(budget));
   affine_growth = ResourceVector<std::shared_ptr<void>>(
       ResourceAllocator<std::shared_ptr<void>>(budget));
-  auto initial_coverage = Footprint::none(spec.sample_shape());
+  ResourceAllocationScope scope(budget);
+  const SampleDescriptor sample(spec);
+  auto initial_coverage = Footprint::none(sample.value.shape);
   if (!initial_coverage.ok())
     return initial_coverage.status();
-  TensorAccess::describe(tensor,
-                         {spec.descriptor.element_type, spec.sample_shape()},
-                         initial_coverage.take_value());
+  coverage = initial_coverage.take_value();
+  device = ResourceVector<DeviceTensorSpan>(
+      ResourceAllocator<DeviceTensorSpan>(budget));
   this->tile_extent = tile_extent;
   return Status::success();
 }

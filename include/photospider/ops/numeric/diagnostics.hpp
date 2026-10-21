@@ -7,7 +7,6 @@
 
 #include "photospider/core/status.hpp"
 #include "photospider/plugin/operation_registry.hpp"
-#include "photospider/plugin/result_program.hpp"
 
 namespace ps {
 /** @brief Actual CPU arithmetic path, separate from the CPU/GPU scheduler.
@@ -229,22 +228,6 @@ inline Result<NumericDiagnostics> read_numeric_report(ByteView bytes) {
   auto status = merge_numeric_diagnostics(&checked, report);
   return status.ok() ? Result<NumericDiagnostics>(report)
                      : Result<NumericDiagnostics>(status);
-}
-inline Status report_numeric(const ResultProgramPhase& phase,
-                             const NumericDiagnostics& report) {
-  if (!phase.report_diagnostic)
-    return Status::success();
-  if (!phase.query.prepared)
-    return {ErrorCode::InvalidArgument,
-            "numeric report requires prepared operation"};
-  const auto& types = phase.query.prepared->traits().diagnostics;
-  for (std::uint32_t i = 0; i < types.size(); ++i) {
-    if (types[i] == numeric_diagnostic_identity()) {
-      const auto bytes = encode_numeric_report(report);
-      return phase.report_diagnostic(i, {bytes.data(), bytes.size()});
-    }
-  }
-  return {ErrorCode::InvalidArgument, "numeric report was not declared"};
 }
 inline Status register_numeric_diagnostics(OperationRegistry& registry) {
   DiagnosticDefinition definition;

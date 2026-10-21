@@ -1,6 +1,9 @@
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <new>
 #include <string>
@@ -8,10 +11,10 @@
 #include <vector>
 
 #include "01-numeric/exact_interpolation.hpp"
-#include "01-numeric/numeric_tensor_program.hpp"
+#include "common/fixed_point_inputs.hpp"
+#include "common/floating_environment.hpp"
 #include "common/registry.hpp"
-#include "photospider/core/resource_allocator.hpp"
-#include "photospider/plugin/whole_stage.hpp"
+#include "common/tensor_program.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -25,16 +28,6 @@ struct InterpolationMath final {
   std::array<BinaryParts, 3> parts{};
   InterpolationMath(InterpolationKind operation, SequenceProfile profile)
       : kind(operation), exact(profile) {}
-  Result<std::uint64_t> invalid(unsigned port) const {
-    return Result<std::uint64_t>(
-        Status{ErrorCode::InvalidArgument,
-               std::string(kind == InterpolationKind::Mix ? "InvalidMixFactor"
-                                                          : "InvalidEdges") +
-                   ": port=" + std::to_string(port) +
-                   " bits=" + std::to_string(bits[port]),
-               FailureReason::InvalidDomain,
-               {FailureOrigin::Domain, FailureScope::Run}});
-  }
   Result<std::uint64_t> evaluate(
       ElementType type, const std::function<Status(std::uint64_t)>& consume) {
     using Answer = Result<std::uint64_t>;
@@ -50,10 +43,6 @@ struct InterpolationMath final {
     for (unsigned port = 0; port < 3; ++port)
       parts[port] = BinaryParts::decode(bits[port], narrow);
     if (kind == InterpolationKind::Mix) {
-      if (parts[2].nan || parts[2].infinite ||
-          parts[2].order_key() < BinaryParts::decode(0, narrow).order_key() ||
-          parts[2].order_key() > BinaryParts::decode(one, narrow).order_key())
-        return invalid(2);
       if (!parts[2].magnitude || bits[2] == one)
         return Answer(bits[bits[2] == one ? 1 : 0]);
       if (parts[0].nan || parts[1].nan)
@@ -65,11 +54,6 @@ struct InterpolationMath final {
                           : bits[parts[0].infinite ? 0 : 1]);
       return exact.mix(parts[0], parts[1], parts[2], narrow, consume);
     }
-    for (unsigned port = 1; port < 3; ++port)
-      if (parts[port].nan || parts[port].infinite)
-        return invalid(port);
-    if (parts[1].order_key() >= parts[2].order_key())
-      return invalid(1);
     if (parts[0].nan)
       return Answer(bits[0] | quiet);
     if (parts[0].order_key() <= parts[1].order_key())
@@ -79,68 +63,75 @@ struct InterpolationMath final {
     return exact.smoothstep(parts[0], parts[1], parts[2], narrow, consume);
   }
 };
-struct InterpolationKernel final {
+struct InterpolationState final {
   InterpolationKind kind;
   SequenceProfile profile;
-  InterpolationKernel(InterpolationKind operation, SequenceProfile selected)
-      : kind(operation), profile(selected) {}
-  Status write(const ResultProgramPhase& phase,
-               const ResourceVector<ResultTensorWriteWindow>& writers) {
-    using namespace numeric_ops;  // NOLINT(build/namespaces)
-    if (writers.size() != 1)
-      return {ErrorCode::OperationFailed,
-              "interpolation requires one packed writer"};
-    const auto& consume = phase.consume_work;
-    auto status = consume(1);
-    if (!status.ok())
-      return status;
-    const auto& input = phase.tensors->at({0, 0});
-    const auto shape = input.spec().sample_shape();
-    const auto type = input.spec().descriptor.element_type;
-    const auto width = TensorSpan::element_size(type);
-    auto scratch =
-        math_take(phase.allocator.allocate(sizeof(InterpolationMath)));
-    static_assert(alignof(InterpolationMath) <= alignof(std::max_align_t));
-    std::unique_ptr<InterpolationMath, void (*)(InterpolationMath*)> math(
-        new (scratch.data()) InterpolationMath(kind, profile),
-        [](InterpolationMath* value) { value->~InterpolationMath(); });
-    std::array<MathTensorReader, 3> readers{
-        MathTensorReader(input, phase.query.cancellation),
-        MathTensorReader(phase.tensors->at({1, 0}), phase.query.cancellation),
-        MathTensorReader(phase.tensors->at({2, 0}), phase.query.cancellation)};
-    MathTensorWriter writer(writers[0]);
-    std::vector<uint64_t> coordinate(shape.size(), 0);
-    const auto count =
-        math_take(phase.query.output.result_schema->tensors[0].sample_count());
-    for (uint64_t i = 0; i < count; ++i) {
-      status = consume(3 * shape.size() + 1);
-      if (!status.ok())
-        return status;
-      for (size_t port = 0; port < readers.size(); ++port)
-        math->bits[port] = readers[port].bits(coordinate);
-      auto result = math->evaluate(type, consume);
-      if (!result.ok()) {
-        auto failure = result.status();
-        if (failure.detail.origin == FailureOrigin::Domain) {
-          failure.message += " coordinate=[";
-          for (size_t axis = 0; axis < coordinate.size(); ++axis) {
-            if (axis)
-              failure.message += ',';
-            failure.message += std::to_string(coordinate[axis]);
-          }
-          failure.message += ']';
-        }
-        return failure;
-      }
-      const auto bits = result.value();
-      std::memcpy(writer.address(coordinate), &bits, width);
-      math_next(coordinate, shape);
-    }
-    return consume(1);
-  }
+  fixed_tensor::PointInputs<3> inputs;
 };
-using numeric_ops::WholeTensorProgram;
-using InterpolationProgram = WholeTensorProgram<InterpolationKernel>;
+void interpolation_invoke(const ps_kernel_invocation_v8* invocation,
+                          ps_kernel_status_v8* status) noexcept {
+  FloatingEnvironment environment;
+  if (!environment.active()) {
+    *status = kernel_failure(ErrorCode::OperationFailed,
+                             "numeric environment unavailable");
+    return;
+  }
+  const auto& state =
+      *static_cast<const InterpolationState*>(invocation->prepared_context);
+  static_assert(alignof(InterpolationMath) <= alignof(std::max_align_t));
+  auto* math = new (invocation->scratch[0].allocation)
+      InterpolationMath(state.kind, state.profile);
+  const auto destroy = [](InterpolationMath* value) {
+    value->~InterpolationMath();
+  };
+  std::unique_ptr<InterpolationMath, decltype(destroy)> guard(math, destroy);
+  try {
+    const std::function<Status(std::uint64_t)> consume =
+        [invocation](std::uint64_t) {
+          return invocation->cancellation.is_cancelled &&
+                         invocation->cancellation.is_cancelled(
+                             invocation->cancellation.context)
+                     ? Status{ErrorCode::Cancelled, {}}
+                     : Status::success();
+        };
+    const auto& output = invocation->outputs[0];
+    const auto& layout = *output.layout;
+    const auto dtype = static_cast<ElementType>(layout.element_type);
+    const auto width = TensorSpan::element_size(dtype);
+    fixed_tensor::PointReader<3> reader{state.inputs, *invocation};
+    std::array<std::uint64_t, 8> at{};
+    std::copy(layout.origin, layout.origin + layout.rank, at.begin());
+    std::uint64_t count = 1;
+    for (unsigned axis = 0; axis < layout.rank; ++axis)
+      count *= layout.shape[axis];
+    for (std::uint64_t sample = 0; sample < count; ++sample) {
+      for (unsigned port = 0; port < 3; ++port)
+        math->bits[port] = reader.bits(port, at, width);
+      auto value = math->evaluate(dtype, consume);
+      if (!value.ok()) {
+        *status =
+            kernel_failure(value.status().code, value.status().message.c_str(),
+                           value.status().reason);
+        return;
+      }
+      const auto bits = value.value();
+      std::memcpy(static_cast<std::uint8_t*>(output.allocation) +
+                      output.byte_offset + sample * width,
+                  &bits, width);
+      for (unsigned axis = layout.rank; axis-- > 0;) {
+        if (++at[axis] < layout.origin[axis] + layout.shape[axis])
+          break;
+        at[axis] = layout.origin[axis];
+      }
+    }
+    *status = {};
+  } catch (const std::bad_alloc&) {
+    *status = kernel_failure(ErrorCode::ResourceExhausted);
+  } catch (...) {
+    *status = kernel_failure(ErrorCode::OperationFailed,
+                             "interpolation arithmetic failed");
+  }
+}
 OperationDefinition interpolation_operation(const std::string& key,
                                             InterpolationKind kind,
                                             SequenceProfile profile) {
@@ -153,9 +144,9 @@ OperationDefinition interpolation_operation(const std::string& key,
   for (auto& input : traits.input_schema) {
     input.element_type_mask = 12;
   }
-  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
-                                       sizeof(InterpolationProgram));
-  traits.workspace_bytes = sizeof(InterpolationMath);
+  traits.outputs[0].key = "values";
+  traits.outputs[0].output_schema = tensor_ops::port();
+  traits.outputs[0].result_schema = tensor_ops::scalar_schema();
   operation.specialize_metadata = [profile](const auto& inputs, const auto&)
       -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
@@ -165,6 +156,11 @@ OperationDefinition interpolation_operation(const std::string& key,
                            FailureReason::None,
                            {FailureOrigin::Schema, FailureScope::Unspecified}});
     };
+    for (const auto& input : inputs) {
+      auto valid = tensor_ops::check_tensor(input);
+      if (!valid.ok())
+        return Answer(valid);
+    }
     const auto& member = inputs[0].result_schema->tensors[0];
     const TensorDescriptor first{member.descriptor.element_type,
                                  member.sample_shape()};
@@ -186,16 +182,56 @@ OperationDefinition interpolation_operation(const std::string& key,
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization result;
-    result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
-        numeric_ops::numeric_tensor_schema(first.element_type, first.shape));
+    auto schema = tensor_ops::scalar_schema();
+    schema.tensors[0].descriptor = first;
+    result.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(std::move(schema));
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.start_result = [kind, profile](const auto&, const auto& allocator) {
-    return ResultContinuation::make<InterpolationProgram>(allocator, kind,
-                                                          profile);
+  const std::string symbol =
+      kind == InterpolationKind::Mix ? "mix" : "smoothstep";
+  operation.lower = [symbol](const OperationLowering& query) {
+    return fixed_tensor::lower_pointwise(query, symbol, "exact-unchecked-v1",
+                                         sizeof(InterpolationMath));
   };
-  return sdk::with_whole_stage(std::move(operation), UINT64_C(1) << 48);
+  operation.prepare_kernel =
+      [kind, profile, symbol](
+          const physical::KernelDesc& kernel,
+          const physical::Placement& placement, const KernelPreparation& query,
+          const ResourceSet&,
+          const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
+    using Answer = Result<ps_prepared_kernel_v8>;
+    if (kernel.symbol != symbol || kernel.contract != "exact-unchecked-v1" ||
+        !query.task_parameters.empty() ||
+        query.scratch !=
+            std::array<std::uint64_t, 3>{sizeof(InterpolationMath), 0, 0})
+      return Answer(
+          {ErrorCode::TypeMismatch, "invalid interpolation kernel signature"});
+    if (placement.backend != physical::Backend::Cpu ||
+        placement.domain != physical::Domain::Host)
+      return Answer({ErrorCode::BackendUnavailable,
+                     "interpolation requires CPU Host placement"});
+    auto available = numeric_ops::sequence_profile_available(profile);
+    if (!available.ok())
+      return Answer(available);
+    auto state = std::make_unique<InterpolationState>();
+    state->kind = kind;
+    state->profile = profile;
+    auto valid = fixed_tensor::prepare_point_inputs(query, &state->inputs);
+    if (!valid.ok())
+      return Answer(valid);
+    ps_prepared_kernel_v8 result{};
+    result.struct_size = sizeof(result);
+    result.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
+    result.invoke_cpu = interpolation_invoke;
+    result.context = state.release();
+    result.release = [](const void* context) {
+      delete static_cast<const InterpolationState*>(context);
+    };
+    return Answer(result);
+  };
+  return operation;
 }
 }  // namespace
 Status register_numeric_interpolation(OperationRegistry* registry) {

@@ -53,7 +53,7 @@ Nuke官方STMap以归一化U/V表示绝对源位置，左下(0,0)、右上(1,1)�
 
 ## Region、资源与验收
 
-affine 可映射矩形顶点后扩大 filter footprint；homography 须排除分母零点。任意非线性映射可能存在内部极值、缝和跨面采样，只看四角不能保证输入 bbox 保守。静态 mapper 必须在编译期给出所有合法运行时地址的有限集合。当前 `image.stmap` 对每个输出 tile 授予完整 source 成员和覆盖该输出的 map tiles；执行时读取 UV 并在既有 source 授权内选择 bilinear taps。Source 的依赖与失效覆盖完整授权，map 的依赖按其授权 tile 记录。更一般的 warp 仍需实现各自的静态范围证明和数值校验。
+affine 可映射矩形顶点后扩大 filter footprint；homography 须排除分母零点。任意非线性映射可能存在内部极值、缝和跨面采样，只看四角不能保证输入 bbox 保守。静态 mapper 必须在编译期给出所有合法运行时地址的有限集合。当前 `image.stmap` 对每个输出 tile 声明所选 batch 的完整 source 空间域和覆盖该输出的 map tiles；执行时读取 UV 并在固定 reads 内选择 bilinear taps。Source 依赖覆盖该 batch 的完整空间域，map 依赖按其自身网格闭包。更一般的 warp 仍需实现各自的静态范围证明和数值校验。
 
 验收包括整数排列bit保持、identity map、已知点、map合成反例、bilinear解析2×2、常量保持、zero/negative scale、极点、odd尺寸、alpha边缘与zone plate缩小频谱。complete-input/ROI/tile一致与前向dirty传播分别检查；局部编辑map不总意味着只读局部源。
 
@@ -70,4 +70,4 @@ affine 可映射矩形顶点后扩大 filter footprint；homography 须排除分
 
 `image.stmap(source,map,boundary)` 当前接收单 Tensor Float32 HWC RGBA source 和 Float64 `[Ho,Wo,2]` map。Source batch 保留到输出；无 batch map 广播，带 batch map 必须匹配 source。输出仅有 `value`，使用 `photospider.image` v1/member `pixels`。UV 为绝对来源像素中心坐标，filter 固定 bilinear，boundary 必填且支持 constant/clamp/wrap/reflect/mirror。Normalized UV、其他 filter、map alpha decode 和 validity 输出仍属于提议目录，不是此接口参数。
 
-默认 straight alpha 的重采样在算子内部计算 `A=ΣwᵢAᵢ` 和 `RGB=ΣwᵢAᵢRGBᵢ/A`；A 为零时 RGB 为正零。Kernel 不转换或认证 association。STMap 不执行颜色空间转换，data map 不作为颜色处理。Planner 固定输入 grants 后，callback 在一次 poll 内选择并读取 tap、计算并发布结果。数值上只读取所选 tap 不会收窄完整 source 的授权或失效范围；同一 map tile 内非法 UV 仍可使请求失败。当前实现契约见[依赖采样](../../kernel-architecture/Dependency-Sampling.md)。
+默认 straight alpha 的重采样在算子内部计算 `A=ΣwᵢAᵢ` 和 `RGB=ΣwᵢAᵢRGBᵢ/A`；A 为零时 RGB 为正零。Kernel 不转换或认证 association。STMap 不执行颜色空间转换，data map 不作为颜色处理。每个所选输出 tile 使用一个固定 CPU task，直接借用 affine views，声明 scratch 为零，输出为独立 dense RGBA 存储。Task 不嵌套启动 worker。UV 转换为整数地址前检查 finite 和 +/-2^40 上限；仅检查实际所选输出像素，未使用的 map 坐标不被扫描。当前实现契约见[依赖采样](../../kernel-architecture/Dependency-Sampling.md)。
