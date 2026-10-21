@@ -24,7 +24,7 @@ external-engine numerical limits. It does not imply NUM strict/four-ULP accuracy
 Engine construction is synchronous and non-cancellable. Profile/config parsing,
 processor linking, BPC preparation, LUT inversion and gamut-table generation do
 not receive or probe a Run cancellation token. Construction work and memory
-limits, first-failure latching, complete validation for Empty/bypass requests,
+limits, first-failure latching, complete static structural preparation for Empty/bypass requests,
 and cleanup on failure remain required. This is the maintainer's explicit
 2026-10-21 revision; no preparation-cancellation kernel extension is required.
 
@@ -68,8 +68,9 @@ All selectors, resources, bindings, intent/options, keepdims/output_axis and
 layout are static and part of identity. The proposed description-based and
 finite-only raw paths follow FMT-12's explicit parameter contract. Static admission and full
 required engine construction occur for empty/bypass-only queries. A semantic
-CMYK source requires [0,1]; raw permits finite extended values. All modes reject
-consumed NaN/Inf and unit-adapter/F32 formatter overflow. Profile parsing alone
+CMYK source requires [0,1]; raw permits finite extended values. These domains,
+finite consumed/results values and representable unit-adapter/F32 conversion
+are unchecked caller premises. No host input, narrowed-value or output scan runs. Profile parsing alone
 does not prove the required directions, numerical validity or engine construction.
 
 A publishes `values`, retaining dtype and using FMT-12's same-count slot retention
@@ -158,8 +159,8 @@ pixels, not the display/proof color transform.
 
 Public source coordinates pass through FMT-12's exact double-unit adapter and
 the pinned input formatter to normalized Float32 engine coordinates. Evaluate
-cmsPipelineEvalFloat on that normalized vector. Require a finite score and emit
-1 iff score>0, otherwise +0. The 16-bit CLUT stage first saturating-quantizes its
+cmsPipelineEvalFloat on that normalized vector. Under the unchecked finite-score
+premise, emit 1 iff score>0, otherwise +0. The 16-bit CLUT stage first saturating-quantizes its
 normalized input to u16, interpolates in the pinned integer path, and returns
 q/65535 in Float32. Thus classification is q>=1 after interpolation/quantization;
 it is not a floating Delta-E comparison and has no added epsilon.
@@ -194,7 +195,7 @@ bit-copy only the corresponding bypass samples; B has no bypass output. Dirty
 mapping follows these dependencies, with no spatial halo. Hidden colors at zero
 alpha remain processed; neither member reads alpha to classify/convert colors.
 Unavoidable upstream complete-input operations retain their scope. Requested outputs only
-are published/validated; internal construction errors still fail the node.
+are published without validation; actual internal construction errors still fail the node.
 
 auto/materialize default to auto and create requested canonical planar output
 pages in a new full virtual reservation; forced view fails. Private uniform-stride
@@ -214,18 +215,19 @@ Check memory/work admission inside table sampling and engine construction.
 Construction is synchronous and noncancellable. Check cancellation around
 bounded pixel batches. The stock helper's ignored sample-return/failure paths must not
 publish a partially initialized table: latch host failure, verify complete table
-construction and discard on any error. Invalid/nonfinite generated sampler
-intermediates must fail construction before unsafe integer conversion; do not
-silently treat malformed profiles as an all-zero mask. Required host safety
-instrumentation preserves successful finite numerical behavior and enters the
-integration identity. No detached work, unbudgeted engine cache or alternate
+construction and discard on any actual error. Generated sampler numerical
+legality is an unchecked premise. The host adds no finite Lab/DeltaE/ratio
+checks, generated-sample scan or publication certificate. Allocation/work and
+actual sampler-completion instrumentation remains in the integration identity;
+a failed construction is never replaced with an all-zero mask. No detached work, unbudgeted engine cache or alternate
 algorithm is permitted. Prepared state, plans and active calls retain required pipeline resources.
 Result read windows retain their actual data storage until final release;
 computed values do not automatically retain profile or processor resources.
 
 Errors and observation scope inherit FMT-12: static invalid profile/parameters
 and unavailable required directions fail construction; type mismatch is explicit;
-consumed domain/narrowing/requested-result failures carry sample/component detail.
+actual engine execution failures retain their engine diagnostics. Numeric
+domain, narrowing and result premises have no required failure diagnostic.
 ResourceExhausted and cancellation are never converted into profile fallback,
 empty pipelines, identity proof or all-zero alarms. No independent transform may
 reuse a failed/partially built state. All static resources are checked even for
@@ -253,8 +255,8 @@ NUM four-ULP or universal physical-gamut accuracy is promised.
   codes and include valid colors equal to alarm RGB; B results must be unchanged.
   Do not demand all-zero masks merely from identical profiles; the heuristic and
   profile reversibility determine actual values.
-- Reject null/wrong-shape gamut pipelines, unsupported reverse directions and
-  nonfinite generated samples. Inject budget failure during table sampling,
+- Reject null/wrong-shape gamut pipelines and unsupported reverse directions.
+  Use generated samples satisfying the numerical premises. Inject budget failure during table sampling,
   cancellation during pixel execution, and ensure no partially built or
   zero-filled success escapes.
 - Split/offset/cross-tile/component observations match whole observations;

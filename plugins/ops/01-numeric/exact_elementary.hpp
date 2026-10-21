@@ -30,13 +30,6 @@ enum class ElementaryKind {
 struct ExactElementary final {
   RatioWorkspace ratio;
   explicit ExactElementary(SequenceProfile profile) : ratio(profile) {}
-  static Result<std::uint64_t> overflow() {
-    return Result<std::uint64_t>(
-        Status{ErrorCode::OperationFailed,
-               "integer arithmetic overflow",
-               FailureReason::ArithmeticOverflow,
-               {FailureOrigin::Domain, FailureScope::Atom}});
-  }
   Result<std::uint64_t> evaluate(
       ElementaryKind kind, ElementType dtype, std::uint64_t a, std::uint64_t b,
       const std::function<Status(std::uint64_t)>& consume,
@@ -85,13 +78,7 @@ struct ExactElementary final {
         default:
           break;
       }
-      const __int128 low =
-          dtype == ElementType::UInt8 ? 0 : -(static_cast<__int128>(1) << 63);
-      const __int128 high = dtype == ElementType::UInt8
-                                ? 255
-                                : (static_cast<__int128>(1) << 63) - 1;
-      if (result < low || result > high)
-        return overflow();
+      // Integer result representability is an unchecked caller premise.
       return Answer(static_cast<std::uint64_t>(result));
     }
     const auto x = BinaryParts::decode(a, narrow),

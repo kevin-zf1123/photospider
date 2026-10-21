@@ -94,13 +94,14 @@ inline Result<WorkflowNode> transpose_node(
 /** @brief Authors a dynamic slice with static positive per-axis counts.
  * starts and steps are Int64[rank] Result inputs. Counts cannot exceed source
  * extents. Each task declares source tiles reachable by any legal controls,
- * plus the complete starts and used steps vectors. Runtime validates complete
- * slice endpoints with widened arithmetic before copying selected coordinates.
+ * plus the complete starts and used steps vectors. Runtime directly computes
+ * selected coordinates with widened arithmetic; complete-domain bounds are
+ * unchecked caller premises.
  * Starts are nonnegative absolute indices; used steps are nonzero. Singleton
  * axes ignore step values; an all-singleton slice excludes the steps payload
  * and producer while still checking its static schema. Empty reads nothing.
- * Invalid controls return InvalidArgument/InvalidDomain. Controls never alter
- * Plan topology. Output allocation, ownership and concurrency match reshape.
+ * No control-domain diagnostic is promised. Controls never alter Plan topology.
+ * Output allocation, ownership and concurrency match reshape.
  */
 inline Result<WorkflowNode> slice_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput starts,

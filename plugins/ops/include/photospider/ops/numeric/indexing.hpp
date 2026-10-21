@@ -65,16 +65,16 @@ inline Result<WorkflowNode> concatenate_node(
  * Source rank is 1..8, with UInt8/Int64/Float32/Float64 dtype. Complete sample
  * shapes include batch axes and have <=2^40 elements. Output values uses
  * photospider.tensor/samples with ordinary axes, replacing axis extent by M.
- * A nonempty selection emits one shared index-validation task and one task per
- * output tile. Every index must be in the source axis, including unselected
- * output positions. Invalid indices return InvalidArgument/InvalidDomain.
+ * A nonempty selection emits one shared index-construction task and one task
+ * per output tile. Every index must be in the source axis, including unselected
+ * output positions, as an unchecked caller premise.
  * The shared task writes a private dense Int64[M,2] normalized table (16*M
  * bytes), with no arithmetic scratch. Consumers declare the non-axis output
  * region and complete source axis, then copy only selected output tiles.
  * Duplicate indices preserve output order and source bits, including sNaN.
- * Empty emits no tasks. Preparation proves views; used normalized positions
- * retain bounds checks before source access. Ownership, errors and helper
- * concurrency follow concatenate_node. Runtime topology remains fixed.
+ * Empty emits no tasks. Preparation proves static view signatures; normalized
+ * positions are trusted without runtime bounds checks. Ownership, errors and
+ * helper concurrency follow concatenate_node. Runtime topology remains fixed.
  */
 inline Result<WorkflowNode> gather_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput indices,
@@ -87,19 +87,19 @@ inline Result<WorkflowNode> gather_node(
  * Updates match base except axis extent M. Each Result has one tensor at any
  * member key; complete sample shapes include batch axes. Output values uses
  * photospider.tensor/samples with ordinary base axes and independent tiles.
- * A shared fixed task validates every index and stably groups (target,position)
+ * A shared fixed task trusts every index and stably groups (target,position)
  * pairs in a private Int64[M,2] tile. It uses that 16*M-byte tile and one
  * 16*M-byte scratch buffer for eight radix passes. Consumers read the base
  * tile region and all update positions for its non-axis region. They use
- * bounded searches; normalized update positions are checked before access.
+ * bounded searches; normalized update positions are unchecked premises.
  * No-hit copies base bits; Replace copies the last matching update bits.
  * Aggregates include base then matching updates in original position order.
  * Sum uses exact accumulation and one final conversion; representability of
  * each computed integer output is an unchecked caller precondition. Minimum/
  * maximum preserve first-NaN and signed-zero rules. Aggregate state is private
  * preallocated scratch. Empty emits no tasks. Mutable state is never shared
- * across Runs. Invalid indices return InvalidArgument/InvalidDomain; resource
- * and cancellation failures prevent successful call publication. Successful
+ * across Runs. Index legality is unchecked; resource and cancellation failures
+ * prevent successful call publication. Successful
  * Results own storage beyond context lifetime. Helpers are
  * pure/concurrent-safe, return owned metadata and may throw bad_alloc, as
  * concatenate_node describes.

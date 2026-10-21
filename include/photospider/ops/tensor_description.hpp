@@ -26,7 +26,8 @@ struct TensorRationalEndpoint final {
   std::vector<std::uint32_t> denominator{1};
   bool negative = false;
 };
-/** @brief Exact finite endpoint. Integers never pass through double; binary64
+/** @brief Exact endpoint, with numerical finiteness an unchecked premise.
+ * Integers never pass through double; binary64
  * retains represented bits, including signed zero. Non-dyadic decoded
  * endpoints use a reduced rational without numerical approximation. */
 using TensorEndpoint = std::variant<
@@ -197,7 +198,10 @@ PHOTOSPIDER_OPS_SDK_API Result<std::string> tensor_description_parameter(
 /** @brief Parse the canonical invocation-local replacement. */
 PHOTOSPIDER_OPS_SDK_API Result<TensorDescription>
 tensor_description_from_parameter(const std::string& parameter);
-/** @brief Validate rank/axis/table alignment without reading tensor samples. */
+/** @brief Validate static rank/axis/table alignment and canonical encoding.
+ * Numeric endpoint ranges, finite/positive axis values and color geometry are
+ * unchecked caller premises, including for statically supplied parameters.
+ * Reads no tensor payload and adds no producer/consumer validation pass. */
 PHOTOSPIDER_OPS_SDK_API Status validate_tensor_description(
     const TensorDescription& description, const TensorDescriptor& descriptor);
 

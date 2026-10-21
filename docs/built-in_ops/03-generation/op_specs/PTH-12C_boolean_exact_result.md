@@ -3,7 +3,7 @@ spec_schema_version: 1
 id: PTH-12C
 status: Accepted
 implementation_status: not_implemented
-registration_status: backend_and_schema_gates
+registration_status: backend_and_implementation_gates
 ---
 
 # PTH-12C: Exact polygon Boolean Result
@@ -26,7 +26,7 @@ and predicates. Isolated points/zero-area edges are not area output. Canonicaliz
 contour orientation, collinear degree-two vertices, contour rotation and ordering as
 specified by PTH-12A, using exact rational comparisons. Do not round coordinates. Store
 exact rational coordinates and incidence/contour structure in the new formal Result; its
-codec, canonical rational representation and factory are schema gates. Subsequent exact
+photospider.ops.exact_polygon v1 member directory and canonical rational representation are specified by the shared geometry contract. Runtime codec/factory and backend implementation remain absent. Subsequent exact
 consumers operate on these exact values, not a hidden Float64 copy. Run-shared complete-input computation
 reads complete geometry and associations. Allocation/large-integer limbs, events and
 retained backing must be charged; failure publishes no partial Result.

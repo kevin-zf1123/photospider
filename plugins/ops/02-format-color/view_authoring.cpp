@@ -423,10 +423,6 @@ format::RgbBasisOptions conversion_options(const Parameters& p) {
 }
 void conditions(const OperationMetadata& metadata,
                 const format::NativeDisplayConditions& display) {
-  require(std::isfinite(display.black_nits) &&
-              std::isfinite(display.white_nits) && display.black_nits >= 0 &&
-              display.black_nits < display.white_nits,
-          "view requires explicit finite black/white display conditions");
   Parameters p{{"input_description",
                 checked(tensor_description_parameter(display.description))}};
   if (!display.group.empty()) {
@@ -442,15 +438,12 @@ void conditions(const OperationMetadata& metadata,
   require(!i.transfer.empty(), "view endpoint requires transfer identity");
   const auto curve = checked(decode_transfer_definition(i.transfer));
   if (i.model == "rgb") {
-    const auto geometry =
-        basis_ops::resolve({i.primaries, i.primaries_xy, i.white});
-    (void)basis_ops::rgb_matrix(geometry.xy, geometry.white);
+    (void)basis_ops::resolve({i.primaries, i.primaries_xy, i.white});
   } else {
     require(i.white.has_value() && i.coordinates &&
                 (i.coordinates->gray_kind == "linear_y" ||
                  i.coordinates->gray_kind == "encoded_luma"),
             "view Gray endpoint requires white and coordinate kind");
-    (void)basis_ops::white_xyz(*i.white);
   }
   require(i.coordinates && (i.coordinates->scale == "relative" ||
                             i.coordinates->scale == "absolute"),
@@ -459,9 +452,6 @@ void conditions(const OperationMetadata& metadata,
     require(
         unit(u) == (i.coordinates->scale == "absolute" ? "cd/m2" : "relative"),
         "view endpoint unit/scale conflict");
-  }
-  if (curve.curve == TransferCurve::Pq) {
-    require(display.white_nits <= 10000, "PQ display white exceeds 10000 nits");
   }
   if (curve.curve == TransferCurve::Bt1886) {
     require(curve.black_luminance == display.black_nits &&

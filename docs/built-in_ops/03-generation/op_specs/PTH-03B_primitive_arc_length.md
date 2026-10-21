@@ -26,16 +26,18 @@ output bits and discrete decisions are fixed.
 
 Primitives PathSet; length and table as PTH-03A.
 
+The associated Result uses `photospider.ops.path_arclength_table` v1 from the [shared geometry schema](PTH_geometry_contract.md). Payload validity is unchecked.
+
 ## Parameters and domain
 
-Same budgets; Bezier/arc/Hermite/nonperiodic spline; split knot spans and subpath
+Same budgets; Bezier/arc/Hermite/nonperiodic spline and explicit Close; split knot spans and subpath
 discontinuities.
 
 ## Mathematical specialization
 
 Orthogonal equal-length arc axes give norm(u)*abs(sweep); other ellipses integrate
 speed. Hermite may use exact rational Bezier conversion. Integrate nonzero spline knot
-spans, not discontinuous jumps. Share deterministic cumulative/selection rules.
+spans, not discontinuous jumps. Close length is the norm of the difference of its mathematical endpoints, without an intermediate Float64 endpoint. Share deterministic cumulative/selection rules.
 
 ## Dependencies, resources and failures
 
@@ -43,14 +45,13 @@ Computation scope: **complete input in a Run-shared stage**. Read complete struc
 selected complete Result atomically. Full shared-control/topology/resource changes
 conservatively invalidate dependent output; sample changes follow the actual dependency
 map. Empty requests perform static preflight without payload reads or advancing a random
-sequence. Compute only requested output mathematics, retaining required shared
-validation.
+sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
 complete-input; certified directed integration or valid control bounds, not ordinary quadrature
 estimates.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
 InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
@@ -64,6 +65,5 @@ Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.

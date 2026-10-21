@@ -16,7 +16,7 @@ Source tile closure follows the source's own batch, spatial and atomic geometry.
 
 Quantile decodes q as an exact binary rational and computes `h=(L-1)*q`, its integer position and remainder without preliminary sample conversion. Exact dyadic interpolation receives one final round-to-nearest, ties-to-even conversion. All three profiles use this exact final path. Full selected lines are classified even for endpoint q; the first NaN in original axis order is quieted and converted under the reduction payload rule. Integral positions preserve selected signed zero and infinity. Fractional positions follow the IEEE infinity and zero-sign rules in [NUM-12B](op_specs/NUM-12B_quantile.md).
 
-Active q must be finite in `[0,1]` as a caller numerical precondition. A constant-time raw-value guard protects array indices and limb shifts; callers have no guaranteed error behavior outside the numerical domain. All source bit patterns are accepted. Finite Float64 source values can round to signed infinity in a Float32 output. Floating rounding mode and exception flags are restored after invocation.
+Active q must be finite in `[0,1]` as a caller numerical precondition. Index and limb-shift arithmetic use q directly without a runtime guard; callers have no guaranteed error behavior outside the numerical domain. All source bit patterns are accepted. Finite Float64 source values can round to signed infinity in a Float32 output. Floating rounding mode and exception flags are restored after invocation.
 
 ## Scratch, validation and failure
 

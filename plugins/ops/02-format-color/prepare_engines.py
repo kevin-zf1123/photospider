@@ -66,19 +66,6 @@ def lcms(source, output):
               '                    cmsPipelineFree(Gamut); Gamut = NULL;\n'
               '                    ps_engine_error("incomplete gamut table");\n'
               '                }')
-    for variable, call in [('LabIn1','cmsDoTransform(t -> hInput, In, &LabIn1, 1);'),
-                           ('LabOut1','cmsDoTransform(t -> hReverse, Proof, &LabOut1, 1);'),
-                           ('LabOut2','cmsDoTransform(t -> hReverse, Proof2, &LabOut2, 1);')]:
-        s=replace(s,call,call+'\n    if (!isfinite('+variable+'.L) || !isfinite('+variable+'.a) || !isfinite('+variable+'.b)) { ps_engine_error("nonfinite gamut sampler"); return 0; }')
-    s=replace(s,'dE2 = cmsDeltaE(&LabIn2, &LabOut2);',
-              'dE2 = cmsDeltaE(&LabIn2, &LabOut2);\n'
-              '    if (!isfinite(dE1) || !isfinite(dE2)) { ps_engine_error("nonfinite gamut distance"); return 0; }')
-    s=replace(s,'if (ErrorRatio > t->Threshold)',
-              'if (!isfinite(ErrorRatio) || ErrorRatio > 65535.0 + t->Threshold) { ps_engine_error("invalid gamut ratio"); return 0; }\n'
-              '                if (ErrorRatio > t->Threshold)')
-    s=replace(s,'// if dE1 is small and dE2 is small, value is likely to be in gamut',
-              'if (dE1 > 65535.0 + t->Threshold) { ps_engine_error("invalid gamut distance"); return 0; }\n'
-              '    // if dE1 is small and dE2 is small, value is likely to be in gamut')
     path.write_text(s)
     path=output/'src/cmsio1.c'
     s=path.read_text().replace('cmsReadTag(', 'ps_engine_icc_read_tag(')

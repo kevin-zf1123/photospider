@@ -71,7 +71,7 @@ default or `reference` where exposed. FMT-18B has a single fixed algorithm
 and no execution/threshold/alarm-color parameter.
 
 OCIO always executes its pinned F32 CPU processor. Float64 input explicitly
-rounds once to binary32, rejects finite overflow, then widens the F32 result
+rounds once to binary32 under the representability premise, then widens the F32 result
 exactly. `reference` uses OPTIMIZATION_NONE and `optimized` uses the pinned
 OPTIMIZATION_DEFAULT. Identity/equality/data routes still pass through this
 numerical boundary.
@@ -159,8 +159,8 @@ cancellation contract. No frozen kernel/public kernel ABI changes were needed.
 | Unsupported dtype/group/layout structure | TypeMismatch, or InvalidArgument for a forbidden explicit option |
 | Invalid profile, dependency, endpoint, inverse or alpha effect | InvalidArgument / InvalidDomain |
 | Construction capacity/work refusal | ResourceExhausted with the original reason |
-| Consumed nonfinite or semantic CMYK out of range | OperationFailed / InvalidDomain |
-| Finite formatter/unit narrowing overflow or requested nonfinite output | OperationFailed / ArithmeticOverflow |
+| Consumed values, semantic CMYK range, formatter/unit narrowing and requested results | Unchecked caller numerical premises; no host domain/overflow diagnostic |
+| Actual private-engine execution failure | OperationFailed; original resource/cancellation failures retain their codes |
 | Cancelled pixel execution | Cancelled |
 
 Unpublished writes and partial engine state are discarded on failure.
@@ -228,8 +228,9 @@ LCMS recipe rather than adding a second project tone map.
 FMT-18B constructs its owning check transform with a Lab4 terminal and borrows
 the independent source-domain gamut pipeline while that transform lives.
 The integration corrects stock cross-channel-count dimensions to source inputs
-and one output: Gray 49, RGB 49³, CMYK 23⁴ grid points. It validates sampler
-completion and finite Lab/ΔE/ratio intermediates before integer conversion.
+and one output: Gray 49, RGB 49³, CMYK 23⁴ grid points. It retains actual sampler-completion checks and failure latching. Generated
+Lab/ΔE/ratio numerical conditions are unchecked; no extra finite-value checks
+are injected before integer conversion.
 Input passes through the actual float formatter; finite score >0 becomes
 exact 1, otherwise exact +0. There is no display alarm-color comparison.
 
@@ -375,7 +376,7 @@ formula; it does not call the production correction.
 
 The final 45 boundary checks and 4 integration checks additionally cover
 Empty/bypass-only full construction,
-nonzero-origin sparse input, consumed nonfinite/overflow failures,
+nonzero-origin sparse input, legacy consumed-nonfinite/overflow failures (historical evidence under the former checked contract; no longer required or implemented),
 construction memory/work limits, execution cancellation, unsupported
 interpolation, selector case/namespaces, closed host-file lookup, dynamic
 property freezing, alpha-coupling and compensating-alpha-matrix rejection.
@@ -494,3 +495,26 @@ when reusing the same resources, and budget separate per-tile engines.
 The timing table describes this machine/workload only. Other OS/architectures,
 arbitrary real profiles and physical gamut/color quality have not been
 established by these measurements.
+
+## Unchecked revision and verification (2026-10-21)
+
+Host input, formatter/narrowing and requested-output numerical checks have been
+removed. Static schema/resource and transform-node structure is still prepared;
+finite values, coefficient domains and representable arithmetic are caller
+premises. ICC ordinary evaluation uses its direct formatter path. Gamut sampling
+retains actual completion/error latching and allocation/work accounting without
+extra finite Lab/DeltaE/ratio instrumentation. OCIO retains node/alpha structure,
+processor construction and actual engine failures without coefficient/LUT scans
+or an extra host transform `validate()` call. Private host identities are
+`lcms2.19.1.host2`, `ocio2.5.2.host2` and `ps-color-2`; the C function ABI is unchanged.
+
+The existing ops/SDK/private-engine build and C/C++ formatting/lint passed. A
+public workflow checked a finite OCIO matrix fixture `(R,G,B)->(2R,G,B/2)` with
+exact binary results. Three additional ICC checks passed: ordinary sRGB-to-sRGB
+reference evaluation within 1e-4, same-profile gamut classification of legal
+in-gamut samples, and propagation of actual construction-work exhaustion. The
+588-byte synthetic sRGB fixture was generated for this run; temporary sources,
+binaries and profile bytes were removed afterwards. These checks do not extend
+the historical performance results below or establish arbitrary-profile color
+accuracy. Earlier nonfinite/domain rejection observations describe the former
+checked contract and are superseded by the current unchecked premises.

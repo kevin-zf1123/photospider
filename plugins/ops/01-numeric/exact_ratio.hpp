@@ -113,8 +113,6 @@ struct ExactRatioWorkspace final {
     if (!work.ok())
       return Answer(work);
     const auto n_top = top(numerator), d_top = top(denominator);
-    if (d_top < 0)
-      return Answer(Status{ErrorCode::InvalidArgument, {}});
     if (n_top < 0)
       return Answer(UINT64_C(0));
     // A power-of-two denominator needs only bit extraction and ties-to-even.

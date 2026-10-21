@@ -1,4 +1,3 @@
-#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -32,7 +31,7 @@ bool unhex(const std::string& text, double* value) {
     bits = (bits << 4) | (c <= '9' ? c - '0' : c - 'a' + 10);
   }
   std::memcpy(value, &bits, 8);
-  return std::isfinite(*value);
+  return true;
 }
 const char* name(TransferCurve curve) {
   switch (curve) {
@@ -69,7 +68,7 @@ Result<std::string> encode_transfer_definition(const TransferDefinition& d) {
        (d.black_luminance || d.white_luminance)))
     return R(invalid());
   if (d.curve == TransferCurve::PowerGamma) {
-    if (!d.gamma || !std::isfinite(*d.gamma) || *d.gamma <= 0)
+    if (!d.gamma)
       return R(invalid());
     return R("fmt09-v1:power_gamma:" + hex(*d.gamma));
   }
@@ -91,10 +90,7 @@ Result<std::string> encode_transfer_definition(const TransferDefinition& d) {
     return R(std::string("fmt09-v1:bt2020:") + variant);
   }
   if (d.curve == TransferCurve::Bt1886) {
-    if (!d.black_luminance || !d.white_luminance ||
-        !std::isfinite(*d.black_luminance) ||
-        !std::isfinite(*d.white_luminance) || *d.black_luminance < 0 ||
-        *d.black_luminance >= *d.white_luminance)
+    if (!d.black_luminance || !d.white_luminance)
       return R(invalid());
     return R("fmt09-v1:bt1886:" + hex(*d.black_luminance) + ":" +
              hex(*d.white_luminance));

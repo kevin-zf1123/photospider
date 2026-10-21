@@ -29,37 +29,34 @@ closing edge), primitive IDs are reference rows.
 
 ## Mathematical specialization
 
-Dispatch by validated authority, preserving original segment IDs and explicit rounding.
-Z runs from current point to M. No implicit global-parameter segment selection.
+Dispatch by the checked static schema, preserving original segment IDs and explicit rounding.
+Z runs from current point to M. A Primitive Close reference evaluates the line between its specified mathematical endpoints: P(t)=(1-t)*end+t*start, derivative=start-end. Evaluate those endpoints under their primitive mathematics and apply only the declared final rounding; no intermediate Float64 endpoint is invented. No implicit global-parameter segment selection.
 
 ## Dependencies, resources and failures
 
 Execution rule: **Regional**. Compute requested output coordinates only. Read
-corresponding query/sample inputs and necessary controls; path/mesh/resource validation
-may require complete control data without computing the whole output canvas. Full
+corresponding query/sample inputs and the controls required by the mathematics. Complete control reads do not imply runtime payload validation. Full
 shared-control/topology/resource changes conservatively invalidate dependent output;
 sample changes follow the actual dependency map. Empty requests perform static preflight
-without payload reads or advancing a random sequence. Compute only requested output
-mathematics, retaining required shared validation.
+without payload reads or advancing a random sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
-Regional queries with complete path association validation; requested position alone
+Regional queries with valid path associations assumed; requested position alone
 need not compute tangent.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
 InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
 
 ## Independent fixtures and acceptance
 
-Mixed L/Q/C/Z, M query rejection, separate/joint outputs, empty path with query
+Mixed L/Q/C/Z, queries selecting evaluable verb rows, separate/joint outputs, empty path with query
 NoSolution.
 
 Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.

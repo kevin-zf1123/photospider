@@ -113,9 +113,10 @@ index below rank. Axis length may be one or smaller than the kernel. For N=1,
 reflect/replicate/wrap repeat the sole sample; zero retains virtual +0 padding.
 Source/output dtype is Float32 or Float64, unchanged, with no attached domain description.
 
-The normalizer is the exact full tap sum. Implementations must establish its
-nonzero positive value for the admitted parameter tuple before division; inability
-to complete certified arithmetic within budgets is ResourceExhausted. Numerical
+The normalizer is the exact full tap sum and is positive as an unchecked
+numerical premise. Interval refinement continues until division and final
+rounding are determined; inability to complete that computation within budgets
+is ResourceExhausted. There is no nonpositive-normalizer admission check. Numerical
 overflow in an intermediate I0, squared parameter or naive coefficient calculation
 does not define an invalid kernel. Avoid it or refine at adequate precision.
 
@@ -129,7 +130,7 @@ For M selected output elements, work is O(M*(2R+1)) plus certified arithmetic. E
 
 Cancellation is checked during coefficient/refinement work and at least every 64 tap contributions or simpler outputs. Operational cancellation/resource failures propagate directly before accepting a shortcut or retrying strict arithmetic. Numerical uncertainty alone can trigger strict refinement. The executor publishes a successful call only after all its declared writes succeed and the call retires; a failed call publishes no partial Result.
 
-Invalid shape/axis/radius/parameters fail preparation with InvalidArgument/InvalidDomain, and incompatible dtype uses TypeMismatch. A certified nonpositive normalizer is InvalidArgument/InvalidDomain; inability to certify a positive denominator or unique final rounding within arithmetic capacity is ResourceExhausted. Source NaN/Inf and final arithmetic overflow are successful IEEE values under the rules above. Source binding, upstream, cancellation and resource failures retain the common execution categories.
+Invalid structural shape/axis/radius or parameter syntax/type fails preparation with InvalidArgument/InvalidDomain, and incompatible dtype uses TypeMismatch. Numeric cutoff/sigma/beta domains and positive normalization are unchecked caller premises. Inability to refine division or unique final rounding within arithmetic capacity is ResourceExhausted. Source NaN/Inf and final arithmetic overflow are successful IEEE values under the rules above. Source binding, upstream, cancellation and resource failures retain the common execution categories.
 
 ## Numerical and antialias acceptance
 
@@ -183,6 +184,6 @@ this implementation and do not claim SciPy floating-point parity.
 
 ## Maintained implementation and validation
 
-This shared contract covers five uniform kernels and 15 profile keys. `lowpass_uniform.cpp` stores immutable parameters and emits `uniform-lowpass-fixed-v1` tasks. `UniformLowpassMath` uses `CheckedLowpassKernel` and explicit failure state for certified sums. Accelerated profiles prepare 128-bit coefficient enclosures in invocation scratch, then bound the complete hardware convolution and normalization before final-error acceptance. Numerical uncertainty dispatches strict convolution; cancellation/resource failures return directly. Certified strict precision is 128..4096 bits and may fail `ResourceExhausted`.
+This shared contract covers five uniform kernels and 15 profile keys. `lowpass_uniform.cpp` stores immutable parameters and emits `uniform-lowpass-unchecked-v2` tasks. `UniformLowpassMath` uses `CheckedLowpassKernel` and explicit failure state for certified sums. Accelerated profiles prepare 128-bit coefficient enclosures in invocation scratch, then bound the complete hardware convolution and normalization before final-error acceptance. Numerical uncertainty dispatches strict convolution; cancellation/resource failures return directly. Certified strict precision is 128..4096 bits and may fail `ResourceExhausted`.
 
 The independent directed-MPFR reference in `oracle/ops/numeric/crv11/uniform.py` imports wide rational numerators and denominators with outward rounding. Temporary public and direct invocation checks compare strict bits and accelerated final FP32 bounds independently. See [CRV-11 umbrella](CRV-11_resample_signal.md).

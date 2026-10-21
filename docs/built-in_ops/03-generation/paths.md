@@ -5,17 +5,37 @@
 [共享契约](op_specs/GEN_common_contract.md)、[oracle 覆盖说明](oracle-coverage.md)、
 [oracle 使用说明](../../../oracle/ops/generation/README.md)与
 [研究来源及采用边界](research-sources.md)分别说明公共语义、可运行参考及证据范围。
-具体 schema、随机映射或后端细节中仍标明未完成的部分，需要在注册成员前明确并验证。
+本文及英文规格定义目标 schema 和随机映射；运行时 codec/factory、数值算法和后端仍需实现并验证，明确未选定的求解器和 backend 不视为已经交付。
+
+schema 与关联均使用 unchecked 契约。只检查静态结构；运行时 counts、offsets、引用、padding、源对象身份和几何数值合法性都由调用方保证。发布端和消费端不扫描或比较 payload，生产端按规定构造结果。长度计算、舍入细化、逼近算法及显式请求的质量测量保留。Float64 转换在构造坐标时累计位移界，舍入后的可表示性、位移预算与连接/拓扑条件由调用方保证，不再完成后扫描并决定是否发布；普通转换报告 topology_status=0。
 
 ## 表示
 
-固定次数首版：quadratic controls `[S,3,2]`，cubic controls `[S,4,2]`，每段固定样本 `[S,N,2]`。现有 CoreVerbs 保存 verbs/control_offsets/controls/subpath_offsets/closed，支持 M/L/Q/C/Z；primitive authority 已表示 Bézier、ArcSweep/FullTurn、Hermite 和非周期 B-spline，并验证连接/属性。布尔和字体轮廓节点仍待实现。公共端点是否重复、闭合是否隐含末段、每段属性归属必须固定。SVG2提供路径与子路径的公开语义词汇。[^svg]
+固定次数的目标接口使用 quadratic controls `[S,3,2]`、cubic controls `[S,4,2]` 和每段固定样本 `[S,N,2]`。PathSet 是逻辑类型族，CoreVerbs 与 Primitives 使用独立 schema，转换必须显式。CoreVerbs 使用 `photospider.ops.path_core` v1，六个成员为 UInt8 `verbs[V]`、Int64 `control_offsets[V+1]`、Float64 `controls[C,2]`、Int64 `subpath_offsets[S+1]`、UInt8 `closed[S]` 和 Int64 `counts[3]`；三个计数依次表示有效 verb/control/subpath 数，空路径全部为 0，V/C/S 为正静态容量。Primitives 使用 `photospider.ops.path_primitives` v1 的 13 个固定成员，分别存引用、子路径、孤立点及 Bézier、ArcSweep/FullTurn、Hermite、非周期 B-spline 的数据池。Close 引用表达数学端点之间的闭合边，不要求把非有理端点塞进 Float64 控制点。属性和来源映射使用独立关联 Result。M/L/Q/C/Z 编码为 1..5，closed 为 0/1；未使用 verbs/closed 为 0、controls 为 +0，offsets 尾部重复各自的有效终值。构造器显式接收 counts，容量从输入 shape 推导；concat 按输入容量相加，reverse/仿射变换/split 复用输入容量，其余需要容量上界的生成算子使用显式 max 参数。controls 的 x/y 和 counts 的三个计数分别作为原子观察，六成员由 lowering 完整写入并以 CompleteBundle 完整交付；不增加验证扫描。当前公共算子 SDK 尚无这些 schema、factory 或 codec，保留 oracle 中的逻辑结构不代表运行时支持。SVG2 提供路径与子路径的公开语义词汇。[^svg]
+
+Primitive 的 terminal Close 可以表达非 Float64 端点间的闭合边，但 v1 reverse 不承诺保留起点并反向这类闭合子路径；调用方须满足该成员的可表示输入域。该限制不增加运行时准入校验或隐式转换。
 
 坐标采用[公共约定](../00-foundation/contracts.md)，width 单位 px，表示完整直径。
 线宽可使用正式附着字段或独立输入，每次显式选择唯一来源；支持整 PathSet 归一弧长、
 每子路径归一弧长和每子路径实际弧长三种定义域。trim/dash 保留原始来源映射，不能
 将截断后的片段重新归一后静默改变宽度。关联字段默认 reject_unmappable；显式 drop
 必须报告丢弃内容。具体绑定与零长规则见[几何契约](op_specs/PTH_geometry_contract.md)。
+
+## 派生数据的最小 schema
+
+具体字段、shape 与编码以[英文几何共享契约](op_specs/PTH_geometry_contract.md)为准。所有 schema 都使用 version 1、正静态容量和有效 count；不用运行时 shape、通用属性字典或哈希校验。普通未使用行填零，offsets 尾部重复有效终值。来源 ObjectId 仅作为输入身份字节记录，不在发布或消费时比较；需要来源几何时由 workflow 显式传入其 ResultRef。
+
+| schema 后缀（统一前缀 `photospider.ops.`） | 最小内容与边界 |
+| --- | --- |
+| `path_arclength_table` | segment IDs、knot offsets、`(t,s_lower,s_upper)`、子路径 offsets、总长及上下界、counts、source ID；表误差不能替代真实长度求值。 |
+| `path_samples_param` / `path_samples_arc` | positions、source_segment、local_t、子路径 offsets、counts、source ID；arc 版本增加子路径内的 arc_s。local_t 独立舍入，不能用于重建原 position。 |
+| `path_partition` | group_offsets、subpath_count、source ID；几何和顺序由配对的扁平 PathSet 提供。 |
+| `path_width` | 固定标准键 width 的 Linear profiles、bindings、stops、widths、source IDs 和 counts；PCHIP 保持独立求值，不新增附着编码。 |
+| `path_source_map` | 目标段到单一来源段的精确有理仿射参数映射；固定 limb 容量，不使用表达式图。无法精确表示时沿用 reject_unmappable 或显式 drop。 |
+| `exact_polygon` / `grid_polygon` | 前者使用约分有理坐标及轮廓 offsets，后者使用 Int64 坐标；均有有效 counts。网格参数显式提供，backend 的交点处理规则仍需落实。 |
+| `path_fit_report` / `geometry_report` | 仅保存现有算法要求的误差上界、拓扑状态、来源身份，以及显式丢弃 width 的标志；不记录迭代轨迹或新增校验数据。 |
+
+有理数使用符号、有效 limb 数和 little-endian base-2^32 limbs，每个 limb 由四个 UInt8 字节表示。有效数约分且分母为正，规范零为 0/1；这些均是 unchecked 前提和生产端构造规则。真弧长切点不可表示为有理 affine 映射时，不用 Float64 近似伪装精确对应。
 
 ## 算子目录
 
@@ -37,7 +57,7 @@
 Bézier二次 `B=(1-t)²P0+2(1-t)tP1+t²P2`；三次用对应Bernstein权重。弧长 `s(t)=∫₀ᵗ|B′(u)|du`，具体成员规定单调(t,s)表与反求t策略。均匀t通常不是均匀几何距离；Fourier只适合显式周期profile，普通线宽优先linear/PCHIP避免振铃负值。
 
 零长路径不计算未定义的 s/L；宽度定义域、重采样数量及零长 cap 分别按成员规定处理。
-空 PathSet 使用 payload count=0，offsets 有效前缀为 [0]；固定容量和 padding codec 在注册前明确；普通 Tensor 轴约束独立适用。B-spline
+空 PathSet 使用 payload count=0，offsets 有效前缀为 [0]；固定容量和 padding 按共享 schema 构造；普通 Tensor 轴约束独立适用。B-spline
 须带 degree/knots，并显式定义归一 t 到有效 knot 区间的映射。
 精确几何对象与近似发布结果分离；拟合按后端求解器区分算子，连续 Hausdorff 误差
 验证独立于求解器的离散残差。拓扑策略默认 allow_change，可选 reject_unproven；
@@ -53,14 +73,14 @@ coverage与SDF独立：前者为像素面积比例[0,1]，后者为px距离。�
 
 ## Region、使用和验收
 
-输出tile需读取所有可能覆盖其footprint的段，stroke扩张包含半宽、join/miter与AA。PathSet schema 不提供 stroke 专用空间索引；节点把完整路径或经证明的数学段支持转换为普通成员 tile Needs，并显式记录 descriptor/拓扑读取。路径中一次编辑的dirty不能只用控制点bbox，要覆盖曲线与描边的真实/保守范围。
+输出tile需读取所有可能覆盖其footprint的段，stroke扩张包含半宽、join/miter与AA。PathSet schema 不提供 stroke 专用空间索引；目标实现把完整路径或经证明的数学段支持转换为 fixed invocation ABI 8 的成员 tile reads，并通过静态 schema 读取和普通 task 依赖表达拓扑需求。路径中一次编辑的dirty不能只用控制点bbox，要覆盖曲线与描边的真实/保守范围。
 
 概念流程：`controls→arc-length→width curve→stroke coverage→color ramp/constant→over`；另可`path→SDF→mask offset→feather`。解析验收包括100px直线、圆/矩形面积、孔洞、自交、闭合接缝、宽度0/.25/1/10px、非均匀变换和不同tile一致。边界与迭代使用Float64参考，GPU 按独立后端 profile 声明数值契约，同版本同 profile 保持确定性；几何误差与数值误差分别验收。
 
 
 Regional、Halo 与 complete-input 按实际数学依赖选择。全局拓扑构造需要 complete-input 时显式声明；
-局部 raster 输出与完整控制验证分开。精确 Boolean、量化网格 Boolean、精确 Result
-发布和 Float64 网格输出分别由 PTH-12 成员定义，Result schema 与生产后端仍须落实。
+局部 raster 输出与完整几何数学依赖分开。精确 Boolean、量化网格 Boolean、精确 Result
+发布和 Float64 网格输出分别由 PTH-12 成员定义，Result schema 已在共享规格定义，运行时 codec/factory、数值算法及生产后端仍未实现。
 
 
 ## 来源

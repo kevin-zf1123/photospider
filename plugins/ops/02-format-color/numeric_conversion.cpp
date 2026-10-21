@@ -162,8 +162,6 @@ Result<Rational> token(const std::string& value) {
       bits = (bits << 4) |
              static_cast<unsigned>(c <= '9' ? c - '0' : c - 'a' + 10);
     }
-    if (((bits >> 52) & 2047) == 2047)
-      return Result<Rational>(invalid("nonfinite endpoint"));
     return Result<Rational>(Rational::binary(bits, false));
   }
   return Result<Rational>(invalid("endpoint must use i: or f64: typed syntax"));
@@ -318,9 +316,6 @@ Result<OperationPreparation> prepare(
   for (std::size_t i = 0; i < entries; ++i) {
     const auto& s = source[source.size() == 1 ? 0 : i];
     const auto& t = destination[destination.size() == 1 ? 0 : i];
-    if (s[0].compare(s[1]) >= 0 || t[0].compare(t[1]) == 0)
-      return Output(
-          invalid("source bounds must increase and target bounds must differ"));
     Bounds b{s[0], s[1], t[0], t[1], false};
     b.identity = !state->rescale ||
                  (s[0].compare(t[0]) == 0 && s[1].compare(t[1]) == 0 &&
@@ -493,13 +488,7 @@ Result<std::uint64_t> convert_one(std::uint64_t input,
   if (floating(state.source)) {
     const bool narrow = state.source == ElementType::Float32;
     const auto parts = numeric_ops::BinaryParts::decode(input, narrow);
-    if (parts.nan || parts.infinite) {
-      // Finite source is a caller precondition for integer destinations. This
-      // defensive branch prevents an invalid exponent from indexing scratch.
-      if (!floating(state.target))
-        return Answer(Status{ErrorCode::OperationFailed,
-                             {},
-                             FailureReason::InvalidDomain});
+    if (floating(state.target) && (parts.nan || parts.infinite)) {
       if (parts.nan)
         return Answer(nan_bits(input, state.source, state.target));
       const bool sign =
@@ -742,7 +731,7 @@ std::uint64_t convert_span(const std::uint8_t* source, std::uint8_t* target,
   return 0;
 }
 
-constexpr const char* conversion_contract = "numeric-conversion-v1";
+constexpr const char* conversion_contract = "numeric-conversion-unchecked-v2";
 std::uint64_t scratch_bytes(const Preparation& state) {
   return state.layout == "view" || state.identity ? 0 : sizeof(ExactConversion);
 }

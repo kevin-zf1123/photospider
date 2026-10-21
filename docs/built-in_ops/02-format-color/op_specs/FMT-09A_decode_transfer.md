@@ -50,7 +50,7 @@ Auto/materialize initialize independent dense output tiles. Nonidentity forced v
 ## Independent acceptance fixtures
 
 1. Gamma=2: [-2,-0,0.5,2] -> [-4,-0,0.25,4], exact in both dtypes.
-   Invalid gamma (zero, negative or nonfinite) fails statically in every mode.
+   Finite positive gamma is an unchecked numerical premise in every mode, even when known statically.
 2. sRGB: compare threshold neighbors around 0.04045 against the independently
    evaluated rational/power formula. Negative magnitudes mirror signs. Do not
    use B(A(x)) as the branch oracle.
@@ -59,7 +59,7 @@ Auto/materialize initialize independent dense output tiles. Nonidentity forced v
    Smooth coefficients are checked against independent root isolation.
 4. BT.1886 with Lb=1,Lw=100: D(0)=1 and D(1)=100 exactly; finite outside [0,1]
    is outside the semantic input precondition. Raw sufficiently negative V reaches the exact zero
-   plateau. Parameters violating 0<=Lb<Lw fail before samples.
+   plateau. The numerical condition 0<=Lb<Lw is an unchecked caller premise.
 5. PQ: D(0)=0 and D(1)=10000; values on the exact zero plateau yield +0.
    Negative or above-one values are outside the semantic precondition; raw evaluates the formula. Check an independent high-precision oracle around c1^m2.
 6. HLG: D(0)=0; D(0.5)=RN_dtype(1/12). Float64 D(1) is approximately

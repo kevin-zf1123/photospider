@@ -14,9 +14,30 @@ The [FMT explicit-configuration contract](../../02-format-color/op_specs/FMT_com
 keeps domain interpretation outside Result/Tensor. Numeric operations receive
 structure and samples; any color, alpha, sampling or LUT interpretation required
 by an operation is a declared static parameter. Outputs do not propagate or
-clear a facet list, because no such list exists. Domain checks come from the
-operation or an explicitly bound validator. Numerical formulas, rounding and
-strict/accelerated precision are unchanged by this ownership boundary.
+clear a facet list, because no such list exists. Numerical formulas, rounding
+and strict/accelerated precision are unchanged by this ownership boundary.
+
+## Static structure and unchecked premises
+
+Compilation and static preparation infer and check schema identity/version,
+member directories, dtype, rank, extents, axes, shape relations, parameter types
+and syntax, and fixed read/write/scratch signatures. Static capacity arithmetic
+is checked. Runtime payload structure (counts, offsets, indices, identities,
+associations and canonical padding/encoding) and numerical/geometric conditions
+are unchecked caller premises. A numerical parameter's presence at preparation
+time does not turn its finite/range/order/positivity condition into a structural
+check. Producers construct results according to the contract without a final
+validation scan or publication gate; consumers trust those premises without
+rescanning or comparing payloads.
+
+Precision refinement, accelerated-path acceptance, candidate selection,
+explicit clipping, error measurement and an explicitly requested quality gate
+remain their named computations. A quality gate consumes the supplied outcome;
+it does not revalidate the report or its association with other inputs. Resource,
+backend, cancellation and actual execution failures retain their normal meaning.
+Raw IEEE rules for NaN, infinities and signed zeros remain as specified. Outside
+a mathematical/payload premise no diagnostic, successful result or recovery is
+promised. This boundary applies throughout NUM/CRV, including SDK reports.
 
 The [relative-coordinate scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 sets native CIELAB/CIELCh lightness to l=L*/100. NUM/CRV consumers now use
@@ -80,9 +101,9 @@ values unless explicitly named otherwise. Each file supplies the shape, dtype
 and static parameters or names the family from which it inherits them. Rank is
 1..8, extents are positive and generic arrays have at most 2^40 logical elements;
 the smaller count/K limits in generator specs take precedence. Shape products
-and indexing use checked integer arithmetic. Outputs have no attached domain description or implicit physical units, colors
-or alpha roles. Typed input validation is retained
-only under the actual-read obligations described by the individual contract.
+use checked integer arithmetic during static inference. Dynamic indices and
+address-control values satisfy unchecked caller premises. Outputs have no
+attached domain description or implicit physical units, colors or alpha roles.
 
 Static parameters are supplied explicitly in direct WorkflowDocument nodes;
 authoring defaults are written by constructors. An empty parameter set means no
@@ -107,8 +128,9 @@ descriptors, including explicit Result schema specialization where specified.
 ## Demand, errors and returned observations
 
 Q denotes requested logical output coordinates, independent of physical stride.
-Individual files define exact per-port Data and Control sets and declare sample Validation support separately; structural
-tuple closure uses atomic_trailing_axes. Descriptor demand covers the static input
+Individual files define exact per-port Data and Control sets. There is no
+implicit sample-validation support; structural tuple closure uses
+atomic_trailing_axes. Descriptor demand covers the static input
 metadata needed by compilation. Empty Q introduces no runtime payload reads.
 Dynamic controls retain witnesses even when they do not change returned values.
 The operator must not enlarge its support to a bounding gap. Required upstream
@@ -121,25 +143,21 @@ a more specific existing Status. Names follow the current
 
 | Failure | Phase | Code / reason | Attribution |
 | --- | --- | --- | --- |
-| Missing, unknown or malformed static parameter; invalid axis/range/shape parameter | Compile or direct preflight | InvalidArgument / InvalidDomain | Schema origin; no invented runtime atom |
+| Missing, unknown or malformed static parameter; invalid structural axis/shape parameter | Compile or direct preflight | InvalidArgument / InvalidDomain | Schema origin; no invented runtime atom |
 | Unsupported port dtype, rank, shape relation or output descriptor | Compile or direct preflight | TypeMismatch / None | Schema origin |
-| Invalid dynamic bounds, control, index or step | Evaluation | InvalidArgument / InvalidDomain | Domain origin, affected output observation |
-| Integer final overflow | Evaluation | OperationFailed / ArithmeticOverflow | Domain origin, actual output atom |
-| Generator finite-only numerical failure | Evaluation | Individual generator's code/reason | Actual demanded value or axis observation |
+| Violated runtime structure or numerical/geometric premise | Outside the operator contract | No validation or diagnostic guarantee | Caller responsibility |
 | Unsupported accelerated target | Capability check | BackendUnavailable / None | Backend origin |
 | Admitted capacity, work or stage exhausted | Admission or execution | ResourceExhausted / CapacityLimit, WorkLimit or StageLimit | Preserve host resource scope |
-| Cancellation, stale input, typed validation or upstream failure | Respective host phase | Preserve original Status | Preserve original origin, scope and source identity |
+| Cancellation, stale input or upstream failure | Respective host phase | Preserve original Status | Preserve original origin, scope and source identity |
 
 Diagnostics identify the operation/output and global coordinate, plus the offending
 port/index/value bits when relevant. Tags such as InvalidBounds or ViewUnavailable
 are bounded human diagnostics, not new FailureReason enumerators or branchable
-API fields. Metadata errors need not fabricate an atom key. For runtime local
-numeric/control failures use Atom attribution for each dependent observation;
-do not broaden a shared-input error into a whole-output ValidationDomain that
-revokes already completed or independent observations. In particular, invalid
-integrate_1d step affects positive indices only, and prefix_sum integer overflow
-belongs only to the requested overflowing prefix. Existing typed validation
-domains retain their own scope. Ordinary execute is fail-fast.
+API fields. Metadata errors need not fabricate an atom key. Actual operational
+failures retain their existing observation scope; do not add a validation domain
+to revoke completed observations. Invalid dynamic steps, indices, bounds and
+unrepresentable arithmetic results governed by caller premises have no required
+error delivery. Ordinary execute remains fail-fast for actual failures.
 
 A failed observation publishes no partial Tensor or successful certificate.
 Independently completed observations retain their terminal outcomes. Dense
@@ -153,29 +171,26 @@ is released at the final owner; unpublished allocations are released on failure.
 
 `NumericDiagnostics` and its classification codec are declared in
 `photospider/ops/numeric/diagnostics.hpp` and belong to `Photospider::ops_sdk`.
-Operations declare `numeric_diagnostic_identity()` in their diagnostics list and
-use `ps::report_numeric(phase, report)`. The SDK encodes a bounded record and
-calls the kernel's generic `report_diagnostic` service. The host admits storage,
-validates and transactionally merges reports by operation/output/backend.
-
-Execution returns reports in `diagnostics.operation_timings`; each timing has an
-optional `reports` accumulator. Read the numeric type explicitly:
+`register_numeric_diagnostics` registers its fixed 588-byte codec for explicit
+`DiagnosticAccumulator` use. Fixed invocation ABI 8 has no report-submission
+callback and does not automatically emit per-operation numeric reports. The
+frozen accumulator retains its envelope, allocation and transactional merge
+rules. The ops validation callback is a no-op: payload identity/counter
+consistency and canonical encoding are caller premises. `read_numeric_report`
+decodes an already supplied complete 588-byte payload without checking it;
+`merge_numeric_diagnostics` computes totals and attribution, returning actual
+counter-capacity exhaustion without mutating the destination.
 
 ```cpp
-for (const auto& timing : execution.diagnostics.operation_timings) {
-  if (!timing.reports) continue;
-  auto bytes = timing.reports->find(ps::numeric_diagnostic_identity());
-  if (!bytes.ok()) continue;  // this attempt did not report this type
-  auto numeric = ps::read_numeric_report(bytes.value());
-  if (!numeric.ok()) return numeric.status();
-  const auto evaluated = numeric.value().evaluated_values;
-  // Consume evaluated together with timing.output and timing.backend.
-}
+// payload is a complete SDK numeric report supplied under the caller premises.
+auto decoded = ps::read_numeric_report(payload);
+if (!decoded.ok()) return decoded.status();
+auto status = ps::merge_numeric_diagnostics(&total, decoded.value());
+if (!status.ok()) return status;
 ```
 
-Success, Need and failed polls retain actual reported work. Cache hits do not
-repeat arithmetic counts. `computed_elements` is a separate structural output
-counter, and diagnostic failure does not replace an earlier computation failure.
+Reports describe actual arithmetic work when explicitly collected. Their values
+do not certify sample domains, report association or a numerical accuracy bound.
 Report bytes and callback addresses do not enter computation identity.
 
 ## Resource and acceptance evidence
@@ -183,7 +198,7 @@ Report bytes and callback addresses do not enter computation identity.
 Per-operation complexity and scratch formulas supplement host accounting.
 Reserve actual output, scratch, index/limb, metadata and retained-owner capacities
 before allocation, including old/new growth overlap and simultaneously retained
-source ancestry. Charge required validation and each committed work/stage unit;
+source ancestry. Charge structural preparation and each committed computational work/stage unit;
 failure does not refund committed work. A view's small output payload does not
 bound its retained source allocation. Cache-off preserves active ownership.
 No implicit disk spill, private unbudgeted workers or RSS upper bound is promised.

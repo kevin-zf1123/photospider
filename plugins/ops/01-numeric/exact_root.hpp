@@ -28,8 +28,6 @@ Result<std::uint64_t> round_sqrt_ratio(
     return Answer(status);
   const auto a_top = Workspace::top(ratio->numerator);
   const auto b_top = Workspace::top(ratio->denominator);
-  if (b_top < 0 || ratio->negative)
-    return Answer(Status{ErrorCode::InvalidArgument, {}});
   if (a_top < 0)
     return Answer(UINT64_C(0));
   int top = a_top - b_top;

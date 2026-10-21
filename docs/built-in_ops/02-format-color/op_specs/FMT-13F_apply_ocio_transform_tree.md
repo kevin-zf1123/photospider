@@ -52,7 +52,7 @@ finite boundary but does not claim the declared semantic target.
 - Build an independent matrix/range/exponent tree and verify ordered processing
   against simple analytic anchors and the selected engine point oracle.
 - Compare empty tree on Float64 with RN32/widen, including `1+2^-30 -> 1` and
-  finite overflow rejection; no empty-tree view shortcut is admitted.
+  other representable narrowing cases; no empty-tree view shortcut is admitted.
 - Reject cyclic/deep-over-budget trees, unsupported nodes, missing dependencies,
   unavailable inverse, alpha writes/dependencies and unresolved dynamic state.
 - Two same-type dynamic property instances with different explicit snapshots

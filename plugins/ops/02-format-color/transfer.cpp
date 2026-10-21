@@ -203,7 +203,7 @@ Result<TileSet> required_tiles(const Preparation& state, const Region& output,
   }
   return sdk::tiles_for_region(budget, grid, output);
 }
-constexpr const char* transfer_contract = "transfer-fixed-v1";
+constexpr const char* transfer_contract = "transfer-unchecked-v2";
 Result<OperationProgram> lower(const OperationLowering& query) {
   using Answer = Result<OperationProgram>;
   const auto& state = *static_cast<const Preparation*>(query.static_state);

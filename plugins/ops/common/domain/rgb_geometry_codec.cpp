@@ -10,7 +10,6 @@ Result<std::string> rgb_basis_parameter(const RgbBasis& basis) {
     plugin_internal::FloatingEnvironment environment;
     typed(environment.active(), "floating environment unavailable");
     const auto resolved = resolve(basis);
-    (void)rgb_matrix(resolved.xy, resolved.white);
     return Result<std::string>(basis_codec(resolved));
   } catch (const CheckedFailure& f) {
     return Result<std::string>(f.status);
@@ -27,7 +26,6 @@ Result<std::string> rgb_basis_parameter(const RgbBasis& basis) {
 Result<std::string> xyz_white_parameter(const std::array<double, 2>& white) {
   using namespace plugin_internal::basis_ops;  // NOLINT(build/namespaces)
   try {
-    (void)white_xyz(white);
     return Result<std::string>(white_codec(white));
   } catch (const CheckedFailure& f) {
     return Result<std::string>(f.status);

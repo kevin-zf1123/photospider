@@ -48,7 +48,7 @@ struct NonuniformPrepared final {
   std::shared_ptr<const SchemaTemplate> output_schema;
 };
 using NonuniformScratch = numeric_ops::NonuniformLowpassMath;
-constexpr const char* nonuniform_contract = "nonuniform-lowpass-fixed-v1";
+constexpr const char* nonuniform_contract = "nonuniform-lowpass-unchecked-v2";
 std::array<Region, 2> input_regions(const NonuniformPrepared& state,
                                     const Region& output, std::uint64_t count) {
   auto values = output.dimensions();
@@ -334,15 +334,6 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
             numeric_ops::array_parameter_error("nonuniform shape count"));
       count *= size;
     }
-    for (const auto& entry : p)
-      if (const auto* real = std::get_if<double>(&entry.second)) {
-        const auto value = BinaryParts::decode(raw(*real), false);
-        if (value.nan || value.infinite ||
-            (value.negative && value.magnitude) ||
-            (!value.magnitude && entry.first != "beta"))
-          return Answer(numeric_ops::array_parameter_error(
-              "nonuniform finite positive parameters (beta>=0)"));
-      }
     auto available = numeric_ops::sequence_profile_available(profile);
     if (!available.ok())
       return Answer(available);

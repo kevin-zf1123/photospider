@@ -43,7 +43,7 @@ class RandomOracleTests(unittest.TestCase):
     def test_counter_injective_supported_subset(self):
         counters={r_pack_counter(x,y,c,d,s,f,k) for x in (-1,0,1) for y in (-1,0) for c in (0,1) for d in (1,2) for s in (0,1) for f in (0,1) for k in (0,1)}
         self.assertEqual(len(counters),3*2*2**5)
-    def test_counter_bounds_reject_aliases(self):
+    def test_reference_counter_domain(self):
         for args in ({'x':1<<31,'y':0},{'x':0,'y':0,'frame':1<<32},{'x':0,'y':0,'channel':65536},{'x':0,'y':0,'draw':1<<32},{'x':0,'y':0,'stream':1<<32}):
             with self.assertRaises(ValueError):r_pack_counter(**args)
     def test_uniform_grid(self):
@@ -53,13 +53,17 @@ class RandomOracleTests(unittest.TestCase):
                 self.assertGreaterEqual(u,0);self.assertLess(u,1)
                 self.assertEqual((F(u)*(1<<p)).denominator,1)
     def test_open_uniform_endpoints(self):
-        self.assertEqual(r_open52(0,0),F(1,1<<53))
-        self.assertEqual(r_open52(r_MASK,r_MASK),1-F(1,1<<53))
-        self.assertEqual(r_halfopen53(r_MASK,r_MASK),1-F(1,1<<53))
+        self.assertEqual(r_open52(0),F(1,1<<53))
+        self.assertEqual(r_open52(r_MASK),1-F(1,1<<53))
+        self.assertEqual(r_halfopen53(r_MASK),1-F(1,1<<53))
+        self.assertEqual(r_halfopen53(2047),0)
+        self.assertEqual(r_halfopen53(2048),F(1,1<<53))
+        self.assertEqual(r_open52(4095),F(1,1<<53))
+        self.assertEqual(r_open52(4096),F(3,1<<53))
     def test_gaussian_slot_mapping(self):
         u,v=r_gaussian_inputs(7,-2,3,seed=42)
         b=r_block(7,-2,3,domain=2,seed=42)
-        self.assertEqual((u,v),(r_open52(b[0],b[1]),r_halfopen53(b[2],b[3])))
+        self.assertEqual((u,v),(r_open52(b[0]),r_halfopen53(b[1])))
     def test_roi_order_invariance(self):
         coordinates=[(x,y) for y in range(-2,2) for x in range(-3,5)]
         forward={(x,y):e_float_bits(r_uniform(x,y,seed=9)) for x,y in coordinates}
@@ -144,7 +148,7 @@ class RandomOracleTests(unittest.TestCase):
         self.assertEqual(r_temporal_fraction(p,0),r_temporal_fraction(p,256))
     def test_poisson_speckle_slots(self):
         u=r_poisson_input(0,0);b=r_block(0,0,domain=8)
-        self.assertEqual(u,r_open52(b[0],b[1]))
+        self.assertEqual(u,r_open52(b[0]))
         self.assertNotEqual(r_block(0,0,domain=9,draw=0),r_block(0,0,domain=9,draw=1))
 
 

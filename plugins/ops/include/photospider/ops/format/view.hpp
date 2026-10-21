@@ -41,6 +41,8 @@ struct ViewStage final {
  * black_nits/white_nits must be finite with 0 <= black < white. They are
  * descriptive unless a listed display-range/BT.1886 stage uses them, in which
  * case their exact values must agree with that stage. PQ white is <=10000 nits.
+ * Finite/range/physical conditions are unchecked numerical premises; only
+ * description structure and duplicate configuration consistency are checked.
  * No monitor calibration, viewing environment or exposure is inferred.
  */
 struct NativeDisplayConditions final {

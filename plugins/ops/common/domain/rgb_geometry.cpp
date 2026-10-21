@@ -14,8 +14,6 @@ Rational reduced(Rational x) {
   return x;
 }
 Rational number(double x) {
-  if (!finite_bits(bits(x), false))
-    throw GeometryError{};
   return reduced(Rational::binary(bits(x), false));
 }
 Rational add(const Rational& a, const Rational& b) {
@@ -61,8 +59,6 @@ Rational multiply(const Rational& a, const Rational& b) {
           a.negative != b.negative, false};
 }
 Rational divide(const Rational& a, const Rational& b) {
-  if (b.n.zero())
-    throw GeometryError{};
   return multiply(a, {b.d, b.n, b.negative, false});
 }
 Matrix inverse(const Matrix& a) {
@@ -79,8 +75,6 @@ Matrix inverse(const Matrix& a) {
   auto determinant = Rational::integer(0);
   for (unsigned c = 0; c < 3; ++c)
     determinant = add(determinant, multiply(a[c], cofactor[3 * c]));
-  if (determinant.n.zero())
-    throw GeometryError{};
   for (auto& n : cofactor)
     n = divide(n, determinant);
   return cofactor;
@@ -88,9 +82,6 @@ Matrix inverse(const Matrix& a) {
 Triple white_xyz(const std::array<double, 2>& xy) {
   const auto x = number(xy[0]), y = number(xy[1]);
   const auto z = subtract(subtract(Rational::integer(1), x), y);
-  if (x.negative || x.n.zero() || y.negative || y.n.zero() || z.negative ||
-      z.n.zero())
-    throw GeometryError{};
   return {divide(x, y), Rational::integer(1), divide(z, y)};
 }
 Matrix rgb_matrix(const std::array<double, 6>& xy,
@@ -107,8 +98,6 @@ Matrix rgb_matrix(const std::array<double, 6>& xy,
     auto scale = Rational::integer(0);
     for (unsigned j = 0; j < 3; ++j)
       scale = add(scale, multiply(inv[3 * c + j], w[j]));
-    if (scale.n.zero())
-      throw GeometryError{};
     for (unsigned r = 0; r < 3; ++r)
       p[3 * r + c] = multiply(p[3 * r + c], scale);
   }
@@ -138,11 +127,8 @@ Matrix adaptation(const std::array<double, 2>& source,
       s = add(s, multiply(h[3 * r + c], ws[c]));
       t = add(t, multiply(h[3 * r + c], wt[c]));
     }
-    if (s.n.zero() || s.negative || t.n.zero() || t.negative)
-      throw GeometryError{};
     ratios[r] = divide(t, s);
   }
-  // Deliberately AFTER all response checks, even for an identity/Empty call.
   if (source == target) {
     Matrix out;
     for (unsigned i = 0; i < 9; ++i)

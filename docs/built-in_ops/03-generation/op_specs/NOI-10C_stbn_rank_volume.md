@@ -23,8 +23,7 @@ rank[T,Th,Tw] Int64 and immutable resource descriptor; values[H,W].
 
 ## Parameters and domain
 
-frame and offsets x/y/t Int64; canvas/dtype. Generic volume lookup validates
-structure/identity; named STBN additionally requires approved provenance/license and
+frame and offsets x/y/t Int64; canvas/dtype. Generic volume lookup checks static structure; valid payload and identity are unchecked premises; named STBN additionally requires approved provenance/license and
 spatial/temporal reports.
 
 ## Mathematical specialization
@@ -37,30 +36,27 @@ conversion and requalification.
 ## Dependencies, resources and failures
 
 Execution rule: **Regional**. Compute requested output coordinates only. Read
-corresponding query/sample inputs and necessary controls; path/mesh/resource validation
-may require complete control data without computing the whole output canvas. Full
+corresponding query/sample inputs and the controls required by the mathematics. Complete control reads do not imply runtime payload validation. Full
 shared-control/topology/resource changes conservatively invalidate dependent output;
 sample changes follow the actual dependency map. Empty requests perform static preflight
-without payload reads or advancing a random sequence. Compute only requested output
-mathematics, retaining required shared validation.
+without payload reads or advancing a random sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
-Regional output after complete volume validation, O(N+area(Q)); periodic T.
+Regional lookup without scanning volume permutation/content, O(area(Q)); periodic T.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
 InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
 
 ## Independent fixtures and acceptance
 
-Negative frame, period T, duplicate ranks/hash mismatch; spatial-blue/time-white
+Negative frame, period T, valid rank permutations and explicit content identity; spatial-blue/time-white
 fixtures cannot certify STBN.
 
 Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.

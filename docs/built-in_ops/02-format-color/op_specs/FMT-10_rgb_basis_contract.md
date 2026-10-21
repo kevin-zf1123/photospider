@@ -138,17 +138,17 @@ adaptation internally. To adapt, connect C explicitly first.
 D's omitted policy means require_match: unequal source/target whites fail,
 while equal whites expand A->B. preserve_xyz expands A->B with explicit B
 preserve_xyz. adapt requires a method and expands A->C->B, with matching C output
-white and B target white. Explicit adapt still validates its selected method and
-white responses even when the whites are equal. Do not erase those parameter
-checks through a same-white shortcut. No FMT-08 relabel replaces the C transform.
+white and B target white. Explicit adapt checks its selected method even when
+the whites are equal. White-response positivity is an unchecked numerical
+premise; a same-white shortcut does not change the permitted domain. No FMT-08 relabel replaces the C transform.
 Raw D freezes the same matrices/policy but does not rely on color metadata in
 its intermediate tensors; raw B receives no semantic match assertion.
 
 C supports XYZ Scaling, linear Bradford, CAT02 and CAT16 at complete adaptation.
 There is no partial degree, scene/environment adaptation parameter, nonlinear
 Bradford variant or full CIECAM02/CAM16 model. All three source/target white
-responses under the selected matrix must be strictly positive. This exact
-static check applies in raw too; no epsilon or method fallback is allowed.
+responses under the selected matrix must be strictly positive as unchecked
+numerical premises in every mode. No epsilon or method fallback is allowed.
 The constraint applies to white parameters, not to color sample responses.
 Finite negative/HDR color samples remain legal. Tiny positive white responses
 are not rejected through a new conditioning threshold.
@@ -187,11 +187,11 @@ map or runtime Result propagation is used.
 
 The compiler retains complete output tiles. Lowering intersects each output tile with at most seven channel spans. Each nonidentity participating component requires all three selected source coordinates at the same point, including zero-coefficient terms. Bypass alpha/AOV/other-group coordinates require only the matching input coordinate. Each mapped region is closed over the input's own TileGrid; the input may have different atomic trailing axes from the output. The fixed read slots are the deduplicated union of those tiles. Rectangle and union sizes are bounded before enumeration. There is no sample-dependent dependency discovery.
 
-Static descriptor, group, geometry and method checks apply to every compilation, including Empty. An Empty output request produces no payload task. D composes the real A/C/B tile closures. A retained B row can require three intermediate XYZ components and therefore retain A/C rows that would disappear under a fused symbolic matrix.
+Static descriptor structure, group, geometry-field representation and method checks apply to every compilation, including Empty. An Empty output request produces no payload task. D composes the real A/C/B tile closures. A retained B row can require three intermediate XYZ components and therefore retain A/C rows that would disappear under a fused symbolic matrix.
 
 Only a complete native matrix exactly equal to I selects bit-copy behavior before dot/nonfinite classification. Each retained output coordinate then reads its corresponding source coordinate. Raw preserves every bit, including signaling NaNs and signed zeros. For semantic identity, the caller guarantees finite selected samples actually copied into retained tiles; bypass samples have no additional finite requirement. A single identity-looking row in a nonidentity matrix does not select this exception.
 
-`auto` and `materialize` write independent dense output tiles for both identity and arithmetic. `view` rejects a statically nonidentity transform during preparation. For exact-I, a nonempty forced-view task reads only the input schema and returns `InvalidArgument/ViewUnavailable`; it neither acquires source pixels nor publishes a result. D applies these rules to every generated node. Equal-white C still checks its selected method and all white responses before selecting identity.
+`auto` and `materialize` write independent dense output tiles for both identity and arithmetic. `view` rejects a statically nonidentity transform during preparation. For exact-I, a nonempty forced-view task reads only the input schema and returns `InvalidArgument/ViewUnavailable`; it neither acquires source pixels nor publishes a result. D applies these rules to every generated node. Equal-white C checks its selected method before selecting identity; white-response numerical premises remain unchecked.
 
 ## Storage, resources, errors and lifetime
 
@@ -203,9 +203,9 @@ For N participating output samples, B bypass samples and rank r, gathering and a
 
 | Condition | Phase | Outcome |
 | --- | --- | --- |
-| Missing/malformed/irrelevant field, ambiguous selector, invalid xy, singular basis, nonpositive white response, source assertion conflict | Static preparation | InvalidArgument / InvalidDomain. |
+| Missing/malformed/irrelevant field, ambiguous selector, malformed geometry encoding, source assertion conflict | Static preparation | InvalidArgument / InvalidDomain. |
 | Wrong model, dtype, transfer, units/reference, axis/shape, default white mismatch | Static preparation | TypeMismatch. |
-| Semantic consumed nonfinite input or nonfinite rounded output | Caller sample-domain precondition | Outside the fixed invocation contract; no sample diagnostic guaranteed. |
+| Invalid numerical geometry, singular basis, nonpositive white response, semantic consumed nonfinite input or nonfinite rounded output | Unchecked caller numerical/geometric precondition | Outside the fixed invocation contract; no sample diagnostic guaranteed. |
 | Raw nonfinite or sample overflow | Evaluation | NUM-defined IEEE result. |
 | Forced view of a statically nonidentity matrix | Static preparation | InvalidArgument / InvalidDomain, ViewUnavailable message. |
 | Nonempty exact-I forced view | Fixed invocation | InvalidArgument / ViewUnavailable. |
@@ -225,8 +225,8 @@ layout. Rank, extent and dtype bounds apply to the complete sample shape.
 
 Use independent exact-rational Gaussian elimination/determinants and dyadic sample
 rounding, plus fixed special-value bit oracles, to verify coefficients and outputs.
-Check all presets including virtual AP0, valid y=0 primaries, exact singularity,
-near-singular cancellation, white response rejection and four methods. Compare
+Check all presets including virtual AP0, valid y=0 primaries, nonsingular
+near-singular cancellation, positive white responses and all four methods. Compare
 white mapping before rounding with each dtype's actual rounded input cases.
 Do not claim exact white or inverse sample results by treating a nonrepresentable
 rational XYZ white as a floating input.

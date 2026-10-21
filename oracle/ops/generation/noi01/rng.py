@@ -30,11 +30,11 @@ def block(x,y,channel=0,domain=1,seed=0,stream=0,frame=0,draw=0):
     return philox4x64(pack_counter(x,y,channel,domain,stream,frame,draw),(s,0))
 
 
-def halfopen53(a,b):return F(((a>>37)<<26)|(b>>38),1<<53)
-def open52(a,b):return F(2*(((a>>38)<<26)|(b>>38))+1,1<<53)
+def halfopen53(word):return F(word>>11,1<<53)
+def open52(word):return F(2*(word>>12)+1,1<<53)
 
-def uniform(x,y,channel=0,dtype='float64',**kw):
-    b=block(x,y,channel,domain=1,**kw)
+def uniform(x,y,channel=0,dtype='float64',seed=0,stream=0,frame=0):
+    b=block(x,y,channel,domain=1,seed=seed,stream=stream,frame=frame,draw=0)
     if dtype=='float32':return float(F(b[0]>>40,1<<24))
-    if dtype=='float64':return float(halfopen53(b[0],b[1]))
+    if dtype=='float64':return float(halfopen53(b[0]))
     raise ValueError('dtype')

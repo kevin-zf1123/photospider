@@ -237,8 +237,9 @@ exact affine cancellation yields positive zero. Identity copying takes priority.
 The implementation uses 68 fixed 64-bit limbs. Endpoint magnitudes are below
 `2^2098`, width/slope magnitudes below `2^2099`, and the affine numerator below
 `2^4198`. Floating division alignment and 64-bit integer quotient rounding fit
-within the 4352-bit capacity. Integer conversion checks magnitude before narrowing
-and applies ties-even before clipping. Every mutable arithmetic temporary belongs
+within the 4352-bit capacity. Integer conversion uses unchecked representability
+premises for the non-clipping policy. The explicit clipping policy compares
+magnitude and applies ties-even before saturation as part of its result formula. Every mutable arithmetic temporary belongs
 to an `ExactConversion` object in declared Host scratch. Static maps and the
 UInt8-to-Float32 lookup are prepared before invocation; runtime arithmetic does
 not allocate vectors or dynamic rational objects.
@@ -262,7 +263,7 @@ remaining lanes use the same exact scalar semantics. No GPU backend is provided.
 
 | Failure | Phase | Status / reason |
 | --- | --- | --- |
-| Malformed parameters, invalid bounds/table/axis, unsupported modes | Static preparation | InvalidArgument / InvalidDomain |
+| Malformed parameters, malformed bound encoding or table/axis structure, unsupported modes | Static preparation | InvalidArgument / InvalidDomain |
 | Unsupported dtype/rank/count or malformed fixed invocation signature | Static preparation / kernel preparation | TypeMismatch |
 | Forced view with a nonidentity map | Static preparation | InvalidArgument / InvalidDomain |
 | Nonempty forced view with an identity map | Invocation | InvalidArgument / ViewUnavailable |

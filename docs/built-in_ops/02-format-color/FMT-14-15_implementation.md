@@ -92,8 +92,9 @@ the input dtype before searching. Every candidate rounds scaled a/b, then
 OKLab-to-XYZ, then XYZ-to-RGB at the same specified boundaries. The search
 retains the accepted candidate itself and uses exact dyadic bounds. It makes
 no assumption that the ray is monotone or that the result is a globally maximal
-chroma. A nonfinite finite-input intermediate is an arithmetic failure, not
-an out-of-gamut candidate to silently discard.
+chroma. Required intermediate/result finiteness and representability are
+unchecked caller premises. Gamut classification remains part of the mapping
+formula; it does not serve as a numerical-domain validator.
 
 FMT-14C and FMT-15A use fixed-capacity rational arithmetic. Static parameters
 and geometry are exact stored binary64 rationals. Exact cancellation at Y=0
@@ -148,9 +149,9 @@ before consuming placeholder results.
 Cancellation is checked between at most 64 points, at most 256 output writes,
 and inside exact arithmetic/refinement/search work. Status and first-failure
 reasons are retained. Static configuration failures use InvalidArgument /
-InvalidDomain or TypeMismatch; consumed nonfinite samples and rejected negative
-Y use OperationFailed / InvalidDomain; nonfinite arithmetic results use
-OperationFailed / ArithmeticOverflow. Capacity failures and cancellation retain
+InvalidDomain or TypeMismatch for structural errors. Numerical parameter
+domains, consumed finite samples, Y>=0 under reject, and finite representable
+results are unchecked caller premises. Capacity failures and cancellation retain
 their native codes. Successful results remain readable after source/context
 teardown; failed calls expose no partial result.
 
@@ -224,7 +225,9 @@ Temporary public compile/prepare/submit/join checks covered:
 - All six native members in Float32/Float64; analytic clip, compression, tone,
   display and mask fixtures; retained outputs after execution-context teardown.
 - Sparse R-only clipping with unrequested NaN peers, alpha-only OKLab bypass,
-  and a selected OKLab output rejecting a nonfinite required peer.
+  and, under the former checked contract, a selected OKLab output rejecting a
+  nonfinite required peer. That historical rejection is superseded by the
+  unchecked numerical premise and is not a current acceptance requirement.
 - Axis-free raw and described Gray, including an explicit Gray group;
   rank-one mask `keepdims`; native view/manual equivalence and FMT-10D expansion.
 - Atomic rollback for inconsistent transitions, malformed descriptions, wrong
@@ -331,3 +334,21 @@ See [FMT-12/13/18 implementation](FMT-12-13-18_implementation.md) for pinned
 engines and private runtime integration, closed snapshots, independent numerical
 oracles, failure injection, construction inspection, performance and configured
 view examples. The native measurements above remain separate evidence.
+
+## Unchecked revision verification (2026-10-21)
+
+Finite input/intermediate/output conditions, positive weights, gain/white/knee
+ranges and display-luminance geometry are unchecked caller premises, including
+when parameters are available at preparation. The retained `reject` spelling for
+negative luminance selects the nonnegative domain; it does not add a validator.
+Explicit clipping, signed extension, gamut tests used by the mapping/search,
+exact rounding and numerical refinement remain the algorithms themselves.
+
+A temporary public workflow verified RGB clip and in-range signed-zero copying,
+axis-free Gray simple tone mapping, its negative signed extension, and the
+relative-to-nits mapping with black=1 and white=101. The same 33-check program
+covered integer/float format clipping, ties-even and NaN payload handling. The
+ops/SDK/private-engine build and modified-source formatting/lint passed. The
+program was removed after execution; no new performance or other-platform claim
+is made by these focused checks. Historical sample-rejection checks above are
+superseded by the unchecked contract.

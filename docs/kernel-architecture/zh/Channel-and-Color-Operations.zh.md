@@ -71,7 +71,7 @@ FMT-11 算术拥有固定容量的有理数工作区，以及供根、幂、三�
 
 ## 原生色域与亮度映射
 
-FMT-14 A-D 与 FMT-15 A/B 提供六个固定 ABI 8 strict CPU key，接收一个 Float32/Float64 tensor，完整 rank 1..8、sample count 至多 2^40。描述选择完整 RGB group，FMT-15 也接受 linear-Y Gray；raw 调用提供所需 selector、几何、model/reference 与单位。静态检查 native encoding、straight-compatible association、组重叠、空间 channel axis 与几何。映射按公式检查实际消费样本的有限性，并返回定义域/溢出错误，raw 也遵循此规则。其他组、alpha、AOV 逐位复制。
+FMT-14 A-D 与 FMT-15 A/B 提供六个固定 ABI 8 strict CPU key，接收一个 Float32/Float64 tensor，完整 rank 1..8、sample count 至多 2^40。描述选择完整 RGB group，FMT-15 也接受 linear-Y Gray；raw 调用提供所需 selector、几何、model/reference 与单位。静态检查 native encoding、straight-compatible association、组重叠、空间 channel axis 与几何字段结构。各模式的数值／几何参数域、样本有限性及中间量／结果可表示性均为 unchecked 前提，不扫描输入或发布结果。其他组、alpha、AOV 逐位复制。
 
 Clip 与显示范围转换逐分量计算；OKLab 降色度、RGB 压缩、gamut mask 与 RGB 亮度映射读取该点的完整三颜色分量。源区域按输入网格取闭包，每个完整输出 tile 对应一个固定 task。auto/materialize 写入独立预分配 dense 输出，atomic_trailing_axes=0；forced view 静态拒绝。Mask 投影保留 batch/空间拓扑，rank-one 使用 keepdims。准备阶段检查完整输入/输出 schema、精确 read slots 与 scratch。算术状态位于已准入的固定 scratch；旁路、clip、mask 不需要算术 workspace。取消检查间隔至多 64 点、256 次输出写入，并进入昂贵的精确运算内部。Empty 保留静态校验且没有 payload task。
 
@@ -79,7 +79,7 @@ Strict 实现使用精确有理公式及指定的阶段舍入。Float32 定向�
 
 ## 显式原生与配置化 view
 
-`format::compose_view` 由 `photospider/ops/format/view.hpp` 和 ops umbrella header 导出，验证非空有序 native FMT-09/10/14/15 与 configured FMT-13A..F 阶段及最终显示条件。各阶段提供完整输入/输出描述与适用参数；FMT-10D 额外显式指定 profile。helper 解析真实图边、规范相容的原生断言、保留无关配置并校验黑白亮度/transfer 一致。描述在任何索引访问前验证，错误参数类型返回失败。只有完整推导成功才提交工作副本。不重排、融合、消除 identity，也不添加隐藏 transfer 或 native C key。
+`format::compose_view` 由 `photospider/ops/format/view.hpp` 和 ops umbrella header 导出，验证非空有序 native FMT-09/10/14/15 与 configured FMT-13A..F 阶段及最终显示条件。各阶段提供完整输入/输出描述与适用参数；FMT-10D 额外显式指定 profile。helper 解析真实图边、规范相容的原生断言、保留无关配置并校验黑白亮度/transfer 一致。描述结构在任何索引访问前验证，错误参数类型返回失败；显示亮度有限性与顺序、正权重及白点／基色几何合法性均为 unchecked 数值前提。只有完整推导成功才提交工作副本。不重排、融合、消除 identity，也不添加隐藏 transfer 或 native C key。
 
 资源感知重载接收显式 ResourceSet，同时支持 NativeDisplayConditions 和 ConfiguredDisplayConditions。它在提交前构建真实 OCIO processor、解析规范空间与方向，并验证最终 configured display/view 端点。D/E/F 的端点含义仍是调用方断言。Configured 端点之后的原生阶段要求相容的 analytic binding；无关组、alpha/AOV 断言和 axes 保持完整。
 
@@ -89,4 +89,4 @@ FMT-12 A/B/C、FMT-13 A..F 和 FMT-18 A/B 提供十一个固定调用 ABI 8 CPU 
 
 每个 prepared kernel 拥有独立引擎、内存准入和 mutex；static operation state 中没有资源相关的隐式可变缓存。Empty/bypass-only 请求也执行完整资源构建验证。构建同步且不可取消，保留分配/工作量上限及首次失败锁存。像素执行每批至多 64 点，继续支持取消。现有准备阶段 ResourceAllocationScope 桥接将保留引擎计入执行预算；独立资源验证使用显式构建上限。内核及 ABI 冻结边界未改变。
 
-FMT-18B 构建独立源域 alarm pipeline，Gray 为 49、RGB 为 49³、CMYK 为 23⁴ 网格点，并把有限 score 分类成精确 0/1；不通过显示报警色反推 mask。构建检查返回实际标签、路径、文件、插值与选中的 Look。操作键、构建身份、独立 oracle 和实测平台边界见[外部引擎实现与性能](../../built-in_ops/02-format-color/FMT-12-13-18_implementation.md)。
+FMT-18B 构建独立源域 alarm pipeline，Gray 为 49、RGB 为 49³、CMYK 为 23⁴ 网格点，并在 score 有限的 unchecked 前提下按 score>0 输出精确 1，否则输出 +0；不通过显示报警色反推 mask。构建检查返回实际标签、路径、文件、插值与选中的 Look。操作键、构建身份、独立 oracle 和实测平台边界见[外部引擎实现与性能](../../built-in_ops/02-format-color/FMT-12-13-18_implementation.md)。

@@ -155,15 +155,12 @@ inline OperationDefinition fixed_pointwise(const char* key, Pointwise kind) {
   traits.outputs[0].result_schema = tensor_ops::scalar_schema();
   traits.requires_metadata_specialization = true;
   if (kind == Pointwise::Clamp) {
-    const auto maximum = std::numeric_limits<double>::max();
-    traits.parameter_schema = {
-        {"min", OperationParameterType::Float64, true, true, -maximum, maximum},
-        {"max", OperationParameterType::Float64, true, true, -maximum,
-         maximum}};
+    traits.parameter_schema = {{"min", OperationParameterType::Float64},
+                               {"max", OperationParameterType::Float64}};
   }
-  definition.specialize_metadata = [kind](const auto& inputs,
-                                          const auto& parameters)
-      -> Result<std::vector<OperationOutputSpecialization>> {
+  definition.specialize_metadata =
+      [](const auto& inputs,
+         const auto&) -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
     for (const auto& input : inputs) {
       auto status = tensor_ops::check_tensor(input);
@@ -179,9 +176,6 @@ inline OperationDefinition fixed_pointwise(const char* key, Pointwise kind) {
         return Answer({ErrorCode::TypeMismatch,
                        "pointwise inputs must share shape and dtype"});
     }
-    if (kind == Pointwise::Clamp && std::get<double>(parameters.at("min")) >
-                                        std::get<double>(parameters.at("max")))
-      return Answer({ErrorCode::InvalidArgument, "clamp min exceeds max"});
     auto schema = tensor_ops::scalar_schema();
     schema.tensors[0].descriptor = {first.descriptor.element_type, shape};
     return Answer(std::vector<OperationOutputSpecialization>{
@@ -207,7 +201,7 @@ inline OperationDefinition fixed_pointwise(const char* key, Pointwise kind) {
     }
     for (const auto& member : query.requests[0].members) {
       for (auto tile : member.second) {
-        auto task = builder.add_task("pointwise", "finite-unchecked-v1");
+        auto task = builder.add_task("pointwise", "finite-unchecked-v2");
         if (!task.ok())
           return Result<OperationProgram>(task.status());
         auto region = output.value().region(tile);
@@ -244,7 +238,7 @@ inline OperationDefinition fixed_pointwise(const char* key, Pointwise kind) {
           {ErrorCode::TypeMismatch, "invalid pointwise kernel signature"});
     };
     if (kernel.symbol != "pointwise" ||
-        kernel.contract != "finite-unchecked-v1" || query.writes.size() != 1 ||
+        kernel.contract != "finite-unchecked-v2" || query.writes.size() != 1 ||
         query.writes[0].port != 0 || query.writes[0].member != 0 ||
         !query.task_parameters.empty() ||
         query.scratch != std::array<std::uint64_t, 3>{})

@@ -39,8 +39,9 @@ Both det(P) and every s component must be exactly nonzero, equivalently P and
 M are nonsingular. Virtual primaries, primary y=0, negative normalization scales
 and exact near-singular bases are allowed. No condition-number cutoff or epsilon
 replacement is introduced. Large exact coefficients are not rounded to a finite
-machine matrix just to decide validity; resource/precision budgets remain real
-limits with explicit errors.
+machine matrix. Finite white geometry, nonsingular bases and nonzero scales are
+unchecked caller premises, even when parameters are known before execution.
+Resource/precision budgets remain real limits with explicit errors.
 
 A: XYZ=M RGB. B: RGB=M^-1 XYZ. M(1,1,1)^T=W exactly before sample rounding.
 M is dimensionless: relative reference white Y=1 and absolute cd/m²-scaled
@@ -77,10 +78,11 @@ coordinates exactly, with metadata signed-zero canonicalization inherited.
 
 Normalize source and target whites Ws,Wt separately to Y=1. For the explicitly
 selected response matrix H, form rs=H Ws and rt=H Wt. Every component of both
-rs and rt must be strictly positive. Check this exactly before execution in
-semantic and raw modes, including equal-white identity requests. Invalid white
-responses are parameter errors; input color samples need not have positive
-responses or lie inside a gamut.
+rs and rt must be strictly positive as unchecked numerical premises in both
+semantic and raw modes, including equal-white identity requests. Preparation
+checks the selected method and parameter representation without testing these
+responses. Input color samples need not have positive responses or lie inside
+a gamut.
 
 ```
 K = inverse(H) * diag(rt[0]/rs[0], rt[1]/rs[1], rt[2]/rs[2]) * H

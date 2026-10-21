@@ -39,7 +39,7 @@ For finite inputs away from the origin, the principal angle theta is the polar
 argument of x+i*y with range [-pi,pi], selecting the signed branch as below.
 Strict rounds the mathematical `atan2(y,x)` directly to output dtype. The
 normalized operation never divides an already-rounded radian angle by a rounded
-pi. Both inputs are read and validated even when a special case fixes the result.
+pi. Both inputs remain declared dependencies and are read even when a special case fixes the result; their payload is not validated.
 
 If either input is NaN, quiet and preserve it; if both are NaN, y's payload/sign
 wins. Otherwise apply the following exact table. Here s is the sign of y,

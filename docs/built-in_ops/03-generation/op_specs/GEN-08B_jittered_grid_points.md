@@ -30,8 +30,8 @@ nx,ny>=1, seed/stream; jitter in [0,1] default 1; frame=0.
 
 ## Mathematical specialization
 
-Domain 3 addresses cell (i,j), channel/draw=0; use two candidate halfopen53 uniforms.
-Position=cell_lower+cell_size*(1/2+jitter*(U-1/2)), RN64 and half-open-cell validation.
+Domain 3 addresses cell (i,j), channel/draw=0; use halfopen53 from words 0/1 for x/y respectively; words 2/3 are unused.
+Position=cell_lower+cell_size*(1/2+jitter*(U-1/2)), RN64 and the specified half-open-cell endpoint correction; representable cell interiors and distinct output points are caller premises.
 jitter=0 matches grid bits; seed remains identity.
 
 ## Dependencies, resources and failures
@@ -40,13 +40,12 @@ Computation scope: **complete input in a Run-shared stage**. Read complete struc
 selected complete Result atomically. Full shared-control/topology/resource changes
 conservatively invalidate dependent output; sample changes follow the actual dependency
 map. Empty requests perform static preflight without payload reads or advancing a random
-sequence. Compute only requested output mathematics, retaining required shared
-validation.
+sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
-complete-input Result, O(nx*ny); packing remains an explicit gate.
+complete-input Result, O(nx*ny); use the DynamicPoints v1 member directory and CompleteBundle publication.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
 InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
@@ -60,6 +59,5 @@ Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.

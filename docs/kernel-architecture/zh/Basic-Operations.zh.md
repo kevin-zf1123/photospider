@@ -26,6 +26,6 @@
 
 准备阶段检查规范输出视图、精确输入 tile 集合、任务参数和 scratch 容量，随后取得固定入口。运行时 invocation 读取借用的输入视图，写入预分配输出视图，检查取消并恢复调用方浮点环境。成功任务的输出可供依赖任务读取。当调用所需的全部任务成功并按序退休时，执行器公开 Result 所有权。失败调用不公开部分 Result。
 
-有限算术样本、递增曲线控制点、互异查询坐标、可表示输出及 `reject` 的 payload 域条件属于调用方前提。内核不扫描完整输入进行数值验证。算法保留 PCHIP 割线可表示性、插值距离缩放、补偿乘积对齐和插值精度检查；LUT 保留有界单元修正及浮点数转索引前的检查。这些检查通过 invocation 内的有界错误状态报告 `OperationFailed`，不分配异常字符串。非法静态参数返回 `InvalidArgument`，schema 不兼容返回 `TypeMismatch`，取消和资源耗尽保留各自状态码。
+有限算术样本、递增曲线控制点、互异查询坐标、可表示输出及 `reject` 的 payload 域条件属于调用方前提。参数有限性、顺序和 LUT 浮点数转索引的数值域也属于 unchecked 前提，即使 preparation 已知参数值。算子不扫描输入或完成后的输出进行验证。算法保留 PCHIP 割线、可逆距离缩放和补偿乘积对齐所需的精度判定，以及有界 LUT 单元修正。这些检查通过 invocation 内的有界错误状态报告 `OperationFailed`，不分配异常字符串。参数类型、语法或静态结构错误返回 `InvalidArgument`，schema 不兼容返回 `TypeMismatch`，取消和资源耗尽保留各自状态码。
 
 图像含义由算子定义。普通图像默认 straight alpha，不自动绑定 RGBA 合规 validator。显式 association 转换和算法所需检查仍属于算子行为，kernel schema 标签不认证像素。

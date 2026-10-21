@@ -67,8 +67,8 @@ channels as a color group receives that group in its own explicit description;
 three input channels do not imply RGB. A Lab color group and an independent alpha
 plane may coexist in one output tensor when the consumer's description says so.
 Assembly does not consume pixel-domain color or alpha constraints and grants no
-sample-validity certificate. A later semantic consumer validates the samples it
-actually uses.
+sample-validity certificate. The caller satisfies each later semantic consumer's numerical premises;
+that consumer does not validate the samples it uses.
 
 ## Current Result interface and bounds
 

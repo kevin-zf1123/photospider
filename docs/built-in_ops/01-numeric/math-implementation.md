@@ -277,7 +277,7 @@ Each invocation owns preallocated `ExactPolynomial` and `ExactSampling` scratch 
 
 Finite t in [0,1], finite consumed controls and RN64 reconstructions, and finite representable outputs are unchecked caller preconditions. Mathematically unused controls have no additional finite scan, but all declared source tiles remain producer dependencies. Handles retain physical dependencies even for endpoint queries. FloatingEnvironment preserves the caller state; cancellation is checked per row/component and inside exact arithmetic. Internal capacity guards remain. Concurrent Runs share immutable preparation and own their scratch/output; required tasks share one call's ordered publication result.
 
-Temporary acceptance uses the retained Fraction Bernstein oracle over actual selected tile cells, with full-output expansion disabled in the temporary checker. Check arithmetic bits independently from source-grid closure, malformed preparation, sparse large shapes, fenv, segment guard, resource admission, cancellation, concurrent rebinding and retained output lifetime. See the [CRV-03 contract](op_specs/CRV-03_evaluate_bezier.md#fixed-execution-and-physical-demand).
+Temporary acceptance uses the retained Fraction Bernstein oracle over actual selected tile cells, with full-output expansion disabled in the temporary checker. Check arithmetic bits independently from source-grid closure, malformed preparation, sparse large shapes, fenv, valid segment boundary selection, resource admission, cancellation, concurrent rebinding and retained output lifetime. See the [CRV-03 contract](op_specs/CRV-03_evaluate_bezier.md#fixed-execution-and-physical-demand).
 
 ## CRV-04 public LUT1D authoring
 
@@ -358,7 +358,7 @@ obey complete selected-color caller preconditions. Representable output associat
 All profiles currently return strict bits within their declared contract. Scalar/NEON/AVX2 integer primitives serve their respective CPU profiles; there is no approximate transfer backend. ExactRgb and ExactColorCoordinate own checked interval state and borrowed synchronous work callbacks. They return terminal cancellation/resource failures before any precision reset and refine only uncertain expressions. Candidate output is accepted only while arithmetic remains active. Scratch destruction and floating-environment restoration happen at synchronous return, including failure.
 
 TensorDescription model/white/primary/transfer/hue configuration belongs to
-the operations SDK. Numeric tuple admission reuses exact FMT geometry checks.
+the operations SDK. Numeric tuples reuse exact FMT geometry calculations. Static description structure is checked; numerical/geometric validity is an unchecked caller premise.
 The logical tuple axis is zero; sampled arrays retain a final component axis.
 CIELAB/CIELCh use normalized l=L*/100 and RGB uses straight storage. Transfer
 kind, gamma bits and alpha presence are resolved once during preparation;

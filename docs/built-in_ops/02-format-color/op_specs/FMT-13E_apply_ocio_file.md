@@ -45,7 +45,7 @@ four-channel CMYK. The same three-component/alpha-independent admission applies.
 ## Execution and acceptance
 
 One input/output tensor preserves dtype/shape/slots. Finite samples, exact point
-support, requested-output validation, optimized/reference and ownership follow
+support, unchecked requested-output numerical premises, optimized/reference and ownership follow
 the family. Entry/exit labels do not add transforms. Raw does not automatically
 publish target semantics. Materialize requested output; view is forbidden.
 
@@ -58,7 +58,7 @@ publish target semantics. Materialize requested output; view is forbidden.
 - Two frozen packages with the same logical filename and different LUT bytes
   must not cross-hit caches. A missing proxy resource must not read a real host
   file at the same path. Construction allocation/work failures cannot cause fallback.
-- Check alpha admission, finite narrowing overflow, hidden colors, bypass,
+- Check structural alpha admission, valid finite narrowing, hidden colors, bypass,
   exact cross-tile requests and both execution configurations.
 
 Public resource helpers, executable operation usage, independent oracle commands

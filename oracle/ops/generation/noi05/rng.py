@@ -7,9 +7,9 @@ from oracle.ops.generation.noi01.rng import block
 from oracle.ops.generation.noi01.rng import halfopen53
 
 
-def cellular_feature(ix,iy,**kw):
-    b=block(ix,iy,domain=7,**kw)
-    return _inside_map(halfopen53(b[0],b[1]),ix,ix+1),_inside_map(halfopen53(b[2],b[3]),iy,iy+1)
+def cellular_feature(ix,iy,seed=0,stream=0,frame=0):
+    b=block(ix,iy,channel=0,domain=7,seed=seed,stream=stream,frame=frame,draw=0)
+    return _inside_map(halfopen53(b[0]),ix,ix+1),_inside_map(halfopen53(b[1]),iy,iy+1)
 
 
 def cellular2d(p,max_search_rings=64,dtype='float64',**kw):

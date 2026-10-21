@@ -22,19 +22,17 @@ output bits and discrete decisions are fixed.
 
 ## Interface and representation
 
-Typed primitive references and Bezier/arc/Hermite/spline payloads, subpath topology,
-optional associated attributes; Primitives PathSet.
+The 13 field tensors of photospider.ops.path_primitives v1, including counts and subpath topology, produce one Primitives PathSet. Width and source-map Results remain separate workflow values.
 
 ## Parameters and domain
 
-Explicit tag/record/payload-field associations; Core fields empty; spline degree<=16.
+Explicit tag/record/payload-field associations; the separate Primitives schema contains no CoreVerbs fields; spline degree<=16.
 
 ## Mathematical specialization
 
-Validate nonzero sub-full-turn ArcSweep and explicit FullTurn direction, nondegenerate
+Caller premises are nonzero sub-full-turn ArcSweep and explicit FullTurn direction, nondegenerate
 ellipse axes, zero unused Bezier slots, positive rational weights and nondecreasing
-valid knots. Connections require exact proof; do not accept approximate equality or
-silently convert authority.
+valid knots. Exact connections are also caller premises; no input scan or connection proof runs during publication or consumption. Representation conversion remains explicit.
 
 ## Dependencies, resources and failures
 
@@ -42,13 +40,12 @@ Computation scope: **complete input in a Run-shared stage**. Read complete struc
 selected complete Result atomically. Full shared-control/topology/resource changes
 conservatively invalidate dependent output; sample changes follow the actual dependency
 map. Empty requests perform static preflight without payload reads or advancing a random
-sequence. Compute only requested output mathematics, retaining required shared
-validation.
+sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
-complete-input O(payload+references+attributes); canonical empty fields.
+complete-input O(payload+references); canonical padding follows the shared schema.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
 InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
@@ -56,12 +53,11 @@ lifetime and actual returned coverage inherit GEN-common.
 ## Independent fixtures and acceptance
 
 Full circle is not zero sweep; degree0 spline; discontinuous knots require separate
-subpaths; stale ObjectId and invalid references fail.
+subpaths; valid ObjectId associations and in-range references.
 
 Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.

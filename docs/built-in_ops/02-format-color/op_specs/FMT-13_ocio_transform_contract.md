@@ -24,7 +24,7 @@ specific numerical recipe chosen for [ICC](FMT-12_icc_transform_contract.md).
 Engine construction is synchronous and non-cancellable. Profile/config parsing,
 processor linking, BPC preparation, LUT inversion and gamut-table generation do
 not receive or probe a Run cancellation token. Construction work and memory
-limits, first-failure latching, complete validation for Empty/bypass requests,
+limits, first-failure latching, complete static structural preparation for Empty/bypass requests,
 and cleanup on failure remain required. This is the maintainer's explicit
 2026-10-21 revision; no preparation-cancellation kernel extension is required.
 
@@ -88,7 +88,7 @@ CMYK conversion remains FMT-12. All image results retain canonical straight form
 Support Float32 and Float64 public tensors with matching output dtype. Float64
 selected colors first round to Float32 under NUM rules, run an F32-to-F32 OCIO
 processor, then widen exactly back to Float64. Float32 colors run directly.
-Finite-to-infinity narrowing fails. This explicitly loses Float64 precision;
+Finite representable narrowing is an unchecked caller premise. This explicitly loses Float64 precision;
 neither public dtype promises a different internal engine. Bypass alpha/AOVs
 never pass through narrowing and retain their original bit patterns.
 
@@ -167,7 +167,8 @@ automatic bit-preserving view/copy. CPU reference does not undo config skips.
 ## Confirmed finite numerical domain
 
 Description-based and finite-only raw paths require consumed color inputs, narrowed Float32 values
-and requested outputs finite. Admit finite negative/HDR coordinates without an
+and requested outputs finite as unchecked caller premises. No adapter scan
+checks source, narrowed or output values. Use finite negative/HDR coordinates without an
 adapter clamp; a configured Range/LUT/rendering transform may itself clip.
 The proposed raw path omits analytic interpretation checks, but still requires
 explicit endpoint configuration and finite samples. No path attaches an output
@@ -201,9 +202,9 @@ Every requested transformed coordinate consumes the complete source triple at
 that point, even for a reported no-op. Spatial demand is exact, without halo or
 unrequested pixels. Bypass alpha/AOV requests consume only their corresponding
 source component; alpha=0 does not suppress requested hidden-color processing.
-Evaluate full target triples in scratch if needed, but validate/publish only
-requested components. Unrequested target nonfinite values alone do not fail an
-otherwise valid requested coordinate; an actual shared engine failure propagates.
+Evaluate full target triples in scratch if needed and publish requested
+components without a validation pass. Actual shared engine execution failures
+propagate; violated sample premises have no required diagnostic.
 
 layout=auto (default) and materialize both use requested regions of one legal
 full-shape planar output reservation. Reject view, including Float32 no-op cases.
@@ -314,12 +315,14 @@ Use prepared same-grid windows, gather into bounded planar scratch where tile
 address maps cannot be described by uniform strides, and never read missing
 pixels or row padding as colors. Do not publish temporary engine planes.
 
-Validate all consumed source colors before RN32 and the narrowed values before
-the processor. Validate requested output coordinates after processing. Shared
-engine failures remain observable even if caused while generating the full
-scratch triple; an unused numerical result alone is not a failure. Empty and
-bypass-only observations still perform static resource/processor admission,
-including alpha-effect checks, without scanning unrequested image samples.
+RN32 conversion, engine processing and requested output conversion run directly
+under the finite/representability premises. No source, narrowed-value or output
+scan is performed. Empty and bypass-only observations still perform static
+resource/processor construction, including structural alpha-effect checks.
+The host visitor checks node types, hierarchy, LUT/curve sizes, interpolation
+and alpha support without scanning numeric coefficients or LUT samples. Frozen
+nodes are not subjected to an extra host `validate()` call; actual processor
+construction and its engine failures remain part of preparation.
 
 ## Execution recipe and reproducibility
 
@@ -420,20 +423,21 @@ failure propagation. Static unsupported dtype/group/layout or incompatible
 semantic model uses TypeMismatch; missing/conflicting selectors, endpoints,
 resources, invalid tree/config/inverse/bridge or alpha-effect admission uses
 InvalidArgument/InvalidDomain. Forced view and unsupported concrete interpolation
-are static InvalidArgument/InvalidDomain. Runtime consumed NaN/Inf uses
-OperationFailed/InvalidDomain; finite narrowing overflow and requested nonfinite
-results use OperationFailed/ArithmeticOverflow. ResourceExhausted preserves the
+are static InvalidArgument/InvalidDomain. Numeric parameter domains, finite
+consumed values, representable narrowing and finite requested results are
+unchecked caller premises. Genuine private-engine execution failure remains
+OperationFailed; no sample-domain diagnostic is promised. ResourceExhausted preserves the
 root limit reason; Cancelled/stale retains inherited precedence and attribution.
 Integration invariant failures are not misreported as invalid user configs.
 
 Diagnostics identify member/coordinate/component, immutable resource, selected
-route and engine error without dumping resource bytes. Do not publish invalid
-requested pixels or substitute a different engine/config/optimization/identity
-copy. Actual host failures cannot trigger config or Look alternatives.
+route and engine error without dumping resource bytes. Actual execution
+failure publishes no successful result and does not substitute a different
+engine/config/optimization/identity copy. There is no output validation gate. Actual host failures cannot trigger config or Look alternatives.
 
 Regression coverage includes both dtypes and configurations; exact identity
 Float64 narrowing; simple matrices/ranges/gamma and independent LUT fixtures;
-negative/HDR/domain failures; aliases/roles/case errors; both directions and
+valid negative/HDR cases and actual engine failures; aliases/roles/case errors; both directions and
 lossy inverse cases; same-name/equalitygroup/isData skips; default bridges and
 explicit views; Look candidate selection; static dynamic-property values;
 alpha mixing/replacement rejection and valid RGB cross-talk; bypass/empty,

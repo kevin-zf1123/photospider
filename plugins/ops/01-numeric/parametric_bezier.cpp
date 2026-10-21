@@ -137,7 +137,7 @@ Result<OperationProgram> lower(const OperationLowering& query) {
   OperationProgramBuilder builder(query);
   for (const auto& member : query.requests[0].members)
     for (auto tile : member.second) {
-      auto task = builder.add_task("evaluate", "parametric-bezier-unchecked-v1",
+      auto task = builder.add_task("evaluate", "parametric-bezier-unchecked-v2",
                                    {}, {sizeof(ParametricMath), 0, 0});
       if (!task.ok())
         return Answer(task.status());
@@ -218,14 +218,6 @@ void invoke(const ps_kernel_invocation_v8* invocation,
         return;
       const auto index = output.layout->origin[0] + row;
       const auto segment = reader.bits(2, {index}, 8);
-      // Signed negatives also compare above the bound as raw unsigned bits.
-      // This guard protects the data-dependent control addresses.
-      if (segment >= state.knots - 1) {
-        *status = kernel_failure(ErrorCode::InvalidArgument,
-                                 "parametric segment out of range",
-                                 FailureReason::InvalidDomain);
-        return;
-      }
       const auto parameter = read(3, {index});
       const auto parts = BinaryParts::decode(parameter, false);
       const int endpoint = !parts.magnitude                            ? 0
@@ -368,7 +360,7 @@ OperationDefinition parametric_operation(const std::string& key,
           const ResourceSet&,
           const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
     if (kernel.symbol != "evaluate" ||
-        kernel.contract != "parametric-bezier-unchecked-v1")
+        kernel.contract != "parametric-bezier-unchecked-v2")
       return Result<ps_prepared_kernel_v8>(
           {ErrorCode::TypeMismatch, "invalid parametric Bezier kernel"});
     if (placement.backend != physical::Backend::Cpu ||

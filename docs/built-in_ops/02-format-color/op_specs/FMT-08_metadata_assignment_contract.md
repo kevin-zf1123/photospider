@@ -149,9 +149,9 @@ never removes its data plane or changes shape; use FMT-05C for logical channel
 removal.
 
 Sample values are never read. Describing samples containing 1.6 as coverage
-succeeds if the description is structurally valid; a later coverage consumer
-that receives this description, or a port-bound validator, can reject that
-sample.
+succeeds if the description is structurally valid. Such a value violates a
+later coverage consumer's numerical premise; neither publication nor the
+consumer performs a payload-domain validation pass.
 
 ## Resources and identity
 

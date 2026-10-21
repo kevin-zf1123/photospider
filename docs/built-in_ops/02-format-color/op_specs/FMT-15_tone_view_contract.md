@@ -50,8 +50,10 @@ geometry, layout=auto|materialize (auto default), and the
 member fields below. Forced view is rejected even for a numerically identity
 parameter choice under this family's fixed materialization policy. Raw supplies ordered slots, RGB/Gray choice and all required
 weights/basis and units explicitly. All modes require consumed inputs and
-requested outputs finite. No output carries an attached domain description. Finite-domain
-mapping is an explicit exception to unrestricted NUM special-value arithmetic.
+requested outputs finite as unchecked caller premises. The same boundary
+covers numeric gain/white/knee/display conditions. No output carries an attached
+domain description. Finite-domain mapping is distinct from unrestricted NUM
+special-value arithmetic and adds no validation scan.
 
 A/B compute in the configured primaries and white with the reference/units
 described below. Other groups/AOVs and alpha pass through bit-for-bit. Callers
@@ -77,7 +79,7 @@ Static parameters:
 
 Let x be Gray or the RGB vector; Y=x for Gray, otherwise Y=w dot x using exact
 FMT-10 Y weights. A color with a negative component but nonnegative Y is allowed.
-If Y<0 and negative_luminance=reject, fail; otherwise put z=gain*abs(Y).
+For negative_luminance=reject, Y>=0 is an unchecked caller premise; the retained spelling selects that domain and does not request a validator. signed_extension permits negative Y. Put z=gain*abs(Y).
 Define the gain applied to every selected component:
 
 k = gain/(1+z)                              # simple
@@ -95,7 +97,7 @@ not an implicit clamp or physical peak. The signed extension is odd in luminance
 it is explicitly a mathematical extension, not negative emitted light. At Y=0,
 k=gain, including nonzero signed RGB whose weighted Y cancels exactly. Thus
 there is no epsilon, 0/0 branch or automatic destruction of hidden chroma.
-For all RGB requests, read/validate all three components, even at Y=0 or a
+For all RGB requests, read all three components for the formula, even at Y=0 or a
 special parameter value. Gray requests consume only their one component.
 
 RGB ratios are preserved before rounding where defined; bounded luminance does
@@ -154,8 +156,9 @@ Conditions are descriptive unless a listed stage actually uses them.
 An OCIO endpoint can instead be the final complete config-defined display
 interpretation, with explicit display/view/config identity. Analytic units or
 nits are required only if an analytic binding claims them; never invent peak
-luminance from an OCIO space name. C validates the declared conditions but does
-not prove monitor calibration or measurement. An OCIO view already contains its
+luminance from an OCIO space name. C checks the structure and mutual
+consistency of declared conditions; numeric/physical validity is a caller
+premise. It does not prove monitor calibration or measurement. An OCIO view already contains its
 configured rendering. A native A before/after it appears only if explicitly
 listed; no duplicate rendering is added by the helper.
 
@@ -177,8 +180,8 @@ Reserve collision-free node IDs and stage the expansion atomically; a failed
 inference leaves the graph and exports unchanged. Keep every constituent's
 rounding, failure, request, cache identity and owner lifetime. No matrix/curve
 fusion, no-op elision or engine replacement is presumed bit-equivalent. Dirty
-sets are the composition of actual support; intermediate overflow remains an
-observable error. The helper cannot upgrade a constituent's execution guarantees.
+sets are the composition of actual support. Each constituent's numeric and
+representability premises also apply to intermediate values without a scan. The helper cannot upgrade a constituent's execution guarantees.
 
 ## Demand, storage, resource and error contract
 
@@ -201,12 +204,11 @@ C additionally charges all actual intermediate owners and any engine resources.
 No automatic eviction, alternate numerical profile or cached exposure estimate.
 
 Use NUM error delivery: TypeMismatch for type/shape/model, InvalidArgument with
-InvalidDomain for static parameters or conflicts, OperationFailed/InvalidDomain
-for consumed nonfinite samples or rejected negative Y, ArithmeticOverflow for
-nonfinite requested results from finite inputs. Capacity/work/stage failures and
-cancellation retain their native statuses/reasons. Publish only complete valid
-requested regions; unaffected previously published observations follow the
-kernel's normal immutable failure rules.
+InvalidDomain for malformed structural parameters or conflicts. Numeric
+parameter domains, finite samples, Y>=0 under reject, and finite representable
+results are unchecked premises. Capacity/work/stage failures and cancellation
+retain their native statuses/reasons. Complete writes retire under the kernel's
+normal publication rules, without input or completed-output validation.
 
 ## Independent acceptance and implementation gates
 
@@ -215,13 +217,14 @@ kernel's normal immutable failure rules.
   with weights (.25,.5,.25),
   (2,-1,0) -> (4,-2,+0), without division by zero.
 - A white_extended, white=2: neutral 2 -> 1; neutral 4 -> 8/5. Signed
-  extension maps neutral -1 -> -.5 for simple; default reject fails instead.
+  extension maps neutral -1 -> -.5 for simple; reject fixtures require Y>=0.
 - B black=1, white=101: relative (.0,.5,1) -> nits (1,51,101), reverse
-  restores this exact fixture. Test native PQ domain checks after B separately.
+  restores this exact fixture. Use native PQ fixtures satisfying its domain after B.
 - Demonstrate that A can leave RGB outside the cube and that a second A changes
   values. No image-statistics dependence: adding unrelated pixels changes no
-  existing result. A overflow uses exact-formula final overflow, not temporary
-  machine overflow; invalid unrequested bypass values do not interfere.
+  existing result. Valid fixtures satisfy exact-formula result representability;
+  temporary machine overflow must not alter a valid exact computation.
+  Unrequested bypass bit patterns do not interfere.
 - Compare sparse/cross-tile/component requests, thread partitions, alpha bits,
   precision at extreme finite values, low budgets and cancellation. Retained
   outputs/windows/resources survive execution-context destruction.

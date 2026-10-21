@@ -198,8 +198,7 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
   traits.outputs[0].key = "values";
   traits.outputs[0].output_schema = tensor_ops::port();
   traits.outputs[0].result_schema = tensor_ops::scalar_schema();
-  operation.specialize_metadata = [kind, profile](const auto& inputs,
-                                                  const auto& parameters)
+  operation.specialize_metadata = [profile](const auto& inputs, const auto&)
       -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
     for (const auto& input : inputs) {
@@ -226,17 +225,6 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
                    {FailureOrigin::Schema, FailureScope::Unspecified}});
       count *= extent;
     }
-    if (kind == Comparison::IsClose) {
-      for (const auto* name : {"atol", "rtol"}) {
-        const auto value = std::get<double>(parameters.at(name));
-        std::uint64_t bits = 0;
-        std::memcpy(&bits, &value, 8);
-        const auto parts = BinaryParts::decode(bits, false);
-        if (parts.nan || parts.infinite || (parts.negative && parts.magnitude))
-          return Answer(numeric_ops::array_parameter_error(
-              "is_close tolerances must be finite and nonnegative"));
-      }
-    }
     auto available = numeric_ops::sequence_profile_available(profile);
     if (!available.ok())
       return Answer(available);
@@ -249,7 +237,8 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
   operation.lower = [](const OperationLowering& query) {
-    return fixed_tensor::lower_pointwise(query, "compare", "exact-predicate-v1",
+    return fixed_tensor::lower_pointwise(query, "compare",
+                                         "exact-predicate-unchecked-v2",
                                          sizeof(ComparisonMath));
   };
   operation.prepare_kernel =
@@ -259,7 +248,8 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
           const ResourceSet&,
           const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
     using Answer = Result<ps_prepared_kernel_v8>;
-    if (kernel.symbol != "compare" || kernel.contract != "exact-predicate-v1" ||
+    if (kernel.symbol != "compare" ||
+        kernel.contract != "exact-predicate-unchecked-v2" ||
         !query.task_parameters.empty() ||
         query.scratch !=
             std::array<std::uint64_t, 3>{sizeof(ComparisonMath), 0, 0})

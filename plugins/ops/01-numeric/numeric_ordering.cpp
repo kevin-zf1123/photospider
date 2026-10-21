@@ -146,7 +146,7 @@ Result<OperationProgram> lower_ordering(bool quantile,
   const auto count = description.source.shape[description.axis];
   for (const auto& item : groups) {
     auto task = builder.add_task(quantile ? "quantile" : "sort",
-                                 "ordering-unchecked-v1", {},
+                                 "ordering-unchecked-v2", {},
                                  {ordering_scratch(quantile, count), 0, 0});
     if (!task.ok())
       return Answer(task.status());
@@ -227,15 +227,10 @@ void ordering_invoke(const ps_kernel_invocation_v8* invocation,
     numeric_ops::QuantilePosition position;
     if constexpr (quantile) {
       if (count > 1) {
-        // q controls memory addresses and a limb shift. Keep its constant-time
-        // guard even though finite [0,1] is an unchecked numerical
-        // precondition.
-        auto found = numeric_ops::quantile_position(
+        position = numeric_ops::quantile_position(
             reader.bits(1, {},
                         TensorSpan::element_size(prepared.probability_type)),
             prepared.probability_type, count);
-        require(found.status());
-        position = found.value();
       }
     }
     auto* scratch =
@@ -473,7 +468,7 @@ OperationDefinition ordering_operation(const std::string& key, bool quantile,
           const ResourceSet&,
           const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
     if (kernel.symbol != (quantile ? "quantile" : "sort") ||
-        kernel.contract != "ordering-unchecked-v1")
+        kernel.contract != "ordering-unchecked-v2")
       return Result<ps_prepared_kernel_v8>(
           {ErrorCode::TypeMismatch, "invalid ordering kernel contract"});
     if (placement.backend != physical::Backend::Cpu ||

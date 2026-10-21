@@ -46,8 +46,8 @@ PHOTOSPIDER_OPS_API Result<OcioConfigResource> ocio_config(
 PHOTOSPIDER_OPS_API Result<ColorResourceBinding> ocio_file(
     const std::string& logical_name, const ImmutableResource&);
 /** Seal a declarative OCIO YAML Transform/GroupTransform fragment. Preparation
- * validates typed nodes, finite parameters, cycles, depth and selected
- * resources. */
+ * checks typed node structure, cycles, depth and selected resources. Numeric
+ * parameter domains and finite LUT values are unchecked caller premises. */
 PHOTOSPIDER_OPS_API Result<ColorResourceBinding> ocio_transform_tree(
     const std::string& yaml, const ResourceBudget&);
 /** Encode a complete endpoint using a canonical one-dimensional color group.

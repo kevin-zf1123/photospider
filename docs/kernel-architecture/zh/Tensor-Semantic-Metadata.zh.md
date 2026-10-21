@@ -48,7 +48,7 @@ Status validate_tensor_description(const TensorDescription&,
                                    const TensorDescriptor&);
 ```
 
-`TensorDescription` 记录可选 channel axis 上的有序 channel、一个选中的 component、逻辑轴、全局解释默认值和完整 color group。`validate_tensor_description` 不读取样本，只把描述与 `TensorDescriptor` 比对。校验要求 rank 为 1 到 8，channel axis 位于该 rank 内，axes 表为空或每个逻辑轴恰有一项。每个轴有 name、unit、有限 origin 和正有限 step。完整 group 列出有序且互异的 component 索引及对应 channel 描述；可选 alpha 索引位于同一 tensor 内，且不在颜色索引中。Group 声明与显式提供的 channel 声明必须一致。
+`TensorDescription` 记录可选 channel axis 上的有序 channel、一个选中的 component、逻辑轴、全局解释默认值和完整 color group。`validate_tensor_description` 不读取样本，只把描述与 `TensorDescriptor` 比对。校验要求 rank 为 1 到 8，channel axis 位于该 rank 内，axes 表为空或每个逻辑轴恰有一项。每个轴有 name、unit、origin 和 step；origin 有限、step 有限且为正属于 unchecked 数值前提。完整 group 列出有序且互异的 component 索引及对应 channel 描述；可选 alpha 索引位于同一 tensor 内，且不在颜色索引中。Group 声明与显式提供的 channel 声明必须一致。
 
 `TensorEncoding` 按下式把存储值映射为解码值：
 
@@ -56,11 +56,11 @@ $$
 D(x)=d_0 + (x-s_0)\frac{d_1-d_0}{s_1-s_0}.
 $$
 
-存储端点必须递增；解码端点必须不同，可以递减。存储端点必须能用 tensor dtype 表示。端点保留其类型：Int64、binary64 或约分后的精确有理数。有理数幅值使用小端 base-2^32 limb，约分后的分子和正分母各最多 128 个 word；整数不经过 binary64。描述只陈述解释，不转换、不截断、不重新缩放样本。完整的整数 color group 需要来自 component、channel 或 tensor 默认值的显式解码器；删除该解码器会使完整原生颜色声明失效。冲突的显式 encoding 或 sampling grid 无法通过校验。
+存储端点递增、解码端点不同（可以递减）、存储端点可由 tensor dtype 表示，均为 unchecked 数值前提；静态校验不检查这些范围或浮点有限性。端点保留其类型：Int64、binary64 或约分后的精确有理数。有理数幅值使用小端 base-2^32 limb，约分后的分子和正分母各最多 128 个 word；整数不经过 binary64。描述只陈述解释，不转换、不截断、不重新缩放样本。完整的整数 color group 需要来自 component、channel 或 tensor 默认值的显式解码器；删除该解码器会使完整原生颜色声明失效。冲突的显式 encoding 或 sampling grid 无法通过校验。
 
 内部 color group 使用同尺寸共址采样：显式 grid、scale `(1,1)`、offset `(0,0)`。外部子采样属于 I/O codec。Configured space 命名一个冻结的配置 identity、canonical space 和 `scene` 或 `display` 参考。Analytic binding 是调用方提供的 model/primaries/transfer/reference/white、有序 roles/units 和 convention 断言，不证明数学等价。
 
-颜色坐标允许空的或 `relative`/`absolute` 的 scale、可选的描述性 observer、灰度解释（`linear_y`、`encoded_luma`、`cielab_l` 或 `oklab_l`），以及可选的有限 binary64 NCL 系数 `[Kr,Kb]`。空字段不作断言。`relative-v1` 以 `L*/100` 存储 CIELAB/CIELCh 明度，a/b/chroma 不变，并保留 XYZ Y=1 参考尺度；它不是范围截断。ICC/OCIO 原生约定指向资源定义的坐标。这些字段都不能确立样本有限性、alpha 合法性或预乘关系。
+颜色坐标允许空的或 `relative`/`absolute` 的 scale、可选的描述性 observer、灰度解释（`linear_y`、`encoded_luma`、`cielab_l` 或 `oklab_l`），以及可选的 binary64 NCL 系数 `[Kr,Kb]`，其有限数值域为 unchecked 前提。空字段不作断言。`relative-v1` 以 `L*/100` 存储 CIELAB/CIELCh 明度，a/b/chroma 不变，并保留 XYZ Y=1 参考尺度；它不是范围截断。ICC/OCIO 原生约定指向资源定义的坐标。这些字段都不能确立样本有限性、alpha 合法性或预乘关系。
 
 Canonical 编码上限为 4096 字节。文本为严格 UTF-8，最长 128 字节；最多 128 个 group，每个 group 最多 64 个 component。Canonical 小端 codec 保留整数与 IEEE binary64 位、有序表、显式存在字节和资源 identity。Version 4 保持原有含义；version 5 增加 model-coordinate 记录。只要 tensor、component、channel 或 group 任一层存在 coordinates（包括存在但为空的记录），编码选择 v5，否则选择 v4。更旧版本、版本与判别字节不匹配、非 canonical 编码和尾随字节都会被拒绝。`tensor_description_parameter` 把 canonical 字节写成用于 String 参数的小写十六进制，`tensor_description_from_parameter` 只接受这种 canonical 形式。
 
@@ -140,12 +140,12 @@ source description + descriptor
 ## 5. 限制与非目标
 
 - 描述是静态算子配置。它不附着在 Result 或 Tensor 上，不沿图的边流动，任何算子输出都不会继承输入的描述。
-- 内核不会因两个 Result 的预期描述不同而拒绝连线；端口兼容只由结构决定。算子在 preparation 时把显式描述与输入 descriptor 比对，绑定的校验器可以检查样本值。
+- 内核不会因两个 Result 的预期描述不同而拒绝连线；端口兼容只由结构决定。算子在 preparation 时把显式描述与输入 descriptor 比对，运行时 payload 结构和数值／几何条件在生产者与消费者两端均为 unchecked 前提。
 - Tensor 描述说明逻辑轴和解释，不定义物理 stride、planar/tiled 存储或图像所有权。
 - Profile identity 不携带资源字节。调用方必须在传给 compiler 的 `ResourceSet` 中提供资源。
 - Profile 或 configured-space 声明不会推断 analytic primaries、transfer 或 white。Analytic binding 仍是调用方来源声明。
 - 描述校验不认证数值样本范围、有限性、覆盖或颜色正确性。
-- ICC 准入是结构性的；OCIO 准入校验冻结快照而不执行 transform。不提供 ICC 或 OCIO 颜色转换引擎。
+- ICC 准入是结构性的；OCIO 准入校验冻结快照而不执行 transform。颜色转换引擎属于独立算子实现，描述 codec 本身不执行这些引擎。
 - Color-group 与 alpha 索引指 channel axis 上的位置，axis role 指逻辑维度；二者都不选择字节顺序。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) D9（Proposed）记录规范图像目标。
 
 格式错误的描述和编辑由 SDK 调用返回 `InvalidArgument`。格式算子在静态 preparation 中解码并校验其 `input_description` 参数，因此参数格式错误或描述与输入 descriptor 不匹配时编译失败。ICC 与 OCIO 资源准入向导入调用提供的 `ResourceBudget` 计费；资源准入、复制或哈希失败时不发布任何 owner。

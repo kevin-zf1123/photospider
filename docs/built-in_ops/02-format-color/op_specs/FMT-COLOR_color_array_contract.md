@@ -205,16 +205,18 @@ Old v3 tables/reports are rejected, and old workflows must be recompiled.
 The operator fixed-contract revisions invalidate old numerical preparations;
 no kernel ABI or generic artifact-container revision is introduced.
 
-Static preparation checks descriptions, shape/dtype/arity and required resources,
-even when requested output is Empty. Numeric sample validity in NUM/CRV remains
-an unchecked caller precondition; migrating metadata adds no eager sample scan.
-Invalid metadata is `InvalidArgument`; incompatible schema/shape/dtype is
-`TypeMismatch`. Resource, upstream, capacity and cancellation statuses retain
-their operational meanings. FMT consumers follow their own explicit consumed
-sample validation contracts.
+Static preparation checks description structure, shape/dtype/arity and required
+resources, even when requested output is Empty. Runtime structure and numerical
+or geometric validity are unchecked caller premises in NUM/CRV/FMT, including
+finite values, monotone ranges, nonsingular bases and legal white coordinates.
+Pure numeric conditions are not checked merely because a parameter is static.
+Malformed description syntax is `InvalidArgument`; incompatible schema/shape/dtype
+is `TypeMismatch`. Resource, upstream, capacity and cancellation statuses retain
+their operational meanings. No producer publication scan or consumer payload
+validation is added by these descriptions.
 
 Acceptance includes canonical round trips, contradictory assertions, old payload
-and old report rejection, all models/hue/dtype variants, exact basis admission,
+and old report rejection, all models/hue/dtype variants, valid exact-basis fixtures,
 straight RGB alpha, normalized Lab/LCh, rational split ports, LUT axes/tables,
 bake configuration identity and explicit CRV-to-FMT composition. Executed
 evidence is recorded in the

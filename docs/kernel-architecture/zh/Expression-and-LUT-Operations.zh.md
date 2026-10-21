@@ -4,7 +4,7 @@
 
 ## 未带后缀的表达式采样器
 
-`numeric.sample_expression` 接收恰含一个 tensor 的 Result，schema ID／version／member key 可为任意合法值。Tensor 为无 batch 的 Float64 `[K]`，`1 <= K <= 256`。必填参数为 String `expression`、`[1,1048576]` 内的 Int64 `count`、Float64 `start` 和 Float64 `step`。Start 有限，step 有限且为正；count>1 时，`fma(count-1,step,start)` 须有限且大于 start。这些静态条件在 preparation 检查。输出端口 `value` 使用 `photospider.tensor` v1/member `samples`，普通 Float32 `[count]`，不附着采样标签。
+`numeric.sample_expression` 接收恰含一个 tensor 的 Result，schema ID／version／member key 可为任意合法值。Tensor 为无 batch 的 Float64 `[K]`，`1 <= K <= 256`。必填参数为 String `expression`、`[1,1048576]` 内的 Int64 `count`、Float64 `start` 和 Float64 `step`。Start 有限，step 有限且为正；count>1 时，`fma(count-1,step,start)` 须有限且大于 start。这些数值条件即使由静态参数给出也属于 unchecked 前提；preparation 检查参数类型及结构性 count。输出端口 `value` 使用 `photospider.tensor` v1/member `samples`，普通 Float32 `[count]`，不附着采样标签。
 
 有界语法接受十进制／科学计数法字面量、`x`、`c[index]`、括号、一元符号、二元 `+ - * / ^`，一元 `abs`、`sqrt`、`exp`、`log`、`sin`、`cos`，二元 `min`、`max`。幂右结合且优先级高于一元符号：`-2^2=-4`、`2^-2=.25`、`2^3^2=512`，`0^0=1`。静态 parser 按 K 检查每个系数索引，拒绝其他标识符、错误函数调用、十六进制／NaN／Inf 字面量、超过 4096 字节的 source、超过 256 个 AST 节点或高度超过 32 的表达式。括号不增加节点。
 
@@ -22,11 +22,11 @@ Preparation 解析一次并持有不可变 AST。每个选中输出 tile 读取�
 
 ## 线性 LUT application
 
-`lut.apply_1d` 接收 Float32 query Result，以及至少两个样本的无 batch Float32 rank-one table Result。每个 Result 恰有一个 tensor，schema／member key 可为任意合法值。Query shape 可包含 batch axes 和多个通道。必填静态参数为 Float64 `sample_origin`、有限正 Float64 `sample_step` 和 String `out_of_domain`（`reject` 或 `clip`）。Origin 和 `fma(N-1,step,origin)` 须有限，后者须大于 origin。输出 `value` 使用 `photospider.tensor` v1/member `samples`，保留 query 的 cell shape 与 batch axes；cell axes 为普通轴，不继承 spatial／atomic facets。
+`lut.apply_1d` 接收 Float32 query Result，以及至少两个样本的无 batch Float32 rank-one table Result。每个 Result 恰有一个 tensor，schema／member key 可为任意合法值。Query shape 可包含 batch axes 和多个通道。必填静态参数为 Float64 `sample_origin`、有限正 Float64 `sample_step` 和 String `out_of_domain`（`reject` 或 `clip`）。Origin 和 `fma(N-1,step,origin)` 须有限，后者须大于 origin，这些均为 unchecked 数值前提。输出 `value` 使用 `photospider.tensor` v1/member `samples`，保留 query 的 cell shape 与 batch axes；cell axes 为普通轴，不继承 spatial／atomic facets。
 
 每个选中输出 tile 按 query 自身 grid 声明相交 query tiles，并声明全部 table tiles。运行时数据决定 table index，因此完整 table 是静态地址上界。实际算术只读取选中端点或相邻一对，不收集或数值扫描整表。多个 task 共享不可变输入 owner。每个 LUT invocation 使用零 scratch 和有界栈状态；`scratch_count=0` 时允许 scratch 数组为空指针。Empty 不声明 payload task。
 
-Query 和实际消费的 table 值有限是调用方前提。`reject` 要求 query 在闭合 table domain 内，域外不保证诊断；`clip` 对有限越域查询返回最近端点。端点查询保留端点值及 signed zero。内部查询使用补偿 Float64 插值，保留整数转换前的有限 `[0,2^53)` position guard、有界相邻 segment 修正、有限可表示候选值检查，以及丢弃补偿不超过 Float32 ULP 八分之一的限制。这些地址／精度检查在无法确定结果时可返回 OperationFailed，区别于通用样本定义域校验。支持 signed／HDR table 值，不赋予色域含义。
+Query 和实际消费的 table 值有限是调用方前提。`reject` 要求 query 在闭合 table domain 内，域外不保证诊断；`clip` 对有限越域查询返回最近端点。端点查询保留端点值及 signed zero。内部查询使用补偿 Float64 插值。整数转换所需的有限 `[0,2^53)` position 域及候选值有限可表示性均为 unchecked 前提；保留有界相邻 segment 修正，以及丢弃补偿不超过 Float32 ULP 八分之一的算法精度判定，无法确定插值精度时可返回 OperationFailed。支持 signed／HDR table 值，不赋予色域含义。
 
 ## 准备、所有权与错误
 
@@ -34,7 +34,7 @@ Preparation 检查静态 schema 和参数、canonical Host 输出、准确完整
 
 一个 call 的所有 task 共享发布结果。Source、资源、backend 和取消失败阻止成功发布，并保留操作状态类别。已接受工作排空后释放未发布存储。并发 Run 只共享不可变 preparation 和输入，输出分配与 expression scratch 各自独立。成功 Result owner 可存活超过 ExecutionContext。Invocation 恢复浮点模式和异常 flags。本路径不保证内容缓存或重复请求的结果身份。
 
-语法或静态参数错误返回 InvalidArgument；dtype、shape 或 task signature 不兼容返回 TypeMismatch。输入／输出结构仍必须校验。数值前提违反没有诊断保证，LUT 地址和精度 guard 仍是可失败算术。不添加自动样本 validator 或隐式布局转换。
+语法或静态参数错误返回 InvalidArgument；dtype、shape 或 task signature 不兼容返回 TypeMismatch。输入／输出结构仍必须校验。数值前提违反没有诊断保证，LUT cell correction 和精度判定仍是可失败算术，地址数值域不校验。不添加自动样本 validator 或隐式布局转换。
 
 ## 行为验证
 

@@ -417,7 +417,7 @@ Result<OperationProgram> lower_scan(bool integral,
     const auto& group = item.second;
     Region source(group.source);
     auto task = builder.add_task(
-        integral ? "integral" : "prefix", "exact-scan-unchecked-v1", {},
+        integral ? "integral" : "prefix", "exact-scan-unchecked-v2", {},
         {scan_scratch(integral, description, source), 0, 0});
     if (!task.ok())
       return Answer(task.status());
@@ -561,7 +561,7 @@ OperationDefinition scan_operation(const std::string& key, bool integral,
           const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
     using Answer = Result<ps_prepared_kernel_v8>;
     if (kernel.symbol != (integral ? "integral" : "prefix") ||
-        kernel.contract != "exact-scan-unchecked-v1")
+        kernel.contract != "exact-scan-unchecked-v2")
       return Answer({ErrorCode::TypeMismatch, "invalid scan kernel contract"});
     if (placement.backend != physical::Backend::Cpu ||
         placement.domain != physical::Domain::Host)

@@ -17,6 +17,16 @@ color](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md). The
 [generators](../generators.md) and [paths](../paths.md) indexes link every member;
 [oracle coverage](../oracle-coverage.md) states current mathematical evidence.
 
+The GEN, NOI and PTH members in this category are target contracts without current bundled-operation registrations. Existing NUM/CRV and FMT operations are reusable dependencies under their current public contracts. Generation implementations and domain SDK helpers must consume the frozen kernel APIs and fixed invocation ABI 8; this category does not authorize kernel changes.
+
+## Unchecked schema and payload contract
+
+Generation schemas and random protocols are unchecked. Only static structure is checked: supported schema/version, member directory, element types, ranks, fixed positive extents, declared axes/layout, and the presence/types of static parameters. Dynamic counts, offsets, indices, IDs, association payloads, padding, random-address ranges, finite values and geometric/numerical domain conditions are caller preconditions. Producers construct specified valid outputs without a separate publication validator; consumers assume these preconditions without scanning or comparing payloads. Static parameter types remain checked, while their numerical/geometry-domain validity is also a caller premise unless imposed by the static Tensor structure itself.
+
+Outside these preconditions, numerical results and diagnostics are not specified; invalid payloads do not promise rejection, a domain error, repair, clamping or fallback. A producer still follows the specified count, padding, identity and random-bit construction rules. Candidate rejection, convergence and correct-rounding refinement, explicitly requested quality measurement and normal stopping remain mathematical algorithm steps. Completed outputs are not scanned or compared against numerical/geometric postconditions to decide publication; calling that check a quality certificate does not create an exception. Declared operational budget exhaustion, cancellation and no-solution behavior for valid inputs remain separate.
+
+The frozen kernel retains its existing ABI, physical-view, declared-access, ownership and resource checks. This category adds no runtime semantic validator and does not alter those kernel checks. Oracle helpers may diagnose an out-of-domain reference request; such guards belong to reference tooling and are not production validation requirements.
+
 ## Coordinates, descriptors and numerical baseline
 
 Canvas H,W>=1 is static; rank1..8 and logical element count<=2^40 with checked
@@ -43,25 +53,22 @@ final-output budget, not per-tap/octave error. Admission requires proved bounds 
 strict fallback, not only sampled agreement.
 
 PathSet controls are finite Float64; exact polygon Results use their separately
-specified rational representation. DynamicPoints use finite Float64 positions and
+specified rational representation. DynamicPoints follow the [GEN-08 v1 schema](GEN-08_point_distributions_contract.md), with a static positive capacity, ordinary count payload and zero padding. Their valid rows use finite Float64 positions and
 associated Int64-width IDs. Zero Result counts are valid; ordinary Tensor extents are
 positive.
 
 ## Publication, resources and error boundaries
 
-Validate shape/dtype/schema before evaluation; static parameters and input descriptors
+Validate shape/dtype/schema during compilation and static preparation; static parameters and input descriptors
 alone determine Tensor shapes. Dynamic counts use formal Results. No Python dictionary or
 oracle fixture constitutes a public codec or association. Accept valid negative/zero
-strides, unaligned offsets and nonzero source origins. Return actual global Region,
-layout, owner and produced coverage; missing is not ExplicitZero. Materialize only the
+strides, unaligned offsets and nonzero source origins. Return the actual schema-relative tensor Region, affine layout, owner and produced coverage. Canvas origin remains an explicit coordinate parameter used in sample mathematics; it does not shift the tensor's schema-relative storage indices. Missing is not ExplicitZero. Materialize only the
 range required by the member execution rule. No data-dependent identity/view guess is an
 implicit contract.
 
-Charge outputs, scratch, exact integer limbs, events/indexes, backing, validation
-I/O/work and retained ancestry. Work/stage/capacity are distinct; managed peak does not
+Charge outputs, scratch, exact integer limbs, events/indexes, backing, mathematical I/O/work and retained ancestry. Work/stage/capacity are distinct; managed peak does not
 promise RSS. Poll bounded loops and preserve ResourceExhausted, Cancelled, Stale and
-upstream statuses. Invalid parameters, NoSolution, NotConverged, InvalidQuality and
-ArithmeticOverflow remain distinct. Never mask budget failure with strict fallback or
+upstream statuses. Static structural errors and operational NoSolution, NotConverged, InvalidQuality and ArithmeticOverflow outcomes for valid inputs remain distinct. Never mask budget failure with strict fallback or
 lower quality. Complete Results publish atomically; independent completed outputs follow
 host rules. Retained values/read windows remain valid after context destruction until
 their final owner is released.
@@ -81,6 +88,8 @@ one GPU-backend profile. Different profiles may differ only within their specifi
 numerical contract. Accelerated error bounds do not authorize within-profile output
 drift.
 
+An explicitly declared process-object association field, such as the GEN-08 report points_object_id, is exempt from cross-Run byte identity. Its producer must declare deterministic=false; numerical samples, ordinal IDs, counts and stop reasons retain their deterministic contract. An object association is not a persistent content identity.
+
 Changes to FMA use, reduction order, approximations, fallback selection or solver
 behavior require a new version when they change otherwise legal outputs. Bit-preserving
 optimization can retain the version. Contract violations are bugs; a version bump does
@@ -90,17 +99,15 @@ and document its impact.
 ## Execution and backend scope
 
 Use exact requested-region computation for local members, necessary input halos for
-neighborhood members, and Run-shared complete-input computation for genuinely global algorithms. Each member
-separately specifies output computation, input reads, complete input validation and
-dirty propagation. Regional output does not imply regional control validation: a local
-fill may still require complete path validation.
+neighborhood members, and Run-shared complete-input computation for genuinely global algorithms. Each member separately specifies output computation, mathematical input reads and dirty propagation. A local fill may require the complete path as mathematical input; it does not validate that path payload.
+
+Regional, Halo and complete-input describe mathematical support. Implement them with fixed tasks, explicit member-tile reads/writes, private intermediate Results and dependencies. Output requests are normalized to complete retained tiles; each read closes on the source's own grid. Payload validity is an unchecked premise, separate from physical read authority. Successful call Results publish in retirement order after required tasks succeed; a failed required task prevents successful publication of that call's output.
 
 Global-coordinate outputs are invariant under request size, tile partition, request
 order and thread scheduling. Do not derive RNG addresses from tile IDs, thread IDs,
 execution order or local ROI origins.
 
-Provide selected GPU members as real workloads for subsequent scheduler work; Perlin
-noise is a candidate workload. Validate through public workflows including demand,
+Implement selected GPU members through the existing native backend interfaces; Perlin noise is a candidate workload. Validate through public workflows including demand,
 allocation, transfers, dependencies and result return, rather than only isolated device
 kernels. GPU profiles are separated by backend. All admitted devices within one backend
 profile must reproduce its versioned result bits. Cross-backend substitution requires
@@ -110,10 +117,13 @@ optimization.
 ## Color coverage
 
 Preserve the established FMT baseline: straight image representation, explicit
-same-tensor alpha roles, complete color interpretation, and Lab/LCh lightness l=L*/100.
-Never infer RGB/RGBA from three/four raw components.
+same-tensor alpha roles, complete color interpretation, and Lab/LCh lightness l=L*/100. Each consumer receives its own static `TensorDescription` using the current v4/v5 codec and explicitly selects required immutable resources. Results carry structural schemas, samples and storage owners; color, alpha, transfer, units and sampling descriptions remain caller-owned configuration. Never infer RGB/RGBA from three/four raw components.
 
-Choose support by operation: constant images validate and copy models supported by
+Numeric CRV descriptions identify one logical tuple at `channel_axis=0`. A downstream FMT description instead uses the actual tensor's channel axis, such as 2 for `[H,W,C]`. This authoring adaptation preserves coordinate meaning and introduces no sample conversion.
+
+A composite member inherits its constituent operations' static checks, numerical caller preconditions, operational failures and public rounding stages. In particular, GEN-06C follows current CRV-06's unchecked numerical premises, including output-tuple representability. Independent generation primitives also use unchecked numerical premises; the color description is not sample-validity certification.
+
+Choose support by operation: constant images copy valid samples in models supported by
 complete descriptions; color ramps define RGB, XYZ, CMYK, Lab, LCh, OKLab, OKLCh, HSL
 and YCbCr separately and follow the current CRV/FMT mathematics. GEN-07 uses generic
 numeric components; NOI-09B requires linear RGB.
@@ -130,7 +140,7 @@ Flatten accepts epsilon_geom_px > 0 in target-canvas pixel units. Constructors w
 0.05 by default; an explicit preview preset writes 0.25. Persist the numeric value and
 include it in cache identity. These are engineering defaults, not measured optimal
 settings. Include flattening and coordinate-publication error in the bound. Subsequent
-transforms require propagation/revalidation of that bound. Do not silently loosen it on
+transforms propagate that bound or compute the required new bound as part of their mathematics. Do not silently loosen it on
 budget exhaustion.
 
 Default source_topology_policy is allow_change. reject_unproven explicitly requires
@@ -141,12 +151,7 @@ Fixed algorithm/version/parameters also fix the approximation bits.
 
 ## Structured results, attributes and width
 
-Add formal Result schemas where existing types cannot accurately express fields, source
-associations and quality. Review ArcLengthTable, PathSamples, PathPartition, FitReport
-and GeometryReport as candidates; five names do not mandate five new schemas. Review
-factories, codecs, ownership, lifetime, validation, counts and consumers. JSON examples
-are not implemented associations. Exact geometry Results defined by the geometry
-contracts belong to this review as well.
+Use the fixed member directories in [PTH geometry](PTH_geometry_contract.md) for paths, arc-length tables, samples, partitions, linear width, source maps, exact/grid polygons and minimal reports. Runtime factories/codecs are not implemented. Counts, references and association payloads are unchecked; explicit workflow values retain any source owners required by later mathematics. No generic attribute dictionary or expression graph is added.
 
 Default attribute_policy=reject_unmappable. Explicit drop_unmappable drops only
 unmappable attributes and reports their keys and reasons. Propagate attributes with
@@ -156,22 +161,20 @@ not publish a successful result with silently missing attributes.
 Width denotes finite nonnegative full stroke width (diameter), in geometry pixel units.
 Support a formal attached width attribute and an independent width input; each
 invocation explicitly selects exactly one source, with no fallback/override precedence.
-Freeze the standard key during schema review; do not infer semantics from arbitrary
-attribute names.
+The v1 standard key is width. Its fixed schema supports attached Linear profiles; independent PCHIP evaluation remains a separate member.
 
 Explicitly distinguish these parameter domains (field spelling remains a schema
 requirement): pathset_normalized_arclength, subpath_normalized_arclength, and
 subpath_arclength_px. The first concatenates subpath lengths in declared order,
 excluding spatial jumps; the second restarts [0,1] on each subpath; the third restarts
-physical distance on each subpath. Store the domain with the binding. Do not silently
-reinterpret an existing generic ArcLength tag.
+physical distance on each subpath. Store the domain with the binding. A generic ArcLength label cannot substitute for these distinct domains; the path_width schema encodes the three domains explicitly.
 
 Trim/dash preserves source-position width by default. Carry or rebuild the source
 mapping; reapplying the full width function to each output fragment requires an explicit
 rebind. An unrepresentable mapping follows the attribute failure policy, not approximate
 interpolation. This preserves width, not every raster pixel: new endpoints can introduce
 new caps. Zero length, closed seams, domain bounds and exact mapping representation
-remain unimplemented member/schema details.
+follow the member rules and bounded rational source-map representation; runtime implementation remains absent.
 
 ## Periodic coordinates and two-circle roots
 
@@ -194,7 +197,7 @@ maximum. Return the finite maximum if present. Treat absence of roots or of a fi
 maximum as absence of a returnable coordinate.
 
 Default no_solution=valid_zero returns t=+0 and UInt8 valid=0; a returnable coordinate
-has valid=1. Explicit reject fails on invalid requested coordinates. valid is geometric
+has valid=1. Explicit reject fails when a valid query has no returnable coordinate. valid is geometric
 coordinate validity, not alpha. Preserve resource, cancellation, arithmetic and
 unfinished-certification errors; they cannot become valid=0.
 
@@ -219,22 +222,15 @@ not be described as one final rounding of a fused expression.
 
 Use Philox4x64-10 with direct, lossless address encoding into its 256-bit counter.
 Global x/y are signed32. frame, draw and stream each range 0..2^32-1, carried by
-existing Int64 parameters. Retain channel 16-bit and built-in domain 8-bit pending full
-layout review; seed denotes a 64-bit bit pattern. Reject out-of-range addresses rather
-than truncating or wrapping.
+existing Int64 parameters. channel is 16-bit and built-in domain is 8-bit; seed denotes a 64-bit bit pattern. Address ranges are caller premises; the contract defines neither validation nor aliasing semantics for out-of-range requests.
 
-The 184 address bits fit without lossy hashing. Concrete field order, seed-to-key
-injection, unused bits, output-word selection, floating-grid mappings and each member's
-draw allocation remain member implementation requirements. The candidate c0=(x,y),
-c1=(frame,draw), c2=(stream,channel,domain), c3=0 layout is a candidate, not a frozen
-sequence. Unused bits cannot acquire new semantics silently.
+The [random contract](NOI_random_contract.md) fixes production v1 counter words c0=(x,y), c1=(frame,draw), c2=(stream,channel,domain), c3=0, with fields packed from low to high bits and all 72 reserved bits zero. It also fixes the key `(seed_bits,0)` and Float32 halfopen24 from the high 24 bits and Float64 halfopen53 from the high 53 bits of output word 0. Open52 uses the high 52 bits of a selected word. Box-Muller uses word 0 for open52 and word 1 for halfopen53 within one block. The random contract fixes member word selections and addresses, including candidate ordinals and Bridson attempts. General integer sampling uses 64-bit word 0 with low-tail modulo rejection and nonwrapping draw increments; each consumer must specify its draw allocation and finite attempt budget.
 
 Address injectivity is not uniqueness of individual output samples or a proof of
 statistical independence across keys. Do not seed implicitly from node identity, clock,
 pointers or scheduling. The integer core agrees across CPU/GPU profiles; floating
 transforms follow their declared profiles. Core known-answer tests validate
-Philox4x64-10 independently of the candidate addressed sequence; addressed goldens
-require a fully specified production packing and floating mapping.
+Philox4x64-10 independently of application addressing; addressed references use the specified v1 packing and floating mapping.
 
 ## Point distributions and completion
 
@@ -246,8 +242,8 @@ exhausting its fixed attempts removes it. IDs follow acceptance order. Spatial i
 and parallel candidate evaluation must preserve decisions.
 
 max_count is a normal stop target: reaching it succeeds; exhausting candidates or the
-active list first succeeds with fewer points. Report the stop reason, with final field
-names to be reviewed. Candidate count, attempt count and max_count are algorithm inputs
+active list first succeeds with fewer points. Report stop_reason and points_object_id
+using the fixed GEN-08 report schema. Candidate count, attempt count and max_count are algorithm inputs
 in cache identity. Neither completion nor count satisfaction proves maximal packing or a
 fixed density. No promise of exactly N points is made.
 
@@ -257,14 +253,13 @@ fits. Freeze boundary cases and member address allocation with the RNG.
 
 ## Rank resources
 
-Deliver generic rank lookup semantics first. Validate structure, layout, ranges,
-addressing and immutable resource identity. A permutation/rank fixture proves neither
+Deliver generic rank lookup semantics first. Check static structure and layout only; ranks, permutation, addressing and immutable content identity are unchecked caller premises. A permutation/rank fixture proves neither
 spatial blue-noise quality nor temporal STBN quality.
 
 Named blue/STBN production capability remains gated on selecting a specific
 resource/release or generator, recording provenance, license and byte SHA256, and
 accepting spatial/temporal spectrum and threshold-set quality reports. Resource
-conversion produces a new identity and requires revalidation. No production resource or
+conversion produces a new identity and requires offline quality requalification for a named blue/STBN asset. No production resource or
 external SDK is approved by these specifications. Generic lookup can exercise real
 resource/demand/scheduler paths without a blue-noise claim.
 
@@ -300,18 +295,23 @@ not authorize additional unreported Boolean quantization.
 
 Provide separate exact Result output and Float64 PathSet output members. Exact polygon
 results retain rational coordinates/topology for exact consumers. Float64 output
-performs deterministic rounding and validates displacement, incidence and absence of
-newly introduced crossings/merges before publication; failure is InvalidQuality. Define
+performs deterministic rounding. Required displacement bounds, incidence, topology and
+finite representability after rounding are unchecked caller preconditions. Accumulate
+the reported displacement bound while constructing coordinates; do not scan the rounded
+geometry or reject publication for a numerical/geometric postcondition. Conversion
+reports topology_status=0 unless topology analysis is explicitly part of the selected
+operation. Define
 an explicit exact-to-Float64 conversion with matching publication rules. Chained Float64
 outputs operate on the newly rounded geometry, not an implicitly preserved exact
-history. Grid-to-Float64 conversion also requires its representability checks. Exact
+history. Grid-to-Float64 conversion uses the same unchecked representability and
+publication premises. Exact
 offset/circular constructions may need a different number domain; rational polygon
 support does not prove them.
 
 Validate candidate backends before selecting production dependencies. Check crossings,
 overlaps, contacts, holes, degeneracy and narrow gaps; exact Result round trips and
 chained consumption; canonical output order; accounting, cancellation and lifetime; and
-publication failures. Review license/build/platform requirements before adopting a
+valid-domain publication accuracy. Review license/build/platform requirements before adopting a
 concrete package. No CGAL/Clipper2 backend is selected by this specification.
 
 Different fitting solvers are different public operators. They share quality acceptance:

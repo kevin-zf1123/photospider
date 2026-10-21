@@ -23,7 +23,7 @@ The mathematical formula is `lower+input*(upper-lower)`, with one final rounding
 
 The helper constructs scalar zero/one literals, expands bounds and literals through fixed constant tasks, and applies fixed remap tasks. Each selected output tile and selected intermediate has an independent dense allocation. Empty selection emits no payload work. Source affine views may have negative/zero strides and unaligned offsets after bounds validation. All admitted intermediates count toward block capacity, and successful output owners outlive the execution context.
 
-The inverse retains a scalar `remap(lower,lower,upper,lower,lower)` dependency before target-lower expansion. This preserves lower bits for valid bounds; it is not a runtime order validator. Shape/dtype mismatches fail before execution. Resource, backend, cancellation and upstream failures retain their operational statuses. Fixed tasks do not use the logarithmic callbacks' complete-input validation, cache or full-output publication mechanism.
+The inverse retains a scalar `remap(lower,lower,upper,lower,lower)` dependency before target-lower expansion. This preserves lower bits for valid bounds; it is not a runtime order validator. Shape/dtype mismatches fail before execution. Resource, backend, cancellation and upstream failures retain their operational statuses. Fixed tasks use the declared sample dependencies and preallocated output tiles, with no complete-input validation, content cache or full-output publication callback.
 
 Both Float32 and Float64 compositions use fixed operations. Float32 zero/one literals use count-one linspace with direct Float32 rounding; the unused endpoint and axis output add no payload tasks. Host profile availability remains required.
 

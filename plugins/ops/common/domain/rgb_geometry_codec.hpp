@@ -79,12 +79,10 @@ inline ResolvedBasis resolve(const format::RgbBasis& basis) {
     out = {"", *basis.primaries_xy, *basis.white};
   }
   for (auto& value : out.xy) {
-    require(finite_bits(bits(value), false), "nonfinite primary xy");
     if (value == 0)
       value = 0;  // Metadata zero canonicalization.
   }
   for (auto& value : out.white) {
-    require(finite_bits(bits(value), false), "nonfinite white xy");
     if (value == 0)
       value = 0;
   }
@@ -119,8 +117,8 @@ inline std::vector<double> parse_words(const std::string& value,
       raw =
           (raw << 4) | static_cast<unsigned>(c <= '9' ? c - '0' : c - 'a' + 10);
     }
-    require(finite_bits(raw, false) && raw != UINT64_C(0x8000000000000000),
-            "xy must be finite and zero-canonical");
+    require(raw != UINT64_C(0x8000000000000000),
+            "xy metadata must use canonical zero");
     double x;
     std::memcpy(&x, &raw, 8);
     out.push_back(x);

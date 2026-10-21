@@ -27,13 +27,7 @@ inline bool curve(Kind kind) {
 }
 inline void check_parameters(
     Kind kind, const std::map<std::string, ParameterValue>& params) {
-  auto real = [&](const char* key) { return std::get<double>(params.at(key)); };
-  if (kind == Kind::Smoothstep) {
-    require(real("edge0") < real("edge1"), ErrorCode::InvalidArgument,
-            "smoothstep interval must increase");
-  } else {
-    require(real("domain_min") < real("domain_max"), ErrorCode::InvalidArgument,
-            "domain must increase");
+  if (kind != Kind::Smoothstep) {
     basic_internal::choice(std::get<std::string>(params.at("out_of_domain")),
                            "reject", "clip");
   }
@@ -49,16 +43,14 @@ inline void field(const ResultTensorSpec& spec) {
 inline bool same_sign(double a, double b) {
   return (a > 0 && b > 0) || (a < 0 && b < 0);
 }
-inline double end_slope(basic_internal::Arithmetic& math, double h0, double h1,
-                        double d0, double d1) {
-  const auto finite = [&](double value) { return math.finite(value); };
-  const double ratio = h0 / finite(h0 + h1);
-  double slope = finite(d0 + finite(ratio * finite(d0 - d1)));
+inline double end_slope(double h0, double h1, double d0, double d1) {
+  const double ratio = h0 / (h0 + h1);
+  double slope = (d0 + (ratio * (d0 - d1)));
   if (!same_sign(slope, d0)) {
     return 0;
   }
   if (!same_sign(d0, d1) && std::abs(slope / 3) > std::abs(d0)) {
-    slope = finite(3 * d0);
+    slope = (3 * d0);
   }
   return slope;
 }
@@ -93,7 +85,6 @@ void invoke(const ps_kernel_invocation_v8* invocation,
     const auto& program = *state.program;
     const auto kind = program.kind;
     basic_internal::Arithmetic math;
-    const auto finite = [&](double value) { return math.finite(value); };
     const auto fraction = [&](double x, double a, double b) {
       return math.fraction(x, a, b);
     };
@@ -143,17 +134,15 @@ void invoke(const ps_kernel_invocation_v8* invocation,
       return value;
     };
     auto put = [&](std::uint64_t index, double value) {
-      finite(value);
       std::memcpy(scratch + index * 8, &value, 8);
     };
     if (kind == Kind::Monotone) {
       for (std::uint64_t i = 0; i + 1 < k; ++i) {
         if (!poll())
           return;
-        const double h = finite(static_cast<double>(x(i + 1)) - x(i));
-        const double d = finite((static_cast<double>(y(i + 1)) - y(i)) / h);
-        math.check(h > 0 && (y(i + 1) == y(i) || d != 0),
-                   ErrorCode::OperationFailed,
+        const double h = (static_cast<double>(x(i + 1)) - x(i));
+        const double d = ((static_cast<double>(y(i + 1)) - y(i)) / h);
+        math.check(y(i + 1) == y(i) || d != 0, ErrorCode::OperationFailed,
                    "PCHIP secant cannot be represented");
         put(i, h);
         put(k + i, d);
@@ -161,9 +150,9 @@ void invoke(const ps_kernel_invocation_v8* invocation,
       put(2 * k, get(k));
       put(3 * k - 1, get(2 * k - 2));
       if (k > 2) {
-        put(2 * k, end_slope(math, get(0), get(1), get(k), get(k + 1)));
-        put(3 * k - 1, end_slope(math, get(k - 2), get(k - 3), get(2 * k - 2),
-                                 get(2 * k - 3)));
+        put(2 * k, end_slope(get(0), get(1), get(k), get(k + 1)));
+        put(3 * k - 1,
+            end_slope(get(k - 2), get(k - 3), get(2 * k - 2), get(2 * k - 3)));
         for (std::uint64_t i = 1; i + 1 < k; ++i) {
           if (!poll())
             return;
@@ -174,10 +163,9 @@ void invoke(const ps_kernel_invocation_v8* invocation,
             const double h0 = get(i - 1) / h, h1 = get(i) / h;
             const double w1 = 2 * h1 + h0, w2 = h1 + 2 * h0;
             const double d = std::min(std::abs(d0), std::abs(d1));
-            slope =
-                finite(std::copysign(d, d0) /
-                       ((w1 * (d / std::abs(d0)) + w2 * (d / std::abs(d1))) /
-                        (w1 + w2)));
+            slope = (std::copysign(d, d0) /
+                     ((w1 * (d / std::abs(d0)) + w2 * (d / std::abs(d1))) /
+                      (w1 + w2)));
           }
           put(2 * k + i, slope);
         }
@@ -221,11 +209,11 @@ void invoke(const ps_kernel_invocation_v8* invocation,
             } else {
               const double t = fraction(query_point, left, right), u = 1 - t,
                            h = get(segment);
-              const double m0 = finite(h * get(2 * k + segment)),
-                           m1 = finite(h * get(2 * k + segment + 1));
-              result = finite(finite(y0 * (1 + 2 * t) * u * u) +
-                              finite(y1 * t * t * (3 - 2 * t)) +
-                              finite(m0 * t * u * u) - finite(m1 * t * t * u));
+              const double m0 = (h * get(2 * k + segment)),
+                           m1 = (h * get(2 * k + segment + 1));
+              result =
+                  ((y0 * (1 + 2 * t) * u * u) + (y1 * t * t * (3 - 2 * t)) +
+                   (m0 * t * u * u) - (m1 * t * t * u));
               result = std::clamp(result, std::min(y0, y1), std::max(y0, y1));
             }
           }
@@ -247,12 +235,6 @@ void invoke(const ps_kernel_invocation_v8* invocation,
               value = table(k - 1);
             } else {
               const double position = fraction(q, a, b) * (k - 1);
-              // Reject invalid float-to-integer conversions before addressing.
-              math.check(
-                  std::isfinite(position) && position >= 0 && position < 0x1p53,
-                  ErrorCode::OperationFailed, "invalid LUT coordinate");
-              if (!poll())
-                return;
               auto lower =
                   std::min(static_cast<std::uint64_t>(position), k - 2);
               const auto knot = [&](std::uint64_t j) {
@@ -345,7 +327,7 @@ Result<OperationProgram> lower(const OperationLowering& query) {
     for (auto tile : member.second) {
       physical::Id task = shared;
       if (!curve(program.kind) || task == physical::none) {
-        auto added = builder.add_task("evaluate", "basic-unchecked-v1", {},
+        auto added = builder.add_task("evaluate", "basic-unchecked-v2", {},
                                       {program.scratch(), 0, 0});
         if (!added.ok())
           return Answer(added.status());
@@ -426,10 +408,8 @@ Result<ps_prepared_kernel_v8> prepare(const KernelPreparation& query) {
   };
   return Answer(kernel);
 }
-inline OperationParameterSpec real(
-    const char* key, double low = -std::numeric_limits<double>::max(),
-    double high = std::numeric_limits<double>::max()) {
-  return {key, OperationParameterType::Float64, true, true, low, high};
+inline OperationParameterSpec real(const char* key) {
+  return {key, OperationParameterType::Float64};
 }
 inline OperationParameterSpec natural(const char* key) {
   return {key, OperationParameterType::Int64, true, true, 2, 1048576};
@@ -565,7 +545,7 @@ inline OperationDefinition operation(const char* key, Kind kind) {
              const physical::Placement& placement,
              const KernelPreparation& query, const ResourceSet&,
              const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
-    if (kernel.symbol != "evaluate" || kernel.contract != "basic-unchecked-v1")
+    if (kernel.symbol != "evaluate" || kernel.contract != "basic-unchecked-v2")
       return Result<ps_prepared_kernel_v8>(
           {ErrorCode::TypeMismatch, "invalid basic kernel contract"});
     if (placement.backend != physical::Backend::Cpu ||

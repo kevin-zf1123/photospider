@@ -58,13 +58,14 @@ struct Lut3dValidationPoints {
  * `photospider.tensor` v1 Result with `samples` shape [N0,N1,N2,3], selected
  * dtype and atomic trailing color axis. Axis is an independent Float64 tensor.
  * report uses curve.bake_lut3d.report v4. Read a completed Result with the
- * public read_lut3d_bake_report helper and description. Its measured_table_id
+ * public read_lut3d_bake_report helper and a statically prepared report layout.
+ * Its measured_table_id
  * tensor identifies the complete table object acquired during measurement. This
  * identity is local to the producing Run; names are not auto-exported.
  */
 struct BakedLut3d {
   WorkflowNodeOutput table, axis, report;
-  /** @brief Owned static configuration for explicit report reading and reuse.
+  /** @brief Owned static configuration for schema construction and reuse.
    * It is not attached to any generated Result.
    */
   Lut3dBakeDescription description;
@@ -96,19 +97,19 @@ struct BakedLut3d {
  * exports the report, so an observer can retain it when a later Gate fails.
  *
  * Report v4 records the actual owned-table ObjectId through the invocation's
- * input association. Gate first checks the configuration identity
- * (TypeMismatch) and table association (OperationFailed/InvalidAssociation),
- * then the measured tolerance result. A legitimate exceeded tolerance
- * successfully produces a passed=false report; Gate fails
- * OperationFailed/InvalidDomain with LutApproximationToleranceExceeded and
- * first-failure details. Valid finite colors, consistent axes and well-formed
- * report values are caller premises; the SDK report reader independently
- * validates its input. Measure and Gate are nondeterministic: fresh owned
- * tables receive fresh ObjectIds per Run. Axis-only requests read neither
- * source nor extra points. Cancellation and resource failures propagate. Result
- * owners survive context teardown. Acceptance applies only at the listed points
- * using the selected interpolation and table dtype; it provides no
- * continuous-domain bound.
+ * input association. Configuration identity, table association and report
+ * consistency are unchecked caller premises. Gate reads the measured passed
+ * result and first_failure_index, without rechecking associations or errors. A
+ * legitimate exceeded tolerance successfully produces a passed=false report;
+ * Gate fails OperationFailed/InvalidDomain with
+ * LutApproximationToleranceExceeded and first_failure_index. Valid finite
+ * colors, consistent axes and well-formed report values are caller premises.
+ * The SDK reader uses a statically prepared layout and decodes without input
+ * validation. Measure is nondeterministic: fresh owned tables receive fresh
+ * ObjectIds per Run. Axis-only requests read neither source nor extra points.
+ * Cancellation and resource failures propagate. Result owners survive context
+ * teardown. Acceptance applies only at the listed points using the selected
+ * interpolation and table dtype; it provides no continuous-domain bound.
  *
  * Calls modifying one document must be serialized. All authoring is staged;
  * failure or exception leaves document unchanged. Allocation or a source

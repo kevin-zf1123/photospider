@@ -124,11 +124,7 @@ struct ExactConversion final {
     auto bits = result.value();
     const auto infinity =
         narrow ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
-    if ((bits & infinity) == infinity) {
-      if (!clip)
-        return Answer(Status{ErrorCode::OperationFailed,
-                             {},
-                             FailureReason::ArithmeticOverflow});
+    if (clip && (bits & infinity) == infinity) {
       bits = (bits & (UINT64_C(1) << (narrow ? 31 : 63))) | (infinity - 1);
     }
     return Answer(bits);
@@ -141,17 +137,16 @@ struct ExactConversion final {
     // For a direct endpoint/pure cast, this also cancels the input's 2^-1074.
     ratio.shift(ratio.denominator, 1074, &other);
     const auto limit = ratio.negative ? negative_limit : positive_limit;
-    const auto overflow = [&]() {
-      return clip ? Answer(ratio.negative ? UINT64_C(0) - limit : limit)
-                  : Answer(Status{ErrorCode::OperationFailed,
-                                  {},
-                                  FailureReason::ArithmeticOverflow});
+    const auto saturated = [&]() {
+      return Answer(ratio.negative ? UINT64_C(0) - limit : limit);
     };
-    // A quotient >=2^64 cannot fit any supported target. Check before the
-    // bounded quotient loop so an oversized magnitude never wraps.
-    ratio.shift(other, 64, &ratio.candidate);
-    if (ratio.compare(ratio.numerator, ratio.candidate) >= 0)
-      return overflow();
+    // Saturation is the requested clip operation. Without clip, target
+    // representability is an unchecked caller premise.
+    if (clip) {
+      ratio.shift(other, 64, &ratio.candidate);
+      if (ratio.compare(ratio.numerator, ratio.candidate) >= 0)
+        return saturated();
+    }
     std::uint64_t quotient = 0;
     for (unsigned bit = 64; bit-- > 0;) {
       const auto& status = consume(256);
@@ -166,12 +161,12 @@ struct ExactConversion final {
     ratio.shift(ratio.numerator, 1, &ratio.candidate);
     const auto order = ratio.compare(ratio.candidate, other);
     if (order > 0 || (!order && (quotient & 1))) {
-      if (quotient == UINT64_MAX)
-        return overflow();
+      if (clip && quotient == UINT64_MAX)
+        return saturated();
       ++quotient;
     }
-    if (quotient > limit)
-      return overflow();
+    if (clip && quotient > limit)
+      return saturated();
     return Answer(ratio.negative ? UINT64_C(0) - quotient : quotient);
   }
 };

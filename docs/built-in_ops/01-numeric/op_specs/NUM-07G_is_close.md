@@ -33,8 +33,9 @@ abs(a-b) <= atol + rtol * max(abs(a),abs(b))
 The two input arrays have identical dtype and shape. Output `values` is UInt8
 with unchanged shape and no attached domain description: 1 means close, 0 means not close. Static
 parameters `atol` and `rtol` are required Float64 values, finite and nonnegative,
-with no implicit default. Negative zero is numerically zero. Reject missing,
-nonfinite or negative tolerance at compile/preflight. No other static numeric
+with no implicit default. Negative zero is numerically zero. Missing or wrongly
+typed parameters fail compilation; finite/nonnegative tolerances are unchecked
+numerical premises, including during static preparation. No other static numeric
 parameters, implicit cast or broadcast is provided.
 
 Inherit the [comparison execution contract](NUM-07_comparison_contract.md) for

@@ -36,16 +36,6 @@ Status validate_expression_metadata(
     return {ErrorCode::TypeMismatch,
             "LUT requires Float32 query and at least two table samples"};
   }
-  const auto origin =
-      std::get<double>(parameters.at(lut ? "sample_origin" : "start"));
-  const auto step =
-      std::get<double>(parameters.at(lut ? "sample_step" : "step"));
-  const auto count = lut ? inputs[1].descriptor.shape[0] : output.shape[0];
-  const auto end = std::fma(static_cast<double>(count - 1), step, origin);
-  if (!std::isfinite(origin) || !std::isfinite(step) || step <= 0 ||
-      !std::isfinite(end) || (count > 1 && end <= origin))
-    return {ErrorCode::InvalidArgument,
-            "sampling endpoint is not representable"};
   if (lut) {
     const auto& policy = std::get<std::string>(parameters.at("out_of_domain"));
     if (policy != "reject" && policy != "clip")

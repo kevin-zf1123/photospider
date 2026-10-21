@@ -33,23 +33,21 @@ canvas/dtype,seed/stream/frame, domain 2; finite mean, finite sigma>=0,C<=65536.
 
 sigma=0 returns RN_T(mean) without log. Otherwise open52 u and halfopen53 v define
 RN_T(mean+sigma*sqrt(-2*ln(u))*cos(2*pi*v)). No intermediate double rounding; one
-independent cos sample per channel, no neighbor pairing.
+independent cos sample per channel, no neighbor pairing. For each channel, take u from word 0 and v from word 1 of the same domain 2 block, using the shared open52 and halfopen53 mappings. Words 2 and 3 are unused; draw is fixed to 0 without a user-adjustable draw parameter.
 
 ## Dependencies, resources and failures
 
 Execution rule: **Regional**. Compute requested output coordinates only. Read
-corresponding query/sample inputs and necessary controls; path/mesh/resource validation
-may require complete control data without computing the whole output canvas. Full
+corresponding query/sample inputs and the controls required by the mathematics. Complete control reads do not imply runtime payload validation. Full
 shared-control/topology/resource changes conservatively invalidate dependent output;
 sample changes follow the actual dependency map. Empty requests perform static preflight
-without payload reads or advancing a random sequence. Compute only requested output
-mathematics, retaining required shared validation.
+without payload reads or advancing a random sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
-Regional pixels; complete mean/sigma controls validated; certified transcendental
+Regional pixels; mean/sigma controls are assumed valid; certified transcendental
 refinement with explicit failure.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
 InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
@@ -63,6 +61,5 @@ Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.

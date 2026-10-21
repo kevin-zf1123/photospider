@@ -68,9 +68,6 @@ struct ExactMoments final {
     if (sum.positive_inf || sum.negative_inf)
       return Answer(narrow ? UINT64_C(0x7fc00000)
                            : UINT64_C(0x7ff8000000000000));
-    if (!count || ddof >= count)
-      return Answer(Status{ErrorCode::InvalidArgument,
-                           "invalid moment degrees of freedom"});
     auto& ratio = sum.ratio;
     if (sum.type == ElementType::Float32 || sum.type == ElementType::Float64)
       aligned_sum = ratio.numerator;

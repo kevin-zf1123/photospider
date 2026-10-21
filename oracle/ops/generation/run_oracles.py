@@ -39,7 +39,7 @@ from oracle.ops.generation.pth09.geometry import polygon_pixel_area as g_polygon
 from oracle.ops.generation.pth11.geometry import region_sdf as g_region_sdf
 from oracle.ops.generation.pth02.geometry import rounded_bezier_position as g_rounded_bezier_position
 from oracle.ops.generation.pth02.geometry import unit_tangent_fixture as g_unit_tangent_fixture
-from oracle.ops.generation.common.rng import CANDIDATE_LAYOUT as rng_CANDIDATE_LAYOUT
+from oracle.ops.generation.common.rng import RNG_PROTOCOL as rng_PROTOCOL
 from oracle.ops.generation.noi06.rng import fractal_fraction as rng_fractal_fraction
 from oracle.ops.generation.noi02.rng import gaussian_inputs as rng_gaussian_inputs
 from oracle.ops.generation.noi04.rng import gradient2d_fraction as rng_gradient2d_fraction
@@ -83,17 +83,12 @@ def rational_tree(value):
     return value
 
 
-CANDIDATE_RNG_OPS={'uniform','gradient2d','fractal'}
-
-def evaluate(request,allow_candidate_rng=False):
+def evaluate(request):
     if not isinstance(request,dict) or not isinstance(request.get('id'),str):raise ValueError('request id string required')
     op=request.get('op');a=decode(request.get('args',{}));dtype=a.pop('dtype','float64')
     if op not in OPERATIONS:raise ValueError(f'unsupported oracle operation: {op}')
     if dtype not in ('float32','float64'):raise ValueError('dtype')
     quality='Exact_finite_reference'
-    if op in CANDIDATE_RNG_OPS:
-        if not allow_candidate_rng:raise ValueError('RNG packing is not frozen; explicitly enable candidate RNG')
-        quality='Candidate_rng_layout_not_production_golden:'+rng_CANDIDATE_LAYOUT
     if op=='coordinate':result=[fp(v,dtype) for v in e_coordinate(**a)]
     elif op=='rectangle_coverage':result=fp(e_rectangle_coverage(**a),dtype)
     elif op=='rectangle_sdf':result=fp(e_rectangle_sdf(**a,dtype=dtype),dtype)
@@ -113,7 +108,8 @@ def evaluate(request,allow_candidate_rng=False):
         values=e_linear_rgba_mix(**a);result=[fp(v,dtype) for v in values]
         if int(result[3]['bits'],16)==0:
             if values[3]>0 and any(int(v['bits'],16)&((1<<(31 if dtype=='float32' else 63))-1) for v in result[:3]):
-                raise ArithmeticError('AssociationUnderflow')
+                # Reject an out-of-contract oracle probe, not a runtime error.
+                raise ValueError('CRV caller precondition: rounded zero alpha requires rounded zero RGB')
             result=[fp(0,dtype) for _ in range(4)]
     elif op=='bilinear':result=[fp(v,dtype) for v in e_bilinear(**a)]
     elif op=='barycentric':result=[fp(v,dtype) for v in e_barycentric(**a)]
@@ -174,10 +170,10 @@ def statistical_report(sample_count=16384):
         a,b=rng_gaussian_inputs(i,0,seed=2026)
         n.append(math.sqrt(-2*math.log(float(a)))*math.cos(2*math.pi*float(b)))
     nm=math.fsum(n)/sample_count;nv=math.fsum((v-nm)**2 for v in n)/sample_count
-    report={'quality':'Candidate_rng_Measured_statistics_not_production_golden','seed':2026,'samples':sample_count,
+    report={'quality':'Measured_statistics_not_strict_numerical_certification','seed':2026,'samples':sample_count,
             'uniform_float64':{'mean':mean,'population_variance':variance,'finite_grid_mean':float((1-F(1,1<<53))/2),'finite_grid_variance':float((1-F(1,1<<106))/12)},
             'gaussian_math_float64_diagnostic':{'mean':nm,'population_variance':nv,'ideal_continuous_mean':0,'ideal_continuous_variance':1,
-               'note':'finite open52 tail and ordinary math candidate; not a strict golden sequence'}}
+               'note':'finite open52 tail and ordinary math transform; not a strict golden sequence'}}
     try:
         tile=json.loads((HERE/'noi07/fixture.json').read_text())['rank']
         volume=json.loads((HERE/'noi10/fixture.json').read_text())['rank']
@@ -191,7 +187,6 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--self-test',action='store_true')
     parser.add_argument('--statistics',action='store_true')
-    parser.add_argument('--allow-candidate-rng',action='store_true',help='opt into experimental packing; never a production golden')
     parser.add_argument('--report',type=Path)
     parser.add_argument('--input',type=Path,help='oracle request JSONL')
     parser.add_argument('--candidate',type=Path,help='candidate result JSONL, matched by id')
@@ -202,7 +197,7 @@ def main(argv=None):
         print('\n'.join(OPERATIONS));return 0
     report={'schema_version':1,'execution_utc':datetime.now(timezone.utc).isoformat(),
             'python':sys.version,'platform':platform.platform(),'implementation_scope':'independent mathematical oracle only; no Photospider kernel execution',
-            'rng_layout_status':'candidate_not_frozen', 'candidate_layout':rng_CANDIDATE_LAYOUT,'production_blue_noise_assets':False}
+            'rng_layout_status':'specified_v1', 'rng_protocol':rng_PROTOCOL,'production_blue_noise_assets':False}
     report['optional_dependencies']={}
     for package in ('mpmath','numpy'):
         try:report['optional_dependencies'][package]=importlib.metadata.version(package)
@@ -221,13 +216,12 @@ def main(argv=None):
             args.report.with_suffix('.log').write_text(log.getvalue(),encoding='utf-8')
         print(log.getvalue(),file=sys.stderr,end='')
     if args.statistics:
-        if not args.allow_candidate_rng:parser.error('--statistics requires --allow-candidate-rng')
         report['statistics']=statistical_report()
     if args.candidate and not args.input:parser.error('--candidate requires --input')
     if args.input:
         requests=[json.loads(line) for line in args.input.read_text().splitlines() if line.strip()]
         if len({x['id'] for x in requests})!=len(requests):raise ValueError('duplicate request ids')
-        results=[evaluate(x,args.allow_candidate_rng) for x in requests]
+        results=[evaluate(x) for x in requests]
         if args.candidate:
             candidate=[json.loads(line) for line in args.candidate.read_text().splitlines() if line.strip()]
             if len({x['id'] for x in candidate})!=len(candidate):raise ValueError('duplicate candidate ids')

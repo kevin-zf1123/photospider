@@ -38,8 +38,7 @@ calculations reuse repository CRV/FMT contracts; browser defaults are not normat
 Source: <https://github.com/DEShawResearch/random123>
 
 Adoption boundary: counter-based random generation. Photospider address packing is
-specified independently of upstream API conventions. Production packing and floating
-bit extraction remain unresolved in the random contract.
+specified independently of upstream API conventions. The random contract fixes production v1 packing, seed-to-key injection and Float32/Float64 half-open and open52 extraction; the same contract specifies member address/word selections and the general integer rejection rule. Integer consumers must define disjoint address allocations and attempt budgets.
 
 ## S06 — Random123 philox.h
 
@@ -55,8 +54,7 @@ Source: <https://raw.githubusercontent.com/DEShawResearch/random123/main/tests/k
 
 Adoption boundary: three external Philox4x64-10 known-answer vectors are retained in
 [the oracle fixture](../../../oracle/ops/generation/noi01/kat.json).
-These validate the core permutation; they do not approve candidate address packing
-or floating conversion. Self-generated goldens cannot replace independent answers.
+These validate the core permutation; they do not validate application address packing or floating conversion. Self-generated goldens cannot replace independent answers.
 
 ## S08 — Ken Perlin, Improved Noise
 

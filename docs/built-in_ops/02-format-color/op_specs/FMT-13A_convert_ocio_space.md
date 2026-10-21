@@ -46,8 +46,8 @@ consumes all three source components at the same point, including no-op cases.
   checks source/destination resolution, noncanonical slots and exact simple
   coordinates. Compare both execution configurations to their point oracles.
 - Same-space Float64 `1+2^-30` produces `1` after RN32, not the original bit
-  pattern. Float32 no-op still validates all three consumed components and
-  does not allow view.
+  pattern. Float32 no-op retains its required engine boundary without component-domain
+  validation and does not allow view.
 - Exact alias and role references resolve identically to their canonical name;
   case mismatch or selecting a NamedTransform through A fails statically.
 - Scene/display crossing fails by default and records a specific bridge when

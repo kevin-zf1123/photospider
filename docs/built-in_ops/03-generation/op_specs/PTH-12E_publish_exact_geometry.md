@@ -3,7 +3,7 @@ spec_schema_version: 1
 id: PTH-12E
 status: Accepted
 implementation_status: not_implemented
-registration_status: backend_and_schema_gates
+registration_status: backend_and_implementation_gates
 ---
 
 # PTH-12E: Publish exact geometry as Float64 PathSet
@@ -17,23 +17,28 @@ contract.
 Input: exact polygon Result from PTH-12C or a formally compatible exact consumer.
 Outputs: Float64 CoreVerbs PathSet and publication report with source association.
 Parameters: epsilon_publication_px > 0 (candidate default 1e-9), attribute_policy
-(default reject_unmappable), validation/work/capacity limits.
+(default reject_unmappable), work/capacity limits.
 
 Canonicalize exact contours, round each rational coordinate once with RN64, canonicalize
-mathematical zero to +0, then verify the actual published geometry. Bound
-corresponding-edge displacement by epsilon_publication_px and prove required face/edge
-incidence and absence of new crossings/merges/collapsed features. Failure is
-InvalidQuality; arithmetic overflow and host resource/cancellation statuses remain
-distinct. Do not snap, delete holes, silently loosen epsilon or return a best guess.
+mathematical zero to +0, and accumulate the Euclidean vertex-displacement bound
+while constructing the output, using the exact squared-error and RU64 rule in
+[PTH geometry](PTH_geometry_contract.md#filled-regions-boolean-and-distance). Finite representability, corresponding-edge displacement
+within epsilon_publication_px, preserved face/edge incidence and absence of new
+crossings/merges/collapsed features are unchecked caller preconditions. Do not scan the
+rounded geometry or return InvalidQuality for violating those premises. The report
+records the constructed displacement bound and topology_status=0 (unverified).
+Work/capacity exhaustion and host resource/cancellation statuses remain operational
+failures. Do not snap, delete holes or silently loosen epsilon.
 Output is the rounded geometry; its later consumers do not retain implicit exact
 history.
 
-complete-input input validation and complete Result publication apply. Exact owner references,
-publication scratch, predicates and output associations are charged and lifetime-safe.
-PTH-12A must produce the same published coordinates/report semantics as exact Boolean
-followed by this member, with equivalent explicit parameters and canonicalization.
+The algorithm reads the complete valid exact geometry and constructs a complete Result without an input or publication validator. Exact owner references,
+publication scratch and output associations are charged and lifetime-safe.
+PTH-12A and exact Boolean followed by this member produce equivalent published coordinates, error stages and topology outcomes under equivalent explicit parameters and canonicalization. Provenance records each operation's actual inputs: PTH-12A has two original source IDs, while this member has the single exact-geometry input ID. Their source-ID shape, values and complete report bytes need not match; no ancestry lookup or additional binding stage is required.
 
-Acceptance: exact dyadic identity, non-dyadic rational rounding, sub-ULP collisions, new
-crossings after rounding, bounds validation, output association and retained owner.
+Acceptance: exact dyadic identity, non-dyadic rational rounding, small representable
+features satisfying the publication premises, construction-time displacement reporting,
+output association and retained owner. Out-of-domain collisions and new crossings do
+not impose runtime rejection requirements.
 
 These are specification acceptance requirements, not completed execution evidence.

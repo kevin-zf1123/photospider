@@ -114,8 +114,8 @@ inline Result<WorkflowNode> sample_bezier_function_node(
  * schema photospider.tensor v1/member samples, shape [N,D], selected dtype and
  * ordinary axes. Each selected output tile has one fixed CPU task, reading
  * its segment/t rows and all anchor/handle rows for its selected columns,
- * closed through each source grid. Dynamic segment indices retain a constant-
- * time address guard; invalid indices fail InvalidArgument/InvalidDomain.
+ * closed through each source grid. Dynamic segment indices are trusted as
+ * unchecked caller premises, with no address guard or index-domain diagnostic.
  * Finite t in [0,1], finite consumed controls, finite RN64 reconstructions and
  * finite representable selected outputs are unchecked caller preconditions.
  * Endpoints numerically use one anchor; interiors use their local controls.

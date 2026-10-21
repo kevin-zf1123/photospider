@@ -89,9 +89,6 @@ Result<ReductionMetadata> metadata(
   }
   if (kind == ReductionKind::Variance || kind == ReductionKind::Std) {
     const auto ddof = std::get<std::int64_t>(parameters.at("ddof"));
-    if (ddof < 0 || static_cast<std::uint64_t>(ddof) >= result.count)
-      return Answer(numeric_ops::array_parameter_error(
-          "InvalidDegreesOfFreedom: require 0<=ddof<N"));
     result.ddof = static_cast<std::uint64_t>(ddof);
   }
   return Answer(std::move(result));
@@ -273,7 +270,7 @@ Result<OperationProgram> lower_reduction(ReductionKind kind,
   for (const auto& member : query.requests[0].members)
     for (auto tile : member.second) {
       auto task = builder.add_task(
-          operation_name(kind), "exact-reduction-unchecked-v1", {},
+          operation_name(kind), "exact-reduction-unchecked-v2", {},
           {kind == ReductionKind::Count ? 0 : sizeof(ReductionState), 0, 0});
       if (!task.ok())
         return Answer(task.status());
@@ -419,7 +416,7 @@ OperationDefinition reduction_operation(const std::string& key,
           const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
     using Answer = Result<ps_prepared_kernel_v8>;
     if (kernel.symbol != operation_name(kind) ||
-        kernel.contract != "exact-reduction-unchecked-v1" ||
+        kernel.contract != "exact-reduction-unchecked-v2" ||
         !query.task_parameters.empty() ||
         query.scratch !=
             std::array<std::uint64_t, 3>{

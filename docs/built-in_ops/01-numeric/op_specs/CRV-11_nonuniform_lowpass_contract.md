@@ -80,9 +80,10 @@ For support R, use the window formulas of
 Windowed sinc has k(s)=sincpi(2*cutoff*s)*w(s/R), |s|<=R; Gaussian has
 k(s)=exp(-s*s/(2*sigma*sigma)), |s|<=R. All are zero outside. Constants are exact
 rationals and pi/I0/exp are mathematical values. Normalization uses the exact
-integral over the full support, not the discrete tap sum. Admit only nonzero
-positive normalization; prove it for valid parameters or return the precise
-normalizer/domain error, never confuse budget exhaustion with a mathematical zero.
+integral over the full support, not the discrete tap sum. Positive normalization
+and the numeric support/cutoff/sigma/beta domains are unchecked caller premises.
+Refine the division and final rounding as needed; budget exhaustion remains an
+operational failure, with no separate normalizer-domain validation.
 
 Between p_j,p_(j+1), reconstruction is the exact affine function through v_j and
 v_(j+1). Let a=p_0,b=p_(K-1),D=b-a as an exact real difference. Reflect maps a
@@ -162,6 +163,6 @@ Temporary public acceptance binds positions/values and kernel parameters, then i
 
 ## Maintained implementation and validation
 
-This shared contract covers five nonuniform kernels and 15 profile keys. `lowpass_nonuniform.cpp` emits `nonuniform-lowpass-fixed-v1` CPU tasks. `CheckedLowpassGeometry::piece_at` reads positions through a raw-word accessor. `NonuniformLowpassMath` streams exact pieces and paired-affine identities, while `CheckedLowpassPolynomialBuilder` uses fixed coefficient views with rigorous Taylor remainder bounds. All accelerated keys currently use strict arithmetic; precision 128..4096 and order <=512 may return `ResourceExhausted`.
+This shared contract covers five nonuniform kernels and 15 profile keys. `lowpass_nonuniform.cpp` emits `nonuniform-lowpass-unchecked-v2` CPU tasks. `CheckedLowpassGeometry::piece_at` reads positions through a raw-word accessor. `NonuniformLowpassMath` streams exact pieces and paired-affine identities, while `CheckedLowpassPolynomialBuilder` uses fixed coefficient views with rigorous Taylor remainder bounds. All accelerated keys currently use strict arithmetic; precision 128..4096 and order <=512 may return `ResourceExhausted`.
 
 The independent Fraction/MPFR oracle enumerates boundary copies and preserves endpoint raw tags through a separate reconstruction for local constant-bit detection. Temporary public and direct checks cover numerical outputs, exact static closures, runtime ownership, cancellation, floating environment, fixed scratch bounds and allocation-free invocation. See [CRV-11 umbrella](CRV-11_resample_signal.md).

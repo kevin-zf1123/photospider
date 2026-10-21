@@ -22,6 +22,10 @@ enum class QualityEvidence : std::uint32_t {
  * acquire a CertifiedBound tag by setting a caller-provided enum or tolerance.
  * The report's owned CPU allocation retains the supplied allocator/root.
  * This is a numerical bound, never a resource/RSS bound or dependency proof.
+ * Runtime input structure and numerical conditions are unchecked caller
+ * premises. Factories construct reports without input or publication scans.
+ * snapshot contains 1..256 printable non-space ASCII bytes; dimension is
+ * positive. Inputs, pointers and callbacks remain valid for the call.
  */
 class PHOTOSPIDER_OPS_SDK_API QualityReport final {
  public:
@@ -34,21 +38,24 @@ class PHOTOSPIDER_OPS_SDK_API QualityReport final {
   std::uint64_t dimension() const noexcept;
   /** @brief Infinity norm observation; zero for an invalid default handle. */
   double residual() const noexcept;
-  /** @brief Only present when the named integer proof was checked. */
+  /** @brief Only present after the named integer bound calculation. */
   std::optional<double> error_bound() const noexcept;
   /** @brief Exact proof inputs (diagonal, estimate, rhs) for independent
-   * checks. Measured reports have no proof rows. No I/O or producer evaluation
+   * inspection. Measured reports have no proof rows. row<proof_count() is an
+   * unchecked premise for proof_row. No I/O or producer evaluation
    * occurs.
    */
   std::uint64_t proof_count() const noexcept;
   Result<std::array<std::int64_t, 3>> proof_row(std::uint64_t row) const;
-  /** @brief Finite nonnegative computed residual, with no error bound. */
+  /** @brief Record a supplied finite nonnegative residual, unchecked, with no
+   * bound. */
   static Result<QualityReport> measured_residual(
       std::string_view snapshot, std::uint64_t dimension, double residual,
       const BufferAllocator& allocator);
-  /** @brief Checks an exact diagonal integer proof in the infinity norm.
-   * count is 1..4096; each input magnitude <=2^26 and every diagonal is
-   * nonzero. Integer residual arithmetic is exact (<2^53). R=max|a*x-b| and
+  /** @brief Compute an exact diagonal integer error bound in the infinity norm.
+   * Unchecked premises: count is 1..4096; arrays contain count entries;
+   * consume_work is nonempty; each input magnitude <=2^26 and every diagonal
+   * is nonzero. Integer residual arithmetic is exact (<2^53). R=max|a*x-b| and
    * m=min|a| give ||x-x*||inf<=R/m. The positive quotient is rounded upward
    * with one nextafter after nearest binary64 division; R=0 gives exact bound
    * zero. All proof inputs are retained in the admitted report allocation. Each

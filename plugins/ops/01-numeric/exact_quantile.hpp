@@ -17,37 +17,27 @@ struct QuantilePosition final {
   }
   unsigned shift = 0;
 };
-// The caller validates 1<=count<=2^40. q is a finite binary32/64 in [0,1];
-// its decoded significand times count-1 fits 93 bits. No floating rank or
-// preliminary sample conversion participates in selection.
-inline Result<QuantilePosition> quantile_position(std::uint64_t raw,
-                                                  ElementType type,
-                                                  std::uint64_t count) {
+// Static preparation proves 1<=count<=2^40. The caller supplies finite q in
+// [0,1]; its decoded significand times count-1 fits 93 bits. No floating rank
+// or preliminary sample conversion participates in selection.
+inline QuantilePosition quantile_position(std::uint64_t raw, ElementType type,
+                                          std::uint64_t count) {
   const bool narrow = type == ElementType::Float32;
   const auto q = BinaryParts::decode(raw, narrow);
-  const auto one = narrow ? UINT64_C(0x3f800000) : UINT64_C(0x3ff0000000000000);
-  if (q.nan || q.infinite || (q.negative && q.magnitude) || q.magnitude > one)
-    return Result<QuantilePosition>(
-        Status{ErrorCode::InvalidArgument,
-               "InvalidQuantileProbability: require finite q in [0,1]",
-               FailureReason::InvalidDomain,
-               {FailureOrigin::Domain, FailureScope::Unspecified}});
   const auto product =
       static_cast<unsigned __int128>(count - 1) * q.significand;
   const auto shift = static_cast<unsigned>(-q.exponent);
   if (shift >= 128)
-    return Result<QuantilePosition>(
-        QuantilePosition{0,
-                         {static_cast<std::uint64_t>(product),
-                          static_cast<std::uint64_t>(product >> 64)},
-                         shift});
+    return QuantilePosition{0,
+                            {static_cast<std::uint64_t>(product),
+                             static_cast<std::uint64_t>(product >> 64)},
+                            shift};
   const auto remaining =
       product & ((static_cast<unsigned __int128>(1) << shift) - 1);
-  return Result<QuantilePosition>(
-      QuantilePosition{static_cast<std::uint64_t>(product >> shift),
-                       {static_cast<std::uint64_t>(remaining),
-                        static_cast<std::uint64_t>(remaining >> 64)},
-                       shift});
+  return QuantilePosition{static_cast<std::uint64_t>(product >> shift),
+                          {static_cast<std::uint64_t>(remaining),
+                           static_cast<std::uint64_t>(remaining >> 64)},
+                          shift};
 }
 // All finite endpoints are represented in units of 2^-1074. A*2^k needs at
 // most 3172 bits for k<=1074; weighting/cancellation and final RN alignment

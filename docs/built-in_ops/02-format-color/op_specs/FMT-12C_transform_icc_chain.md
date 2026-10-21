@@ -60,7 +60,7 @@ engine CLUT paths retain their actual arithmetic even with Float64 ports.
 Use family group replacement, planar materialization, point/group support,
 finite raw boundary and semantic sample constraints. Alpha/AOVs remain external
 to the CMM and bit-preserving. Required construction failures are static even
-for bypass-only requests; runtime sample failures have exact requested support.
+for bypass-only requests; actual runtime engine failures follow the required execution support; sample domains are unchecked.
 
 ## Acceptance and conceptual workflow
 

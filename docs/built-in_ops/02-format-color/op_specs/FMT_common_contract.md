@@ -56,9 +56,12 @@ The selected interpretation policy below (C13) makes every color, alpha,
 transfer, sampling and LUT interpretation an explicit static parameter of the
 operation that consumes it. Data carries no description, so there is nothing to
 propagate, clear or match between operations. A description is not a
-certificate of sample validity. Color validity follows the applicable
-model contract when a consumer uses it, including finite color samples and alpha
-constraints, even where raw numeric computation permits IEEE non-finite values.
+certificate of sample validity. Color-domain requirements, including finite
+samples and alpha constraints, are unchecked caller premises even where raw
+numeric computation separately defines IEEE non-finite values. The inherited
+NUM boundary checks only static structure. Finite/range/order/geometry conditions
+on static numeric parameters are also premises; neither producers nor consumers
+perform payload validation or publication scans.
 An individual FMT formula
 must still define its strict reference and rounding boundaries. External engines
 use the separately selected conformance boundary below; no CMM/OCIO precision
@@ -67,10 +70,10 @@ guarantee follows merely from inheriting the numerical baseline.
 [FMT-COLOR](FMT-COLOR_color_array_contract.md) already defines primary/white
 coordinates, transfer separation, relative reference, native model units,
 signed/HDR domains, hue units and winding preservation, RGB association,
-complete-color validation and immutable CMYK profile ownership. Reuse the color
+complete-color domains and immutable CMYK profile ownership. Reuse the color
 science; resource ownership follows C13 (resources are selected by the consuming
-operation's preparation, not attached to data), and the consumption policy
-determines when a complete-color validation obligation exists. In particular, an RGB ramp's zero-alpha output policy
+operation's preparation, not attached to data). Complete-color premises do not
+introduce additional payload reads or validation. In particular, an RGB ramp's zero-alpha output policy
 does not automatically define every future color conversion's policy.
 
 ## Terminology used for this clarification
@@ -185,10 +188,10 @@ ColorArray consumers.
 | C07 | External-engine conformance | Define versioned ICC/OCIO adapter contracts separately from native mathematical primitives; individual precision/determinism guarantees remain to be established. | Confirmed 2026-09-22 |
 | C08 | Output interpretation | Outputs carry no description. A caller that needs the destination interpretation constructs it explicitly, for example with `format::edit_description`, and passes it to the next consumer. | C13 replaces description retention |
 | C09 | Per-call interpretation | Every interpretation is local to one invocation and enters that invocation's identity; the source and other consumers are unaffected. | Confirmed 2026-09-22; generalized by C13 |
-| C10 | Validation trigger | Validate only the semantics an operation actually consumes from its explicit parameters, or a port's explicitly bound validator; ordinary numeric arithmetic consumes no color interpretation. | Confirmed 2026-09-22 |
+| C10 | Static structure and unchecked domains | Compile static schema, descriptors, parameter syntax/types and structural relations. Runtime structure and all numerical/geometric premises are trusted at both publication and consumption. | Revised 2026-10-21 |
 | C11 | Image storage | Mandatory planar and one DAG-wide tile geometry. Interior payloads are tight full blocks; edge tiles retain valid rows and pad their width to Tw. Every next tile starts page-aligned, with gaps distinct from row padding. | Revised and confirmed 2026-09-22 |
 | C12 | Virtual image backing | Reserve one full-image continuous virtual range; explicitly prepare page backing before operator access, retain produced pages until final owner retirement and fail on budget exhaustion. | Confirmed 2026-09-22 |
-| C13 | Explicit static interpretation | Result/Tensor carry structure, data and storage owners only. Color space, white, transfer, alpha association, sampling and LUT interpretation are explicit static parameters of each consuming operation. No attached description, automatic propagation, `metadata_mode`, or connection-time label matching. Same-structure data with different intended meanings connects without rejection; domain legality is proved by explicit SDK calls or port-bound validators. | Approved by the maintainer as a breaking boundary change |
+| C13 | Explicit static interpretation | Result/Tensor carry structure, data and storage owners only. Color space, white, transfer, alpha association, sampling and LUT interpretation are explicit static parameters of each consuming operation. No attached description, automatic propagation, `metadata_mode`, or connection-time label matching. Same-structure data with different intended meanings connects without rejection; domain legality is an unchecked caller premise. | Approved by the maintainer as a breaking boundary change |
 
 ### Representation and source authority
 
@@ -258,13 +261,11 @@ Each operation declares the interpretation parameters it consumes and its
 required sample domain. Plain numerical arithmetic consumes dtype, shape and
 numerical operands; it has no color parameter and adds no color-domain
 validation or whole-color read closure. A color/coverage/compositing consumer
-validates the explicit semantic fields and associated samples it actually
-relies on. It must include sample dependencies required by its formula or
-consumed semantic invariants. Structural completeness of a color group in the
-supplied description does not itself demand all color samples or alpha. Alpha
-samples enter demand/validation only when the formula or consumed
-alpha/coverage/compositing semantics require them. Descriptor checks remain
-mandatory even when their corresponding samples are not read.
+checks the static structure of its explicit semantic fields and trusts sample
+premises. Sample dependencies come from the selected computation. Structural
+completeness of a color group does not itself demand all color samples or alpha.
+Alpha samples enter demand only when the formula uses them. Static descriptor
+checks remain mandatory even when their corresponding samples are not read.
 
 The choice between semantic and raw forms is made by the parameters themselves:
 a member that offers both runs semantic selection when `input_description` (and
@@ -274,21 +275,20 @@ retains NUM nonfinite formula outcomes, whereas FMT-14/15 require finite consume
 samples and requested arithmetic.
 
 The raw form ignores color interpretation for numerical processing. It still
-checks storage bounds, dtype/shape compatibility, memory ownership and the
-selected numeric formula's domain. It obeys normal resource, cancellation and
-failure rules. A semantic formula needing primaries, axes or alpha roles cannot
+uses the compiled dtype/shape and storage contract and trusts the selected
+formula's caller premises. It obeys normal resource, cancellation and actual
+execution-failure rules. A semantic formula needing primaries, axes or alpha roles cannot
 invent those inputs; they must be specified explicitly or the invocation is
 incomplete. The supported raw form of each primitive must be stated, rather than
 promised for arbitrary operations.
 
 Arithmetic output carries no sample-validity guarantee across changed values.
-For example, alpha .8 multiplied by 2 can yield 1.6; a later coverage consumer
-whose explicit description declares that channel as alpha, or whose port binds
-an alpha-range validator, rejects it.
+For example, alpha .8 multiplied by 2 can yield 1.6; passing that result to a
+coverage consumer whose contract requires alpha in [0,1] violates a caller
+premise. Neither operation adds a range scan or a publication gate.
 
-Validation is tied to immutable input identity, the explicit interpretation
-parameters and the observed sample domain. It is not a mutable global boolean on
-a shared tensor. Interpretation parameters are static parameters, so they enter
+Identity and association fields in runtime data are trusted caller premises;
+there is no sample-validity flag or automatic input certificate. Interpretation parameters are static parameters, so they enter
 the compiled invocation identity and cache keys; two consumers reading the same
 source with different descriptions have distinct identities and outcomes.
 
@@ -436,22 +436,22 @@ proofing from an OCIO display/view label.
 
 The kernel has no implicit validation hooks, facet propagation or label-based
 tuple closure: sample closure comes only from `atomic_trailing_axes`, and domain
-validity comes from explicit descriptions and port-bound validators. Image/Layer
+validity is supplied by caller premises. Image/Layer
 operations consume explicit parameters. Compiler inference, partial requests,
-cache/validation identity, immutable resources and generic collection
+cache identity, immutable resources and generic collection
 correspondence follow C13. Reintroducing a dedicated Layer schema behind a
 renamed image tensor does not satisfy the selected target.
 
 Operation changes must satisfy at least these independent checks:
 
-- Raw alpha arithmetic succeeds outside coverage range; a semantic coverage
-  consumer then rejects the affected observation.
+- Raw alpha arithmetic follows its formula; semantic coverage fixtures satisfy
+  the documented alpha premise without producer or consumer range scans.
 - A numeric red-channel read and a componentwise FMT-09 red request do not
   observe unrelated alpha. A structurally complete color group does not expand
   their sample support. Unrequested alpha NaN, missing coverage or upstream
   failure cannot fail these observations unless required upstream complete-input behavior
-  already makes that failure unavoidable. Semantic FMT-04 unassociation requests and
-  validates alpha for a requested color component. Explicit alpha bypass requests
+  already makes that failure unavoidable. Semantic FMT-04 unassociation reads
+  alpha for its requested color computation and trusts its domain. Explicit alpha bypass requests
   copy its bits under the member contract without adding coverage validation.
 - Two consumers can interpret the same immutable source differently through
   their own explicit descriptions without changing the other consumer or source.
@@ -462,8 +462,8 @@ Operation changes must satisfy at least these independent checks:
   consumer is validated against that consumer's input descriptor.
 - Distinct descriptions produce distinct invocation and cache identities;
   resources selected by preparation stay alive while the plan or a Run needs them.
-- Raw processing preserves the relevant numeric oracle and cannot bypass bounds,
-  resource, cancellation, or required upstream failures.
+- Raw processing preserves the relevant numeric oracle, static structural
+  requirements, resource limits, cancellation and required upstream failures.
 
 These are acceptance cases for operation changes; they are not a record of
 completed test runs.
@@ -499,10 +499,11 @@ See the [relative-coordinate migration](FMT_relative_coordinate_scale.md).
 Compile immutable per-invocation plans from the explicit description and typed
 parameters. Resolve roles, axes, encodings, exact basis/inverse matrices, branch
 thresholds and coefficient enclosures once where possible. For each output,
-represent three distinct support sets: `Data` (formula/copy operands),
-`Validation` (sample-domain checks), and `Descriptor` (structural schema and
-resource checks). Use the union of required sample sets for reads and its
-transpose for dirty propagation; descriptor checks do not imply sample reads.
+represent `Data` support for formula/copy operands and `Descriptor` support for
+static schema/resource structure. Data support determines sample reads and its
+transpose determines dirty propagation. There is no additional validation read
+set: numerical/geometric premises and runtime payload structure are unchecked.
+Descriptor checks do not imply sample reads.
 Honor member-defined static support even when a pixel-dependent branch could
 use fewer samples. Do not replace local FMT demand with an existing NUM complete-input
 callback merely because its arithmetic is reusable.
@@ -543,8 +544,8 @@ is insufficient. Apply the following constraints before admitting an optimizatio
 
 FMT-10D with equal source/target bases still has rounded intermediate XYZ; large
 finite RGB can overflow a required intermediate even when an algebraically
-combined matrix is identity. HLG decode(1) in Float64 can fail a following encode
-domain check; PQ's zero plateau and ACES floor/caps lose information. These
+combined matrix is identity. HLG decode(1) in Float64 can fall outside a following encode
+domain premise; PQ's zero plateau and ACES floor/caps lose information. These
 behaviors cannot be removed by fusion. A different once-rounded primitive or
 changed FMT-14B iteration/termination algorithm requires a separate contract.
 

@@ -1,8 +1,10 @@
 """Independent Philox integer oracle and exact finite noise models.
 
 Philox4x64-10 is checked against external Random123 KATs (see SOURCES.md).
-Address packing and bit extraction below are CANDIDATE layout experiment-1,
-not a frozen Photospider sequence. All addressed stochastic helpers inherit this limit.
+Counter packing, seed-to-key injection and Float32/Float64 half-open and open52 extraction match production v1.
+Member word selections and address allocations follow the shared v1 contract.
+Python domain guards reject unsupported oracle probes only; the production
+contract assumes valid payloads without runtime semantic validation.
 No upstream implementation is bundled. Bridson's transcendental candidates below
 are explicitly MEASURED, not correctly-rounded strict golden sequences.
 """
@@ -15,7 +17,7 @@ import math
 
 MASK=(1<<64)-1
 MASK32=(1<<32)-1
-CANDIDATE_LAYOUT="philox4x64-layout-experiment-1"
+RNG_PROTOCOL="philox4x64-v1"
 DOMAINS={'uniform':1,'gaussian':2,'jitter':3,'rejection':4,'bridson':5,
          'gradient':6,'cellular':7,'poisson':8,'speckle':9,'grain':10,'resource':11}
 

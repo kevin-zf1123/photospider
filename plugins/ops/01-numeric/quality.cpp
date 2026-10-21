@@ -9,7 +9,6 @@
 
 #include "common/floating_environment.hpp"
 #include "photospider/core/status_helpers.hpp"
-#include "photospider/ops/errors.hpp"
 
 namespace ps {
 namespace {
@@ -25,11 +24,6 @@ Header header(const std::shared_ptr<const CpuStorage>& storage) noexcept {
   if (storage)
     std::memcpy(&result, storage->bytes().data(), sizeof(result));
   return result;
-}
-bool snapshot_valid(std::string_view snapshot) {
-  return !snapshot.empty() && snapshot.size() <= 256 &&
-         std::all_of(snapshot.begin(), snapshot.end(),
-                     [](unsigned char c) { return c >= 0x21 && c <= 0x7e; });
 }
 void set_snapshot(Header* destination, std::string_view snapshot) {
   destination->snapshot_size = static_cast<std::uint32_t>(snapshot.size());
@@ -69,8 +63,6 @@ std::uint64_t QualityReport::proof_count() const noexcept {
 }
 Result<std::array<std::int64_t, 3>> QualityReport::proof_row(
     std::uint64_t row) const {
-  if (row >= proof_count())
-    return Result<std::array<std::int64_t, 3>>(ops_error::invalid_quality());
   std::array<std::int64_t, 3> result{};
   std::memcpy(result.data(),
               storage_->bytes().data() + sizeof(Header) + row * 24, 24);
@@ -82,9 +74,6 @@ Result<QualityReport> QualityReport::measured_residual(
   plugin_internal::FloatingEnvironment environment;
   if (!environment.active())
     return Result<QualityReport>(Status{ErrorCode::OperationFailed, {}});
-  if (!snapshot_valid(snapshot) || !dimension || !std::isfinite(residual) ||
-      residual < 0)
-    return Result<QualityReport>(ops_error::invalid_quality());
   auto allocated = allocator.allocate(sizeof(Header));
   if (!allocated.ok())
     return Result<QualityReport>(allocated.status());
@@ -108,9 +97,6 @@ Result<QualityReport> QualityReport::certify_integer_diagonal(
   plugin_internal::FloatingEnvironment environment;
   if (!environment.active())
     return Result<QualityReport>(Status{ErrorCode::OperationFailed, {}});
-  if (!snapshot_valid(snapshot) || !count || count > 4096 || !diagonal ||
-      !estimate || !rhs || !consume_work)
-    return Result<QualityReport>(ops_error::invalid_quality());
   if (cancellation.cancelled())
     return Result<QualityReport>(Status{ErrorCode::Cancelled, {}});
   auto allocated = allocator.allocate(sizeof(Header) + count * 24);
@@ -125,11 +111,6 @@ Result<QualityReport> QualityReport::certify_integer_diagonal(
     if (!charged.ok())
       return Result<QualityReport>(charged);
     const std::array<std::int64_t, 3> row{diagonal[i], estimate[i], rhs[i]};
-    for (auto value : row)
-      if (value < -(1LL << 26) || value > (1LL << 26))
-        return Result<QualityReport>(ops_error::invalid_quality());
-    if (!row[0])
-      return Result<QualityReport>(ops_error::invalid_quality());
     residual = std::max(residual, magnitude(row[0] * row[1] - row[2]));
     minimum = std::min(minimum, magnitude(row[0]));
     std::memcpy(buffer.data() + sizeof(Header) + i * 24, row.data(), 24);

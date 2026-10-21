@@ -1,8 +1,6 @@
 #include "photospider/ops/tensor_description.hpp"
 
-#include <cmath>
 #include <cstring>
-#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -24,24 +22,11 @@ bool valid_text(const std::string& text) {
          (text.empty() || core_internal::valid_utf8_key(text));
 }
 using data_internal::format_numeric::Natural;
-using data_internal::format_numeric::Rational;
 Natural natural(const std::vector<std::uint32_t>& words) {
   Natural value;
   value.words.assign(words.begin(), words.end());
   value.trim();
   return value;
-}
-Rational rational_endpoint(const TensorEndpoint& value) {
-  if (const auto* integer = std::get_if<std::int64_t>(&value))
-    return Rational::integer(*integer);
-  if (const auto* number = std::get_if<double>(&value)) {
-    std::uint64_t bits;
-    std::memcpy(&bits, number, 8);
-    return Rational::binary(bits, false);
-  }
-  const auto& exact = std::get<TensorRationalEndpoint>(value);
-  return {natural(exact.numerator), natural(exact.denominator), exact.negative,
-          false};
 }
 bool valid_rational(const TensorRationalEndpoint& value) {
   if (value.numerator.empty() || value.denominator.empty() ||
@@ -56,22 +41,15 @@ bool valid_rational(const TensorRationalEndpoint& value) {
   return Natural::gcd(natural(value.numerator), natural(value.denominator))
              .compare(Natural(1)) == 0;
 }
-bool endpoint_less(const TensorEndpoint& a, const TensorEndpoint& b) {
-  return rational_endpoint(a).compare(rational_endpoint(b)) < 0;
-}
 bool valid_encoding(const std::optional<TensorEncoding>& encoding) {
   if (!encoding)
     return true;
   for (const auto* pair : {&encoding->stored, &encoding->decoded})
     for (const auto& n : *pair)
-      if (auto* f = std::get_if<double>(&n); f && !std::isfinite(*f))
+      if (auto* r = std::get_if<TensorRationalEndpoint>(&n);
+          r && !valid_rational(*r))
         return false;
-      else if (auto* r = std::get_if<TensorRationalEndpoint>(&n);
-               r && !valid_rational(*r))
-        return false;
-  return endpoint_less(encoding->stored[0], encoding->stored[1]) &&
-         (endpoint_less(encoding->decoded[0], encoding->decoded[1]) ||
-          endpoint_less(encoding->decoded[1], encoding->decoded[0]));
+  return true;
 }
 bool valid_sampling(const std::optional<TensorSampling>& sampling) {
   return !sampling || (valid_text(sampling->grid) && !sampling->grid.empty() &&
@@ -113,20 +91,6 @@ bool valid_extended(const std::string& convention,
         }
       }
     }
-    if (binding->white) {
-      for (auto n : *binding->white) {
-        if (!std::isfinite(n)) {
-          return false;
-        }
-      }
-    }
-    if (binding->primaries_xy) {
-      for (auto n : *binding->primaries_xy) {
-        if (!std::isfinite(n)) {
-          return false;
-        }
-      }
-    }
     if (binding->model == "rgb") {
       if (binding->transfer.empty() ||
           (binding->primaries.empty() &&
@@ -154,10 +118,6 @@ bool valid_coordinates(const std::optional<TensorModelCoordinates>& c) {
        c->gray_kind != "oklab_l") ||
       !valid_text(c->observer))
     return false;
-  if (c->ncl_coefficients)
-    for (double x : *c->ncl_coefficients)
-      if (!std::isfinite(x))
-        return false;
   return true;
 }
 bool valid_interpretation(const TensorInterpretation& v) {
@@ -168,14 +128,6 @@ bool valid_interpretation(const TensorInterpretation& v) {
     if (!valid_text(*text))
       return false;
   }
-  if (v.white)
-    for (auto number : *v.white)
-      if (!std::isfinite(number))
-        return false;
-  if (v.primaries_xy)
-    for (auto number : *v.primaries_xy)
-      if (!std::isfinite(number))
-        return false;
   return valid_extended(v.convention, v.configured, v.analytic_binding,
                         v.profile.has_value());
 }
@@ -206,9 +158,7 @@ Status validate_structure(const TensorDescription& value) {
       return core_internal::invalid_schema_domain(
           "invalid tensor channel text");
   for (const auto& axis : value.axes)
-    if (!valid_text(axis.name) || !valid_text(axis.unit) ||
-        !std::isfinite(axis.origin) || !std::isfinite(axis.step) ||
-        axis.step <= 0)
+    if (!valid_text(axis.name) || !valid_text(axis.unit))
       return core_internal::invalid_schema_domain(
           "invalid tensor axis description");
   for (const auto* field : {&value.model, &value.primaries, &value.transfer,
@@ -1105,46 +1055,6 @@ Status validate_tensor_description(const TensorDescription& description,
             {FailureOrigin::Schema, FailureScope::Unspecified}};
   const auto integer_dtype = descriptor.element_type != ElementType::Float32 &&
                              descriptor.element_type != ElementType::Float64;
-  TensorEndpoint low = std::int64_t{0}, high = std::int64_t{255};
-  switch (descriptor.element_type) {
-    case ElementType::UInt8:
-      break;
-    case ElementType::UInt16:
-      high = std::int64_t{65535};
-      break;
-    case ElementType::Int8:
-      low = std::int64_t{-128};
-      high = std::int64_t{127};
-      break;
-    case ElementType::Int16:
-      low = std::int64_t{-32768};
-      high = std::int64_t{32767};
-      break;
-    case ElementType::Int64:
-      low = INT64_MIN;
-      high = INT64_MAX;
-      break;
-    case ElementType::Float32:
-      low = -static_cast<double>(std::numeric_limits<float>::max());
-      high = static_cast<double>(std::numeric_limits<float>::max());
-      break;
-    case ElementType::Float64:
-      low = -std::numeric_limits<double>::max();
-      high = std::numeric_limits<double>::max();
-      break;
-  }
-  const auto compatible_encoding = [&](const std::optional<TensorEncoding>& e) {
-    return !e || (!endpoint_less(e->stored[0], low) &&
-                  !endpoint_less(high, e->stored[1]));
-  };
-  if (!compatible_encoding(description.encoding))
-    return {ErrorCode::TypeMismatch, "encoding interval exceeds dtype"};
-  for (const auto& c : description.channels)
-    if (!compatible_encoding(c.encoding))
-      return {ErrorCode::TypeMismatch, "channel encoding exceeds dtype"};
-  if (description.component &&
-      !compatible_encoding(description.component->encoding))
-    return {ErrorCode::TypeMismatch, "component encoding exceeds dtype"};
   for (const auto& g : description.groups)
     for (std::size_t i = 0; i < g.components.size(); ++i) {
       auto e = g.components[i].encoding;
@@ -1152,8 +1062,6 @@ Status validate_tensor_description(const TensorDescription& description,
         e = description.channels[g.indices[i]].encoding;
       if (!e)
         e = description.encoding;
-      if (!compatible_encoding(e))
-        return {ErrorCode::TypeMismatch, "group encoding exceeds dtype"};
       if (integer_dtype && !e)
         return core_internal::invalid_schema_domain(
             "complete integer color group requires explicit decoder");

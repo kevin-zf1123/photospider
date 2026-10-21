@@ -345,203 +345,54 @@ void looks_exist(const OCIO::Config& config, const std::string& value) {
   }
 }
 
-void finite(double value) {
-  require(std::isfinite(value), "nonfinite OCIO transform parameter");
-}
-void finite_values(const double* values, size_t n) {
-  for (size_t i = 0; i < n; ++i) {
-    finite(values[i]);
-  }
-}
-template <class RGBM>
-void finite_rgbm(const RGBM& v) {
-  finite(v.m_red);
-  finite(v.m_green);
-  finite(v.m_blue);
-  finite(v.m_master);
-}
-template <class Tone>
-void finite_tone(const Tone& v) {
-  finite_rgbm(v);
-  finite(v.m_start);
-  finite(v.m_width);
-}
 template <class Curve>
-void finite_curve(const Curve& curve) {
+void check_curve_structure(const Curve& curve) {
   require(static_cast<bool>(curve), "null OCIO grading curve");
   const auto n = curve->getNumControlPoints();
   require(n >= 0 && static_cast<uint64_t>(n) <= 1048576,
           "OCIO curve point limit");
-  for (int i = 0; i < n; ++i) {
-    ps_engine_cpp_tick(1);
-    const auto& v = curve->getControlPoint(i);
-    finite(v.m_x);
-    finite(v.m_y);
-    finite(curve->getSlope(i));
-  }
 }
-void finite_node(const OCIO::ConstTransformRcPtr& node) {
+void check_node_structure(const OCIO::ConstTransformRcPtr& node) {
   require(static_cast<bool>(node), "null OCIO transform");
   ps_engine_cpp_tick(1);
-  if (dynamic_cast<const OCIO::GroupTransform*>(node.get())) {
+  if (dynamic_cast<const OCIO::GroupTransform*>(node.get()) ||
+      dynamic_cast<const OCIO::MatrixTransform*>(node.get()) ||
+      dynamic_cast<const OCIO::ExponentTransform*>(node.get()) ||
+      dynamic_cast<const OCIO::ExponentWithLinearTransform*>(node.get()) ||
+      dynamic_cast<const OCIO::ExposureContrastTransform*>(node.get()) ||
+      dynamic_cast<const OCIO::LogCameraTransform*>(node.get()) ||
+      dynamic_cast<const OCIO::LogAffineTransform*>(node.get()) ||
+      dynamic_cast<const OCIO::LogTransform*>(node.get()) ||
+      dynamic_cast<const OCIO::CDLTransform*>(node.get()) ||
+      dynamic_cast<const OCIO::RangeTransform*>(node.get()) ||
+      dynamic_cast<const OCIO::GradingPrimaryTransform*>(node.get()) ||
+      dynamic_cast<const OCIO::GradingToneTransform*>(node.get())) {
     return;
   }
-  if (auto* t = dynamic_cast<const OCIO::MatrixTransform*>(node.get())) {
-    double m[16], v[4];
-    t->getMatrix(m);
-    t->getOffset(v);
-    finite_values(m, 16);
-    finite_values(v, 4);
-  } else if (auto* t = dynamic_cast<const OCIO::Lut1DTransform*>(node.get())) {
-    const auto n = t->getLength();
-    require(n <= 1048576, "OCIO 1D LUT length limit");
-    for (unsigned i = 0; i < n; ++i) {
-      ps_engine_cpp_tick(1);
-      float r, g, b;
-      t->getValue(i, r, g, b);
-      finite(r);
-      finite(g);
-      finite(b);
-    }
+  if (auto* t = dynamic_cast<const OCIO::Lut1DTransform*>(node.get())) {
+    require(t->getLength() <= 1048576, "OCIO 1D LUT length limit");
   } else if (auto* t = dynamic_cast<const OCIO::Lut3DTransform*>(node.get())) {
-    const auto n = t->getGridSize();
-    require(n <= 129, "OCIO 3D LUT grid limit");
-    for (unsigned r = 0; r < n; ++r) {
-      for (unsigned g = 0; g < n; ++g) {
-        for (unsigned b = 0; b < n; ++b) {
-          ps_engine_cpp_tick(1);
-          float x, y, z;
-          t->getValue(r, g, b, x, y, z);
-          finite(x);
-          finite(y);
-          finite(z);
-        }
-      }
-    }
-  } else if (auto* t =
-                 dynamic_cast<const OCIO::ExponentTransform*>(node.get())) {
-    double v[4];
-    t->getValue(v);
-    finite_values(v, 4);
-  } else if (auto* t = dynamic_cast<const OCIO::ExponentWithLinearTransform*>(
-                 node.get())) {
-    double v[4];
-    t->getGamma(v);
-    finite_values(v, 4);
-    t->getOffset(v);
-    finite_values(v, 4);
-  } else if (auto* t = dynamic_cast<const OCIO::ExposureContrastTransform*>(
-                 node.get())) {
-    finite(t->getExposure());
-    finite(t->getContrast());
-    finite(t->getGamma());
-    finite(t->getPivot());
-    finite(t->getLogExposureStep());
-    finite(t->getLogMidGray());
-  } else if (auto* t =
-                 dynamic_cast<const OCIO::LogCameraTransform*>(node.get())) {
-    double v[3];
-    finite(t->getBase());
-    t->getLogSideSlopeValue(v);
-    finite_values(v, 3);
-    t->getLogSideOffsetValue(v);
-    finite_values(v, 3);
-    t->getLinSideSlopeValue(v);
-    finite_values(v, 3);
-    t->getLinSideOffsetValue(v);
-    finite_values(v, 3);
-    t->getLinSideBreakValue(v);
-    finite_values(v, 3);
-    if (t->getLinearSlopeValue(v)) {
-      finite_values(v, 3);
-    }
-  } else if (auto* t =
-                 dynamic_cast<const OCIO::LogAffineTransform*>(node.get())) {
-    double v[3];
-    finite(t->getBase());
-    t->getLogSideSlopeValue(v);
-    finite_values(v, 3);
-    t->getLogSideOffsetValue(v);
-    finite_values(v, 3);
-    t->getLinSideSlopeValue(v);
-    finite_values(v, 3);
-    t->getLinSideOffsetValue(v);
-    finite_values(v, 3);
-  } else if (auto* t = dynamic_cast<const OCIO::LogTransform*>(node.get())) {
-    finite(t->getBase());
-  } else if (auto* t = dynamic_cast<const OCIO::CDLTransform*>(node.get())) {
-    double v[3];
-    t->getSlope(v);
-    finite_values(v, 3);
-    t->getOffset(v);
-    finite_values(v, 3);
-    t->getPower(v);
-    finite_values(v, 3);
-    finite(t->getSat());
-  } else if (auto* t = dynamic_cast<const OCIO::RangeTransform*>(node.get())) {
-    if (t->hasMinInValue()) {
-      finite(t->getMinInValue());
-    }
-    if (t->hasMaxInValue()) {
-      finite(t->getMaxInValue());
-    }
-    if (t->hasMinOutValue()) {
-      finite(t->getMinOutValue());
-    }
-    if (t->hasMaxOutValue()) {
-      finite(t->getMaxOutValue());
-    }
+    require(t->getGridSize() <= 129, "OCIO 3D LUT grid limit");
   } else if (auto* t = dynamic_cast<const OCIO::FixedFunctionTransform*>(
                  node.get())) {
-    const auto n = t->getNumParams();
-    require(n <= 1048576, "OCIO fixed-function parameter limit");
-    ps_engine_cpp_tick(n);
-    std::vector<double> v(n);
-    if (n) {
-      t->getParams(v.data());
-    }
-    finite_values(v.data(), n);
-  } else if (auto* t = dynamic_cast<const OCIO::GradingPrimaryTransform*>(
-                 node.get())) {
-    const auto& v = t->getValue();
-    finite_rgbm(v.m_brightness);
-    finite_rgbm(v.m_contrast);
-    finite_rgbm(v.m_gamma);
-    finite_rgbm(v.m_offset);
-    finite_rgbm(v.m_exposure);
-    finite_rgbm(v.m_lift);
-    finite_rgbm(v.m_gain);
-    finite(v.m_saturation);
-    finite(v.m_pivot);
-    finite(v.m_pivotBlack);
-    finite(v.m_pivotWhite);
-    finite(v.m_clampBlack);
-    finite(v.m_clampWhite);
-  } else if (auto* t =
-                 dynamic_cast<const OCIO::GradingToneTransform*>(node.get())) {
-    const auto& v = t->getValue();
-    finite_tone(v.m_blacks);
-    finite_tone(v.m_shadows);
-    finite_tone(v.m_midtones);
-    finite_tone(v.m_highlights);
-    finite_tone(v.m_whites);
-    finite(v.m_scontrast);
+    require(t->getNumParams() <= 1048576,
+            "OCIO fixed-function parameter limit");
   } else if (auto* t = dynamic_cast<const OCIO::GradingRGBCurveTransform*>(
                  node.get())) {
     const auto v = t->getValue();
     require(static_cast<bool>(v), "null RGB curves");
     for (int i = 0; i < OCIO::RGB_NUM_CURVES; ++i) {
-      finite_curve(v->getCurve(static_cast<OCIO::RGBCurveType>(i)));
+      check_curve_structure(v->getCurve(static_cast<OCIO::RGBCurveType>(i)));
     }
   } else if (auto* t = dynamic_cast<const OCIO::GradingHueCurveTransform*>(
                  node.get())) {
     const auto v = t->getValue();
     require(static_cast<bool>(v), "null hue curves");
     for (int i = 0; i < OCIO::HUE_NUM_CURVES; ++i) {
-      finite_curve(v->getCurve(static_cast<OCIO::HueCurveType>(i)));
+      check_curve_structure(v->getCurve(static_cast<OCIO::HueCurveType>(i)));
     }
   } else {
-    throw std::invalid_argument("unrecognized OCIO numerical parameter set");
+    throw std::invalid_argument("unsupported OCIO transform type");
   }
 }
 void preflight(const OCIO::ConstTransformRcPtr& node, bool configured,
@@ -582,7 +433,7 @@ void preflight(const OCIO::ConstTransformRcPtr& node, bool configured,
                   lut->getInterpolation() == OCIO::INTERP_TETRAHEDRAL,
               "unsupported public 3D interpolation");
     }
-    finite_node(node);
+    check_node_structure(node);
   }
 }
 
@@ -600,17 +451,11 @@ OCIO::TransformRcPtr freeze(const OCIO::ConstTransformRcPtr& original,
     return out;
   }
   auto t = original->createEditableCopy();
-  finite_node(t);
+  check_node_structure(t);
   if (auto* m = dynamic_cast<OCIO::MatrixTransform*>(t.get())) {
     double matrix[16], offset[4];
     m->getMatrix(matrix);
     m->getOffset(offset);
-    for (double v : matrix) {
-      require(std::isfinite(v), "nonfinite OCIO matrix");
-    }
-    for (double v : offset) {
-      require(std::isfinite(v), "nonfinite OCIO offset");
-    }
     require(matrix[3] == 0 && matrix[7] == 0 && matrix[11] == 0 &&
                 matrix[12] == 0 && matrix[13] == 0 && matrix[14] == 0 &&
                 matrix[15] == 1 && offset[3] == 0,
@@ -650,7 +495,6 @@ OCIO::TransformRcPtr freeze(const OCIO::ConstTransformRcPtr& original,
                dynamic_cast<OCIO::FixedFunctionTransform*>(t.get()))) {
     throw std::invalid_argument("Unknown alpha effect in resolved OCIO graph");
   }
-  t->validate();
   if (active_build) {
     std::ostringstream record;
     record.precision(17);

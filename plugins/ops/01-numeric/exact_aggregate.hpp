@@ -100,7 +100,8 @@ struct ExactAggregate final {
       const std::function<Status(std::uint64_t)>& consume) {
     return finish_as(type, 1, consume);
   }
-  // Caller validates destination domain and positive divisor. Numeric sum and
+  // Caller supplies the destination domain and a positive divisor, unchecked.
+  // Numeric sum and
   // mean may change float width or widen/narrow integer sums; min/max preserve
   // their source dtype. Source integers enter a floating mean without casts.
   Result<std::uint64_t> finish_as(
@@ -118,14 +119,6 @@ struct ExactAggregate final {
       return Answer(selected);
     if (!floating) {
       const auto magnitude = ratio.numerator.words[0];
-      const auto limit = destination == ElementType::UInt8 ? UINT64_C(255)
-                         : ratio.negative                  ? UINT64_C(1) << 63
-                                          : UINT64_C(0x7fffffffffffffff);
-      if (RatioWorkspace::top(ratio.numerator) > 63 || magnitude > limit ||
-          (destination == ElementType::UInt8 && ratio.negative && magnitude))
-        return Answer(Status{ErrorCode::OperationFailed,
-                             "integer aggregate overflow",
-                             FailureReason::ArithmeticOverflow});
       return Answer(ratio.negative ? UINT64_C(0) - magnitude : magnitude);
     }
     const auto infinity =

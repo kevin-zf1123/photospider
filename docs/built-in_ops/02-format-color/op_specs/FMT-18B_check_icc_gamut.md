@@ -29,7 +29,7 @@ physical display condition is inferred from names or the current monitor.
 
 ## Algorithm and exact support
 
-Use the mandatory source-dimensional CLUT correction and read the borrowed gamut pipeline directly. Validate its dimensions and ownership. Float32 normalized input passes through the pinned u16 table evaluation; output is 1 exactly when its finite score is positive. Alarm-color comparison is forbidden.
+Use the mandatory source-dimensional CLUT correction and read the borrowed gamut pipeline directly. Validate its dimensions and ownership. Float32 normalized input passes through the pinned u16 table evaluation; output is 1 exactly when score>0, with score finiteness an unchecked premise. Alarm-color comparison is forbidden.
 Any requested color/mask consumes all source colors at that position. No halo,
 alpha dependence or hidden-color suppression. There are no alpha/AOV outputs or unrelated display-transform pixel requests.
 Static construction is required even for empty requests; it does not scan pixels.

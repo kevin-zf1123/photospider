@@ -35,7 +35,8 @@ is silently added merely from the declared endpoint labels.
 One `input` tensor yields same-dtype/shape `values` through the common triple and
 F32 boundary. Every path supplies explicit endpoint declarations/resources and publishes
 numeric data without an attached exit description. All modes apply
-finite checks, alpha admission, exact point/group support and materialization.
+unchecked finite-value premises, structural alpha admission, exact point/group
+support and materialization.
 
 ## Acceptance and conceptual workflow
 

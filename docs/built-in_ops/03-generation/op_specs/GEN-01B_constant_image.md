@@ -23,46 +23,39 @@ and profile; within one version/profile, output bits and discrete decisions are 
 
 ## Interface and representation
 
-color[C] Float32/64 with explicit group/alpha description; image[H,W,C] of the same
-dtype.
+A single-tensor Result supplies `color[C]` in Float32/64. The output is a single-tensor Result with logical image shape `[H,W,C]` and the same dtype. Color and alpha interpretation are explicit static configuration; the output carries structure and samples only.
 
 ## Parameters and domain
 
-canvas and complete FMT description; constructor may explicitly write linear
-sRGB/D65/relative with encoding ranges.
+Canvas and a complete FMT `TensorDescription` are explicit static parameters. The description uses the actual input vector's channel axis 0 and explicitly identifies the selected color group and any independent alpha. A constructor may explicitly supply linear sRGB/D65/relative coordinates with applicable encoding ranges. A downstream FMT consumer of `[H,W,C]` receives its own description with channel axis 2 and the corresponding group indices.
 
 ## Mathematical specialization
 
-Validate the complete finite color and alpha in [0,1], then copy each component.
-Preserve finite hidden color at alpha=0. Publish straight planar image metadata; do not
-premultiply or infer roles from C.
+The caller supplies finite color components and alpha in [0,1]; copy each component without payload validation. Preserve finite hidden color at alpha=0 and publish planar image samples. Straight association, model and units remain explicit caller-owned configuration; they are neither attached to the Result nor inferred from C. This member uses the shared unchecked numerical contract.
 
 ## Dependencies, resources and failures
 
 Execution rule: **Regional**. Compute requested output coordinates only. Read
-corresponding query/sample inputs and necessary controls; path/mesh/resource validation
-may require complete control data without computing the whole output canvas. Full
+corresponding query/sample inputs and the controls required by the mathematics. Complete control reads do not imply runtime payload validation. Full
 shared-control/topology/resource changes conservatively invalidate dependent output;
 sample changes follow the actual dependency map. Empty requests perform static preflight
-without payload reads or advancing a random sequence. Compute only requested output
-mathematics, retaining required shared validation.
+without payload reads or advancing a random sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
-O(C*area(Q)); full color controls validated.
+O(C*area(Q)); read the required color controls without validating their values.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
 InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
 
 ## Independent fixtures and acceptance
 
-No alpha, non-last alpha slot, hidden color, Lab l=0.5 and invalid alpha.
+No alpha, non-last alpha slot, hidden color, Lab l=0.5 and valid alpha endpoints.
 
 Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.

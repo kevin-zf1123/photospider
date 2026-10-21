@@ -26,7 +26,7 @@ One input tensor Tensor produces values with unchanged Float32/Float64 dtype, sh
 
 ## Formula, request and errors
 
-Full source RGB is consumed for any color output; Gray consumes one sample. Alpha/AOV bypass independently. Neutral 3 with gain=1 and simple gives .75. Negative Y fails unless the explicit signed extension is selected.
+Full source RGB is consumed for any color output; Gray consumes one sample. Alpha/AOV bypass independently. Neutral 3 with gain=1 and simple gives .75. The reject mode has the unchecked premise Y>=0; the explicit signed extension defines the negative-Y domain.
 The family states every finite domain, rounding boundary and branch. Static
 validation remains required for empty/bypass-only observations. Zero alpha does
 not remove hidden-color work. Required upstream failures keep their scope.

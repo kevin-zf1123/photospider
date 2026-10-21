@@ -41,9 +41,7 @@ Result<double> interpolate(const Read& read, std::uint64_t size, double query,
   delta.high = std::scalbn(delta.high, -exponent);
   delta.low = std::scalbn(delta.low, -exponent);
   const double position = delta.high / step;
-  // Indices must be exactly representable before multiplying by the step.
-  if (!std::isfinite(position) || position < 0 || position >= 0x1p53)
-    return failure();
+  // Position and index representability are unchecked caller premises.
   auto lower = std::min(static_cast<std::uint64_t>(position), size - 2);
   Split left{}, right{};
   double lost = 0;
@@ -88,9 +86,6 @@ Result<double> interpolate(const Read& read, std::uint64_t size, double query,
   const double remainder =
       std::fma(-high, step, numerator.high) + numerator.low;
   const double result = high + remainder / step;
-  if (!std::isfinite(result) ||
-      std::abs(result) > std::numeric_limits<float>::max())
-    return failure();
   const float rounded = static_cast<float>(result);
   const double ulp = std::max(
       static_cast<double>(std::numeric_limits<float>::denorm_min()),
@@ -186,7 +181,8 @@ void invoke(const ps_kernel_invocation_v8* invocation,
         };
         // The reject policy's closed-domain condition is a caller precondition.
         // Endpoint branches implement clip and preserve endpoint values.
-        // Interior interpolation retains its address and precision guards.
+        // Interior interpolation retains cell correction and precision
+        // certification.
         if (query <= program.domain.sample_origin) {
           value = table(0);
         } else if (query >= program.end) {
@@ -262,7 +258,7 @@ Result<OperationProgram> lower(const OperationLowering& query) {
       auto task =
           builder.add_task(Ports == 1 ? "sample" : "linear",
                            Ports == 1 ? "indexed-expression-unchecked-v1"
-                                      : "linear-lut-unchecked-v1",
+                                      : "linear-lut-unchecked-v2",
                            {}, {Ports == 1 ? UINT64_C(4096) : 0, 0, 0});
       if (!task.ok())
         return Answer(task.status());
@@ -341,7 +337,6 @@ inline OperationDefinition operation(const char* key, bool lut) {
   traits.outputs[0].key = "value";
   traits.outputs[0].output_schema = tensor_ops::port();
   traits.outputs[0].result_schema = tensor_ops::scalar_schema();
-  const double maximum = std::numeric_limits<double>::max();
   if (lut)
     traits.parameter_schema = {
         {"out_of_domain", OperationParameterType::String},
@@ -351,9 +346,8 @@ inline OperationDefinition operation(const char* key, bool lut) {
     traits.parameter_schema = {
         {"count", OperationParameterType::Int64, true, true, 1, 1048576},
         {"expression", OperationParameterType::String},
-        {"start", OperationParameterType::Float64, true, true, -maximum,
-         maximum},
-        {"step", OperationParameterType::Float64, true, true, 0, maximum}};
+        {"start", OperationParameterType::Float64},
+        {"step", OperationParameterType::Float64}};
   definition.prepare_static =
       [lut](const auto& inputs,
             const auto& params) -> Result<OperationPreparation> {
@@ -420,7 +414,7 @@ inline OperationDefinition operation(const char* key, bool lut) {
             const KernelPreparation& query, const ResourceSet&,
             const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
     if (kernel.symbol != (lut ? "linear" : "sample") ||
-        kernel.contract != (lut ? "linear-lut-unchecked-v1"
+        kernel.contract != (lut ? "linear-lut-unchecked-v2"
                                 : "indexed-expression-unchecked-v1"))
       return Result<ps_prepared_kernel_v8>(
           {ErrorCode::TypeMismatch, "invalid expression/LUT kernel contract"});

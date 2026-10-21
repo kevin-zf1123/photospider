@@ -26,7 +26,7 @@ One input tensor Tensor produces values with unchanged Float32/Float64 dtype, sh
 
 ## Formula, request and errors
 
-Each output color component consumes only itself. black=1, white=101 maps .5 to 51 nits. No clip, tone curve or implicit peak; requested finite arithmetic overflow fails.
+Each output color component consumes only itself. black=1, white=101 maps .5 to 51 nits. No clip, tone curve or implicit peak; finite representable requested results are an unchecked caller premise.
 The family states every finite domain, rounding boundary and branch. Static
 validation remains required for empty/bypass-only observations. Zero alpha does
 not remove hidden-color work. Required upstream failures keep their scope.

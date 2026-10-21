@@ -82,54 +82,24 @@ struct NumericDiagnostics final {
    */
   std::array<std::array<std::uint64_t, 4>, 8> function_fallbacks{};
 };
-/** @brief Checks and accumulates a physical attempt in fixed inline storage.
- * Identities must match, except that a canonical empty destination adopts its
- * first report. Overflow/malformed input leaves the destination unchanged.
- * Caller serializes mutations; independent records can be merged concurrently.
- * Only construction of a failure diagnostic can allocate.
+/** @brief Accumulates a physical attempt in fixed inline storage.
+ * Caller supplies a nonnull destination and canonical reports with matching
+ * identities and consistent counters. These payload premises are unchecked.
+ * A canonical empty destination adopts its first report. Accumulator capacity
+ * overflow leaves the destination unchanged. Caller serializes mutations;
+ * independent records can be merged concurrently. Only failure diagnostics
+ * can allocate.
  */
 inline Status merge_numeric_diagnostics(NumericDiagnostics* target,
                                         const NumericDiagnostics& report) {
-  if (!target)
-    return Status{ErrorCode::InvalidArgument, "null numeric diagnostics"};
-  if (report.profile == CpuNumericProfile::Unspecified) {
-    if (report.implementation != std::array<char, 256>{} ||
-        report.evaluated_values || report.strict_fallbacks ||
-        report.view_elements || report.copied_elements ||
-        report.strict_math_calls ||
-        report.function_fallbacks !=
-            std::array<std::array<std::uint64_t, 4>, 8>{} ||
-        report.fallback_reasons != std::array<std::uint64_t, 4>{})
-      return Status{ErrorCode::InvalidArgument,
-                    "noncanonical empty numeric diagnostics"};
+  if (report.profile == CpuNumericProfile::Unspecified)
     return Status::success();
-  }
-  if (static_cast<std::uint32_t>(report.profile) > 3 ||
-      !report.implementation[0] || report.implementation.back())
-    return Status{ErrorCode::InvalidArgument,
-                  "invalid numeric implementation identity"};
-  std::uint64_t sum = 0;
-  for (const auto count : report.fallback_reasons) {
-    if (count > UINT64_MAX - sum)
-      return Status{ErrorCode::InvalidArgument,
-                    "numeric fallback counter overflow"};
-    sum += count;
-  }
-  if (sum != report.strict_fallbacks)
-    return Status{ErrorCode::InvalidArgument,
-                  "inconsistent numeric fallback counts"};
   auto attributed = report;
   for (unsigned reason = 0; reason < 4; ++reason) {
     std::uint64_t count = 0;
     for (const auto& function : report.function_fallbacks) {
-      if (function[reason] > UINT64_MAX - count)
-        return Status{ErrorCode::InvalidArgument,
-                      "function fallback counter overflow"};
       count += function[reason];
     }
-    if (count > report.fallback_reasons[reason])
-      return Status{ErrorCode::InvalidArgument,
-                    "inconsistent function fallback counts"};
     attributed.function_fallbacks[0][reason] +=
         report.fallback_reasons[reason] - count;
   }
@@ -137,10 +107,6 @@ inline Status merge_numeric_diagnostics(NumericDiagnostics* target,
   if (merged.profile == CpuNumericProfile::Unspecified) {
     merged = attributed;
   } else {
-    if (merged.profile != report.profile ||
-        merged.implementation != report.implementation)
-      return Status{ErrorCode::InvalidArgument,
-                    "numeric implementation changed within attempt"};
     if (report.evaluated_values > UINT64_MAX - merged.evaluated_values ||
         report.strict_fallbacks > UINT64_MAX - merged.strict_fallbacks ||
         report.view_elements > UINT64_MAX - merged.view_elements ||
@@ -198,11 +164,11 @@ inline std::array<std::uint8_t, numeric_report_bytes> encode_numeric_report(
       put(n, 8);
   return bytes;
 }
-/** @brief Decode an owned report; malformed records return InvalidArgument. */
+/** @brief Decode a report under the unchecked fixed-size payload contract.
+ * bytes supplies numeric_report_bytes readable bytes in the declared codec.
+ * Identity, canonical encoding and counter consistency are caller premises.
+ */
 inline Result<NumericDiagnostics> read_numeric_report(ByteView bytes) {
-  if (!bytes.data() || bytes.size() != numeric_report_bytes)
-    return Result<NumericDiagnostics>(
-        Status{ErrorCode::InvalidArgument, "numeric report size"});
   std::size_t at = 0;
   const auto get = [&](unsigned width) {
     std::uint64_t n = 0;
@@ -224,18 +190,15 @@ inline Result<NumericDiagnostics> read_numeric_report(ByteView bytes) {
   for (auto& row : report.function_fallbacks)
     for (auto& n : row)
       n = get(8);
-  NumericDiagnostics checked;
-  auto status = merge_numeric_diagnostics(&checked, report);
-  return status.ok() ? Result<NumericDiagnostics>(report)
-                     : Result<NumericDiagnostics>(status);
+  return Result<NumericDiagnostics>(report);
 }
 inline Status register_numeric_diagnostics(OperationRegistry& registry) {
   DiagnosticDefinition definition;
   definition.identity = numeric_diagnostic_identity();
   definition.payload_bytes = numeric_report_bytes;
-  definition.validate = [](ByteView bytes) {
-    return read_numeric_report(bytes).status();
-  };
+  // The frozen accumulator owns the fixed-size envelope. Payload semantics
+  // are caller premises; this required callback performs no payload scan.
+  definition.validate = [](ByteView) { return Status::success(); };
   definition.merge = [](ByteView before, ByteView incoming,
                         DiagnosticDestination target) {
     auto a = read_numeric_report(before), b = read_numeric_report(incoming);

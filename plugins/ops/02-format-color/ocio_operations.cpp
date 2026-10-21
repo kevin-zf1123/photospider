@@ -174,7 +174,7 @@ OperationPreparation prepare(const std::vector<OperationMetadata>& inputs,
   }
   same_shape(s.get(), inputs[0]);
   s->symbol = "ps.color.ocio.v1";
-  s->contract = "ocio2.5.2.host1";
+  s->contract = "ocio2.5.2.host2";
   s->scratch = 3 * 64 * sizeof(float);
   OperationPreparation result;
   result.state = s;
@@ -406,27 +406,16 @@ void invoke(const ps_kernel_invocation_v8* q,
           } else {
             std::memcpy(&value, &bits, 8);
           }
-          if (!std::isfinite(value)) {
-            *status =
-                kernel_failure(ErrorCode::OperationFailed, "OCIO input domain",
-                               FailureReason::InvalidDomain);
-            return;
-          }
           float narrowed = static_cast<float>(value);
-          if (!std::isfinite(narrowed)) {
-            *status = kernel_failure(ErrorCode::OperationFailed,
-                                     "OCIO input narrowing",
-                                     FailureReason::ArithmeticOverflow);
-            return;
-          }
           source_values[c * count + p] = narrowed;
         }
       }
       if (!ps_color_ocio_apply_v1(prepared.engine->handle, source_values,
                                   count)) {
-        *status = kernel_failure(ErrorCode::OperationFailed,
-                                 "OCIO formatter/pipeline overflow",
-                                 FailureReason::ArithmeticOverflow);
+        if (!cancelled()) {
+          *status = kernel_failure(ErrorCode::OperationFailed,
+                                   "OCIO engine execution failed");
+        }
         return;
       }
       if (cancelled()) {
@@ -440,20 +429,8 @@ void invoke(const ps_kernel_invocation_v8* q,
       for (unsigned c = 0; c < s.output_components; ++c) {
         if (prepared.requested & (1U << c)) {
           double value = target[c * count + p];
-          if (!std::isfinite(value)) {
-            *status = kernel_failure(ErrorCode::OperationFailed,
-                                     "OCIO requested output overflow",
-                                     FailureReason::ArithmeticOverflow);
-            return;
-          }
           if constexpr (Narrow) {
             float f = static_cast<float>(value);
-            if (!std::isfinite(f)) {
-              *status = kernel_failure(ErrorCode::OperationFailed,
-                                       "OCIO output narrowing",
-                                       FailureReason::ArithmeticOverflow);
-              return;
-            }
             std::uint32_t bits;
             std::memcpy(&bits, &f, 4);
             values[c] = bits;

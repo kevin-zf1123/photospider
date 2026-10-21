@@ -33,24 +33,22 @@ dtype,seed/stream/frame; corner coordinates signed32; period_x/y=0 or 1..2^31-1.
 ## Mathematical specialization
 
 Exact floor/local fraction; positive periods apply Euclidean modulo to valid corner
-indices before RNG. Domain6, channel/draw=0; low three selected word bits choose
+indices before RNG. Domain6, channel/draw=0; the low three bits of word 0 (word0 & 7) choose
 (1,0),(-1,0),(0,1),(0,-1),(1,1),(-1,1),(1,-1),(-1,-1). Diagonals are not normalized.
 Four fade5-weighted dots form one RN expression.
 
 ## Dependencies, resources and failures
 
 Execution rule: **Regional**. Compute requested output coordinates only. Read
-corresponding query/sample inputs and necessary controls; path/mesh/resource validation
-may require complete control data without computing the whole output canvas. Full
+corresponding query/sample inputs and the controls required by the mathematics. Complete control reads do not imply runtime payload validation. Full
 shared-control/topology/resource changes conservatively invalidate dependent output;
 sample changes follow the actual dependency map. Empty requests perform static preflight
-without payload reads or advancing a random sequence. Compute only requested output
-mathematics, retaining required shared validation.
+without payload reads or advancing a random sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
-O(4*count(Q)); charged gradient cache optional; RNG mapping gate.
+O(4*count(Q)); charged gradient cache optional; use the production v1 random mapping.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
 InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
@@ -64,6 +62,5 @@ Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.

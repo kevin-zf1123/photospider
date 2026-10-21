@@ -41,7 +41,7 @@ a codec does not make every transfer legal for every consumer.
 
 ## Confirmed curve set, meaning and domains
 
-D denotes A decoding and E denotes B encoding. Semantic callers guarantee finite participating inputs, membership in the listed input domains and finite rounded outputs throughout complete retained output tiles. These are unchecked sample-domain preconditions. Static description and parameter checks remain mandatory.
+D denotes A decoding and E denotes B encoding. Semantic callers guarantee finite participating inputs, membership in the listed input domains and finite rounded outputs throughout complete retained output tiles. These are unchecked sample-domain preconditions. Static description structure, parameter presence/types and codec syntax are checked. Numeric gamma/Lb/Lw domains are unchecked premises even during preparation.
 
 | Curve | Native linear quantity | Semantic input domains and selected behavior |
 | --- | --- | --- |
@@ -183,7 +183,7 @@ The host retains immutable preparation, source views, exclusive output and scrat
 
 | Condition | Phase | Outcome |
 | --- | --- | --- |
-| Malformed/missing/irrelevant parameter, invalid gamma/Lb/Lw, ambiguous selector, source assertion conflict | Static preparation | InvalidArgument / InvalidDomain. |
+| Malformed/missing/irrelevant parameter or wrong type, ambiguous selector, source assertion conflict | Static preparation | InvalidArgument / InvalidDomain. |
 | Unsupported dtype/model, incompatible units/reference, wrong source transfer or structural layout | Static preparation | TypeMismatch. |
 | Semantic nonfinite/out-of-domain input or nonfinite rounded output | Caller sample precondition | Outside the fixed invocation contract; no sample error guaranteed. |
 | Forced view of a statically nonidentity curve | Static preparation | InvalidArgument / InvalidDomain, ViewUnavailable message. |

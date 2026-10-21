@@ -202,7 +202,7 @@ OperationPreparation prepare(const std::vector<OperationMetadata>& inputs,
         intent(text(p, "source_intent", "relative_colorimetric"));
   }
   s->symbol = "ps.color.icc.v1";
-  s->contract = "lcms2.19.1.host1";
+  s->contract = "lcms2.19.1.host2";
   s->scratch = 8 * 64 * sizeof(double);
   OperationPreparation result;
   for (const auto& ref : s->profiles) {
@@ -441,31 +441,18 @@ void invoke(const ps_kernel_invocation_v8* q,
           } else {
             std::memcpy(&value, &bits, 8);
           }
-          if (!std::isfinite(value) ||
-              (s.selection.semantic && s.source_model == 2 &&
-               (value < 0 || value > 1))) {
-            *status =
-                kernel_failure(ErrorCode::OperationFailed, "ICC input domain",
-                               FailureReason::InvalidDomain);
-            return;
-          }
           if (s.source_model == 2 || (s.source_model == 4 && c == 0)) {
             value = value * 100.0;
-          }
-          if (!std::isfinite(value)) {
-            *status =
-                kernel_failure(ErrorCode::OperationFailed, "ICC unit overflow",
-                               FailureReason::ArithmeticOverflow);
-            return;
           }
           source_values[c * count + p] = value;
         }
       }
       if (!ps_color_icc_apply_v1(prepared.engine->handle, source_values, target,
                                  count)) {
-        *status = kernel_failure(ErrorCode::OperationFailed,
-                                 "ICC formatter/pipeline overflow",
-                                 FailureReason::ArithmeticOverflow);
+        if (!cancelled()) {
+          *status = kernel_failure(ErrorCode::OperationFailed,
+                                   "ICC engine execution failed");
+        }
         return;
       }
       if (cancelled()) {
@@ -483,23 +470,8 @@ void invoke(const ps_kernel_invocation_v8* q,
               (s.target_model == 2 || (s.target_model == 4 && c == 0))) {
             value = value / 100.0;
           }
-          if (!std::isfinite(value) ||
-              (s.selection.semantic && s.kind != Kind::Gamut &&
-               s.target_model == 2 && (value < 0 || value > 1))) {
-            *status = kernel_failure(
-                ErrorCode::OperationFailed, "ICC output domain",
-                std::isfinite(value) ? FailureReason::InvalidDomain
-                                     : FailureReason::ArithmeticOverflow);
-            return;
-          }
           if constexpr (Narrow) {
             float f = static_cast<float>(value);
-            if (!std::isfinite(f)) {
-              *status = kernel_failure(ErrorCode::OperationFailed,
-                                       "ICC output narrowing",
-                                       FailureReason::ArithmeticOverflow);
-              return;
-            }
             std::uint32_t bits;
             std::memcpy(&bits, &f, 4);
             values[c] = bits;

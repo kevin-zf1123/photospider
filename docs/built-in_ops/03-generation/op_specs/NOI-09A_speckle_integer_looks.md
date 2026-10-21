@@ -31,7 +31,7 @@ Integer looks L=1..64; seed/stream/frame,domain9,draw j=0..L-1.
 
 ## Mathematical specialization
 
-G=-sum_j ln(open52_j)/L; output RN_T(signal*G) with no intermediate RN of G. Ideal
+Each look j takes open52 from word 0 of its domain 9 block with draw=j; words 1/2/3 are unused. G=-sum_j ln(open52_j)/L; output RN_T(signal*G) with no intermediate RN of G. Ideal
 continuous multiplier has mean1,variance1/L; disclose finite-grid bias. Signed raw
 signals allowed; physical intensity interpretation requires nonnegative values.
 Signed-zero signal follows multiplication sign.
@@ -39,17 +39,15 @@ Signed-zero signal follows multiplication sign.
 ## Dependencies, resources and failures
 
 Execution rule: **Regional**. Compute requested output coordinates only. Read
-corresponding query/sample inputs and necessary controls; path/mesh/resource validation
-may require complete control data without computing the whole output canvas. Full
+corresponding query/sample inputs and the controls required by the mathematics. Complete control reads do not imply runtime payload validation. Full
 shared-control/topology/resource changes conservatively invalidate dependent output;
 sample changes follow the actual dependency map. Empty requests perform static preflight
-without payload reads or advancing a random sequence. Compute only requested output
-mathematics, retaining required shared validation.
+without payload reads or advancing a random sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
 Regional, O(C*area(Q)*L), certified sum/log; deterministic reduction.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
 InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
@@ -63,6 +61,5 @@ Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.

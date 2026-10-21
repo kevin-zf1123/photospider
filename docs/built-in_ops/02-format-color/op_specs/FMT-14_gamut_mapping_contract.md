@@ -57,17 +57,19 @@ and member-specific fields. Forced `view` is rejected for every member, includin
 sample-dependent identity branches. No data-dependent layout or profile choice.
 A/D raw require three ordered distinct slots, but no geometric basis. B/C raw
 also require the full explicit target basis needed by their formulas. All modes
-require finite consumed samples; this is a finite-domain mapping/classification
-contract. Raw skips the described color-interpretation checks, not the finite domain or
-structural rules. Every output is ordinary numeric data with no attached
+require finite consumed samples as unchecked caller premises. Raw skips the
+static color-description structure checks; the numerical premises and static
+port structure still apply. Every output is ordinary numeric data with no attached
 description. D's +0/1 values encode the actual comparison.
 
 B requires D65=(RN64(.3127),RN64(.3290)) and relative Y=1. Other whites require
 explicit adaptation before entering B. C admits any FMT-10 basis whose exact
 Y-row weights are all strictly positive (they sum exactly to one). This excludes
 some virtual-primary bases admitted by general basis conversion. A/D impose no
-additional primary restrictions. Geometry and explicit configuration are checked statically,
-even when only bypass data or an empty region is requested.
+additional primary restrictions. Static structure and explicit configuration
+consistency are checked even for bypass/Empty requests. Geometric legality,
+positive Y weights, finite parameters and representable arithmetic are unchecked
+premises; no extra matrix construction is performed merely to validate them.
 
 A/B/C compute coordinates in the selected RGB basis and preserve bypass alpha
 and unrelated samples. Callers provide the corresponding configuration to later
@@ -77,27 +79,28 @@ consumers. There is no automatic description or validity propagation.
 
 For each requested color component x, return +0 if x<0, 1 if x>1, otherwise
 copy x bit-for-bit. Thus -0 survives the copy branch; no epsilon is used. Only
-that component is read and checked for finiteness. This is image-gamut clipping,
+that component is read under the unchecked finite-value premise. This is image-gamut clipping,
 not integer overflow clipping, legal-code validation or quantization.
 
 ## B: oklab_chroma_bisect_v1
 
-B reads and validates the full RGB triple for any requested mapped component.
+B reads the full RGB triple for any requested mapped component.
 Its numerical steps and control decisions are fixed; no perceptual tolerance,
 iteration setting or implementation-dependent early termination is exposed.
 
 1. If the input triple is within [0,1]^3, return its bits unchanged.
 2. Evaluate FMT-10A strict to relative XYZ, rounding each component to the input
    dtype. Evaluate FMT-11E strict on that stored triple, again rounding to the
-   same dtype, yielding (L,a,b). Both complete intermediate triples must be
-   finite; their overflow is an error, not a signal to substitute black/white.
+   same dtype, yielding (L,a,b). Both complete intermediate triples are finite as an unchecked
+   numerical premise. There is no overflow validator or black/white substitution.
 3. If L<=0, output (+0,+0,+0); if L>=1, output (1,1,1). These are explicit
    out-of-lightness-range fallbacks, not preservation of HDR lightness.
 4. Define candidate R(t), for exact dyadic t in [0,1], by storing
    (L, RN_dtype(t*a), RN_dtype(t*b)), then FMT-11F strict to stored XYZ and
    FMT-10B strict to stored target RGB. Retain both stage-rounding boundaries.
-   Exact-zero products become +0. Check every candidate intermediate/output
-   finite; arithmetic overflow fails. Test gamut on the resulting stored RGB.
+   Exact-zero products become +0. Candidate intermediates and outputs satisfy
+   the unchecked finite representability premise. Test gamut on the resulting
+   stored RGB as part of the mapping algorithm.
 5. Compute R(0). If it is outside the cube, return its component projection A.
    This explicitly handles neutral-axis residuals in the pinned OKLab matrices;
    it does not modify those matrices or silently repair white elsewhere.
@@ -171,10 +174,10 @@ Retained results/windows and metadata owners survive context destruction.
 ## Errors, precision and acceptance
 
 Inherit NUM error delivery/publication. Static type/shape errors are TypeMismatch;
-invalid fields, geometry, interpretation or forced view are InvalidArgument with
-InvalidDomain. Consumed nonfinite samples fail OperationFailed/InvalidDomain;
-nonfinite requested arithmetic or required B intermediates from finite inputs
-fail OperationFailed/ArithmeticOverflow. Budget failures and cancellation retain
+malformed fields, incompatible interpretation structure or forced view are
+InvalidArgument with InvalidDomain. Numerical/geometric parameter domains,
+consumed finite samples and finite representable required intermediates/results
+are unchecked caller premises, with no domain/overflow guard or publication scan. Budget failures and cancellation retain
 their native reasons and observation scope. Do not publish a failed requested
 region or silently switch algorithms. Strict copies and mask decisions are exact;
 B intermediate rounding is normative, not an error tolerance.

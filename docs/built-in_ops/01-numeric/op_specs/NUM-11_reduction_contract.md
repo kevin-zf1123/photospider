@@ -47,7 +47,7 @@ Numerical tasks borrow fixed input views and use a preallocated `ReductionState`
 
 ## Errors and acceptance
 
-Compilation rejects malformed or empty axes, duplicate/out-of-rank axes, unsupported dtype or shape, invalid static parameters and input sizes above 2^40. Invalid `ddof` reports `InvalidArgument` / `InvalidDomain` before sample reads. Integer result representability is an unchecked caller obligation; diagnostics for violating it are unspecified. Floating infinity, NaN and underflow are numerical results. Resource and cancellation failures retain their operational categories; failed Runs publish no final RET.
+Compilation rejects malformed or empty axes, duplicate/out-of-rank axes, unsupported dtype or shape, invalid static parameters and input sizes above 2^40. `0<=ddof<N` is an unchecked numerical premise; static preparation checks its Int64 type without a value-domain rejection. Integer result representability is an unchecked caller obligation; diagnostics for violating it are unspecified. Floating infinity, NaN and underflow are numerical results. Resource and cancellation failures retain their operational categories; failed Runs publish no final RET.
 
 The seven member specifications define formulas and acceptance cases. Use independent exact rational totals/moments and squared-midpoint square-root rounding to check raw output bits. Cover sparse and empty requests, input tile boundaries, negative strides, batch/atomic geometry, NaN priority and count without upstream payload. The [fixed reduction execution page](../reductions-execution.md) describes the current implementation and validation scope. The specifications remain Proposed.
 

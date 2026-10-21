@@ -19,10 +19,11 @@ enum class Lut3dInterpolation : std::uint32_t {
 };
 /** @brief Immutable semantics of a measured LUT bake, never a whole-domain
  * bound. shape extents are 2..256; extras is 0..1048576. Tolerances are finite
- * and nonnegative. Colors use the same supported three-component model. Dtypes
- * are Float32/64 and recipe_identity identifies the expanded source graph and
- * its compiler metadata. The owned table schema is version 4 and contains one
- * `colors` tensor [N0,N1,N2,3] with the selected dtype.
+ * and nonnegative as unchecked caller preconditions. Colors use the same
+ * supported three-component model. Dtypes are Float32/64 and recipe_identity
+ * identifies the expanded source graph and its compiler metadata. The owned
+ * table schema is version 4 and contains one `colors` tensor [N0,N1,N2,3] with
+ * the selected dtype.
  */
 struct Lut3dBakeDescription {
   std::array<std::uint64_t, 3> shape{2, 2, 2};
@@ -42,6 +43,8 @@ struct Lut3dBakeDescription {
  */
 struct Lut3dBakeReport {
   bool passed = false;
+  /** @brief Configuration identity decoded without comparing its contents. */
+  std::array<char, 64> configuration_id{};
   /** @brief ObjectId of the complete table acquired during measurement.
    * Encoded as eight little-endian bytes in the report. Valid only for this
    * process object; equal contents do not authorize a different table object.
@@ -59,8 +62,8 @@ struct Lut3dBakeReport {
 };
 /** @brief Canonical identity of explicit bake settings, stored in report data.
  * Includes the source recipe, both descriptions, dtypes, sampling and
- * tolerance. Returns a 64-byte lowercase SHA-256 string or rejects invalid
- * settings.
+ * tolerance. Returns a 64-byte lowercase SHA-256 string. Static structure
+ * and supported choices are checked; numerical premises are trusted.
  */
 PHOTOSPIDER_OPS_SDK_API Result<std::string> lut3d_bake_configuration_id(
     const Lut3dBakeDescription& description);
@@ -84,25 +87,34 @@ PHOTOSPIDER_OPS_SDK_API Result<SchemaTemplate> lut3d_bake_table_schema(
  */
 PHOTOSPIDER_OPS_SDK_API Status validate_lut3d_bake_schema(
     const SchemaTemplate& schema, const Lut3dBakeDescription& description);
-/** @brief Reads a sealed report through explicit owned Result read windows.
- * The completed Result must cover all thirteen report members.
- * description must be the explicit configuration used to generate the report;
- * its canonical identity must match the configuration_id field. Configuration
- * is never inferred from the schema. Does not start a producer.
- * The measured_table_id member identifies the complete table object acquired
- * by measurement, independently of member projection.
- * Result and windows own backing after
- * context teardown. maximum_window must admit a complete member (at most 72
- * bytes); a smaller window fails with ResourceExhausted.
- * The helper independently validates report values and requires complete
- * coverage of all 13 report tensors. Optional consume_work accounts bounded
- * schema, axis and report validation.
- * Cancellation/I/O/capacity errors propagate; malformed report members fail
- * OperationFailed/InvalidDomain. Thread-safe for an immutable sealed Result.
- * Caller-owned returned arrays require no retained context or callback.
+/** @brief Prepared fixed member regions for a LUT3D bake report.
+ * Construct during static preparation and retain unchanged while reading
+ * Results. A reader trusts the supplied layout and the matching complete Result
+ * schema.
+ */
+struct Lut3dBakeReportLayout {
+  std::array<Region, 13> regions;
+};
+/** @brief Checks report v4 structure and prepares its fixed read regions.
+ * Pure/thread-safe; incompatible schema returns TypeMismatch. No payload is
+ * read. The caller performs this once during compilation/static preparation.
+ */
+PHOTOSPIDER_OPS_SDK_API Result<Lut3dBakeReportLayout>
+prepare_lut3d_bake_report_layout(const SchemaTemplate& schema);
+/** @brief Decodes a completed report using its statically prepared layout.
+ * The caller supplies a valid sealed Result covering all thirteen members with
+ * the prepared schema. Payload contents, configuration identity and table
+ * pairing are unchecked premises. The helper neither scans values nor compares
+ * identities and does not start a producer. configuration_id and
+ * measured_table_id are data. Result and windows retain backing after context
+ * teardown. maximum_window must admit each complete member (at most 72 bytes),
+ * or ResourceExhausted is returned. Optional consume_work accounts the 361
+ * copied payload bytes. Cancellation, capacity and read-window failures
+ * propagate. Thread-safe for an immutable Result/layout; returned arrays own
+ * their values without a retained context.
  */
 PHOTOSPIDER_OPS_SDK_API Result<Lut3dBakeReport> read_lut3d_bake_report(
-    const ResultRef& result, const Lut3dBakeDescription& description,
+    const ResultRef& result, const Lut3dBakeReportLayout& layout,
     std::uint64_t maximum_window = 4096,
     const CancellationToken& cancellation = {},
     const std::function<Status(std::uint64_t)>& consume_work = {});

@@ -33,7 +33,7 @@ element type is Float32 or Float64.
 `axis` is a required static Int64 parameter in `0..rank-1`, measured against the
 full source sample shape. `dtype` is a required static String parameter whose
 value is `float32` or `float64`. These parameters and the q tensor schema are
-validated as static metadata. Active q must be finite in `[0,1]` as a caller numerical precondition. A constant-time guard protects memory indices and shifts; no out-of-domain diagnostic is guaranteed.
+validated as static metadata. Active q must be finite in `[0,1]` as a caller numerical precondition. No runtime guard checks q before index/shift arithmetic; no out-of-domain diagnostic is guaranteed.
 
 The `values` output is a `Result` with schema `photospider.tensor` and tensor key
 `samples`. It has the selected output dtype and keeps the source rank and shape,

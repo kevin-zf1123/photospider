@@ -9,7 +9,7 @@ Philox4x64-10 multipliers, Weyl increments and round ordering were checked again
 The three ten-round known-answer cases in `noi01/kat.json` were transcribed
 from [the authors' kat_vectors](https://github.com/DEShawResearch/random123/blob/main/tests/kat_vectors)
 from the upstream known-answer inventory. Zero/all-one/pi-word cases test the core independently of our Python
-implementation and experimental address layout. No upstream implementation is vendored.
+implementation and specified v1 address layout. No upstream implementation is vendored.
 
 Perlin's 256-entry numerical permutation follows
 [the author's reference](https://mrl.cs.nyu.edu/~perlin/noise/).

@@ -198,22 +198,6 @@ TensorChannelDescription bypass_description(const TensorDescription& source,
     result.sampling = source.sampling;
   return result;
 }
-void valid_pair(const std::array<double, 2>& pair, const char* name) {
-  require(std::isfinite(pair[0]) && std::isfinite(pair[1]),
-          std::string(name) + " must be finite");
-  const auto work = [](std::uint64_t) { return Status::success(); };
-  RationalMath exact(SequenceProfile::Strict);
-  exact.bind(work);
-  const auto a = exact.binary(numeric_ops::numeric_bits(pair[0]));
-  const auto b = exact.binary(numeric_ops::numeric_bits(pair[1]));
-  const bool valid = exact.order(a, exact.integer(0)) > 0 &&
-                     exact.order(b, exact.integer(0)) > 0 &&
-                     exact.order(exact.add(a, b), exact.integer(1)) < 0;
-  if (!exact.active())
-    throw exact.status();
-  require(valid, std::string(name) +
-                     " requires positive entries whose exact sum is below one");
-}
 std::array<double, 2> parameter_pair(const Params& p, const char* x,
                                      const char* y) {
   require(p.count(x) && p.count(y),
@@ -237,7 +221,6 @@ std::optional<std::array<double, 2>> ncl_parameter(const Params& p) {
   }
   if (p.count("kr") || p.count("kb")) {
     auto pair = parameter_pair(p, "kr", "kb");
-    valid_pair(pair, "NCL coefficients");
     return pair;
   }
   return {};
@@ -254,9 +237,6 @@ std::uint64_t typed_constant(const std::string& literal, bool narrow) {
   require(
       parsed.ec == std::errc{} && parsed.ptr == literal.data() + literal.size(),
       "invalid typed constant hexadecimal bits");
-  const auto value = numeric_ops::BinaryParts::decode(bits, narrow);
-  require(!value.nan && !value.infinite,
-          "black_value/white_value must be finite");
   return bits;
 }
 void legal_parameters(Kind kind, const Params& p, bool raw) {
@@ -355,7 +335,6 @@ void native_metadata(const TensorInterpretation& interpretation,
   if (white_needed) {
     require(interpretation.white.has_value(),
             "native model description requires reference-white xy");
-    valid_pair(*interpretation.white, "reference white");
     out.math.white = *interpretation.white;
   }
   if (kind == Kind::XyzToOklab || kind == Kind::OklabToXyz ||
@@ -383,7 +362,6 @@ void native_metadata(const TensorInterpretation& interpretation,
   if (encoded) {
     require(coords.ncl_coefficients.has_value(),
             "NCL source must retain explicit Kr,Kb");
-    valid_pair(*coords.ncl_coefficients, "NCL coefficients");
     out.math.ncl = *coords.ncl_coefficients;
   }
   const bool inverse_hue = kind == Kind::LchToLab ||
@@ -605,11 +583,9 @@ Result<OperationPreparation> prepare(
       if (kind == Kind::XyzToLab || kind == Kind::LabToXyz ||
           kind == Kind::XyzToXyy) {
         out.math.white = parameter_pair(p, "white_x", "white_y");
-        valid_pair(out.math.white, "raw reference white");
       }
       if (kind == Kind::GrayToColor && out.math.gray == GrayKind::LinearY) {
         out.math.white = parameter_pair(p, "gray_white_x", "gray_white_y");
-        valid_pair(out.math.white, "raw Gray white");
       }
       if (kind == Kind::LchToLab || kind == Kind::OklchToOklab ||
           kind == Kind::HslToRgb || kind == Kind::HsvToRgb) {
@@ -638,13 +614,10 @@ Result<OperationPreparation> prepare(
                 "NCL matrix assertion disagrees with source");
       if (pair)
         out.math.ncl = *pair;
-      valid_pair(out.math.ncl, "NCL coefficients");
     }
     if (kind == Kind::Threshold) {
       require(p.count("threshold"), "threshold is required");
       out.math.threshold = std::get<double>(p.at("threshold"));
-      require(std::isfinite(out.math.threshold),
-              "threshold must be finite Float64");
     }
     if (kind == Kind::BinaryToGray) {
       out.math.levels = {
@@ -1043,7 +1016,7 @@ Result<std::set<TileIndex>> required_tiles(const Preparation& state,
   }
   return Answer(std::move(result));
 }
-constexpr const char* model_contract = "model-conversion-fixed-v1";
+constexpr const char* model_contract = "model-conversion-unchecked-v2";
 Result<OperationProgram> lower(const OperationLowering& query) {
   using Answer = Result<OperationProgram>;
   const auto& state = *static_cast<const Preparation*>(query.static_state);

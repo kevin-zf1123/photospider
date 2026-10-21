@@ -56,7 +56,7 @@ class QualityReport final {
 - Atom identifies exactly one logical producer observation.
 - Group, Run and Waiter describe operational extent and do not invent a failed semantic value at an arbitrary coordinate.
 
-`FailureScope` uses `Unspecified=0`, `Atom=1`, `Group=4`, `Run=5`, and `Waiter=6`. `AtomKey` identifies an output index and 1..8 coordinates, with unused coordinates zero. `FailureDetail` carries `origin`, `scope`, optional `atom`, `node_id`, `input_id`, optional `call_sequence`/`task_id`, and opaque `domain_code`. The operations SDK's `InvalidAssociation` domain error identifies a mismatch in explicit operation data, such as the ObjectId of the table measured for a LUT report. These numeric scopes classify failure extent; they do not define per-sample dependency semantics.
+`FailureScope` uses `Unspecified=0`, `Atom=1`, `Group=4`, `Run=5`, and `Waiter=6`. `AtomKey` identifies an output index and 1..8 coordinates, with unused coordinates zero. `FailureDetail` carries `origin`, `scope`, optional `atom`, `node_id`, `input_id`, optional `call_sequence`/`task_id`, and opaque `domain_code`. The operations SDK's `InvalidAssociation` domain code is available to explicit domain operations. Ordinary LUT report producers, readers and Gates trust table/configuration associations without testing them. These numeric scopes classify failure extent; they do not define per-sample dependency semantics.
 
 Fixed invocation ABI 8 returns `code`, `reason`, opaque `domain_code` and a 256-byte message array including its terminator through `ps_kernel_status_v8`. The kernel does not interpret domain codes. C++ callers may construct `Status` with `DomainErrorCode`; C kernels fill the status record directly. Stable operation domain codes are defined in `photospider/ops/errors.hpp`.
 
@@ -68,7 +68,7 @@ Task failure messages are copied into storage reserved before issue. Invalid or 
 
 ## Algorithms and mathematical quality bounds (operations SDK)
 
-`QualityReport` is an operations-SDK type in `photospider/ops/numeric/quality.hpp`; the kernel neither creates nor reads it. It is an immutable owning allocation created only by named factories. Its evidence enum cannot be promoted by a caller-supplied flag. Measured finite residuals carry no certified error bound. CertifiedBound is currently available for the checked integer diagonal system factory only, with 1..4096 rows, nonzero diagonal and magnitudes at most 2^26. Snapshot names are 1..256 printable ASCII bytes. The report retains all exact integer proof rows. Malformed report inputs return `InvalidArgument` with domain code `ops_error::InvalidQuality`.
+`QualityReport` is an operations-SDK type in `photospider/ops/numeric/quality.hpp`; the kernel neither creates nor reads it. It is an immutable owning allocation created only by named factories. Its evidence enum cannot be promoted by a caller-supplied flag. Measured finite residuals carry no certified error bound. CertifiedBound is currently available only from the exact integer diagonal bound calculation. Its 1..4096 rows, nonzero diagonal, magnitudes at most 2^26, array/callback validity and 1..256 printable ASCII snapshot bytes are unchecked caller premises. The factory constructs the residual and bound and retains all exact proof rows without an input or publication-validation pass. `proof_row` trusts its index; it does not check runtime structure or numerical legality.
 
 For the stored diagonal system, let $R$ be the maximum exact residual and $m$ the minimum absolute diagonal value.
 

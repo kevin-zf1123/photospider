@@ -21,7 +21,7 @@ Specification decision status remains Proposed.
 Engine construction is synchronous and non-cancellable. Profile/config parsing,
 processor linking, BPC preparation, LUT inversion and gamut-table generation do
 not receive or probe a Run cancellation token. Construction work and memory
-limits, first-failure latching, complete validation for Empty/bypass requests,
+limits, first-failure latching, complete static structural preparation for Empty/bypass requests,
 and cleanup on failure remain required. This is the maintainer's explicit
 2026-10-21 revision; no preparation-cancellation kernel extension is required.
 
@@ -33,7 +33,7 @@ that import behavior does not imply cancellable engine construction.
 ## Inherited contracts
 
 Use the structural tensors and explicit configuration, planar storage, straight internal color,
-call-local interpretation and consumed-semantic validation rules from
+call-local interpretation and unchecked consumed-semantic premises from
 [FMT-common](FMT_common_contract.md). External-engine conformance is separately
 specified; NUM strict rounding or accelerated four-ULP guarantees do not follow
 automatically. The [relative-coordinate scale](FMT_relative_coordinate_scale.md)
@@ -193,13 +193,14 @@ requires each consumed ink coordinate in [0,1]. Pass admitted finite extensions
 without an extra adapter clamp; profile curves/CLUTs may themselves clip or
 otherwise lose HDR information. No HDR-preservation guarantee follows from
 floating endpoint types. Consumed inputs and requested outputs must be finite;
-requested CMYK outputs must also lie in [0,1]. Reject nonfinite source samples
-before calling the engine.
+requested CMYK outputs must also lie in [0,1]. These are unchecked caller
+premises. Neither the adapter nor its private bridge scans inputs or completed
+outputs to validate them.
 
 The proposed finite-only raw path uses explicit profiles and the same unit
-adapter, while skipping the described CMYK nominal-range check. All modes reject nonfinite
-consumed inputs/requested results and overflow during unit adaptation or entry
-into the engine's Float32 pipeline. Raw does not inherit NUM NaN-payload
+adapter, without the described CMYK nominal-range premise. Finite consumed
+inputs, unit adaptation, Float32 pipeline values and requested outputs are
+unchecked premises in both forms. Raw does not inherit NUM NaN-payload
 propagation through this engine. Neither path attaches a color description to
 its output.
 
@@ -218,9 +219,9 @@ No resampling or change to non-channel dimensions occurs.
 
 Any requested transformed color component reads the complete selected source
 color group at that coordinate. Spatial demand is exact with no halo. The engine
-may compute all target color components into scratch; publish and validate only
-the requested components. An unrequested target nonfinite sample alone does
-not fail another component; an actual shared engine failure remains a failure.
+may compute all target color components into scratch and publishes the requested
+components without a result-validity scan. Actual shared engine execution
+failures still propagate; sample-domain violations have no required diagnostic.
 Bypass alpha/AOV requests read only their mapped source component and do not
 evaluate color. Requested hidden color is still transformed at alpha=0 without
 reading alpha. Dirty propagation maps a changed source color component to every
@@ -315,9 +316,9 @@ preparation, plans and active execution, independently of Result storage owners.
 Validate the full static interface and construct the transform even for empty
 spatial or bypass-only requests. This reads resources, not image samples.
 Bypass samples preserve all bits, including NaN payloads and signed zeros.
-Pixel validation follows the exact point/group support above; an upstream complete-input
-node retains its own support/failure scope. Unproduced samples remain missing.
-Physical page/row-padding access does not enlarge logical sample validation.
+Pixel computation follows the exact point/group support above; an upstream
+complete-input node retains its own support/failure scope. Unproduced samples
+remain missing. Physical page/row-padding access adds no validation support.
 
 ## Fixed engine execution recipe
 
@@ -340,9 +341,10 @@ channels. Copy bypass planes outside the CMM and retain explicit unit rounding.
   bit-identical. Other numerical build options, including the profile black
   point tag option, retain pinned release defaults.
 
-Check normalized Float32 input-formatter results for finiteness before pipeline
-evaluation. Public Float64 finiteness alone is insufficient. Adapter/formatter
-overflow and requested output overflow fail in all modes. Finite underflow
+Normalized Float32 formatter values and requested outputs satisfy the documented
+finite/representability premises without checks. The ordinary path invokes the
+engine directly, with no separate formatter prepass. The gamut path performs
+its formatter and pipeline computation once. Finite underflow
 follows the selected arithmetic without epsilon replacement. Internal profile
 clipping remains part of the engine, distinct from an adapter clamp. Unrequested
 scratch results establish neither published coverage nor validity guarantees.
@@ -372,19 +374,18 @@ and transactional publication. Admission/inference rejects unsupported
 dtype/shape/channel structure with TypeMismatch. Malformed/disallowed profiles,
 invalid parameters, metadata conflicts, missing endpoints, incompatible chains,
 forced view and construction failure use InvalidArgument/InvalidDomain with
-profile/stage detail. Consumed nonfinite/out-of-domain values, adapter/formatter
-overflow and requested invalid outputs use OperationFailed with sample
-coordinate/component: InvalidDomain for invalid input or range, and
-ArithmeticOverflow for adapter/formatter narrowing overflow or a requested
-nonfinite result from finite input. Host resource failures use ResourceExhausted and
+profile/stage detail. Numerical parameters, consumed domains, representability
+of adaptation/narrowing and requested output validity are unchecked premises;
+no InvalidDomain/ArithmeticOverflow diagnostic is promised for their violation.
+A genuine private-engine execution failure remains OperationFailed. Host resource failures use ResourceExhausted and
 the applicable capacity/work/stage reason. Pixel-execution cancellation/currentness
 retains its inherited status; construction does not poll a cancellation token.
 
 An integration invariant failure is not an invalid-profile error. Diagnostics
 identify member, execution configuration, profile/stage identity and effective
-settings without dumping resource bytes. Never publish invalid requested
-samples or fall back to another engine/configuration, identity copy or invented
-profile after failure.
+settings without dumping resource bytes. An actual failed computation publishes
+no successful result and does not fall back to another engine/configuration,
+identity copy or invented profile. No extra output validation gate is added.
 
 ## Inherited resource obligations
 
@@ -456,10 +457,10 @@ possible profile or platform has been tested.
    thread schedules and repeated execution to match bits within each build and
    configuration. Test each requested color separately and jointly. Unused
    peers in the source color group are still consumed; bypass planes are not.
-5. Reject NaN/Inf, finite unit/formatter overflow and semantic CMYK out-of-range.
-   Exercise negative/HDR finite coordinates, engine clipping, underflow/signed
-   zeros and invalid unrequested target values without introducing global sample
-   scans. Alpha-only output preserves arbitrary alpha bits.
+5. Use fixtures satisfying finite unit/formatter/output premises and semantic
+   CMYK range. Exercise negative/HDR coordinates, engine clipping, underflow and
+   signed zeros without producer or consumer scans. Alpha-only output preserves
+   arbitrary alpha bits. Violated premises have no required error behavior.
 6. Exercise explicit endpoint/profile conflicts, finite-only raw, missing or malformed
    endpoint binding, named-space/profile identity distinction, incompatible
    topology and unsupported versions/classes/directions. A valid header without

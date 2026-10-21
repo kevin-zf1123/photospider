@@ -68,12 +68,6 @@ Rational imported(const basis_ops::Rational& value) {
   out.negative = value.negative;
   return out;
 }
-Status domain() {
-  return {ErrorCode::OperationFailed, {}, FailureReason::InvalidDomain};
-}
-Status overflow() {
-  return {ErrorCode::OperationFailed, {}, FailureReason::ArithmeticOverflow};
-}
 std::uint64_t one(bool narrow) {
   return narrow ? UINT64_C(0x3f800000) : UINT64_C(0x3ff0000000000000);
 }
@@ -241,9 +235,6 @@ Status rational(const State& s, RationalWork* work, const Bits& input,
           return value.status();
         }
         (*output)[i] = value.value();
-        if (!basis_ops::finite_bits((*output)[i], s.narrow)) {
-          return overflow();
-        }
       }
     }
     return Status::success();
@@ -277,13 +268,6 @@ Status rational(const State& s, RationalWork* work, const Bits& input,
       }
     }
     if (s.kind == Kind::Tone) {
-      const int sign = math.order(y, zero);
-      if (!math.active()) {
-        return math.status();
-      }
-      if (sign < 0 && !s.signed_luminance) {
-        return domain();
-      }
       const auto z = math.multiply(c.gain, math.absolute(y));
       auto k = math.divide(c.gain, math.add(unit, z));
       if (s.extended) {
@@ -341,12 +325,6 @@ Status rational(const State& s, RationalWork* work, const Bits& input,
   if (!math.active()) {
     return math.status();
   }
-  for (unsigned i = 0; i < count; ++i) {
-    if ((requested & (1U << i)) &&
-        !basis_ops::finite_bits((*output)[i], s.narrow)) {
-      return overflow();
-    }
-  }
   return Status::success();
 }
 Result<std::uint64_t> matrix_row(const State& s, ReductionWork* w,
@@ -384,9 +362,6 @@ Status reduce(const State& s, ReductionWork* w, const Bits& input, Bits* output,
       return value.status();
     }
     xyz[i] = value.value();
-    if (!basis_ops::finite_bits(xyz[i], s.narrow)) {
-      return overflow();
-    }
   }
   for (unsigned i = 0; i < 3; ++i) {
     auto value = w->lab.evaluate(xyz, i);
@@ -394,9 +369,6 @@ Status reduce(const State& s, ReductionWork* w, const Bits& input, Bits* output,
       return value.status();
     }
     lab[i] = value.value();
-    if (!basis_ops::finite_bits(lab[i], s.narrow)) {
-      return overflow();
-    }
   }
   const double light = numeric_ops::numeric_double(lab[0], s.narrow);
   if (light <= 0 || light >= 1) {
@@ -425,9 +397,6 @@ Status reduce(const State& s, ReductionWork* w, const Bits& input, Bits* output,
         return value.status();
       }
       coordinates[i] = value.value();
-      if (!basis_ops::finite_bits(coordinates[i], s.narrow)) {
-        return overflow();
-      }
     }
     for (unsigned i = 0; i < 3; ++i) {
       auto value = matrix_row(s, w, c.inverse[i], coordinates, consume);
@@ -435,9 +404,6 @@ Status reduce(const State& s, ReductionWork* w, const Bits& input, Bits* output,
         return value.status();
       }
       (*result)[i] = value.value();
-      if (!basis_ops::finite_bits((*result)[i], s.narrow)) {
-        return overflow();
-      }
     }
     return Status::success();
   };
@@ -567,7 +533,7 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
   auto s = std::make_shared<State>();
   s->kind = kind;
   s->symbol = "native-color-mapping";
-  s->contract = "native-color-mapping-v1";
+  s->contract = "native-color-mapping-unchecked-v2";
   const bool tone = kind == Kind::Tone || kind == Kind::Display;
   // Select model before assigning the RGB role order.
   s->selection = select(inputs[0], p);
@@ -591,9 +557,6 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
             "display range required");
     s->black = real(p, "black_nits", 0);
     s->white_nits = real(p, "white_nits", 1);
-    require(std::isfinite(s->black) && std::isfinite(s->white_nits) &&
-                s->black >= 0 && s->black < s->white_nits,
-            "invalid display luminance range");
   }
   interpretation(s.get(), p);
   if (kind == Kind::Check) {
@@ -615,9 +578,6 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
             "white is required only for white_extended");
     s->gain = real(p, "gain", 1);
     s->white = real(p, "white", 1);
-    require(std::isfinite(s->gain) && s->gain > 0 && std::isfinite(s->white) &&
-                s->white > 0,
-            "gain and white must be finite and positive");
     const auto negative = text(p, "negative_luminance", "reject");
     require(negative == "reject" || negative == "signed_extension",
             "unknown negative luminance policy");
@@ -625,8 +585,6 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
   }
   if (kind == Kind::Compress) {
     s->knee = real(p, "knee", .8);
-    require(std::isfinite(s->knee) && s->knee >= 0 && s->knee < 1,
-            "knee must lie in [0,1)");
   }
   c->gain = math.binary(basis_ops::bits(s->gain));
   const auto white = math.binary(basis_ops::bits(s->white));
@@ -683,11 +641,6 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
       const auto value = numeric_ops::numeric_double(nearest);
       c->fast_weights[i] = {numeric_ops::numeric_down(value),
                             numeric_ops::numeric_up(value)};
-      if (kind == Kind::Compress || kind == Kind::Tone) {
-        const auto order = math.order(c->weights[i], math.integer(0));
-        checked(math.status());
-        require(order > 0, "strictly positive luminance weights required");
-      }
     }
     if (kind == Kind::Reduce) {
       require(basis.white == std::array<double, 2>{.3127, .3290},
@@ -815,10 +768,6 @@ void invoke(const ps_kernel_invocation_v8* invocation,
             source[s.selection.axis] = s.selection.channels[i];
           }
           input[i] = reader.bits(0, source, width);
-          if (!basis_ops::finite_bits(input[i], s.narrow)) {
-            accept(domain());
-            return;
-          }
         }
       }
       Status evaluated;

@@ -214,7 +214,7 @@ Result<TileSet> required_tiles(const UniformPrepared& state,
   }
   return TileSet::from_indices(budget, std::move(indices));
 }
-constexpr const char* uniform_contract = "uniform-lowpass-fixed-v1";
+constexpr const char* uniform_contract = "uniform-lowpass-unchecked-v2";
 Result<OperationProgram> lower(const OperationLowering& query) {
   using Answer = Result<OperationProgram>;
   const auto& state = *static_cast<const UniformPrepared*>(query.static_state);
@@ -486,18 +486,6 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
          boundary != "zero" && boundary != "wrap"))
       return Answer(
           numeric_ops::array_parameter_error("lowpass axis/radius/boundary"));
-    for (const auto& field : p) {
-      if (!std::holds_alternative<double>(field.second))
-        continue;
-      const auto value =
-          BinaryParts::decode(raw(std::get<double>(field.second)), false);
-      if (value.nan || value.infinite || (value.negative && value.magnitude) ||
-          (field.first != "beta" && !value.magnitude) ||
-          (field.first == "cutoff" &&
-           value.magnitude >= UINT64_C(0x3fe0000000000000)))
-        return Answer(numeric_ops::array_parameter_error(
-            "lowpass finite positive kernel parameter (beta>=0, cutoff<0.5)"));
-    }
     auto available = numeric_ops::sequence_profile_available(profile);
     if (!available.ok())
       return Answer(available);

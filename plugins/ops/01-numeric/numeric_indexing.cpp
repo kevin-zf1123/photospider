@@ -211,8 +211,6 @@ void indices_invoke(const ps_kernel_invocation_v8* invocation,
         *static_cast<const PreparedIndex*>(invocation->prepared_context);
     IndexReader reader{state.inputs, *invocation};
     const auto count = state.description.count;
-    const auto extent =
-        state.description.inputs[0].shape[state.description.axis];
     auto* output =
         static_cast<std::uint8_t*>(invocation->outputs[0].allocation) +
         invocation->outputs[0].byte_offset;
@@ -222,9 +220,6 @@ void indices_invoke(const ps_kernel_invocation_v8* invocation,
         checked(cancellation(*invocation));
       coordinate[0] = position;
       auto index = reader.bits(1, coordinate, 8);
-      if (index >= extent)
-        throw Status{ErrorCode::InvalidArgument, "index outside source axis",
-                     FailureReason::InvalidDomain};
       store_pair(output, position,
                  state.kind == IndexKind::Gather ? IndexPair{position, index}
                                                  : IndexPair{index, position});
@@ -343,14 +338,7 @@ void values_invoke(const ps_kernel_invocation_v8* invocation,
     std::array<std::uint8_t, 32> buffer{};
     unsigned buffered = 0;
     const auto update_position = [&](std::uint64_t index) {
-      auto position = load_pair(indices, index).position;
-      // A modified physical program can supply arbitrary private payloads.
-      // Never use a normalized position as an address without its bound.
-      if (position >= description.count)
-        throw Status{ErrorCode::InvalidArgument,
-                     "invalid normalized update position",
-                     FailureReason::InvalidDomain};
-      return position;
+      return load_pair(indices, index).position;
     };
     for (std::uint64_t index = 0; index < count; ++index) {
       if (index % 64 == 0)
@@ -372,10 +360,6 @@ void values_invoke(const ps_kernel_invocation_v8* invocation,
         bits = reader.bits(port, source, width);
       } else if (state.kind == IndexKind::Gather) {
         auto position = load_pair(indices, at[description.axis]).position;
-        if (position >= description.inputs[0].shape[description.axis])
-          throw Status{ErrorCode::InvalidArgument,
-                       "invalid normalized gather position",
-                       FailureReason::InvalidDomain};
         source[description.axis] = position;
         bits = reader.bits(0, source, width);
       } else {
@@ -454,7 +438,7 @@ Result<OperationProgram> lower_index(IndexKind kind,
     auto value = taken(builder.add_temporary(
         std::make_shared<const SchemaTemplate>(std::move(schema))));
     auto task =
-        taken(builder.add_task("indices", "indexing-fixed-v1", {},
+        taken(builder.add_task("indices", "indexing-unchecked-v2", {},
                                {scratch_bytes(kind, description, true), 0, 0}));
     declare(task, Region{}, true);
     normalized = taken(builder.write_temporary(task, value, 0, 0));
@@ -462,7 +446,7 @@ Result<OperationProgram> lower_index(IndexKind kind,
   for (const auto& member : query.requests[0].members)
     for (auto tile : member.second) {
       auto task = taken(
-          builder.add_task("values", "indexing-fixed-v1", {},
+          builder.add_task("values", "indexing-unchecked-v2", {},
                            {scratch_bytes(kind, description, false), 0, 0}));
       declare(task, taken(output.region(tile)), false);
       if (normalized != physical::none)
@@ -621,7 +605,7 @@ OperationDefinition index_operation(const std::string& key, IndexKind kind,
           const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
     using Answer = Result<ps_prepared_kernel_v8>;
     if ((kernel.symbol != "indices" && kernel.symbol != "values") ||
-        kernel.contract != "indexing-fixed-v1")
+        kernel.contract != "indexing-unchecked-v2")
       return Answer(
           {ErrorCode::TypeMismatch, "invalid indexing kernel contract"});
     if (placement.backend != physical::Backend::Cpu ||

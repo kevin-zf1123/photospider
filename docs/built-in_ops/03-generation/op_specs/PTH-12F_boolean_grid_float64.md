@@ -3,7 +3,7 @@ spec_schema_version: 1
 id: PTH-12F
 status: Accepted
 implementation_status: not_implemented
-registration_status: backend_and_schema_gates
+registration_status: backend_and_implementation_gates
 ---
 
 # PTH-12F: Explicit-grid Boolean with Float64 output
@@ -17,17 +17,22 @@ contract.
 Inputs and quantized Boolean semantics match PTH-12D. Outputs are a Float64 CoreVerbs
 PathSet and both quantization/publication diagnostics. Parameters include the same grid
 origin/scale and algorithm identity, plus a positive publication displacement budget and
-separate hard validation/resource limits.
+separate hard work/capacity limits.
 
 Execute the fixed grid algorithm, map grid coordinates to exact geometric coordinates
-using the declared grid origin/scale, then round once to Float64. Verify the chosen
-publication budget and the incidence/topology of the grid result after conversion.
-Distinct grid points collapsing in Float64 cannot silently count as successful
-publication. Do not claim original-input exactness. Canonical output must agree with an
+using the declared grid origin/scale, then round once to Float64 and accumulate the
+publication displacement bound during construction using the same exact
+squared-error and RU64 rule as PTH-12E, measured in geometric pixel coordinates
+after applying origin/scale. Finite representability, the chosen
+publication budget, preserved incidence/topology and distinct required grid points
+remaining distinct in Float64 are unchecked caller preconditions. No output scan or
+publication gate checks them; report topology_status=0 (unverified). Do not claim
+original-input exactness. Canonical output must agree with an
 explicit compatible grid-result publication path, once that codec/conversion is frozen.
 
 Run-shared complete-input computation; no partial Result on failure. Tests include large grid indices,
-non-power-of-two scale, topology-preserving and topology-breaking publication,
-scale/origin identity, overflow and cancellation. Backend and codec remain gates.
+non-power-of-two scale, valid topology-preserving publication, scale/origin identity,
+capacity exhaustion and cancellation. Invalid publication geometry has no promised
+runtime diagnostic. Backend and codec remain gates.
 
 These are specification acceptance requirements, not completed execution evidence.

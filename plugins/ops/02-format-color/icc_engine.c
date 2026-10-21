@@ -328,26 +328,17 @@ static int apply(ps_icc_engine* e, const double* input, double* output,
                  unsigned count) {
   _cmsTRANSFORM* transform = (_cmsTRANSFORM*)e->transform;
   cmsFloat32Number normalized[cmsMAXCHANNELS];  // NOLINT(runtime/arrays)
-  unsigned p, c;
-  for (p = 0; p < count; ++p) {
-    transform->FromInputFloat(transform, normalized,
-                              (cmsUInt8Number*)(input + p),
-                              count * sizeof(double));
-    for (c = 0; c < e->inputs; ++c) {
-      if (!isfinite(normalized[c])) {
-        return 0;
-      }
-    }
-    if (e->gamut) {
+  if (e->gamut) {
+    unsigned p;
+    for (p = 0; p < count; ++p) {
       cmsFloat32Number score;
+      transform->FromInputFloat(transform, normalized,
+                                (cmsUInt8Number*)(input + p),
+                                count * sizeof(double));
       cmsPipelineEvalFloat(normalized, &score, e->gamut);
-      if (!isfinite(score)) {
-        return 0;
-      }
       output[p] = score > 0 ? 1.0 : 0.0;
     }
-  }
-  if (!e->gamut) {
+  } else {
     cmsDoTransformLineStride(e->transform, input, output, count, 1, 0, 0,
                              count * sizeof(double), count * sizeof(double));
   }
@@ -374,6 +365,6 @@ const char* ps_color_icc_trace_v1(const void* p) {
                                           : "";
 }
 const char* ps_color_engine_identity_v1(void) {
-  return "ps-color-1;lcms=2.19.1;ocio=2.5.2;build=" PS_COLOR_BUILD_HASH
+  return "ps-color-2;lcms=2.19.1;ocio=2.5.2;build=" PS_COLOR_BUILD_HASH
          ";RN;no-contract;closed";
 }

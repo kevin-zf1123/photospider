@@ -199,13 +199,13 @@ The SDK defines SchemaTemplate id `curve.bake_lut3d.report` at version 4 with th
 | configuration_id | UInt8 [1,64], lowercase hexadecimal SHA-256 |
 | measured_table_id | UInt8 [1,8], little-endian ObjectId |
 
-The thirteen members contain 361 bytes of fixed payload. `configuration_id` is the lowercase hexadecimal SHA-256 of the shape, interpolation, tolerances, source/table dtypes, extra-point count, explicit color descriptions and source recipe, under the `photospider.bake-configuration.v2` hash domain. Both exact canonical TensorDescription byte strings enter the digest. The reader
-and gate receive the expected `Lut3dBakeDescription` explicitly. Old v3 report
-and owned-table schemas are rejected; no legacy adapter remains.
+The thirteen members contain 361 bytes of fixed payload. `configuration_id` is the lowercase hexadecimal SHA-256 of the shape, interpolation, tolerances, source/table dtypes, extra-point count, explicit color descriptions and source recipe, under the `photospider.bake-configuration.v2` hash domain. Both exact canonical TensorDescription byte strings enter the digest. Static helpers receive `Lut3dBakeDescription`; the runtime reader receives a
+previously prepared `Lut3dBakeReportLayout`. Old v3 report and owned-table schemas
+are rejected during static preparation; no legacy adapter remains.
 
-`measured_table_id` is an ordinary `UInt8[1,8]` payload encoding the ObjectId of the complete owned table read during measurement, in little-endian order. The gate compares it with the logical ObjectId supplied for the current owned-table input. ObjectId is process-local identity, not a content digest: two tables with identical bytes but different ObjectIds are not interchangeable for this quality report.
+`measured_table_id` is an ordinary `UInt8[1,8]` payload encoding the ObjectId of the complete owned table read during measurement, in little-endian order. The producer records the logical ObjectId of its owned-table input. Reader and Gate trust this association without comparing identities. ObjectId is process-local identity, not a content digest: two tables with identical bytes but different ObjectIds are not interchangeable for this quality report.
 
-Call `read_lut3d_bake_report(result, description)` only on a completed Result covering all thirteen report members. The reader accesses completed data without starting production; its window limit must admit the largest member, 72 bytes. Axis values are ordinary payload rather than dynamic schema extents.
+Prepare `Lut3dBakeReportLayout` from the static report schema before execution. Call `read_lut3d_bake_report(result, layout)` only on a completed Result covering all thirteen members, under the prepared schema and payload premises. The reader accesses completed data without starting production; its window limit must admit the largest member, 72 bytes. Axis values are ordinary payload rather than dynamic schema extents.
 
 Compare errors and tolerances using exact arithmetic before report rounding.
 Choose maxima by exact absolute error, breaking ties with the earliest ordinal.
@@ -238,7 +238,7 @@ Let V=N0*N1*N2 and P=(N0-1)*(N1-1)*(N2-1)+M. A table/report observation evaluate
 V grid colors and P reference colors, then P applied-LUT queries and exact error
 checks, plus declared source work. The fifteen geometry keys allocate only selected output tiles: grid colors use 3*V*8 bytes for full selection, validation points use 3*P*8 bytes, and converted colors use their selected dtype widths. A sparse geometry request reserves only its selected tiles and fixed scratch. Source
 work and outputs additionally follow each source operator contract. The sampled
-table Result owns 3*V*b bytes. Pack, Unpack and Gate each copy their selected samples into independent dense output tiles. Global measurement requires complete Pack and application inputs even when Gate returns one tile. Pack and Unpack use zero scratch; Measure owns one fixed report/arithmetic object, and Gate owns one fixed exact-error object per active invocation. All shared owners,
+table Result owns 3*V*b bytes. Pack, Unpack and Gate each copy their selected samples into independent dense output tiles. Global measurement requires complete Pack and application inputs even when Gate returns one tile. Pack, Unpack and Gate use zero scratch; Measure owns one fixed report/arithmetic object per active invocation. All shared owners,
 scratch, staging and repeated work count against host limits. No unbudgeted full
 source batch or global table cache is allowed. A small requested ROI does not
 waive global measurement work. Managed payload accounting is not a claim about
@@ -254,15 +254,16 @@ result-owned metadata and data remain until their final owner releases them.
 
 ## Failure model and acceptance
 
-Malformed authoring bindings, unsupported model/shape and invalid tolerances fail
-compile/preflight with InvalidArgument/InvalidDomain; incompatible ports/source
+Malformed authoring bindings, unsupported model/shape and malformed parameter
+syntax/types fail compile/preflight with InvalidArgument/InvalidDomain;
+finite nonnegative tolerances are unchecked premises. Incompatible ports/source
 boundaries/descriptions use TypeMismatch. Dynamic axis consistency, validation-point bounds/model legality, finite representable color conversion and well-formed report values are unchecked premises for fixed invocation. Their violation has no promised runtime diagnostic. Source/upstream errors retain their origin.
 Method-unavailable, ResourceExhausted, cancellation and stale-binding failures
 retain established host categories. A failed Run publishes no final RET map; already delivered retirement Results remain valid.
 
 A completed measurement with failed_count>0 leaves report successful but causes
 table observation to fail OperationFailed/InvalidDomain with diagnostic tag
-LutApproximationToleranceExceeded and first-failure details.
+LutApproximationToleranceExceeded and first_failure_index.
 
  For source (r,g,b)->(r*r,g,b), the same grid
 and center [0.5,0.5,0.5] give source [0.25,0.5,0.5] versus LUT [0.5,0.5,0.5]. Adding the same
@@ -300,17 +301,22 @@ computed during authoring. The exported table is `photospider.tensor` v1/member
 internal table is `curve.bake_lut3d.table` v4/member `colors` with the same shape
 and dtype. Neither contains a domain description or quality metadata.
 
-The public SDK header is `photospider/ops/numeric/lut3d_bake.hpp`. Read a report
-with the configuration returned by authoring:
+The public SDK header is `photospider/ops/numeric/lut3d_bake.hpp`. Prepare the
+report layout from static metadata, then reuse it for completed reports:
 
 ```cpp
-// result is the executed report ResultRef; baked is numeric::BakedLut3d.
-auto measured = ps::read_lut3d_bake_report(result, baked.description);
+// Before execution: baked is numeric::BakedLut3d.
+auto schema = ps::lut3d_bake_schema(baked.description);
+if (!schema.ok()) return schema.status();
+auto layout = ps::prepare_lut3d_bake_report_layout(schema.value());
+if (!layout.ok()) return layout.status();
+// After execution: result is the complete report ResultRef.
+auto measured = ps::read_lut3d_bake_report(result, layout.value());
 if (!measured.ok()) return measured.status();
 const bool passed = measured.value().passed;
 ```
 
-Gate first compares the report configuration with its static configuration and returns `TypeMismatch` on mismatch. It then compares `measured_table_id` with the invocation's owned-table association; a different ObjectId returns `OperationFailed`/`InvalidAssociation`, including for byte-identical tables. Only a matching report proceeds to the tolerance check. `passed=false` returns `OperationFailed`/`InvalidDomain` with `LutApproximationToleranceExceeded` and the first failing component's point/reference/LUT/error-upper raw bits. Report-only execution succeeds for a legitimate failed measurement. When jointly requesting a gated table, an `on_call_retired` observer can retain the successful Measure report before Gate fails; the failed Run itself returns no final results.
+Gate trusts the report configuration, measured-table association and internal consistency. It consumes `passed`: false returns `OperationFailed`/`InvalidDomain` with `LutApproximationToleranceExceeded` and the recorded first_failure_index. It performs no configuration/ObjectId comparison, report scan or recomputation of failed sample errors. Report-only execution succeeds for a legitimate failed measurement. When jointly requesting a gated table, an `on_call_retired` observer can retain the successful Measure report before Gate fails; the failed Run itself returns no final results.
 
 ### Fixed geometry tasks
 
@@ -326,13 +332,13 @@ Finite consistent axis data, model-valid colors, in-range extras and representab
 
 ### Fixed Result tasks
 
-Pack, Unpack and Gate emit one `bake-result-fixed-v2` CPU task per selected output tile. They close the corresponding source rectangle on its own grid and copy raw bytes to an independently allocated dense output. Gate also reads report members passed, first_failure_index/input/reference/lut, configuration_id and measured_table_id. Those reads are fixed before execution; a one-tile table selection still depends on the global Measure task.
+Pack, Unpack and Gate emit one `bake-result-unchecked-v3` CPU task per selected output tile. They close the corresponding source rectangle on its own grid and copy raw bytes to an independently allocated dense output. Gate reads only report members passed and first_failure_index and needs zero arithmetic scratch. Those reads are fixed before execution; a one-tile table selection still depends on the global Measure task.
 
 A nonempty Measure emits one task. It reads the complete axis, owned table, points, reference and applied colors, while the grid port contributes static schema only. Complete table reads establish readiness and supply identity; error arithmetic uses the point/reference/applied data. The task writes all tiles of all thirteen report members and exports the report in its retired CallRecord. Selecting one report member retains the same task and complete numerical work. Empty selection emits no task.
 
-Preparation checks exact read/write slots, member grids, dtype, domain, parameters and scratch. Kernels borrow affine reads, use preallocated scratch, write dense outputs and poll cancellation in sample/arithmetic loops. Immutable preparation supports independent concurrent Runs. Measure and Gate compare errors using fixed 4352-bit integers and construct bounded failure records directly. Numerical sample legality is a caller premise; configuration/ObjectId association and measured tolerance are explicit Gate behavior. The SDK report reader independently validates all report fields.
+Preparation checks exact read/write slots, member grids, dtype, storage domain, parameter syntax/types and scratch. Kernels borrow affine reads, use preallocated scratch, write dense outputs and poll cancellation in sample/arithmetic loops. Immutable preparation supports independent concurrent Runs. Measure compares errors using fixed 4352-bit integers and constructs the report during measurement. Gate trusts passed and first_failure_index without repeating error arithmetic. Numerical legality, report consistency and configuration/ObjectId association are caller premises. The SDK report reader only acquires and decodes fields; it does not recheck schema or payload.
 
-`measured_table_id` identifies the complete logical table Result through `input_object_ids`; a tile pointer, static physical ValueId or equal content is insufficient. Complete Pack exports share this ID, while partial Result projections and explicit Unpack/Gate copies receive fresh IDs. External DenseHost adaptation preserves the bound input association for kernel checks while its exported COPY wrapper is a new Result. The independent Fraction oracle accepts an explicit `source_type`; its Float32 source case evaluates Float64 source arithmetic followed by a distinct Float32 cast, preserving that graph's rounding boundaries and raw zero signs.
+`measured_table_id` identifies the complete logical table Result through `input_object_ids`; a tile pointer, static physical ValueId or equal content is insufficient. Complete Pack exports share this ID, while partial Result projections and explicit Unpack/Gate copies receive fresh IDs. External DenseHost adaptation preserves the bound input association for identity recording while its exported COPY wrapper is a new Result. The independent Fraction oracle accepts an explicit `source_type`; its Float32 source case evaluates Float64 source arithmetic followed by a distinct Float32 cast, preserving that graph's rounding boundaries and raw zero signs.
 
 - [3D LUT application](CRV-07_apply_lut3d.md).
 - [1D baking templates](CRV-04_bake_lut1d.md).

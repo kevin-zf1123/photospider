@@ -41,14 +41,14 @@ against labels on the input.
 
 ## Output, demand and numerical behavior
 
-Use family unit adaptation, domain checks, fixed engine settings and same-count
+Use family unit adaptation, unchecked numerical premises, fixed engine settings and same-count
 or changed-count group placement. Retain bypass alpha/AOV bits and remap internal
 references. Pass the exit interpretation explicitly to subsequent consumers.
 No persistent external alpha reference or multi-owner image storage is introduced.
 
 The complete source color tuple at a point supports any target color request.
-No unrequested pixels or alpha are required. Only requested target components
-receive sample validity checks; shared engine failures still propagate. Forced
+No unrequested pixels or alpha are required. Requested target components are published
+without sample validation; actual shared engine failures still propagate. Forced
 view is invalid even for a mathematically identity link. Resource failures
 cannot silently substitute the source data or a different link.
 

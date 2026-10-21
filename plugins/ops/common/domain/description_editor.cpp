@@ -54,9 +54,6 @@ Tree tree(std::int64_t value) {
   return {'i', std::to_string(value), {}};
 }
 Tree tree(double value) {
-  if (!std::isfinite(value)) {
-    throw Invalid("nonfinite descriptor number");
-  }
   std::uint64_t bits = 0;
   std::memcpy(&bits, &value, 8);
   std::string bytes(8, '\0');
@@ -307,9 +304,6 @@ double real(const Tree& t) {
   }
   double out = 0;
   std::memcpy(&out, &bits, 8);
-  if (!std::isfinite(out)) {
-    throw Invalid("nonfinite descriptor number");
-  }
   return out;
 }
 std::string field(const Tree& t, const char* k) {

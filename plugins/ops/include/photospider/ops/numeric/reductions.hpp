@@ -150,9 +150,8 @@ inline Result<WorkflowNode> moments(std::uint64_t id, const char* operation,
                                     std::vector<std::uint64_t> axes,
                                     std::int64_t ddof, ElementType dtype,
                                     CpuNumericProfile profile) {
-  if (ddof < 0 ||
-      (dtype != ElementType::Float32 && dtype != ElementType::Float64))
-    return invalid("invalid moments ddof/dtype");
+  if (dtype != ElementType::Float32 && dtype != ElementType::Float64)
+    return invalid("invalid moments dtype");
   auto result = with_dtype(
       node(id, operation, std::move(input), std::move(axes), profile), dtype);
   if (!result.ok())
@@ -163,8 +162,8 @@ inline Result<WorkflowNode> moments(std::uint64_t id, const char* operation,
 }
 }  // namespace reduction_detail
 /** @brief RN of exact (N*sum(x*x)-sum(x)^2)/(N*(N-ddof)).
- * ddof defaults to zero and must be below static group count. Invalid ddof
- * fails compilation/preflight before sample reads. NaN priority uses logical
+ * ddof defaults to zero; 0<=ddof<N is an unchecked numerical premise.
+ * Static preparation checks the Int64 parameter type. NaN priority uses logical
  * row-major order; any infinity without NaN produces the fixed positive qNaN.
  */
 inline Result<WorkflowNode> reduce_variance_node(

@@ -31,26 +31,23 @@ dtype,seed/stream/frame; signed32 lattice; L2 metric; max_search_rings default 6
 
 ## Mathematical specialization
 
-Each domain7 cell gets two halfopen53 offsets, published RN64 with explicit
+Each domain7 cell uses its integer x/y, channel=0 and draw=0 with caller frame. Halfopen53 offsets use words 0/1 for x/y, leaving words 2/3 unused, and are published RN64 with explicit
 half-open-cell endpoint adjustment. Sort all supported sites by
 (distance_squared,iy,ix). Expand Chebyshev rings until the unvisited-cell closure lower
-bound is strictly greater than current F2; equality cannot discard a tie. If proof needs
-out-of-range cells, fail rather than truncating the field.
+bound is strictly greater than current F2; equality cannot discard a tie. All cells needed by the mathematical search must have representable signed32 addresses as an unchecked caller premise; the field is not truncated to repair an invalid address.
 
 ## Dependencies, resources and failures
 
 Execution rule: **Regional**. Compute requested output coordinates only. Read
-corresponding query/sample inputs and necessary controls; path/mesh/resource validation
-may require complete control data without computing the whole output canvas. Full
+corresponding query/sample inputs and the controls required by the mathematics. Complete control reads do not imply runtime payload validation. Full
 shared-control/topology/resource changes conservatively invalidate dependent output;
 sample changes follow the actual dependency map. Empty requests perform static preflight
-without payload reads or advancing a random sequence. Compute only requested output
-mathematics, retaining required shared validation.
+without payload reads or advancing a random sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
 Regional queries; O(count(Q)*R^2) reference; charge rings and certification.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
 InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
@@ -64,6 +61,5 @@ Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.

@@ -20,11 +20,11 @@ output bits and discrete decisions are fixed.
 
 ## Interface and representation
 
-Rank/resource as NOI-07A; DynamicPoints Result, at most one point per canvas pixel.
+Rank/resource as NOI-07A; [DynamicPoints v1](GEN-08_point_distributions_contract.md) Result, at most one point per canvas pixel.
 
 ## Parameters and domain
 
-canvas,offsets,threshold_count K=0..N; hard output capacity max_count.
+canvas,offsets,threshold_count K=0..N; nonnegative static hard output capacity max_count, with physical P=max(1,max_count). Zero capacity permits an empty result only; generating a selected point beyond the logical capacity fails operationally.
 
 ## Mathematical specialization
 
@@ -38,14 +38,13 @@ Computation scope: **complete input in a Run-shared stage**. Read complete struc
 selected complete Result atomically. Full shared-control/topology/resource changes
 conservatively invalidate dependent output; sample changes follow the actual dependency
 map. Empty requests perform static preflight without payload reads or advancing a random
-sequence. Compute only requested output mathematics, retaining required shared
-validation.
+sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
-complete-input count/allocate/fill, O(HW+N); capacity exhaustion fails. This capacity is not
+count/fill the selected canvas support without a resource-validity scan, O(HW); capacity exhaustion fails. This capacity is not
 GEN-08C/D's normal count target.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
 InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
@@ -58,6 +57,5 @@ Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.

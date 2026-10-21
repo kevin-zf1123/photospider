@@ -122,8 +122,8 @@ inline Result<WorkflowNodeOutput> assemble_channels(
  * `output_axis` is a cell-axis index too. All axis values exclude the Result
  * batch prefix. Complete sample rank, including
  * batch and cell axes, is at most 8. The helper reads no samples. Compilation
- * and execution validate dtype, batch prefix, remaining shape and axis
- * assertions. Error, exception and document-mutation guarantees match
+ * and static preparation validate dtype, batch prefix, remaining shape and
+ * axis assertions. Error, exception and document-mutation guarantees match
  * `assemble_channels`.
  */
 inline Result<WorkflowNodeOutput> concatenate_channels(

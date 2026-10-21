@@ -31,8 +31,8 @@ inline void choice(const std::string& value, const char* a, const char* b) {
   require(value == a || value == b, ErrorCode::InvalidArgument,
           "unknown basic operation parameter choice");
 }
-// Invocation-local bounded failure state. Numerical guards never allocate or
-// throw; static metadata validation uses the separate require() helper above.
+// Invocation-local bounded precision-failure state. Accuracy checks never
+// allocate or throw; static structure uses the separate require() helper above.
 struct Arithmetic final {
   ErrorCode code = ErrorCode::Ok;
   const char* message = nullptr;
@@ -43,25 +43,17 @@ struct Arithmetic final {
     }
     return condition;
   }
-  double finite(double number) {
-    return check(std::isfinite(number), ErrorCode::OperationFailed,
-                 "nonfinite basic operation intermediate")
-               ? number
-               : 0;
-  }
   // Stable convex interpolation uses both distances independently. Scaling only
   // when the interval difference overflows retains subnormal ordinary
   // intervals.
   double fraction(double x, double a, double b) {
-    if (!check(a < b, ErrorCode::InvalidArgument, "interval must increase"))
-      return 0;
     double width = b - a;
     double distance = x - a;
     if (!std::isfinite(width) || !std::isfinite(distance)) {
       width = b * .5 - a * .5;
       distance = x * .5 - a * .5;
     }
-    const double result = finite(distance / width);
+    const double result = (distance / width);
     if (!check(x <= a || x >= b || (result > 0 && result < 1),
                ErrorCode::OperationFailed,
                "interval coordinate loses precision"))
@@ -106,9 +98,6 @@ struct Arithmetic final {
     width = scale(width);
     left = scale(left);
     right = scale(right);
-    if (!check(width.high > 0 && left.high >= 0 && right.high >= 0,
-               ErrorCode::OperationFailed, "invalid interpolation distances"))
-      return 0;
     // Normalize products separately, then align them to a common exponent.
     // Normalizing only distances can underflow even an exactly representable
     // subnormal output before the final division restores its magnitude.
@@ -149,20 +138,20 @@ struct Arithmetic final {
       error += add_split(&numerator, high);
       error += add_split(&numerator, low);
     }
-    const double high = finite(numerator.high / width.high);
+    const double high = (numerator.high / width.high);
     auto remainder =
         two_sum(std::fma(-high, width.high, numerator.high), numerator.low);
     error += add_split(&remainder, -high * width.low);
     error +=
         add_split(&remainder, std::fma(-high, width.low, high * width.low));
     const double result =
-        finite(high + (remainder.high + remainder.low) / width.high);
+        (high + (remainder.high + remainder.low) / width.high);
     const double ulp = std::max(std::numeric_limits<double>::denorm_min(),
                                 std::abs(result - std::nextafter(result, 0.)));
     if (!check(error / width.high <= ulp / 8, ErrorCode::OperationFailed,
                "interpolation precision cannot be represented"))
       return 0;
-    return finite(std::scalbn(result, product_exponent));
+    return (std::scalbn(result, product_exponent));
   }
 };
 }  // namespace ps::basic_internal

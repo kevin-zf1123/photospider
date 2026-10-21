@@ -3,7 +3,7 @@ spec_schema_version: 1
 id: PTH-12D
 status: Accepted
 implementation_status: not_implemented
-registration_status: backend_and_schema_gates
+registration_status: backend_and_implementation_gates
 ---
 
 # PTH-12D: Explicit-grid polygon Boolean Result
@@ -16,8 +16,7 @@ contract.
 
 Inputs: two Polyline PathSets; outputs: grid-geometry Result and quantization/geometry
 report. Parameters explicitly include grid spacing/scale and grid origin, operation,
-fill rules, attribute policy and hard budgets. Numeric types and representable grid
-range must be frozen with the backend; all inputs must be finite, grid spacing positive.
+fill rules, attribute policy and hard budgets. The photospider.ops.grid_polygon v1 output uses signed64 coordinates. Finite inputs, positive grid spacing and representable grid coordinates are unchecked caller premises. Backend arithmetic and intermediate intersection rules remain distinct implementation gates.
 
 Quantize each input coordinate to the declared grid under a versioned rounding rule. The
 rule, intermediate intersection rounding, overflow handling, degenerate-feature handling

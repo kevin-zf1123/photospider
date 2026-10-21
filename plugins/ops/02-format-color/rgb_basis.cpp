@@ -657,7 +657,7 @@ Result<std::set<TileIndex>> required_tiles(const Preparation& state,
   }
   return Answer(std::move(result));
 }
-constexpr const char* basis_contract = "rgb-basis-fixed-v1";
+constexpr const char* basis_contract = "rgb-basis-unchecked-v2";
 Result<OperationProgram> lower(const OperationLowering& query) {
   using Answer = Result<OperationProgram>;
   const auto& state = *static_cast<const Preparation*>(query.static_state);

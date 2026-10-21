@@ -38,7 +38,7 @@ symbols. The old oracle filename is replaced by `common/color_geometry.py`.
 | Bake configuration | Both complete description encodings enter `photospider.bake-configuration.v2` |
 | Owned bake table/report | `curve.bake_lut3d.table` / `curve.bake_lut3d.report` schema v4 |
 | Exported ordinary table | Unchanged `photospider.tensor` v1, member `samples` |
-| Fixed operation contracts | `color-ramp-fixed-v2`, `lut3d-fixed-v2`, `bake-geometry-fixed-v2`, `bake-result-fixed-v2` |
+| Fixed operation contracts | `color-ramp-fixed-v2`, `lut3d-fixed-v2`, `bake-geometry-fixed-v2`, `bake-result-unchecked-v3` |
 
 The report still contains thirteen static tensor members and 361 payload bytes.
 `measured_table_id` still binds the actual owned Result ObjectId. Gate order is

@@ -260,7 +260,8 @@ Result<OperationProgram> lower_layout(LayoutKind kind,
   OperationProgramBuilder builder(query);
   for (const auto& member : query.requests[0].members)
     for (auto tile : member.second) {
-      auto task = builder.add_task(parameter_name(kind), "layout-copy-v1");
+      auto task =
+          builder.add_task(parameter_name(kind), "layout-copy-unchecked-v2");
       if (!task.ok())
         return Answer(task.status());
       auto region = output.value().region(tile);
@@ -333,20 +334,6 @@ void layout_invoke(const ps_kernel_invocation_v8* query,
           bits = reader.bits(2, coordinate, 8);
           std::memcpy(&steps[axis], &bits, 8);
         }
-      }
-      const auto last =
-          static_cast<__int128>(starts[axis]) +
-          static_cast<__int128>(description.output.shape[axis] - 1) *
-              steps[axis];
-      if (starts[axis] < 0 ||
-          static_cast<std::uint64_t>(starts[axis]) >=
-              description.source.shape[axis] ||
-          (description.output.shape[axis] > 1 && !steps[axis]) || last < 0 ||
-          last >= description.source.shape[axis]) {
-        *status = kernel_failure(ErrorCode::InvalidArgument,
-                                 "invalid slice endpoints",
-                                 FailureReason::InvalidDomain);
-        return;
       }
     }
   }
@@ -551,7 +538,7 @@ OperationDefinition layout_operation(const std::string& key, LayoutKind kind,
           const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
     using Answer = Result<ps_prepared_kernel_v8>;
     if (kernel.symbol != parameter_name(kind) ||
-        kernel.contract != "layout-copy-v1")
+        kernel.contract != "layout-copy-unchecked-v2")
       return Answer(
           {ErrorCode::TypeMismatch, "invalid layout kernel contract"});
     if (placement.backend != physical::Backend::Cpu ||

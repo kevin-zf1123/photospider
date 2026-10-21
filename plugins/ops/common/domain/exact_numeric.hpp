@@ -242,8 +242,7 @@ class Natural final {
   }
   static std::pair<Natural, Natural> divide(const Natural& n,
                                             const Natural& d) {
-    if (d.zero())
-      throw std::logic_error("zero exact denominator");
+    // Nonzero denominator is an unchecked mathematical premise.
     if (n.words.size() > maximum_words || d.words.size() > maximum_words)
       throw std::bad_alloc();
     work(std::max<std::size_t>(1, n.bits()) *

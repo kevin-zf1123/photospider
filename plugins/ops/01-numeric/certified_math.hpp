@@ -446,12 +446,7 @@ struct CertifiedMath final {
       bool negative_result = false;
       std::uint64_t numerator = 0, denominator = 1;
       if (is_rational) {
-        if (!b || (b >> 63))
-          return Answer(Status{
-              ErrorCode::InvalidArgument,
-              "InvalidRationalDenominator: port=1 bits=" + std::to_string(b),
-              FailureReason::InvalidDomain,
-              {FailureOrigin::Domain, FailureScope::Atom}});
+        // The rational denominator is positive by the unchecked port contract.
         x.negative = (a >> 63) != 0;
         numerator = x.negative ? UINT64_C(0) - a : a;
         denominator = b;

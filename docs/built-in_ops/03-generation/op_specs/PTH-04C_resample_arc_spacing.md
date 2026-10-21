@@ -24,6 +24,8 @@ output bits and discrete decisions are fixed.
 
 PathSet,positive spacing[1] in px; PathSamplesArc Result.
 
+The associated Result uses `photospider.ops.path_samples_arc` v1 from the [shared geometry schema](PTH_geometry_contract.md). Payload validity is unchecked.
+
 ## Parameters and domain
 
 include_open_end default true, hard max_count; closed seam not repeated.
@@ -40,13 +42,12 @@ Computation scope: **complete input in a Run-shared stage**. Read complete struc
 selected complete Result atomically. Full shared-control/topology/resource changes
 conservatively invalidate dependent output; sample changes follow the actual dependency
 map. Empty requests perform static preflight without payload reads or advancing a random
-sequence. Compute only requested output mathematics, retaining required shared
-validation.
+sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
-complete-input; certify count before allocation, refine borderline length comparisons.
+complete-input; allocate from the statically inferred max_count capacity, determine effective count by refining true-length comparisons, and report an operational capacity failure if the constructed result exceeds that capacity.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
 InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
@@ -60,6 +61,5 @@ Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.

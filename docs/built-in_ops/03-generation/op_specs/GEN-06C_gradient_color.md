@@ -20,49 +20,37 @@ output bits and discrete decisions are fixed.
 
 ## Interface and representation
 
-t of shape S, stops[K], colors[K,C]; complete described colors S+[C], an image when
-S=HW.
+The ordinary floating-hue members consume `t` of shape S, `stops[K]` and `colors[K,C]`, and produce numerical samples of shape S+[C]. Ports, dtypes, K bounds and model-specific arity follow [CRV-06](../../01-numeric/op_specs/CRV-06_color_ramp.md). Rational-pi members use the corresponding `[K,2]` floating colors and separate Int64 numerator/denominator ports. S=HW gives a logical image-shaped output; the Result carries no color description.
 
 ## Parameters and domain
 
-Separate RGB/XYZ/CMYK/Lab/LCh/OKLab/OKLCh/HSL/YCbCr members; strictly increasing stops,
-complete FMT description; explicit upstream spread.
+Compose the corresponding RGB/XYZ/CMYK/Lab/LCh/OKLab/OKLCh/HSL/YCbCr CRV-06 member with explicit upstream spread. `color_description` uses the existing `TensorDescription` v4/v5 codec and describes one canonical logical tuple with `channel_axis=0`; it is independent of leading query/sample dimensions. RGB alone admits optional straight alpha. For downstream FMT calls, explicitly construct a description for the actual output tensor, such as `channel_axis=2` for `[H,W,C]`. CMYK profile resources are selected by the consuming CRV operation's preparation.
 
 ## Mathematical specialization
 
-Compose corresponding CRV-06/FMT rules after migration. For RGB interpolate in linear
-light: Q=(1-w)*a0*D(c0)+w*a1*D(c1), A=(1-w)*a0+w*a1; straight result E(Q/A) for A>0,
-transparent black at A=0. Preserve CRV endpoint/AssociationUnderflow rules. Lab
-l=L*/100; original hue and winding are interpolated, not normalized.
+Use the current CRV-06 mathematics and preserve each public node's rounding boundary. For RGB interpolate in linear light: Q=(1-w)*a0*D(c0)+w*a1*D(c1), A=(1-w)*a0+w*a1; the straight result is E(Q/A) for A>0, and transparent black for A=0. Direct/identical-row paths, zero signs and transparent canonicalization follow the selected CRV member. Lab uses l=L*/100; polar members retain original hue and winding.
+
+Finite ordered stops, consumed queries, selected model-valid colors and representable outputs are the current CRV-06 caller preconditions. If exact output alpha is positive and rounds to zero, every rounded RGB component must also be zero; a valid all-zero tuple becomes canonical +0. Numerical precondition violations have no promised runtime domain, overflow or association-underflow diagnostic. This composition adds no numerical validator.
 
 ## Dependencies, resources and failures
 
 Execution rule: **Regional**. Compute requested output coordinates only. Read
-corresponding query/sample inputs and necessary controls; path/mesh/resource validation
-may require complete control data without computing the whole output canvas. Full
+corresponding query/sample inputs and the controls required by the mathematics. Complete control reads do not imply runtime payload validation. Full
 shared-control/topology/resource changes conservatively invalidate dependent output;
 sample changes follow the actual dependency map. Empty requests perform static preflight
-without payload reads or advancing a random sequence. Compute only requested output
-mathematics, retaining required shared validation.
+without payload reads or advancing a random sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
-Regional query target; composed producer execution retains its real dependency rules and
-public rounding stages.
+Regional query computation retains each composed producer's fixed-task dependency rules. Current CRV-06 reads the selected query tiles and conservatively declares complete stops/colors/p/q tile closures because row selection depends on payload values. Full declared reads do not imply numerical inspection of unselected rows. Empty requests retain static schema/parameter/resource checks and emit no CRV payload task.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
-InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
+Preserve static schema/parameter/resource failures and operational capacity, cancellation, stale-plan, backend and upstream statuses from each constituent operation. Incomplete CRV arithmetic certification returns ResourceExhausted. Account output, scratch, tile records, required static validation and retained owners. Successful call outputs follow the frozen executor's retirement rules; a failed required task prevents publication of that call's output. Numerical precondition violations are outside this workflow's promised runtime diagnostics.
 
 ## Independent fixtures and acceptance
 
-Transparent red to opaque blue midpoint is blue with alpha 0.5; Lab/OKLab units;
-multi-turn hue; positive-alpha underflow failure.
+Transparent red to opaque blue midpoint is blue with alpha 0.5. Cover native Lab/OKLab units, multi-turn hue, direct/identical-row zero signs and valid all-zero alpha-underflow canonicalization. An oracle may reject probes outside the CRV caller premises to delimit its reference domain; that rejection is not an expected runtime failure. Static description/resource errors and operational failures retain their separate acceptance cases.
 
 Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.

@@ -58,7 +58,7 @@ class QualityReport final {
 - Atom 精确标识一个逻辑 producer 观测。
 - Group、Run 和 Waiter 描述操作范围，不会在任意坐标上虚构一个失败的语义值。
 
-`FailureScope` 的数值为 `Unspecified=0`、`Atom=1`、`Group=4`、`Run=5`、`Waiter=6`。`AtomKey` 标识 output index 和 1..8 维坐标，未使用坐标为零。`FailureDetail` 保存 `origin`、`scope`、可选 `atom`、`node_id`、`input_id`、可选 `call_sequence`/`task_id` 和不透明的 `domain_code`。算子 SDK 的领域码 `InvalidAssociation` 表示显式操作数据身份不匹配，例如 LUT 报告测量表的 ObjectId。这些数值范围用于失败分类，不定义逐样本依赖语义。
+`FailureScope` 的数值为 `Unspecified=0`、`Atom=1`、`Group=4`、`Run=5`、`Waiter=6`。`AtomKey` 标识 output index 和 1..8 维坐标，未使用坐标为零。`FailureDetail` 保存 `origin`、`scope`、可选 `atom`、`node_id`、`input_id`、可选 `call_sequence`/`task_id` 和不透明的 `domain_code`。算子 SDK 的 `InvalidAssociation` 领域码可供显式领域操作使用。普通 LUT 报告生产者、reader 和 Gate 直接信任 table／configuration 关联，不进行比较。这些数值范围用于失败分类，不定义逐样本依赖语义。
 
 固定调用 ABI 8 使用 `ps_kernel_status_v8` 返回 `code`、`reason`、不透明的 `domain_code` 及包含终止符的 256 字节消息数组。内核不解释领域码。C++ 调用方可以构造带 `DomainErrorCode` 的 `Status`；C kernel 直接填写 status 记录。稳定的算子领域码定义在 `photospider/ops/errors.hpp`。
 
@@ -70,7 +70,7 @@ Task 失败消息在 issue 前预留的存储中复制。非法或重复 complet
 
 ## 算法与数学质量界（算子 SDK）
 
-`QualityReport` 是 `photospider/ops/numeric/quality.hpp` 中的算子 SDK 类型；内核既不创建也不读取它。它是只能由具名 factory 创建的不可变拥有型分配。其证据枚举不能被调用方提供的标志提升。有限的 Measured 残差不带认证误差界。CertifiedBound 目前只由经检查的整数对角系统 factory 提供：1..4096 行、对角非零、幅值至多 2^26。Snapshot 名称是 1..256 个可打印 ASCII 字节。报告保留全部精确整数证明行。格式错误的报告输入返回带领域码 `ops_error::InvalidQuality` 的 `InvalidArgument`。
+`QualityReport` 是 `photospider/ops/numeric/quality.hpp` 中的算子 SDK 类型；内核既不创建也不读取它。它是只能由具名 factory 创建的不可变拥有型分配。其证据枚举不能被调用方提供的标志提升。有限的 Measured 残差不带认证误差界。CertifiedBound 目前只由整数对角系统的精确误差界计算提供。1..4096 行、对角非零、幅值至多 2^26、数组／回调有效及 1..256 个可打印 ASCII snapshot 字节，均为 unchecked 调用方前提。Factory 直接计算残差和误差界、保留全部精确证明行，不增加输入或发布验证。`proof_row` 信任索引，不检查运行时结构或数值合法性。
 
 对所存储的对角系统，令 $R$ 为最大精确残差，$m$ 为对角元素绝对值的最小值。
 

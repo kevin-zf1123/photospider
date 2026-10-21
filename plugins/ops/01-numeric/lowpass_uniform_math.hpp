@@ -224,10 +224,6 @@ struct UniformLowpassMath {
             return Answer(m.status());
           if (!m.active())
             continue;
-          if (denominator.high.negative || m.top(denominator.high) < 0)
-            return Answer(Status{ErrorCode::InvalidArgument,
-                                 {},
-                                 FailureReason::InvalidDomain});
           if (denominator.low.negative || m.top(denominator.low) < 0)
             continue;
           if (shortcut)

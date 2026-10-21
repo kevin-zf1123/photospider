@@ -14,7 +14,6 @@
 #include "common/fixed_point_inputs.hpp"
 #include "common/registry.hpp"
 #include "common/tensor_program.hpp"
-#include "photospider/ops/errors.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -104,8 +103,7 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
     if (kind == Kind::Gate &&
         (!inputs[1].result_schema ||
          !inputs[1].result_schema->same_schema(report_schema.value())))
-      return Answer(mismatch(
-          "gated report must describe this exact bake recipe/dtype/method"));
+      return Answer(mismatch("gated report structure mismatch"));
     auto schema =
         numeric_ops::numeric_tensor_schema(table.element_type, table.shape);
     schema.tensors[0].atomic_trailing_axes = 1;
@@ -125,11 +123,9 @@ struct Measurement {
   numeric_ops::ExactBakeError arithmetic;
 };
 std::uint64_t scratch_bytes(Kind kind) {
-  return kind == Kind::Measure ? sizeof(Measurement)
-         : kind == Kind::Gate  ? sizeof(numeric_ops::ExactBakeError)
-                               : 0;
+  return kind == Kind::Measure ? sizeof(Measurement) : 0;
 }
-constexpr const char* contract = "bake-result-fixed-v2";
+constexpr const char* contract = "bake-result-unchecked-v3";
 struct ReadRegion {
   unsigned port, member;
   Region region;
@@ -153,7 +149,7 @@ Result<std::vector<ReadRegion>> source_regions(
   } else {
     regions.push_back({0, 0, output});
     if (state.kind == Kind::Gate)
-      for (unsigned member : {0U, 7U, 8U, 9U, 10U, 11U, 12U})
+      for (unsigned member : {0U, 7U})
         regions.push_back(
             {1, member,
              Region::whole(
@@ -384,88 +380,15 @@ bool measure(const BakeKernel& state, const ps_kernel_invocation_v8& invocation,
   }
   return true;
 }
-bool gate(const BakeKernel& state, const ps_kernel_invocation_v8& invocation,
-          Reader& reader, numeric_ops::ExactBakeError& arithmetic,
-          ps_kernel_status_v8* status,
-          const core_internal::WorkConsumer& consume) {
-  const auto& program = *state.program;
-  std::uint64_t measured = 0;
-  for (unsigned i = 0; i < 8; ++i)
-    measured |= reader.bits(13, {0, i}, 1) << (8 * i);
-  bool configured = true;
-  for (unsigned i = 0; i < 64; ++i)
-    configured &= reader.bits(12, {0, i}, 1) ==
-                  static_cast<std::uint8_t>(program.configuration[i]);
-  if (!configured) {
-    *status = kernel_failure(ErrorCode::TypeMismatch,
-                             "bake report configuration mismatch");
-    return false;
-  }
-  if (measured != invocation.input_object_ids[state.table_slot]) {
-    *status = kernel_failure(ErrorCode::OperationFailed,
-                             "bake report/table object mismatch");
-    status->domain_code = ops_error::InvalidAssociation.value;
-    return false;
-  }
+bool gate(Reader& reader, ps_kernel_status_v8* status) {
   if (reader.bits(1, {0}, 1))
     return true;
-  const auto index = reader.bits(8, {0}, 8);
-  std::array<std::uint64_t, 3> point{}, reference{}, lut{};
-  for (unsigned c = 0; c < 3; ++c) {
-    point[c] = reader.bits(9, {0, c}, 8);
-    reference[c] = reader.bits(10, {0, c}, 8);
-    lut[c] = reader.bits(11, {0, c}, 8);
-  }
-  for (unsigned c = 0; c < 3; ++c) {
-    auto accepted = arithmetic.check(reference[c], lut[c], program.atol,
-                                     program.rtol, consume);
-    if (!accepted.ok()) {
-      *status = kernel_failure(accepted.status().code, nullptr,
-                               accepted.status().reason);
-      return false;
-    }
-    if (accepted.value())
-      continue;
-    arithmetic.maxima[0] = arithmetic.difference;
-    auto error = arithmetic.upward(0, consume);
-    if (!error.ok()) {
-      *status =
-          kernel_failure(error.status().code, nullptr, error.status().reason);
-      return false;
-    }
-    *status = kernel_failure(ErrorCode::OperationFailed, nullptr,
-                             FailureReason::InvalidDomain);
-    char* cursor = status->message;
-    char* const end = status->message + sizeof(status->message) - 1;
-    const auto text = [&](const char* value) {
-      while (*value && cursor != end)
-        *cursor++ = *value++;
-    };
-    const auto number = [&](std::uint64_t value) {
-      cursor = std::to_chars(cursor, end, value).ptr;
-    };
-    text("LutApproximationToleranceExceeded index=");
-    number(index);
-    text(" component=");
-    number(c);
-    text(" point_bits=");
-    number(point[0]);
-    text(",");
-    number(point[1]);
-    text(",");
-    number(point[2]);
-    text(" reference_bits=");
-    number(reference[c]);
-    text(" lut_bits=");
-    number(lut[c]);
-    text(" error_upper_bits=");
-    number(error.value());
-    *cursor = '\0';
-    return false;
-  }
-  *status = kernel_failure(ErrorCode::OperationFailed,
-                           "inconsistent failed bake report",
-                           FailureReason::InvalidDomain);
+  *status = kernel_failure(
+      ErrorCode::OperationFailed,
+      "LutApproximationToleranceExceeded index=", FailureReason::InvalidDomain);
+  char* const begin = status->message + std::strlen(status->message);
+  char* const end = status->message + sizeof(status->message) - 1;
+  *std::to_chars(begin, end, reader.bits(8, {0}, 8)).ptr = '\0';
   return false;
 }
 void invoke(const ps_kernel_invocation_v8* invocation,
@@ -494,15 +417,8 @@ void invoke(const ps_kernel_invocation_v8* invocation,
       *status = {};
     return;
   }
-  if (state.program->kind == Kind::Gate) {
-    auto* scratch =
-        new (invocation->scratch[0].allocation) numeric_ops::ExactBakeError;
-    const auto success =
-        gate(state, *invocation, reader, *scratch, status, consume);
-    scratch->~ExactBakeError();
-    if (!success)
-      return;
-  }
+  if (state.program->kind == Kind::Gate && !gate(reader, status))
+    return;
   const auto& output = invocation->outputs[0];
   const auto width = state.table_narrow ? 4U : 8U;
   std::uint64_t count = 1;
@@ -662,7 +578,7 @@ OperationDefinition operation(Kind kind) {
     object(1, "curve.bake_lut3d.report");
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = report_parameters();
-  if (kind == Kind::Measure || kind == Kind::Gate) {
+  if (kind == Kind::Measure) {
     traits.deterministic = false;
   }
   auto& out = traits.outputs[0];

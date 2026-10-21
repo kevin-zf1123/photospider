@@ -158,7 +158,7 @@ There is no output-description parameter or hidden edge-description table.
 Dropping alpha does not flatten against a background. Replacing an alpha slot
 does not multiply or divide color samples or scan a coverage interval. FMT-04
 owns association arithmetic and FMT-05 owns alpha-specific editing. A later
-consumer validates the domain it explicitly requests.
+consumer trusts the numerical premises of its explicit domain without a scan.
 
 ## Coordinate and dependency reference
 

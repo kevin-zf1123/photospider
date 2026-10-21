@@ -75,8 +75,8 @@ with changing channel counts receive separate contracts.
 ## Confirmed CIELAB white interpretation
 
 A and B use the explicit reference white in the effective input description.
-D50, D65 and valid custom white xy are admitted under the existing exact white
-validation. The result is interpreted on that white; callers supply it downstream explicitly, and neither direction performs
+D50, D65 and custom white xy use the existing exact white calculations.
+Custom-white numerical/geometric validity is an unchecked caller premise. The result is interpreted on that white; callers supply it downstream explicitly, and neither direction performs
 chromatic adaptation or silently supplies a missing D50 white. Missing source
 interpretation requires an explicit input_description. D65 XYZ to D50
 Lab composes FMT-10C before A. Raw white parameters are specified in the static interface below.
@@ -259,15 +259,15 @@ Each native member accepts one Result containing one tensor , then publishes one
 | input_description | Optional explicit TensorDescription; absence selects the raw numerical path. |
 | group | Described path: optional selector when exactly one complete matching group exists; ambiguity fails. |
 | axis/components | Raw ordered distinct triple for A–Q, single component for R/S/T, or axis_free=true for R/S/T. In the described path these may assert the configuration's exact axis and indices. |
-| white_x/white_y | Raw A/B/O require explicit valid xy. Described A/B/O use input_description white and reject these raw fields. E/F described white is fixed D65. |
+| white_x/white_y | Raw A/B/O require explicit xy fields; valid xy is an unchecked numerical premise. Described A/B/O use input_description white and reject these raw fields. E/F described white is fixed D65. |
 | output_hue_unit | Required radian or pi_multiple for C/G/I/K; no default |
 | input_hue_unit | D/H/J/L resolve from semantic source; raw requires it explicitly |
 | ncl_matrix | M requires preset or Kr/Kb; N resolves source metadata, optional assertion must match; raw M/N require explicit coefficients/preset |
 | gray_kind | Q resolves from source model; R from Gray; raw Q/R require linear_y, encoded_luma, cielab_l or oklab_l |
-| gray_white_x/gray_white_y | R linear_y resolves Gray white semantically; raw requires valid xy |
+| gray_white_x/gray_white_y | R linear_y resolves Gray white semantically; raw requires explicit xy, with unchecked numerical validity |
 | output_axis | Required only for axis-free R insertion; otherwise preserve existing axis |
-| threshold | S required finite Float64, no default, in native Gray units |
-| black_value/white_value | T required finite typed constants matching input dtype, no defaults |
+| threshold | S required Float64; finite value is an unchecked premise, no default, in native Gray units |
+| black_value/white_value | T required typed constants matching input dtype; finite values are unchecked premises, no defaults |
 | layout | auto default or materialize produce independent tiles; only Q accepts view statically, and a nonempty view task fails ViewUnavailable. |
 | algorithm | auto default, scalar or reference. |
 
@@ -325,7 +325,7 @@ Precision retry is distinct from cancellation and capacity failure. The first op
 
 | Trigger | Phase / category |
 | --- | --- |
-| Invalid/missing parameters, selector, unit, white/NCL data, insertion axis or conflicting metadata | Compile/direct preflight: InvalidArgument / InvalidDomain |
+| Missing/malformed parameters, unknown selector or unit, malformed white/NCL encoding, insertion-axis structure or conflicting metadata | Compile/direct preflight: InvalidArgument / InvalidDomain |
 | Unsupported dtype/model/scale/reference, description mismatch or premultiplied semantic source | Compile/direct preflight: TypeMismatch |
 | Forced view for a member other than Q | Compile/direct preflight: InvalidArgument / InvalidDomain |
 | Nonempty Q forced view | Fixed task: InvalidArgument / ViewUnavailable; auto/materialize allocate independent outputs |

@@ -26,7 +26,7 @@ Core/Bezier PathSet,start[1],end[1]; trimmed CoreVerbs PathSet with source mappi
 
 ## Parameters and domain
 
-units=normalized_arc/arc_px; each subpath validates its range; closed_wrap default
+units=normalized_arc/arc_px; each subpath range is valid as an unchecked premise; closed_wrap default
 false; attribute_policy.
 
 ## Mathematical specialization
@@ -34,7 +34,8 @@ false; attribute_policy.
 Convert endpoints to true subpath arc positions. a=b yields empty. Ordinary0<=a<=b<=L;
 closed explicit wrap with a>b emits[a,L] then[0,b] as one open subpath. Full range
 preserves original closed state/geometry bits. Invert boundaries, exact de Casteljau
-trim then RN64 controls; verify connections/publication. Preserve source-position width
+trim then RN64 controls; connection and publication geometry are unchecked caller
+premises, with no completed-output validation. Preserve source-position width
 using source snapshot and original lengths; explicit rebind alone reapplies full
 profile.
 
@@ -44,14 +45,16 @@ Computation scope: **complete input in a Run-shared stage**. Read complete struc
 selected complete Result atomically. Full shared-control/topology/resource changes
 conservatively invalidate dependent output; sample changes follow the actual dependency
 map. Empty requests perform static preflight without payload reads or advancing a random
-sequence. Compute only requested output mathematics, retaining required shared
-validation.
+sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
-complete-input O(segments+inverse work); maps must survive publication rounding or reject/drop,
-never guessed interpolation.
+complete-input O(segments+inverse work). Source-map reject/drop applies only
+when the selected map representation cannot express the computed mapping, such
+as a non-rational arc cut in the v1 rational affine map. Rounding compatibility,
+connections and topology remain unchecked premises; there is no publication
+scan or guessed interpolation.
 
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
 InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
@@ -65,8 +68,7 @@ Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. Formal schemas, unresolved algorithms and backend admission must
-be implemented and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
 identity is implied by these requirements.
 
 ## Source width mapping

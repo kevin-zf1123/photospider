@@ -26,7 +26,7 @@ Test results are written by the current invocation.
 | Module | Implemented reference | Boundary |
 | --- | --- | --- |
 | `common/exact.py`, `gen*/exact.py`, `noi*/exact.py`, `pth*/exact.py` | Fraction mathematics, IEEE RNE/sqrt, basic fields, generic numeric mesh, source-width coordinates, rational-root two-circle subset | Not full shape/metadata validation; irrational two-circle roots explicitly unsupported |
-| `common/rng.py`, `noi*/rng.py`, `gen08/rng.py` | Philox4x64-10 core with three upstream KATs, candidate addressed sequences, fixed Perlin polynomial, point algorithms | Packing/seed/word extraction are **experimental**, not production goldens; Bridson candidates use ordinary math and are Measured |
+| `common/rng.py`, `noi*/rng.py`, `gen08/rng.py` | Philox4x64-10 core with three upstream KATs, v1 addressed sequences, fixed Perlin polynomial, point algorithms | Packing, seed-to-key injection and Float32/Float64 half-open and open52 extraction match production v1; finite mapping checks do not establish runtime delivery; Bridson candidates use ordinary math and are Measured |
 | `common/geometry.py`, `gen03/geometry.py`, `noi05/geometry.py`, `pth*/geometry.py` | Finite rational curves, flatten bounds, polygon area/Boolean boundaries, polyline fixtures | No Result ABI; many arc operations require rational segment lengths; publication helper performs necessary checks only, not general topology certification |
 | `common/measured.py`, `gen*/measured.py`, `noi*/measured.py`, `pth*/measured.py` | High-precision integral/transcendental/Poisson diagnostics | All outputs are Measured; precision agreement does not certify rounding or global roots |
 | `common/resources.py`, `noi07/resources.py`, `noi10/resources.py` | Raw rank structure/hash/lookup/threshold checks | Synthetic fixtures are not approved blue/STBN assets |
@@ -37,41 +37,33 @@ lists the available helper subset and remaining limitations for all 95 current m
 specifications. No coverage level means the corresponding operator is implemented.
 A helper test is not complete validation of every member using it.
 
-## RNG candidate isolation
+## RNG v1 reference
 
-The core is the selected Philox4x64-10. Address packing and floating bit selection
-remain unresolved in the random contract. This suite experiments with `philox4x64-layout-experiment-1`:
-`c0=uint32(x)|(uint32(y)<<32)`, `c1=frame|(draw<<32)`,
-`c2=stream|(channel<<32)|(domain<<48)`, `c3=0`; key is `(seed_bits,0)`.
-Each x/y is signed32; frame/draw/stream are unsigned32 ranges carried as integers.
+The selected Philox4x64-10 core, counter layout, key `(seed_bits,0)` and finite-grid mappings follow [production v1](../../../docs/built-in_ops/03-generation/op_specs/NOI_random_contract.md). Counter words encode x/y, frame/draw and stream/channel/domain in that order, with 72 reserved bits fixed to zero. Float32 halfopen24 uses the high 24 bits of word 0; Float64 halfopen53 uses the high 53 bits. Open52 uses the high 52 bits of its selected word.
 
-Experimental float extraction takes 24 high bits of word 0 for Float32; 27 high
-bits of word 0 and 26 of word 1 for halfopen53; 26 high bits each of words 0/1
-for open52; words 2/3 form the second sample. This is an explicitly recorded
-experiment, not a specification amendment. There are no old 4x32 implementations.
+Box-Muller uses word 0 for open52 and word 1 for halfopen53. Jitter, finite rejection, Bridson and cellular use words 0/1 for their two halfopen53 samples. The shared contract defines draw selections, rejection candidate addresses and Bridson iteration/attempt addresses. General integer rejection has a specified rule but no executable helper here; each consumer still requires its own address allocation and attempt budget.
 
-The Python stochastic helpers all inherit this candidate status. CLI uniform,
-gradient2d and fractal operations reject by default; `--allow-candidate-rng` opts
-in and labels results as candidate. Statistics also requires this flag:
+The JSONL uniform, gradient2d and fractal references use the specified mappings. Statistics remain finite diagnostics, and Box-Muller/Bridson transcendental calculations remain Measured. Specifying a random sequence does not establish correct rounding of those transforms or any production operator/backend execution.
 
 ```sh
-python3 -m oracle.ops.generation.run_oracles --statistics --allow-candidate-rng --report build/generation-oracle/statistics.json
+python3 -m oracle.ops.generation.run_oracles --statistics --report build/generation-oracle/statistics.json
 ```
 
-Do not use these addressed results as production goldens until packing and mappings
-are separately frozen. Philox core KATs do not depend on packing. Fixed Perlin 2002
-has its own permutation, no seed, and does not use Philox.
+Philox core KATs are independent of application packing. Fixed Perlin 2002 has its own permutation, no seed, and does not use Philox.
 
 ## Mathematical semantics
+
+Production schemas and random protocols are unchecked: only static structure is checked. Domain checks in Python helpers diagnose unsupported reference inputs; they are tooling guards, not runtime validation to copy into operators, publishers or consumers. Valid-input numerical fixtures remain the acceptance evidence. ObjectId pairing, counts, offsets, finite geometry and random-address ranges are production caller premises.
 
 Repeat/angle final rounding is not followed by nextDown/wrap. Cell point placement
 and rank midpoint mappings retain their separately specified endpoint rules.
 Generic meshes treat every component numerically, including a fourth component.
 Point max_count is a normal target; `with_status=True` returns count/candidate/active
-termination reasons. Independent iteration limits fail. Candidate helpers currently
-require max_count >= 1; the production zero-count boundary remains a unresolved schema detail.
+termination reasons. Independent iteration limits fail. A zero max_count returns an empty point list with count_reached before any random sample. The target Result schema represents that list with static capacity at least one and count=0; these list helpers do not implement Result publication.
 Width helpers retain source position rather than reapplying the profile to each
 fragment. They do not implement snapshot association or arbitrary curve remapping.
+
+The linear RGB/RGBA reference follows current CRV-06 caller premises. In particular, positive exact alpha rounding to zero requires every rounded RGB component to be zero. Valid transparent tuples canonicalize to +0. The JSONL evaluator rejects a probe outside that reference domain with a `ValueError` identifying the caller precondition; it does not define or test a production `AssociationUnderflow` failure.
 
 ## JSONL
 
@@ -97,3 +89,5 @@ The 1,566 combinations include Float32/64, negative coordinates, subnormals,
 huge finite values and deterministic random coordinates. The reference module
 can be imported without argument parsing or native execution. Implementation
 adapters are created temporarily for each operation change.
+
+Reference fixture diagnostics, including `publish_polygon_fixture`, are offline oracle tooling. They may reject malformed fixtures to make test errors visible; they do not impose producer publication validation or consumer scans on the unchecked production contracts. Ordinary exact-to-Float64 publication has no topology-certification gate.

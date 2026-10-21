@@ -2,6 +2,7 @@
 from fractions import Fraction as F
 import math
 import unittest
+from unittest.mock import patch
 from oracle.ops.generation.gen07.exact import bicubic_patch as e_bicubic_patch
 from oracle.ops.generation.gen07.exact import bilinear as e_bilinear
 from oracle.ops.generation.common.exact import float_bits as e_float_bits
@@ -46,14 +47,15 @@ class ContractRegressionTests(unittest.TestCase):
         self.assertEqual(e_float_bits(e_spread_rounded(-0.,'pad')),1<<63)
         self.assertEqual(e_float_bits(e_spread_rounded(-0.,'repeat')),0)
 
-    def test_color_copy_transparency_and_underflow(self):
+    def test_color_copy_transparency_and_reference_domain(self):
         def request(a,b,t,dtype='float64'):
             return {'id':'color','op':'linear_rgba_mix','args':{'a':a,'b':b,'t':t,'dtype':dtype}}
         got=protocol_evaluate(request([-0.,0,0,1],[1,1,1,1],0))
         self.assertEqual(got['result'][0]['bits'],'8000000000000000')
         got=protocol_evaluate(request([1,0,0,0],[0,0,1,1],0))
         self.assertTrue(all(int(v['bits'],16)==0 for v in got['result']))
-        with self.assertRaisesRegex(ArithmeticError,'AssociationUnderflow'):
+        # Oracle-domain rejection does not prescribe a CRV execution failure.
+        with self.assertRaisesRegex(ValueError,'CRV caller precondition'):
             protocol_evaluate(request([1,0,0,2**-150],[1,0,0,2**-150],.5,'float32'))
 
     def test_transparent_underflow_canonical_zero(self):
@@ -106,12 +108,15 @@ class ContractRegressionTests(unittest.TestCase):
         self.assertEqual(c[2] & m,100000);self.assertEqual((c[2]>>32)&65535,39)
         self.assertEqual(c[2]>>48,10)
 
-    def test_candidate_protocol_requires_opt_in(self):
-        q={'id':'candidate','op':'uniform','args':{'x':0,'y':0}}
-        with self.assertRaisesRegex(ValueError,'not frozen'):protocol_evaluate(q)
-        got=protocol_evaluate(q,allow_candidate_rng=True)
-        self.assertIn('Candidate_rng_layout_not_production_golden',got['quality'])
-        # The algorithm core KAT is independent of experimental address packing.
+    def test_uniform_protocol_finite_grid(self):
+        q={'id':'uniform','op':'uniform','args':{'x':0,'y':0}}
+        got=protocol_evaluate(q)
+        self.assertEqual(got['quality'],'Exact_finite_reference')
+        self.assertEqual(got['result']['dtype'],'float64')
+        # Nonnegative finite half-open sample, with IEEE ordering for positive bits.
+        self.assertLess(int(got['result']['bits'],16),0x3ff0000000000000)
+        with self.assertRaises(TypeError):
+            protocol_evaluate({'id':'invalid-draw','op':'uniform','args':{'x':0,'y':0,'draw':1}})
         core=protocol_evaluate({'id':'core','op':'philox','args':{'counter':[0]*4,'key':[0]*2}})
         self.assertEqual(core['quality'],'Exact_finite_reference')
 
@@ -129,6 +134,14 @@ class ContractRegressionTests(unittest.TestCase):
         self.assertEqual(a['stop_reason'],'count_reached')
         with self.assertRaises(ArithmeticError):
             rng_bridson_reference([0,0,1,1],F(1,10),max_count=2,max_iterations=0)
+
+    def test_zero_target_stops_before_random_sampling(self):
+        with patch('oracle.ops.generation.gen08.rng.block',side_effect=AssertionError('unexpected random sample')):
+            for result in (
+                rng_rejection_points([0,0,1,1],1,10,max_count=0,with_status=True),
+                rng_bridson_reference([0,0,1,1],1,max_count=0,max_iterations=0,with_status=True),
+            ):
+                self.assertEqual(result,{'points':[],'stop_reason':'count_reached'})
 
     def test_grain_hidden_color_and_zero_strength_copy(self):
         rgb,alpha=e_linear_grain([F(1,5),F(3,10),F(2,5)],-0.,1,F(1,10))

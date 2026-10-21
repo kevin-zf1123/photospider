@@ -16,7 +16,7 @@ Bundled 源码定义了未带后缀的有限域算术与 clamp、固定标量归
 
 每个逐元素输入恰含一个 tensor，schema 和 member key 必须结构有效。各输入的 Float32/Float64 dtype 和完整 `sample_shape()` 相同，rank 为 1..8，包含 batch axes。输出是 `photospider.tensor` v1 Result/member `samples`，保留 dtype，并将完整 shape 作为普通 axes。
 
-八个未带后缀的 numeric key 使用 unchecked 有限域语义。调用方保证操作数有限、结果可表示；除法要求除数非零。Clamp 的静态 Float64 `min`、`max` 必须有限且满足 `min <= max`，这些条件在 metadata specialization 中检查。所选结果必须能用目标 dtype 表示；未选端点可以超出 Float32 范围。运行时 kernel 不扫描样本，也不承诺对违反数值前提的输入返回错误。规划阶段检查每个所选 tile 的字节容量。大逻辑域可进行稀疏选择，无需物化或计数完整 payload。
+八个未带后缀的 numeric key 使用 unchecked 有限域语义。调用方保证操作数有限、结果可表示；除法要求除数非零。Clamp 的静态 Float64 `min`、`max` 必须有限且满足 `min <= max`，这些数值条件均为 unchecked 前提，metadata specialization 只检查参数存在性和 Float64 类型。所选结果必须能用目标 dtype 表示；未选端点可以超出 Float32 范围。运行时 kernel 不扫描样本，也不承诺对违反数值前提的输入返回错误。规划阶段检查每个所选 tile 的字节容量。大逻辑域可进行稀疏选择，无需物化或计数完整 payload。
 
 `math.add` 要求两个完整 `sample_shape()` 为 `[1]` 的 Float64 tensor 输入，产生 `photospider.tensor` v1 Result，其中 `samples` 成员的 shape 为 `[1]`。非空选择降低为一个 ABI 8 CPU task，具有两个固定 read 和一个预分配 write。Kernel 执行 IEEE Float64 addition，包括 NaN 和 infinity 传播。Preparation 检查完整的标量 invocation 签名。空选择不生成 task。
 
@@ -32,7 +32,7 @@ Bundled 源码定义了未带后缀的有限域算术与 clamp、固定标量归
 
 `numeric.sample_expression` 接受无 batch 的 Float64 系数向量，以及静态 start／正 step／count／expression。每个选中 Float32 输出 tile 读取完整系数向量，使用 4096 字节固定 scratch，并按全局 index 计算 FMA 坐标。有界 AST 在 preparation 解析一次；数值域及中间量／结果有限性由调用方保证。
 
-`lut.apply_1d` 按静态 origin／正 step 与 reject／clip 策略将 Float32 query 映射到无 batch 的 Float32 table。每个 task 读取所选 query 区域，并将完整 table 声明为数据相关地址的保守上界。输出保留 query cell shape 和 batch axes，scratch 为零。Index 转换和补偿插值精度 guard 仍检查。参见[表达式与 LUT 算子](Expression-and-LUT-Operations.zh.md)。
+`lut.apply_1d` 按静态 origin／正 step 与 reject／clip 策略将 Float32 query 映射到无 batch 的 Float32 table。每个 task 读取所选 query 区域，并将完整 table 声明为数据相关地址的保守上界。输出保留 query cell shape 和 batch axes，scratch 为零。Index 转换的数值域为 unchecked 前提；保留有界 cell correction 和补偿插值所需的精度判定。参见[表达式与 LUT 算子](Expression-and-LUT-Operations.zh.md)。
 
 ## 固定有序归约与 scan
 
@@ -51,7 +51,7 @@ Mean 将 Float32 sample 精确转换为 Float64，从正零开始按逻辑 row-m
 
 六个比较谓词、`is_close` 和 `select` 各有 strict、Apple Silicon 与 x86-64 profile key。每个请求输出 tile 生成一个 CPU task。Prepare 根据各端口自己的 dtype 和网格校验固定 reads。比较输出 UInt8；select 保留分支 dtype 和原始位模式。Empty 不发任务。
 
-普通比较支持 UInt8、Int64、Float32 和 Float64，不将整数转为浮点。IEEE 位分类直接处理 signed zero、Inf 和 NaN。`is_close` 接受 Float32/Float64，检查必需的有限非负静态 Float64 `atol`/`rtol`，在预分配 scratch 内进行精确整数阈值比较。Select 使用 UInt8 条件，0/1 为 unchecked 调用者前提；两个分支均为声明依赖。其循环使用有界栈状态，task scratch 为零。参见 [NUM-07 固定执行](../../built-in_ops/01-numeric/comparison-execution.md)。
+普通比较支持 UInt8、Int64、Float32 和 Float64，不将整数转为浮点。IEEE 位分类直接处理 signed zero、Inf 和 NaN。`is_close` 接受 Float32/Float64，检查必需静态参数 `atol`/`rtol` 的 Float64 类型，其有限非负数值域为 unchecked 前提，在预分配 scratch 内进行精确整数阈值比较。Select 使用 UInt8 条件，0/1 为 unchecked 调用者前提；两个分支均为声明依赖。其循环使用有界栈状态，task scratch 为零。参见 [NUM-07 固定执行](../../built-in_ops/01-numeric/comparison-execution.md)。
 
 ## 固定插值 profile
 
@@ -87,7 +87,7 @@ Clamp 支持 UInt8、Int64 和 Float32/64，保留选中值位模式并 quiet �
 
 ## 固定归约 profile
 
-带后缀的归约族注册 `numeric.reduce_sum`、`numeric.reduce_minimum`、`numeric.reduce_maximum`、`numeric.reduce_mean`、`numeric.reduce_count`、`numeric.reduce_variance` 和 `numeric.reduce_std`，每个 key 都有上述三种后缀。这些 key 使用固定 CPU task，要求以逗号分隔的 String `axes`，其中轴下标是唯一、canonical、非负整数；sum、mean、variance、standard deviation 还要求 String `dtype`（`uint8`、`int64`、`float32` 或 `float64`），并受输入与算子数值域限制；variance 和 standard deviation 要求 Int64 `ddof` 满足 `0 <= ddof < N`，其中 `N` 是被归约轴的 extent 乘积。被归约的轴输出长度为一，未归约轴保留原 extent。实现拒绝无效轴、不支持的 dtype 组合、超大输入以及非法自由度。这些 profile key 使用各自精确算术和输出转换，与上文未带后缀、采用固定有序 task 的 `numeric.mean`、`numeric.variance` 是不同注册项。
+带后缀的归约族注册 `numeric.reduce_sum`、`numeric.reduce_minimum`、`numeric.reduce_maximum`、`numeric.reduce_mean`、`numeric.reduce_count`、`numeric.reduce_variance` 和 `numeric.reduce_std`，每个 key 都有上述三种后缀。这些 key 使用固定 CPU task，要求以逗号分隔的 String `axes`，其中轴下标是唯一、canonical、非负整数；sum、mean、variance、standard deviation 还要求 String `dtype`（`uint8`、`int64`、`float32` 或 `float64`），并受输入与算子数值域限制；variance 和 standard deviation 要求 Int64 `ddof` 满足 `0 <= ddof < N`，其中 `N` 是被归约轴的 extent 乘积。被归约的轴输出长度为一，未归约轴保留原 extent。实现拒绝无效轴、不支持的 dtype 组合、超大输入 schema 以及错误的自由度参数类型；ddof 数值域为 unchecked 前提。这些 profile key 使用各自精确算术和输出转换，与上文未带后缀、采用固定有序 task 的 `numeric.mean`、`numeric.variance` 是不同注册项。
 
 每个选中输出 tile 声明覆盖其完整归约组的来源 tile，并使用私有的预分配 exact aggregate/moments scratch。逻辑 row-major 顺序决定 NaN 优先级，物理 tile 布局与完成顺序不改变该规则。整数最终结果可表示是 unchecked 调用者前提。Count 仅声明 schema 引用，将静态数量写入选定的 dense Int64 输出 tile，不需要来源 payload 或算术 scratch。Empty 不生成任务。参见[固定归约执行](../../built-in_ops/01-numeric/reductions-execution.md)。
 
@@ -101,13 +101,13 @@ Clamp 支持 UInt8、Int64 和 Float32/64，保留选中值位模式并 quiet �
 
 九个 `array.{reshape,transpose,slice}_<profile>` key 通过固定 CPU task 按位拷贝全部七种数值 dtype，每个选中输出 tile 独立 dense 分配。Reshape 映射全局 row-major ordinal，transpose 置换逻辑轴，slice 使用动态 Int64 starts/steps 和正整数静态 counts。旧 `layout` 参数及 `TransformLayout` 枚举已移除。输出 `values` 使用 `photospider.tensor`/`samples`，目标轴均为普通轴。
 
-Reshape 和 transpose 精确声明静态映射触及的输入 tile。Slice 声明任意合法控制可能访问的 tile 并集，每轴最多贡献两个区间。运行时先检查完整 slice 端点，再执行拷贝。全 singleton slice 不读取 steps payload；Empty 不生成 task。Prepare 校验完整 read/write slots。来源仿射 stride 可以为负数或零；运行时使用有界栈状态，无 payload scratch。参见[固定布局变换](../../built-in_ops/01-numeric/layouts-execution.md)。
+Reshape 和 transpose 精确声明静态映射触及的输入 tile。Slice 声明任意合法控制可能访问的 tile 并集，每轴最多贡献两个区间。运行时以加宽算术直接计算来源坐标，完整 slice 端点合法性为 unchecked 前提。全 singleton slice 不读取 steps payload；Empty 不生成 task。Prepare 校验完整 read/write slots。来源仿射 stride 可以为负数或零；运行时使用有界栈状态，无 payload scratch。参见[固定布局变换](../../built-in_ops/01-numeric/layouts-execution.md)。
 
 ## 固定索引 profile
 
-十八个 `array.{concatenate,gather,scatter_replace,scatter_sum,scatter_minimum,scatter_maximum}_<profile>` key 使用固定 CPU task，值类型为 UInt8/Int64/Float32/Float64。Concatenate 接受 2..256 个输入，移除布局策略，每个选中输出 tile 只声明相交的来源 slab。Gather/scatter 在共享任务中为每个调用验证一次完整动态 Int64 indices；scatter 还稳定排序 target/position 对。结果写入私有 dense Int64 `[M,2]` tile，由输出任务消费。
+十八个 `array.{concatenate,gather,scatter_replace,scatter_sum,scatter_minimum,scatter_maximum}_<profile>` key 使用固定 CPU task，值类型为 UInt8/Int64/Float32/Float64。Concatenate 接受 2..256 个输入，移除布局策略，每个选中输出 tile 只声明相交的来源 slab。Gather/scatter 在共享任务中为每个调用从完整动态 Int64 indices 构造 table，indices 合法性为 unchecked 前提；scatter 还稳定排序 target/position 对。结果写入私有 dense Int64 `[M,2]` tile，由输出任务消费。
 
-每个消费者声明对应非 axis 区域以及全部可能的 axis 位置；scatter 另读取其 base 输出区域。No-hit 和 Replace 保留原始位。Aggregate 按 base 优先、updates 原 position 顺序执行精确算术和最终转换；整数 sum 可表示性是 unchecked 调用者前提。读取来源前检查私有 normalized position 的边界。每个选中输出 tile 独立分配；Empty 不生成 task。排序使用 `16*M` 私有 payload 和 `16*M` task scratch，并受执行器逐 lane scratch 预留规则约束。参见[固定索引执行](../../built-in_ops/01-numeric/indexing-execution.md)。
+每个消费者声明对应非 axis 区域以及全部可能的 axis 位置；scatter 另读取其 base 输出区域。No-hit 和 Replace 保留原始位。Aggregate 按 base 优先、updates 原 position 顺序执行精确算术和最终转换；整数 sum 可表示性是 unchecked 调用者前提。读取来源时直接信任私有 normalized position 及其来源关联，不做边界检查。每个选中输出 tile 独立分配；Empty 不生成 task。排序使用 `16*M` 私有 payload 和 `16*M` task scratch，并受执行器逐 lane scratch 预留规则约束。参见[固定索引执行](../../built-in_ops/01-numeric/indexing-execution.md)。
 
 ## 固定 constant 与 broadcast profile
 
@@ -125,7 +125,7 @@ Reshape 和 transpose 精确声明静态映射触及的输入 tile。Slice 声�
 
 六个 `array.sort_<profile>` 和 `numeric.quantile_<profile>` key 接受 UInt8/Int64/Float32/Float64 source 和静态 axis。Sort 按非 axis 矩形合并所选 values／indices tiles，每个 task 对每条完整源轴线排序一次，仅分配所选输出 tiles。Quantile 对每条选中轴线生成一个值，精确计算二进制 rank 与插值后最终 RN。源 NaN、Inf 和 signed zero 遵循指定的排序／转换语义；sort 保留原始位模式。
 
-每个 task 按源 grid 声明完整轴线的 tile 支持。Quantile 在轴长大于 1 时读取标量 q，否则只记录 schema。活动 q 须有限且位于 `[0,1]`，常数时间 guard 保护地址与移位安全。scratch 包含两个 L-word 缓冲和固定比较／精确算术状态，在轴线之间复用。各 Run 独占 scratch，任务共享其 IR call 的发布结果。参见[固定排序执行](../../built-in_ops/01-numeric/ordering-execution.md)。
+每个 task 按源 grid 声明完整轴线的 tile 支持。Quantile 在轴长大于 1 时读取标量 q，否则只记录 schema。活动 q 须有限且位于 `[0,1]`，地址与移位运算直接使用这一 unchecked 前提，不设置 guard。scratch 包含两个 L-word 缓冲和固定比较／精确算术状态，在轴线之间复用。各 Run 独占 scratch，任务共享其 IR call 的发布结果。参见[固定排序执行](../../built-in_ops/01-numeric/ordering-execution.md)。
 
 ## 固定微积分 profile
 
@@ -159,7 +159,7 @@ L=1 直接转换所选 table 行，零 scratch；input/axis 保留静态 schema 
 
 ## 固定参数 Bezier profile
 
-三个 `curve.evaluate_bezier_<profile>` key 为每个所选输出 tile 执行一个固定 CPU task。Segment/t 读取对应 query 行；anchors/handles 读取所选列的全部候选段，并按各源 grid 闭包。段索引 guard 保护动态控制点地址。任务在各列间复用行分类，只写所选全局输出，各 invocation 独占固定 ExactPolynomial/ExactSampling scratch。
+三个 `curve.evaluate_bezier_<profile>` key 为每个所选输出 tile 执行一个固定 CPU task。Segment/t 读取对应 query 行；anchors/handles 读取所选列的全部候选段，并按各源 grid 闭包。动态段索引合法性为 unchecked 前提，不设置地址 guard。任务在各列间复用行分类，只写所选全局输出，各 invocation 独占固定 ExactPolynomial/ExactSampling scratch。
 
 t 有限且位于 [0,1]、消费的 controls 与 RN64 重建值有限、输出有限且可表示，均为 unchecked 调用方前提。端点选择与精确多项式舍入保持零符号。当前全部 profile 使用同一精确数值算法。参见 [CRV-03 固定执行](../../built-in_ops/01-numeric/op_specs/CRV-03_evaluate_bezier.md#fixed-execution-and-physical-demand)。
 
@@ -206,7 +206,7 @@ association 选项已移除。描述不附着于 Result，也不增加样本扫�
 
 15 个 `curve.lowpass_uniform_*` key 为每个所选输出 tile 生成一个 ABI 8 CPU task。静态非零 tap 与 reflect/replicate/zero/wrap 映射确定源区间，再按源自身的 tile 网格闭包。闭包附带的物理样本不成为数值操作数。输出将完整 shape/dtype 保留为普通轴，atomic trailing axes 为零，仅分配所选 tiles。每个 invocation 借用 affine 源 views，独占固定算术、样本及系数 scratch。Empty 不生成 task。
 
-NaN/Inf 样本保留规格规定的逻辑 tap 顺序聚合。Strict 对精确归一化总和舍入一次；accelerated 候选通过最终 FP32 界检查，否则执行 strict 算术。常量与对称捷径同样需要正 normalizer 证明。Checked 算术在数值重试之前直接返回取消和资源失败。参见 [uniform low-pass 契约](../../built-in_ops/01-numeric/op_specs/CRV-11_uniform_lowpass_contract.md)。
+NaN/Inf 样本保留规格规定的逻辑 tap 顺序聚合。Strict 对精确归一化总和舍入一次；accelerated 候选通过最终 FP32 界检查，否则执行 strict 算术。正 normalizer 为 unchecked 前提；区间细化用于计算除法和最终舍入，不增加单独的定义域校验。Checked 算术在数值重试之前直接返回取消和资源失败。参见 [uniform low-pass 契约](../../built-in_ops/01-numeric/op_specs/CRV-11_uniform_lowpass_contract.md)。
 
 ## 固定 nonuniform low-pass
 
@@ -218,7 +218,7 @@ NaN/Inf 样本保留规格规定的逻辑 tap 顺序聚合。Strict 对精确归
 
 15 个 `curve.bake_lut3d_{axis,grid,points,points_extra,color}` profile key 为每个所选输出 tile 生成一个固定 CPU task。Axis 复制所选单元。Grid 和 center task 读取六个端点，以固定 ExactSampling scratch 重建 RN64 knot；center 对实际相邻 knot 求平均。纯 extra tile 仅读取所选 extra 行，不读取 axis payload，scratch 为零。Color 同 dtype 复制原位，或按 RN 转换一次，scratch 为零。源读取按各自网格闭包；输出保留全局坐标，除 axis 外均有一个 atomic trailing component axis。Empty 不生成 task。
 
-有限一致的 axis、模型合法颜色、域内 extra 及有限可表示的转换结果是调用方前提。直接 invocation 借用有符号 stride／非对齐 views，独占 scratch，仅写入所选 dense tiles。Pack/Measure/Unpack/Gate 使用固定 CPU invocation。Pack/Unpack/Gate 将所选样本复制到独立 dense tile。非空 Measure 等待完整 owned table，读取全部验证点、reference 和 applied 颜色，并以固定精确整数 scratch 写出全部 13 个报告成员。报告和 table 投影保留全局测量闭包。即使后续 Gate 失败，退休 observer 仍可保留报告。报告 v4 从 invocation 关联数组取得实际 owned-table ObjectId。Gate 依次检查配置身份（`TypeMismatch`）、table 身份（`OperationFailed/InvalidAssociation`）及容差（`OperationFailed/InvalidDomain`，携带首次失败细节）。合法报告值属于调用方前提；SDK reader 对其独立校验。参见 [CRV-09](../../built-in_ops/01-numeric/op_specs/CRV-09_bake_lut3d.md#fixed-geometry-tasks)。
+有限一致的 axis、模型合法颜色、域内 extra 及有限可表示的转换结果是调用方前提。直接 invocation 借用有符号 stride／非对齐 views，独占 scratch，仅写入所选 dense tiles。Pack/Measure/Unpack/Gate 使用固定 CPU invocation。Pack/Unpack/Gate 将所选样本复制到独立 dense tile。非空 Measure 等待完整 owned table，读取全部验证点、reference 和 applied 颜色，并以固定精确整数 scratch 写出全部 13 个报告成员。报告和 table 投影保留全局测量闭包。即使后续 Gate 失败，退休 observer 仍可保留报告。报告 v4 从 invocation 关联数组取得实际 owned-table ObjectId。Gate 直接信任配置／table 关联与报告一致性，只读取 passed 和 first_failure_index；显式测量未通过时返回 OperationFailed/InvalidDomain。Gate 不需要算术 scratch。SDK reader 使用静态准备的 Lut3dBakeReportLayout 解码，不重查 schema、身份或 payload。参见 [CRV-09](../../built-in_ops/01-numeric/op_specs/CRV-09_bake_lut3d.md#fixed-geometry-tasks)。
 
 ## Backend 选择
 

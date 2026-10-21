@@ -343,7 +343,7 @@ OperationDefinition point_math_operation(const std::string& key, Kind kind,
   };
   operation.lower = [](const OperationLowering& query) {
     return fixed_tensor::lower_pointwise(
-        query, "point-math", "numeric-unchecked-v1", sizeof(Scratch));
+        query, "point-math", "numeric-unchecked-v2", sizeof(Scratch));
   };
   operation.prepare_kernel =
       [kind, profile, ports](
@@ -353,7 +353,7 @@ OperationDefinition point_math_operation(const std::string& key, Kind kind,
           const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
     using Answer = Result<ps_prepared_kernel_v8>;
     if (kernel.symbol != "point-math" ||
-        kernel.contract != "numeric-unchecked-v1" ||
+        kernel.contract != "numeric-unchecked-v2" ||
         !query.task_parameters.empty() ||
         query.scratch != std::array<std::uint64_t, 3>{sizeof(Scratch), 0, 0})
       return Answer(

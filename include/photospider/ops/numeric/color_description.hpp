@@ -49,8 +49,9 @@ PHOTOSPIDER_OPS_SDK_API Result<TensorDescription> color_tuple_description(
  * Requires exactly one complete canonical-order group, channel_axis=0, no
  * component/axis/encoding/sampling metadata and no unrelated channels. Global
  * and channel interpretation assertions must agree with the group. Native RGB
- * basis and transfer, reference white, role units and NCL coefficients are
- * checked exactly; preset basis fields are resolved in the returned group.
+ * basis/transfer field structure, reference-white presence, role units and
+ * coefficient-field structure are checked; numeric/geometric domains are
+ * unchecked caller premises. Preset basis fields are resolved in the group.
  * Only linear, sRGB and positive power-gamma transfer are admitted by these
  * numeric primitives. Absolute, configured, analytic-binding and premultiplied
  * descriptions are rejected. Alpha is independent and straight; individual
