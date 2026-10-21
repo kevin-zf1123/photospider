@@ -25,9 +25,48 @@ typedef enum ps_kernel_code_v8 {
   PS_KERNEL_INTERNAL_V8 = 10
 } ps_kernel_code_v8;
 
+/** @brief Stable optional failure details. NONE leaves code sufficient.
+ * Values are carried in uint32_t fields; the C enum layout is not part of ABI.
+ * Unknown codes or reasons produce INTERNAL with MALFORMED_ENVELOPE.
+ * Operation-specific details belong in the opaque domain_code field.
+ */
+typedef enum ps_kernel_reason_v8 {
+  PS_KERNEL_REASON_NONE_V8 = 0,
+  PS_KERNEL_REASON_ARITHMETIC_OVERFLOW_V8 = 1,
+  PS_KERNEL_REASON_INVALID_DOMAIN_V8 = 2,
+  PS_KERNEL_REASON_MALFORMED_ENVELOPE_V8 = 3,
+  PS_KERNEL_REASON_UNAUTHORIZED_READ_V8 = 4,
+  PS_KERNEL_REASON_STALE_HANDLE_V8 = 5,
+  PS_KERNEL_REASON_HOST_EXCEPTION_V8 = 6,
+  PS_KERNEL_REASON_SHORT_IO_V8 = 7,
+  PS_KERNEL_REASON_WORK_LIMIT_V8 = 8,
+  PS_KERNEL_REASON_CAPACITY_LIMIT_V8 = 9,
+  PS_KERNEL_REASON_STAGE_LIMIT_V8 = 10,
+  PS_KERNEL_REASON_CANCELLED_V8 = 11,
+  PS_KERNEL_REASON_STALE_VERSION_V8 = 12,
+  PS_KERNEL_REASON_VIEW_UNAVAILABLE_V8 = 13
+} ps_kernel_reason_v8;
+
+/** @brief Stable tensor element codes, carried in uint32_t fields.
+ * Integer names specify signedness and bit width; FLOAT32/FLOAT64 are IEEE-754
+ * binary32/binary64. Zero is only a wildcard in a port predicate. Other codes
+ * are rejected. Existing values retain their meanings within ABI 8.
+ */
+typedef enum ps_element_type_v8 {
+  PS_ELEMENT_UINT8_V8 = 1,
+  PS_ELEMENT_INT64_V8 = 2,
+  PS_ELEMENT_FLOAT64_V8 = 3,
+  PS_ELEMENT_FLOAT32_V8 = 4,
+  PS_ELEMENT_INT8_V8 = 5,
+  PS_ELEMENT_UINT16_V8 = 6,
+  PS_ELEMENT_INT16_V8 = 7
+} ps_element_type_v8;
+
 /** @brief Fixed-size terminal record, copied into reserved completion storage.
  * message is UTF-8 with a terminating NUL; truncation is permitted. reason and
- * domain_code are optional machine-readable details. No field owns memory.
+ * domain_code are optional machine-readable details. code uses
+ * ps_kernel_code_v8 and reason uses ps_kernel_reason_v8; zero initializes both
+ * to success/NONE. domain_code is opaque to the host. No field owns memory.
  */
 typedef struct ps_kernel_status_v8 {
   uint32_t code, reason;
@@ -40,7 +79,7 @@ typedef struct ps_kernel_status_v8 {
 #define PS_KERNEL_DOMAIN_SHARED_V8 2U
 
 /** @brief Prepared affine layout, borrowed through terminal completion.
- * rank is 1..8; element_type uses the public Tensor element codes 1..7.
+ * rank is 1..8; element_type uses ps_element_type_v8.
  * shape/origin are logical coordinates and strides are signed bytes. Unused
  * axes are zero. The host checks every reachable address before submission.
  */

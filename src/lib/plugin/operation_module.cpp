@@ -21,6 +21,45 @@
 
 namespace ps::plugin_internal {
 namespace {
+// Module records carry these values without changing their numeric encoding.
+static_assert(
+    static_cast<std::uint32_t>(ResultPublicationPolicy::CompleteBundle) ==
+    PS_SCHEMA_COMPLETE_BUNDLE_V8);
+static_assert(
+    static_cast<std::uint32_t>(ResultPublicationPolicy::IndependentChunks) ==
+    PS_SCHEMA_INDEPENDENT_CHUNKS_V8);
+static_assert(
+    static_cast<std::uint32_t>(ResultPublicationPolicy::StablePrefix) ==
+    PS_SCHEMA_STABLE_PREFIX_V8);
+static_assert(static_cast<std::uint32_t>(OperationParameterType::Int64) ==
+              PS_PARAMETER_INT64_V8);
+static_assert(static_cast<std::uint32_t>(OperationParameterType::Float64) ==
+              PS_PARAMETER_FLOAT64_V8);
+static_assert(static_cast<std::uint32_t>(OperationParameterType::Bool) ==
+              PS_PARAMETER_BOOL_V8);
+static_assert(static_cast<std::uint32_t>(OperationParameterType::String) ==
+              PS_PARAMETER_STRING_V8);
+static_assert(static_cast<std::uint32_t>(physical::Backend::Cpu) ==
+              PS_BACKEND_CPU_V8);
+static_assert(static_cast<std::uint32_t>(physical::Backend::Gpu) ==
+              PS_BACKEND_GPU_V8);
+
+static_assert(PS_ELEMENT_MASK_UINT8_V8 ==
+              (UINT32_C(1) << (PS_ELEMENT_UINT8_V8 - 1)));
+static_assert(PS_ELEMENT_MASK_INT64_V8 ==
+              (UINT32_C(1) << (PS_ELEMENT_INT64_V8 - 1)));
+static_assert(PS_ELEMENT_MASK_FLOAT64_V8 ==
+              (UINT32_C(1) << (PS_ELEMENT_FLOAT64_V8 - 1)));
+static_assert(PS_ELEMENT_MASK_FLOAT32_V8 ==
+              (UINT32_C(1) << (PS_ELEMENT_FLOAT32_V8 - 1)));
+static_assert(PS_ELEMENT_MASK_INT8_V8 ==
+              (UINT32_C(1) << (PS_ELEMENT_INT8_V8 - 1)));
+static_assert(PS_ELEMENT_MASK_UINT16_V8 ==
+              (UINT32_C(1) << (PS_ELEMENT_UINT16_V8 - 1)));
+static_assert(PS_ELEMENT_MASK_INT16_V8 ==
+              (UINT32_C(1) << (PS_ELEMENT_INT16_V8 - 1)));
+static_assert(PS_ELEMENT_MASK_ALL_V8 == UINT32_C(127));
+
 struct Failure {
   Status status;
 };
@@ -632,7 +671,7 @@ Result<std::vector<OperationDefinition>> import_operation_module(
                   array(op.inputs, op.input_count, 1024) &&
                   array(op.outputs, op.output_count, 64) && op.output_count &&
                   array(op.parameters, op.parameter_count, 128) &&
-                  op.repeated_match <= 1,
+                  op.repeated_match <= PS_REPEATED_MATCH_DTYPE_SHAPE_V8,
               "invalid operation declaration");
       require(op.repeated_maximum
                   ? (pointer(op.repeated_input) && op.repeated_minimum &&

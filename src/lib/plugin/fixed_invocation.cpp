@@ -12,6 +12,77 @@
 #include "core/resource_observation.hpp"
 
 namespace ps {
+// Direct enum conversions below require identical public C and C++ codes.
+static_assert(static_cast<std::uint32_t>(ErrorCode::Ok) == PS_KERNEL_OK_V8);
+static_assert(static_cast<std::uint32_t>(ErrorCode::InvalidArgument) ==
+              PS_KERNEL_INVALID_ARGUMENT_V8);
+static_assert(static_cast<std::uint32_t>(ErrorCode::NotFound) ==
+              PS_KERNEL_NOT_FOUND_V8);
+static_assert(static_cast<std::uint32_t>(ErrorCode::Cycle) ==
+              PS_KERNEL_CYCLE_V8);
+static_assert(static_cast<std::uint32_t>(ErrorCode::TypeMismatch) ==
+              PS_KERNEL_TYPE_MISMATCH_V8);
+static_assert(static_cast<std::uint32_t>(ErrorCode::ResourceExhausted) ==
+              PS_KERNEL_RESOURCE_EXHAUSTED_V8);
+static_assert(static_cast<std::uint32_t>(ErrorCode::Cancelled) ==
+              PS_KERNEL_CANCELLED_V8);
+static_assert(static_cast<std::uint32_t>(ErrorCode::Stale) ==
+              PS_KERNEL_STALE_V8);
+static_assert(static_cast<std::uint32_t>(ErrorCode::BackendUnavailable) ==
+              PS_KERNEL_BACKEND_UNAVAILABLE_V8);
+static_assert(static_cast<std::uint32_t>(ErrorCode::OperationFailed) ==
+              PS_KERNEL_OPERATION_FAILED_V8);
+static_assert(static_cast<std::uint32_t>(ErrorCode::Internal) ==
+              PS_KERNEL_INTERNAL_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::None) ==
+              PS_KERNEL_REASON_NONE_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::ArithmeticOverflow) ==
+              PS_KERNEL_REASON_ARITHMETIC_OVERFLOW_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::InvalidDomain) ==
+              PS_KERNEL_REASON_INVALID_DOMAIN_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::MalformedEnvelope) ==
+              PS_KERNEL_REASON_MALFORMED_ENVELOPE_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::UnauthorizedRead) ==
+              PS_KERNEL_REASON_UNAUTHORIZED_READ_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::StaleHandle) ==
+              PS_KERNEL_REASON_STALE_HANDLE_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::HostException) ==
+              PS_KERNEL_REASON_HOST_EXCEPTION_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::ShortIo) ==
+              PS_KERNEL_REASON_SHORT_IO_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::WorkLimit) ==
+              PS_KERNEL_REASON_WORK_LIMIT_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::CapacityLimit) ==
+              PS_KERNEL_REASON_CAPACITY_LIMIT_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::StageLimit) ==
+              PS_KERNEL_REASON_STAGE_LIMIT_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::Cancelled) ==
+              PS_KERNEL_REASON_CANCELLED_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::StaleVersion) ==
+              PS_KERNEL_REASON_STALE_VERSION_V8);
+static_assert(static_cast<std::uint32_t>(FailureReason::ViewUnavailable) ==
+              PS_KERNEL_REASON_VIEW_UNAVAILABLE_V8);
+static_assert(static_cast<std::uint32_t>(ElementType::UInt8) ==
+              PS_ELEMENT_UINT8_V8);
+static_assert(static_cast<std::uint32_t>(ElementType::Int64) ==
+              PS_ELEMENT_INT64_V8);
+static_assert(static_cast<std::uint32_t>(ElementType::Float64) ==
+              PS_ELEMENT_FLOAT64_V8);
+static_assert(static_cast<std::uint32_t>(ElementType::Float32) ==
+              PS_ELEMENT_FLOAT32_V8);
+static_assert(static_cast<std::uint32_t>(ElementType::Int8) ==
+              PS_ELEMENT_INT8_V8);
+static_assert(static_cast<std::uint32_t>(ElementType::UInt16) ==
+              PS_ELEMENT_UINT16_V8);
+static_assert(static_cast<std::uint32_t>(ElementType::Int16) ==
+              PS_ELEMENT_INT16_V8);
+static_assert(static_cast<std::uint32_t>(physical::Domain::Host) ==
+              PS_KERNEL_DOMAIN_HOST_V8);
+static_assert(static_cast<std::uint32_t>(physical::Domain::Device) ==
+              PS_KERNEL_DOMAIN_DEVICE_V8);
+static_assert(static_cast<std::uint32_t>(physical::Domain::Shared) ==
+              PS_KERNEL_DOMAIN_SHARED_V8);
+
 ps_kernel_status_v8 kernel_failure(ErrorCode code, const char* message,
                                    FailureReason reason) noexcept {
   ps_kernel_status_v8 result{};
@@ -28,7 +99,7 @@ ps_kernel_status_v8 kernel_failure(ErrorCode code, const char* message,
 void assign_kernel_status(Status* target, const ps_kernel_status_v8& status) {
   target->detail = {};
   if (status.code > PS_KERNEL_INTERNAL_V8 ||
-      status.reason > static_cast<unsigned>(FailureReason::ViewUnavailable) ||
+      status.reason > PS_KERNEL_REASON_VIEW_UNAVAILABLE_V8 ||
       !std::memchr(status.message, 0, sizeof(status.message))) {
     target->code = ErrorCode::Internal;
     target->reason = FailureReason::MalformedEnvelope;

@@ -33,6 +33,24 @@ The module table contains its exact `struct_size`, `abi_version = 8`, 1..1024 op
 
 C strings carry explicit byte lengths. Empty strings use `{NULL, 0}`. Keys are strict UTF-8; parameter string values are arbitrary bytes. Operation keys allow 1024 bytes; other declaration keys, kernel symbols, contracts and placement strings allow 128 bytes. Arrays use naturally aligned nonnull pointers exactly when their count is nonzero. Records with `struct_size` require an exact size match.
 
+The compatibility policy retains exact-size validation. Each ABI version fixes its record layouts, function signatures, numeric encodings and field semantics, including ownership and threading rules. Changes to those contracts require a new version of the affected ABI. New names for existing numeric values leave the binary contract unchanged. The host accepts the versions documented here; structures have no prefix or trailing-field negotiation.
+
+The standalone C headers define the complete numeric vocabulary. Enum constants name values carried in fixed-width integer fields; the ABI does not embed C enum objects. `ps_element_type_v8` defines these codes:
+
+| Constant | Code | `element_type_mask` bit |
+| --- | --- | --- |
+| `PS_ELEMENT_UINT8_V8` | 1 | `PS_ELEMENT_MASK_UINT8_V8 = 0x01` |
+| `PS_ELEMENT_INT64_V8` | 2 | `PS_ELEMENT_MASK_INT64_V8 = 0x02` |
+| `PS_ELEMENT_FLOAT64_V8` | 3 | `PS_ELEMENT_MASK_FLOAT64_V8 = 0x04` |
+| `PS_ELEMENT_FLOAT32_V8` | 4 | `PS_ELEMENT_MASK_FLOAT32_V8 = 0x08` |
+| `PS_ELEMENT_INT8_V8` | 5 | `PS_ELEMENT_MASK_INT8_V8 = 0x10` |
+| `PS_ELEMENT_UINT16_V8` | 6 | `PS_ELEMENT_MASK_UINT16_V8 = 0x20` |
+| `PS_ELEMENT_INT16_V8` | 7 | `PS_ELEMENT_MASK_INT16_V8 = 0x40` |
+
+A port selects one nonzero element code or a bitwise OR of `PS_ELEMENT_MASK_*_V8` constants. Both fields zero add no dtype restriction; setting both nonzero is invalid. Each mask bit is `1u << (code - 1)`; `PS_ELEMENT_MASK_ALL_V8` is `0x7f`, and other bits are rejected. Zero is a port wildcard, not a tensor element type.
+
+Schema scopes use `PS_SCHEMA_COMPLETE_BUNDLE_V8 = 1`, `PS_SCHEMA_INDEPENDENT_CHUNKS_V8 = 2` or `PS_SCHEMA_STABLE_PREFIX_V8 = 3`. These values describe schema publication metadata; fixed execution still completes whole tasks and publishes Results at call retirement or RET. Repeated inputs use `PS_REPEATED_MATCH_DTYPE_SHAPE_V8 = 1` to require the selected tensor members to share dtype and full logical shape, including batch axes. `PS_REPEATED_MATCH_NONE_V8 = 0` permits differences and requires a static prepare callback for an active group. Disabled groups have a null template and zero bounds/match code. Boolean fields use 0 and 1.
+
 An operation has at most 1024 inputs, 64 outputs and 128 parameter declarations. Repeated inputs add one trailing homogeneous contract after the fixed input prefix, with explicit minimum/maximum bounds. `input_count = UINT32_MAX` and a null projection pointer select all original inputs; zero selects no payload inputs. Static preparation can narrow the registered projection. Schema-only dependence is declared separately during lowering.
 
 `load_plugin(path)` accepts an explicit path of 1..4096 bytes with no embedded NUL. Missing ABI 8 entry points fail `TypeMismatch`. A null, misaligned, wrong-size or wrong-version module table fails `InvalidArgument`. The loader checks the module header before attaching its destroy hook and reading nested records. It validates every declaration in a private candidate registry, then publishes all operations atomically. Malformed declarations, duplicate keys or a concurrent freeze leave the registry unchanged.
@@ -84,7 +102,7 @@ The module validates its invocation signature here and returns an immutable prep
 
 CPU invocation borrows inputs, exclusive outputs, scratch, task parameters and a cancellation query until synchronous return. Success means every declared output sample has been initialized and all accesses have ended. The host restores the callback's floating-point environment. Kernels are reentrant; mutable state belongs to the invocation's scratch or output allocations.
 
-`ps_kernel_status_v8` carries an operational code, reason, optional domain code and a bounded NUL-terminated message. Status values come from `fixed_invocation_api.h`; for example, `NotFound = 2` and `Cancelled = 6`. Unknown codes/reasons or unterminated messages become `Internal`. Runtime sample validation is outside this protocol.
+`ps_kernel_status_v8` carries an operational code, reason, optional domain code and a bounded NUL-terminated message. Status values come from `fixed_invocation_api.h`: `ps_kernel_code_v8` defines categories (`PS_KERNEL_NOT_FOUND_V8 = 2`, `PS_KERNEL_CANCELLED_V8 = 6`), and `ps_kernel_reason_v8` defines reasons from `PS_KERNEL_REASON_NONE_V8 = 0` through `PS_KERNEL_REASON_VIEW_UNAVAILABLE_V8 = 13`. The host preserves `domain_code` as an opaque operation-owned value. Unknown codes/reasons or unterminated messages become `Internal`. Runtime sample validation is outside this protocol.
 
 The executor also links asynchronous GPU entry points over Host, Shared or Device storage and arms a completion slot before submission. Acceptance retains invocation views and scratch through the matching terminal callback; rejection transfers no borrowing. Inline completion is valid. Context-wide GPU credits return only after completion or local rejection settlement. Native Shared buffers are allocated before block issue and may be accessed by CPU kernels or explicit COPY tasks. Native preparation links Metal MSL or Vulkan SPIR-V kernels over Shared and Device storage. Device allocations expose opaque identities and remain unmapped; completed outputs retain their owners through Result publication. The executor prepares COPY tasks internally, without calling an operation kernel callback.
 

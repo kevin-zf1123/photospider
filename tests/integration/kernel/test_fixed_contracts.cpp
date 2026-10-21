@@ -135,6 +135,54 @@ int parameters(const std::shared_ptr<OperationRegistry>& registry) {
   }
   return 0;
 }
+int vocabulary(const std::shared_ptr<OperationRegistry>& registry) {
+  auto prepared = registry->prepare_operation("contract.vocabulary", {}, {});
+  PS_REQUIRE_OK(prepared);
+  const auto& schema = *prepared.value()->traits().outputs[0].result_schema;
+  const ElementType types[] = {ElementType::UInt8,   ElementType::Int64,
+                               ElementType::Float64, ElementType::Float32,
+                               ElementType::Int8,    ElementType::UInt16,
+                               ElementType::Int16};
+  PS_CHECK(schema.tensors.size() == 7);
+  for (unsigned i = 0; i < 7; ++i)
+    PS_CHECK(schema.tensors[i].descriptor.element_type == types[i]);
+  PS_CHECK(schema.publication_scopes.size() == 3);
+  PS_CHECK(schema.publication_scopes[0].policy ==
+           ResultPublicationPolicy::CompleteBundle);
+  PS_CHECK(schema.publication_scopes[1].policy ==
+           ResultPublicationPolicy::IndependentChunks);
+  PS_CHECK(schema.publication_scopes[2].policy ==
+           ResultPublicationPolicy::StablePrefix);
+  const FailureReason reasons[] = {FailureReason::None,
+                                   FailureReason::ArithmeticOverflow,
+                                   FailureReason::InvalidDomain,
+                                   FailureReason::MalformedEnvelope,
+                                   FailureReason::UnauthorizedRead,
+                                   FailureReason::StaleHandle,
+                                   FailureReason::HostException,
+                                   FailureReason::ShortIo,
+                                   FailureReason::WorkLimit,
+                                   FailureReason::CapacityLimit,
+                                   FailureReason::StageLimit,
+                                   FailureReason::Cancelled,
+                                   FailureReason::StaleVersion,
+                                   FailureReason::ViewUnavailable};
+  for (std::int64_t i = 0; i < 14; ++i) {
+    auto failed =
+        registry->prepare_operation("contract.vocabulary", {}, {{"reason", i}});
+    PS_CHECK(!failed.ok());
+    PS_CHECK(failed.status().code == ErrorCode::OperationFailed);
+    PS_CHECK(failed.status().reason == reasons[i]);
+    PS_CHECK(failed.status().detail.domain_code ==
+             UINT64_C(0xfedcba9876543210));
+  }
+  auto unknown = registry->prepare_operation("contract.vocabulary", {},
+                                             {{"reason", INT64_C(14)}});
+  PS_CHECK(!unknown.ok());
+  PS_CHECK(unknown.status().code == ErrorCode::Internal);
+  PS_CHECK(unknown.status().reason == FailureReason::MalformedEnvelope);
+  return 0;
+}
 int sparse(const std::shared_ptr<OperationRegistry>& registry) {
   constexpr std::uint64_t extent = UINT64_C(1) << 61;
   ResourceBudget root;
@@ -211,5 +259,6 @@ int main() {
   PS_CHECK(members(registry) == 0);
   PS_CHECK(parameters(registry) == 0);
   PS_CHECK(sparse(registry) == 0);
+  PS_CHECK(vocabulary(registry) == 0);
   return 0;
 }

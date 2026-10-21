@@ -25,12 +25,14 @@ static const ps_parameter_spec_v8 parameters[] = {
      .key = STR("dtype"),
      .type = PS_PARAMETER_STRING_V8,
      .required = 1}};
-static ps_port_contract_v8 input = {.struct_size = sizeof(input),
-                                    .rank = 1,
-                                    .element_type_mask = 12};
+static ps_port_contract_v8 input = {
+    .struct_size = sizeof(input),
+    .rank = 1,
+    .element_type_mask =
+        PS_ELEMENT_MASK_FLOAT32_V8 | PS_ELEMENT_MASK_FLOAT64_V8};
 static ps_tensor_spec_v8 tensor = {.struct_size = sizeof(tensor),
                                    .key = STR("samples"),
-                                   .element_type = 4,
+                                   .element_type = PS_ELEMENT_FLOAT32_V8,
                                    .rank = 1,
                                    .shape = {1},
                                    .channel_axis = UINT32_MAX};
@@ -46,7 +48,8 @@ static ps_operation_output_v8 output = {
                  .schema_id = STR("fixture.contract"),
                  .schema_version = 1,
                  .rank = 1,
-                 .element_type_mask = 12},
+                 .element_type_mask =
+                     PS_ELEMENT_MASK_FLOAT32_V8 | PS_ELEMENT_MASK_FLOAT64_V8},
     .prototype = &schema,
     .input_count = UINT32_MAX};
 static ps_kernel_status_v8 prepare(void* user, const ps_static_query_v8* query,
@@ -66,9 +69,9 @@ static ps_kernel_status_v8 prepare(void* user, const ps_static_query_v8* query,
   ps_schema_v8 selected = schema;
   ps_tensor_spec_v8 member = tensor;
   if (dtype.size == 7 && !memcmp(dtype.data, "float32", 7))
-    member.element_type = 4;
+    member.element_type = PS_ELEMENT_FLOAT32_V8;
   else if (dtype.size == 7 && !memcmp(dtype.data, "float64", 7))
-    member.element_type = 3;
+    member.element_type = PS_ELEMENT_FLOAT64_V8;
   else
     return status(PS_KERNEL_INVALID_ARGUMENT_V8);
   member.shape[0] = query->input_count;
@@ -125,14 +128,14 @@ static void invoke(const ps_kernel_invocation_v8* query,
         (const unsigned char*)query->inputs[i].allocation +
         query->inputs[i].byte_offset;
     double value;
-    if (state->input_type[i] == 4) {
+    if (state->input_type[i] == PS_ELEMENT_FLOAT32_V8) {
       float sample;
       memcpy(&sample, input, 4);
       value = sample;
     } else {
       memcpy(&value, input, 8);
     }
-    if (state->output_type == 4) {
+    if (state->output_type == PS_ELEMENT_FLOAT32_V8) {
       const float converted = (float)value;
       memcpy(output + i * 4, &converted, 4);
     } else {
@@ -155,10 +158,11 @@ static ps_kernel_status_v8 prepare_kernel(void* user,
     return status(PS_KERNEL_INVALID_ARGUMENT_V8);
   const ps_kernel_view_spec_v8* out = &query->writes[0];
   const uint32_t type = out->layout.element_type;
-  const uint32_t width = type == 4 ? 4 : 8;
-  if ((type != 3 && type != 4) || out->port || out->member ||
-      out->domain != PS_KERNEL_DOMAIN_HOST_V8 || out->byte_offset ||
-      out->layout.rank != 1 || out->layout.shape[0] != query->read_count ||
+  const uint32_t width = type == PS_ELEMENT_FLOAT32_V8 ? 4 : 8;
+  if ((type != PS_ELEMENT_FLOAT64_V8 && type != PS_ELEMENT_FLOAT32_V8) ||
+      out->port || out->member || out->domain != PS_KERNEL_DOMAIN_HOST_V8 ||
+      out->byte_offset || out->layout.rank != 1 ||
+      out->layout.shape[0] != query->read_count ||
       out->layout.strides[0] != width ||
       out->bytes != query->read_count * width ||
       out->layout.origin[0] > query->facts.input_count ||
@@ -168,8 +172,9 @@ static ps_kernel_status_v8 prepare_kernel(void* user,
   for (uint32_t i = 0; i < query->read_count; ++i) {
     const ps_kernel_view_spec_v8* in = &query->reads[i];
     const uint32_t in_type = in->layout.element_type;
-    const uint32_t in_width = in_type == 4 ? 4 : 8;
-    if ((in_type != 3 && in_type != 4) ||
+    const uint32_t in_width = in_type == PS_ELEMENT_FLOAT32_V8 ? 4 : 8;
+    if ((in_type != PS_ELEMENT_FLOAT64_V8 &&
+         in_type != PS_ELEMENT_FLOAT32_V8) ||
         in->port != out->layout.origin[0] + i || in->member || in->tile_index ||
         in->domain != PS_KERNEL_DOMAIN_HOST_V8 || in->byte_offset ||
         in->layout.rank != 1 || in->layout.origin[0] || !in->layout.shape[0] ||
@@ -183,37 +188,39 @@ static ps_kernel_status_v8 prepare_kernel(void* user,
   if (!owned)
     return status(PS_KERNEL_RESOURCE_EXHAUSTED_V8);
   *owned = state;
-  *kernel = (ps_prepared_kernel_v8){.struct_size = sizeof(*kernel),
-                                    .abi_version = 8,
-                                    .context = owned,
-                                    .release = release,
-                                    .invoke_cpu = invoke};
+  *kernel =
+      (ps_prepared_kernel_v8){.struct_size = sizeof(*kernel),
+                              .abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8,
+                              .context = owned,
+                              .release = release,
+                              .invoke_cpu = invoke};  // NOLINT(readability/braces)
   return status(PS_KERNEL_OK_V8);
 }
-static ps_operation_v8 operation = {.struct_size = sizeof(operation),
-                                    .key = STR("fixture.contract"),
-                                    .flags = PS_OPERATION_CPU_V8 |
-                                             PS_OPERATION_DETERMINISTIC_V8 |
-                                             PS_OPERATION_PURE_V8,
-                                    .outputs = &output,
-                                    .output_count = 1,
-                                    .parameters = parameters,
-                                    .parameter_count = 1,
-                                    .prepare = prepare,
-                                    .lower = lower,
-                                    .prepare_kernel = prepare_kernel,
-                                    .repeated_input = &input,
-                                    .repeated_minimum = 1,
-                                    .repeated_maximum = 4,
-                                    .repeated_match = 1};
+static ps_operation_v8 operation = {
+    .struct_size = sizeof(operation),
+    .key = STR("fixture.contract"),
+    .flags = PS_OPERATION_CPU_V8 | PS_OPERATION_DETERMINISTIC_V8 |
+             PS_OPERATION_PURE_V8,
+    .outputs = &output,
+    .output_count = 1,
+    .parameters = parameters,
+    .parameter_count = 1,
+    .prepare = prepare,
+    .lower = lower,
+    .prepare_kernel = prepare_kernel,
+    .repeated_input = &input,
+    .repeated_minimum = 1,
+    .repeated_maximum = 4,
+    .repeated_match = PS_REPEATED_MATCH_DTYPE_SHAPE_V8};
 static void destroy(void* context) {
   (void)context;
 }
-static const ps_operation_module_v8 api = {.struct_size = sizeof(api),
-                                           .abi_version = 8,
-                                           .operations = &operation,
-                                           .operation_count = 1,
-                                           .destroy = destroy};
+static const ps_operation_module_v8 api = {
+    .struct_size = sizeof(api),
+    .abi_version = PS_OPERATION_MODULE_ABI_VERSION_8,
+    .operations = &operation,
+    .operation_count = 1,
+    .destroy = destroy};
 PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
 ps_operation_module_get_api_v8(void) {
 #if PS_BAD_CONTRACT_CASE == 1
@@ -229,7 +236,7 @@ ps_operation_module_get_api_v8(void) {
 #elif PS_BAD_CONTRACT_CASE == 8
   input.element_type_mask = UINT32_C(1) << 7;
 #elif PS_BAD_CONTRACT_CASE == 9
-  input.element_type = 3;
+  input.element_type = PS_ELEMENT_FLOAT64_V8;
 #elif PS_BAD_CONTRACT_CASE == 10
   output.prototype = NULL;
 #elif PS_BAD_CONTRACT_CASE == 11
@@ -237,7 +244,7 @@ ps_operation_module_get_api_v8(void) {
 #elif PS_BAD_CONTRACT_CASE == 12
   output.input_count = 1;
 #elif PS_BAD_CONTRACT_CASE == 13
-  operation.repeated_match = 0;
+  operation.repeated_match = PS_REPEATED_MATCH_NONE_V8;
   operation.prepare = NULL;
 #endif
   return &api;

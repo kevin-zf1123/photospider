@@ -30,12 +30,42 @@ extern "C" {
 #define PS_PARAMETER_BOOL_V8 3U
 #define PS_PARAMETER_STRING_V8 4U
 
+/** @brief Port dtype sets. Combine named bits with bitwise OR.
+ * Each bit is 1u << (ps_element_type_v8 code - 1). Zero adds no dtype
+ * constraint. Bits outside PS_ELEMENT_MASK_ALL_V8 are invalid.
+ */
+#define PS_ELEMENT_MASK_UINT8_V8 UINT32_C(0x01)
+#define PS_ELEMENT_MASK_INT64_V8 UINT32_C(0x02)
+#define PS_ELEMENT_MASK_FLOAT64_V8 UINT32_C(0x04)
+#define PS_ELEMENT_MASK_FLOAT32_V8 UINT32_C(0x08)
+#define PS_ELEMENT_MASK_INT8_V8 UINT32_C(0x10)
+#define PS_ELEMENT_MASK_UINT16_V8 UINT32_C(0x20)
+#define PS_ELEMENT_MASK_INT16_V8 UINT32_C(0x40)
+#define PS_ELEMENT_MASK_ALL_V8 UINT32_C(0x7f)
+
+/** @brief Stable schema publication metadata, carried in uint32_t fields.
+ * COMPLETE_BUNDLE groups full member coverage; INDEPENDENT_CHUNKS describes
+ * independent complete tiles; STABLE_PREFIX describes a single member's tiles
+ * in local index order. Fixed execution completes whole tasks and publishes
+ * Results at call retirement or RET, irrespective of this schema metadata.
+ */
+typedef enum ps_schema_policy_v8 {
+  PS_SCHEMA_COMPLETE_BUNDLE_V8 = 1,
+  PS_SCHEMA_INDEPENDENT_CHUNKS_V8 = 2,
+  PS_SCHEMA_STABLE_PREFIX_V8 = 3
+} ps_schema_policy_v8;
+
+#define PS_REPEATED_MATCH_NONE_V8 0U
+#define PS_REPEATED_MATCH_DTYPE_SHAPE_V8 1U
+
 /** @brief Borrowed byte string. Empty strings use {NULL,0}. Keys are UTF-8;
  * parameter values are arbitrary bytes. No terminating NUL is required.
  * Query records, strings and nested metadata/view arrays expire at callback
  * return. Kernel preparation may retain its static_state pointer and immutable
  * resource data: the host keeps their owners through kernel release.
  * All struct_size fields require the exact sizeof of their named ABI record.
+ * Shorter prefixes and larger records are rejected. Changing record layouts,
+ * signatures or existing field semantics requires a new ABI version.
  * Arrays have a nonnull aligned pointer exactly when count is nonzero.
  */
 typedef struct ps_string_v8 {
@@ -43,7 +73,7 @@ typedef struct ps_string_v8 {
   uint32_t size;
 } ps_string_v8;
 
-/** @brief Static tensor member. Element codes are the fixed invocation codes.
+/** @brief Static tensor member. element_type uses ps_element_type_v8.
  * rank is cell rank; batch_rank + rank <= 8. channel_axis=UINT32_MAX omits it.
  * Only declared axes are used; spatial is 0/1. Shape and batch extents are
  * positive. Atomic trailing axes remain whole in each fixed tile.
@@ -56,8 +86,9 @@ typedef struct ps_tensor_spec_v8 {
   uint32_t spatial, height_axis, width_axis, channel_axis;
 } ps_tensor_spec_v8;
 
-/** @brief Result schema metadata; policy uses CompleteBundle=1,
- * IndependentChunks=2, StablePrefix=3. Fixed execution publishes whole tasks.
+/** @brief Result schema scope; policy uses ps_schema_policy_v8.
+ * Members and scopes are sorted, disjoint and bounded by 16. STABLE_PREFIX
+ * lists one member; unlisted members use INDEPENDENT_CHUNKS.
  */
 typedef struct ps_schema_scope_v8 {
   uint32_t policy, member_count;
@@ -75,19 +106,28 @@ typedef struct ps_schema_v8 {
 /** @brief Static port predicates. An empty schema id accepts a metadata-derived
  * identity. Zero dtype/rank/mask adds no corresponding constraint. A nonempty
  * tensor_key selects a named member; otherwise a tensor predicate requires a
- * sole member. No sample validator is invoked by fixed execution.
+ * sole member. element_type uses ps_element_type_v8; a nonzero element_type
+ * and a nonzero element_type_mask are mutually exclusive. Masks combine
+ * PS_ELEMENT_MASK_*_V8 bits. No sample validator runs in fixed execution.
  */
 typedef struct ps_port_contract_v8 {
   uint32_t struct_size;
   ps_string_v8 schema_id, tensor_key;
   uint32_t schema_version, element_type, rank, element_type_mask;
 } ps_port_contract_v8;
+/** @brief Scalar parameter declaration. type uses PS_PARAMETER_*_V8.
+ * required and bounded are 0/1. Numeric bounds are inclusive; bounded Int64
+ * endpoints are exact integers in +/-(2^53-1). Bool/String are unbounded.
+ */
 typedef struct ps_parameter_spec_v8 {
   uint32_t struct_size;
   ps_string_v8 key;
   uint32_t type, required, bounded;
   double minimum, maximum;
 } ps_parameter_spec_v8;
+/** @brief Typed scalar value. type selects the corresponding value field;
+ * bool_value is 0/1. All other value fields are zero-initialized by the host.
+ */
 typedef struct ps_parameter_value_v8 {
   ps_string_v8 key;
   uint32_t type;
@@ -245,7 +285,13 @@ typedef struct ps_kernel_preparation_v8 {
 /** @brief Immutable module-owned declaration, valid until module destroy.
  * 0..1024 inputs, 1..64 outputs, 0..128 parameters. Repeated inputs use one
  * trailing homogeneous contract after input_count fixed contracts; bounds are
- * 1..1024 when enabled. A lower callback is mandatory. prepare is optional for
+ * 1..1024 when enabled, with fixed plus repeated inputs at most 1024.
+ * repeated_match=PS_REPEATED_MATCH_DTYPE_SHAPE_V8 requires the selected tensor
+ * members of repeated inputs to share dtype and full logical shape, including
+ * batch axes. PS_REPEATED_MATCH_NONE_V8 permits differing dtype/shape and
+ * requires prepare for an active group. A disabled group uses NULL and zero
+ * for repeated_input, both bounds and repeated_match. Other match codes fail.
+ * A lower callback is mandatory. prepare is optional for
  * fixed prototypes; prepare_kernel is optional for COPY-only/elided calls.
  * Callbacks are reentrant, must not throw across the C ABI, and report statuses
  * from fixed_invocation_api.h. On any prepare/prepare_kernel return, ownership

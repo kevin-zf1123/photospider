@@ -33,6 +33,24 @@ Module 表包含精确的 `struct_size`、`abi_version = 8`、1..1024 条 operat
 
 C 字符串携带显式字节长度，空字符串使用 `{NULL, 0}`。Key 使用严格 UTF-8，参数字符串值可以是任意字节。Operation key 最多 1024 bytes，其他声明 key、kernel symbol、contract 与 placement 字符串最多 128 bytes。数组在且仅在计数非零时使用自然对齐的非空指针。带 `struct_size` 的记录要求大小精确匹配。
 
+兼容策略保留 exact-size 校验。每个 ABI 版本固定记录布局、函数签名、数值编码和字段语义，包括所有权及线程规则。改变这些契约时，必须升级受影响的 ABI 版本。为已有数值增加名称不改变二进制契约。Host 接受本文列出的版本；结构不进行前缀或尾部字段协商。
+
+独立 C 头文件定义完整的数值词汇。枚举常量为固定宽度整数字段中的值命名，ABI 记录不内嵌 C enum 对象。`ps_element_type_v8` 定义以下编码：
+
+| 常量 | 编码 | `element_type_mask` 位 |
+| --- | --- | --- |
+| `PS_ELEMENT_UINT8_V8` | 1 | `PS_ELEMENT_MASK_UINT8_V8 = 0x01` |
+| `PS_ELEMENT_INT64_V8` | 2 | `PS_ELEMENT_MASK_INT64_V8 = 0x02` |
+| `PS_ELEMENT_FLOAT64_V8` | 3 | `PS_ELEMENT_MASK_FLOAT64_V8 = 0x04` |
+| `PS_ELEMENT_FLOAT32_V8` | 4 | `PS_ELEMENT_MASK_FLOAT32_V8 = 0x08` |
+| `PS_ELEMENT_INT8_V8` | 5 | `PS_ELEMENT_MASK_INT8_V8 = 0x10` |
+| `PS_ELEMENT_UINT16_V8` | 6 | `PS_ELEMENT_MASK_UINT16_V8 = 0x20` |
+| `PS_ELEMENT_INT16_V8` | 7 | `PS_ELEMENT_MASK_INT16_V8 = 0x40` |
+
+端口可选择一个非零元素编码，或对 `PS_ELEMENT_MASK_*_V8` 常量按位 OR。两个字段均为零时不增加 dtype 限制；同时非零属于非法声明。每个位为 `1u << (code - 1)`；`PS_ELEMENT_MASK_ALL_V8` 为 `0x7f`，其他位会被拒绝。零仅用于端口通配，不是 Tensor 元素类型。
+
+Schema scope 使用 `PS_SCHEMA_COMPLETE_BUNDLE_V8 = 1`、`PS_SCHEMA_INDEPENDENT_CHUNKS_V8 = 2` 或 `PS_SCHEMA_STABLE_PREFIX_V8 = 3`。这些值描述 schema publication metadata；固定执行仍以完整 task 为完成单位，并在 call 退休或 RET 时发布 Result。重复输入使用 `PS_REPEATED_MATCH_DTYPE_SHAPE_V8 = 1`，要求选定 Tensor member 的 dtype 和包含 batch 轴的完整逻辑 shape 相同。`PS_REPEATED_MATCH_NONE_V8 = 0` 允许差异；启用重复输入组时，该模式要求静态 prepare 回调。停用的组使用空模板指针和零 bounds/match code。布尔字段使用 0 和 1。
+
 一个 operation 最多有 1024 个输入、64 个输出与 128 个参数声明。重复输入在固定输入前缀后增加一个同构契约，并显式声明最小/最大数量。`input_count = UINT32_MAX` 配合空投影指针选择全部原始输入；零表示不读取 payload 输入。静态 preparation 可以收窄注册投影。Schema-only 依赖在 lowering 时单独声明。
 
 `load_plugin(path)` 接受 1..4096 bytes 且不含内嵌 NUL 的显式路径。缺少 ABI 8 入口时返回 `TypeMismatch`。空、未对齐、大小错误或版本错误的 module 表返回 `InvalidArgument`。Loader 检查 module header 后才挂接 destroy hook 并读取嵌套记录。它在私有候选 registry 中验证全部声明，然后原子发布所有 operation。声明非法、key 重复或并发 freeze 均不改变当前 registry。
@@ -84,7 +102,7 @@ Module 在此检查调用签名，并返回带直接 CPU 和/或 GPU 入口的�
 
 CPU invocation 借用输入、独占输出、scratch、task 参数和取消查询，直至同步返回。成功意味着所有声明输出样本已经初始化，且全部访问已经结束。Host 恢复回调的浮点环境。Kernel 可重入；可变状态属于当前 invocation 的 scratch 或输出分配。
 
-`ps_kernel_status_v8` 携带操作性错误码、reason、可选 domain code 和有界 NUL 结尾消息。Status 数值由 `fixed_invocation_api.h` 定义，例如 `NotFound = 2`、`Cancelled = 6`。未知 code/reason 或未终止消息转换为 `Internal`。运行期 sample 校验不属于此协议。
+`ps_kernel_status_v8` 携带操作性错误码、reason、可选 domain code 和有界 NUL 结尾消息。Status 数值由 `fixed_invocation_api.h` 定义：`ps_kernel_code_v8` 定义类别，例如 `PS_KERNEL_NOT_FOUND_V8 = 2`、`PS_KERNEL_CANCELLED_V8 = 6`；`ps_kernel_reason_v8` 定义从 `PS_KERNEL_REASON_NONE_V8 = 0` 到 `PS_KERNEL_REASON_VIEW_UNAVAILABLE_V8 = 13` 的 reason。Host 将 `domain_code` 作为不透明的算子自有值保留。未知 code/reason 或未终止消息转换为 `Internal`。运行期 sample 校验不属于此协议。
 
 Executor 也可链接使用 Host、Shared 或 Device 存储的异步 GPU 入口，并在提交前设置完成槽。接受提交后，invocation view 和 scratch 持续借用直至匹配的终态 callback；拒绝提交不转移借用。完成可以在提交返回前发生。整个 context 的 GPU 额度只在完成或本地拒绝结算后归还。Native Shared buffer 在 block 发射前分配，可由 CPU kernel 或显式 COPY task 访问。Native preparation 可链接使用 Shared 与 Device 存储的 Metal MSL 或 Vulkan SPIR-V kernel。Device 分配提供 opaque identity 并保持未映射，已完成输出通过 Result publication 继续持有 owner。Executor 在内部准备 COPY task，无需调用算子的 kernel callback。
 

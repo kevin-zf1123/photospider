@@ -33,13 +33,13 @@ static const unsigned modes[] = {0, 1, 2, 3};
 static const ps_tensor_spec_v8 tensors[] = {
     {.struct_size = sizeof(ps_tensor_spec_v8),
      .key = TEXT(tensor_key),
-     .element_type = 3,
+     .element_type = PS_ELEMENT_FLOAT64_V8,
      .rank = 1,
      .shape = {1},
      .channel_axis = UINT32_MAX},
     {.struct_size = sizeof(ps_tensor_spec_v8),
      .key = TEXT(tensor_key),
-     .element_type = 3,
+     .element_type = PS_ELEMENT_FLOAT64_V8,
      .rank = 2,
      .shape = {1, UINT64_C(1) << 61},
      .channel_axis = UINT32_MAX}};
@@ -71,9 +71,11 @@ static const ps_operation_output_v8 outputs[] = {
 static const ps_port_contract_v8 ports[] = {
     {.struct_size = sizeof(ps_port_contract_v8),
      .tensor_key = TEXT(member_key),
-     .element_type = 4,
+     .element_type = PS_ELEMENT_FLOAT32_V8,
      .rank = 1},
-    {.struct_size = sizeof(ps_port_contract_v8), .element_type = 4, .rank = 1}};
+    {.struct_size = sizeof(ps_port_contract_v8),
+     .element_type = PS_ELEMENT_FLOAT32_V8,
+     .rank = 1}};
 /* Deliberately reverse lexical order; callback values are canonical by key. */
 static const ps_parameter_spec_v8 parameters[] = {
     {.struct_size = sizeof(ps_parameter_spec_v8),
@@ -174,7 +176,7 @@ static ps_kernel_status_v8 prepare_kernel(void* user,
   uint64_t bytes = 8;
   if (out->port || out->member || out->byte_offset ||
       out->domain != PS_KERNEL_DOMAIN_HOST_V8 ||
-      out->layout.element_type != 3 || !out->layout.rank ||
+      out->layout.element_type != PS_ELEMENT_FLOAT64_V8 || !out->layout.rank ||
       out->layout.rank > 2)
     return status(PS_KERNEL_INVALID_ARGUMENT_V8);
   for (uint32_t axis = out->layout.rank; axis-- > 0;) {
@@ -216,19 +218,101 @@ static ps_kernel_status_v8 prepare_kernel(void* user,
    .lower = lower,                                                    \
    .prepare_kernel = prepare_kernel}
 // NOLINTEND
+/* This operation exercises the module's metadata and status boundary. */
+// NOLINTBEGIN(whitespace/indent)
+#define TENSOR(KEY, TYPE)                    \
+  {.struct_size = sizeof(ps_tensor_spec_v8), \
+   .key = TEXT(KEY),                         \
+   .element_type = TYPE,                     \
+   .rank = 1,                                \
+   .shape = {1},                             \
+   .channel_axis = UINT32_MAX}
+// NOLINTEND
+static const ps_tensor_spec_v8 vocabulary_tensors[] = {
+    TENSOR("u8", PS_ELEMENT_UINT8_V8),    TENSOR("i64", PS_ELEMENT_INT64_V8),
+    TENSOR("f64", PS_ELEMENT_FLOAT64_V8), TENSOR("f32", PS_ELEMENT_FLOAT32_V8),
+    TENSOR("i8", PS_ELEMENT_INT8_V8),     TENSOR("u16", PS_ELEMENT_UINT16_V8),
+    TENSOR("i16", PS_ELEMENT_INT16_V8)};
+#undef TENSOR
+static const uint32_t scope_members[] = {0, 1, 2};
+static const ps_schema_scope_v8 vocabulary_scopes[] = {
+    {PS_SCHEMA_COMPLETE_BUNDLE_V8, 1, &scope_members[0]},
+    {PS_SCHEMA_INDEPENDENT_CHUNKS_V8, 1, &scope_members[1]},
+    {PS_SCHEMA_STABLE_PREFIX_V8, 1, &scope_members[2]}};
+static const ps_schema_v8 vocabulary_schema = {
+    .struct_size = sizeof(ps_schema_v8),
+    .id = TEXT("contract.vocabulary"),
+    .version = 1,
+    .tensor_count = 7,
+    .tensors = vocabulary_tensors,
+    .scope_count = 3,
+    .scopes = vocabulary_scopes};
+static const ps_operation_output_v8 vocabulary_output = {
+    .struct_size = sizeof(ps_operation_output_v8),
+    .key = TEXT("value"),
+    .contract = {.struct_size = sizeof(ps_port_contract_v8),
+                 .schema_id = TEXT("contract.vocabulary"),
+                 .schema_version = 1},
+    .prototype = &vocabulary_schema};
+static const ps_parameter_spec_v8 vocabulary_parameter = {
+    .struct_size = sizeof(ps_parameter_spec_v8),
+    .key = TEXT("reason"),
+    .type = PS_PARAMETER_INT64_V8};
+static ps_kernel_status_v8 vocabulary_prepare(
+    void* user, const ps_static_query_v8* query,
+    const ps_preparation_sink_v8* sink, ps_operation_state_v8* state) {
+  static const uint32_t reasons[] = {PS_KERNEL_REASON_NONE_V8,
+                                     PS_KERNEL_REASON_ARITHMETIC_OVERFLOW_V8,
+                                     PS_KERNEL_REASON_INVALID_DOMAIN_V8,
+                                     PS_KERNEL_REASON_MALFORMED_ENVELOPE_V8,
+                                     PS_KERNEL_REASON_UNAUTHORIZED_READ_V8,
+                                     PS_KERNEL_REASON_STALE_HANDLE_V8,
+                                     PS_KERNEL_REASON_HOST_EXCEPTION_V8,
+                                     PS_KERNEL_REASON_SHORT_IO_V8,
+                                     PS_KERNEL_REASON_WORK_LIMIT_V8,
+                                     PS_KERNEL_REASON_CAPACITY_LIMIT_V8,
+                                     PS_KERNEL_REASON_STAGE_LIMIT_V8,
+                                     PS_KERNEL_REASON_CANCELLED_V8,
+                                     PS_KERNEL_REASON_STALE_VERSION_V8,
+                                     PS_KERNEL_REASON_VIEW_UNAVAILABLE_V8};
+  (void)user;
+  (void)sink;
+  (void)state;
+  if (!query->parameter_count)
+    return status(PS_KERNEL_OK_V8);
+  const int64_t index = query->parameters[0].int64_value;
+  ps_kernel_status_v8 result = status(PS_KERNEL_OPERATION_FAILED_V8);
+  result.reason =
+      index >= 0 && (uint64_t)index < sizeof(reasons) / sizeof(*reasons)
+          ? reasons[index]
+          : UINT32_MAX;
+  result.domain_code = UINT64_C(0xfedcba9876543210);
+  return result;
+}
 static const ps_operation_v8 operations[] = {
     OP(operation_key, 0, &ports[0], 1, &outputs[0], NULL, 0),
     OP("contract.sole", 1, &ports[1], 1, &outputs[0], NULL, 0),
     OP("contract.parameters", 2, NULL, 0, &outputs[0], parameters, 2),
-    OP("contract.sparse", 3, NULL, 0, &outputs[1], NULL, 0)};
+    OP("contract.sparse", 3, NULL, 0, &outputs[1], NULL, 0),
+    {.struct_size = sizeof(ps_operation_v8),
+     .key = TEXT("contract.vocabulary"),
+     .flags = PS_OPERATION_CPU_V8 | PS_OPERATION_PURE_V8 |
+              PS_OPERATION_DETERMINISTIC_V8,
+     .outputs = &vocabulary_output,
+     .output_count = 1,
+     .parameters = &vocabulary_parameter,
+     .parameter_count = 1,
+     .prepare = vocabulary_prepare,
+     .lower = lower}};
 static void destroy(void* context) {
   (void)context;
 }
-static const ps_operation_module_v8 module = {.struct_size = sizeof(module),
-                                              .abi_version = 8,
-                                              .operations = operations,
-                                              .operation_count = 4,
-                                              .destroy = destroy};
+static const ps_operation_module_v8 module = {
+    .struct_size = sizeof(module),
+    .abi_version = 8,
+    .operations = operations,
+    .operation_count = sizeof(operations) / sizeof(*operations),
+    .destroy = destroy};
 PS_OPERATION_MODULE_EXPORT const ps_operation_module_v8*
 ps_operation_module_get_api_v8(void) {
   return &module;
