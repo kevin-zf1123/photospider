@@ -175,6 +175,25 @@ t 有限且位于 [0,1]、消费的 controls 与 RN64 重建值有限、输出�
 
 各 invocation 独占预分配 ExactShaper 状态。完整公式的精确／认证算术用固定字段记录 retry、range 和 failure，这些状态转换不分配异常对象。只分配所选输出 tiles，所需任务共享 call 有序发布结果。线性 shaper 保持固定 remap/constant 组合。参见 [CRV-08 固定执行](../../built-in_ops/01-numeric/op_specs/CRV-08_shaper.md#fixed-log-execution)。
 
+## 显式 NUM 颜色描述
+
+CRV-06/07/09 使用算子 SDK 的 `TensorDescription` 现有 v4/v5 codec。
+`ps::numeric::color_tuple_description` 构造单个逻辑 tuple：`channel_axis=0`、
+一个按规范顺序排列的完整颜色 group，以及可选的独立 straight alpha。
+物理端口仍按各自契约使用末尾分量轴。FMT 描述的是实际输入张量的轴；
+CRV 接 FMT 时须显式编写该轴映射，坐标单位不变。
+
+CIELAB/CIELCh 存储 `l=L*/100`，opponent/chroma 与 hue 圈数不变。
+RGB ramp 输入输出为 straight，内部精确 alpha 加权保持不变；其他 ramp
+和 LUT 消费者保留各自的分量数限制。旧 ColorArray 类型／codec 和 RGB
+association 选项已移除。描述不附着于 Result，也不增加样本扫描。
+
+烘焙内部 owned table 和 report 为 schema v4。报告仍含 13 个成员／361 字节；
+输入、输出的完整 TensorDescription 编码均进入
+`photospider.bake-configuration.v2` 配置摘要域。旧 v3 表／报告被拒绝。
+内核接口和 artifact 容器未改变。参见
+[迁移记录](../../built-in_ops/01-numeric/NUM-CRV_color_migration.md)。
+
 ## 固定三维 LUT 应用
 
 六个 trilinear/tetrahedral LUT3D key 为每个所选完整颜色输出 tile 生成一个固定 CPU task。读取区域包含对应 query、完整 table 和六个 axis 端点，各按源网格闭包。数值轴一致性与顺序、原始 query 合法性、贡献 table 颜色合法性、reject 域内条件及有限输出是调用方前提。仅正权完整顶点进入精确算术。每个 invocation 独占固定 knots/算术 scratch，写入具有一个 atomic trailing component axis 的 dense 输出 tile；Empty 不生成 task。参见 [CRV-07](../../built-in_ops/01-numeric/op_specs/CRV-07_apply_lut3d.md)。
@@ -199,7 +218,7 @@ NaN/Inf 样本保留规格规定的逻辑 tap 顺序聚合。Strict 对精确归
 
 15 个 `curve.bake_lut3d_{axis,grid,points,points_extra,color}` profile key 为每个所选输出 tile 生成一个固定 CPU task。Axis 复制所选单元。Grid 和 center task 读取六个端点，以固定 ExactSampling scratch 重建 RN64 knot；center 对实际相邻 knot 求平均。纯 extra tile 仅读取所选 extra 行，不读取 axis payload，scratch 为零。Color 同 dtype 复制原位，或按 RN 转换一次，scratch 为零。源读取按各自网格闭包；输出保留全局坐标，除 axis 外均有一个 atomic trailing component axis。Empty 不生成 task。
 
-有限一致的 axis、模型合法颜色、域内 extra 及有限可表示的转换结果是调用方前提。直接 invocation 借用有符号 stride／非对齐 views，独占 scratch，仅写入所选 dense tiles。Pack/Measure/Unpack/Gate 使用固定 CPU invocation。Pack/Unpack/Gate 将所选样本复制到独立 dense tile。非空 Measure 等待完整 owned table，读取全部验证点、reference 和 applied 颜色，并以固定精确整数 scratch 写出全部 13 个报告成员。报告和 table 投影保留全局测量闭包。即使后续 Gate 失败，退休 observer 仍可保留报告。报告 v3 从 invocation 关联数组取得实际 owned-table ObjectId。Gate 依次检查配置身份（`TypeMismatch`）、table 身份（`OperationFailed/InvalidAssociation`）及容差（`OperationFailed/InvalidDomain`，携带首次失败细节）。合法报告值属于调用方前提；SDK reader 对其独立校验。参见 [CRV-09](../../built-in_ops/01-numeric/op_specs/CRV-09_bake_lut3d.md#fixed-geometry-tasks)。
+有限一致的 axis、模型合法颜色、域内 extra 及有限可表示的转换结果是调用方前提。直接 invocation 借用有符号 stride／非对齐 views，独占 scratch，仅写入所选 dense tiles。Pack/Measure/Unpack/Gate 使用固定 CPU invocation。Pack/Unpack/Gate 将所选样本复制到独立 dense tile。非空 Measure 等待完整 owned table，读取全部验证点、reference 和 applied 颜色，并以固定精确整数 scratch 写出全部 13 个报告成员。报告和 table 投影保留全局测量闭包。即使后续 Gate 失败，退休 observer 仍可保留报告。报告 v4 从 invocation 关联数组取得实际 owned-table ObjectId。Gate 依次检查配置身份（`TypeMismatch`）、table 身份（`OperationFailed/InvalidAssociation`）及容差（`OperationFailed/InvalidDomain`，携带首次失败细节）。合法报告值属于调用方前提；SDK reader 对其独立校验。参见 [CRV-09](../../built-in_ops/01-numeric/op_specs/CRV-09_bake_lut3d.md#fixed-geometry-tasks)。
 
 ## Backend 选择
 

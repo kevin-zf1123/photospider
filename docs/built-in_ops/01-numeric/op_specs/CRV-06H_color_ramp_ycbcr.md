@@ -28,7 +28,7 @@ values remain exact.
 
 Directly interpolate the three Y',Cb,Cr components, retaining the same complete
 color description. The description specifies underlying RGB primaries, white,
-transfer, YCbCr matrix and numeric range/encoding. The initial variant has no
+encoded transfer, explicit NCL coefficients and unbiased native coordinate units. The initial variant has no
 alpha and no chroma subsampling. It does not convert to RGB to perform blending.
 
 The matrix uses the non-constant-luminance (NCL) form parameterized by static
@@ -69,7 +69,10 @@ when the selected table is constant.
 Required static String parameters are color_description, dtype, out_of_domain.
 The description explicitly declares YCbCr NCL, underlying RGB primaries/white/
 transfer, matrix coefficients/preset, unbiased floating coordinate units and no
-alpha. No matrix default silently fills a missing required description. Output coordinates use that interpretation without attaching it to the Result.
+alpha. It is a canonical TensorDescription tuple at `channel_axis=0`, encoded
+with `tensor_description_parameter`. Linear underlying transfer is rejected;
+sRGB and positive finite power gamma are admitted. No matrix default silently
+fills a missing required description. Output coordinates use that interpretation without attaching it to the Result.
 
 For each component c, interpolate RN_dtype((1-w)*c0+w*c1), using the exact
 stop-derived w and only one final rounding for strict. Accelerated results obey

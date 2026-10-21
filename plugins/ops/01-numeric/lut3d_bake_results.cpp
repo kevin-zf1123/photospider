@@ -22,6 +22,17 @@ using namespace bake_ops;  // NOLINT(build/namespaces)
 enum class Kind { Pack, Measure, Unpack, Gate };
 Lut3dBakeDescription placeholder() {
   Lut3dBakeDescription result;
+  TensorInterpretation interpretation;
+  interpretation.model = "xyz";
+  interpretation.reference = "display";
+  interpretation.association = "straight";
+  interpretation.white = std::array<double, 2>{.3127, .3290};
+  interpretation.coordinates = TensorModelCoordinates{};
+  interpretation.coordinates->scale = "relative";
+  result.input_description =
+      numeric::color_tuple_description(interpretation, {"1", "1", "1"})
+          .take_value();
+  result.output_description = result.input_description;
   result.recipe_identity.assign(64, '0');
   return result;
 }
@@ -118,7 +129,7 @@ std::uint64_t scratch_bytes(Kind kind) {
          : kind == Kind::Gate  ? sizeof(numeric_ops::ExactBakeError)
                                : 0;
 }
-constexpr const char* contract = "bake-result-fixed-v1";
+constexpr const char* contract = "bake-result-fixed-v2";
 struct ReadRegion {
   unsigned port, member;
   Region region;
@@ -641,7 +652,7 @@ OperationDefinition operation(Kind kind) {
   const auto object = [&](unsigned port, const char* id) {
     traits.input_schema[port].element_type_mask = 0;
     traits.input_schema[port].result_schema_id = id;
-    traits.input_schema[port].result_schema_version = 3;
+    traits.input_schema[port].result_schema_version = 4;
   };
   if (kind == Kind::Measure)
     object(2, "curve.bake_lut3d.table");

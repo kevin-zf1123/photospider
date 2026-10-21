@@ -179,4 +179,12 @@ def reference_cases():
         table[12:15] = [1 << 63, bits(F(1, 2)), bits(2)]
         case(method, raw=True, shape=(3, 2, 2), endpoints=((1, 0), (0, 1), (0, 1)),
              query=[bits(F(1, 2)), 0, 0], table=table)
+    # LUT axes and table lightness are natively normalized; C* remains
+    # in its original scale and hue may span multiple turns.
+    for method, model in itertools.product((0, 1), ('cielab', 'cielch')):
+        table = [v for l, a, b in itertools.product((F(-1, 4), F(3, 2)),
+                                                   (F(0), F(150)), (F(-8), F(8)))
+                 for v in (l, a, b)]
+        case(method, model=model, query=(F(1, 2), F(50), F(3)),
+             endpoints=((F(-1, 4), F(3, 2)), (0, 150), (-8, 8)), table=table)
     return records

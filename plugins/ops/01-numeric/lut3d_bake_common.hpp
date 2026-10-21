@@ -85,10 +85,11 @@ inline TensorDescriptor tensor_descriptor(const OperationMetadata& input) {
   return {tensor.descriptor.element_type, tensor.sample_shape()};
 }
 inline Status color_metadata(const OperationMetadata& input,
-                             const ColorArrayDescriptor& color) {
+                             const TensorDescription& color) {
   if (!sole_tensor(input))
     return mismatch("bake requires one tensor member");
-  auto valid = validate_color_array_descriptor(color, tensor_descriptor(input));
+  auto valid =
+      numeric::validate_color_tuple_shape(color, tensor_descriptor(input));
   if (!valid.ok())
     return valid;
   return Status::success();

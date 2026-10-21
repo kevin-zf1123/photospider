@@ -305,7 +305,7 @@ FloatingEnvironment preserves the caller state and establishes RN/gradual underf
 
 Use the retained Fraction oracle for valid numerical inputs, and temporary public workflow checks for tile support, sparse allocation, mixed dtypes, batch/atomic axes, signed/zero/unaligned layouts, concurrency, fenv, malformed preparation, resource rejection and cancellation. All six CRV-04 templates execute through this consumer, subject to their individual numerical preconditions. The complete numerical and demand contract is [CRV-05](op_specs/CRV-05_apply_lut1d.md).
 
-## CRV-06 ColorArray and color ramps
+## CRV-06 explicit color tuples and color ramps
 
 The 15 independent primitives provide 45 fixed CPU keys using invocation ABI 8. Each selected output tile reads the corresponding query region and conservative complete stops/colors/p/q closures on each input's grid. The kernel searches source stops directly, reads one or two selected complete rows, and writes dense preallocated complete-color output. Numerical validity is a caller precondition; unused generic rows remain numerically unused. Output shape appends one atomic component axis, without preserving input batch grouping or attaching a color description. Empty emits no task. Only selected output tiles are allocated, with fixed arithmetic scratch per invocation.
 
@@ -321,7 +321,7 @@ cancel symbolically; direct stored zeros retain their signs and genuine mixed
 exact zeros are +0. Polar hues retain every turn, including achromatic inputs.
 
 `ExactRgb` uses the 40960-bit/96-slot polynomial integer arena for direct
-association conversion, linear transfer and gamma=2. The latter rounds a
+dtype conversion, straight linear transfer and gamma=2. The latter rounds a
 signed square root of the complete rational expression using squared-midpoint
 comparisons. Intermediate premultiplied values and alpha are never rounded.
 The ordinary gamma=2 bounds, including midpoint alignment, fit below 13000
@@ -333,8 +333,8 @@ General gamma uses positive-domain homogeneity: normalize both straight encoded
 magnitudes by their maximum `m`, compute the signed alpha-weighted mixture `R`
 of the normalized powers, and encode as `m*sign(R)*abs(R)^(1/gamma)`. Normalized
 power bases and `abs(R)` are at most one. Gamma and its reciprocal retain their
-exact real meanings. The final `m` and alpha ratios are each split into a
-unit-scale interval and an exact binary exponent. Their exponents are passed
+exact real meanings. The final magnitude `m` is split into a unit-scale interval and an exact binary
+exponent. That exponent is passed
 to final IEEE rounding, preserving subnormal/HDR results without requiring the
 whole output magnitude to fit the interval's absolute fractional scale.
 
@@ -357,15 +357,20 @@ obey complete selected-color caller preconditions. Representable output associat
 
 All profiles currently return strict bits within their declared contract. Scalar/NEON/AVX2 integer primitives serve their respective CPU profiles; there is no approximate transfer backend. ExactRgb and ExactColorCoordinate own checked interval state and borrowed synchronous work callbacks. They return terminal cancellation/resource failures before any precision reset and refine only uncertain expressions. Candidate output is accepted only while arithmetic remains active. Scratch destruction and floating-environment restoration happen at synchronous return, including failure.
 
-ColorArray model/white/primary/transfer/hue/association configuration belongs
-to the operations SDK. Exact bounded arithmetic validates its geometry. CMYK
+TensorDescription model/white/primary/transfer/hue configuration belongs to
+the operations SDK. Numeric tuple admission reuses exact FMT geometry checks.
+The logical tuple axis is zero; sampled arrays retain a final component axis.
+CIELAB/CIELCh use normalized l=L*/100 and RGB uses straight storage. Transfer
+kind, gamma bits and alpha presence are resolved once during preparation;
+obsolete premultiplied input/output branches and their extra exact ratios are
+removed. Exact alpha weighting, direct-path zero signs and final rounding remain. CMYK
 profile wrappers import immutable bytes with content identity; operations select
 required identities explicitly into their preparation/plan resources. CMYK uses the once-per-preparation resource hook to check frozen ICC structure and the optional Profile ID without a full-profile copy; Empty and artifact import also pass this hook. Results
 do not retain a profile because of a color description. Generic ResourceSet
 checks duplicate identities for byte conflicts and retains admitted owners.
 
 Acceptance should cover strict numerical references, mixed dtype, model domains,
-RGB association, hue units, resources, arbitrary layouts, active cancellation,
+straight RGB alpha, hue units, resources, arbitrary layouts, active cancellation,
 sparse output allocation, direct-call scratch bounds and zero allocation during invocation.
 The retained accelerated allowance is contractual; bit matching in these cases
 does not replace that contract.
@@ -461,11 +466,16 @@ The fifteen geometry profile keys use fixed CPU tasks. Axis copies selected cell
 
 Preparation checks complete signatures and exact scratch. Concurrent Runs share immutable state and own separate arithmetic/output allocations. Invocation cancellation returns before publication, and escaped Results retain their storage owners. The independent Fraction `geometry_reference` checks endpoint bits, grid reconstruction, two-stage center rounding and dtype conversion. Temporary public/direct checks additionally cover source closure, large sparse grids, layouts, floating environment, cancellation and zero invocation heap allocation.
 
-Pack, Measure, Unpack and Gate use fixed CPU invocations. Pack/Unpack/Gate copy selected samples into independent dense tiles. Measure emits one task that waits for the complete owned table, scans every point/reference/applied color and writes the complete report. It exports the report on retirement; later Gate failure leaves an independently retained observer result valid. The public template connects ordinary source-grid/reference/application nodes with an independent axis and a global quality gate. The report v3 has thirteen tensor members and 361 payload bytes. Its `measured_table_id` is the actual owned table Result ObjectId, encoded little-endian; equal bytes with another ObjectId cannot satisfy that binding.
+Pack, Measure, Unpack and Gate use fixed CPU invocations. Pack/Unpack/Gate copy selected samples into independent dense tiles. Measure emits one task that waits for the complete owned table, scans every point/reference/applied color and writes the complete report. It exports the report on retirement; later Gate failure leaves an independently retained observer result valid. The public template connects ordinary source-grid/reference/application nodes with an independent axis and a global quality gate. The report v4 has thirteen tensor members and 361 payload bytes. Its `measured_table_id` is the actual owned table Result ObjectId, encoded little-endian; equal bytes with another ObjectId cannot satisfy that binding.
 
 The report algorithm compares component error and `atol+rtol*abs(reference)` as exact integers in `2^-2148` units. Error needs fewer than 3173 bits and the threshold product fewer than 4197, within 4352-bit arithmetic. Exact comparisons retain the earliest ordinal on ties. Displayed maxima round upward, with diagnostic +Inf allowed. Centers precede extras in row-major order. Measurement threshold failure produces `passed=false`; the separate gate reports `LutApproximationToleranceExceeded`. Exact arithmetic and report storage use fixed scratch. Gate writes bounded diagnostics directly, checks configuration and ObjectId before tolerance, and copies table samples only on success. Legal finite samples and well-formed report values are caller premises.
 
-`configuration_id` binds shape, method, tolerances, dtypes, descriptions, extra count and source recipe. The explicit SDK reader checks this configuration and the report fields. Measured quality applies only at listed points under the selected interpolation method and table dtype, never to the whole continuous domain.
+`configuration_id` binds shape, method, tolerances, dtypes, both complete
+canonical TensorDescription byte strings, extra count and source recipe under
+`photospider.bake-configuration.v2`. Owned tables and reports are schema v4;
+old v3 inputs are rejected. Native Lab/LCh axes, tables and validation points
+use l=L*/100. A scalar atol must be reauthored for the three native coordinate
+units; blindly dividing it by 100 also changes opponent/chroma acceptance. The explicit SDK reader checks this configuration and the report fields. Measured quality applies only at listed points under the selected interpolation method and table dtype, never to the whole continuous domain.
 
 ## CRV-10 inverse curves
 

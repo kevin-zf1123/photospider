@@ -79,9 +79,12 @@ resource validator. Reject malformed or unsupported resources before color
 evaluation. This does not execute A2B/B2A transforms or select a rendering intent.
 
 Required static parameters are color_description, dtype and out_of_domain.
-color_description is the proposed canonical description-helper String referring
-to the frozen profile resource, CMYK model, channel order C/M/Y/K, normalized ink
-units and alpha=none. It has no RGB primaries/gamma overrides or default printing
+color_description is a canonical TensorDescription String referring to the
+frozen profile resource, CMYK model, canonical C/M/Y/K tuple order, normalized
+ink units and no alpha. Its convention is `icc-native`, reference is `profile`,
+and association is straight. The logical tuple uses `channel_axis=0`.
+`color_ramp_cmyk_description(identity)` returns `Result<TensorDescription>`;
+callers check its result and supply the profile resource to compilation. It has no RGB primaries/gamma overrides or default printing
 profile. dtype is float32/float64, default colors dtype in constructors; policy
 is clamp/reject, default clamp. Direct nodes supply all three. Results carry no attached color description.
 

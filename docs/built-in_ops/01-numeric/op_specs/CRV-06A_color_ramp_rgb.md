@@ -49,23 +49,21 @@ same specified encoding and color space. Interpolation is fixed in linear-light
 RGB: decode color values, interpolate in linear light, then encode back to that
 same space. No encoded-value interpolation mode is provided.
 
-The maintainer requires RGBA association/encoding to be explicitly declared in
-the specification and color description. An unspecified four-component color
-must not be treated as automatically straight or automatically premultiplied.
-Input and output association are independently declared straight or premultiplied;
-the output authoring default is straight. Premultiplied storage means encoded
-RGB multiplied by alpha, where encoded refers to the description's transfer.
-For nonzero alpha, restore encoded straight RGB before decoding, then premultiply
-linear-light RGB for interpolation. After interpolation, recover straight linear
-RGB, encode it, and multiply the encoded result by alpha only for premultiplied
-output. With linear transfer this reduces to ordinary premultiplied linear RGB.
-Alpha itself is never transfer-encoded. Zero-alpha cases are specified separately.
+The color tuple explicitly identifies RGB and optional independent alpha.
+Input and output RGB coordinates are straight. The description accepts absent
+or `"straight"` association and rejects `"premultiplied"`. A four-column tensor
+alone does not establish an alpha interpretation. The logical tuple has
+`channel_axis=0`; its colors port has physical shape `[K,3]` or `[K,4]`.
 
-Alpha must be finite and in [0,1]. Premultiplied input with zero alpha requires
-zero RGB. Straight input may retain finite hidden RGB at zero alpha, but it
-contributes no visible premultiplied color. At zero output alpha, emit zero RGB
-in either selected output association. Do not infer a hidden-color-preservation
-exception at exact transparent stops.
+For nonzero alpha, decode straight RGB and weight the linear-light value by
+alpha for interpolation. Divide by the mixed alpha and encode straight output.
+Alpha itself is never transfer encoded. There is no output association option,
+storage-format conversion or legacy overload.
+
+Alpha must be finite and in [0,1]. Straight input may retain finite hidden RGB
+at zero alpha, but it contributes zero to the weighted linear color. At zero
+output alpha emit canonical transparent black, including exact transparent
+stops. This does not require hidden source RGB to be zero.
 
 ## Confirmed stop ordering
 
@@ -84,21 +82,21 @@ logical element limit. Total logical input/color/output products retain the 2^40
 
 ## Confirmed color observation granularity
 
-The final channel axis is a complete RGB/RGBA color. Every selected output tile includes all components. A task reads its query region and conservatively declares all stops/colors tiles. Complete selected colors obey finite/alpha/association caller preconditions. Exact hits, clamp and K=1 use one stop color and directly perform dtype/association conversion without transfer decode/encode. Generic unselected colors are numerically unused. Transparent canonicalization and the representable-output association precondition apply on direct paths.
+The final channel axis is a complete RGB/RGBA color. Every selected output tile includes all components. A task reads its query region and conservatively declares all stops/colors tiles. Complete selected colors obey finite/alpha/association caller preconditions. Exact hits, clamp and K=1 use one stop color and directly perform dtype conversion without transfer decode/encode. Generic unselected colors are numerically unused. Transparent canonicalization and the representable-output association precondition apply on direct paths.
 
 If both selected stop colors have identical complete stored bit patterns, use
-the same direct dtype/association conversion to preserve the constant color.
+the same direct dtype conversion to preserve the constant color.
 Still read both complete colors and retain their dependencies. Do not perform
 a needless transfer round trip even near the standard sRGB segment thresholds.
 
 ## Confirmed description binding
 
-A required static `color_description` supplies model, primaries, white, transfer and input alpha association. The output association is a separate parameter. Results and Tensor members carry no attached color description. The authoring helper serializes these parameters and performs no payload conversion while constructing the node. It supplies the declared defaults; direct nodes must provide the required configuration.
+A required static `color_description` is encoded by `tensor_description_parameter` from a TensorDescription tuple. It supplies RGB model, primaries, white, transfer and optional straight alpha. The public constructor takes `ColorRampOptions`; `RgbRampOptions` and `output_association` are removed. Results and Tensor members carry no attached color description. The authoring helper serializes these parameters and performs no payload conversion while constructing the node. It supplies the declared defaults; direct nodes must provide the required configuration.
 
 ## Confirmed numerical versions
 
-Strict treats transfer decode, association conversion, linear-light interpolation,
-output encode and output association as a complete mathematical expression,
+Strict treats transfer decode, alpha-weighted linear-light interpolation,
+alpha division and straight output encoding as a complete mathematical expression,
 then correctly rounds each final component directly to the output dtype.
 There is no prescribed intermediate Float64 rounding that defines the result.
 Input floats and static gamma denote their exact numerical values.
@@ -109,7 +107,7 @@ Exact selected endpoints and zero-alpha cases retain exact semantics; ordinary
 alpha arithmetic must also preserve its [0,1] constraint. Required special values,
 alpha constraints and output representability use the strict reference. The selected implementation must establish its declared bound. Resource/cancellation failures remain explicit.
 
-If exact output alpha is positive but its correctly rounded destination alpha is zero, every correctly rounded RGB component must also be zero. This output-association representability condition is an unchecked caller precondition. A valid all-zero result becomes canonical transparent black. The accelerated allowance cannot change this reference classification.
+If exact output alpha is positive but its correctly rounded destination alpha is zero, every correctly rounded RGB component must also be zero. This output-tuple representability condition is an unchecked caller precondition. A valid all-zero result becomes canonical transparent black. The accelerated allowance cannot change this reference classification.
 
 Direct selection/constant-color paths preserve the signs of converted RGB zeros.
 Actual mixed-color exact zeros are +0; nonzero exact underflow retains its sign.
@@ -144,15 +142,15 @@ are generic floating Result tensors interpreted by the explicit parameters. Cons
 
 | Static parameter | Type/domain | Constructor behavior |
 | --- | --- | --- |
-| color_description | Canonical String emitted by the proposed color-description helper; RGB model and explicit input association | Populate sRGB primaries, D65, sRGB transfer defaults; input alpha format remains explicit |
-| output_association | String none for C=3, straight/premultiplied for C=4 | none for RGB; straight for RGBA |
+| color_description | Canonical TensorDescription String; one RGB tuple with optional independent straight alpha | `color_ramp_rgb_description(with_alpha)` supplies sRGB primaries, D65, sRGB transfer and display reference |
 | dtype | String float32/float64 | Match colors dtype |
 | out_of_domain | String clamp/reject | clamp |
 
-All are explicit in direct nodes; output_association must agree with C. The
-description carries transfer=linear/srgb/gamma and a positive finite gamma only
-for gamma mode. It provides the numeric primaries/white, not an unresolved gamut
-name. Output coordinates use the specified model/color-space/transfer and association without attached color metadata. Unknown or mismatched descriptors,
+All are explicit in direct nodes. Alpha presence must agree with C. Transfer
+uses the existing transfer-definition codec for linear/sRGB/power gamma, with a
+positive finite exponent for gamma. Basis presets resolve through the shared
+FMT geometry rules and must agree with explicit coordinates. Output uses the
+same model/color space/transfer and straight coordinates without attached metadata. Unknown or mismatched descriptors,
 parameters and shape relations fail before payload evaluation.
 
 Let D be signed transfer decoding and E encoding. linear is identity. For gamma,
@@ -171,28 +169,25 @@ transfer output is rounded as part of the strict definition. Signed zeros follow
 the explicit direct/mixed/transparent policies rather than a sign(0) convention.
 
 For two selected stops, define exact w=(input-stops[j])/(stops[j+1]-stops[j]).
-For RGB, treat a0=a1=1. For RGBA, ai is each stored alpha. Let ui be straight
-encoded RGB: stored RGB for straight, stored RGB/ai for premultiplied with ai>0.
+For RGB, treat a0=a1=1. For RGBA, ai is each stored alpha. Let ui be the
+stored straight encoded RGB.
 For ai=0 use premultiplied-linear qi=0 without decoding hidden color. Otherwise
 qi=ai*D(ui). Complete selected source colors obey caller validity preconditions even on the zero-contribution path.
 
 A = (1-w)*a0 + w*a1
     Q = (1-w)*q0 + w*q1
     encoded = E(Q/A)                         when A>0
-    rgb_out = encoded                       for straight/none
-              A*encoded                     for premultiplied
+    rgb_out = encoded                       straight RGB output
 
 At exact A=0, all output components are +0. Final alpha is RN_dtype(A);
-final RGB is RN_dtype(rgb_out), subject to the output association representability precondition. Intermediate
+final RGB is RN_dtype(rgb_out), subject to the output tuple representability precondition. Intermediate
 unbounded mathematical values do not fail merely because an approximate
 Float64 evaluation would overflow; source/destination finiteness is a caller precondition and host resource limits remain operational checks.
 
 On direct selection or identical-color paths, skip D/E. With positive alpha,
-same-association RGB is converted directly; straight->premultiplied multiplies
-encoded RGB by alpha, and premultiplied->straight divides by alpha, with one
-destination rounding. All versions correctly round these direct paths exactly;
+convert each stored straight RGB component directly with one destination rounding. All versions correctly round these direct paths exactly;
 the four-ULP allowance applies only to actual mixed RGB. Zero-alpha canonicalization
-and the shared output-association precondition still apply. Both selected colors remain dependencies
+and the shared output-tuple precondition still apply. Both selected colors remain dependencies
 on the identical-color shortcut.
 
 ## Observation mapping, demand and ownership
@@ -220,13 +215,13 @@ Under gamma=2, the middle encoded component is RN_dtype(sqrt(1/2)).
 Under linear transfer it is 0.5. Use independent directed-precision transfer
 enclosures and exact rational weights, not the production helper, as oracle.
 
-RGBA fixture with straight inputs: transparent red [1,0,0,0] to opaque blue
-[0,0,1,1] at w=0.5 gives straight [0,0,1,0.5] by default.
-Explicit premultiplied output gives [0,0,0.5,0.5]. At the transparent stop return [0,0,0,0]. Cover
-same-format and cross-format direct paths, repeated identical bit-pattern stops,
-zero signs, negative/HDR components, transfer join neighbors, tiny-alpha
-output-association boundaries, valid all-zero underflow, valid premultiplied sources,
-K=1, irregular stops and description mismatch.
+RGBA fixture: transparent red [1,0,0,0] to opaque blue [0,0,1,1] at w=0.5
+produces straight [0,0,1,0.5]. At the transparent stop return [0,0,0,0]. Cover
+mixed-dtype direct paths, repeated identical bit-pattern stops, zero signs,
+negative/HDR components, transfer join neighbors, tiny-alpha representability,
+valid all-zero underflow, K=1, irregular stops and description conflicts.
+Reject premultiplied descriptions and the removed `output_association` parameter
+on the RGB member itself.
 
 Use independent exact-rational or certified-pi/transfer references on valid inputs. Check complete-color tile coverage, mixed source grids and dtypes, unused generic rows, arbitrary source strides, concurrent Runs, cancellation, bounded scratch, allocation-free invocation and retained output lifetime. Numerical precondition violations are not runtime-error acceptance cases. Public workflows bind explicit descriptions and inspect numerical Results; the specification remains Proposed.
 

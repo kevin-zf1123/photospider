@@ -50,7 +50,9 @@ The shared lightness revision does not rescale OKLab coordinates. Specifically:
   one mathematical formula with final correct rounding; all versions match bits.
 - Each selected output tile preserves a complete color. Source reads include the corresponding query region and conservative stops/colors/p/q closure on independent grids. Model, finite and selected-denominator conditions are caller preconditions, including at C=0.
 
-Static descriptions must identify the input model and hue representation. The Result carries no color description. Rational L/C ports alone are not complete ColorArrays. Shapes, owners, fixed scratch, cancellation and ordered call publication follow the [family fixed contract](CRV-06_color_ramp.md#fixed-execution-and-caller-preconditions).
+Static descriptions must identify the input model and hue representation. The Result carries no color description. `tensor_description_parameter` encodes a canonical logical tuple at axis zero.
+Rational L/C ports alone are not complete colors; the logical tuple's hue is
+supplied by the separate numerator/denominator ports. Shapes, owners, fixed scratch, cancellation and ordered call publication follow the [family fixed contract](CRV-06_color_ramp.md#fixed-execution-and-caller-preconditions).
 
 ## Acceptance and entrypoints
 

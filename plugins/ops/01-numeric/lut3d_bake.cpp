@@ -115,18 +115,22 @@ Status validate(const Lut3dBakeDescription& spec) {
     if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
       return core_internal::invalid_schema_domain(
           "invalid LUT3D bake report schema");
+  std::string model;
   for (const auto* description :
        {&spec.input_description, &spec.output_description}) {
-    if (description->model != spec.input_description.model ||
-        description->model == ColorModel::Cmyk ||
-        description->association != ColorAssociation::None ||
-        description->source_layout != ColorSourceLayout::Interleaved)
+    auto group = numeric::resolve_color_tuple(*description);
+    if (!group.ok())
+      return group.status();
+    if (model.empty())
+      model = group.value().interpretation.model;
+    if (group.value().interpretation.model != model ||
+        group.value().components.size() != 3 || group.value().alpha)
       return core_internal::invalid_schema_domain(
           "LUT3D bake requires same-model three-component colors");
-    auto checked = validate_color_array_descriptor(
-        *description, {ElementType::Float64, {1, 3}});
-    if (!checked.ok())
-      return checked;
+    for (const auto& component : group.value().components)
+      if (component.unit == "rational_pi")
+        return core_internal::invalid_schema_domain(
+            "LUT3D bake requires floating hue coordinates");
   }
   return Status::success();
 }
@@ -137,7 +141,7 @@ Result<std::string> lut3d_bake_configuration_id(
   if (!checked.ok())
     return Result<std::string>(checked);
   content_internal::Sha256 hash;
-  hash.text("photospider.bake-configuration.v1");
+  hash.text("photospider.bake-configuration.v2");
   hash.text(spec.recipe_identity);
   for (auto extent : spec.shape)
     hash.integer(extent);
@@ -149,7 +153,7 @@ Result<std::string> lut3d_bake_configuration_id(
   hash.integer(core_internal::binary64_bits(spec.rtol == 0 ? 0 : spec.rtol));
   for (const auto* description :
        {&spec.input_description, &spec.output_description}) {
-    auto bytes = encode_color_array(*description);
+    auto bytes = encode_tensor_description(*description);
     if (!bytes.ok())
       return Result<std::string>(bytes.status());
     hash.integer(bytes.value().size());
@@ -163,7 +167,7 @@ Result<SchemaTemplate> lut3d_bake_schema(const Lut3dBakeDescription& spec) {
     return Result<SchemaTemplate>(checked);
   SchemaTemplate schema;
   schema.id = "curve.bake_lut3d.report";
-  schema.version = 3;
+  schema.version = 4;
   const auto add = [&](const char* key, ElementType dtype,
                        std::vector<std::uint64_t> shape, unsigned atomic) {
     ResultTensorSpec member;
@@ -194,7 +198,7 @@ Result<SchemaTemplate> lut3d_bake_table_schema(
     return made;
   auto schema = made.take_value();
   schema.id = "curve.bake_lut3d.table";
-  schema.version = 3;
+  schema.version = 4;
   schema.tensors.clear();
   ResultTensorSpec tensor;
   tensor.key = "colors";
@@ -341,10 +345,9 @@ Status validate_lut3d_bake_report_values(
     }
     return true;
   };
-  const auto valid_chroma = [](const ColorArrayDescriptor& color,
-                               double chroma) {
-    return (color.model != ColorModel::Cielch &&
-            color.model != ColorModel::Oklch) ||
+  const auto valid_chroma = [](const TensorDescription& color, double chroma) {
+    const auto& model = color.groups[0].interpretation.model;
+    return (model != "cielch" && model != "oklch") ||
            !(core_internal::binary64_bits(chroma) >> 63) ||
            !(core_internal::binary64_bits(chroma) << 1);
   };
@@ -410,9 +413,9 @@ Result<Lut3dBakeDescription> lut3d_bake_from_parameters(
   spec.source_dtype =
       source == "float32" ? ElementType::Float32 : ElementType::Float64;
   spec.extra_points = std::get<std::int64_t>(parameters.at("extra_count"));
-  auto a = color_array_from_parameter(
+  auto a = tensor_description_from_parameter(
            std::get<std::string>(parameters.at("input_color_description"))),
-       b = color_array_from_parameter(
+       b = tensor_description_from_parameter(
            std::get<std::string>(parameters.at("output_color_description")));
   if (!a.ok() || !b.ok())
     return Answer(!a.ok() ? a.status() : b.status());

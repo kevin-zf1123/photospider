@@ -5,7 +5,7 @@
 #include <string>
 #include <utility>
 
-#include "photospider/ops/color_array.hpp"
+#include "photospider/ops/numeric/color_description.hpp"
 #include "photospider/ops/numeric/curves.hpp"
 
 namespace ps::numeric {
@@ -24,8 +24,8 @@ namespace lut3d_detail {
 inline Result<WorkflowNode> node(std::uint64_t id, const char* method,
                                  WorkflowInput input, WorkflowInput table,
                                  WorkflowInput axis, ElementType input_type,
-                                 const ColorArrayDescriptor& input_description,
-                                 const ColorArrayDescriptor& output_description,
+                                 const TensorDescription& input_description,
+                                 const TensorDescription& output_description,
                                  const Lut3dOptions& options) {
   using Answer = Result<WorkflowNode>;
   const auto invalid = [](const char* message) {
@@ -48,18 +48,25 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* method,
       (options.out_of_domain != CurveDomain::Reject &&
        options.out_of_domain != CurveDomain::Clamp))
     return Answer(invalid("invalid LUT3D id/dtype/domain/profile"));
-  if (input_description.model != output_description.model ||
-      input_description.model == ColorModel::Cmyk ||
-      input_description.association != ColorAssociation::None ||
-      output_description.association != ColorAssociation::None ||
-      input_description.source_layout != ColorSourceLayout::Interleaved ||
-      output_description.source_layout != ColorSourceLayout::Interleaved)
-    return Answer(invalid(
-        "LUT3D requires same-model three-component interleaved colors"));
-  auto source = color_array_parameter(input_description);
+  auto input_group = resolve_color_tuple(input_description);
+  auto output_group = resolve_color_tuple(output_description);
+  if (!input_group.ok() || !output_group.ok())
+    return Answer(!input_group.ok() ? input_group.status()
+                                    : output_group.status());
+  if (input_group.value().interpretation.model !=
+          output_group.value().interpretation.model ||
+      input_group.value().components.size() != 3 ||
+      output_group.value().components.size() != 3 ||
+      input_group.value().alpha || output_group.value().alpha)
+    return Answer(invalid("LUT3D requires same-model three-component colors"));
+  for (const auto* group : {&input_group.value(), &output_group.value()})
+    for (const auto& component : group->components)
+      if (component.unit == "rational_pi")
+        return Answer(invalid("LUT3D requires floating hue coordinates"));
+  auto source = tensor_description_parameter(input_description);
   if (!source.ok())
     return Answer(source.status());
-  auto destination = color_array_parameter(output_description);
+  auto destination = tensor_description_parameter(output_description);
   if (!destination.ok())
     return Answer(destination.status());
   return Answer(WorkflowNode{
@@ -99,7 +106,7 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* method,
  * region, complete table and six axis endpoints on each source's own grid.
  * Exact positive-weight complete vertices alone enter arithmetic, at most
  * eight. Upstream failures propagate through the full table dependency.
- * The output carries no ColorArray description or input batch partition.
+ * The output carries no color description or input batch partition.
  * Empty emits no tasks. Each invocation owns preallocated arithmetic/knots
  * scratch and borrows affine inputs; retained output survives context teardown.
  * Preparation is immutable and shareable across concurrent Runs.
@@ -110,14 +117,15 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* method,
  * Structural signature checks occur before invocation. Cancellation,
  * capacity and upstream failures retain operational errors; successful call
  * publication follows all required task completions in retirement order.
- * No implicit color or lightness-unit conversion occurs; ColorArray v1 retains
- * its existing CIELAB interpretation.
+ * Both descriptions are canonical logical tuples (channel_axis=0). Native
+ * CIELAB/CIELCh use l = L-star / 100; axes, table samples, validation points
+ * and tolerances must already use that scale. No implicit conversion occurs.
  */
 inline Result<WorkflowNode> apply_lut3d_trilinear_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput table,
     WorkflowInput axis, ElementType input_type,
-    const ColorArrayDescriptor& input_description,
-    const ColorArrayDescriptor& output_description, Lut3dOptions options = {}) {
+    const TensorDescription& input_description,
+    const TensorDescription& output_description, Lut3dOptions options = {}) {
   return lut3d_detail::node(id, "trilinear", std::move(input), std::move(table),
                             std::move(axis), input_type, input_description,
                             output_description, options);
@@ -134,8 +142,8 @@ inline Result<WorkflowNode> apply_lut3d_trilinear_node(
 inline Result<WorkflowNode> apply_lut3d_tetrahedral_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput table,
     WorkflowInput axis, ElementType input_type,
-    const ColorArrayDescriptor& input_description,
-    const ColorArrayDescriptor& output_description, Lut3dOptions options = {}) {
+    const TensorDescription& input_description,
+    const TensorDescription& output_description, Lut3dOptions options = {}) {
   return lut3d_detail::node(id, "tetrahedral", std::move(input),
                             std::move(table), std::move(axis), input_type,
                             input_description, output_description, options);

@@ -175,6 +175,27 @@ The six `curve.log2_shaper[_inverse]_<profile>` keys execute one fixed CPU task 
 
 Each invocation owns preallocated ExactShaper state. Exact/certified whole-formula arithmetic uses fixed retry/range/failure state and no exception allocation for those transitions. Only selected output tiles are allocated, and required tasks share ordered call publication. Linear shapers remain fixed remap/constant compositions. See [CRV-08 fixed execution](../built-in_ops/01-numeric/op_specs/CRV-08_shaper.md#fixed-log-execution).
 
+## Explicit numeric color descriptions
+
+CRV-06/07/09 use the operations-SDK `TensorDescription` codec (existing v4/v5).
+`ps::numeric::color_tuple_description` constructs one logical tuple:
+`channel_axis=0`, one complete canonical group and optional independent straight
+alpha. Sampled ports retain their declared final component axis. FMT descriptions
+instead name the actual input tensor axes; composing CRV with FMT requires
+explicitly authoring that axis mapping, without changing coordinate units.
+
+CIELAB/CIELCh store `l=L*/100`; opponent/chroma coordinates and hue winding are
+unchanged. RGB ramps accept and emit straight coordinates and retain exact
+internal alpha weighting. Other ramps and LUT consumers keep their member arity
+restrictions. Old ColorArray types/codecs and RGB association options are removed.
+No description is attached to a Result and no new sample scan is introduced.
+
+The owned bake table and report are schema v4. The report remains thirteen
+members/361 bytes; both exact TensorDescription encodings enter configuration
+hash domain `photospider.bake-configuration.v2`. Old v3 tables/reports are rejected.
+Kernel interfaces and artifact containers are unchanged. See
+[the migration record](../built-in_ops/01-numeric/NUM-CRV_color_migration.md).
+
 ## Fixed three-dimensional LUT application
 
 The six trilinear/tetrahedral LUT3D keys emit one fixed CPU task per selected complete-color output tile. Reads close its query region, the complete table and six axis endpoints on independent source grids. Numerical axis consistency/order, original query legality, contributing table color legality, reject-domain membership and finite output are caller preconditions. Only positive-weight complete vertices enter exact arithmetic. Each invocation owns fixed knot/arithmetic scratch and writes a dense output tile with one atomic trailing component axis; Empty emits no tasks. See [CRV-07](../built-in_ops/01-numeric/op_specs/CRV-07_apply_lut3d.md).
@@ -199,7 +220,7 @@ Finite strictly increasing positions, finite contributing endpoints and finite r
 
 The fifteen `curve.bake_lut3d_{axis,grid,points,points_extra,color}` profile keys emit one fixed CPU task per selected output tile. Axis copies selected cells. Grid and center tasks read six endpoints and reconstruct RN64 knots with fixed ExactSampling scratch; centers average the two actual neighboring knots. Extra-only tiles read selected extra rows without axis payload or scratch. Color copies same-dtype bits or converts once under RN, with zero scratch. Source closures follow each input grid; outputs preserve global coordinates and use one atomic trailing component axis except for axis. Empty emits no task.
 
-Finite consistent axes, model-valid colors, in-range extras and finite representable conversion are caller preconditions. Direct invocation borrows signed/unaligned views, owns its scratch and writes only selected dense tiles. Pack/Measure/Unpack/Gate use fixed CPU invocations. Pack/Unpack/Gate copy selected samples into independent dense tiles. A nonempty Measure waits for the complete owned table, reads every validation point/reference/applied color, and writes all thirteen report members with fixed exact-integer scratch. Report and table projections retain this global measurement closure. The retirement observer can retain the report even if a later Gate fails. Report v3 stores the actual owned-table ObjectId from the invocation association array. Gate checks configuration identity (`TypeMismatch`), then table identity (`OperationFailed/InvalidAssociation`), then tolerance (`OperationFailed/InvalidDomain` with first-failure details). Well-formed report values are caller premises; the SDK reader independently validates them. See [CRV-09](../built-in_ops/01-numeric/op_specs/CRV-09_bake_lut3d.md#fixed-geometry-tasks).
+Finite consistent axes, model-valid colors, in-range extras and finite representable conversion are caller preconditions. Direct invocation borrows signed/unaligned views, owns its scratch and writes only selected dense tiles. Pack/Measure/Unpack/Gate use fixed CPU invocations. Pack/Unpack/Gate copy selected samples into independent dense tiles. A nonempty Measure waits for the complete owned table, reads every validation point/reference/applied color, and writes all thirteen report members with fixed exact-integer scratch. Report and table projections retain this global measurement closure. The retirement observer can retain the report even if a later Gate fails. Report v4 stores the actual owned-table ObjectId from the invocation association array. Gate checks configuration identity (`TypeMismatch`), then table identity (`OperationFailed/InvalidAssociation`), then tolerance (`OperationFailed/InvalidDomain` with first-failure details). Well-formed report values are caller premises; the SDK reader independently validates them. See [CRV-09](../built-in_ops/01-numeric/op_specs/CRV-09_bake_lut3d.md#fixed-geometry-tasks).
 
 ## Backend selection
 

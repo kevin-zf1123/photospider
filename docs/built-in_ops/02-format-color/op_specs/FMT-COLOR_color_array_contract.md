@@ -5,400 +5,223 @@ kind: shared_data_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_subset
+implementation_status: implemented
 clarification_status: complete
 ---
 
-# FMT-COLOR: generic color-array description
+# FMT-COLOR: explicit color descriptions and numeric tuples
 
-## Selected category target and current implementation
+## Scope and implementation
 
-The [relative-coordinate scale contract](FMT_relative_coordinate_scale.md)
-requires l=L*/100 for target CIELAB/CIELCh storage. Current v1 bytes and the runtime
-behavior below use the implicit 0..100 L* unit until they adopt that scale.
-The two meanings are never mixed, and no compatibility mode exists.
+NUM/CRV and FMT use the operations-SDK `TensorDescription` and its existing
+canonical v4/v5 codecs. Native CIELAB and CIELCh(ab) store `l=L*/100`.
+The [relative-coordinate contract](FMT_relative_coordinate_scale.md) defines
+this scale, including finite negative and HDR extensions. This contract remains
+Proposed; its implementation status is independent of that decision status.
 
-It supersedes the Image/Layer coexistence direction for the future category
-target. The codec and domain shape restrictions below remain SDK contracts;
-operations invoke their validation explicitly. This note
-does not change existing v1 bytes or claim that migration has been implemented.
+Descriptions are explicit static operation parameters. Result and Tensor carry
+structure, samples and storage owners; they do not carry, propagate or certify
+color interpretation. Every consuming operation receives its own description.
+A description identifies immutable profile/configuration resources but does not
+own their bytes or cause a color transform.
 
-The subsequent [kernel storage target](../../../kernel-specs/Tensor-Storage-and-Region-Access.md)
-requires planar images in one full-image virtual range with explicit page backing.
-The explicit tensor-description configuration may group non-RGB color and an independent alpha plane
-within one tensor, including Lab plus alpha. The RGB-only alpha restriction below
-still describes the current v1 codec; it is not the selected future group model.
+The former `ColorArrayDescriptor`, `color-array-v1` codec, its validation helpers
+and `photospider/ops/color_array.hpp` have been removed. No forwarding header,
+old overload, legacy decoder or inferred L* scale remains. Old workflows and
+bake reports must be reauthored and rebuilt. The kernel, its public data model,
+workflow format, IR, planner, executor and invocation ABI are unchanged.
 
-The 2026-09-23 shared decision additionally requires canonical straight images
-with any alpha in the same tensor. The straight/premultiplied options, default
-premultiplied ramp output and association codec tags described below record the
-v1 contract pending migration. They do not permit ordinary premultiplied images
-or persistent external alpha bindings in the selected new target. Their encoded
-bytes are not silently changed by this specification update.
+## NUM logical tuple and physical ports
 
-## Confirmed need and scope
+The public numeric helpers are in
+[`photospider/ops/numeric/color_description.hpp`](../../../../include/photospider/ops/numeric/color_description.hpp).
+They are an operations-SDK restriction of `TensorDescription`, not another codec:
 
-Color ramps use an explicit color-array description. Callers supply the
-corresponding description independently to each downstream consumer; numeric
-outputs do not carry or propagate it. Support Float32 and
-Float64, arbitrary legal array shapes with the last axis holding color channels.
-This is a Proposed shared data contract required by CRV-06, not an operation key
-or a kernel data tag.
+- `color_tuple_description` constructs and checks one logical color tuple.
+- `resolve_color_tuple` validates it and returns its resolved color group.
+- `validate_color_tuple_shape` checks a sampled floating port without reading
+  samples.
 
-The description must express color model, gamut/primaries, reference white and
-transfer explicitly where relevant, along with the model-specific channel/alpha
-information below. RGB ramp defaults are sRGB primaries, D65 and the standard
-piecewise sRGB transfer; this authoring default does not change existing linear
-composite SDK arithmetic requirements. This initial representation clarification is complete;
-the maintained encoding/helpers, resource ownership and operator integration are recorded
-in the implementation section below; this contract remains Proposed.
+The logical tuple description has `channel_axis=0`, exactly one complete group,
+canonical component roles at consecutive indices starting at zero, and no
+unrelated channels. It has no logical axes table, selected component, numeric
+encoding or sampling record. An optional alpha is an independent final channel
+outside the group's color indices; it requires an explicit channel declaration
+with role `alpha` and a native unit. Alpha is straight and never transfer encoded.
 
-ColorArray rank is 2..8, all extents positive and logical elements <=2^40. The
-last axis contains the model channels; one color is [1,C]. One immutable static
-description applies to the whole array. Per-element color-space switching is
-not supported. The full-color observation domain excludes the channel axis and
-therefore has rank 1..7. Arbitrary strides do not change that logical layout.
+This axis zero describes a tuple of shape `[C]`. NUM ports independently define
+sample arrays of shape `[...,C]`, rank 2..8, positive extents and at most `2^40`
+logical elements, with Float32 or Float64 storage. A single sampled color is
+`[1,C]`. A ramp's colors port is `[K,C]`; LUT input, output and tables have their
+own declared ranks. A rational-hue ramp instead binds two floating non-hue
+columns plus separate Int64 numerator and denominator ports. Its description
+still names all three logical color coordinates and uses `rational_pi` for hue.
 
-## Current implementation boundary
+FMT descriptions name axes of the actual tensor supplied to that FMT call.
+For a CRV-produced tensor with shape `[N,3]`, explicitly construct the FMT input
+description with `channel_axis=1`; for `[H,W,3]` use axis 2. Carry over the same
+color interpretation and native units. This is static authoring, not an implicit
+description propagation or numerical conversion. Physical affine strides remain
+independent of the logical axis number.
 
-`ColorArrayDescriptor` and its codec belong to `Photospider::ops_sdk`, with the
-public API in [`photospider/ops/color_array.hpp`](../../../../include/photospider/ops/color_array.hpp).
-It is owned static configuration, independent of a `TensorDescriptor` or Result
-schema. Generic containers establish structure and storage validity. Callers use
-`validate_color_array_descriptor` and `validate_color_array_value`, or an
-operation's explicitly declared validation contract, to establish color-domain
-validity. Equal shapes alone neither establish nor reject a color interpretation.
+## Interpretation and conflicts
 
-CRV-06 uses the `color_description` static String generated by
-`color_array_parameter`. CRV-07 independently takes `input_color_description`
-and `output_color_description`. Authoring helpers serialize the explicit
-configuration into complete node parameters. No edge-to-description map,
-attached descriptor, automatic propagation or implicit color conversion exists.
+A complete numeric group declares its model and required model fields. Global
+and per-channel interpretation assertions must agree with the group wherever
+both specify a value. The generic codec checks group/channel role and unit
+consistency; the numeric resolver additionally checks reference, association,
+white, basis, transfer, convention and model-coordinate conflicts. Empty native
+units inherit the model convention; hue always has an explicit unit.
 
-## Maintained implementation and validation
+For native models, `convention="relative-v1"` and `reference="scene"` or
+`"display"` are required. `association` is absent or `"straight"`; resolution
+makes straight explicit. No exposure, adaptation or tone mapping follows from
+the reference label. Native tuples reject ICC/configured-space and analytic
+binding records. CMYK instead uses `convention="icc-native"`,
+`reference="profile"` and an immutable profile identity.
 
-The later [FMT-12 target](FMT-12_icc_transform_contract.md) additionally requires
-complete profile-defined RGB/Gray/CMYK/XYZ/Lab spaces and explicit analytic
-endpoint bindings. Arbitrary ICC LUTs need not decompose into analytic fields.
-The v1 ColorArray codec does not express those profile-defined endpoints or
-analytic bindings, and the SDK does not provide CMM execution. Shared
-`IccProfile` does provide structural admission for supported ICC v2/v4
-RGB/Gray/CMYK/XYZ/Lab resources; admission alone does not perform conversion.
+Numeric tuples have no absolute-luminance or code-range encoding. Explicit
+absolute-to-relative conversion and FMT-06 numeric decoding precede these
+consumers when needed. The shared TensorDescription codec also represents
+Gray, HSV, xyY, profile-defined and configured spaces, integer encoding and
+arbitrary channel groups; that wider vocabulary does not add NUM/CRV members.
 
-[FMT-13](FMT-13_ocio_transform_contract.md) likewise introduces a future
-config-defined three-coordinate interpretation, identified by frozen OCIO
-resources/context and canonical space or explicit endpoints. It does not infer
-native model units from a name or extend the existing v1 codec implicitly.
+## Models, roles and native units
 
-The SDK supplies canonical encoding, exact white/basis checks and regional
-sample validation. Split rational descriptions remain static parameters for
-coordinated ramp input ports. Complete tuple access is expressed structurally
-by `atomic_trailing_axes` and the operation's declared input demand; the kernel
-does not derive validation closure from a color tag.
-
-`IccProfile` supplies domain admission for explicitly supplied immutable bytes.
-`ResourceSet` resolves the resource identities requested by static operation
-preparation. Prepared operations, plans and active execution retain the selected
-resources. Result storage retains only its actual backing owners, and does not
-inherit the profile because its values were computed using that profile.
-
-## Confirmed RGB primaries and white representation
-
-Represent the RGB gamut by explicit xy chromaticities for red, green and blue,
-plus an explicit white xy pair. Named presets fill these numbers; custom
-coordinates are supported. Transfer is separate from the primaries/white data.
-Neither an RGB name nor equal channel count substitutes for those values.
-The selected built-in primary presets are sRGB, Display P3, Rec.2020,
-Adobe RGB (1998), ProPhoto RGB, ACES AP0 and ACES AP1. Each preset supplies its
-defined default white; transfer remains separately explicit and is not switched
-implicitly by a primary preset.
-
-White xy must be finite with x>0,y>0 and exact x+y<1, yielding positive XYZ when
-normalized to white Y=1. Primary xy may be virtual/imaginary, but the resulting
-RGB-to-XYZ matrix must be invertible. Check exact coordinate relationships rather
-than approximate determinant thresholds. Use homogeneous primary columns
-(x,y,1-x-y), so a primary y=0 is not inherently invalid. Solve for column scales
-against white (xw/yw,1,(1-xw-yw)/yw); both the primary basis and scaled matrix
-must be nonsingular. Negative primary y or negative normalization scale is not by
-itself invalid, as needed for AP0. A near-singular but exact invertible matrix is
-not silently rejected by an invented condition-number cutoff; downstream numeric
-budgets/overflow remain explicit. A malformed white/basis is a descriptor error.
-
-Preset validation must allow the defined imaginary primaries: for example,
-[ACES AP0](https://docs.acescentral.com/encodings/aces2065-1/) has blue xy
-(0.00010,-0.077), and AP0/AP1 use white (0.32168,0.33767), as also documented
-by [ACEScg](https://docs.acescentral.com/encodings/acescg/). Do not reject them
-by requiring every primary coordinate to lie in [0,1]. White selection is not
-implicitly forced to D65 for every preset.
-
-## Confirmed initial transfer scope
-
-RGB and related three-component colors explicitly carry reference=scene_relative
-or display_relative. It is required static configuration; the default sRGB authoring helper
-fills display_relative. Ramp/LUT execution never infers exposure, tone mapping
-or luminance adaptation from this label. CMYK's device/reference conditions
-remain defined by its bound ICC profile rather than a fabricated RGB reference.
-
-Support linear, the standard piecewise sRGB transfer and parameterized pure-power
-gamma. Gamma is a static positive finite numeric parameter. PQ, HLG and log
-encodings are outside this initial dependency scope and require separately defined
-scene/luminance parameters and conversion specifications. Alpha is not a color
-transfer channel; RGBA association/encoding must be explicit. The precise
-supported RGBA association values are straight and premultiplied. Premultiplied
-means alpha times encoded RGB under the specified transfer, not transfer encoding
-of an already premultiplied linear value. A consumer must restore straight encoded
-RGB before decoding when alpha is nonzero. RGB ramps declare input/output formats
-independently and default RGBA output to straight; premultiplied output is an explicit option. Existing linear-only Image/Layer
-contracts are unchanged by this proposed general encoded representation.
-
-For RGBA, alpha is finite in [0,1]. At zero alpha, premultiplied storage requires
-zero RGB; straight storage may contain finite hidden RGB. A consumer's transform
-may impose stronger output rules: the selected RGB ramp emits zero RGB whenever
-its output alpha is zero, in either output association. This does not redefine
-every straight source array as having zero hidden color.
-
-## Confirmed CIE and OK coordinates
-
-XYZ records relative X,Y,Z coordinates with reference-white Y=1 and explicit
-white xy, default D65, optionally D50/custom. It allows finite signed/HDR values.
-Absolute luminance and white-Y=100 data require explicit conversion. XYZ ramp,
-same-model 3D LUT application and baking take this description explicitly; no RGB transfer
-or primaries are implied by an XYZ value. Initial color tuples have no alpha.
-
-Target CIELAB uses l=L*/100,a*,b* and an explicit reference white, default D50
-in existing ramp authoring. Target CIELCh(ab) uses the same l and white with
-nonnegative C* and hue. The v1 runtime still describes unscaled L* and requires
-migration. OKLab and OKLCh use
-their own coordinate scales and fixed D65; arbitrary white replacement is not
-accepted. These four initial ramp models have three channels and no alpha.
-All lightness and Cartesian opponent components may be finite extended values;
-chroma is finite and nonnegative. Nominal lightness ranges are not clipping rules.
-
-Polar color descriptions record hue unit explicitly. Floating storage uses
-radian or pi_multiple; the rational ramp source interface uses separate Int64
-numerator/positive-denominator arrays coordinated with its two L/C columns.
-That two-column array alone is not a complete ColorArray. Outputs always contain
-three floating channels. Their interpretation uses the configured output hue unit,
-which callers supply explicitly to later consumers. The maintainer requires original hue values without normalization for CIELCh,
-OKLCh and HSL. No canonical one-turn storage range is imposed. These ramps interpolate the original hue difference and retain winding count;
-no circular-path parameter is provided. C=0 does
-not erase or invalidate stored hue. See the complete
-[CIELCh contract](../../01-numeric/op_specs/CRV-06D_color_ramp_cielch.md) and
-[OKLCh contract](../../01-numeric/op_specs/CRV-06F_color_ramp_oklch.md).
-
-## Confirmed HSL and YCbCr descriptions
-
-HSL records its underlying RGB primaries, white and transfer, defaulting to
-sRGB/D65/standard sRGB transfer in authoring helpers. Its channel order is H,S,L,
-with explicit radian/pi-multiple hue. Rational source hue is represented by
-coordinated integer numerator/denominator ports. All S/L finite extensions are
-allowed in the ramp; hue remains original, unnormalized and active at S=0.
-The initial form has no alpha. Future HSL conversion operators must explicitly
-define their extension for out-of-reference-range S/L; the ramp does no conversion.
-
-YCbCr records underlying RGB primaries/white/transfer and an NCL matrix, using
-Kr,Kb with positive coefficients and sum<1. BT.601, BT.709 and BT.2020 NCL are
-matrix-only presets; custom coefficients are supported. Coordinates are unbiased
-floating Y',Cb,Cr, nominally [0,1],[-0.5,0.5],[-0.5,0.5], with all finite
-extensions allowed. Initial ramp output has three full-resolution components,
-no alpha and no integer full/limited-range code interpretation. See
-[YCbCr ramp](../../01-numeric/op_specs/CRV-06H_color_ramp_ycbcr.md).
-
-## Confirmed CMYK profile resource
-
-CMYK ramp descriptions reference a specific immutable printing ICC profile
-resource, frozen at compilation and identified by content. Profile changes
-require recompilation, even when the path string is unchanged. Repeated workflow
-execution may change stop/color values while the profile identity stays fixed.
-A downstream color-management operation explicitly receives the profile identity
-and requests its resource during preparation. A description names the resource;
-it does not own its bytes. A path or process-local pointer cannot replace the
-content identity.
-
-The initial CMYK ramp accepts only ICC v2/v4 output-device profiles (prtr) with
-CMYK data space. Reject RGB, DeviceLink and ICCmax resources for this operation.
-Freeze and validate profile format/content before numeric evaluation, and retain
-an owning resource reference in prepared, planned and active execution state. ICC resource bytes and
-validation work are host-accounted, not an unbudgeted path-based cache. The generic
-resource handle owns immutable bytes; any caller that needs them beyond a plan
-or execution lifetime retains that handle explicitly.
-
-## Complete model fields and validity
-
-Every description identifies model, ordered roles/units, reference and alpha
-association as applicable. The following model-specific fields are mandatory;
-irrelevant fields are absent, not silently interpreted as defaults.
-
-| Model | Channels | Required model fields / numeric domain |
+| Model | Canonical roles | Required interpretation and coordinate domain |
 | --- | --- | --- |
-| rgb | R,G,B or R,G,B,A | Primaries xy, white xy, transfer; finite signed/HDR RGB; alpha rules above |
-| xyz | X,Y,Z | White xy, relative white-Y=1; finite signed/HDR |
-| cielab | l,a*,b* | Revised target: l=L*/100, nominal l=0..1, finite extensions; white xy; v1 units pending migration |
-| cielch | l,C*,h | Revised target: l=L*/100; white xy, floating hue unit; finite l, C*>=0, finite original hue; v1 units pending migration |
-| oklab | L,a,b | Fixed D65; finite extensions, nominal L=0..1 |
-| oklch | L,C,h | Fixed D65, floating hue unit; finite L, C>=0, finite original hue |
-| hsl | H,S,L | Underlying RGB primaries/white/transfer, floating hue unit; all finite extensions |
-| ycbcr | Y',Cb,Cr | Underlying RGB description, NCL Kr/Kb and unbiased coordinate scale; finite extensions |
-| cmyk | C,M,Y,K | Frozen ICC v2/v4 CMYK prtr resource; each ink in [0,1]; no alpha |
+| rgb | red, green, blue | RGB basis, white and linear/sRGB/power-gamma transfer; finite signed/HDR RGB |
+| xyz | x, y, z | Explicit white and `coordinates.scale="relative"`; white Y=1; finite signed/HDR values |
+| cielab | l, a, b | Explicit white; `l=L*/100`, unchanged a*,b*; finite extensions |
+| cielch | l, c, h | Same normalized l and white; C*>=0; explicit original hue |
+| oklab | l, a, b | Fixed D65; existing OKLab units and finite extensions |
+| oklch | l, c, h | Fixed D65; existing L/C units, C>=0 and explicit original hue |
+| hsl | hue, saturation, lightness | Underlying RGB basis, white and transfer; finite S/L extensions and original hue |
+| ycbcr | y, cb, cr | Underlying encoded RGB basis/white/transfer and explicit NCL Kr,Kb; unbiased native Y',Cb,Cr |
+| cmyk | cyan, magenta, yellow, black | Immutable ICC v2/v4 CMYK printing profile; each ink in [0,1] |
 
-Only RGB initially supports alpha. Three-channel RGB uses association=none;
-RGBA uses straight/premultiplied with the encoded-association definition above.
-All other initial models have association=none. Three-component reference is
-scene_relative/display_relative; CMYK uses profile-defined device reference.
-Floating hue is radian/pi_multiple with no modulo canonicalization of sample
-values. Negative zero samples remain governed by the producing operation, not
-by descriptor serialization. Color operations validate complete samples according to their declared
-observation contract. Generic numeric operations do not acquire color rules from
-the tensor shape.
+A native non-hue component accepts an empty unit, `"1"` or `"relative"`.
+CIELAB a/b additionally accept `"a*"`/`"b*"`, and CIELCh chroma accepts `"C*"`.
+These unit spellings retain the model's native coordinate, not a uniform scale
+for all channels. `"L*"`, percentage, absolute-unit and range-encoding declarations
+are rejected by the numeric tuple resolver. Hue is `"radian"`, `"pi_multiple"`
+or, only for coordinated ramp source ports, `"rational_pi"`.
 
-Required transfer identity is linear, srgb or gamma, with gamma's positive finite
-Float64 exponent only for gamma. sRGB uses the exact piecewise constants/exponents
-and odd signed extension in CRV-06A. Gamma uses sign(c)*abs(c)^gamma to decode
-and its mathematical inverse to encode. No implicit transfer applies to XYZ/Lab.
-No absolute luminance parameter or PQ/HLG/log transfer is inferred by this version.
+The generic numeric tuple helper can express independent alpha for these models.
+Individual members impose narrower arity: CRV-06 supports alpha only for RGB;
+CMYK has four ink components without alpha; other ramps have three colors.
+CRV-07 and CRV-09 require same-model input/output descriptions with exactly three
+color components, no alpha and floating hue. No consumer infers alpha from a
+four-column tensor.
 
-## Named primary/white presets
+## RGB geometry, transfer and alpha
 
-Authoring helpers fill explicit Float64 xy values by nearest/ties-even conversion
-of these decimals. Preset spelling is not semantic identity: custom coordinates
-with the same canonical values have the same interpretation. Transfer remains
-separate. This lists primaries/white only, not complete named RGB encodings.
+RGB geometry uses explicit primary/white xy coordinates or a supported named
+basis with consistent explicit assertions. Transfer is independent. Numeric
+consumers reuse the exact FMT basis/white admission implementation:
+[rgb_geometry_codec.hpp](../../../../plugins/ops/common/domain/rgb_geometry_codec.hpp).
+White must be finite with x>0, y>0 and exact x+y<1. Homogeneous primary columns
+`(x,y,1-x-y)` and the white-normalized basis must be nonsingular. Imaginary
+primaries, zero primary y and negative primary normalization scales are not
+rejected merely for leaving [0,1]. No approximate determinant threshold is added.
 
-| Preset | Red xy | Green xy | Blue xy | White xy |
-| --- | --- | --- | --- | --- |
-| srgb | .64,.33 | .30,.60 | .15,.06 | .3127,.3290 |
-| display_p3 | .68,.32 | .265,.69 | .15,.06 | .3127,.3290 |
-| rec2020 | .708,.292 | .170,.797 | .131,.046 | .3127,.3290 |
-| adobe_rgb_1998 | .64,.33 | .21,.71 | .15,.06 | .3127,.3290 |
-| prophoto_rgb | .734699,.265301 | .159597,.840403 | .036598,.000105 | .3457,.3585 |
-| aces_ap0 | .73470,.26530 | 0,1 | .00010,-.077 | .32168,.33767 |
-| aces_ap1 | .713,.293 | .165,.830 | .128,.044 | .32168,.33767 |
+Supported named bases are `srgb_rec709`, `display_p3`, `rec2020`,
+`adobe_rgb_1998`, `prophoto_rgb`, `aces_ap0` and `aces_ap1`. Named D65 and D50
+white coordinates are (.3127,.3290) and (.3457,.3585); ACES uses its stated white.
+[The basis specification](FMT-10_basis_math.md) records exact preset values.
 
-Named D65 and D50 helpers use (.3127,.3290) and (.3457,.3585), respectively;
-ACES white is its stated pair, not an implicit substitution by D65. XYZ white
-coordinates are derived with Y=1 from the stored xy as exact ratios. No bitwise
-equivalence to older image descriptors with separately rounded XYZ white triples
-is claimed. Basis validation includes AP0's imaginary primary and all custom
-zero-y primary cases permitted by the homogeneous representation.
+Numeric RGB/HSL accept linear, standard sRGB and positive finite power gamma.
+YCbCr requires encoded underlying RGB and rejects linear transfer; Kr and Kb
+must be positive with exact Kr+Kb<1. PQ, HLG, log and engine-defined transfers
+require separately specified conversion and are not added to numeric ramps.
+The default RGB ramp description selects sRGB/Rec.709 primaries, D65, standard
+sRGB transfer and display reference.
 
-These identify preset data, not adoption of CSS interpolation or an ACES transform.
+RGB ramp inputs and outputs are straight. For RGBA, alpha is finite in [0,1].
+The ramp decodes straight RGB, weights linear color by alpha, interpolates,
+divides by the mixed alpha and re-encodes straight RGB. Internal alpha weighting
+does not define a premultiplied storage format. Finite hidden color at zero
+input alpha contributes zero; zero output alpha produces canonical transparent
+black. The complete expression and representability rules are in
+[CRV-06A](../../01-numeric/op_specs/CRV-06A_color_ramp_rgb.md).
+There is no `output_association` parameter or `RgbRampOptions` compatibility type.
 
-## Canonical encoding and authoring helpers
+## CIE, OK, hue and NCL coordinates
 
-This section records the existing v1 codec, whose CIELAB/CIELCh units are old
-unscaled L*. It does not encode the revised normalized-lightness target above.
-That target requires an explicitly distinguishable semantic schema before use;
-the model tag alone must not acquire a second implicit interpretation.
+CIELAB/CIELCh l is normalized, while a*, b* and C* retain their existing scales.
+A nominal l interval of 0..1 is not clipping. XYZ uses one common tristimulus
+scale with reference-white Y=1; X/Z are not divided by white X/Z.
+OKLab/OKLCh retain their own scales and exact D65 white declaration.
 
-The `color-array-v1` codec uses a canonical bounded payload of at most 4096
-bytes. SDK encode/decode/parameter helpers own their returned data. The static
-`color_description` String is the canonical lowercase hexadecimal payload, at
-most 8192 bytes, emitted by `color_array_parameter`. This is operation
-configuration; it is never attached to a Tensor or Result. The codec preserves
-its existing units and byte layout independently of the removed tag system.
+Polar ramps interpolate original hue differences, including multiple turns.
+They do not normalize hue, choose a shortest arc or erase hue at zero chroma
+or saturation. Rational source hue uses Int64 p/q with a positive selected
+denominator. Outputs contain three floating coordinates in the selected
+radian or pi-multiple unit; callers explicitly author that output description
+for a later consumer.
 
-Use an explicit model-tagged fixed-field binary record, with little-endian fixed
-width integers and IEEE binary64 bit encodings for numeric metadata. Model tags
-are rgb=1,xyz=2,cielab=3,cielch=4,oklab=5,oklch=6,hsl=7,ycbcr=8,cmyk=9;
-reference tags scene_relative=1,display_relative=2,profile_relative=3;
-association none=0,straight=1,premultiplied=2. The prefix is four UInt8 values:
-model, reference, association, source_layout (0 interleaved,1 rational_hue_split).
-Channel roles/units are determined by model, association and hue-unit tags;
-no redundant unconstrained role strings are encoded.
+YCbCr uses full-resolution unbiased floating Y',Cb,Cr, nominally
+[0,1],[-0.5,0.5],[-0.5,0.5], with finite extensions. It has no implicit integer
+full/limited range, chroma subsampling or matrix execution in a ramp.
 
-Following the prefix, all non-CMYK models contain white xy (two Float64).
-RGB/HSL/YCbCr additionally contain primary xy in R,G,B order (six Float64),
-then transfer UInt8 (linear=0,srgb=1,gamma=2) and a Float64 exponent only for
-gamma. CIELCh/OKLCh/HSL then contain hue UInt8 (radian=0,pi_multiple=1,
-rational_pi=2). YCbCr then contains Kr,Kb as two Float64; its fixed unbiased
-range is implicit in version/model. CMYK instead contains UInt64 profile byte
-length and a 32-byte content identity as described below. All inapplicable fields
-are omitted, and no trailing bytes or unknown tags are accepted. Only CMYK uses profile_relative;
-all other models require scene_relative or display_relative. Only RGB accepts
-a nonzero association tag. Configuration signed zeros are canonicalized to +0,
-never sample payloads. Reject noncanonical encodings
-on decode rather than silently repairing stored payloads.
+## CMYK resource ownership and admission
 
-Runtime ColorArray requires source_layout=0 and floating hue codes 0/1 only.
-The rational ramp authoring wrapper uses source_layout=1 and hue=2, only for
-CIELCh/OKLCh/HSL. It describes coordinated split source ports and is legal only
-as the static source parameter; the two-column L/C or S/L input alone does not
-contain a complete interleaved color. Output encoders always use interleaved layout
-and the selected floating hue unit. This distinction resolves static rational
-input descriptions without inventing a rational sample dtype.
+The CMYK ramp names an immutable ICC profile by SHA-256 content identity and
+exact byte length. `color_ramp_cmyk_description` returns
+`Result<TensorDescription>` and rejects an empty identity. It does not load a
+path or retain profile bytes. `ResourceSet` supplies the selected immutable
+resource to compilation; changing the identity requires recompilation.
 
-For YCbCr, matrix presets populate Kr/Kb by correctly rounding the documented
-decimal coefficients to Float64; the actual stored numeric values define the
-custom/preset descriptor alike. No preset name silently replaces them with a
-different rational matrix. Ordinary ramp arithmetic does not execute the matrix.
-Exact configuration comparisons cover all canonical fields, including reference,
-white, hue unit, association and profile identity; dtype/shape are checked separately.
+CRV-06B accepts ICC v2/v4 output-device (`prtr`) profiles with CMYK data space
+and valid XYZ/Lab PCS. It rejects RGB, DeviceLink and ICCmax profiles. Admission
+checks the declared length, signature, version, tag directory, offsets and sizes,
+required profile-class structure, permitted shared data and optional v4 Profile
+ID within frozen bytes. It runs once per PreparedOperation, including Empty
+calls and artifact import, with the declared 64 MiB static work limit.
 
-For XYZ, the first four bytes are the model/reference/association/layout tags,
-followed by the two little-endian binary64 white coordinates. The helper's
-static String is exactly the lowercase hex above. No primary,
-transfer, hue or profile fields may be appended to this XYZ record. Future codec
-acceptance compares exact bytes and rejects trailing fields independently of
-sample dtype/shape validation.
+Resource bytes and admission work are host-accounted. Preparation, Plan and
+active execution retain the selected owner. Result retains its actual output
+storage and does not inherit a profile owner. Interpolation neither executes an
+ICC transform nor infers total-ink constraints. FMT-12/13/18 separately implement
+their explicit ICC/configured transforms and immutable engine resources.
 
-## ICC resource ownership and admission
+## Encoding, cache identity and validation
 
-Profile content identity is SHA-256 plus exact byte length, computed after loading
-the explicitly bound immutable resource. Matching identity is a lookup aid; a
-resolver must retain the actual accepted bytes and reject conflicting content for
-an existing identity, rather than allowing a pathname substitution. The resource
-must have checked declared length, acsp signature, v2/v4 version, prtr class and
-CMYK data space, valid XYZ/Lab PCS and a structurally valid bounded tag directory.
-Check all offsets/sizes/count arithmetic against the frozen bytes, required
-profile-class structures and permitted shared tag data under the selected ICC
-version. Do not execute transform tables merely to interpolate CMYK components.
+Use `tensor_description_parameter` / `tensor_description_from_parameter` for
+static strings and `encode_tensor_description` / `decode_tensor_description` for
+bytes. The existing TensorDescription v4/v5 discriminator and canonical rules
+are unchanged by NUM/CRV migration. Unknown, noncanonical and old ColorArray
+payloads fail admission; no numeric magnitude can select a legacy interpretation.
 
-The content identity does not provide ownership. `ResourceSet` retains selected
-immutable handles, deduplicates identities and rejects conflicting bytes for the
-same identity. It does not rehash every handle during set construction. Missing
-requested resources fail preparation; operations do not load mutable paths from
-configuration during evaluation. Profile admission and its scratch work remain
-host-budgeted. A Result or read window keeps its storage alive, but does not keep
-unrelated color configuration alive automatically.
+CRV-06 takes `color_description`; CRV-07 and CRV-09 take independent
+`input_color_description` and `output_color_description`. The descriptions may
+have different references, white/basis or transfer where the member allows
+them; same-model LUT evaluation applies its authored table and performs no
+implicit conversion. Output samples have no attached description.
 
-## Integration, errors and acceptance
+CRV-09 hashes both canonical TensorDescription payloads under
+`photospider.bake-configuration.v2`. Its owned table and report are schema v4.
+Old v3 tables/reports are rejected, and old workflows must be recompiled.
+The operator fixed-contract revisions invalidate old numerical preparations;
+no kernel ABI or generic artifact-container revision is introduced.
 
-Static preparation checks explicit configuration, structural dtype/shape and
-required resources. Evaluation validates complete colors within the operation's
-authorized observation/support. Registered validators cannot request upstream
-computation or expand their read window. Full bundle validation is declared by
-the operation; a schema id never selects a built-in color validator.
+Static preparation checks descriptions, shape/dtype/arity and required resources,
+even when requested output is Empty. Numeric sample validity in NUM/CRV remains
+an unchecked caller precondition; migrating metadata adds no eager sample scan.
+Invalid metadata is `InvalidArgument`; incompatible schema/shape/dtype is
+`TypeMismatch`. Resource, upstream, capacity and cancellation statuses retain
+their operational meanings. FMT consumers follow their own explicit consumed
+sample validation contracts.
 
-Each consumer receives its own explicit source description and, where needed,
-destination description. Generic numeric operations apply their own numeric
-contracts without propagating color configuration. Color-preserving arithmetic
-does not relieve the caller of supplying configuration to a later consumer.
+Acceptance includes canonical round trips, contradictory assertions, old payload
+and old report rejection, all models/hue/dtype variants, exact basis admission,
+straight RGB alpha, normalized Lab/LCh, rational split ports, LUT axes/tables,
+bake configuration identity and explicit CRV-to-FMT composition. Executed
+evidence is recorded in the
+[NUM/CRV migration report](../../01-numeric/NUM-CRV_color_migration.md).
 
-Malformed or noncanonical configuration, invalid white/basis/transfer/matrix,
-invalid profiles and unresolved resources fail static admission. SDK descriptor
-checks return `InvalidArgument` for invalid configuration and `TypeMismatch` for
-incompatible dtype/shape. Regional sample validation returns the requested
-numeric failure category (default `InvalidArgument`) with generic or SDK domain
-error context. Operation callbacks may use `OperationFailed` for invalid consumed
-samples. Cancellation, resource and upstream failures preserve their category;
-SDK-specific association reasons use the transmissible domain error code.
-
-Explicit parameters, resource content identities and bound validation contract
-versions/implementation identities participate in cache identity. Callbacks,
-addresses and diagnostic reports do not. Result storage budgets and prepared
-configuration/resource budgets follow their actual owners.
-
-Acceptance covers canonical round trips and rejection of old/unknown/trailing
-formats, each model/role count, arbitrary strides, all presets including AP0,
-singular and near-singular custom primaries, invalid white and gamma, scene/display
-mismatches, hue original multi-turn values, rational-source versus runtime layout,
-XYZ scale, CMYK profile classes/tag ranges/resources and context-lifetime ownership.
-Test partial-channel requests validating the whole required color, unrelated
-colors remaining unread, cache identity changes, metadata/resource budgets and
-cancellation. Provide actual public producer/consumer workflow evidence when
-implemented; acceptance claims must identify the commands and paths actually exercised.
-
-- [CRV-06 color ramps](../../01-numeric/op_specs/CRV-06_color_ramp.md).
-- [Color management category](../representation.md).
-- [Operator specification template](../../00-foundation/spec-template.md).
+- [TensorDescription runtime contract](../../../kernel-architecture/Tensor-Semantic-Metadata.md).
+- [CRV-06](../../01-numeric/op_specs/CRV-06_color_ramp.md),
+  [CRV-07](../../01-numeric/op_specs/CRV-07_apply_lut3d.md),
+  [CRV-09](../../01-numeric/op_specs/CRV-09_bake_lut3d.md).
 - [Current public foundation contract](../../00-foundation/contracts.md).

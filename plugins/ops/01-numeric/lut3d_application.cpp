@@ -19,7 +19,7 @@
 #include "common/registry.hpp"
 #include "common/tensor_program.hpp"
 #include "photospider/core/resource_allocator.hpp"
-#include "photospider/ops/color_array.hpp"
+#include "photospider/ops/numeric/color_description.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -42,23 +42,28 @@ Result<OperationPreparation> prepare(
     const std::vector<OperationMetadata>& inputs,
     const std::map<std::string, ParameterValue>& parameters) {
   using Answer = Result<OperationPreparation>;
-  auto source = color_array_from_parameter(
+  auto source = tensor_description_from_parameter(
       std::get<std::string>(parameters.at("input_color_description")));
-  auto destination = color_array_from_parameter(
+  auto destination = tensor_description_from_parameter(
       std::get<std::string>(parameters.at("output_color_description")));
   if (!source.ok())
     return Answer(source.status());
   if (!destination.ok())
     return Answer(destination.status());
-  const auto& a = source.value();
-  const auto& b = destination.value();
-  if (a.model != b.model || a.model == ColorModel::Cmyk ||
-      a.association != ColorAssociation::None ||
-      b.association != ColorAssociation::None ||
-      a.source_layout != ColorSourceLayout::Interleaved ||
-      b.source_layout != ColorSourceLayout::Interleaved)
+  auto a = numeric::resolve_color_tuple(source.value());
+  auto b = numeric::resolve_color_tuple(destination.value());
+  if (!a.ok() || !b.ok())
+    return Answer(!a.ok() ? a.status() : b.status());
+  if (a.value().interpretation.model != b.value().interpretation.model ||
+      a.value().components.size() != 3 || b.value().components.size() != 3 ||
+      a.value().alpha || b.value().alpha)
     return Answer(numeric_ops::array_parameter_error(
-        "LUT3D requires same-model three-component interleaved colors"));
+        "LUT3D requires same-model three-component colors"));
+  for (const auto* group : {&a.value(), &b.value()})
+    for (const auto& component : group->components)
+      if (component.unit == "rational_pi")
+        return Answer(numeric_ops::array_parameter_error(
+            "LUT3D requires floating hue coordinates"));
   const auto& dtype = std::get<std::string>(parameters.at("dtype"));
   const auto& domain = std::get<std::string>(parameters.at("out_of_domain"));
   if ((dtype != "float32" && dtype != "float64") ||
@@ -158,7 +163,7 @@ Result<TileSet> required_tiles(const Region& region, const TileGrid& grid,
   }
   return sdk::tiles_for_region(budget, grid, region);
 }
-constexpr const char* lut_contract = "lut3d-fixed-v1";
+constexpr const char* lut_contract = "lut3d-fixed-v2";
 Result<OperationProgram> lower(const OperationLowering& query) {
   using Answer = Result<OperationProgram>;
   const auto& state = *static_cast<const Lut3dProgram*>(query.static_state);

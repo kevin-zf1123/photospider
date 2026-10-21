@@ -8,7 +8,7 @@ category: 01-numeric
 kind: composite_workflow
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_subset
+implementation_status: implemented
 clarification_status: complete
 ---
 
@@ -16,17 +16,17 @@ clarification_status: complete
 
 ## Fixed execution status
 
-The fifteen geometry profile keys (`axis`, `grid`, `points`, `points_extra`, `color`) and four Result operations (Pack, Measure, Unpack, Gate) execute through fixed ABI 8 CPU tasks. The authoring helper builds ordinary source, sampling, application, measurement and gate nodes. A registry must provide those fixed definitions and the source operation keys. Report v3 retains its process-local owned-table ObjectId association.
+The fifteen geometry profile keys (`axis`, `grid`, `points`, `points_extra`, `color`) and four Result operations (Pack, Measure, Unpack, Gate) execute through fixed ABI 8 CPU tasks. The authoring helper builds ordinary source, sampling, application, measurement and gate nodes. A registry must provide those fixed definitions and the source operation keys. Report v4 retains its process-local owned-table ObjectId association.
 
-## Revised lightness coordinate and implementation boundary
+## Native lightness and explicit description
 
-The [2026-09-23 shared scale revision](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
-requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
-LUT input axes and output table coordinates. Finite values outside 0..1 remain
-legal. Opponent/chroma scales and arithmetic formulas are unchanged. The current ColorArray SDK configuration interprets L* in its implicit 0..100 unit;
-this target scale applies only after explicit configuration, fixtures and consumers
-adopt it explicitly. No implicit unit alias or inference from sample magnitude
-is permitted.
+The [shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
+uses native CIELAB/CIELCh `l=L*/100` for ramp colors, LUT input axes, output
+table coordinates and validation points. Finite values outside 0..1 remain
+legal. Opponent/chroma scales, hue winding and arithmetic formulas are unchanged.
+The implementation uses canonical TensorDescription v4/v5 tuple parameters.
+The old ColorArray types and decoder are removed; old payloads and explicit
+L* units are rejected without sample-magnitude inference.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -72,7 +72,7 @@ shape=[N0,N1,N2]. Inherit CRV-07's
 Float64 coordinates. Finite endpoints, consistent representable step and strict RN64 reconstructed ordering are caller preconditions for geometry and CRV-07 application. Evaluate the source at those
 grid colors. The exported table is a `photospider.tensor` Result with `samples`
 of shape [N0,N1,N2,3], selected table dtype and one atomic trailing component axis;
-its internal owned table uses `curve.bake_lut3d.table` v3 with tensor member
+its internal owned table uses `curve.bake_lut3d.table` v4 with tensor member
 `colors`. Axis is an immutable Float64 Result tensor independent of source
 execution, and its coordinates follow the input description.
 
@@ -139,7 +139,9 @@ optional validation_points, and the graph's remaining declared shared inputs.
 Required static parameters are shape (three integer extents), interpolation
 (trilinear/tetrahedral), atol/rtol (Float64), table_dtype (Float32/Float64,
 default source output dtype), input/output color descriptions and the explicit
-source_pointwise assertion. Descriptions obey CRV-07's same-model requirements.
+source_pointwise assertion. Descriptions are TensorDescription logical tuples
+encoded by `tensor_description_parameter`; they obey CRV-07's same-model,
+three-component, no-alpha and floating-hue requirements.
 The assertion is caller responsibility, not a general compiler independence proof.
 The source builder receives Result tensor references under any schema id/key;
 each source result must contain one tensor with a `sample_shape()` matching the
@@ -170,9 +172,19 @@ The maintained authoring API supplies explicit source sampling, global validatio
 and Result publication through ordinary graph nodes. It remains a Proposed
 workflow contract rather than a new opaque runtime composition primitive.
 
+## Native-unit migration and tolerance
+
+The native lightness coordinate is `l=L*/100` in the source grid, extra points,
+table values, reference values and recorded failure coordinates. The scalar
+`atol` applies to each of the three stored output components, while `rtol` uses
+the existing relative-error formula. Dividing an old L*-based `atol` by 100
+would also tighten unchanged a*/b*/C* channels, so it is not an equivalent
+whole-color migration. Reauthor the intended tolerance in native units and
+regenerate the bake/report. There is no automatic old-table rescaling.
+
 ## Structured report schema
 
-The SDK defines SchemaTemplate id `curve.bake_lut3d.report` at version 3 with thirteen static Tensor members. The measurement stage publishes the report after evaluating the complete validation set, and the SDK report reader requires complete report coverage. A partial public projection can expose selected members, while measurement still writes the complete report before any member becomes available.
+The SDK defines SchemaTemplate id `curve.bake_lut3d.report` at version 4 with thirteen static Tensor members. The measurement stage publishes the report after evaluating the complete validation set, and the SDK report reader requires complete report coverage. A partial public projection can expose selected members, while measurement still writes the complete report before any member becomes available.
 
 | Tensor member | Dtype and shape |
 | --- | --- |
@@ -187,7 +199,9 @@ The SDK defines SchemaTemplate id `curve.bake_lut3d.report` at version 3 with th
 | configuration_id | UInt8 [1,64], lowercase hexadecimal SHA-256 |
 | measured_table_id | UInt8 [1,8], little-endian ObjectId |
 
-The thirteen members contain 361 bytes of fixed payload. `configuration_id` is the lowercase hexadecimal SHA-256 of the shape, interpolation, tolerances, source/table dtypes, extra-point count, explicit color descriptions and source recipe, under the `photospider.bake-configuration.v1` hash domain. The reader and gate receive the expected `Lut3dBakeDescription` explicitly.
+The thirteen members contain 361 bytes of fixed payload. `configuration_id` is the lowercase hexadecimal SHA-256 of the shape, interpolation, tolerances, source/table dtypes, extra-point count, explicit color descriptions and source recipe, under the `photospider.bake-configuration.v2` hash domain. Both exact canonical TensorDescription byte strings enter the digest. The reader
+and gate receive the expected `Lut3dBakeDescription` explicitly. Old v3 report
+and owned-table schemas are rejected; no legacy adapter remains.
 
 `measured_table_id` is an ordinary `UInt8[1,8]` payload encoding the ObjectId of the complete owned table read during measurement, in little-endian order. The gate compares it with the logical ObjectId supplied for the current owned-table input. ObjectId is process-local identity, not a content digest: two tables with identical bytes but different ObjectIds are not interchangeable for this quality report.
 
@@ -283,7 +297,7 @@ the same immutable Result bindings, including shared inputs and optional
 plus an owning `description` configuration value for the caller. No payload is
 computed during authoring. The exported table is `photospider.tensor` v1/member
 `samples`, shape [N0,N1,N2,3], selected dtype and atomic_trailing_axes=1. The
-internal table is `curve.bake_lut3d.table` v3/member `colors` with the same shape
+internal table is `curve.bake_lut3d.table` v4/member `colors` with the same shape
 and dtype. Neither contains a domain description or quality metadata.
 
 The public SDK header is `photospider/ops/numeric/lut3d_bake.hpp`. Read a report
@@ -300,7 +314,7 @@ Gate first compares the report configuration with its static configuration and r
 
 ### Fixed geometry tasks
 
-Each selected output tile emits one `bake-geometry-fixed-v1` CPU task. Axis copies its selected Float64 cells with zero scratch. Grid and cell-center tasks read six axis endpoints; step metadata remains a caller premise. Grid coordinates use endpoint-weighted RN64 reconstruction. Each center averages the two actual neighboring reconstructed Float64 knots and rounds that exact average to Float64. This preserves descending axes, endpoint raw bits and rounded-to-vertex centers.
+Each selected output tile emits one `bake-geometry-fixed-v2` CPU task. Axis copies its selected Float64 cells with zero scratch. Grid and cell-center tasks read six axis endpoints; step metadata remains a caller premise. Grid coordinates use endpoint-weighted RN64 reconstruction. Each center averages the two actual neighboring reconstructed Float64 knots and rounds that exact average to Float64. This preserves descending axes, endpoint raw bits and rounded-to-vertex centers.
 
 `points_extra` appends extra rows after centers. A task reads only the selected extra rows; it reads axis endpoints only if its output also contains centers. An extra-only tile therefore has no axis payload dependency and uses zero scratch. Color tasks read corresponding complete colors and copy same-dtype bits or perform one direct RN conversion, with zero scratch. Arithmetic grid/center tasks use one preallocated `ExactSampling` object, independent of the total grid or point count.
 
@@ -312,7 +326,7 @@ Finite consistent axis data, model-valid colors, in-range extras and representab
 
 ### Fixed Result tasks
 
-Pack, Unpack and Gate emit one `bake-result-fixed-v1` CPU task per selected output tile. They close the corresponding source rectangle on its own grid and copy raw bytes to an independently allocated dense output. Gate also reads report members passed, first_failure_index/input/reference/lut, configuration_id and measured_table_id. Those reads are fixed before execution; a one-tile table selection still depends on the global Measure task.
+Pack, Unpack and Gate emit one `bake-result-fixed-v2` CPU task per selected output tile. They close the corresponding source rectangle on its own grid and copy raw bytes to an independently allocated dense output. Gate also reads report members passed, first_failure_index/input/reference/lut, configuration_id and measured_table_id. Those reads are fixed before execution; a one-tile table selection still depends on the global Measure task.
 
 A nonempty Measure emits one task. It reads the complete axis, owned table, points, reference and applied colors, while the grid port contributes static schema only. Complete table reads establish readiness and supply identity; error arithmetic uses the point/reference/applied data. The task writes all tiles of all thirteen report members and exports the report in its retired CallRecord. Selecting one report member retains the same task and complete numerical work. Empty selection emits no task.
 

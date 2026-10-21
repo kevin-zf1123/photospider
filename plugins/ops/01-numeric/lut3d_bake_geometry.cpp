@@ -31,15 +31,19 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
   auto available = numeric_ops::sequence_profile_available(profile);
   if (!available.ok())
     return Answer(available);
-  auto color = color_array_from_parameter(std::get<std::string>(
+  auto color = tensor_description_from_parameter(std::get<std::string>(
       parameters.at(kind == Geometry::Color ? "color_description"
                                             : "input_color_description")));
   if (!color.ok())
     return Answer(color.status());
-  if (color.value().model == ColorModel::Cmyk ||
-      color.value().association != ColorAssociation::None ||
-      color.value().source_layout != ColorSourceLayout::Interleaved)
+  auto group = numeric::resolve_color_tuple(color.value());
+  if (!group.ok())
+    return Answer(group.status());
+  if (group.value().components.size() != 3 || group.value().alpha)
     return Answer(invalid("bake geometry requires three-component colors"));
+  for (const auto& component : group.value().components)
+    if (component.unit == "rational_pi")
+      return Answer(invalid("bake geometry requires floating hue coordinates"));
   for (const auto& input : inputs) {
     auto valid = tensor_ops::check_tensor(input);
     if (!valid.ok())
@@ -90,7 +94,7 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
   }
   if (kind != Geometry::Axis) {
     auto valid =
-        validate_color_array_descriptor(color.value(), tensor.descriptor);
+        numeric::validate_color_tuple_shape(color.value(), tensor.descriptor);
     if (!valid.ok())
       return Answer(valid);
     tuple_axes = 1;
@@ -152,7 +156,7 @@ Status check_tile_count(const TileGrid& grid, const Region& region,
   }
   return Status::success();
 }
-constexpr const char* geometry_contract = "bake-geometry-fixed-v1";
+constexpr const char* geometry_contract = "bake-geometry-fixed-v2";
 Result<OperationProgram> lower(const OperationLowering& query) {
   using Answer = Result<OperationProgram>;
   const auto& state = *static_cast<const GeometryProgram*>(query.static_state);
@@ -436,11 +440,6 @@ OperationDefinition geometry(Geometry kind, SequenceProfile profile,
     auto output = specialize(kind, profile, inputs, parameters);
     if (!output.ok())
       return Result<OperationPreparation>(output.status());
-    auto color = color_array_from_parameter(std::get<std::string>(
-        parameters.at(kind == Geometry::Color ? "color_description"
-                                              : "input_color_description")));
-    if (!color.ok())
-      return Result<OperationPreparation>(color.status());
     OperationPreparation prepared;
     prepared.outputs = output.take_value();
     prepared.state = std::make_shared<const GeometryProgram>(

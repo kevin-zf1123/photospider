@@ -28,10 +28,11 @@ Inherit [FIL-04](FIL-04_contract.md), [FILTER common contract](FILTER_common_con
 
 Input port `input` selects a Result containing one tensor. Output
 port `output` publishes one Result tensor with the same complete sample shape,
-including batch axes. Its tensor schema, facets, layout metadata, and bound
-resources are copied from the input; supported typed ColorArray v1 and ICC
-ownership are retained. Raw numeric inputs do not reject NaN or infinity under a
-blanket finite-value rule.
+including batch axes. Color interpretation is explicit static configuration
+under the current FMT contract, not a facet copied through Result. The old
+ColorArray v1 interface is removed. Downstream color consumers receive their
+own TensorDescription and explicitly select any ICC resource during preparation.
+Raw numeric inputs do not reject NaN or infinity under a blanket finite-value rule.
 
 ## Explicit parameters and legal domain
 
@@ -49,7 +50,9 @@ Treat `kx` and `ky` as exact binary64 constants. Return `RN_t(Σ ky*kx*I / ((Σk
 
 The numeric class and E/B/S meanings are defined in [FILTER numeric reference](FILTER_numeric_reference.md). Retain every declared rounding stage; helper calls do not introduce extra intermediate rounding unless the member says so. Signed zero, discrete choices, gradual underflow, and output range follow the member and NUM contracts.
 
-complete-input and GPU demand the complete tensor domain and publish a complete output. CPU tiled uses IndependentChunks and computes only requested output regions. Its Data support is a compact exact Neighborhood relation for nonzero taps after boundary mapping. It unions a separate Validation relation that closes typed ColorArray channel tuples and atomic trailing axes; the first Need also carries Descriptor role. Later Needs request Data and Validation without repeating descriptor demand. Boundaries use the complete input sample domain, including batch axes, never an ROI or tile edge. Empty demand reads no payload and performs no coefficient or arithmetic payload allocation.
+complete-input and GPU demand the complete tensor domain and publish a complete output. CPU tiled uses IndependentChunks and computes only requested output regions. Its Data support is a compact exact Neighborhood relation for nonzero taps after boundary mapping. Structural atomic trailing axes still constrain complete tiles. There is no
+ColorArray tag selecting an automatic color-tuple validation closure; any color
+observation requirement must be part of an explicit consuming operation contract. Boundaries use the complete input sample domain, including batch axes, never an ROI or tile edge. Empty demand reads no payload and performs no coefficient or arithmetic payload allocation.
 
 Use the Cartesian product of nonzero 1D taps; the kernel is derived static control data. Zero sigma only removes support on its own axis. There is no hidden UI maximum for large sigma, though indexing, work, and resource budgets still apply. Execution follows FIL-02A.
 
@@ -69,9 +72,9 @@ runtime budgets and share one immutable owner across the invocation's host range
 `filter.gaussian_baked64_v1_strict_cpu_tiled` computes requested regions with
 budgeted coefficient preparation, exact Data support and CPU tile stages.
 IndependentChunks preserve certified output as it is published. A compact
-Neighborhood relation describes nonzero x/y taps; a separate Validation
-relation closes ColorArray tuple and atomic trailing axes. Dirty propagation
-follows these relations, and the continuation reuses one coefficient owner across
+Neighborhood relation describes nonzero x/y taps; structural atomic trailing
+axes remain explicit. No removed ColorArray facet adds a validation relation.
+Dirty propagation follows the declared relations, and the continuation reuses one coefficient owner across
 its tile polls.
 
 ## Oracle, fixtures, and acceptance

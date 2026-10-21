@@ -8,13 +8,12 @@ set(PHOTOSPIDER_OPS_SDK_SOURCES
   plugins/ops/common/domain/rgb_geometry.cpp
   plugins/ops/common/domain/rgb_geometry_codec.cpp
   plugins/ops/common/domain/description_editor.cpp
-  plugins/ops/common/domain/color_array.cpp
+  plugins/ops/common/domain/numeric_color_description.cpp
   plugins/ops/common/domain/tensor_description.cpp
   plugins/ops/common/domain/icc_profile.cpp
   plugins/ops/common/domain/icc_validation.cpp
   plugins/ops/common/domain/ocio_config_resource.cpp
   plugins/ops/01-numeric/lut3d_bake.cpp
-  plugins/ops/01-numeric/lut3d_bake_validation.cpp
   plugins/ops/01-numeric/quality.cpp
   plugins/ops/09-composite/layer.cpp)
 add_library(photospider_ops_sdk ${PHOTOSPIDER_OPS_SDK_SOURCES})

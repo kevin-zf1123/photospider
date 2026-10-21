@@ -21,6 +21,8 @@
 #include "common/registry.hpp"
 #include "common/tensor_program.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "photospider/ops/format/transfer.hpp"
+#include "photospider/ops/numeric/color_description.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -33,9 +35,10 @@ Status mismatch(const char* message) {
           {FailureOrigin::Schema, FailureScope::Unspecified}};
 }
 struct RampProgram {
-  ColorArrayDescriptor description;
-  std::optional<ColorHueUnit> input_hue, output_hue;
-  ColorAssociation output_association = ColorAssociation::None;
+  TensorInterpretation description;
+  bool with_alpha = false, linear = false, square = false, srgb = false;
+  std::uint64_t gamma = 0;
+  std::optional<numeric::HueUnit> input_hue, output_hue;
   SequenceProfile profile;
   unsigned channels = 3;
   bool rational = false;
@@ -43,34 +46,33 @@ struct RampProgram {
   std::shared_ptr<const SchemaTemplate> output_schema;
 };
 Result<OperationPreparation> prepare(
-    ColorModel model, std::optional<ColorHueUnit> hue, SequenceProfile profile,
-    const std::vector<OperationMetadata>& inputs,
+    const std::string& model, std::optional<numeric::HueUnit> hue,
+    SequenceProfile profile, const std::vector<OperationMetadata>& inputs,
     const std::map<std::string, ParameterValue>& parameters) {
   using Answer = Result<OperationPreparation>;
-  auto parsed = color_array_from_parameter(
+  auto parsed = tensor_description_from_parameter(
       std::get<std::string>(parameters.at("color_description")));
   if (!parsed.ok())
     return Answer(parsed.status());
-  auto description = parsed.take_value();
-  const bool rational = hue == ColorHueUnit::RationalPi;
-  if (description.model != model || description.hue != hue ||
-      description.source_layout != (rational
-                                        ? ColorSourceLayout::RationalHueSplit
-                                        : ColorSourceLayout::Interleaved))
-    return Answer(
-        numeric_ops::array_parameter_error("ramp color model/hue mismatch"));
+  auto resolved = numeric::resolve_color_tuple(parsed.value());
+  if (!resolved.ok())
+    return Answer(resolved.status());
+  const auto& group = resolved.value();
+  const auto& description = group.interpretation;
+  const bool rational = hue == numeric::HueUnit::RationalPi;
+  if (description.model != model || (group.alpha && model != "rgb") ||
+      (hue && group.components[model == "hsl" ? 0 : 2].unit !=
+                  numeric::hue_unit_name(*hue)))
+    return Answer(numeric_ops::array_parameter_error(
+        "ramp color model/hue/alpha mismatch"));
   const auto& dtype = std::get<std::string>(parameters.at("dtype"));
   const auto& domain = std::get<std::string>(parameters.at("out_of_domain"));
   if ((dtype != "float32" && dtype != "float64") ||
       (domain != "clamp" && domain != "reject"))
     return Answer(
         numeric_ops::array_parameter_error("invalid ramp dtype/domain"));
-  const unsigned channels =
-      model == ColorModel::Cmyk ||
-              (model == ColorModel::Rgb &&
-               description.association != ColorAssociation::None)
-          ? 4
-          : 3;
+  const unsigned channels = static_cast<unsigned>(
+      group.components.size() + static_cast<bool>(group.alpha));
   if (inputs.size() != (rational ? 5U : 3U))
     return Answer(mismatch("color-ramp input count mismatch"));
   std::vector<TensorDescriptor> descriptors;
@@ -117,19 +119,20 @@ Result<OperationPreparation> prepare(
   program->channels = channels;
   program->rational = rational;
   program->knots = knots;
-  if (model == ColorModel::Rgb) {
-    const auto& association =
-        std::get<std::string>(parameters.at("output_association"));
-    if ((channels == 3 && association != "none") ||
-        (channels == 4 && association != "straight" &&
-         association != "premultiplied"))
-      return Answer(numeric_ops::array_parameter_error(
-          "RGB output association disagrees with channel arity"));
-    program->output_association = association == "none" ? ColorAssociation::None
-                                  : association == "straight"
-                                      ? ColorAssociation::Straight
-                                      : ColorAssociation::Premultiplied;
-    description.association = program->output_association;
+  program->with_alpha = group.alpha.has_value();
+  if (model == "rgb") {
+    auto transfer = decode_transfer_definition(description.transfer);
+    if (!transfer.ok())
+      return Answer(transfer.status());
+    const auto& definition = transfer.value();
+    if (definition.gamma)
+      std::memcpy(&program->gamma, &*definition.gamma, 8);
+    program->linear = definition.curve == TransferCurve::Linear ||
+                      (definition.curve == TransferCurve::PowerGamma &&
+                       program->gamma == UINT64_C(0x3ff0000000000000));
+    program->square = definition.curve == TransferCurve::PowerGamma &&
+                      program->gamma == UINT64_C(0x4000000000000000);
+    program->srgb = definition.curve == TransferCurve::Srgb;
   }
   if (hue) {
     const auto& output =
@@ -137,10 +140,8 @@ Result<OperationPreparation> prepare(
     if (output != "radian" && output != "pi_multiple")
       return Answer(
           numeric_ops::array_parameter_error("invalid ramp output hue unit"));
-    program->output_hue =
-        output == "radian" ? ColorHueUnit::Radian : ColorHueUnit::PiMultiple;
-    description.hue = program->output_hue;
-    description.source_layout = ColorSourceLayout::Interleaved;
+    program->output_hue = output == "radian" ? numeric::HueUnit::Radian
+                                             : numeric::HueUnit::PiMultiple;
   }
   auto shape = descriptors[0].shape;
   shape.push_back(channels);
@@ -155,7 +156,7 @@ Result<OperationPreparation> prepare(
   output.metadata.result_schema =
       std::make_shared<const SchemaTemplate>(std::move(schema));
   program->output_schema = output.metadata.result_schema;
-  if (model == ColorModel::Cmyk)
+  if (model == "cmyk")
     prepared.resources.push_back(*program->description.profile);
   prepared.state = std::move(program);
   return Answer(std::move(prepared));
@@ -196,11 +197,10 @@ Result<TileSet> required_tiles(const Region& region, const TileGrid& grid,
   }
   return sdk::tiles_for_region(budget, grid, region);
 }
-constexpr const char* ramp_contract = "color-ramp-fixed-v1";
+constexpr const char* ramp_contract = "color-ramp-fixed-v2";
 std::uint64_t scratch_bytes(const RampProgram& state) {
-  return state.description.model == ColorModel::Rgb
-             ? sizeof(RampArithmetic<true>)
-             : sizeof(RampArithmetic<false>);
+  return state.description.model == "rgb" ? sizeof(RampArithmetic<true>)
+                                          : sizeof(RampArithmetic<false>);
 }
 Result<OperationProgram> lower(const OperationLowering& query) {
   using Answer = Result<OperationProgram>;
@@ -361,32 +361,19 @@ void invoke(const ps_kernel_invocation_v8* invocation,
                                              read(1, {first + count - 1})};
     std::array<std::uint64_t, 4> result{};
     if constexpr (rgb) {
-      const auto& transfer = *program.description.transfer;
-      std::uint64_t gamma = 0;
-      if (transfer.gamma)
-        std::memcpy(&gamma, &*transfer.gamma, 8);
-      const bool linear = transfer.kind == ColorTransferKind::Linear ||
-                          (transfer.kind == ColorTransferKind::Gamma &&
-                           gamma == UINT64_C(0x3ff0000000000000));
-      const bool square = transfer.kind == ColorTransferKind::Gamma &&
-                          gamma == UINT64_C(0x4000000000000000);
       auto value =
-          direct || linear || square
-              ? arithmetic->algebraic(knots, query, rows,
-                                      program.description.association,
-                                      program.output_association, direct,
-                                      square, state.narrow, consume)
-              : arithmetic->nonlinear(knots, query, rows,
-                                      program.description.association,
-                                      program.output_association,
-                                      transfer.kind == ColorTransferKind::Srgb,
-                                      gamma, state.narrow, consume);
+          direct || program.linear || program.square
+              ? arithmetic->algebraic(knots, query, rows, program.with_alpha,
+                                      direct, program.square, state.narrow,
+                                      consume)
+              : arithmetic->nonlinear(knots, query, rows, program.with_alpha,
+                                      program.srgb, program.gamma, state.narrow,
+                                      consume);
       if (!accept(value.status()))
         return;
       result = value.value();
     } else {
-      const unsigned hue_channel =
-          program.description.model == ColorModel::Hsl ? 0 : 2;
+      const unsigned hue_channel = program.description.model == "hsl" ? 0 : 2;
       for (unsigned channel = 0; channel < program.channels; ++channel) {
         const bool hue = program.input_hue && channel == hue_channel;
         const bool rational = hue && program.rational;
@@ -397,11 +384,11 @@ void invoke(const ps_kernel_invocation_v8* invocation,
         if (!rational)
           values = {rows[0][source], rows[1][source]};
         int pi_power = 0;
-        if (hue && program.input_hue == ColorHueUnit::Radian &&
-            program.output_hue == ColorHueUnit::PiMultiple)
+        if (hue && program.input_hue == numeric::HueUnit::Radian &&
+            program.output_hue == numeric::HueUnit::PiMultiple)
           pi_power = -1;
-        else if (hue && program.input_hue != ColorHueUnit::Radian &&
-                 program.output_hue == ColorHueUnit::Radian)
+        else if (hue && program.input_hue != numeric::HueUnit::Radian &&
+                 program.output_hue == numeric::HueUnit::Radian)
           pi_power = 1;
         auto value = arithmetic->evaluate(knots, query, values, numerator,
                                           denominator, rational, direct,
@@ -490,22 +477,21 @@ Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
   kernel.struct_size = sizeof(kernel);
   kernel.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
   kernel.context = prepared.release();
-  kernel.invoke_cpu = state->description.model == ColorModel::Rgb
-                          ? invoke<true>
-                          : invoke<false>;
+  kernel.invoke_cpu =
+      state->description.model == "rgb" ? invoke<true> : invoke<false>;
   kernel.release = [](const void* context) {
     delete static_cast<const PreparedRamp*>(context);
   };
   return Answer(kernel);
 }
 
-OperationDefinition operation(const std::string& name, ColorModel model,
-                              std::optional<ColorHueUnit> hue,
+OperationDefinition operation(const std::string& name, const std::string& model,
+                              std::optional<numeric::HueUnit> hue,
                               SequenceProfile profile) {
   OperationDefinition result;
   result.key = name;
   auto& traits = result.traits;
-  traits.input_count = hue == ColorHueUnit::RationalPi ? 5 : 3;
+  traits.input_count = hue == numeric::HueUnit::RationalPi ? 5 : 3;
   traits.input_schema.resize(traits.input_count);
   for (unsigned port = 0; port < traits.input_count; ++port) {
     traits.input_schema[port].element_type_mask = port < 3 ? 12 : 2;
@@ -515,9 +501,6 @@ OperationDefinition operation(const std::string& name, ColorModel model,
       {"color_description", OperationParameterType::String},
       {"dtype", OperationParameterType::String},
       {"out_of_domain", OperationParameterType::String}};
-  if (model == ColorModel::Rgb)
-    traits.parameter_schema.push_back(
-        {"output_association", OperationParameterType::String});
   if (hue)
     traits.parameter_schema.push_back(
         {"output_hue_unit", OperationParameterType::String});
@@ -529,7 +512,7 @@ OperationDefinition operation(const std::string& name, ColorModel model,
     return prepare(model, hue, profile, inputs, params);
   };
   result.lower = lower;
-  if (model == ColorModel::Cmyk) {
+  if (model == "cmyk") {
     result.validate_resources = [](const void* value,
                                    const ResourceSet& resources) -> Status {
       const auto& state = *static_cast<const RampProgram*>(value);
@@ -572,29 +555,23 @@ Status register_color_ramps(OperationRegistry* registry) {
         std::make_pair("_accelerated_apple_silicon",
                        SequenceProfile::AppleSilicon),
         std::make_pair("_accelerated_x86_64", SequenceProfile::X86Avx2)}) {
-    for (const auto& model : {std::make_pair("rgb", ColorModel::Rgb),
-                              std::make_pair("xyz", ColorModel::Xyz),
-                              std::make_pair("cmyk", ColorModel::Cmyk),
-                              std::make_pair("cielab", ColorModel::Cielab),
-                              std::make_pair("oklab", ColorModel::Oklab),
-                              std::make_pair("ycbcr", ColorModel::Ycbcr)}) {
-      auto status = registry->register_operation(operation(
-          std::string("curve.color_ramp_") + model.first + profile.first,
-          model.second, {}, profile.second));
+    for (const auto* model :
+         {"rgb", "xyz", "cmyk", "cielab", "oklab", "ycbcr"}) {
+      auto status = registry->register_operation(
+          operation(std::string("curve.color_ramp_") + model + profile.first,
+                    model, {}, profile.second));
       if (!status.ok())
         return status;
     }
-    for (const auto& model : {std::make_pair("cielch", ColorModel::Cielch),
-                              std::make_pair("oklch", ColorModel::Oklch),
-                              std::make_pair("hsl", ColorModel::Hsl)}) {
+    for (const auto* model : {"cielch", "oklch", "hsl"}) {
       for (const auto& unit :
-           {std::make_pair("", ColorHueUnit::Radian),
-            std::make_pair("_pi", ColorHueUnit::PiMultiple),
-            std::make_pair("_rational_pi", ColorHueUnit::RationalPi)}) {
+           {std::make_pair("", numeric::HueUnit::Radian),
+            std::make_pair("_pi", numeric::HueUnit::PiMultiple),
+            std::make_pair("_rational_pi", numeric::HueUnit::RationalPi)}) {
         auto status = registry->register_operation(
-            operation(std::string("curve.color_ramp_") + model.first +
-                          unit.first + profile.first,
-                      model.second, unit.second, profile.second));
+            operation(std::string("curve.color_ramp_") + model + unit.first +
+                          profile.first,
+                      model, unit.second, profile.second));
         if (!status.ok())
           return status;
       }

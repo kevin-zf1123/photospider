@@ -2,13 +2,11 @@
 
 状态：Proposed。旧测试 kernel 不作为规格依据。本文是空间滤波的中文功能目录，说明成员范围、区别和使用边界；具体端口、公式、数值、需求及资源契约以链接的英文族与成员规格为准。旧版 field/image 实现曾经存在，不代表这些规格已经 Accepted 或运行时已注册。
 
-当前已注册的 Gaussian CPU complete-input、CPU tiled 和 native GPU operation 使用单
-tensor Result 输入与输出，支持 generic numeric tensor 和已有 typed image
-Result（例如 photospider.image）。操作保留完整 sample shape（含 batch axes）、
-image facets、ColorArray v1 facets 和 ICC resources，因此输出仍可组合下游 image
-operation；raw numeric tensor 不会自动增加图像语义。complete-input/GPU 请求完整 tensor；
-tiled 使用精确 Neighborhood Data relation、独立 Validation 闭包和
-IndependentChunks，并在多个 tile poll 间复用系数 owner。
+Gaussian 的单 tensor Result 端口保留完整 sample shape（含 batch axes）。
+颜色解释遵循当前 FMT 显式参数契约：Result 不携带或传播 image／ColorArray facets，
+也不因颜色解释继承 ICC 资源。旧 ColorArray v1 接口已经移除；下游颜色消费者
+须显式提供 TensorDescription，所需 profile 由其 preparation 选择。
+各执行形式的支持域与资源要求见成员规格；颜色配置本身不扩大数值读取区域。
 
 Gaussian 的 x_axis/y_axis 索引完整 sample shape，包含 batch-axis 前缀。对 RGBA
 shape {N,L,H,W,4}，使用 y_axis=2、x_axis=3。参数、边界和资源契约见英文实现说明。

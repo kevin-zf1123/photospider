@@ -19,10 +19,11 @@ operation or an explicitly bound validator. Numerical formulas, rounding and
 strict/accelerated precision are unchanged by this ownership boundary.
 
 The [relative-coordinate scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
-sets native CIELAB/CIELCh lightness to l=L*/100 for the unified semantic target.
-It changes color interpretation, not ordinary numeric formulas or precision.
-The current ColorArray SDK configuration and its consuming runtime use the implicit
-0..100 L* unit until they adopt that scale.
+sets native CIELAB/CIELCh lightness to l=L*/100. NUM/CRV consumers now use
+TensorDescription v4/v5 logical tuple parameters with that convention. The old
+ColorArray public API and decoder are removed; no implicit L* compatibility
+exists. This changes color interpretation and configuration identity, while
+ordinary numeric formulas, precision and the frozen kernel remain unchanged.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared

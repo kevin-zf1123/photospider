@@ -162,6 +162,10 @@ def cases():
         add(1, method, dtype, points=((F(1, 2),)*3,)*3, atol=F(1, 4))
         add(1, method, dtype, atol=F(1, 4)-F(2)**-54)
         add(0, method, dtype, axis_override=[bits(v) for v in (0, 1, 1, 0, 1, F(1, 2), 0, 1, 1)])
+    for method, model in itertools.product((0, 1), (2, 4)):
+        add(0, method, model=model, shape=(3, 3, 3),
+            endpoints=((F(-1, 4), F(3, 2)), (0, 150), (-8, 8)),
+            points=((F(1, 2), 50, 3),))
     return rows
 
 

@@ -27,6 +27,13 @@ the family specifications. Numerical formulas, profile accuracy contracts and
 caller preconditions belong to those specifications, separately from kernel
 scheduling and resource behavior.
 
+The independent NUM/CRV color migration is complete. CRV-06/07/09 use existing
+TensorDescription v4/v5 logical tuples, normalized Lab/LCh lightness and straight
+RGB storage. Old ColorArray interfaces/decoding and RGB association options are
+removed. Bake report/owned-table schema v4 and configuration hash domain v2 retire
+old payload identities. The kernel remains frozen. See the
+[migration implementation and validation record](NUM-CRV_color_migration.md).
+
 See the [numeric implementation reference](../../kernel-architecture/Numeric-Operations.md),
 [accelerated specification](op_specs/NUM_accelerated_contract.md#current-implementation),
 [mathematical implementation](math-implementation.md),

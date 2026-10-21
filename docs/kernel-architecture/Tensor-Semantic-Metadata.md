@@ -64,6 +64,22 @@ Color coordinates allow empty or `relative`/`absolute` scale, an optional descri
 
 The canonical encoding is bounded to 4096 bytes. Text is strict UTF-8 and at most 128 bytes; at most 128 groups are allowed, each with at most 64 components. The canonical little-endian codec preserves integer and IEEE binary64 bits, ordered tables, explicit presence bytes, and resource identities. Version 4 preserves its existing meaning; version 5 adds model-coordinate records. Encoding selects v5 when coordinates are present at any tensor, component, channel, or group level, including a present-but-empty record; otherwise it selects v4. Older versions, mismatched version/discriminator pairs, noncanonical encodings, and trailing bytes are rejected. `tensor_description_parameter` writes the canonical bytes as lowercase hexadecimal for a String parameter, and `tensor_description_from_parameter` accepts only that canonical form.
 
+### Numeric color tuples
+
+`photospider/ops/numeric/color_description.hpp` restricts the same description
+type for CRV-06/07/09. A numeric description names one logical `[C]` tuple with
+`channel_axis=0` and one complete canonical group. A sampled port has its own
+`[...,C]` shape; the logical tuple does not declare its leading sample axes.
+An FMT consumer instead needs the channel axis of its actual tensor, such as
+axis 1 for `[N,3]`. Callers explicitly author that mapping.
+
+The resolver rejects incompatible global/channel assertions, encodings, sampling,
+unrelated components and external premultiplied coordinates. Native CIELAB/LCh
+use `l=L*/100`. Individual members restrict alpha and split rational hue.
+Descriptions use the unchanged v4/v5 codec; the former ColorArray type, codec
+and compatibility overloads are removed. These SDK rules add no kernel metadata
+or runtime sample certification. See [the shared tuple contract](../built-in_ops/02-format-color/op_specs/FMT-COLOR_color_array_contract.md).
+
 ## 3. Execution: pure description editing
 
 ```cpp

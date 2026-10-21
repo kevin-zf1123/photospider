@@ -64,6 +64,20 @@ $$
 
 Canonical 编码上限为 4096 字节。文本为严格 UTF-8，最长 128 字节；最多 128 个 group，每个 group 最多 64 个 component。Canonical 小端 codec 保留整数与 IEEE binary64 位、有序表、显式存在字节和资源 identity。Version 4 保持原有含义；version 5 增加 model-coordinate 记录。只要 tensor、component、channel 或 group 任一层存在 coordinates（包括存在但为空的记录），编码选择 v5，否则选择 v4。更旧版本、版本与判别字节不匹配、非 canonical 编码和尾随字节都会被拒绝。`tensor_description_parameter` 把 canonical 字节写成用于 String 参数的小写十六进制，`tensor_description_from_parameter` 只接受这种 canonical 形式。
 
+### NUM 颜色 tuple
+
+`photospider/ops/numeric/color_description.hpp` 对同一描述类型施加
+CRV-06/07/09 的专用限制。NUM 描述单个逻辑 `[C]` tuple，固定
+`channel_axis=0`，并含一个规范顺序的完整 group。物理采样端口另有
+`[...,C]` shape，逻辑 tuple 不描述其前导采样轴。FMT 消费者需要实际张量
+的通道轴，例如 `[N,3]` 的 axis 1；调用方显式编写该映射。
+
+Resolver 拒绝冲突的全局／channel 断言、encoding、sampling、无关分量和
+外部预乘坐标。原生 CIELAB/LCh 使用 `l=L*/100`；各成员另行限制 alpha
+和拆分 rational hue。描述沿用未改变的 v4/v5 codec；旧 ColorArray 类型、
+codec 和兼容重载已移除。这些 SDK 规则不增加内核 metadata 或运行时样本
+认证。参见[共享 tuple 契约](../../built-in_ops/02-format-color/op_specs/FMT-COLOR_color_array_contract.md)。
+
 ## 3. 执行：纯描述编辑
 
 ```cpp

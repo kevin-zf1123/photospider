@@ -1,4 +1,3 @@
-#include "photospider/ops/numeric/diagnostics.hpp"
 #pragma once
 
 #include <array>
@@ -8,6 +7,7 @@
 
 #include "photospider/compiler/compiler.hpp"
 #include "photospider/ops/export.hpp"
+#include "photospider/ops/numeric/diagnostics.hpp"
 #include "photospider/ops/numeric/lut3d.hpp"
 #include "photospider/ops/numeric/lut3d_bake.hpp"
 #include "photospider/ops/numeric/workflow_authoring.hpp"
@@ -42,7 +42,7 @@ struct Lut3dBakeOptions {
   std::array<std::uint64_t, 3> shape{};
   Lut3dInterpolation interpolation = static_cast<Lut3dInterpolation>(0);
   double atol = -1, rtol = -1;
-  ColorArrayDescriptor input_description, output_description;
+  TensorDescription input_description, output_description;
   bool source_pointwise = false;
   std::optional<ElementType> table_dtype;
   CpuNumericProfile profile = CpuNumericProfile::Strict;
@@ -57,7 +57,7 @@ struct Lut3dValidationPoints {
 /** @brief Connectable exports; table is a globally quality-gated
  * `photospider.tensor` v1 Result with `samples` shape [N0,N1,N2,3], selected
  * dtype and atomic trailing color axis. Axis is an independent Float64 tensor.
- * report uses curve.bake_lut3d.report v3. Read a completed Result with the
+ * report uses curve.bake_lut3d.report v4. Read a completed Result with the
  * public read_lut3d_bake_report helper and description. Its measured_table_id
  * tensor identifies the complete table object acquired during measurement. This
  * identity is local to the producing Run; names are not auto-exported.
@@ -95,7 +95,7 @@ struct BakedLut3d {
  * gated table preserves this global measurement closure. Its retired CallRecord
  * exports the report, so an observer can retain it when a later Gate fails.
  *
- * Report v3 records the actual owned-table ObjectId through the invocation's
+ * Report v4 records the actual owned-table ObjectId through the invocation's
  * input association. Gate first checks the configuration identity
  * (TypeMismatch) and table association (OperationFailed/InvalidAssociation),
  * then the measured tolerance result. A legitimate exceeded tolerance

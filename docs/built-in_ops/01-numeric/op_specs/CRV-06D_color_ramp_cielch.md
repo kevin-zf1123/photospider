@@ -8,7 +8,7 @@ category: 01-numeric
 kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_subset
+implementation_status: implemented
 clarification_status: complete
 ---
 
@@ -16,15 +16,15 @@ clarification_status: complete
 
 Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
-## Revised lightness coordinate and implementation boundary
+## Native lightness and explicit description
 
 The [shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
-requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
-LUT input axes and output table coordinates. Finite values outside 0..1 remain
-legal. Opponent/chroma scales and arithmetic formulas are unchanged. The current runtime ColorArray v1 encodes L* in its implicit 0..100 unit;
-this target scale applies only after public metadata, fixtures and consumers
-adopt it explicitly. No implicit unit alias or inference from sample magnitude
-is permitted.
+uses native CIELAB/CIELCh `l=L*/100` for ramp colors, LUT input axes, output
+table coordinates and validation points. Finite values outside 0..1 remain
+legal. Opponent/chroma scales, hue winding and arithmetic formulas are unchanged.
+The implementation uses canonical TensorDescription v4/v5 tuple parameters.
+The old ColorArray types and decoder are removed; old payloads and explicit
+L* units are rejected without sample-magnitude inference.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -73,9 +73,10 @@ output_hue_unit; constructors write the defaults specified here. The explicit
 description identifies CIELCh(ab), reference-white xy (default D50), channel units,
 no alpha, and the entrypoint's input hue representation. For rational input, the description interprets the coordinated ports
 as one color table; lightness_chroma[K,2] alone is not a complete three-channel
-ColorArray. Output is a complete CIELCh(ab) ColorArray whose hue unit is the
+color tuple. Output is a complete CIELCh(ab) color whose hue unit is the
 selected floating output_hue_unit. No RGB transfer, gamut conversion, alpha or
-white adaptation occurs. The public ColorArray codec supplies the description.
+white adaptation occurs. `tensor_description_parameter` encodes the logical
+three-component TensorDescription, with `channel_axis=0` and an explicit hue unit.
 
 ## Exact interpolation and unit conversion
 

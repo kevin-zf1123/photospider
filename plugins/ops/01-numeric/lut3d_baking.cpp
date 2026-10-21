@@ -97,7 +97,7 @@ Result<WorkflowNodeOutput> expand(WorkflowDocument* document,
 Result<ElementType> source_type(const ValidatedIR& graph,
                                 const WorkflowNodeOutput& output,
                                 const TensorDescriptor& descriptor,
-                                const ColorArrayDescriptor& color) {
+                                const TensorDescription& color) {
   for (const auto& node : graph.nodes()) {
     if (node.id != output.source_node)
       continue;
@@ -110,7 +110,7 @@ Result<ElementType> source_type(const ValidatedIR& graph,
             (tensor.descriptor.element_type != ElementType::Float32 &&
              tensor.descriptor.element_type != ElementType::Float64))
           break;
-        auto checked = validate_color_array_descriptor(
+        auto checked = validate_color_tuple_shape(
             color, {tensor.descriptor.element_type, tensor.sample_shape()});
         if (!checked.ok())
           return Result<ElementType>(checked);
@@ -157,8 +157,11 @@ Result<BakedLut3d> bake_lut3d(WorkflowDocument& document,
   auto checked = lut3d_bake_schema(spec);
   if (!checked.ok())
     return Answer(checked.status());
-  auto input_color = color_array_parameter(spec.input_description),
-       output_color = color_array_parameter(spec.output_description);
+  auto input_color = tensor_description_parameter(spec.input_description),
+       output_color = tensor_description_parameter(spec.output_description);
+  if (!input_color.ok() || !output_color.ok())
+    return Answer(!input_color.ok() ? input_color.status()
+                                    : output_color.status());
   std::map<std::string, ParameterValue> geometry{
       {"n0", static_cast<std::int64_t>(spec.shape[0])},
       {"n1", static_cast<std::int64_t>(spec.shape[1])},

@@ -30,7 +30,7 @@ The maintainer requires separate CIELAB, CIELCh(ab), OKLab and OKLCh ramp
 implementations. This specification covers OKLab only, rather than an ambiguous
 Lab mode. Use explicit stops and a model-described color array under the
 [ramp family](CRV-06_color_ramp.md). This primitive's clarification is complete;
-its ColorArray representation and registry implementation are available in the
+its TensorDescription tuple representation and registry implementation are available in the
 current runtime; the specification remains Proposed.
 
 ## Confirmed interpolation and white
@@ -63,7 +63,8 @@ is part of this primitive.
 
 Required static String parameters are color_description, dtype and out_of_domain.
 The description identifies OKLab, the fixed D65 white identity, L/a/b
-channel units and alpha=none. No RGB primaries or RGB transfer override is accepted.
+native channel units and no alpha. `tensor_description_parameter` encodes the
+canonical logical tuple with `channel_axis=0`. No RGB primaries or RGB transfer override is accepted.
 Direct nodes supply all parameters; constructors write dtype and clamp defaults.
 Results carry no description; the static parameters define the coordinate interpretation.
 

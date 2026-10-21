@@ -6,10 +6,9 @@
 
 #include "01-numeric/directed_color_functions.hpp"
 #include "01-numeric/exact_polynomial.hpp"
-#include "photospider/ops/color_array.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
-// Algebraic RGB paths: direct association conversion, linear transfer and
+// Algebraic RGB paths: direct dtype conversion, straight linear transfer and
 // gamma=2. All source floats denote exact dyadic values; implicit alpha is 1.
 // B=2^-1074. Products below need fewer than 13000 bits including square-root
 // midpoint alignment, within the shared 40960-bit polynomial integer arena.
@@ -202,8 +201,8 @@ class ExactRgb final {
 
   Result<std::uint64_t> nonlinear_component(
       const std::array<Index, 2>& c, const std::array<Index, 2>& denominator,
-      const std::array<Index, 2>& beta, Index weighted_alpha, Index h,
-      bool premultiplied, bool srgb, std::uint64_t gamma, bool narrow) {
+      const std::array<Index, 2>& beta, Index weighted_alpha, bool srgb,
+      std::uint64_t gamma, bool narrow) {
     auto& math = directed_.functions.math;
     const auto zero = exact_.integer(0);
     std::array<Index, 2> magnitude{};
@@ -276,15 +275,8 @@ class ExactRgb final {
           exact_.multiply(weighted_alpha, denominator[0]), denominator[1]);
       rational = compare_scaled(rational_n, 62500000, rational_d, 2528121) <= 0;
     }
-    if (rational) {
-      int scale = 0;
-      if (premultiplied) {
-        rational_n = exact_.multiply(rational_n, weighted_alpha);
-        rational_d = exact_.multiply(rational_d, h);
-        scale = -1074;
-      }
-      return rounded(rational_n, rational_d, narrow, scale);
-    }
+    if (rational)
+      return rounded(rational_n, rational_d, narrow, 0);
     if (!check())
       return Result<std::uint64_t>(exact_.status());
     const auto maximum = order >= 0 ? 0u : 1u;
@@ -352,14 +344,6 @@ class ExactRgb final {
                                             denominator[maximum]);
             math.multiply(encoded, encoded, base);
           }
-          if (premultiplied) {
-            // Normalize the exact alpha ratio before multiplying, and apply
-            // its power of two last. A tiny alpha must not lose all relative
-            // precision before multiplying an HDR straight encoded value.
-            const auto exponent = normalized_ratio(weight, weighted_alpha, h);
-            math.multiply(encoded, encoded, weight);
-            output_scale += exponent - 1074;
-          }
           if (encoded.low.negative)
             math.clear(encoded.low);
           const auto lower = round_scaled(encoded.low, narrow, output_scale);
@@ -382,9 +366,8 @@ class ExactRgb final {
       : exact_(profile), directed_(profile) {}
   Result<std::array<std::uint64_t, 4>> nonlinear(
       const std::array<std::uint64_t, 2>& stops, std::uint64_t query,
-      const std::array<std::array<std::uint64_t, 4>, 2>& rows,
-      ColorAssociation input, ColorAssociation output, bool srgb,
-      std::uint64_t gamma, bool narrow,
+      const std::array<std::array<std::uint64_t, 4>, 2>& rows, bool with_alpha,
+      bool srgb, std::uint64_t gamma, bool narrow,
       const core_internal::WorkConsumer& consume) {
     using Answer = Result<std::array<std::uint64_t, 4>>;
     exact_.begin(consume);
@@ -408,8 +391,7 @@ class ExactRgb final {
     const auto h = exact_.add(u, v);
     std::array<Index, 2> alpha{}, beta{};
     for (unsigned i = 0; i < 2; ++i) {
-      alpha[i] = exact_.binary(
-          input == ColorAssociation::None ? one_bits : rows[i][3], 1074);
+      alpha[i] = exact_.binary(with_alpha ? rows[i][3] : one_bits, 1074);
       beta[i] = exact_.multiply(i ? v : u, alpha[i]);
     }
     const auto weighted_alpha = exact_.add(beta[0], beta[1]);
@@ -429,14 +411,10 @@ class ExactRgb final {
       for (unsigned i = 0; i < 2; ++i) {
         c[i] = exact_.sign(alpha[i]) ? exact_.binary(rows[i][channel], 1074)
                                      : exact_.integer(0);
-        denominator[i] =
-            input == ColorAssociation::Premultiplied && exact_.sign(alpha[i])
-                ? alpha[i]
-                : unit;
+        denominator[i] = unit;
       }
-      auto value = nonlinear_component(
-          c, denominator, beta, weighted_alpha, h,
-          output == ColorAssociation::Premultiplied, srgb, gamma, narrow);
+      auto value = nonlinear_component(c, denominator, beta, weighted_alpha,
+                                       srgb, gamma, narrow);
       if (!value.ok())
         return Answer(value.status());
       result[channel] = value.value();
@@ -445,15 +423,15 @@ class ExactRgb final {
       result.fill(0);
     return Answer(result);
   }
-  // Caller guarantees complete valid rows and association, and selects this
+  // Caller guarantees complete valid straight rows and alpha, and selects this
   // entry only for direct, linear/gamma=1, or gamma=2. A four-word result has
   // alpha at [3] even for RGB; the caller publishes only its declared
   // three/four channels.
   Result<std::array<std::uint64_t, 4>> algebraic(
       const std::array<std::uint64_t, 2>& stops, std::uint64_t query,
-      const std::array<std::array<std::uint64_t, 4>, 2>& rows,
-      ColorAssociation input, ColorAssociation output, bool direct, bool square,
-      bool narrow, const core_internal::WorkConsumer& consume) {
+      const std::array<std::array<std::uint64_t, 4>, 2>& rows, bool with_alpha,
+      bool direct, bool square, bool narrow,
+      const core_internal::WorkConsumer& consume) {
     using Answer = Result<std::array<std::uint64_t, 4>>;
     exact_.begin(consume);
     struct End {
@@ -461,12 +439,9 @@ class ExactRgb final {
       ~End() { math.end(); }
     } end{exact_};
     constexpr auto one_bits = UINT64_C(0x3ff0000000000000);
-    const bool alpha = input != ColorAssociation::None;
-    const bool premultiplied = input == ColorAssociation::Premultiplied;
-    const bool output_premultiplied = output == ColorAssociation::Premultiplied;
     const auto one = exact_.integer(1);
-    const auto a0 = exact_.binary(alpha ? rows[0][3] : one_bits, 1074);
-    const auto a1 = exact_.binary(alpha ? rows[1][3] : one_bits, 1074);
+    const auto a0 = exact_.binary(with_alpha ? rows[0][3] : one_bits, 1074);
+    const auto a1 = exact_.binary(with_alpha ? rows[1][3] : one_bits, 1074);
     Index u = 0, v = 0, h = one, weighted_alpha = a0;
     if (!direct) {
       const auto s0 = exact_.binary(stops[0], 1074),
@@ -495,55 +470,18 @@ class ExactRgb final {
       Index n = c0, d = one;
       int scale = -1074;
       bool root = false;
-      if (direct) {
-        if (!premultiplied && output_premultiplied) {
-          n = exact_.multiply(c0, a0);
-          scale = -2148;
-        } else if (premultiplied && !output_premultiplied) {
-          d = a0;
-          scale = 0;
-        }
-      } else if (!square) {
-        if (premultiplied)
-          n = exact_.add(exact_.multiply(u, c0), exact_.multiply(v, c1));
-        else
+      if (!direct) {
+        if (!square) {
           n = exact_.add(exact_.multiply(exact_.multiply(u, a0), c0),
                          exact_.multiply(exact_.multiply(v, a1), c1));
-        d = output_premultiplied ? h : weighted_alpha;
-        scale = premultiplied ? (output_premultiplied ? -1074 : 0)
-                              : (output_premultiplied ? -2148 : -1074);
-      } else {
-        root = true;
-        const auto square0 = signed_square(c0), square1 = signed_square(c1);
-        if (premultiplied) {
-          // Zero-alpha premultiplied sources are black by precondition.
-          // Replacing their otherwise-zero denominator by 1 preserves their
-          // zero term.
-          const auto denominator0 = exact_.sign(a0) ? a0 : one;
-          const auto denominator1 = exact_.sign(a1) ? a1 : one;
-          n = exact_.add(
-              exact_.multiply(exact_.multiply(u, square0), denominator1),
-              exact_.multiply(exact_.multiply(v, square1), denominator0));
-          const auto denominators = exact_.multiply(denominator0, denominator1);
-          if (output_premultiplied) {
-            n = exact_.multiply(n, weighted_alpha);
-            d = exact_.multiply(exact_.multiply(h, h), denominators);
-            scale = -2148;
-          } else {
-            d = exact_.multiply(denominators, weighted_alpha);
-            scale = 0;
-          }
+          d = weighted_alpha;
         } else {
-          n = exact_.add(exact_.multiply(exact_.multiply(u, a0), square0),
-                         exact_.multiply(exact_.multiply(v, a1), square1));
-          if (output_premultiplied) {
-            n = exact_.multiply(n, weighted_alpha);
-            d = exact_.multiply(h, h);
-            scale = -4296;
-          } else {
-            d = weighted_alpha;
-            scale = -2148;
-          }
+          root = true;
+          n = exact_.add(
+              exact_.multiply(exact_.multiply(u, a0), signed_square(c0)),
+              exact_.multiply(exact_.multiply(v, a1), signed_square(c1)));
+          d = weighted_alpha;
+          scale = -2148;
         }
       }
       auto value =

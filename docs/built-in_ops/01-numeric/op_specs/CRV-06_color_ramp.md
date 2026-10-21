@@ -5,21 +5,21 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_subset
+implementation_status: implemented
 clarification_status: complete
 ---
 
 # CRV-06: color-ramp family
 
-## Revised lightness coordinate and implementation boundary
+## Native lightness and explicit description
 
 The [shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
-requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
-LUT input axes and output table coordinates. Finite values outside 0..1 remain
-legal. Opponent/chroma scales and arithmetic formulas are unchanged. The current runtime ColorArray v1 encodes L* in its implicit 0..100 unit;
-this target scale applies only after public metadata, fixtures and consumers
-adopt it explicitly. No implicit unit alias or inference from sample magnitude
-is permitted.
+uses native CIELAB/CIELCh `l=L*/100` for ramp colors, LUT input axes, output
+table coordinates and validation points. Finite values outside 0..1 remain
+legal. Opponent/chroma scales, hue winding and arithmetic formulas are unchanged.
+The implementation uses canonical TensorDescription v4/v5 tuple parameters.
+The old ColorArray types and decoder are removed; old payloads and explicit
+L* units are rejected without sample-magnitude inference.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -62,7 +62,7 @@ association behavior, while CMYK is four ink channels without alpha.
 
 The model-specific operation clarifications are complete in the linked specs.
 Each declares stop constraints, input/output types, interpolation, boundaries,
-precision, dependencies and output semantics. The shared ColorArray
+precision, dependencies and output semantics. The shared TensorDescription tuple
 representation and the 45-key implementation are available through the current
 public runtime while this family remains Proposed. Validation is recorded below;
 remaining category work is tracked in [implementation.md](../implementation.md).
@@ -78,10 +78,11 @@ dependencies may be clarified in their corresponding specifications, without
 silently extending current accepted runtime metadata or conversion behavior.
 
 Color ramp configuration is supplied by the required String `color_description`,
-encoded with the SDK `color_array_parameter`. The operation validates it against
-the selected model and source layout. Dtype and out_of_domain are explicit
-parameters; RGB also declares output_association, and polar members declare
-output_hue_unit. No input or output Result carries a ColorArray label.
+encoded with `tensor_description_parameter`. It describes one logical tuple
+with `channel_axis=0`; the operation separately validates its physical port shape
+and member model. Dtype and out_of_domain are explicit parameters; polar members
+also declare output_hue_unit. RGB input/output is straight, and the removed
+output_association parameter is rejected. No Result carries a color description.
 
 The standard sRGB transfer is independently documented in
 [W3C CSS Color 4](https://www.w3.org/TR/2026/CRD-css-color-4-20260913/#valdef-color-srgb).
@@ -112,7 +113,7 @@ the output itself carries only structure and numerical samples.
 
 Static preparation validates complete input schemas, port arity, K, shape products, dtypes and color descriptions. `values` uses a fresh `photospider.tensor` v1 schema, member `samples`, descriptor shape `sample_shape(input)+[C]` and `atomic_trailing_axes=1`. It carries no color description and does not preserve the input's batch-axis partition. The output channel axis stays complete in each selected tile.
 
-Each selected output tile lowers to one CPU `color-ramp` / `color-ramp-fixed-v1` task using invocation ABI 8. Its query region is the output region without the component axis. Stops, colors and optional p/q arrays have conservative complete closures because row selection depends on query samples. Every region closes on its own source grid; physical grants may contain unused samples. Empty emits no tasks or sample reads. K=1 still reads the requested query positions and selected stop/color row.
+Each selected output tile lowers to one CPU `color-ramp` / `color-ramp-fixed-v2` task using invocation ABI 8. Its query region is the output region without the component axis. Stops, colors and optional p/q arrays have conservative complete closures because row selection depends on query samples. Every region closes on its own source grid; physical grants may contain unused samples. Empty emits no tasks or sample reads. K=1 still reads the requested query positions and selected stop/color row.
 
 The caller guarantees all stops are finite and strictly increasing, consumed queries are finite, and reject-policy queries lie in the closed stop domain. Selected complete colors must be finite and obey their model and association rules; selected rational denominators must be positive, including at zero chroma/saturation. Unselected generic color rows and p/q pairs carry no consumer numerical precondition. Final components must be finite in the output dtype. For RGBA, a positive exact alpha that rounds to zero requires all rounded RGB components to be zero; this valid transparent tuple canonicalizes to +0. Numerical violations have no promised runtime domain or overflow diagnostic.
 
@@ -134,6 +135,9 @@ Preparation, Plan and active kernel owners retain the selected resource. Color R
 
 [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp) registers 45 profile keys for 15 independent entrypoints. [`color_ramps.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/color_ramps.hpp) supplies their public constructors. All profiles currently use exact/certified whole-expression arithmetic. RGB uses a 40960-bit polynomial arena; coordinates use 9216-bit integers. Directed work has a 12288-bit arena and a 128..4096 fractional precision ladder. Checked state and borrowed WorkConsumer callbacks propagate cancellation and capacity without exception-based control flow.
 
-Temporary acceptance uses the independent [coordinate oracle](../../../../oracle/ops/numeric/crv06/reference.py), [RGB oracle](../../../../oracle/ops/numeric/crv06/rgb.py) and [ICC fixtures](../../../../oracle/ops/numeric/crv06/icc.py). Cover valid numerical cases, explicit raw negative zeros, all model/unit/dtype combinations, RGB association, sparse tiles, mixed source grids, concurrent Runs, direct affine layouts, cancellation, allocation counts, scratch/output boundaries, resource admission and lifetime. Static malformed ICC cases remain rejection tests; invalid numerical preconditions do not define runtime failure tests. Remove temporary operator tests after validation and retain the independent oracles.
+Temporary acceptance uses the independent [coordinate oracle](../../../../oracle/ops/numeric/crv06/reference.py), [RGB oracle](../../../../oracle/ops/numeric/crv06/rgb.py) and [ICC fixtures](../../../../oracle/ops/numeric/crv06/icc.py). Cover valid numerical cases, explicit raw negative zeros, all model/unit/dtype combinations, straight RGB alpha, sparse tiles, mixed source grids, concurrent Runs, direct affine layouts, cancellation, allocation counts, scratch/output boundaries, resource admission and lifetime. Static malformed ICC cases remain rejection tests; invalid numerical preconditions do not define runtime failure tests. Remove temporary operator tests after validation and retain the independent oracles.
 
-The CIELAB/CIELCh ColorArray v1 lightness interpretation remains distinct from the revised native `l=L*/100` contract described above. Profile registration does not establish physical x86 or GPU execution. This family has CPU implementations and remains Proposed.
+CIELAB/CIELCh uses native `l=L*/100` throughout the migrated public API,
+independent fixtures and consumers. [Migration evidence](../NUM-CRV_color_migration.md)
+records executed profiles. Registration alone does not establish physical x86
+or GPU execution. This family has CPU implementations and remains Proposed.

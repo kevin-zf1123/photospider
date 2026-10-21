@@ -5,21 +5,21 @@ category: 01-numeric
 kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_subset
+implementation_status: implemented
 clarification_status: complete
 ---
 
 # CRV-07: three-dimensional LUT application
 
-## Revised lightness coordinate and implementation boundary
+## Native lightness and explicit description
 
-The [current shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
-requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
-LUT input axes and output table coordinates. Finite values outside 0..1 remain
-legal. Opponent/chroma scales and arithmetic formulas are unchanged. The current runtime ColorArray v1 encodes L* in its implicit 0..100 unit;
-this target scale applies only after public metadata, fixtures and consumers
-adopt it explicitly. No implicit unit alias or inference from sample magnitude
-is permitted.
+The [shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
+uses native CIELAB/CIELCh `l=L*/100` for ramp colors, LUT input axes, output
+table coordinates and validation points. Finite values outside 0..1 remain
+legal. Opponent/chroma scales, hue winding and arithmetic formulas are unchanged.
+The implementation uses canonical TensorDescription v4/v5 tuple parameters.
+The old ColorArray types and decoder are removed; old payloads and explicit
+L* units are rejected without sample-magnitude inference.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -109,13 +109,15 @@ the reference mathematical function.
 ## Confirmed table demand
 
 Required static `input_color_description` and `output_color_description` Strings
-use the SDK ColorArray parameter codec. They define the same-model input and
+use `tensor_description_parameter` on canonical logical color tuples. Both
+require three components, no alpha and a floating hue unit; rational hue is
+restricted to split-port ramps. They define the same-model input and
 table/output interpretation explicitly; no description is read from or attached
 to a Result. `dtype` and `out_of_domain` remain explicit parameters.
 
 Each input is a Result containing one tensor member under any schema id/version and member key. Shapes use complete `sample_shape()`: input [...,3] has rank 2..8 and logical element count <=2^40, table is [N0,N1,N2,3], and axis is [3,3]. A single query color uses [1,3]. Static preparation validates schemas, dtypes, extents and both descriptions.
 
-The output `values` uses a fresh `photospider.tensor` v1 schema with member `samples`, the complete input sample shape as its descriptor shape, selected Float32/Float64 dtype, and `atomic_trailing_axes=1`. It carries no ColorArray description and does not preserve the input's batch-axis partition. Each selected output tile therefore contains complete three-component colors.
+The output `values` uses a fresh `photospider.tensor` v1 schema with member `samples`, the complete input sample shape as its descriptor shape, selected Float32/Float64 dtype, and `atomic_trailing_axes=1`. It carries no color description and does not preserve the input's batch-axis partition. Each selected output tile therefore contains complete three-component colors.
 
 Lowering declares the query region corresponding to that output tile, the complete table, and axis region [0:3,0:2]. Each region closes to complete tiles on that input's own grid; a granted source tile may contain unused samples or the step column. Table closure is conservative because vertex addresses depend on runtime queries. Upstream failures in required table tiles propagate even when a vertex would have zero weight. The LUT kernel itself reads only exact positive-weight complete vertices, at most eight for trilinear and four for tetrahedral. Numerical conditions on unused table vertices are outside this consumer's preconditions.
 
@@ -208,10 +210,12 @@ hue components and every supported color model.
 
 ## Maintained implementation and validation
 
-The six operation keys are registered in [`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp), and [`lut3d.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/lut3d.hpp) provides the public constructors. They lower to `lut3d` / `lut3d-fixed-v1` kernels using invocation ABI 8. All profiles currently use exact integer weights and a single final rounding. [`ExactLut3d`](../../../../plugins/ops/01-numeric/exact_lut3d.hpp) uses borrowed callbacks and invocation-owned arithmetic state.
+The six operation keys are registered in [`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp), and [`lut3d.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/lut3d.hpp) provides the public constructors. They lower to `lut3d` / `lut3d-fixed-v2` kernels using invocation ABI 8. All profiles currently use exact integer weights and a single final rounding. [`ExactLut3d`](../../../../plugins/ops/01-numeric/exact_lut3d.hpp) uses borrowed callbacks and invocation-owned arithmetic state.
 
 The independent [`CRV-07 oracle`](../../../../oracle/ops/numeric/crv07/reference.py) reconstructs RN64 grids and exact rational cells/weights, then rounds sums with separate IEEE conversion logic. Temporary acceptance should compare valid fixtures through the public Compiler/ExecutionContext path and direct prepared kernels, including sparse requests, different input grids, concurrent Runs, cancellation, strides, allocation counts and owner lifetime. Error fixtures for violated numerical preconditions are not fixed-executor acceptance cases.
 
-Runtime ColorArray v1 retains its existing CIELAB lightness interpretation; the revised `l=L*/100` contract remains a known gap. These CPU implementations do not establish native GPU behavior.
+Native `l=L*/100`, the public TensorDescription tuple API and independent fixtures
+are migrated together. See [migration evidence](../NUM-CRV_color_migration.md).
+These CPU implementations do not establish native GPU behavior.
 
 Specification acceptance remains Proposed.

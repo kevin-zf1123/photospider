@@ -179,4 +179,13 @@ def reference_cases():
     for model in ('cielch', 'oklch', 'hsl'):
         add(model, 2, 1, p=[(1 << 63)-1, -(1 << 63)], d=[1, 1])
         add(model, 2, 1, p=[14, 2], d=[8, 8])
+    # Native normalized lightness fixtures include negative and HDR l.
+    # Opponent/chroma and original unwrapped hue keep their native units.
+    for model in ('cielab', 'cielch'):
+        for query in (Fraction(1, 4), Fraction(1, 2), Fraction(3, 4)):
+            add(model, 0, 0, query=query,
+                colors=[Fraction(-1, 4), 40, -70,
+                        Fraction(3, 2), 10, 120])
+        add(model, 0, 0, query=0, stops=[0],
+            colors=[Fraction(1, 2), 50, 10])
     return records

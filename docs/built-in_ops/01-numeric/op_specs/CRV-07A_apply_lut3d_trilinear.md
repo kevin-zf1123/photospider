@@ -12,21 +12,21 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_subset
+implementation_status: implemented
 clarification_status: complete
 ---
 
 # CRV-07A: apply_lut3d_trilinear
 
-## Revised lightness coordinate and implementation boundary
+## Native lightness and explicit description
 
-The [current shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
-requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
-LUT input axes and output table coordinates. Finite values outside 0..1 remain
-legal. Opponent/chroma scales and arithmetic formulas are unchanged. The current runtime ColorArray v1 encodes L* in its implicit 0..100 unit;
-this target scale applies only after public metadata, fixtures and consumers
-adopt it explicitly. No implicit unit alias or inference from sample magnitude
-is permitted.
+The [shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
+uses native CIELAB/CIELCh `l=L*/100` for ramp colors, LUT input axes, output
+table coordinates and validation points. Finite values outside 0..1 remain
+legal. Opponent/chroma scales, hue winding and arithmetic formulas are unchanged.
+The implementation uses canonical TensorDescription v4/v5 tuple parameters.
+The old ColorArray types and decoder are removed; old payloads and explicit
+L* units are rejected without sample-magnitude inference.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -47,12 +47,14 @@ and logical product <=2^40. Table is Float32/Float64 [N0,N1,N2,3], each Ni=2..25
 axis is Float64 [3,3], with rows [start,end,step]. Input/table dtypes may differ.
 Output port `values` is an immutable packed Result using `photospider.tensor`
 v1/member `samples`, with the complete input shape, selected Float32/Float64 dtype,
-`atomic_trailing_axes=1`. Output carries no ColorArray description; its descriptor contains the full input sample shape without preserving the input batch-axis partition. The default output dtype follows the authoring `input_type`
+`atomic_trailing_axes=1`. Output carries no color description; its descriptor contains the full input sample shape without preserving the input batch-axis partition. The default output dtype follows the authoring `input_type`
 hint; the compiler independently validates bound input metadata.
 
 Required static parameters are String `input_color_description`,
 `output_color_description`, `dtype` and `out_of_domain` (reject/clamp, default
-reject). Input/output descriptions use the same supported three-component model;
+reject). Both descriptions use `tensor_description_parameter` and canonical
+logical tuples (`channel_axis=0`) with floating hue only. Input/output
+descriptions use the same supported three-component model;
 descriptions may differ within that model. No alpha or four-channel CMYK input is
 supported. Table grid axes follow input model channel order and its value component
 axis follows the output model channel order. Lookup uses actual coordinates; no

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exact Fraction oracle for ColorArray white and primary-basis admission.
+"""Exact Fraction oracle for native color white and primary-basis admission.
 
 No product arithmetic helpers, third-party packages, or integration registration.
 """
