@@ -5,18 +5,33 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 ---
 
 # FMT-13: configured OpenColorIO transforms
 
-It registers no runtime operation. Engine hooks, numerical corpus and
-public workflow validation remain implementation prerequisites. Inherit the structural tensors and explicit configuration, planar
+All six CPU adapters are registered with fixed invocation ABI 8. See
+[implementation, validation and performance](../FMT-12-13-18_implementation.md) for the private engine, resource hooks, closed resolver and public workflow evidence.
+Inherit the structural tensors and explicit configuration, planar
 storage, straight internal color and explicit interpretation rules from
 [FMT-common](FMT_common_contract.md). OCIO requires its own external-engine
 contract; it does not inherit native NUM strict/four-ULP guarantees or the
 specific numerical recipe chosen for [ICC](FMT-12_icc_transform_contract.md).
+
+## Construction and execution cancellation
+
+Engine construction is synchronous and non-cancellable. Profile/config parsing,
+processor linking, BPC preparation, LUT inversion and gamut-table generation do
+not receive or probe a Run cancellation token. Construction work and memory
+limits, first-failure latching, complete validation for Empty/bypass requests,
+and cleanup on failure remain required. This is the maintainer's explicit
+2026-10-21 revision; no preparation-cancellation kernel extension is required.
+
+Cancellation remains an execution concern: check it before and after bounded
+pixel batches and discard unpublished results when cancelled. An existing
+immutable-resource import API may independently observe its caller's token;
+that import behavior does not imply cancellable engine construction.
 
 ## Confirmed initial members
 
@@ -365,7 +380,7 @@ profile-size-to-memory estimate replaces audited actual accounting or a proven
 reservation bound. Validate dimensions/counts before products and allocations.
 Stages/curves/tree depth/resources must obey root capacity/work/stage limits.
 
-Stock v2.5.2 needs audited integration changes to satisfy this contract:
+The private v2.5.2 integration makes the following audited changes:
 
 - YAML/config construction may read ambient environment; CPU creation may read
   OCIO_OPTIMIZATION_FLAGS. Active display/view/inactive-space overrides and cache
@@ -373,7 +388,7 @@ Stock v2.5.2 needs audited integration changes to satisfy this contract:
   or global current config as a per-DAG strategy.
 - ConfigIOProxy does not itself guarantee closed lookup. The pinned implementation
   may fall back to host file hashing/ifstream for absolute paths after empty
-  proxy results or exceptions. Disable such fallback. Latch budget/cancellation
+  proxy results or exceptions. Disable such fallback. Latch construction budget
   failures independently; do not reinterpret them as missing resources eligible
   for Look fallback, nor accept a processor returned after a swallowed failure.
 - Global file/hash caches are path-keyed and not isolated by a private Config.
@@ -383,16 +398,18 @@ Stock v2.5.2 needs audited integration changes to satisfy this contract:
   hooks. Retained compiled state remains explicitly owned/charged. Do not call
   global ClearAllCaches while another graph relies on live state.
 - Public APIs do not account all std::vector/new/stream allocations or expose
-  bounded probes throughout parse/CLUT/inverse construction. Add reviewed hooks
-  or proven equivalent accounting and bounded cooperative work/cancel probes.
-  Installing a proxy or checking around a long call alone is insufficient.
+  work admission throughout parse/CLUT/inverse construction. Add reviewed hooks
+  or proven equivalent accounting and checked work probes. Construction has
+  no cancellation probes. A proxy or checks only around a long call are
+  insufficient to account internal allocation and work.
 
 Freeze successful numeric behavior while adding host hooks and identify that
 integration revision. Use private construction state, then immutable non-dynamic
 processor instances; concurrent sharing requires actual thread-safety validation,
 otherwise retain private worker instances under budgets. Cancellation/currentness
-checks occur before/after bounded pixel batches and inside bounded construction
-loops. No detached work or asynchronous thread killing. Discard unpublished
+checks occur before/after bounded pixel batches; construction uses work/memory
+admission without cancellation checks. No detached work or asynchronous thread
+killing. Discard unpublished
 writes/state on failure, retain valid published owners and release all temporary
 capacity. Same-identity resources may be shared only under normal root accounting.
 
@@ -414,18 +431,18 @@ route and engine error without dumping resource bytes. Do not publish invalid
 requested pixels or substitute a different engine/config/optimization/identity
 copy. Actual host failures cannot trigger config or Look alternatives.
 
-Future acceptance must cover both dtypes and configurations; exact identity
+Regression coverage includes both dtypes and configurations; exact identity
 Float64 narrowing; simple matrices/ranges/gamma and independent LUT fixtures;
 negative/HDR/domain failures; aliases/roles/case errors; both directions and
 lossy inverse cases; same-name/equalitygroup/isData skips; default bridges and
 explicit views; Look candidate selection; static dynamic-property values;
 alpha mixing/replacement rejection and valid RGB cross-talk; bypass/empty,
 noncanonical slots, disjoint/offset/cross-tile ROI, lane tails and worker schedules.
-Check low budgets/cancel in parse, LUT inversion and execution; cache-off,
+Check low budgets in parse/LUT inversion and cancellation during pixel execution; cache-off,
 same-path/different-resource isolation, missing-file no-host-fallback and latched
 failure cleanup. Verify output/read windows survive context destruction and
 all final allocations retire. Supply actual public workflows plus direct-engine
-and independent numeric evidence only after implementation. Benchmark construction
+and independent numeric evidence in [implementation, validation and performance](../FMT-12-13-18_implementation.md). Benchmark construction
 separately from application, reporting exact build/CPU path and managed memory.
 
 This revision does not implement GPU execution, runtime dynamic-property ports,

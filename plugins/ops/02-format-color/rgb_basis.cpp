@@ -13,7 +13,9 @@
 #include <utility>
 #include <vector>
 
+#include "02-format-color/color_authoring.hpp"
 #include "02-format-color/rgb_basis_math.hpp"
+#include "common/domain/model_coordinates.hpp"
 #include "common/domain/rgb_geometry_codec.hpp"
 #include "common/fixed_point_inputs.hpp"
 #include "common/floating_environment.hpp"
@@ -33,14 +35,18 @@ std::string text(const Parameters& params, const char* key,
   return it == params.end() ? default_value : std::get<std::string>(it->second);
 }
 unsigned method_index(const std::string& method) {
-  if (method == "xyz_scaling")
+  if (method == "xyz_scaling") {
     return 0;
-  if (method == "bradford")
+  }
+  if (method == "bradford") {
     return 1;
-  if (method == "cat02")
+  }
+  if (method == "cat02") {
     return 2;
-  if (method == "cat16")
+  }
+  if (method == "cat16") {
     return 3;
+  }
   throw CheckedFailure{
       invalid("method must be xyz_scaling, bradford, cat02 or cat16")};
 }
@@ -78,13 +84,15 @@ TensorInterpretation global_interpretation(const TensorDescription& d) {
   out.convention = d.convention;
   out.configured = d.configured;
   out.analytic_binding = d.analytic_binding;
+  out.coordinates = d.coordinates;
   return out;
 }
 bool described(const TensorInterpretation& value) {
   return !value.model.empty() || !value.primaries.empty() ||
          !value.transfer.empty() || !value.reference.empty() ||
          !value.association.empty() || value.white || value.primaries_xy ||
-         value.profile || value.configured || value.analytic_binding;
+         value.profile || value.configured || value.analytic_binding ||
+         value.coordinates;
 }
 void overlay(TensorInterpretation* target, const TensorInterpretation& source) {
   // A default-constructed, absent global/channel record makes no convention
@@ -93,8 +101,9 @@ void overlay(TensorInterpretation* target, const TensorInterpretation& source) {
   if (described(source)) {
     typed(!had_description || target->convention == source.convention,
           "conflicting coordinate conventions");
-    if (!had_description)
+    if (!had_description) {
       target->convention = source.convention;
+    }
   }
   typed(!target->profile || !source.profile ||
             *target->profile == *source.profile,
@@ -114,30 +123,41 @@ void overlay(TensorInterpretation* target, const TensorInterpretation& source) {
     typed(pair.first->empty() || pair.second->empty() ||
               *pair.first == *pair.second,
           "conflicting effective interpretation");
-    if (pair.first->empty())
+    if (pair.first->empty()) {
       *pair.first = *pair.second;
+    }
   }
   typed(!target->white || !source.white || *target->white == *source.white,
         "conflicting effective white");
   typed(!target->primaries_xy || !source.primaries_xy ||
             *target->primaries_xy == *source.primaries_xy,
         "conflicting effective primaries");
-  if (!target->white)
+  if (!target->white) {
     target->white = source.white;
-  if (!target->primaries_xy)
+  }
+  if (!target->primaries_xy) {
     target->primaries_xy = source.primaries_xy;
-  if (!target->profile)
+  }
+  if (!target->profile) {
     target->profile = source.profile;
-  if (!target->configured)
+  }
+  if (!target->configured) {
     target->configured = source.configured;
-  if (!target->analytic_binding)
+  }
+  if (!target->analytic_binding) {
     target->analytic_binding = source.analytic_binding;
+  }
+  typed(data_internal::overlay_model_coordinates(&target->coordinates,
+                                                 source.coordinates, true),
+        "conflicting effective model coordinates");
 }
 Rational endpoint(const TensorEndpoint& value) {
-  if (const auto* v = std::get_if<std::int64_t>(&value))
+  if (const auto* v = std::get_if<std::int64_t>(&value)) {
     return Rational::integer(*v);
-  if (const auto* v = std::get_if<double>(&value))
+  }
+  if (const auto* v = std::get_if<double>(&value)) {
     return number(*v);
+  }
   const auto& v = std::get<TensorRationalEndpoint>(value);
   Rational out;
   out.n.words.assign(v.numerator.begin(), v.numerator.end());
@@ -148,8 +168,9 @@ Rational endpoint(const TensorEndpoint& value) {
   return out;
 }
 void native_encoding(const std::optional<TensorEncoding>& value) {
-  if (!value)
+  if (!value) {
     return;
+  }
   typed(
       endpoint(value->stored[0]).compare(endpoint(value->decoded[0])) == 0 &&
           endpoint(value->stored[1]).compare(endpoint(value->decoded[1])) == 0,
@@ -177,9 +198,11 @@ struct Preparation final {
     is_identity = identity(matrix);
   }
   int row(std::uint64_t channel) const {
-    for (unsigned i = 0; i < 3; ++i)
-      if (channel == selected[i])
+    for (unsigned i = 0; i < 3; ++i) {
+      if (channel == selected[i]) {
         return static_cast<int>(i);
+      }
+    }
     return -1;
   }
 };
@@ -210,11 +233,13 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
   require(layout == "auto" || layout == "view" || layout == "materialize",
           "unknown layout");
   std::optional<TensorDescription> desc;
-  if (semantic)
+  if (semantic) {
     desc = checked(
         tensor_description_from_parameter(text(params, "input_description")));
-  if (desc)
+  }
+  if (desc) {
     checked(validate_tensor_description(*desc, input.descriptor));
+  }
   std::array<std::uint64_t, 3> selected{};
   unsigned axis = 0, group_index = 0;
   TensorInterpretation effective;
@@ -243,12 +268,13 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
             "semantic input needs v4 channel axis and explicit group");
     axis = *desc->channel_axis;
     bool found = false;
-    for (unsigned i = 0; i < desc->groups.size(); ++i)
+    for (unsigned i = 0; i < desc->groups.size(); ++i) {
       if (desc->groups[i].name == text(params, "group")) {
         require(!found, "ambiguous group");
         found = true;
         group_index = i;
       }
+    }
     require(found, "selected group is absent");
     auto& group = desc->groups[group_index];
     effective = group.interpretation;
@@ -271,10 +297,12 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
       if (selected[j] < desc->channels.size()) {
         const auto& channel = desc->channels[selected[j]];
         native_encoding(channel.encoding);
-        if (selected_units[j].empty())
+        if (selected_units[j].empty()) {
           selected_units[j] = channel.unit;
-        if (channel.interpretation)
+        }
+        if (channel.interpretation) {
           overlay(&effective, *channel.interpretation);
+        }
       }
     }
     if (effective.profile || effective.configured) {
@@ -284,9 +312,10 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
       typed(b.model == effective.model && b.roles.size() == 3 &&
                 b.units.size() == 3,
             "analytic binding model/order mismatch");
-      for (unsigned k = 0; k < 3; ++k)
+      for (unsigned k = 0; k < 3; ++k) {
         typed(b.roles[k] == group.components[k].role,
               "analytic binding role order mismatch");
+      }
       TensorInterpretation analytic;
       analytic.model = b.model;
       analytic.primaries = b.primaries;
@@ -313,41 +342,58 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
         const auto& declared = effective.analytic_binding->units[k];
         typed(current.empty() || current == declared,
               "analytic binding unit mismatch");
-        if (current.empty())
+        if (current.empty()) {
           current = declared;
+        }
       }
-      typed(current == "1" || current == "cd/m2",
+      typed(current == "1" || current == "relative" || current == "cd/m2" ||
+                current == "cd/m^2",
             "native component unit must be 1 or cd/m2");
-      typed(unit.empty() || unit == current, "component units disagree");
-      unit = current;
+      const auto normalized = current == "relative" ? "1"
+                              : current == "cd/m^2" ? "cd/m2"
+                                                    : current;
+      typed(unit.empty() || unit == normalized, "component units disagree");
+      unit = normalized;
     }
     const auto& ref = effective.reference;
     typed(ref == "scene_relative" || ref == "display_relative" ||
-              ref == "absolute_display_cd_m2" || ref == "scene" ||
-              ref == "display",
+              ref == "absolute_display_cd_m2" || ref == "display_absolute" ||
+              ref == "scene" || ref == "display",
           "explicit scene/display reference required");
-    typed(unit == "1" ? ref != "absolute_display_cd_m2"
-                      : (ref == "absolute_display_cd_m2" || ref == "display"),
+    typed(unit == "1"
+              ? (ref != "absolute_display_cd_m2" && ref != "display_absolute")
+              : (ref == "absolute_display_cd_m2" || ref == "display_absolute" ||
+                 ref == "display"),
           "unit/reference combination is incoherent");
+    if (effective.coordinates && !effective.coordinates->scale.empty()) {
+      typed(effective.coordinates->scale ==
+                (unit == "1" ? "relative" : "absolute"),
+            "native unit and coordinate scale disagree");
+    }
     typed(
         member == 0
             ? effective.transfer == "linear"
             : (effective.transfer.empty() || effective.transfer == "linear") &&
                   effective.primaries.empty() && !effective.primaries_xy,
         "requires native linear RGB or coherent XYZ");
-    for (unsigned i = 0; i < desc->groups.size(); ++i)
-      if (i != group_index)
-        for (auto c : desc->groups[i].indices)
+    for (unsigned i = 0; i < desc->groups.size(); ++i) {
+      if (i != group_index) {
+        for (auto c : desc->groups[i].indices) {
           require(
               std::find(selected.begin(), selected.end(), c) == selected.end(),
               "selected group overlaps another group");
+        }
+      }
+    }
   }
   require(axis < shape.size(), "axis outside rank");
-  for (auto c : selected)
+  for (auto c : selected) {
     require(c < shape[axis], "component outside channel extent");
-  if (input.layout.spatial)
+  }
+  if (input.layout.spatial) {
     typed(input.layout.channel_axis && *input.layout.channel_axis == axis,
           "selected axis must be structural image channel axis");
+  }
   Matrix matrix;
   std::optional<ResolvedBasis> source, target;
   std::array<double, 2> source_white{}, target_white{};
@@ -371,16 +417,18 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
     require(params.count("target_basis"), "B requires target_basis");
     target = parse_basis(text(params, "target_basis"));
     target_white = target->white;
-    if (params.count("target_white"))
+    if (params.count("target_white")) {
       require(parse_white(text(params, "target_white")) == target_white,
               "duplicate target white disagrees");
+    }
     if (semantic) {
       typed(effective.white.has_value(), "XYZ source white is required");
       source_white = *effective.white;
       (void)white_xyz(source_white);
-      if (params.count("source_white"))
+      if (params.count("source_white")) {
         require(parse_white(text(params, "source_white")) == source_white,
                 "source white assertion disagrees");
+      }
       const auto policy = text(params, "white_handling", "require_match");
       require(policy == "require_match" || policy == "preserve_xyz",
               "B never adapts white");
@@ -398,9 +446,10 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
     if (semantic) {
       typed(effective.white.has_value(), "XYZ source white is required");
       source_white = *effective.white;
-      if (params.count("source_white"))
+      if (params.count("source_white")) {
         require(parse_white(text(params, "source_white")) == source_white,
                 "source white assertion disagrees");
+      }
     } else {
       require(params.count("source_white"), "raw C requires source_white");
       source_white = parse_white(text(params, "source_white"));
@@ -439,8 +488,9 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
     const auto global = global_interpretation(*desc);
     // Preserve inherited descriptions of unrelated groups before clearing
     // global RGB-only fields that can no longer describe a mixed-model tensor.
-    for (auto& other : desc->groups)
+    for (auto& other : desc->groups) {
       overlay(&other.interpretation, global);
+    }
     group.interpretation = updated;
     for (unsigned j = 0; j < 3; ++j) {
       const auto it =
@@ -453,8 +503,9 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
         auto& channel = desc->channels[selected[j]];
         channel.role = target_roles[j];
         channel.unit = selected_units[j];
-        if (channel.interpretation)
+        if (channel.interpretation) {
           channel.interpretation = updated;
+        }
       }
     }
     if (desc->groups.size() == 1) {
@@ -527,12 +578,15 @@ struct Workspace final {
   RowWorkspace exact;
 };
 bool calculates(const Preparation& state, const Region& output) {
-  if (state.is_identity || state.layout == "view")
+  if (state.is_identity || state.layout == "view") {
     return false;
+  }
   const auto c = output.dimensions()[state.axis];
-  for (auto selected : state.selected)
-    if (selected >= c.offset && selected - c.offset < c.extent)
+  for (auto selected : state.selected) {
+    if (selected >= c.offset && selected - c.offset < c.extent) {
       return true;
+    }
+  }
   return false;
 }
 std::uint64_t scratch_bytes(const Preparation& state, const Region& output) {
@@ -545,24 +599,28 @@ Result<std::set<TileIndex>> required_tiles(const Preparation& state,
                                            std::uint64_t maximum_tiles) {
   using Answer = Result<std::set<TileIndex>>;
   std::set<TileIndex> result;
-  if (state.layout == "view")
+  if (state.layout == "view") {
     return Answer(std::move(result));
+  }
   for (const auto& span : state.spans) {
     auto charged = budget.consume({1});
-    if (!charged.ok())
+    if (!charged.ok()) {
       return Answer(charged);
+    }
     auto dimensions = output.dimensions();
     auto& c = dimensions[state.axis];
     const auto s = span.region.dimensions()[state.axis];
     const auto first = std::max(c.offset, s.offset);
     const auto end = std::min(c.offset + c.extent, s.offset + s.extent);
-    if (first >= end)
+    if (first >= end) {
       continue;
+    }
     c = {first, end - first};
     for (unsigned term = 0; term < span.terms; ++term) {
       auto source = dimensions;
-      if (span.terms == 3)
+      if (span.terms == 3) {
         source[state.axis] = {state.selected[term], 1};
+      }
       Region region(std::move(source));
       // Bound the rectangle before enumerating its tiles, including imported
       // tasks with fewer read slots than the source closure requires.
@@ -570,25 +628,30 @@ Result<std::set<TileIndex>> required_tiles(const Preparation& state,
       for (unsigned axis = 0; axis < grid.rank(); ++axis) {
         const auto d = region.dimensions()[axis];
         std::uint64_t extent = 1;
-        if (grid.batch_axis_mask() & (1U << axis))
+        if (grid.batch_axis_mask() & (1U << axis)) {
           extent = d.extent;
-        else if (axis == grid.height_axis() || axis == grid.width_axis())
+        } else if (axis == grid.height_axis() || axis == grid.width_axis()) {
           extent = (d.offset + d.extent - 1) / grid.tile_extent() -
                    d.offset / grid.tile_extent() + 1;
-        if (extent > maximum_tiles / count)
+        }
+        if (extent > maximum_tiles / count) {
           return Answer({ErrorCode::ResourceExhausted, "RGB read tile limit"});
+        }
         count *= extent;
       }
       auto tiles = sdk::tiles_for_region(budget, grid, region);
-      if (!tiles.ok())
+      if (!tiles.ok()) {
         return Answer(tiles.status());
+      }
       for (auto index : tiles.value()) {
         auto status = budget.consume({1});
-        if (!status.ok())
+        if (!status.ok()) {
           return Answer(status);
+        }
         result.insert(index);
-        if (result.size() > maximum_tiles)
+        if (result.size() > maximum_tiles) {
           return Answer({ErrorCode::ResourceExhausted, "RGB read union limit"});
+        }
       }
     }
   }
@@ -600,44 +663,53 @@ Result<OperationProgram> lower(const OperationLowering& query) {
   const auto& state = *static_cast<const Preparation*>(query.static_state);
   auto output =
       TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
-  if (!output.ok())
+  if (!output.ok()) {
     return Answer(output.status());
+  }
   auto input =
       TileGrid::from_schema(*query.inputs[0].result_schema, query.tile_extent);
-  if (!input.ok())
+  if (!input.ok()) {
     return Answer(input.status());
+  }
   ResourceLimits limits;
   limits.maximum_work = query.limits.maximum_work;
   ResourceBudget budget(limits);
   OperationProgramBuilder builder(query);
-  for (const auto& member : query.requests[0].members)
+  for (const auto& member : query.requests[0].members) {
     for (auto tile : member.second) {
       auto region = output.value().region(tile);
-      if (!region.ok())
+      if (!region.ok()) {
         return Answer(region.status());
+      }
       auto task =
           builder.add_task("rgb-basis", basis_contract, {},
                            {scratch_bytes(state, region.value()), 0, 0});
-      if (!task.ok())
+      if (!task.ok()) {
         return Answer(task.status());
+      }
       auto reads = required_tiles(state, region.value(), input.value(), budget,
                                   query.limits.maximum_records);
-      if (!reads.ok())
+      if (!reads.ok()) {
         return Answer(reads.status());
+      }
       if (reads.value().empty()) {
         auto status = builder.read_input_schema(task.value(), 0);
-        if (!status.ok())
+        if (!status.ok()) {
           return Answer(status);
+        }
       }
       for (auto index : reads.value()) {
         auto status = builder.read_input(task.value(), 0, 0, index);
-        if (!status.ok())
+        if (!status.ok()) {
           return Answer(status);
+        }
       }
       auto status = builder.write_output(task.value(), 0, member.first, tile);
-      if (!status.ok())
+      if (!status.ok()) {
         return Answer(status);
+      }
     }
+  }
   return builder.finish();
 }
 struct PreparedBasis final {
@@ -648,9 +720,11 @@ struct PreparedBasis final {
   std::shared_ptr<const std::array<ExactRow, 3>> rows;
   fixed_tensor::PointInputs<1> inputs;
   int row(std::uint64_t channel) const noexcept {
-    for (unsigned i = 0; i < 3; ++i)
-      if (selected[i] == channel)
+    for (unsigned i = 0; i < 3; ++i) {
+      if (selected[i] == channel) {
         return static_cast<int>(i);
+      }
+    }
     return -1;
   }
 };
@@ -664,14 +738,15 @@ Status evaluate(Workspace* work, unsigned count, unsigned row,
                   (state.narrow || state.profile != SequenceProfile::Strict);
 #endif
   std::fill_n(work->finite.begin(), count, true);
-  for (unsigned j = 0; j < 3; ++j)
+  for (unsigned j = 0; j < 3; ++j) {
     for (unsigned i = 0; i < count; ++i) {
       const bool finite = finite_bits(work->raw[j][i], state.narrow);
       work->finite[i] = work->finite[i] && finite;
       // Classify nonfinite bits before any floating conversion, including
       // signaling NaNs. Strict binary64 does not need a floating candidate.
-      if (!use_candidate)
+      if (!use_candidate) {
         continue;
+      }
       if (!finite) {
         work->candidate.input[j][i] = 0;
       } else if (state.narrow) {
@@ -683,8 +758,10 @@ Status evaluate(Workspace* work, unsigned count, unsigned row,
         std::memcpy(&work->candidate.input[j][i], &work->raw[j][i], 8);
       }
     }
-  if (use_candidate)
+  }
+  if (use_candidate) {
     candidates(&work->candidate, count, coefficients, state.profile);
+  }
   for (unsigned i = 0; i < count; ++i) {
     if (!work->finite[i] || !use_candidate ||
         !certify(coefficients, work->candidate, i, state.narrow, state.profile,
@@ -692,8 +769,9 @@ Status evaluate(Workspace* work, unsigned count, unsigned row,
       auto result = coefficients.evaluate(
           {work->raw[0][i], work->raw[1][i], work->raw[2][i]}, state.narrow,
           &work->exact, consume);
-      if (!result.ok())
+      if (!result.ok()) {
         return result.status();
+      }
       work->result[i] = result.value();
     }
   }
@@ -711,13 +789,15 @@ void invoke(const ps_kernel_invocation_v8* invocation,
                : Status::success();
   };
   const auto accept = [status](const Status& result) {
-    if (!result.ok())
+    if (!result.ok()) {
       *status =
           kernel_failure(result.code, result.message.c_str(), result.reason);
+    }
     return result.ok();
   };
-  if (!accept(consume(0)))
+  if (!accept(consume(0))) {
     return;
+  }
   if (state.view) {
     *status = kernel_failure(ErrorCode::InvalidArgument, "ViewUnavailable",
                              FailureReason::ViewUnavailable);
@@ -740,15 +820,18 @@ void invoke(const ps_kernel_invocation_v8* invocation,
   const auto first = layout.origin[state.axis];
   const auto channels = layout.shape[state.axis];
   std::uint64_t points = 1;
-  for (unsigned a = 0; a < layout.rank; ++a)
-    if (a != state.axis)
+  for (unsigned a = 0; a < layout.rank; ++a) {
+    if (a != state.axis) {
       points *= layout.shape[a];
+    }
+  }
   for (auto channel = first; channel < first + channels; ++channel) {
     const int row = state.row(channel);
     const bool arithmetic = row >= 0 && !state.is_identity;
     for (std::uint64_t begin = 0; begin < points; begin += block_size) {
-      if (!accept(consume(0)))
+      if (!accept(consume(0))) {
         return;
+      }
       const auto count = static_cast<unsigned>(
           std::min<std::uint64_t>(block_size, points - begin));
       for (unsigned lane = 0; lane < count; ++lane) {
@@ -777,11 +860,13 @@ void invoke(const ps_kernel_invocation_v8* invocation,
       }
       if (arithmetic) {
         if (!accept(evaluate(work, count, static_cast<unsigned>(row), state,
-                             consume)))
+                             consume))) {
           return;
-        for (unsigned lane = 0; lane < count; ++lane)
+        }
+        for (unsigned lane = 0; lane < count; ++lane) {
           std::memcpy(destination + work->packed_offsets[lane],
                       &work->result[lane], width);
+        }
       }
     }
   }
@@ -796,24 +881,28 @@ Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
   if (!state || query.inputs.size() != 1 || query.outputs.size() != 1 ||
       query.writes.size() != 1 || !query.task_parameters.empty() ||
       !query.outputs[0].result_schema ||
-      !query.outputs[0].result_schema->same_schema(*state->output_schema))
+      !query.outputs[0].result_schema->same_schema(*state->output_schema)) {
     return invalid();
+  }
   const auto& write = query.writes[0];
   auto grid =
       TileGrid::from_schema(*query.outputs[0].result_schema, query.tile_extent);
-  if (!grid.ok())
+  if (!grid.ok()) {
     return Answer(grid.status());
+  }
   auto region = grid.value().region(write.tile_index);
-  if (!region.ok())
+  if (!region.ok()) {
     return Answer(region.status());
+  }
   if (query.scratch !=
           std::array<std::uint64_t, 3>{scratch_bytes(*state, region.value()), 0,
                                        0} ||
       write.port || write.member || write.domain != physical::Domain::Host ||
       write.layout.element_type !=
           (state->narrow ? ElementType::Float32 : ElementType::Float64) ||
-      !fixed_tensor::matches_region(write.layout, region.value()))
+      !fixed_tensor::matches_region(write.layout, region.value())) {
     return invalid();
+  }
   auto prepared = std::make_unique<PreparedBasis>();
   prepared->narrow = state->narrow;
   prepared->is_identity = state->is_identity;
@@ -825,32 +914,37 @@ Result<ps_prepared_kernel_v8> prepare_kernel(const KernelPreparation& query) {
   prepared->rows = state->rows;
   auto input =
       TileGrid::from_schema(*query.inputs[0].result_schema, query.tile_extent);
-  if (!input.ok())
+  if (!input.ok()) {
     return Answer(input.status());
+  }
   prepared->inputs.grids[0] = input.take_value();
   ResourceLimits limits;
   limits.maximum_work = physical::ValidationLimits{}.maximum_work;
   ResourceBudget budget(limits);
   auto reads = required_tiles(*state, region.value(), prepared->inputs.grids[0],
                               budget, query.reads.size());
-  if (!reads.ok())
+  if (!reads.ok()) {
     return Answer(reads.status());
+  }
   std::size_t slot = 0;
   for (auto index : reads.value()) {
     const auto& read = query.reads[slot];
     auto expected = prepared->inputs.grids[0].region(index);
-    if (!expected.ok())
+    if (!expected.ok()) {
       return Answer(expected.status());
+    }
     if (read.port || read.member || read.tile_index != index ||
         read.domain != physical::Domain::Host ||
         read.layout.element_type != write.layout.element_type ||
-        !fixed_tensor::matches_region(read.layout, expected.value()))
+        !fixed_tensor::matches_region(read.layout, expected.value())) {
       return invalid();
+    }
     prepared->inputs.slots[0].push_back(
         {index, static_cast<std::uint32_t>(slot++)});
   }
-  if (slot != query.reads.size())
+  if (slot != query.reads.size()) {
     return invalid();
+  }
   ps_prepared_kernel_v8 kernel{};
   kernel.struct_size = sizeof(kernel);
   kernel.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_8;
@@ -875,9 +969,10 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
   traits.input_schema = {port};
   traits.requires_metadata_specialization = true;
   for (const auto* name :
-       {"group", "components", "input_description", "layout"})
+       {"group", "components", "input_description", "layout"}) {
     traits.parameter_schema.push_back(
         {name, OperationParameterType::String, false});
+  }
   traits.parameter_schema.push_back(
       {"axis", OperationParameterType::Int64, false});
   if (member == 0) {
@@ -912,13 +1007,15 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
          const physical::Placement& placement, const KernelPreparation& query,
          const ResourceSet&,
          const ps_native_gpu_service_v2*) -> Result<ps_prepared_kernel_v8> {
-    if (kernel.symbol != "rgb-basis" || kernel.contract != basis_contract)
+    if (kernel.symbol != "rgb-basis" || kernel.contract != basis_contract) {
       return Result<ps_prepared_kernel_v8>(
           {ErrorCode::TypeMismatch, "invalid RGB basis kernel"});
+    }
     if (placement.backend != physical::Backend::Cpu ||
-        placement.domain != physical::Domain::Host)
+        placement.domain != physical::Domain::Host) {
       return Result<ps_prepared_kernel_v8>(
           {ErrorCode::BackendUnavailable, "RGB basis requires CPU Host"});
+    }
     return prepare_kernel(query);
   };
   return op;
@@ -928,7 +1025,8 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
 // An explicit DFS stack bounds storage by reachable nodes, not C++ call depth.
 OperationMetadata edge_metadata(const WorkflowDocument& document,
                                 const WorkflowInput& edge,
-                                const OperationRegistry& registry) {
+                                const OperationRegistry& registry,
+                                const ResourceSet& resources = {}) {
   std::map<std::uint64_t, const WorkflowNode*> nodes;
   std::map<std::uint64_t, OperationMetadata> inputs;
   for (const auto& declaration : document.inputs) {
@@ -940,9 +1038,10 @@ OperationMetadata edge_metadata(const WorkflowDocument& document,
     require(inputs.emplace(canonical.id, std::move(m)).second,
             "duplicate graph input id");
   }
-  for (const auto& n : document.nodes)
+  for (const auto& n : document.nodes) {
     require(n.id && nodes.emplace(n.id, &n).second,
             "duplicate/zero graph node id");
+  }
   std::map<std::uint64_t, std::map<std::string, OperationMetadata>> outputs;
   std::map<std::uint64_t, unsigned> status;
   const auto resolve_edge =
@@ -958,8 +1057,9 @@ OperationMetadata edge_metadata(const WorkflowDocument& document,
             "node/port is absent");
     return it->second.at(ref.source_port);
   };
-  if (std::holds_alternative<WorkflowInputReference>(edge))
+  if (std::holds_alternative<WorkflowInputReference>(edge)) {
     return resolve_edge(edge);
+  }
   struct Frame final {
     std::uint64_t id;
     std::size_t next = 0;
@@ -986,18 +1086,21 @@ OperationMetadata edge_metadata(const WorkflowDocument& document,
         }
       }
     }
-    if (descended)
+    if (descended) {
       continue;
+    }
     std::vector<OperationMetadata> source;
-    for (const auto& ref : n.inputs)
+    for (const auto& ref : n.inputs) {
       source.push_back(resolve_edge(ref));
-    const auto prepared =
-        checked(registry.prepare_operation(n.operation, source, n.parameters));
+    }
+    const auto prepared = checked(registry.prepare_operation(
+        n.operation, source, n.parameters, resources));
     auto inferred = checked(
         infer_operation_outputs(prepared->traits(), source, n.parameters));
-    for (unsigned i = 0; i < inferred.size(); ++i)
+    for (unsigned i = 0; i < inferred.size(); ++i) {
       outputs[n.id].emplace(prepared->traits().outputs[i].key,
                             std::move(inferred[i]));
+    }
     status[n.id] = 2;
     stack.pop_back();
   }
@@ -1009,20 +1112,24 @@ Parameters parameters(const format::RgbBasisOptions& options) {
               options.profile == "accelerated_x86_64",
           "unknown CPU profile");
   Parameters out{{"layout", options.layout}};
-  if (!options.group.empty())
+  if (!options.group.empty()) {
     out.emplace("group", options.group);
+  }
   if (options.components) {
     const auto& c = *options.components;
     out.emplace("components", std::to_string(c[0]) + ',' +
                                   std::to_string(c[1]) + ',' +
                                   std::to_string(c[2]));
   }
-  if (options.axis)
+  if (options.axis) {
     out.emplace("axis", static_cast<std::int64_t>(*options.axis));
-  if (options.source_basis)
+  }
+  if (options.source_basis) {
     out.emplace("source_basis", basis_codec(resolve(*options.source_basis)));
-  if (options.target_basis)
+  }
+  if (options.target_basis) {
     out.emplace("target_basis", basis_codec(resolve(*options.target_basis)));
+  }
   if (options.source_white) {
     (void)white_xyz(*options.source_white);
     out.emplace("source_white", white_codec(*options.source_white));
@@ -1031,14 +1138,17 @@ Parameters parameters(const format::RgbBasisOptions& options) {
     (void)white_xyz(*options.target_white);
     out.emplace("target_white", white_codec(*options.target_white));
   }
-  if (options.method)
+  if (options.method) {
     out.emplace("method", *options.method);
-  if (options.white_handling)
+  }
+  if (options.white_handling) {
     out.emplace("white_handling", *options.white_handling);
-  if (options.input_description)
+  }
+  if (options.input_description) {
     out.emplace(
         "input_description",
         checked(tensor_description_parameter(*options.input_description)));
+  }
   return out;
 }
 struct Appended final {
@@ -1066,14 +1176,16 @@ Result<WorkflowNodeOutput> author(WorkflowDocument& document,
                                   WorkflowInput input,
                                   const format::RgbBasisOptions& options,
                                   std::shared_ptr<OperationRegistry> registry,
-                                  unsigned member) {
+                                  unsigned member,
+                                  const ResourceSet& resources = {}) {
   using Answer = Result<WorkflowNodeOutput>;
   try {
     plugin_internal::FloatingEnvironment environment;
     typed(environment.active(), "floating environment unavailable");
-    if (!registry)
+    if (!registry) {
       registry = make_default_operation_registry();
-    const auto source = edge_metadata(document, input, *registry);
+    }
+    const auto source = edge_metadata(document, input, *registry, resources);
     WorkflowDocument staged = document;
     if (member < 3) {
       const auto out =
@@ -1085,9 +1197,10 @@ Result<WorkflowNodeOutput> author(WorkflowDocument& document,
     require(!options.source_white, "D source white belongs in source_basis");
     const auto target = resolve(*options.target_basis);
     (void)rgb_matrix(target.xy, target.white);
-    if (options.target_white)
+    if (options.target_white) {
       require(*options.target_white == target.white,
               "D duplicate target white disagrees");
+    }
     const auto policy = options.white_handling.value_or("require_match");
     require(policy == "require_match" || policy == "preserve_xyz" ||
                 policy == "adapt",
@@ -1119,8 +1232,9 @@ Result<WorkflowNodeOutput> author(WorkflowDocument& document,
       c.target_basis.reset();
       c.white_handling.reset();
       c.target_white = target.white;
-      if (!c.input_description)
+      if (!c.input_description) {
         c.source_white = prepared_a.source_white;
+      }
       const auto converted = prepare_impl({current.metadata}, parameters(c), 2,
                                           SequenceProfile::Strict);
       current_description =
@@ -1135,11 +1249,12 @@ Result<WorkflowNodeOutput> author(WorkflowDocument& document,
     b.source_white.reset();
     b.target_white.reset();
     b.method.reset();
-    if (!b.input_description)
+    if (!b.input_description) {
       b.white_handling.reset();
-    else
+    } else {
       b.white_handling =
           policy == "preserve_xyz" ? "preserve_xyz" : "require_match";
+    }
     current = append(&staged, current.edge, current.metadata, 1, b, *registry);
     document = std::move(staged);
     return Answer(current.edge);
@@ -1157,18 +1272,61 @@ Result<WorkflowNodeOutput> author(WorkflowDocument& document,
   }
 }
 }  // namespace
+Result<OperationMetadata> workflow_metadata(const WorkflowDocument& document,
+                                            const WorkflowInput& input,
+                                            const OperationRegistry& registry,
+                                            const ResourceSet& resources) {
+  try {
+    return Result<OperationMetadata>(
+        edge_metadata(document, input, registry, resources));
+  } catch (const CheckedFailure& failure) {
+    return Result<OperationMetadata>(failure.status);
+  }
+}
+Result<WorkflowNodeOutput> author_view_conversion(
+    WorkflowDocument& document, WorkflowInput input,
+    const format::RgbBasisOptions& options,
+    std::shared_ptr<OperationRegistry> registry, const ResourceSet& resources) {
+  return author(document, std::move(input), options, std::move(registry), 3,
+                resources);
+}
+Result<TensorDescription> output_description(
+    const OperationMetadata& input,
+    const std::map<std::string, ParameterValue>& parameters, unsigned member) {
+  using Answer = Result<TensorDescription>;
+  try {
+    require(member < 3, "invalid native basis member");
+    plugin_internal::FloatingEnvironment environment;
+    typed(environment.active(), "floating environment unavailable");
+    const auto preparation =
+        prepare_impl({input}, parameters, member, SequenceProfile::Strict);
+    const auto& result =
+        static_cast<const Preparation*>(preparation.state.get())
+            ->output_description;
+    require(result.has_value(), "explicit description required");
+    return Answer(*result);
+  } catch (const CheckedFailure& failure) {
+    return Answer(failure.status);
+  } catch (const GeometryError&) {
+    return Answer(invalid("invalid view geometry"));
+  } catch (const ExactWorkFailure& failure) {
+    return Answer(failure.status);
+  }
+}
 Status register_members(OperationRegistry* registry) {
   for (const auto& p :
        {std::make_pair("strict", SequenceProfile::Strict),
         std::make_pair("accelerated_apple_silicon",
                        SequenceProfile::AppleSilicon),
-        std::make_pair("accelerated_x86_64", SequenceProfile::X86Avx2)})
+        std::make_pair("accelerated_x86_64", SequenceProfile::X86Avx2)}) {
     for (unsigned member = 0; member < 3; ++member) {
       auto status =
           registry->register_operation(definition(member, p.first, p.second));
-      if (!status.ok())
+      if (!status.ok()) {
         return status;
+      }
     }
+  }
   return Status::success();
 }
 }  // namespace ps::plugin_internal::basis_ops

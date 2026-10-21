@@ -33,11 +33,11 @@ sampling. FMT-09 does not implicitly execute those stages or normalize an
 arbitrary luminance to 1. A transfer curve does not itself change primaries,
 white or turn scene coordinates into display rendering.
 
-Current ColorTransferKind in
-[color_array.hpp](../../../../include/photospider/ops/color_array.hpp) only
-contains linear, sRGB and gamma. NUM/CRV ramp helpers do not implement independent
-FMT-09 nodes or the new units/reference vocabulary. Their old association and
-last-axis conventions do not override the FMT contract.
+NUM/CRV tuple descriptions use the shared TensorDescription and transfer codecs.
+Their member admission remains restricted to linear, sRGB and power gamma
+(YCbCr requires an encoded transfer). Numeric ramps consume and emit straight
+coordinates; FMT-09 independently provides the wider transfer set below. Sharing
+a codec does not make every transfer legal for every consumer.
 
 ## Confirmed curve set, meaning and domains
 
@@ -102,7 +102,7 @@ and dtype remain unchanged, and unselected samples copy exactly.
 | Logical parameter | Rule |
 | --- | --- |
 | input_description | Optional explicit TensorDescription. Presence selects the described RGB/Gray path; absence selects raw numerical components. |
-| group | Required static unique RGB/Gray group in semantic mode. |
+| group | Required static unique RGB/Gray group when selecting an explicit group. An axis-free Gray component may supply its component description without a group. |
 | components / axis | Raw all-components or explicit index selection; do not also supply semantic group. |
 | curve | A may resolve from input_description; an explicit assertion must agree. B and raw require an explicit curve. No default sRGB guess. |
 | gamma | Required only for power_gamma; finite static Float64 >0; no implicit 2.2 exponent. |
@@ -125,8 +125,20 @@ Float64 parameter bits. Raw selectors use a bounded canonical index string.
 
 ## Curve identity, metadata and reference checks
 
+The described implementation resolves compatible global/group/selected-channel
+assertions, explicit analytic bindings and native numeric encodings. It supports
+axis-free Gray groups as well as a component-only Gray description. Gray must
+supply `coordinates.gray_kind`: `linear_y` for encode or linear decode, and
+`encoded_luma` for a nonlinear decode. CIELAB/OKLab lightness is not transfer
+luminance. Canonical `reference=scene|display` requires explicit
+`coordinates.scale=relative|absolute`; legacy relative/display-absolute reference
+spellings remain accepted, with contradictory scales rejected. Relative units
+accept `relative`/`1` (Gray also `relative_luminance`), and absolute display units
+accept `cd/m2`/`cd/m^2`. Spatial selection must agree with the structural channel
+axis. The native view helper uses these same semantic rules.
+
 The described path reads only the explicit `input_description`. It requires a
-unique `group` and rejects `axis/components`. Decode A resolves the complete
+unique `group` (or an explicit axis-free Gray component) and rejects `axis/components`. Decode A resolves the complete
 source transfer when `curve` is omitted; any supplied curve and its parameters
 must agree with the description. Encode B always requires a target curve and
 requires the explicit source transfer to be linear. No sRGB guess or automatic

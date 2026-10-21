@@ -7,7 +7,7 @@ kind: external_engine_adapter
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 proposed_operation_keys:
   - color.ocio_named_transform_2_5_2_cpu
@@ -17,7 +17,7 @@ proposed_operation_keys:
 
 Inherit [FMT-13](FMT-13_ocio_transform_contract.md). A NamedTransform is selected
 as a transform object rather than guessed to be a color space. This native
-external-engine adapter is Proposed/unimplemented.
+external-engine adapter is implemented; the decision status remains Proposed. See [implementation, validation and performance](../FMT-12-13-18_implementation.md).
 
 ## Interface and meaning
 
@@ -50,5 +50,5 @@ finite checks, alpha admission, exact point/group support and materialization.
   requests, Float64 adaptation and both execution configurations to the point
   oracle.
 
-A future public graph imports the named object and explicit endpoint bindings,
-then selects D. No executable registry support is claimed yet.
+Public resource helpers, executable operation usage, independent oracle commands
+and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).

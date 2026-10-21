@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: common_scope_complete
 ---
 
@@ -14,11 +14,16 @@ clarification_status: common_scope_complete
 It precedes individual FMT operator specifications. The maintainer selected a
 unified tensor target with explicit per-operation interpretation; raw and
 interpretation policies are confirmed below. Individual formulas, ports and
-implementation remain separate work.
+implementation are recorded by the individual member specifications.
 Current implementation facts and those future requirements are distinguished
 below. It registers no operation and changes no runtime ABI.
 Decisions belong in this category's specifications; this clarification creates
 neither an ADR nor a separate glossary.
+
+The shared representation and independent NUM/CRV migration are implemented.
+All enumerated active FMT members are implemented under their own contracts.
+Decision status remains Proposed; see the
+[NUM/CRV migration record](../../01-numeric/NUM-CRV_color_migration.md).
 
 Implementation note: registered FMT operations take their interpretation as
 explicit static parameters. A tensor description is the operations-SDK
@@ -33,8 +38,9 @@ and [Tensor descriptions](../../../kernel-architecture/Tensor-Semantic-Metadata.
 The later [relative-coordinate scale decision](FMT_relative_coordinate_scale.md)
 sets native CIELAB/CIELCh lightness storage to l=L*/100 across NUM/CRV/FMT.
 It supersedes old L*=0..100 storage wording while retaining finite extensions,
-other coordinate scales and explicit absolute units. Its semantic migration is
-pending; no existing ColorArray v1 payload is silently reinterpreted.
+other coordinate scales and explicit absolute units. NUM/CRV and FMT use the
+existing TensorDescription v4/v5 codecs. The old ColorArray v1 API and codec
+have been removed; old payloads are rejected.
 
 The maintainer explicitly selected the numerical semantics of
 [NUM-common](../../01-numeric/op_specs/NUM_common_contract.md) and
@@ -139,11 +145,12 @@ Current public types:
   a separately implemented public dtype extension or an explicitly defined
   encoding in an existing container. An interval such as 0..65535 is not itself
   a native UInt16 storage type.
-- [ColorArrayDescriptor](../../../../include/photospider/ops/color_array.hpp)
-  (operations SDK) has RGB, XYZ, CIELAB, CIELCh, OKLab, OKLCh, HSL, YCbCr and
-  CMYK. It has no Gray, HSV or xyY model; alpha is currently RGB-only. Transfer is
-  linear/sRGB/gamma. It is a static parameter codec (`color_array_parameter`),
-  not a property of a Tensor or Result.
+- [Numeric color tuples](../../../../include/photospider/ops/numeric/color_description.hpp)
+  restrict TensorDescription to one canonical logical tuple for NUM/CRV:
+  RGB, XYZ, CIELAB, CIELCh, OKLab, OKLCh, HSL, YCbCr or CMYK. The tuple
+  uses axis zero independently of its sampled port's leading dimensions.
+  Native coordinates are straight; individual members define alpha arity.
+  These helpers use the existing TensorDescription codec.
 - [TensorDescription](../../../../include/photospider/ops/tensor_description.hpp)
   (operations SDK) is the general description used by the `input_description`
   parameters of FMT-01, FMT-04/05 and FMT-09..11 and by the per-input
@@ -208,14 +215,14 @@ structural facts carried by the Result schema. Color model, channel roles,
 transfer, primaries/white, alpha, coverage, emission and coordinate/sampling
 interpretation are not carried by data. Each operation that needs them receives
 them as explicit static parameters: a `TensorDescription` in `input_description`,
-RGB geometry and white parameters, a transfer definition, model options, or a
-`ColorArrayDescriptor` parameter. Image/Layer are not special semantic carrier
+RGB geometry and white parameters, a transfer definition, model options, or
+an explicit NUM/CRV TensorDescription tuple parameter. Image/Layer are not special semantic carrier
 types.
 
-Existing ColorArray color science remains the starting vocabulary, including
-Float32/Float64 computation and [H,W,C] image examples. Its closed descriptor
-and channel-last restrictions are facts of that parameter codec, not authority
-to reintroduce a universal special image type. Each operator identifies the
+The shared color science includes Float32/Float64 computation and [H,W,C]
+image examples. Numeric tuple consumers require a final physical color axis;
+FMT describes the actual tensor axes explicitly. Neither restriction introduces
+a universal special image type. Each operator identifies the
 relevant axes/roles through its explicit parameters. A tensor collection must
 retain explicit correspondence between related components. A description string
 alone cannot create storage or resource ownership; immutable profile and
@@ -359,9 +366,10 @@ P as C in a later call is not unassociation unless the caller explicitly
 requests a numerical reinterpretation rather than preservation of color.
 
 This decision supersedes earlier FMT-04/05 permissions for persistent external
-alpha bindings and ordinary premultiplied image results. The ColorArray
-parameter codec and existing numeric ramp association options remain
-implementation facts, not exceptions to the category target.
+alpha bindings and ordinary premultiplied image results. Numeric RGB ramps now
+consume and emit straight RGB/RGBA. Their old association options and the old
+ColorArray codec are removed; internal alpha weighting remains part of the
+linear-light interpolation formula.
 
 ### Computation and storage encoding
 
@@ -379,9 +387,9 @@ integer values. The proposed native widths must be implemented before claiming
 those storage types at public ports. Float16/Int32/UInt32/UInt64 are outside this
 selected expansion. Existing Int64 remains supported.
 
-The ColorArray parameter codec describes Float32/64 colors only, so an integer
-output needs a `TensorDescription` with an explicit `TensorEncoding` when a later
-consumer must interpret it. The caller constructs that description; FMT-06 does
+NUM/CRV native tuple consumers accept Float32/64 and reject numeric encodings.
+An integer output needs a `TensorDescription` with an explicit `TensorEncoding`
+when a later FMT consumer must interpret it. The caller constructs that description; FMT-06 does
 not emit one. Later FMT-06 members must define legal code/effective-bit
 conventions; FMT-07 is retired.
 FMT-05B now specifies opaque generation through explicit or dtype-default alpha
@@ -407,8 +415,8 @@ adapters. It adds complete profile-defined RGB/Gray/CMYK/XYZ/Lab spaces plus
 explicit profile-to-analytic endpoint bindings. Arbitrary profile LUTs do not
 imply decomposable primaries/transfer; ICC PCS D50 is not silently equated with
 an analytic white preset. These description records are implemented in the SDK
-`TensorDescription` v4/v5 codec and do not reinterpret ColorArray parameter
-bytes; LCMS transform integration remains separate.
+`TensorDescription` v4/v5 codec. Removed ColorArray payloads are rejected. The pinned LCMS integration is implemented separately from the codec;
+see [external-engine implementation](../FMT-12-13-18_implementation.md).
 
 [FMT-13](FMT-13_ocio_transform_contract.md) separately fixes OpenColorIO v2.5.2
 CPU for configured spaces, display/view, Looks, NamedTransform, files and
@@ -418,7 +426,8 @@ infer units. Selected Float64 colors pass through RN32/F32/widen while alpha
 and AOVs bypass. Config/file resources and property snapshots are static;
 explicit reference-bridge and alpha-effect admission apply. Configured-space
 descriptions and immutable `OcioConfigResource` snapshots are implemented in the
-operations SDK; engine integrations remain unimplemented. [FMT-18](FMT-18_softproof_contract.md)
+operations SDK; all six pinned CPU integrations are implemented.
+[FMT-18](FMT-18_softproof_contract.md)
 separately specifies proof colors and sampled gamut alarms on the LCMS foundation,
 including an identified source-domain gamut-table correction. It does not infer
 proofing from an OCIO display/view label.
@@ -465,23 +474,25 @@ The operations-SDK [TensorDescription codec](../../../kernel-architecture/Tensor
 (canonical v4/v5) fixes the description, typed endpoint, sampling,
 configured-space and resource-identity representation used by FMT
 `input_description` parameters. Older encodings reject. External FMT-12/13
-engine gates remain separate; descriptive OCIO snapshots run no engine.
+engine validation remains separate from serialization; descriptive OCIO
+snapshots run no engine until an operation or inspection constructs one.
 
 Before registering a member that consumes new description fields, freeze and
 review the following shared artifacts:
 
 | Artifact | Required decision and acceptance |
 | --- | --- |
-| Generic description codec | Canonical tensor/axis/component/group/reference/encoding records, structural invariants, unknown-field policy and equality. Equivalent descriptions must have one canonical encoding. |
-| Version and migration | An explicit persisted schema/version discriminator for the revised coordinate convention, old-v1 import conversion or retirement, and rejection of silently mixed meanings. The Markdown `spec_schema_version` is not this runtime discriminator. |
+| Generic description codec | Canonical tensor/axis/component/group/reference/encoding records, structural invariants, unknown-field policy and equality. Each exact description value has one canonical encoding; semantic equivalence does not collapse distinct explicit records. |
+| Version and migration | Existing TensorDescription v4/v5 discriminators identify the native convention. Old ColorArray v1 interfaces and decoding are retired; old payloads are rejected. CRV-09 report/table schema v4 and configuration hash domain v2 distinguish migrated bake metadata. The Markdown `spec_schema_version` is not a runtime discriminator. |
 | Typed parameters | Exact integer endpoints, Float64 bit patterns where significant, enum/default normalization and conditional-field rejection. Preserve signed zero where FMT-06 endpoint/identity rules observe it; do not pass Int64 endpoints through Float64. |
 | Resource binding | Immutable profile/configuration and transitive resource content identities selected by preparation from the compiler's `ResourceSet`, execution/build settings, owned lifetimes and cache-key rules. Names or host paths alone cannot identify engine results. |
 | Consumer migration | Compiler inference, NUM/CRV consumers, LUT axes, import paths, fixtures and cache/validation identity must agree on the version and coordinate units. |
 
-The engine consumer gates are still open; no engine integration is claimed.
-Implementations must not attach new formulas to old descriptors and defer the
-discriminator until after registration. See the
-[relative-coordinate migration](FMT_relative_coordinate_scale.md).
+The active FMT and NUM/CRV consumers implement these version/resource checks;
+executed validation is recorded in their implementation documents. NUM/CRV
+migration changes operator configuration and contract identity while keeping
+the kernel frozen. Old descriptions, bake tables and reports are retired.
+See the [relative-coordinate migration](FMT_relative_coordinate_scale.md).
 
 ## Numerical and dependency plans
 
@@ -559,7 +570,9 @@ changed FMT-14B iteration/termination algorithm requires a separate contract.
 Focused regression inputs include adjacent floats at branch thresholds, signed
 zero/NaN payload copies, exact Int64 endpoints, tiny alpha, large hue, near-singular
 bases, one-component requests with invalid unrequested peers, missing alpha
-coverage, low budgets and cancellation during construction/refinement. Member
+coverage, low construction budgets and cancellation during native refinement
+or bounded pixel execution. FMT-12/13/18 external-engine construction is
+synchronous and noncancellable; it retains memory/work admission. Member
 formulas decide which of these inputs are accepted; the list adds no new domains.
 
 Memory measurements distinguish virtual reservation, committed backing, retained
@@ -569,8 +582,8 @@ allocation. Page retention until final owner retirement and the prohibition on
 automatic eviction/replay remain unchanged. Gamut containment and luminance
 bounds must be reported separately from perceptual quality; FMT-14B does not
 promise maximum chroma/minimum color difference and FMT-14C is not idempotent.
-These are future implementation gates, not evidence of tests or engines run by
-this documentation revision.
+These are regression coverage requirements. The family implementation documents
+record the executed workloads, numerical oracles and measured limits.
 
 ## Completed member scope and future extensions
 
@@ -578,8 +591,10 @@ Current members of FMT-01..06, FMT-09..15 and FMT-18 are specified in their
 family/member documents; FMT-08 is an SDK editing function with no workflow
 member. [FMT-14](FMT-14_gamut_mapping_contract.md) fixes native
 mapping and geometric masks; [FMT-15](FMT-15_tone_view_contract.md) fixes native
-luminance/unit mapping and explicit view composition. Their Proposed status and
-not_implemented state remain distinct from completed design.
+luminance/unit mapping and explicit view composition. Active members are
+implemented; their Proposed decision status remains independent of runtime
+status. See [native gamut/tone](../FMT-14-15_implementation.md) and
+[external engines/configured views](../FMT-12-13-18_implementation.md).
 
 Further FMT-06 code constraints, BT.2020 CL, GRD-29/30, external codec
 filters/siting/packing and additional appearance algorithms remain separate
@@ -600,8 +615,8 @@ describes configuration-based color processing (the page identifies its content
 as originating from v1; it is used only for this conceptual distinction).
 These are reference material,
 not automatic adoption of CSS rendering behavior or a fixed OCIO implementation.
-No operator execution or numerical acceptance test is performed by this
-documentation-only clarification.
+Runtime and numerical acceptance evidence belongs to the linked implementation
+records; the external references alone do not establish that evidence.
 
 The maintainer confirmed that internal color planes, including Y/Cb/Cr, retain
 same-size 1:1:1 sampling, with alpha in the same tensor. External chroma

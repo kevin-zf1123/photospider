@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
 proposed_operation_keys:
@@ -17,7 +17,7 @@ proposed_operation_keys:
 # FMT-15A: Explicit-exposure luminance mapping
 
 Inherit the complete [FMT-15 family](FMT-15_tone_view_contract.md), including its
-normative A section. Proposed/unimplemented; no old operation alias is restored.
+normative A section. The specification remains Proposed; the strict CPU operation is registered with fixed invocation ABI 8. See [implementation and validation](../FMT-14-15_implementation.md). No old operation alias is restored.
 
 ## Interface and inference
 
@@ -34,8 +34,7 @@ not remove hidden-color work. Required upstream failures keep their scope.
 ## Storage and numerical identity
 
 auto/materialize create requested planar values; forced view fails. Native CPU strict arithmetic only in this revision. Account exact arithmetic, scratch, output pages and ancestry; honor cancellation and immutable lifetime.
-Metadata and sample-validity guarantees remain separate. No runtime evidence is
-claimed by this specification.
+Metadata and sample-validity guarantees remain separate. Runtime evidence and its limits are recorded in the linked implementation page.
 
 ## Acceptance and conceptual use
 

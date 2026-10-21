@@ -41,6 +41,9 @@
 !plugins/ops/**/
 !plugins/ops/**/*.cpp
 !plugins/ops/**/*.hpp
+!plugins/ops/02-format-color/*.c
+!plugins/ops/02-format-color/*.h
+!plugins/ops/02-format-color/prepare_*.py
 !plugins/ops/03-generation/*.metal
 !plugins/ops/03-generation/perlin.slang
 !plugins/ops/03-generation/*.hpp.in
@@ -62,6 +65,8 @@
 !oracle/ops/
 !oracle/ops/**/
 !oracle/ops/**/*.py
+!oracle/ops/format_color/external/*.c
+!oracle/ops/format_color/external/*.cpp
 !oracle/ops/**/*.hpp
 !oracle/ops/**/*.md
 !oracle/ops/**/*.json

@@ -20,8 +20,10 @@
 | [FMT-09](../../built-in_ops/02-format-color/op_specs/FMT-09_transfer_contract.md) | `color.transfer_decode_<profile>`、`color.transfer_encode_<profile>` | 显式曲线参数与可选输入描述；输出 values。 |
 | [FMT-10](../../built-in_ops/02-format-color/op_specs/FMT-10_rgb_basis_contract.md) | RGB/XYZ、XYZ/RGB、白点适应 key；`format::convert_linear_rgb` | 显式源解释与几何；D 生成 A→可选 C→B，并写入显式中间节点参数。 |
 | [FMT-11](../../built-in_ops/02-format-color/op_specs/FMT-11_model_conversion_contract.md) | 19 个原生成员各有三种 profile；S helper 使用 MASK threshold key | 显式描述或有序 raw selector 与模型参数；输出 values，Q/R 改变通道数。 |
+| [FMT-14](../../built-in_ops/02-format-color/op_specs/FMT-14_gamut_mapping_contract.md) | `color.clip_rgb_gamut_strict`、`color.reduce_oklab_chroma_v1_strict`、`color.compress_rgb_chroma_v1_strict`、`color.check_rgb_gamut_strict` | 显式原生相对线性 RGB；A/B/C 输出 values，D 输出同 dtype 二值 mask。 |
+| [FMT-15](../../built-in_ops/02-format-color/op_specs/FMT-15_tone_view_contract.md) | `color.map_luminance_v1_strict`、`color.convert_display_luminance_strict`；`format::compose_view` | 显式 RGB/linear-Y Gray、gain/curve 或显示范围；native C 保留逐阶段舍入和显式配置。 |
 
-三种 CPU profile 是 strict、accelerated_apple_silicon、accelerated_x86_64；加速 profile 需要匹配的主机能力。数值格式转换只有 strict key。Proposed 规格状态与注册状态分开记录；这些族没有 GPU 实现。
+三种 CPU profile 是 strict、accelerated_apple_silicon、accelerated_x86_64；加速 profile 需要匹配的主机能力。数值格式转换与原生 FMT-14/15 只有 strict key。Proposed 规格状态与注册状态分开记录；这些族没有 GPU 实现。
 
 ## 结构性通道操作
 
@@ -47,7 +49,7 @@ FMT-05 要求调用方提供 straight 解释。Set 使用固定 ABI 8 和 Float3
 
 FMT-06 通过固定调用 ABI 8 实现全部 49 对 dtype 转换。Rescale 默认为 true，源与目标区间分别来自显式值或 dtype 默认值；pure cast 拒绝 ranges 和 axis。逐通道 range table 使用显式 cell axis。精确仿射结果只向目标舍入一次。reject 要求舍入结果可表示，整数目标要求原始源样本有限；clip 和浮点 NaN/Inf 映射仍是结果语义。Result 保留结构 schema identity、tensor key、shape、batch，改变 dtype 并将 atomic_trailing_axes 设为零；不传播 decoder。每个完整输出 tile 对应一个 task，读取自身在源网格上的闭包并写入独立 dense 分配。identity 用零 scratch 复制原始位，非 identity 使用固定精确算术 scratch。非空 identity view 仅依赖 schema，并返回 ViewUnavailable。SIMD/SME 路径共享 strict 数值契约，测量时仍需独立的 native dispatch 证据。
 
-FMT-09 有 input_description 时要求唯一 group，并禁止 raw axis/components。Decode 可从该配置解析完整曲线；encode 要求目标 curve 和 linear 源解释。无描述时必需 components 与 curve，index list 还要求 axis。各曲线的单位/reference 校验保留。输出保留 shape/dtype、atomic_trailing_axes=0，不带 transfer 标签。
+FMT-09 有 input_description 时选择唯一 group（含无轴 Gray group）或显式无轴 Gray component，并禁止 raw axis/components。Decode 可从该配置解析完整曲线；encode 要求目标 curve 和 linear 源解释。无描述时必需 components 与 curve，index list 还要求 axis。显式合并相容的 global/group/channel 断言与 analytic binding。规范 scene/display reference 要求显式 coordinate scale；相对单位接受 relative/1（Gray 也接受 relative_luminance），绝对显示单位接受 cd/m2/cd/m^2，兼容 reference 拼写须与显式 scale 一致。Gray 在 encode/linear decode 时必须为 linear_y，非线性 decode 时为 encoded_luma；拒绝 Lab/OKLab lightness。保留各曲线的 reference 校验。输出保留 shape/dtype、atomic_trailing_axes=0，不带 transfer 标签。
 
 FMT-09 的六个 CPU keys 使用固定调用 ABI 8。语义输入有限性、曲线定义域和输出有限性属于完整保留输出 tile 上的调用者前提。Linear 与 gamma=1 按位复制，旁路 tile 使用零 scratch。Auto/materialize 写独立 dense tile；非 identity forced view 静态拒绝，非空 identity view 仅依赖 schema 并返回 ViewUnavailable。
 
@@ -57,6 +59,8 @@ FMT-09 的六个 CPU keys 使用固定调用 ABI 8。语义输入有限性、曲
 
 FMT-10 应用精确 RGB/XYZ 矩阵，以及显式选择的 XYZ Scaling、Bradford、CAT02、CAT16 适应。描述路径要求选定 RGB/XYZ group；raw 调用要求 axis、有序 components 与几何。九个 CPU keys 使用固定调用 ABI 8。非 identity 行消费全部三个来源项，包括零系数；完整矩阵 identity 只读对应样本。语义输入与输出有限性是保留输出 tile 上的调用者前提。源闭包按输入网格展开，auto/materialize 写独立 dense tile。非 identity forced view 静态拒绝；精确 I 的非空 view 只读 schema 并返回 ViewUnavailable。旁路 alpha/AOV 精确复制。Transfer、exposure、gamut 和 rendering 是独立操作。
 
+FMT-10 接受 relative/1 与 cd/m2/cd/m^2 单位别名，并校验显式 coordinate scale 一致；别名不产生数值转换。
+
 D 在修改原图前暂存完整展开。它根据显式源描述推导中间 XYZ 配置并写入生成节点参数，不从边恢复描述。A→B 和 A→C→B 保留各节点的舍入与失败；相同源/目标 basis 不允许将组合替换成 identity。
 
 FMT-11 A–R/T 提供 57 个按 profile 区分的原生 model key，S 使用三个 MASK threshold key。显式描述可解析唯一 group，并允许相符的 axis/components assertion。Raw 调用提供成员要求的 selectors、white、hue unit、NCL 系数、Gray kind 或常量。Raw XYZ→xyY 需要实现声明的 white_x/white_y。Q 删除两个选定槽；R 展开 Gray 槽或插入显式 output_axis。输出不附着模型描述。
@@ -64,3 +68,25 @@ FMT-11 A–R/T 提供 57 个按 profile 区分的原生 model key，S 使用三�
 全部 60 个 keys 使用固定调用 ABI 8。每个完整选中输出 tile 通过不可变通道 span 映射源区域，再取源网格 tile 并集。纯复制和常量使用零 scratch；无源样本依赖的 task 保留 schema 依赖。算术使用固定有理数／区间 scratch 和 64 点收集缓冲区。Auto/materialize 产生独立 dense 输出。Q 静态接受 forced view，但非空 view task 仅依赖 schema，并返回 InvalidArgument/ViewUnavailable；其他成员静态拒绝 forced view。Empty 无 payload task。语义数值有效性与 T 的精确 0/1 selector 属于调用者前提。黑 XYZ、零 chroma 的数学替代规则与 raw IEEE 行为保留。静态描述检查拒绝有效 association 非 straight 的输入。发布遵循成功调用的顺序退休；此路径不发送逐算子数值报告。
 
 FMT-11 算术拥有固定容量的有理数工作区，以及供根、幂、三角函数和 atan2 共用的 checked interval pool。取消与算术容量失败保留首次错误的 code/reason，并停止后续工作回调。精度细化只清除尚未收敛的区间状态，不重试已取消或容量耗尽的算术。每个分量求值前重置数值状态。这些算术状态转换使用显式状态，不使用异常存储。工作回调在求值期间借用；区间回调引用工作区内的有理数状态，因此工作区禁止复制和移动。Kernel preparation 核对精确 read slots、输出几何与 scratch 后，通过固定 CPU 入口调用该工作区。
+
+## 原生色域与亮度映射
+
+FMT-14 A-D 与 FMT-15 A/B 提供六个固定 ABI 8 strict CPU key，接收一个 Float32/Float64 tensor，完整 rank 1..8、sample count 至多 2^40。描述选择完整 RGB group，FMT-15 也接受 linear-Y Gray；raw 调用提供所需 selector、几何、model/reference 与单位。静态检查 native encoding、straight-compatible association、组重叠、空间 channel axis 与几何。映射按公式检查实际消费样本的有限性，并返回定义域/溢出错误，raw 也遵循此规则。其他组、alpha、AOV 逐位复制。
+
+Clip 与显示范围转换逐分量计算；OKLab 降色度、RGB 压缩、gamut mask 与 RGB 亮度映射读取该点的完整三颜色分量。源区域按输入网格取闭包，每个完整输出 tile 对应一个固定 task。auto/materialize 写入独立预分配 dense 输出，atomic_trailing_axes=0；forced view 静态拒绝。Mask 投影保留 batch/空间拓扑，rank-one 使用 keepdims。准备阶段检查完整输入/输出 schema、精确 read slots 与 scratch。算术状态位于已准入的固定 scratch；旁路、clip、mask 不需要算术 workspace。取消检查间隔至多 64 点、256 次输出写入，并进入昂贵的精确运算内部。Empty 保留静态校验且没有 payload task。
+
+Strict 实现使用精确有理公式及指定的阶段舍入。Float32 定向区间与矩阵候选只有在证明相同舍入位模式后才接受，否则回退精确运算。显示转换预编译精确仿射行。FMT-14B 保留固定 32/64 步 dyadic 搜索和已接受候选，不合并 RGB/XYZ/OKLab 阶段。不新增 accelerated key、近似 SIMD 契约或 GPU backend。[实现说明](../../built-in_ops/02-format-color/FMT-14-15_implementation.md)分别记录独立 oracle、公开工作流、算术耗时与 submit-through-join 耗时。
+
+## 显式原生与配置化 view
+
+`format::compose_view` 由 `photospider/ops/format/view.hpp` 和 ops umbrella header 导出，验证非空有序 native FMT-09/10/14/15 与 configured FMT-13A..F 阶段及最终显示条件。各阶段提供完整输入/输出描述与适用参数；FMT-10D 额外显式指定 profile。helper 解析真实图边、规范相容的原生断言、保留无关配置并校验黑白亮度/transfer 一致。描述在任何索引访问前验证，错误参数类型返回失败。只有完整推导成功才提交工作副本。不重排、融合、消除 identity，也不添加隐藏 transfer 或 native C key。
+
+资源感知重载接收显式 ResourceSet，同时支持 NativeDisplayConditions 和 ConfiguredDisplayConditions。它在提交前构建真实 OCIO processor、解析规范空间与方向，并验证最终 configured display/view 端点。D/E/F 的端点含义仍是调用方断言。Configured 端点之后的原生阶段要求相容的 analytic binding；无关组、alpha/AOV 断言和 axes 保持完整。
+
+## 固定外部颜色引擎
+
+FMT-12 A/B/C、FMT-13 A..F 和 FMT-18 A/B 提供十一个固定调用 ABI 8 CPU keys。ICC 使用私有 Little CMS 2.19.1 context、double formatter、五种准入端点模型与显式 profile/chain 设置。OCIO 使用私有 2.5.2 processor，冻结属性并闭合 config/context/file 解析。OCIO Float64 输入显式舍入至 Float32，结果精确扩宽；alpha/AOV 逐位旁路。
+
+每个 prepared kernel 拥有独立引擎、内存准入和 mutex；static operation state 中没有资源相关的隐式可变缓存。Empty/bypass-only 请求也执行完整资源构建验证。构建同步且不可取消，保留分配/工作量上限及首次失败锁存。像素执行每批至多 64 点，继续支持取消。现有准备阶段 ResourceAllocationScope 桥接将保留引擎计入执行预算；独立资源验证使用显式构建上限。内核及 ABI 冻结边界未改变。
+
+FMT-18B 构建独立源域 alarm pipeline，Gray 为 49、RGB 为 49³、CMYK 为 23⁴ 网格点，并把有限 score 分类成精确 0/1；不通过显示报警色反推 mask。构建检查返回实际标签、路径、文件、插值与选中的 Look。操作键、构建身份、独立 oracle 和实测平台边界见[外部引擎实现与性能](../../built-in_ops/02-format-color/FMT-12-13-18_implementation.md)。

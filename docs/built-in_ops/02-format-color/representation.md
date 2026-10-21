@@ -3,13 +3,13 @@
 当前 Result operation 支持状态以[Image Operations](../../kernel-architecture/Image-Operations.md)为准；此处各行分别标明当前 Result 注册状态和保留源码状态；“Proposed”只表示规格决策尚未接受，不表示实现未注册。各规格的目标行为和实现状态分别见对应规格页。
 
 [FMT-09～18 范围审查](op_specs/FMT-09-18_scope_review.md)记录已完成的成员设计及实现前置条件。
-FMT-14/15/18 按维护者 2026-09-24 的委托完成设计；规格仍保持 Proposed。
+当前列举的有效成员已完成实现，规格决策状态仍保持 Proposed。[FMT-14/15 实现与性能](FMT-14-15_implementation.md)记录六个原生算子和 native view；[FMT-12/13/18 实现与性能](FMT-12-13-18_implementation.md)记录十一个外部引擎算子、configured view、独立参考及资源/性能验证。
 
-各规格的 Proposed 状态表示目标契约尚未接受，不等同于实现状态。当前内置 Result FMT families 包括 FMT-01 channel extraction、FMT-02 channel assembly、FMT-03 channel editing、FMT-04 alpha association、FMT-05A alpha setting、FMT-06 numeric conversion、FMT-08 SDK 描述编辑、FMT-09 transfer conversion、FMT-10 RGB basis conversion，以及 `numeric.convert_format_strict`、`channel.literal_like_<profile>` 和 `channel.scalar_literal_<profile>` primitives。FMT-04A/B 的 alpha association operations 与 FMT-05A `alpha.set_<profile>` 使用固定 ABI 8 CPU keys；FMT-09 transfer、FMT-10 A/B/C native operations 和 FMT-11/MASK model operations 使用固定 ABI 8；FMT-05B/C helpers 编译为现有已注册 Result operations 的组合，FMT-10D 编译为 A/可选 C/B。`literal_like` 通过固定 ABI 8 CPU tile task 提供 FMT-05B opaque fallback，仅依赖输入 schema 并使用零 scratch；`scalar_literal` 是 FMT-03 无输入 shape-[1] provider。当前已有实现的 FMT source families 均提供 Result CPU operations，或提供可降低为已注册 operations 的公共 helper；Proposed 或尚无实现的规格成员不因此视为已实现。其他 FMT 成员的运行状态分别按对应规格记录。ICC/OCIO 转换使用独立外部引擎契约，Float64 端口不代表完整 Float64 内部精度。整数主要用于输入输出编码；跨通道 shape、资源输入与当前端口的限制见 G1..G5。
+各规格的 Proposed 状态表示目标契约尚未接受，不等同于实现状态。当前内置 Result FMT families 包括 FMT-01 channel extraction、FMT-02 channel assembly、FMT-03 channel editing、FMT-04 alpha association、FMT-05A alpha setting、FMT-06 numeric conversion、FMT-08 SDK 描述编辑、FMT-09 transfer conversion、FMT-10 RGB basis conversion、FMT-11 model conversion、FMT-12 ICC、FMT-13 OCIO、FMT-14 gamut mapping、FMT-15A/B luminance mapping、native/configured FMT-15C helper 与 FMT-18 softproof/alarm，以及 `numeric.convert_format_strict`、`channel.literal_like_<profile>` 和 `channel.scalar_literal_<profile>` primitives。FMT-04A/B 的 alpha association operations 与 FMT-05A `alpha.set_<profile>` 使用固定 ABI 8 CPU keys；FMT-09 transfer、FMT-10 A/B/C native operations 和 FMT-11/MASK model operations 使用固定 ABI 8；FMT-05B/C helpers 编译为现有已注册 Result operations 的组合，FMT-10D 编译为 A/可选 C/B。`literal_like` 通过固定 ABI 8 CPU tile task 提供 FMT-05B opaque fallback，仅依赖输入 schema 并使用零 scratch；`scalar_literal` 是 FMT-03 无输入 shape-[1] provider。当前已有实现的 FMT source families 均提供 Result CPU operations，或提供可降低为已注册 operations 的公共 helper；Proposed 或尚无实现的规格成员不因此视为已实现。其他 FMT 成员的运行状态分别按对应规格记录。ICC/OCIO 转换使用独立外部引擎契约，Float64 端口不代表完整 Float64 内部精度。整数主要用于输入输出编码；跨通道 shape、资源输入与当前端口的限制见 G1..G5。
 
 ## 算子目录
 
-已确认覆盖原 FMT-01～FMT-18 的功能并补齐缺口；其中 FMT-07、FMT-16、FMT-17 后续已退休并分配替代归属，
+目录已列出原 FMT-01～FMT-18 的目标功能及缺口规格；其中 FMT-07、FMT-16、FMT-17 后续已退休并分配替代归属，
 其余编号不变。Result/Tensor 仅携带结构、数据和存储所有权；颜色、alpha、transfer、采样与 LUT 解释由每个消费算子的显式静态参数提供。通道操作不传播描述，内核不按领域标签匹配连线。没有描述时的 raw 数值路径仍遵循对应公式和结构约束。
 完整图像采用 straight 解释，alpha 位于同一 tensor 内；外部 alpha 可作为显式输入，
 不保留跨张量关联。空间 axes 表示逻辑拓扑。已接入固定 ABI 8 的算子按
@@ -19,9 +19,10 @@ FMT-14/15/18 按维护者 2026-09-24 的委托完成设计；规格仍保持 Pro
 该文件区分已确认结论、当前实现与待决问题；
 已列成员的端口和算法见各自规格；未来扩展另列，尚未扩展当前运行时支持面。
 
-CRV-06 已触发[通用颜色数组描述](op_specs/FMT-COLOR_color_array_contract.md)的配套澄清：
-支持 Float32/Float64、rank 2～8、最后一轴为颜色通道，其 SDK 配置对象记录模型及适用的色域、白点、reference 和 transfer。
-NUM/CRV 通过显式参数使用该配置；FMT 的任意轴、Gray/HSV/xyY 使用显式 TensorDescription。两者均不附着于数值结果。
+NUM/CRV 与 FMT 统一使用 [TensorDescription 颜色描述](op_specs/FMT-COLOR_color_array_contract.md)，
+旧 ColorArray 类型、编解码和兼容入口已移除。NUM 描述单个逻辑颜色 tuple，固定 `channel_axis=0`；
+其物理端口仍为 Float32/Float64、rank 2～8、最后一轴含颜色分量。FMT 描述实际张量轴，
+接收 CRV 输出时须显式按其 shape 设置通道轴。两者都以静态参数记录模型、白点、reference、transfer 等信息，不附着于结果。
 
 | ID / 提议操作 | 输入 → 输出 | 关键参数和建议默认 | 实现/支持与验收 |
 | --- | --- | --- | --- |
@@ -36,13 +37,13 @@ NUM/CRV 通过显式参数使用该配置；FMT 的任意轴、Gray/HSV/xyY 使�
 | [FMT-09 transfer 编码／解码](op_specs/FMT-09_transfer_contract.md) | A 解码、B 编码；Float32/64 单 tensor Result，单 RGB/Gray 组或显式 raw components | 十类静态曲线；PQ/1886 为绝对 nits；按曲线明确 reference／定义域；cell-relative axis | 六个固定 ABI 8 CPU keys；完整输出 tile 闭包、固定数值 scratch、独立 dense 输出；语义样本域属于调用者前提；非空 view 失败；Proposed；无 GPU |
 | [FMT-10 RGB 基底／XYZ／白点适应](op_specs/FMT-10_rgb_basis_contract.md) | A RGB→XYZ、B XYZ→RGB、C 适应；D 编译期 A→可选 C→B | 七预设＋自定义 xy；四种完全适应；显式 preserve_xyz／adapt；相对／绝对尺度不隐式换算；Result 单 tensor inputs/outputs | 九个固定 ABI 8 CPU keys 注册 A/B/C；D 保留逐节点舍入；保留输出 tile 的非 identity 参与行映射全部三分量，完整 I 与旁路映射对应样本，再按源网格取闭包；固定 scratch、独立 dense 输出；语义有限性为调用者前提；非空 view 失败；Proposed；无 GPU |
 | [FMT-11 颜色模型转换族](op_specs/FMT-11_model_conversion_contract.md) | A～P 八组方向对；Q/R Gray 提取／中性重建；S/T 二值化／两级展开 | 原生浮点、精确分量依赖；Lab/LCh 使用 l=L*/100；NCL YCbCr，显式路径 | 澄清完成，A-R/T 共 57 个 strict/Apple/x86 CPU keys，S helper 降低为 MASK threshold；固定 ABI 8；Float32/64；完整输出 tile 决定源网格闭包，auto/materialize 独立 dense 输出，纯复制／常量零 scratch；语义数值有效性为调用者前提；Q 非空 view 仅依赖 schema 并失败，其他成员静态拒绝 view；Proposed |
-| [FMT-12 ICC 转换族](op_specs/FMT-12_icc_transform_contract.md) | A 双 profile；B DeviceLink；C 显式有序 profile 链 | Little CMS 2.19.1 CPU；ICC v2/v4；optimized 默认，reference 显式 | 澄清完成，Proposed/未实现；浮点原生单位适配、profile 定义空间、实际 intent/BPC 路径明确 |
-| [FMT-13 OCIO 转换族](op_specs/FMT-13_ocio_transform_contract.md) | A 空间；B display/view；C Looks；D NamedTransform；E 文件；F 变换树 | OCIO 2.5.2 CPU；optimized 默认，reference 显式；资源／属性冻结 | 澄清完成，Proposed/未实现；三分量、F32 引擎边界、精确区域；alpha 独立直通 |
-| [FMT-14 色域映射](op_specs/FMT-14_gamut_mapping_contract.md) | A 分量裁剪；B OKLab 降色度；C 线性 RGB knee 压缩；D 越界 mask | 显式目标线性 RGB 0..1；固定算法与迭代次数，无隐式 tone/transfer | 设计完成，Proposed/未实现；原生 strict CPU，精确区域与分量依赖 |
-| [FMT-15 tone/view](op_specs/FMT-15_tone_view_contract.md) | A Reinhard 亮度映射；B 相对显示值与 nits 转换；C 显式 view 组合 | 曝光、白锚点和黑白亮度明确；阶段顺序由调用方列出 | 设计完成，Proposed/未实现；无自动曝光统计，保留组合节点的舍入与失败 |
+| [FMT-12 ICC 转换族](op_specs/FMT-12_icc_transform_contract.md) | A 双 profile；B DeviceLink；C 显式有序 profile 链 | Little CMS 2.19.1 CPU；ICC v2/v4；optimized 默认，reference 显式 | 三个固定 ABI 8 CPU keys 已实现；五种端点模型、普通/DeviceLink/有序链、显式单位与 intent/BPC；构建同步不可取消，保留内存/工作预算，像素执行可取消；Proposed 决策状态保留 |
+| [FMT-13 OCIO 转换族](op_specs/FMT-13_ocio_transform_contract.md) | A 空间；B display/view；C Looks；D NamedTransform；E 文件；F 变换树 | OCIO 2.5.2 CPU；optimized 默认，reference 显式；资源／属性冻结 | 六个固定 ABI 8 CPU keys 已实现；闭合配置/上下文/文件、动态属性冻结、实际路径检查；Float64 显式 RN32 后精确扩宽，alpha/AOV 逐位直通；同步不可取消构建，保留预算与像素取消 |
+| [FMT-14 色域映射](op_specs/FMT-14_gamut_mapping_contract.md) | A 分量裁剪；B OKLab 降色度；C 线性 RGB knee 压缩；D 越界 mask | 显式目标线性 RGB 0..1；固定算法与迭代次数，无隐式 tone/transfer | 四个 strict CPU keys 已实现，固定 ABI 8；Float32/64、精确组件映射与源 tile 闭包、有限域检查；Proposed 决策状态保留 |
+| [FMT-15 tone/view](op_specs/FMT-15_tone_view_contract.md) | A Reinhard 亮度映射；B 相对显示值与 nits 转换；C 显式 view 组合 | 曝光、白锚点和黑白亮度明确；阶段顺序由调用方列出 | A/B strict CPU 与 native/configured C helper 已实现；资源感知重载验证真实 OCIO 阶段与最终端点；保留逐节点舍入、失败及事务式图修改 |
 | [FMT-16 已退休](op_specs/FMT-16_retired.md) | 外部色度子采样／重建归 input/output codec | 内部 Y/Cb/Cr 始终同尺寸 1:1:1 | 不再提议内核 chroma_resample 算子；RGB↔YCbCr 数学保留 FMT-11 |
 | [FMT-17 已退休](op_specs/FMT-17_retired.md) | 外部布局与打包归 input/output codec | 内核内全部图像遵守 planar | 不再提议独立 image.layout_convert 算子；分配／访问遵守 kernel，逻辑轴操作归 NUM／通道族 |
-| [FMT-18 软打样与警告](op_specs/FMT-18_softproof_contract.md) | A proof 颜色；B 独立 ICC gamut alarm mask | 固定 LCMS、intent/BPC；mask 读取独立 pipeline，并要求源域维度修正 | 设计完成，Proposed/未实现；不通过报警色反推 mask；设备告警不同于 FMT-14 几何边界 |
+| [FMT-18 软打样与警告](op_specs/FMT-18_softproof_contract.md) | A proof 颜色；B 独立 ICC gamut alarm mask | 固定 LCMS、intent/BPC；mask 读取独立 pipeline，并要求源域维度修正 | 两个固定 ABI 8 CPU keys 已实现；Gray 49、RGB 49³、CMYK 23⁴ 源域建表；独立 pipeline 生成精确 0/1 mask；构建同步不可取消且受预算约束；设备告警不同于 FMT-14 几何边界 |
 
 OpenImageIO官方提供通道重排、premult/unpremult、色彩变换等独立操作，支持这种职责拆分；Photospider的端口与默认值是本规格建议。[^oiio] ICC与OCIO分别采用其公开语义和资源配置，不能只以“色域名字”替代完整输入。[^icc][^ocio]
 
@@ -52,7 +53,8 @@ OpenImageIO官方提供通道重排、premult/unpremult、色彩变换等独立�
 补齐全部所列模型，见[模型转换覆盖表](op_specs/FMT_model_conversion_coverage.md)。
 ICC／OCIO 分别由 FMT-12／13 定义独立引擎契约，FMT-14/15/18 已分别规定映射、渲染与软打样，不增加统一自动转换入口。
 [通用相对坐标尺度](op_specs/FMT_relative_coordinate_scale.md)规定 Lab/LCh 存储 l=L*/100，
-允许有限负值／HDR；ColorArray 与 TensorDescription 已迁入 ops SDK，NUM/CRV 使用显式配置。
+允许有限负值／HDR；NUM/CRV 的描述、LUT 轴／表、参考数据与消费者已完成该尺度迁移。
+RGB ramp 输入输出为 straight；烘焙内部表／报告为 v4，配置摘要域为 v2，旧格式明确拒绝。
 
 | 名称 | 语义和必要信息 | 首期建议 |
 | --- | --- | --- |
@@ -71,7 +73,7 @@ ICC／OCIO 分别由 FMT-12／13 定义独立引擎契约，FMT-14/15/18 已分�
 
 ## 数学核心
 
-`a≤0.04045` 时sRGB解码为 `a/12.92`，其他非负值为 `((a+0.055)/1.055)^2.4`。新增 ColorArray 的 RGB ramp 采用对绝对值运算后恢复符号的扩展，见其具体规格。RGB原色转换使用线性值，经XYZ及所选白点适应，再到目标线性RGB。对编码RGB直接乘原色矩阵会得到不同结果。
+`a≤0.04045` 时sRGB解码为 `a/12.92`，其他非负值为 `((a+0.055)/1.055)^2.4`。RGB ramp 采用对绝对值运算后恢复符号的扩展，见其具体规格。RGB原色转换使用线性值，经XYZ及所选白点适应，再到目标线性RGB。对编码RGB直接乘原色矩阵会得到不同结果。
 
 Lab转换中 `f(t)=cbrt(t)` 当 `t>(6/29)^3`，否则 `t/(3(6/29)^2)+4/29`；标准量 `L*=116f(Y/Yn)-16`，原生存储 `l=L*/100`、`a*=500(f(X/Xn)-f(Y/Yn))`、`b*=200(f(Y/Yn)-f(Z/Zn))`。LCh 的坐标转换使用 `C=hypot(a,b)`、弧度 `h=atan2(b,a)`，或显式输出 `atan2(b,a)/pi` 的 π 倍数；原点策略由对应转换规格定义。已有 LCh/HSL 输入的 hue 在 ramp/LUT 中保留原值与圈数，不做归一化或角度制转换。采样、白点与超范围策略影响结果，不能仅测试常见RGB颜色块。
 

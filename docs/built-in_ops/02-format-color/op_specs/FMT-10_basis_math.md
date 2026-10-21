@@ -50,7 +50,8 @@ ratio, exposure gain or gamut clipping is hidden in A/B.
 ## Fixed primary/white presets
 
 These literal coordinates match the inspected preset table in
-[color_array.cpp](../../../../plugins/ops/common/domain/color_array.cpp). Preset selection
+[rgb_geometry_codec.hpp](../../../../plugins/ops/common/domain/rgb_geometry_codec.hpp),
+shared by FMT and NUM tuple admission. Preset selection
 sets geometry, not transfer or implicit adaptation. A separately named RGB space
 must also satisfy its reference/transfer definition.
 

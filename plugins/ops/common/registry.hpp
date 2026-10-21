@@ -3,6 +3,9 @@
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::plugin_internal {
+Status register_ocio_color(OperationRegistry* registry);
+Status register_icc_color(OperationRegistry* registry);
+Status register_gamut_tone(OperationRegistry* registry);
 Status register_rgb_basis(OperationRegistry* registry);
 Status register_channel_assembly(OperationRegistry* registry);
 Status register_channel_literal_like(OperationRegistry* registry);

@@ -21,7 +21,11 @@ Operation DSOs are trusted in-process extensions configured at startup. Their ex
 
 ## Build
 
-Building the kernel requires CMake 3.21+, Clang C and C++ compilers with C99 and C++17 support, and Threads. Bundled operations additionally require the pinned SLEEF 3.9.0 source; follow the [SLEEF preparation instructions](third_party/SLEEF.md) to download it into `third_party/sleef/`. The `psc` and `psx` tools, enabled by default, require the pinned yyjson 0.13.0 source; follow the [yyjson preparation instructions](third_party/YYJSON.md) to place it in `third_party/yyjson/` before configuring, or set `PHOTOSPIDER_BUILD_TOOLS=OFF` to disable the tools. Both source directories are ignored by Git and absent from repository checkouts; CMake does not download dependencies. Reuse an existing build directory for local development; configure only when its options need changing. The kernel library itself has no mandatory media, serialization, cryptographic, or GPU SDK dependency.
+Building the kernel requires CMake 3.21+, Clang C and C++ compilers with C99 and C++17 support, and Threads. The kernel library itself has no mandatory media, serialization, cryptographic, or GPU SDK dependency. Reuse an existing build directory for local development; configure only when its options need changing.
+
+Bundled operations require the pinned SLEEF 3.9.0 source; follow the [SLEEF preparation instructions](third_party/SLEEF.md) to place it in `third_party/sleef/`. Their ICC/OCIO integration additionally requires CMake 3.24+, Python 3, a compatible Clang/LLVM toolchain, `llvm-config`, `llvm-objcopy`, libc++ headers, static `libc++.a` and `libc++abi.a`, and the LLVM runtime license. CMake downloads the pinned color-engine sources and dependencies through FetchContent. See the [external color-engine build requirements](docs/built-in_ops/02-format-color/FMT-12-13-18_implementation.md#pinned-engines-and-closed-resources) for source versions and offline configuration. These dependencies belong to `Photospider::ops`; `PHOTOSPIDER_BUILD_OPS=OFF` disables their configuration.
+
+The `psc` and `psx` tools, enabled by default, require the pinned yyjson 0.13.0 source; follow the [yyjson preparation instructions](third_party/YYJSON.md) to place it in `third_party/yyjson/` before configuring, or set `PHOTOSPIDER_BUILD_TOOLS=OFF` to disable the tools. The SLEEF and yyjson source directories are ignored by Git, absent from repository checkouts and supplied by the caller.
 
 ```bash
 CC=clang CXX=clang++ cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON

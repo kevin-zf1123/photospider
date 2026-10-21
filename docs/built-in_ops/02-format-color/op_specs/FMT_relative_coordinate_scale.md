@@ -5,18 +5,19 @@ kind: shared_data_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_metadata
+implementation_status: implemented
 clarification_status: complete
 ---
 
 # Relative color-coordinate scales
 
-This target revises the
-CIELAB/CIELCh lightness coordinate used by NUM/CRV/FMT descriptions. It supersedes
-earlier native L*=0..100 storage statements, including earlier FMT-11 decisions.
-Ordinary NUM rounding, arithmetic, demand and precision are unchanged. Package 0.22.0 implements the explicit v3 metadata convention described in the
-[runtime contract](../../../kernel-architecture/Tensor-Semantic-Metadata.md);
-individual arithmetic consumers retain their separate implementation status.
+NUM/CRV/FMT descriptions and consumers use native CIELAB/CIELCh lightness
+`l=L*/100`. This supersedes earlier native L*=0..100 storage statements,
+including earlier FMT-11 decisions. Ordinary NUM rounding, arithmetic, demand
+and precision are unchanged. Consumers use the existing TensorDescription v4/v5
+codecs described in the
+[runtime contract](../../../kernel-architecture/Tensor-Semantic-Metadata.md).
+The independent NUM/CRV migration is complete; no kernel format changed.
 
 ## Canonical relative coordinates
 
@@ -63,22 +64,31 @@ be explicitly encoded by FMT-06 into integer or other numeric intervals.
 
 ## Migration and compatibility boundary
 
-Current ColorArray v1 assigns implicit model coordinate units, including old
-CIELAB L*. Do not reinterpret those existing bytes as l or infer the scale from
-sample magnitudes. The new generic semantic schema must identify the revised
-coordinate convention; complete-group validation, authoring, caches, LUT axes,
-tables, sample fixtures and consuming operations must migrate together.
-Old payloads require explicit import conversion or retirement, not a silent
-compatibility alias. The selected runtime discriminator is now tensor-description v3 (`TDM3`).
-Closing the [shared representation implementation gate](FMT_common_contract.md#shared-representation-implementation-gate)
-is mandatory before registering consumers or persisting the revised descriptions.
-The document front matter's `spec_schema_version: 1` versions the specification
-format only; it cannot identify which coordinate unit a runtime value uses.
+The old ColorArray v1 public types, codec, validation helpers and overloads have
+been removed. NUM/CRV now use explicit TensorDescription v4/v5 tuple parameters,
+the same native convention used by FMT. Old ColorArray bytes are rejected;
+there is no decoder, unit alias or inference from sample magnitude. The generic
+TensorDescription codec itself is unchanged by this migration.
 
-The interpolation algorithms are scale-linear; adopting this scale still requires
-updating their public metadata. Affected specs mark the revised semantic portion
-as pending. Acceptance includes reference white l=1, extended values,
-same-scale metadata matching and rejection of silently mixed meanings.
+Callers must explicitly convert old L* sample coordinates to l, reauthor LUT
+input axes and table output coordinates, regenerate sample fixtures and
+recompile workflows. A logical NUM tuple uses `channel_axis=0`; an FMT description
+uses the actual tensor's channel axis. Both retain the same coordinate meaning.
+CIELAB a*,b*,C*, OKLab coordinates, hue winding and CMYK inks are not rescaled.
+
+CRV-09 uses configuration hash domain `photospider.bake-configuration.v2` and
+owned-table/report schema v4. Old reports and tables are retired, not silently
+accepted. Reauthor validation points and tolerances in the new stored units.
+CRV-09 has one scalar `atol` for all three components: dividing it by 100 does
+not preserve an old mixed lightness/opponent acceptance test. Choose the intended
+new-coordinate tolerance and regenerate the bake and report. The relative
+tolerance formula remains unchanged.
+
+Acceptance covers white l=1, midpoint l=0.5, finite negative/HDR lightness,
+unchanged large opponent/chroma values, both floating dtypes, consistent explicit
+descriptions, old payload rejection and a CRV Lab ramp followed by FMT XYZ
+conversion. See [executed migration evidence](../../01-numeric/NUM-CRV_color_migration.md).
+The Markdown `spec_schema_version` versions the specification document only.
 
 Sources: [CIE CIELAB definition](https://cie.co.at/eilvterm/17-23-076) defines
 standard L*. Division by 100 and the scope of this storage change are explicit

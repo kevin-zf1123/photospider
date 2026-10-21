@@ -19,10 +19,15 @@ Bundled image and format operations are compiled into `Photospider::ops`. That t
 | Transfer | `transfer.cpp`; SDK `photospider/ops/format/transfer.hpp` | Six fixed ABI 8 CPU encode/decode keys use explicit transfer definitions and selected RGB/Gray groups or raw components, source tile closure, declared numerical scratch and independent outputs. Semantic sample validity is a caller precondition. The SDK provides the definition codec. |
 | RGB basis and white | `rgb_basis.cpp`; `rgb_basis.hpp`, SDK `rgb_geometry.hpp` | Nine A/B/C fixed ABI 8 CPU keys perform RGB/XYZ and explicit white adaptation using static source tile closure, fixed scratch and independent dense outputs. Semantic sample validity is a caller precondition. D preserves constituent rounding. |
 | Models | `model_conversion.cpp`, `model_math.cpp`, `model_simd.cpp`; `model_conversion.hpp` | A–R/T provide 57 fixed ABI 8 CPU keys; S lowers to three fixed MASK threshold keys. |
+| Gamut and luminance mapping | `gamut_tone.cpp`, `color_point.hpp` | Six strict fixed ABI 8 CPU keys for FMT-14 A-D and FMT-15 A/B; Float32/64, exact component demands, finite-domain failures, independent outputs and fixed arithmetic scratch. |
+| ICC, OCIO and proofing | icc_operations.cpp, ocio_operations.cpp; format/external_color.hpp | Eleven fixed ABI 8 CPU keys for FMT-12 A-C, FMT-13 A-F and FMT-18 A/B; private pinned engines, Float32/64, closed immutable resources and exact color/bypass demand. |
+| Explicit view | `view_authoring.cpp`; `photospider/ops/format/view.hpp` | `format::compose_view` transactionally composes native FMT-09/10/14/15 and configured FMT-13A..F stages; resource-aware overloads validate actual processors and native/configured final display assertions. |
 | Description editing | SDK `common/domain/description_editor.cpp`; `photospider/ops/format/metadata.hpp` | `format::edit_description` returns a configuration value. It creates no graph node; `metadata.assign/remove` are not registered. |
 | LUT bake and application | `plugins/ops/01-numeric/`; `photospider/ops/numeric/lut3d_bake.hpp` | Ordinary numeric Results and explicit configuration. Report/table schemas and validation belong to the SDK, not the kernel's spatial-storage machinery. |
 
-See [Channel and color operations](Channel-and-Color-Operations.md) for each family's invocation protocol. The CPU profiles are `strict`, `accelerated_apple_silicon` and `accelerated_x86_64`; accelerated profiles require the matching host capability. Registration does not imply support for every spatial layout or a GPU backend.
+See [Channel and color operations](Channel-and-Color-Operations.md) for each family's invocation protocol. Native numerical CPU profiles are `strict`, `accelerated_apple_silicon` and `accelerated_x86_64`; accelerated profiles require the matching host capability. Registration does not imply support for every spatial layout or a GPU backend.
+
+External-engine construction is synchronous and noncancellable, with memory/work admission and complete Empty/bypass validation. Pixel execution remains cancellable. No frozen kernel change is required. See [implementation, independent validation and performance](../built-in_ops/02-format-color/FMT-12-13-18_implementation.md).
 
 ## Alpha and model operations
 

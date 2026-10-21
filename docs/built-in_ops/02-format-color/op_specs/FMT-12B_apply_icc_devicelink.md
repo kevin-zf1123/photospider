@@ -7,7 +7,7 @@ kind: external_engine_adapter
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 proposed_operation_keys:
   - color.icc_apply_devicelink_lcms2_19_1_cpu
@@ -66,7 +66,5 @@ cannot silently substitute the source data or a different link.
 - Check NaN/Inf and formatter overflow in raw, valid out-of-range finite raw
   CMYK, alpha-only requests and cross-tile exact support.
 
-A future public graph imports a CMYK-to-CMYK DeviceLink and its explicit printing
-condition declarations, binds planar CMYK plus alpha, requests selected target
-inks and verifies fixed outputs. This is a conceptual graph, not a registered
-runtime example or a claim that the old CMYK resource importer accepts links.
+Public resource helpers, executable operation usage, independent oracle commands
+and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).

@@ -7,7 +7,7 @@ kind: external_engine_adapter
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 proposed_operation_keys:
   - color.icc_transform_lcms2_19_1_cpu
@@ -16,7 +16,7 @@ proposed_operation_keys:
 # FMT-12A: ordinary ICC profile conversion
 
 Inherit the complete [FMT-12 family](FMT-12_icc_transform_contract.md), including
-the frozen Little CMS 2.19.1 CPU contract. This Proposed adapter is unimplemented.
+the frozen Little CMS 2.19.1 CPU contract. The fixed ABI 8 CPU adapter is implemented; see [implementation, validation and performance](../FMT-12-13-18_implementation.md). Its decision status remains Proposed.
 It is not a native NUM strict/accelerated primitive.
 
 ## Interface and construction
@@ -81,6 +81,5 @@ scans or fallback copies.
 - Lab l=0.5 enters the formatter as L*=50; CMYK 0.5 enters as 50 percent.
   Test independent unit fixtures and the family overflow/underflow boundary.
 
-The future public workflow explicitly imports frozen bytes, binds an input
-interpretation, selects A and requests a nonzero ROI. No current executable key
-or successful runtime evidence is claimed by this conceptual example.
+Public resource helpers, executable operation usage, independent oracle commands
+and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).

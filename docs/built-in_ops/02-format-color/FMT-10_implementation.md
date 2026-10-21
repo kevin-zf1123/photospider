@@ -23,7 +23,7 @@
 
 使用 SDK TensorDescription 的 v4/v5 codec 作为显式参数。有描述时必须选择三角色完整组；RGB/XYZ 角色顺序独立于物理索引。没有描述时显式提供 axis、components 和几何。输出只携带结构和样本；下游配置由调用方提供。
 
-本实现的原生单位字符串为 `1` / `cd/m2`；reference 为 `scene_relative`、`display_relative`、`absolute_display_cd_m2`，并接受已有生态中的 `scene` / `display`。绝对值要求 `absolute_display_cd_m2` 或 `display`，相对值不能标成绝对单位。XYZ 使用相同数值尺度，而非隐含 Y=100 归一化。单位字符串的上游统一约定是需要重点复核的接口决定。
+原生相对单位接受 `relative` / `1`，绝对显示单位接受 `cd/m2` / `cd/m^2`；reference 接受 `scene` / `display` 与兼容拼写 `scene_relative`、`display_relative`、`display_absolute`、`absolute_display_cd_m2`。绝对坐标必须是 display reference；显式 `coordinates.scale` 必须与单位一致。别名不产生任何数值缩放，XYZ 也不隐含 Y=100 归一化。FMT-15C 的 native view helper 复用相同解析，并保留 D 的 A→可选 C→B 舍入边界。
 
 非空 global/group/selected-channel 描述必须一致。profile/configured 坐标只有在提供明确、模型/角色顺序/单位一致的 analytic binding 时才被解释为本族的原生解析坐标；不会推断 ICC/OCIO 的等价矩阵，更不会运行 profile engine。D 的私有中间配置删除失效的 profile/configured/binding 字段并保留适用单位，随后显式写入后续节点参数。单个算子的 Result 不携带这些配置；资源仅按 preparation 显式返回的身份选择。
 

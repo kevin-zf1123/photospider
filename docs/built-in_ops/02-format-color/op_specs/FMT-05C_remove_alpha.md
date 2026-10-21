@@ -7,7 +7,7 @@ kind: composite_workflow
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_subset
+implementation_status: implemented
 clarification_status: complete
 ---
 
@@ -87,3 +87,10 @@ tile boundaries. Check surviving output owners after context retirement,
 final release, low budgets, cancellation and rollback of failed helper expansion.
 Create a temporary public compile/execute check for the helper expansion and
 remove it after the operation change is validated.
+
+## Current execution evidence
+
+[Implementation and validation](../FMT-14-15_implementation.md) records the temporary public compile/execute
+checks for all seven copy dtypes, exact opaque encodings, shared-alpha behavior
+and transactional failures. Mathematical oracle coverage alone does not
+establish helper execution.

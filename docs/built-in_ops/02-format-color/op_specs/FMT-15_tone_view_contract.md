@@ -5,15 +5,17 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
 ---
 
 # FMT-15: luminance mapping and explicit view composition
 
-All members are
-Proposed and unimplemented. Inherit [FMT-common](FMT_common_contract.md),
+All member specifications remain Proposed. A/B are registered strict CPU
+operations with fixed invocation ABI 8. C implements native and resource-aware
+configured stage composition. See [native implementation](../FMT-14-15_implementation.md)
+and [configured implementation](../FMT-12-13-18_implementation.md). Inherit [FMT-common](FMT_common_contract.md),
 [FMT-10 exact geometry](FMT-10_basis_math.md), and the native NUM numerical,
 resource, cancellation and immutable publication contracts.
 
@@ -182,14 +184,18 @@ observable error. The helper cannot upgrade a constituent's execution guarantees
 
 A: any selected RGB output <- full source RGB at the same position; Gray <- Gray.
 B: each selected component <- corresponding source component. A/B bypass <-
-corresponding bypass sample only, no color validation. Union demands and transpose
-for dirty mapping; no halo, image statistics, alpha-zero skip or frame history.
+corresponding bypass sample only, no color validation. Complete retained output
+tiles determine the fixed source tile union; there is no halo, image statistics,
+alpha-zero skip or frame history. Incremental dirty propagation is outside the
+fixed executor protocol.
 C follows its expanded graph, including unavoidable upstream complete-input operations.
 
-A/B materialize requested values into the kernel's canonical planar owner and
-full virtual reservation. Prepare/retain pages explicitly; do not publish padding
-as pixels. Account exact coefficients/rational refinement, private scratch,
-output backing, read windows and live ancestry. Native point work is O(P) plus
+A/B use fixed invocation ABI 8, one CPU Host task per complete requested output
+tile. Source component regions close on the source grid. Auto/materialize write
+independent preallocated dense output tiles; padding is not published as pixels.
+Preparation checks exact schemas, read slots, output geometry and fixed scratch.
+Account exact coefficients/rational refinement, private scratch, output backing,
+read windows and live ancestry. Native point work is O(P) plus
 strict precision work, bounded by resource budgets with cancellable refinement.
 C additionally charges all actual intermediate owners and any engine resources.
 No automatic eviction, alternate numerical profile or cached exposure estimate.
@@ -224,8 +230,10 @@ kernel's normal immutable failure rules.
   later clamp. Invalid unit/reference sequence or duplicate IDs must not mutate
   the original graph. Test both native and configured-view recipes.
 
-Implementation must supply runnable public workflows and commands with an
-independent exact-rational/staged oracle. None was executed by this spec change.
+The implementation page records public workflow commands and the independent
+exact-rational/staged oracle. Configured-view numerical/rollback evidence and
+synchronous, noncancellable engine construction are recorded in the separate
+[external-engine implementation](../FMT-12-13-18_implementation.md).
 The first revision exposes strict native CPU only; named alternatives and GPU
 require separate contracts and verified quality before registration.
 

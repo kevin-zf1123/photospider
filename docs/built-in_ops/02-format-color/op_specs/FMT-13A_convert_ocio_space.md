@@ -7,7 +7,7 @@ kind: external_engine_adapter
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 proposed_operation_keys:
   - color.ocio_convert_space_2_5_2_cpu
@@ -16,7 +16,7 @@ proposed_operation_keys:
 # FMT-13A: configured color-space conversion
 
 Inherit the complete [FMT-13 family](FMT-13_ocio_transform_contract.md).
-This native OCIO v2.5.2 CPU adapter is Proposed/unimplemented.
+This OCIO v2.5.2 CPU adapter is implemented with fixed invocation ABI 8. The decision status remains Proposed; see [implementation, validation and performance](../FMT-12-13-18_implementation.md).
 
 ## Interface and behavior
 
@@ -57,6 +57,5 @@ consumes all three source components at the same point, including no-op cases.
   in raw. NaN in a source peer fails a requested color; NaN in bypass alpha does
   not. Sparse/batched observations preserve the normative point result.
 
-A future public workflow imports frozen config/resources, binds its source
-interpretation, selects A and requests an offset ROI. This is conceptual;
-current runtime registration and executed numerical evidence are not claimed.
+Public resource helpers, executable operation usage, independent oracle commands
+and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).

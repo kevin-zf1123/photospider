@@ -7,7 +7,7 @@ kind: external_engine_adapter
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 proposed_operation_keys:
   - color.ocio_looks_2_5_2_cpu
@@ -17,7 +17,7 @@ proposed_operation_keys:
 
 Inherit [FMT-13](FMT-13_ocio_transform_contract.md). C is one native processor
 using LookTransform, not independently rounded project nodes for each Look.
-It is Proposed/unimplemented.
+The CPU implementation is available; the decision status remains Proposed. See [implementation, validation and performance](../FMT-12-13-18_implementation.md).
 
 ## Parameters and construction
 
@@ -58,5 +58,5 @@ boundary, request/materialization and accounting rules apply to the whole chain.
   containing unaddressable engine grammar delimiters, alpha admission and F64
   no-op narrowing. Test exact ROI and both execution configurations.
 
-The future public workflow explicitly supplies the ordered Look list and frozen
-dependencies. This spec contains no claimed implementation or runtime result.
+Public resource helpers, executable operation usage, independent oracle commands
+and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).

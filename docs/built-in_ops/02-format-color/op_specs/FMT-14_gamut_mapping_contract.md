@@ -5,15 +5,15 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
 ---
 
 # FMT-14: explicit native RGB gamut mapping
 
-This Proposed specification completes the family design; it supplies no runtime
-implementation. Inherit [FMT-common](FMT_common_contract.md), the exact RGB basis
+The specification remains Proposed. All four strict CPU members are registered
+with fixed invocation ABI 8; see [implementation and validation](../FMT-14-15_implementation.md). Inherit [FMT-common](FMT_common_contract.md), the exact RGB basis
 of [FMT-10](FMT-10_basis_math.md), and the fixed OKLab mathematics of
 [FMT-11](FMT-11_model_math.md). No transfer, white adaptation, tone rendering,
 profile lookup or dtype conversion is inserted implicitly.
@@ -152,17 +152,17 @@ No halo or spatial statistics. A requests only each selected input component.
 B/C/D request all three source colors at the same spatial position for each
 requested mapped color/mask. A/B/C bypass output requests read only the
 corresponding original sample, copy every bit and do not validate color or alpha.
-Union support for multiple outputs; forward dirty mapping is the transpose of
-these component relations. Pixel-dependent branches do not reduce declared
+Complete retained output tiles determine the union of source-grid tiles.
+Incremental dirty propagation is outside the fixed executor protocol. Pixel-dependent branches do not reduce declared
 source support. Zero alpha never skips requested hidden-color work. Required
 upstream complete-input behavior remains unchanged.
 
-auto/materialize produce requested valid samples in a new canonical planar owner
-with the kernel's full virtual reservation, DAG tile geometry, explicit page
-preparation and retained backing. Bounded private planar scratch is allowed;
-row padding and page gaps are not pixels. Missing output remains missing.
+Fixed invocation ABI 8 emits one CPU Host task per complete requested output
+tile. Auto/materialize write independent preallocated dense output tiles;
+preparation validates complete schemas, exact read slots, output geometry and
+declared scratch. Row padding is not a sample. Missing output remains missing.
 Charge static matrices, exact rational/dyadic state, precision refinement, scratch,
-output pages and simultaneously live ancestry. A/C/D are O(P) point work; B is
+output backing and simultaneously live ancestry. A/C/D are O(P) point work; B is
 O(P*N) with N fixed above plus strict transform refinement. No whole-image scan,
 cache-dependent approximation or adaptive algorithm switch. Cancellation checks
 occur in pixel batches, every B iteration and expensive exact-math refinement.
@@ -194,9 +194,10 @@ Independent oracle fixtures must include:
 - Exercise low budgets, per-iteration cancellation, overflow in B's first XYZ,
   multi-consumer lifetime and absence of hidden complete-input or whole-image allocation.
 
-Future public workflows explicitly compose transfer decode, FMT-10 basis/white,
-chosen mapper, transfer encode and FMT-06/codec. Runtime acceptance requires
-actual commands and independent expected values; no runnable API is claimed here.
+Public workflows explicitly compose transfer decode, FMT-10 basis/white,
+chosen mapper, transfer encode and FMT-06/codec. The implementation page records
+the public workflow checks, independent expectations, measured scope and remaining
+external-engine integration gates.
 
 ## Sources and scope limits
 

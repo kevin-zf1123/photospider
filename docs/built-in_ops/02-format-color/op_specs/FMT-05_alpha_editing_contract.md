@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_subset
+implementation_status: implemented
 clarification_status: complete
 ---
 
@@ -19,7 +19,7 @@ fill, mapped assembly and core identity operations. FMT-04 association
 operations are also registered. The profiles are `strict`,
 `accelerated_apple_silicon`, and `accelerated_x86_64`.
 
-All FMT-05B/C inputs and outputs use the single-tensor Result ABI with
+All FMT-05B/C inputs and outputs use the single-tensor Result ABI,
 support the seven native copy dtypes, preserve the batch prefix, and avoid
 sample-domain validation. Axes are cell-relative and exclude the Result batch
 prefix. The complete sample rank, including batch and cell axes, is at most 8;
@@ -39,6 +39,9 @@ have no additional alpha-validation dependency. Every connected input retains
 static schema checks. Set writes independent dense output tiles with zero scratch;
 nonempty view tasks fail ViewUnavailable with schema-only dependencies. Empty
 has no payload task. A channel axis contains at most 65,536 source slots.
+
+Current public helper validation, including seven-dtype execution and exact
+opaque encodings, is recorded in [implementation and validation](../FMT-14-15_implementation.md).
 
 ## Purpose and representation
 

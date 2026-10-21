@@ -7,7 +7,7 @@ kind: external_engine_adapter
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
 proposed_operation_keys:
@@ -17,7 +17,7 @@ proposed_operation_keys:
 # FMT-18B: Independent ICC gamut alarm
 
 Inherit the complete [FMT-18 family](FMT-18_softproof_contract.md) and applicable
-[FMT-12 foundation](FMT-12_icc_transform_contract.md). Proposed and unimplemented.
+[FMT-12 foundation](FMT-12_icc_transform_contract.md). The CPU implementation is available; the decision status remains Proposed. See [implementation, validation and performance](../FMT-12-13-18_implementation.md).
 
 ## Ports, parameters and output inference
 
@@ -38,7 +38,10 @@ Static construction is required even for empty requests; it does not scan pixels
 
 Only auto/materialize layouts; forced view fails. Inherit planar reservations,
 explicit page preparation, immutable lifetimes and all FMT-12 host-engine resource
-hooks. The complete static alarm grid and helper transforms are budgeted; cancellation or sampler failure invalidates construction, never produces a successful all-zero mask.
+hooks. The complete static alarm grid and helper transforms are budgeted;
+construction budget or sampler failure invalidates the build and never produces
+a successful all-zero mask. Construction has no cancellation checks; pixel
+execution remains cancellable.
 The external engine/build identity determines numerical behavior. No native NUM
 precision label or commercial CMM equivalence is claimed. Failures preserve their
 actual status/reason and required observation scope with no algorithm fallback.
@@ -48,6 +51,6 @@ actual status/reason and required observation scope with no algorithm fallback.
 Apply the family direct-CMM/oracle fixtures, model/unit cases, exact regions,
 metadata, budget/cancellation and lifetime checks. Verify RGB-to-CMYK and CMYK-to-RGB source grid dimensions, K-only variation, q=0/q=1, same-count stock parity and alarm-color independence.
 A conceptual workflow branches working input into proof colors and an independent
-warning mask, then optionally composes an overlay. An implementation must provide
-actual public workflow commands and measured fixed-profile results before claiming
-runtime acceptance. Primary sources and compatibility limits are in the family.
+warning mask, then optionally composes an overlay. Public API examples and
+measured fixed-profile results are in [implementation, validation and performance](../FMT-12-13-18_implementation.md). Primary sources and
+compatibility limits remain in the family.

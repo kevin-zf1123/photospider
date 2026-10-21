@@ -51,6 +51,11 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/02-format-color/alpha_authoring.cpp
   plugins/ops/02-format-color/alpha_operations.cpp
   plugins/ops/02-format-color/numeric_conversion.cpp
+  plugins/ops/02-format-color/icc_operations.cpp
+  plugins/ops/02-format-color/ocio_operations.cpp
+  plugins/ops/02-format-color/external_authoring.cpp
+  plugins/ops/02-format-color/gamut_tone.cpp
+  plugins/ops/02-format-color/view_authoring.cpp
   plugins/ops/02-format-color/model_conversion.cpp
   plugins/ops/02-format-color/model_math.cpp
   plugins/ops/02-format-color/model_simd.cpp
@@ -194,7 +199,9 @@ endforeach()
 if(NOT BUILD_SHARED_LIBS)
   target_compile_definitions(photospider_ops PUBLIC PHOTOSPIDER_OPS_STATIC)
 endif()
+include(${CMAKE_CURRENT_LIST_DIR}/ColorEngines.cmake)
 target_link_libraries(photospider_ops PUBLIC Photospider::ops_sdk Photospider::ops_headers)
+target_link_libraries(photospider_ops PRIVATE photospider_color_engine)
 target_include_directories(photospider_ops PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops")
 if(APPLE AND PHOTOSPIDER_ENABLE_ACCELERATE)

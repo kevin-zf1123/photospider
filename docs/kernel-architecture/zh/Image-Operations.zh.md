@@ -19,10 +19,15 @@
 | Transfer | `transfer.cpp`；SDK `photospider/ops/format/transfer.hpp` | 六个固定 ABI 8 CPU encode/decode keys 使用显式 transfer 定义及选定 RGB/Gray group 或 raw 分量，声明源 tile 闭包、数值 scratch 和独立输出。语义样本有效性属于调用者前提；SDK 提供定义 codec。 |
 | RGB basis 与白点 | `rgb_basis.cpp`；`rgb_basis.hpp`、SDK `rgb_geometry.hpp` | 九个 A/B/C 固定 ABI 8 CPU keys 执行 RGB/XYZ 与显式白点适应，使用静态源 tile 闭包、固定 scratch 和独立 dense 输出。语义样本有效性属于调用者前提；D 保留各阶段舍入。 |
 | 颜色模型 | `model_conversion.cpp`、`model_math.cpp`、`model_simd.cpp`；`model_conversion.hpp` | A–R/T 提供 57 个固定 ABI 8 CPU keys；S 降低为三个固定 MASK threshold keys。 |
+| 色域与亮度映射 | `gamut_tone.cpp`、`color_point.hpp` | FMT-14 A-D 和 FMT-15 A/B 的六个 strict 固定 ABI 8 CPU keys；Float32/64、精确组件依赖、有限域错误、独立输出和固定算术 scratch。 |
+| ICC、OCIO 与打样 | icc_operations.cpp、ocio_operations.cpp；format/external_color.hpp | FMT-12 A-C、FMT-13 A-F 和 FMT-18 A/B 共十一个固定 ABI 8 CPU keys；私有固定引擎、Float32/64、闭合不可变资源、精确颜色/旁路依赖。 |
+| 显式 view | `view_authoring.cpp`；`photospider/ops/format/view.hpp` | `format::compose_view` 事务式组合 native FMT-09/10/14/15 与 configured FMT-13A..F 阶段；资源感知重载验证真实 processor 及 native/configured 最终显示断言。 |
 | 描述编辑 | SDK `common/domain/description_editor.cpp`；`photospider/ops/format/metadata.hpp` | `format::edit_description` 返回配置值，不创建图节点；`metadata.assign/remove` 未注册。 |
 | LUT bake 与应用 | `plugins/ops/01-numeric/`；`photospider/ops/numeric/lut3d_bake.hpp` | 使用普通数值 Result 和显式配置；报告/表 schema 与校验属于 SDK，不属于内核空间存储机制。 |
 
-各族的运行调用协议见[通道与颜色算子](Channel-and-Color-Operations.zh.md)。CPU profile 为 `strict`、`accelerated_apple_silicon` 和 `accelerated_x86_64`；加速 profile 要求匹配的主机能力。注册不代表支持全部空间布局或 GPU 后端。
+各族的运行调用协议见[通道与颜色算子](Channel-and-Color-Operations.zh.md)。原生数值 CPU profile 为 `strict`、`accelerated_apple_silicon` 和 `accelerated_x86_64`；加速 profile 要求匹配的主机能力。注册不代表支持全部空间布局或 GPU 后端。
+
+外部引擎构建同步且不可取消，保留内存/工作量准入与 Empty/bypass 完整验证；像素执行继续支持取消，无需改变冻结内核。详见[实现、独立验证与性能](../../built-in_ops/02-format-color/FMT-12-13-18_implementation.md)。
 
 ## Alpha 与模型算子
 

@@ -5,19 +5,33 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
 ---
 
 # FMT-18: ICC softproof colors and independent gamut alarms
 
-This family is
-Proposed and unimplemented. It reuses the complete
+The CPU implementation is available; the decision status remains Proposed. See [implementation, validation and performance](../FMT-12-13-18_implementation.md). It reuses the complete
 [FMT-12 engine contract](FMT-12_icc_transform_contract.md), including immutable
 ICC v2/v4 resources, Little CMS 2.19.1 CPU, endpoint bindings, native units,
-double formatters, finite inputs/results, host budget/cancellation hooks and
+double formatters, finite inputs/results, construction budget/work hooks,
+pixel-execution cancellation and
 external-engine numerical limits. It does not imply NUM strict/four-ULP accuracy.
+
+## Construction and execution cancellation
+
+Engine construction is synchronous and non-cancellable. Profile/config parsing,
+processor linking, BPC preparation, LUT inversion and gamut-table generation do
+not receive or probe a Run cancellation token. Construction work and memory
+limits, first-failure latching, complete validation for Empty/bypass requests,
+and cleanup on failure remain required. This is the maintainer's explicit
+2026-10-21 revision; no preparation-cancellation kernel extension is required.
+
+Cancellation remains an execution concern: check it before and after bounded
+pixel batches and discard unpublished results when cancelled. An existing
+immutable-resource import API may independently observe its caller's token;
+that import behavior does not imply cancellable engine construction.
 
 ## Member allocation
 
@@ -196,8 +210,9 @@ resource preprocessing, not a complete-input image scan. Complexity is O(grid_kn
 alarm construction plus O(P) bounded-dimensional interpolation; A construction
 is profile-dependent and pixel work O(P) for fixed profiles.
 
-Check cancellation inside table sampling and engine construction as well as
-pixel batches. The stock helper's ignored sample-return/failure paths must not
+Check memory/work admission inside table sampling and engine construction.
+Construction is synchronous and noncancellable. Check cancellation around
+bounded pixel batches. The stock helper's ignored sample-return/failure paths must not
 publish a partially initialized table: latch host failure, verify complete table
 construction and discard on any error. Invalid/nonfinite generated sampler
 intermediates must fail construction before unsafe integer conversion; do not
@@ -239,22 +254,23 @@ NUM four-ULP or universal physical-gamut accuracy is promised.
   Do not demand all-zero masks merely from identical profiles; the heuristic and
   profile reversibility determine actual values.
 - Reject null/wrong-shape gamut pipelines, unsupported reverse directions and
-  nonfinite generated samples. Inject cancel/budget failure during table sampling
-  and ensure no partially built or zero-filled success escapes.
+  nonfinite generated samples. Inject budget failure during table sampling,
+  cancellation during pixel execution, and ensure no partially built or
+  zero-filled success escapes.
 - Split/offset/cross-tile/component observations match whole observations;
   sparse requests never scan unrelated pixels. Verify multi-consumer/window
   lifetime, simultaneous static-table/scratch budgets and final resource release.
 
 Conceptual public workflow branches the same working input into A for proof
 colors and B for warnings; the original remains available. An explicit overlay
-combines A with B if desired. Runtime acceptance still requires runnable public
-commands and actual engine/profile corpus results. No CMM execution occurred in
-this documentation step.
+combines A with B if desired. Runnable public usage, the retained direct-CMM
+oracle and actual execution evidence are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).
 
-## Primary source evidence and remaining implementation work
+## Source and scope boundary
 
-These fixed source paths were inspected; they are not runtime test evidence.
-The source-dimension fix, resource/cancellation hooks, explicit endpoint configuration and
-actual profile corpus remain implementation gates. Spectral appearance models,
+The source-dimension correction, allocation/work hooks, explicit endpoint
+configuration and synthetic profile corpus are implemented and validated as
+recorded in the implementation document. This does not establish physical color
+quality for arbitrary device profiles. Spectral appearance models,
 ink-separation editing, physical viewing adaptation, arbitrary threshold tuning
 and monitor calibration are outside these two specified members.

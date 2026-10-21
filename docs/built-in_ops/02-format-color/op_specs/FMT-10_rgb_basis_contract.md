@@ -124,9 +124,9 @@ Presets, method and layout are closed authoring choices; custom
 coordinates are fixed arrays of Float64; selectors use static bounded integer
 indices/metadata identifiers. Fields not applicable to a member fail rather
 than being ignored. All matrix data are compile-time fixed; changing them
-requires reinference/recompilation. Typed canonical serialization of the new
-group/unit/geometry descriptions is an implementation prerequisite; the current
-ColorArray v1 codec is not silently reinterpreted.
+requires reinference/recompilation. Typed group/unit/geometry descriptions use
+canonical TensorDescription v4/v5. NUM/CRV share that codec under their logical
+tuple contract; the removed ColorArray v1 payload is rejected.
 
 ## White handling and adaptation methods
 
@@ -234,3 +234,13 @@ rational XYZ white as a floating input.
 Native/composite acceptance covers complete, partial and disjoint output tile requests, nonzero origins, differing input/output grids, bypass-only and Empty requests. Check raw NaN order, zero-coefficient peers, whole-I bit copies, negative/zero/unaligned input strides, static rejection, schema-only view failure, allocation-free invocation, scratch bounds, cancellation, retained owners, concurrent Runs and floating-environment restoration. Semantic fixtures satisfy the finite caller preconditions; no sample-error behavior is asserted outside them.
 
 Exercise the registered operations through public Result workflows and independent coefficient/sample oracles. Verify D against independently rounded A/C/B stages, including raw intermediate infinity consumed by a zero coefficient. Keep the independent oracle; remove temporary built-in execution checkers after validation.
+
+## Native coordinate spelling compatibility
+
+The implementation accepts `relative`/`1` and `cd/m2`/`cd/m^2` as the native
+relative/absolute unit spellings. Canonical `scene`/`display` references and the
+legacy `scene_relative`, `display_relative`, `display_absolute` and
+`absolute_display_cd_m2` spellings remain subject to the existing reference
+rules. A supplied `coordinates.scale` must agree with units. These aliases do
+not rescale samples or insert a display-range conversion. The FMT-15C helper
+retains each native FMT-10 node's rounding and explicit intermediate description.

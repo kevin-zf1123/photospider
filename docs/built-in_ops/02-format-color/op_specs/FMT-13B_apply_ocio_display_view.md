@@ -7,7 +7,7 @@ kind: external_engine_adapter
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 proposed_operation_keys:
   - color.ocio_display_view_2_5_2_cpu
@@ -17,7 +17,7 @@ proposed_operation_keys:
 
 Inherit the complete [FMT-13 family](FMT-13_ocio_transform_contract.md).
 One native engine invocation applies a declared display/view route, with no
-implicit second FMT-15 tone/view pass. Proposed/unimplemented.
+implicit second FMT-15 tone/view pass. The CPU implementation is available; the decision status remains Proposed. See [implementation, validation and performance](../FMT-12-13-18_implementation.md).
 
 ## Interface and selected route
 
@@ -60,6 +60,5 @@ integration prerequisites. Public alpha is never passed to the engine.
   hidden-color requests, both public dtypes, cross-tile regions and point-oracle
   agreement under reference/optimized.
 
-A future public workflow binds a specific versioned ACES config, source space,
-display and view, then requests rendered RGB and alpha separately. Actual
-runtime commands and measured outputs are implementation acceptance work.
+Public resource helpers, executable operation usage, independent oracle commands
+and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).

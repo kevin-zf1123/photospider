@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
 proposed_operation_keys:
@@ -18,7 +18,7 @@ proposed_operation_keys:
 
 Inherit the complete [FMT-14 family](FMT-14_gamut_mapping_contract.md), including
 its normative A algorithm, interface, metadata, finite-domain raw, errors,
-resource obligations and strict numerical reference. Proposed and unimplemented.
+resource obligations and strict numerical reference. The specification remains Proposed; the strict CPU operation is registered with fixed invocation ABI 8. See [implementation and validation](../FMT-14-15_implementation.md).
 
 ## Ports, parameters and output
 

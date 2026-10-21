@@ -7,7 +7,7 @@ kind: external_engine_adapter
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 proposed_operation_keys:
   - color.ocio_transform_tree_2_5_2_cpu
@@ -17,7 +17,7 @@ proposed_operation_keys:
 
 Inherit [FMT-13](FMT-13_ocio_transform_contract.md). F is one native processor
 for a fixed declarative Transform or GroupTransform tree. It is not a composite
-workflow of separately published NUM/CRV/FMT tensors. Proposed/unimplemented.
+workflow of separately published NUM/CRV/FMT tensors. The CPU implementation is available; the decision status remains Proposed. See [implementation, validation and performance](../FMT-12-13-18_implementation.md).
 
 ## Tree and endpoints
 
@@ -58,7 +58,9 @@ finite boundary but does not claim the declared semantic target.
 - Two same-type dynamic property instances with different explicit snapshots
   remain independently fixed, with no cross-instance sharing changing values.
 - Exercise nested display/color-space bridges, configured bypass, sparse ROI,
-  both configurations and cancellation within resource-heavy construction.
+  both configurations, memory/work refusal during resource-heavy construction
+  and cancellation during pixel execution.
 
-The future public example builds a typed tree and checks a small planar sample
-grid through the installed public API. No current executable support is claimed.
+The public ocio_transform_tree helper seals a declarative YAML tree. The
+registered operation validates and freezes its resolved primitives before
+execution. See [implementation, validation and performance](../FMT-12-13-18_implementation.md) for public usage and oracle evidence.

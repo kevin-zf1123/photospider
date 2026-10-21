@@ -7,7 +7,7 @@ kind: external_engine_adapter
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 proposed_operation_keys:
   - color.ocio_file_transform_2_5_2_cpu
@@ -57,10 +57,9 @@ publish target semantics. Materialize requested output; view is forbidden.
   and unreadable/malformed resources fail.
 - Two frozen packages with the same logical filename and different LUT bytes
   must not cross-hit caches. A missing proxy resource must not read a real host
-  file at the same path. Allocation/cancel exceptions cannot cause fallback.
+  file at the same path. Construction allocation/work failures cannot cause fallback.
 - Check alpha admission, finite narrowing overflow, hidden colors, bypass,
   exact cross-tile requests and both execution configurations.
 
-A future public workflow binds the frozen file and endpoint interpretation,
-applies E to a small color grid and compares independent plus direct-engine
-oracles. Neither runtime support nor measured precision is claimed here.
+Public resource helpers, executable operation usage, independent oracle commands
+and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).

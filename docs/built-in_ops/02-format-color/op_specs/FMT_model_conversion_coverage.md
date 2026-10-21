@@ -4,7 +4,7 @@ id: FMT-model-conversion-coverage
 kind: specification_coverage_proposal
 category: 02-format-color
 status: Proposed
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: current_active_member_coverage_complete
 ---
 
@@ -12,20 +12,26 @@ clarification_status: current_active_member_coverage_complete
 
 This proposal fills the model-level gaps in the [format/color catalog](../representation.md).
 Its coverage direction is confirmed; it is not a completed member specification,
-new registry API or declaration of runtime support. FMT-09..15 and FMT-18 now have member specifications, including external engines
-and explicit rendering families. They remain unimplemented. The
+new registry API. FMT-09..15 and FMT-18 have implemented active members,
+including external engines and explicit rendering families. Implementation
+status here refers to those enumerated members; the separately scoped future
+codec extensions are not implied. The separate NUM/CRV description migration
+is complete without adding numeric color-conversion members. See the
+[native mapping](../FMT-14-15_implementation.md) and
+[external-engine](../FMT-12-13-18_implementation.md) implementation records. The
 maintainer's same-size planar image and I/O codec boundary is recorded in
 [FMT codec boundary](FMT_codec_boundary.md).
 
-## Current coverage gap
+## Description and conversion responsibilities
 
 The catalog names RGB, gray, binary black/white, XYZ/xyY, CIELAB/CIELCh,
 OKLab/OKLCh, HSL/HSV, YCbCr, CMYK and ACES. Naming a model does not specify its
-conversion graph. Existing ColorArray v1 supplies nine model descriptions and
-some NUM/CRV helpers, with last-axis and restricted alpha rules. It has no Gray,
-HSV or xyY enum. Its ramp/interpolation/validation helpers are not arbitrary
-source-to-target conversion operators. FMT target specifications, including clarified FMT-09/10/11, do not implement
-model transforms by themselves.
+conversion graph. NUM/CRV helpers now use TensorDescription logical tuples for
+nine ramp models; their sampled ports require a final color axis and their
+members define alpha arity. The generic codec also represents Gray, HSV and xyY,
+but that does not add corresponding numeric ramps or arbitrary source-to-target
+conversion. FMT-09/10/11 use the same description codec with actual tensor axes
+and explicit member implementations. The old ColorArray interface is removed.
 
 Complete coverage needs all three layers:
 
@@ -97,18 +103,20 @@ same-tensor, and unrelated alpha/AOV-only requests bypass color arithmetic.
   Little CMS 2.19.1 CPU, ordinary/DeviceLink/chain members and optimized/reference
   execution; concrete user rendering/transport resources remain explicit inputs, not guessed defaults. The
   [relative-coordinate scale](FMT_relative_coordinate_scale.md) revision also
-  requires explicit NUM/CRV metadata migration.
+  is implemented by NUM/CRV tuple consumers and FMT; see the
+  [migration record](../../01-numeric/NUM-CRV_color_migration.md).
 - [FMT-09 transfer](FMT-09_transfer_contract.md) is now clarified with A/B member
   specs and ten named curves; [FMT-10 basis/adaptation](FMT-10_rgb_basis_contract.md)
-  is also clarified with native A/B/C and composite D. Both remain unimplemented.
+  is implemented with native A/B/C and composite D. The transfer members
+  are also implemented.
   [FMT-11](FMT-11_model_conversion_contract.md) now specifies A-T and FMT-12
   specifies the ICC engine contract. [FMT-13](FMT-13_ocio_transform_contract.md)
   specifies OCIO v2.5.2 CPU A-F, with fixed resources/properties and an F32 engine
   boundary. [FMT-14](FMT-14_gamut_mapping_contract.md) specifies native gamut mapping,
   [FMT-15](FMT-15_tone_view_contract.md) tone/units and explicit view composition,
   and [FMT-18](FMT-18_softproof_contract.md) ICC proofing/alarms. BT.2020 CL remains
-  a future member. All new conversion members
-  remain unimplemented.
+  a future member. All enumerated active conversion members are implemented;
+  their family documents record exact supported behavior and validation scope.
 - For every model, record forward/reverse prerequisites, units/ranges, singular
   cases, exact rounding or external-engine tolerance, metadata updates, exact
   demands/dirty support, cancellation/resources and failure behavior.

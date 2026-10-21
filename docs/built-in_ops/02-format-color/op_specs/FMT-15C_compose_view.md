@@ -7,7 +7,7 @@ kind: composite_workflow
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
 ---
@@ -15,7 +15,14 @@ decision_authority: maintainer_delegated_2026_09_24
 # FMT-15C: Explicit view composition
 
 Inherit the complete [FMT-15 family](FMT-15_tone_view_contract.md), including its
-normative C section. Proposed/unimplemented; no old operation alias is restored.
+normative C section. The specification remains Proposed. The public
+`ps::format::compose_view` helper in `photospider/ops/format/view.hpp` implements
+native FMT-09/10/14/15 and configured FMT-13A..F stages transactionally.
+Resource-aware overloads validate actual OCIO construction, closed resources,
+direction and canonical endpoints. Native and configured display conditions are
+explicit. No native C key or old operation alias is restored. See
+[native implementation](../FMT-14-15_implementation.md) and
+[configured implementation and validation](../FMT-12-13-18_implementation.md).
 
 ## Interface and inference
 
@@ -32,8 +39,8 @@ not remove hidden-color work. Required upstream failures keep their scope.
 ## Storage and numerical identity
 
 Every generated node keeps its own numerical profile, planar owner, scratch and engine-resource accounting. Stage the graph expansion atomically. No fusion or zero-copy identity shortcut is implied.
-Metadata and sample-validity guarantees remain separate. No runtime evidence is
-claimed by this specification.
+Metadata and sample-validity guarantees remain separate. Native workflow evidence
+and the configured-stage limitation are recorded in the implementation page.
 
 ## Acceptance and conceptual use
 

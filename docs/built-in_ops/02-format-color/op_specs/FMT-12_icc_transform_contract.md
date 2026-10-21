@@ -5,15 +5,30 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 ---
 
 # FMT-12: ICC profile transforms
 
-It specifies a future external-engine adapter and registers no operation.
-Engine integration, numerical corpus and public runtime acceptance remain
-implementation prerequisites, not evidence supplied by this specification.
+The three specified CPU adapters are registered with fixed invocation ABI 8.
+Their pinned private-engine integration, public workflow evidence and retained
+independent oracle are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).
+Specification decision status remains Proposed.
+
+## Construction and execution cancellation
+
+Engine construction is synchronous and non-cancellable. Profile/config parsing,
+processor linking, BPC preparation, LUT inversion and gamut-table generation do
+not receive or probe a Run cancellation token. Construction work and memory
+limits, first-failure latching, complete validation for Empty/bypass requests,
+and cleanup on failure remain required. This is the maintainer's explicit
+2026-10-21 revision; no preparation-cancellation kernel extension is required.
+
+Cancellation remains an execution concern: check it before and after bounded
+pixel batches and discard unpublished results when cancelled. An existing
+immutable-resource import API may independently observe its caller's token;
+that import behavior does not imply cancellable engine construction.
 
 ## Inherited contracts
 
@@ -46,11 +61,10 @@ requires native CIELAB lightness l=L*/100. Engine boundary units are specified b
 
 [IccProfile](../../../../include/photospider/ops/icc_profile.hpp) currently
 provides structural admission and owned immutable bytes for supported ICC v2/v4
-RGB/Gray/CMYK/XYZ/Lab profiles. CMYK is restricted to output-device profiles;
-DeviceLink and abstract profiles required by later members are not admitted by
-this helper. Structural admission does not execute a CMM, prove transform
-direction availability or establish numerical conformance. Those adapters and
-the additional profile-class support remain implementation dependencies.
+RGB/Gray/CMYK/XYZ/Lab profiles, including ordinary, DeviceLink and internal
+abstract classes admitted by this family. Structural admission does not execute
+a CMM or prove required transform direction. The registered adapters perform
+actual construction during resource validation, including Empty/bypass requests.
 
 ## Confirmed engine boundary
 
@@ -126,8 +140,8 @@ FMT-11's four Gray kinds. Do not invent those fields. Use an explicit conversion
 to an identified analytic endpoint before consumers that require those fields.
 Each operation receives its source profile and interpretation explicitly.
 Profile-defined endpoint configuration is supported by the SDK
-`TensorDescription` codec. It does not attach a descriptor to data or extend
-ColorArray v1 implicitly; LCMS execution remains unimplemented.
+`TensorDescription` codec. It does not attach a descriptor to data. The registered
+adapters own LCMS execution; numeric tuple helpers do not execute the engine.
 
 An explicit endpoint binding may associate a frozen profile identity with a
 complete analytic space. This is a caller assertion, not inferred from profile
@@ -363,8 +377,8 @@ overflow and requested invalid outputs use OperationFailed with sample
 coordinate/component: InvalidDomain for invalid input or range, and
 ArithmeticOverflow for adapter/formatter narrowing overflow or a requested
 nonfinite result from finite input. Host resource failures use ResourceExhausted and
-the applicable capacity/work/stage reason; cancellation/currentness retain their
-inherited status and take precedence when latched by integration hooks.
+the applicable capacity/work/stage reason. Pixel-execution cancellation/currentness
+retains its inherited status; construction does not poll a cancellation token.
 
 An integration invariant failure is not an invalid-profile error. Diagnostics
 identify member, execution configuration, profile/stage identity and effective
@@ -378,10 +392,10 @@ Profiles are explicitly supplied immutable byte resources, not runtime paths,
 system-monitor lookups or ambient application defaults. Keep frozen bytes and
 their content identity alive for consumers that need them; a filename or an ICC
 header Profile ID is not sufficient ownership. Profile loading, parser scratch,
-engine state and image windows participate in the host's resource budgets and
-cancellation contract. The selected external numerical contract does not waive
-these kernel obligations. Concrete adapter enforcement must satisfy the
-requirements below and be verified before runtime acceptance.
+engine state and image windows participate in the host's resource budgets.
+Construction uses synchronous memory/work admission; bounded pixel execution
+retains the cancellation contract. The selected external numerical contract
+does not waive these phase-specific obligations.
 
 Engine identity includes the exact release/integration revision, compiler and
 numerically relevant build options, platform/math runtime, formatters and chosen
@@ -396,15 +410,13 @@ allocator. Reserve audited fixed overhead or correct and validate the integratio
 path, without mutating a process-global allocator to serve one DAG. Temporary
 engine/formatter storage is private scratch; public images remain planar.
 
-Upstream memory callbacks alone do not provide bounded cancellation/work probes
-through all parse/link/BPC loops. A conforming integration must add and audit
-necessary host work/cancellation hooks without changing successful numerical
-behavior, and identify that integration revision with the engine build. Never
-claim that checking only before/after cmsCreateTransform supplies kernel-level
-bounded construction cancellation. Latch allocator/work/cancellation failure
-independently and reject construction even if an internal engine fallback hides
-a failed helper and returns a non-null transform. These are implementation
-prerequisites, not features demonstrated by this documentation.
+Upstream memory callbacks alone do not account work throughout parse/link/BPC
+loops. The private integration adds audited allocation and work hooks without
+changing successful numerical behavior and includes that integration in the
+engine build identity. Construction is synchronous and noncancellable; no
+construction cancellation probes or token are required. Latch allocator/work
+failure independently and reject construction even if an internal engine
+fallback hides a failed helper and returns a non-null transform.
 
 Use private engine contexts and execution-local transform instances for active
 workers. Do not share mutable profile parsing/transform state concurrently or
@@ -414,16 +426,18 @@ Internal memory/work/error hooks are host integration, not optional color
 algorithm plugins. Disabling caches must still permit correct construction and
 execution. Reused compiled state requires explicit ownership and accounting.
 
-Bound pixel batches and all profile/tag/curve/CLUT/link loops by checked work
-counts. Check cancellation/currentness before and after engine calls and at
-bounded internal hook intervals; no detached engine work may outlive cancellation.
-Do not use asynchronous thread termination. Release failed construction, scratch
+Bound profile/tag/curve/CLUT/link construction by checked work counts. Check
+cancellation/currentness before and after bounded pixel-engine batches and
+during output writes. Construction itself has no cancellation checks. No
+detached work or asynchronous thread termination is permitted. Release failed construction, scratch
 and unpublished writes; published results/read windows retain normal ownership.
 No engine optimization or precision fallback may be triggered by budget failure.
 
-## Acceptance and implementation prerequisites
+## Acceptance coverage
 
-These are future implementation gates, not results of this documentation turn.
+The following cases define regression coverage. Actual executed evidence and
+its limits are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md); this list is not a claim that every
+possible profile or platform has been tested.
 
 1. Independently specify compact identity/constant/affine DeviceLink fixtures
    and ordinary matrix/TRC profiles, with frozen bytes and expected coordinates.
@@ -450,23 +464,25 @@ These are future implementation gates, not results of this documentation turn.
    endpoint binding, named-space/profile identity distinction, incompatible
    topology and unsupported versions/classes/directions. A valid header without
    a usable transform fails admission. Equal profiles do not justify view.
-7. Inject root capacity/work/stage failure and cancellation during profile copy,
-   parsing, curve/CLUT expansion, BPC construction and pixel batches, including
+7. Inject capacity/work/stage failure during profile copy, parsing,
+   curve/CLUT expansion and BPC construction, and cancellation during pixel batches, including
    an engine helper failure otherwise swallowed by fallback. Check context
    bootstrap accounting, no hidden allocation escape and complete cleanup.
 8. Verify cache-off, concurrent independent contexts, caller FP environment
    restoration, immutable resource reuse, result/read-window survival after
    context teardown and final release. No successful engine state may survive a
-   latched cancellation or resource refusal as an apparently valid transform.
+   latched construction resource refusal as an apparently valid transform.
 9. Supply an actual minimal public workflow and commands after implementation,
    plus directly checkable expectations. Benchmark transform construction and
    steady evaluation separately for each configuration; report managed memory
    and platform/build identity, without extrapolating unmeasured GPU/OS support.
 
-Required implementation work includes broadening ICC resource admission,
-explicit profile-defined/analytic endpoint configuration, canonical planar bindings,
-all host accounting/cancellation hooks and actual-path diagnostics. The existing
-CMYK ramp importer and legacy ColorArray v1 do not satisfy those requirements.
+The implementation includes broader ICC resource admission, explicit
+profile-defined/analytic endpoint configuration, canonical planar bindings,
+construction accounting/work hooks, pixel cancellation and actual-path
+inspection. These use TensorDescription and immutable resources. NUM/CRV now
+share the description codec through a narrower logical tuple contract; the
+old ColorArray v1 interface and decoder are removed.
 The engine can impose internal losses even with normalized public coordinates.
 No compatibility alias restores the retired color operations.
 

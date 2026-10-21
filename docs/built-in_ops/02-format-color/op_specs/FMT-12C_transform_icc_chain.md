@@ -7,7 +7,7 @@ kind: external_engine_adapter
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 proposed_operation_keys:
   - color.icc_transform_chain_lcms2_19_1_cpu
@@ -17,7 +17,7 @@ proposed_operation_keys:
 
 Inherit the complete [FMT-12 family](FMT-12_icc_transform_contract.md). C is one
 native external-engine transform, not a composition of rounded A outputs.
-The specification is Proposed and unimplemented.
+The CPU adapter is implemented; the specification remains Proposed. See [implementation, validation and performance](../FMT-12-13-18_implementation.md).
 
 ## Static chain and ports
 
@@ -77,8 +77,8 @@ for bypass-only requests; runtime sample failures have exact requested support.
   Compare each to its own reference; the compiler must not split C or merge
   separate A nodes into C without proving all observable behavior equivalent.
 - Exercise two and 255 stages, checked rejection of 0/1/256, low construction
-  work/capacity budgets, latched internal failure and bounded cancellation.
+  work/capacity budgets, latched internal failure and bounded pixel-execution cancellation.
 
-The future public workflow explicitly lists its stages and immutable resources,
-supplies explicit input configuration, selects an execution configuration and requests a sparse
-ROI. No runtime implementation or measured profile corpus exists in this spec.
+The public icc_chain authoring helper seals the ordered stage list and bytes.
+It does no CMM construction; the registered operation performs full validation
+and construction. See [implementation, validation and performance](../FMT-12-13-18_implementation.md) for runnable usage and measured corpus coverage.

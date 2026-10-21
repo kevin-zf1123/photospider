@@ -7,7 +7,7 @@ kind: composite_workflow
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_subset
+implementation_status: implemented
 clarification_status: complete
 ---
 
@@ -129,3 +129,10 @@ uses `channel.extract_index_<profile>`; opaque fallback uses
 `channel.literal_like_<profile>` with exact prepared bits and descriptor-only
 source demand. Validate the helper expansion through the public compile/execute path; checking
 the reused primitive alone does not establish composition behavior.
+
+## Current execution evidence
+
+[Implementation and validation](../FMT-14-15_implementation.md) records the temporary public compile/execute
+checks for all seven copy dtypes, exact opaque encodings, shared-alpha behavior
+and transactional failures. Mathematical oracle coverage alone does not
+establish helper execution.
