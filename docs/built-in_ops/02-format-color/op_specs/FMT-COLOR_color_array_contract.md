@@ -185,7 +185,7 @@ storage and does not inherit a profile owner. Interpolation neither executes an
 ICC transform nor infers total-ink constraints. FMT-12/13/18 separately implement
 their explicit ICC/configured transforms and immutable engine resources.
 
-## Encoding, cache identity and validation
+## Encoding, compiled identity and structural admission
 
 Use `tensor_description_parameter` / `tensor_description_from_parameter` for
 static strings and `encode_tensor_description` / `decode_tensor_description` for

@@ -50,7 +50,7 @@ oracle 通过也不表示 runtime 已实现。文档只描述当前功能或当�
 保证；生产者按定义构造结果，发布前不自检，消费者不扫描、比较或重复验证。
 静态参数的数值/几何前置条件同样 unchecked，只有决定静态结构的约束保留检查。
 算法本身的分支、正确舍入细化、候选选择、显式质量测量及资源/取消行为保留。
-不得把完成计算后的合法性检查改称质量证书后放回普通发布流程。
+不得把完成计算后的合法性检查改称质量证书后放回普通发布流程。独立 oracle 可以诊断非法参考请求；成员的生产验收须使用满足前提的输入，非法 payload 的诊断不得写成运行时必须失败的要求。
 
 每个独立节点规格放在所属分类的 `op_specs/<ID>_<function>.md`，例如已有 PNT-05A。先标明对象是基础算子、复合 workflow、宿主交互功能还是外部模型适配。采用稳定需求 ID 和提议操作名；分别记录规格状态 `Proposed/Accepted`、实现状态（未实现/已实现子集/已实现）、D1/D2/D3、所属分类和依赖；给核对分支/提交和实现入口，不能用文档成熟度代替交付状态。已经实现的名称单独引用现有文档，不为拟定接口编造可运行示例。
 
@@ -68,8 +68,8 @@ oracle 通过也不表示 runtime 已实现。文档只描述当前功能或当�
 | 支持矩阵 | 通道、dtype、HDR/负值、CPU/GPU、平面/交错 | “支持所有格式” |
 | 空间/时间需求 | lowering 的固定成员 tile reads、schema-only reads、数学 halo/边界和有限地址 superset | 把任意变换当 Elementwise |
 | 返回映射 | 输出 Region、坐标原点、layout/stride、owner、缺失/ExplicitZero、发布范围与关联完整性 | 将 nominal plane origin 当实际 source support |
-| 资源与寿命 | output/scratch/准备数据/临时 backing/校验成本、同时存活 owner、root capacity/work/stage、独立 Run、取消与最终释放 | 将 managed peak 当 RSS 上界 |
-| 错误模型 | 除零/NaN/Inf/overflow/association underflow，发生阶段、Status code/reason/detail/scope、前缀是否保留 | 每次 silently clamp |
+| 资源与寿命 | output/scratch/准备数据/临时 backing/静态结构校验成本、同时存活 owner、root capacity/work/stage、独立 Run、取消与最终释放 | 将 managed peak 当 RSS 上界 |
+| 前提、数学特殊值与实际失败 | 区分 unchecked 数值/关联前提、公式规定的除零/NaN/Inf/overflow 行为、算法精度失败和资源/取消；写明阶段、实际 Status 及已退休 call 的有效性 | 把非法 payload 或数值前提写成运行时必须报错 |
 | 数值质量 | 舍入/累加顺序、容差、Measured/CertifiedBound 和支持范围，优化后端/fallback 的实际语义 | 用 residual=0 代替误差证明 |
 | 验收 | 独立 oracle、解析小样本、容差、边界、最小公开工作流 | 只检查“输出看起来正确” |
 | 来源与开放项 | 一手证据、软件版本/设置、未决问题、兼容等级 | 用旧对话证明商业实现 |

@@ -24,13 +24,9 @@ straight color and storage in [FMT](../../02-format-color/op_specs/FMT_common_co
 [relative coordinates](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 and [tensor storage](../../../kernel-specs/Tensor-Storage-and-Region-Access.md).
 The new logical collection schemas require runtime integration before registration.
-FIL-01D explicitly overrides FMT's finite-color-sample validation as documented in
-[color composition](FILTER_color_composition.md), while retaining FMT metadata,
-straight representation and finite coverage validation.
+FIL-01D explicitly admits NUM color-sample arithmetic as documented in [color composition](FILTER_color_composition.md), while retaining explicit FMT interpretation, straight representation and the unchecked finite-coverage premise.
 
-Unless explicitly declared Result or authoring helper, ports are required Values in
-member-table order. Data use generic tensors, with no new Image, Layer or complex
-dtype. Arithmetic inputs are Float32/Float64; related image inputs have matching
+All operation ports carry Results with fixed Tensor member schemas in member-table order; authoring helpers compose those ports explicitly. Data use generic tensors, with no new Image, Layer or complex dtype. Arithmetic inputs are Float32/Float64; related image inputs have matching
 dtypes. Outputs retain the main input dtype unless explicitly specified otherwise.
 Kernel/calibration coefficients declared Float64 retain that precision. Integer
 images require explicit FMT conversion. Dtype never implies a 0..1 or 0..255 scale.
@@ -39,10 +35,16 @@ Image logical rank is 2..8. Static Int64 y_axis and x_axis are distinct nonnegat
 axes; other axes are independent batch/channel planes. An explicit component_axis
 for vector guides, RGB or matrices cannot coincide with either spatial axis.
 Examples written [H,W,C] do not require interleaved storage. Extents are positive;
-the inherited 2^40 element limit and checked integer shape/index arithmetic apply.
+the inherited 2^40 element limit and checked static shape/capacity arithmetic apply. Runtime indices and address-control payloads are unchecked caller premises.
 Scalars use [1]; zero-length Values cannot represent empty valid convolutions.
 Shapes depend only on descriptors and static parameters. A runtime radius field
 cannot change output shape and has an explicit admitted max_radius.
+
+## Static structure and unchecked execution
+
+Compilation and static preparation check schema/version, member directories, dtype, rank, positive extents, axes and shape relations, parameter presence/types/syntax, fixed read/write/scratch signatures and static capacity arithmetic. Runtime counts, offsets, indices, masks, IDs, associations, padding/encoding, PSF/model constraints and numerical/geometric domains are unchecked caller premises. Static numerical parameters retain their finite/range/order/positivity premises; only constraints that determine static structure are checked.
+
+Producers construct each declared output without a validation pass; consumers use valid payloads without rescanning or comparing them. No result, diagnostic or recovery is promised outside those premises. Algorithmic predicates, candidate/branch selection, correct-rounding refinement, explicit clipping and quality measurements remain required computations. Resource exhaustion, cancellation, backend failures and explicitly defined no-solution outcomes on valid inputs remain operational. Independent oracles may diagnose malformed reference inputs without imposing production validation. All implementations consume the frozen [physical execution contract](../../../kernel-architecture/Compiler-and-Execution.md) and fixed invocation ABI 8.
 
 ## Parameters and numerical semantics
 
@@ -58,9 +60,7 @@ member explicitly specifies a different parameter domain.
 [Numeric reference](FILTER_numeric_reference.md) defines exact expressions, baked
 constants and staged state. NaN/Inf, payload, signed zero, floating overflow and
 underflow follow corresponding NUM operations. There is no category-wide finite
-sample requirement and no category-wide floating-overflow failure. Parameter,
-mask, PSF, geometry and model constraints remain explicit member validations;
-nonfinite arithmetic cannot suppress those validations or upstream failures.
+sample requirement and no category-wide floating-overflow failure. Parameter, mask, PSF, geometry and model domains are member-defined caller premises. Nonfinite arithmetic retains the formula's defined NUM behavior and does not suppress required upstream failures.
 
 Physical units are mathematical units: spatial lengths, guide distances, noise
 standard deviations, squared-unit variances/epsilon and model-specific solver
@@ -68,31 +68,13 @@ parameters. There is no universal intensity knob, implicit normalization, inferr
 image range or unit-conversion helper. Lab uses FMT l=L*/100. Scaling relationships
 do not imply bit identity through floating conversion and staged rounding.
 
-Raw field operators consume explicit values, axes and parameters; neither channel
-count nor attached metadata makes them consume RGB or alpha. Preserve descriptors
-that remain structurally valid but invalidate unsupported sample-validity proofs.
-Derivatives, spectra and covariance establish their own units/axes. Semantic color
-entry points obey [color composition](FILTER_color_composition.md).
+Raw field operators consume explicit values, axes and parameters. Color/alpha/units/sampling interpretation is caller-owned configuration; Results carry no attached descriptions or sample-validity proofs. Output schemas establish structural axes and member layouts, and the caller supplies the next consumer's interpretation. Semantic color entry points obey [color composition](FILTER_color_composition.md).
 
-## Demand, validation and publication
+## Fixed support and publication
 
-Data, Control, Validation and Descriptor demand are distinct. Empty requested
-Region Q reads no payload. Dynamic kernel/guide/radius/mask decisions retain Control
-witnesses even when output bits do not change. Kernel-table validation is not whole
-image color validation. Boundary extension uses the full logical domain, never an
-ROI/tile edge. Exact demand is the actual admitted sample set; a radius bounding
-box is only Conservative. FFT/prefix-sum optimizations cannot silently enlarge
-Exact-only reads. complete-input outputs require their complete input dependency group.
-Dirty propagation transposes retained Data/Control/Validation relations; descriptor
-or static changes reinfer outputs. A local halo does not establish locality of
-connectivity, transforms or iterative solvers.
+Data and Control denote mathematical sample support; Descriptor denotes static schema requirements. There is no separate Validation read set. Empty Q introduces no payload tasks. Lowering emits finite, fixed member-tile reads for kernel/guide/radius/mask computation and uses a static superset for data-dependent addresses. Boundary extension uses the full logical domain. Support closes on source tile grids; runtime selection cannot request additional producers. Complete-input algorithms declare their complete input dependency group and shared intermediate tasks. Changed descriptors/statics require compilation; the executor has no dirty-propagation or content-cache path. A local halo does not establish locality of connectivity, transforms or iterative solvers.
 
-Publish canonical planar owned storage with full-image virtual address reservation,
-unified DAG tile geometry, explicitly prepared pages and valid edge pixels separate
-from padding. A dense Tensor exposes only generated global Regions; missing data are
-not zero. Owners/read windows can outlive ExecutionContext until their final release.
-Independent outputs do not read unrelated inputs when requested jointly. Collection
-association and band-lazy payloads follow [collections](FILTER_collections_contract.md).
+Requests normalize to complete retained tiles on each Result's own grid. Every materialized tile has an independent allocation, one producer and fully initialized declared writes, including specified padding. Shared computation uses explicit tasks and private SSA values; persistent iteration state crosses CFG edges explicitly. A successful task enables dependents, and a call publishes selected Result exports only after its required tasks succeed and the call retires in IR order. A failed task prevents successful publication of that call; already retired calls remain valid. Missing coverage is not zero. Result/read-window owners can outlive ExecutionContext until final release. Output selection eliminates unrelated computation without promising failure isolation within one call. Collection representation and selected-band dependencies follow [collections](FILTER_collections_contract.md).
 
 ## Resources, cancellation and capabilities
 
@@ -118,25 +100,21 @@ retention and cooperative termination follow [iteration](FILTER_iterative_contra
 
 Fixed-step strict profiles preserve reproducible state trajectories. Accelerated
 profiles retain exact discrete decisions and NUM final-value bounds. Independent
-asynchronous early-stop invocations may select different returned rounds; their
-cross-invocation result caching is prohibited as specified in the iteration contract.
+asynchronous early-stop invocations may select different returned rounds; the frozen executor retains no cross-Run result cache. Operator-defined stopping and explicit state follow the iteration contract.
 
 ## Errors and acceptance
 
 | Condition | Phase | Status obligation |
 | --- | --- | --- |
-| Invalid static parameter/anchor/profile/domain | Compile/preflight | InvalidArgument / InvalidDomain |
+| Missing/mistyped parameter, invalid syntax/enum or structural anchor/shape constraint | Compile/preparation | InvalidArgument / InvalidDomain |
 | Unsupported dtype/rank/shape/semantic structure | Compile/preflight | TypeMismatch / None |
-| Invalid dynamic control or explicit model constraint | Evaluation | Member's domain error; not a generic nonfinite arithmetic error |
+| Violated dynamic control, model, association or numerical/geometric premise | Outside the contract | No validation, repair or diagnostic guarantee |
 | Floating invalid arithmetic, division by zero, overflow | Evaluation | Successful NUM NaN/Inf result unless a corresponding explicit NUM domain exception applies |
-| Checked integer overflow | Owning phase | Explicit failure |
+| Static shape/capacity arithmetic overflow | Compile/preparation/admission | Explicit failure |
 | Unavailable backend | Capability | BackendUnavailable / None |
 | Resource, cancellation, upstream failure | Original phase | Preserve original failure |
 
-Diagnostics identify operation, output, global coordinate and offending bits where
-applicable; strings do not add FailureReason enumerators. Failure scope follows
-actual dependency observations and association requirements, preserving unrelated
-completed outputs. Do not publish partially successful Values or success certificates.
+Operational diagnostics use existing Status/FailureReason fields; strings do not add enumerators. Completion status is attributed to the failing task/call, without an invented per-sample diagnostic or report-submission ABI. No success is published for a failed call. Numerical and association premise violations impose no diagnostic requirement. Production acceptance uses valid payloads; malformed oracle fixtures exercise only reference-tool diagnostics.
 [Acceptance](FILTER_oracle_protocol.md) separates mathematical evidence, third-party
 comparisons, runtime behavior and image-quality scores. Conceptual DAGs are not
 executable public APIs.

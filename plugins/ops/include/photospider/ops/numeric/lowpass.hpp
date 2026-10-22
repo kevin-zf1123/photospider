@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <cstring>
 #include <string>
 #include <utility>
 
@@ -12,13 +11,6 @@ namespace ps::numeric {
 /** @brief Explicit discrete/continuous boundary extension. */
 enum class LowpassBoundary { Reflect, Replicate, Zero, Wrap };
 namespace lowpass_detail {
-inline bool parameter(double value, bool zero = false) {
-  std::uint64_t bits = 0;
-  std::memcpy(&bits, &value, 8);
-  const auto magnitude = bits & UINT64_C(0x7fffffffffffffff);
-  return magnitude < UINT64_C(0x7ff0000000000000) &&
-         (!(bits >> 63) || !magnitude) && (zero || magnitude);
-}
 inline Result<WorkflowNode> uniform(std::uint64_t id, const char* kernel,
                                     WorkflowInput input, std::int64_t axis,
                                     std::int64_t radius, double cutoff_or_sigma,
@@ -37,9 +29,7 @@ inline Result<WorkflowNode> uniform(std::uint64_t id, const char* kernel,
                            ? "_accelerated_x86_64"
                            : nullptr;
   if (!id || !extension || !suffix || axis < 0 || axis > 7 || radius < 1 ||
-      radius > 4096 || !parameter(cutoff_or_sigma) ||
-      (!gaussian && cutoff_or_sigma >= .5) ||
-      (kaiser && !parameter(beta, true)))
+      radius > 4096)
     return Result<WorkflowNode>(
         Status{ErrorCode::InvalidArgument,
                "invalid uniform lowpass parameters",
@@ -69,9 +59,10 @@ inline Result<WorkflowNode> uniform(std::uint64_t id, const char* kernel,
  * sigma>0 in samples; Kaiser also requires beta>=0. No unused kernel parameter,
  * output conversion, implicit resampling or antialias quality is introduced.
  * Helpers own metadata, are pure/thread-safe, and may throw bad_alloc. Invalid
- * parameters return InvalidArgument/InvalidDomain; Compiler checks actual input
- * dtype/shape/axis and backend availability. No source payload is read at
- * authoring.
+ * IDs, enum selections, axes and structural radius return
+ * InvalidArgument/InvalidDomain; Compiler checks actual input dtype/shape/axis
+ * and backend availability. Finite cutoff/sigma/beta domains are unchecked
+ * caller premises, including during authoring. No source payload is read.
  *
  * Strict rounds the exact normalized whole sum once. Accelerated follows
  * CpuNumericProfile's final FP32 bound, reusing certified coefficient
@@ -174,9 +165,7 @@ inline Result<WorkflowNode> nonuniform(std::uint64_t id, const char* kernel,
                        : profile == CpuNumericProfile::X86Avx2
                            ? "_accelerated_x86_64"
                            : nullptr;
-  if (!id || !extension || !suffix || axis < 0 || axis > 7 ||
-      !parameter(radius) || !parameter(cutoff_or_sigma) ||
-      (kaiser && !parameter(beta, true)))
+  if (!id || !extension || !suffix || axis < 0 || axis > 7)
     return Result<WorkflowNode>(
         Status{ErrorCode::InvalidArgument,
                "invalid nonuniform lowpass parameters",
@@ -210,11 +199,12 @@ inline Result<WorkflowNode> nonuniform(std::uint64_t id, const char* kernel,
  *
  * All five nonuniform helpers share this contract. Authoring is
  * pure/thread-safe with owned metadata, InvalidArgument/InvalidDomain for
- * invalid parameters and possible bad_alloc; Compiler checks actual connected
- * metadata/profile. Default Reflect folds continuously at the endpoints;
- * Replicate extends endpoint values, Zero extends +0, and Wrap uses the domain
- * length with a permitted seam jump and no invented connecting segment. No
- * sample-rate inference is performed.
+ * invalid IDs, axes or enum selections, and possible bad_alloc. Compiler checks
+ * connected metadata and profile. Finite support_radius/cutoff/sigma/beta
+ * domains are unchecked caller premises, including during authoring. Default
+ * Reflect folds at the endpoints; Replicate extends endpoint values, Zero
+ * extends +0, and Wrap uses the domain length with a permitted seam jump and no
+ * invented connecting segment. No sample-rate inference is performed.
  *
  * Runtime integrates the exact continuous affine reconstruction against the
  * real kernel and divides by its full integral, rounding once. Current

@@ -25,7 +25,7 @@ Inherit the [RES-09 family contract](RES-09_contract.md), [FILTER common contrac
 
 ## Required parameters and model domain
 
-Require explicit `max_iterations>=0`, `y_axis`, `x_axis`, kernel `anchor_y`, `anchor_x`, `boundary∈{constant0,wrap}`, `broadcast_axes`, output dtype and output requests. This member’s epsilon is a mandatory finite `epsilon>0`, measured in observation units. Factories have no defaults, including for boundary, anchor, broadcast axes and output requests. PSF taps are nonnegative with positive exact sum. Mask values lie in `[0,1]`; finite Poisson-model observation, estimate and background values must be nonnegative. Negative values outside the model are `InvalidDomain`. For NUM-permitted NaN/Inf values, use ordinary NUM arithmetic propagation; do not blanket-reject them as finite-only data. Mask-zero taps set `r=+0` without reading observation.
+Require explicit `max_iterations>=0`, `y_axis`, `x_axis`, kernel `anchor_y`, `anchor_x`, `boundary∈{constant0,wrap}`, `broadcast_axes`, output dtype and output requests. This member’s epsilon is a mandatory finite `epsilon>0`, measured in observation units. Factories have no defaults, including for boundary, anchor, broadcast axes and output requests. PSF taps are nonnegative with positive exact sum. Mask values lie in `[0,1]`; finite Poisson-model observation, estimate and background values must be nonnegative. The stated nonnegative numerical/model domains are unchecked caller premises. For NUM-permitted NaN/Inf values, use ordinary NUM arithmetic propagation; do not blanket-reject them as finite-only data. Mask-zero taps set `r=+0` without reading observation.
 
 ## Recurrence
 
@@ -52,10 +52,10 @@ The strict and CPU accelerated keys are proposed and not registered. Accelerated
 
 ### Exceptional ratio branch
 
-After required control/model validation, a zero mask excludes observation arithmetic.
+Under the caller-supplied control/model premises, a zero mask excludes observation arithmetic.
 For a positive mask, an observation NaN propagates with NUM operand priority even
 when the prediction denominator is zero; it is neither the y=0 branch nor the y>0
-domain-error branch. A prediction NaN also propagates when no earlier numerator NaN
+no-solution branch. A prediction NaN also propagates when no earlier numerator NaN
 has priority. Valid finite zero denominators retain the explicit zero/positive
 observation rules above. Scalar fixtures are provided by `special.rl_ratio`;
 complete exceptional solver trajectories remain outside the finite-rational oracle.

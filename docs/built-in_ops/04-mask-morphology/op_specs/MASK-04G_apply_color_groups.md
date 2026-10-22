@@ -24,17 +24,19 @@ Inherit [MASK-common](MASK_common_contract.md) and the
 
 image: Float32/Float64 planar[C_image,H,W], model:complete grouped-color Result
 -> values: Coverage[H,W], image dtype. Required statics: channels;
-interpretation respect|override with conditional source_description; shared
+input_description; shared
 inner,outer finite Float64, 0<=inner<=outer; curve linear|smoothstep.
-No per-group overrides, priors or hidden color conversions. Model coordinate
-roles and effective description must match the selected complete image group.
+No per-group overrides, priors or hidden color conversions. The workflow supplies the same input_description used to interpret the model
+coordinates and pairs it with a compatible selected complete image group;
+this semantic pairing is a caller premise.
 
 ## Exact model consumption and response
 
-Validate all model IDs, counts, dimensions and floating entries before use.
-IDs are unique positive and sorted. Means and lower factors are finite Float64;
-upper triangle must be +0 and every diagonal positive. An empty model is legal.
-There is no requirement that the image share the fitting source ObjectId.
+Preparation checks model schema and dimensions and the explicit description.
+Model count, IDs, numerical entries and canonical padding are unchecked caller
+premises. Effective IDs are positive, unique and sorted; means/lower factors are
+finite Float64, upper triangle is +0 and every effective diagonal is positive.
+An empty model is legal. No fitting-source ObjectId match is required.
 
 For each effective group solve L*z=x-mean in exact arithmetic on the stored
 binary values. Let d=sqrt(sum z^2). No rounded inverse matrix or sequential
@@ -46,22 +48,24 @@ is defined. Group population and fitting weight are not blend weights.
 
 ## Demand, errors and acceptance
 
-For nonempty Q consume the complete model and selected image samples at Q for
-a nonempty model, including all groups needed by the minimum. No response=1
-short-circuit waives required input/model validation. For an empty model, return
-+0 without image sample reads; descriptors and coordinate interpretation remain
-checked. There is no full-image statistics stage. Model edits may dirty all output;
-image edits follow the selected image/validation support. Empty Q is descriptor
-only. Account for model retention and exact triangular-solve scratch; poll across
-pixels/groups. Invalid model structure/domain fails rather than repairing it.
+For nonempty output selection, consume the model's effective prefix and selected
+image samples for a nonempty model, including all groups needed by the minimum.
+An empty model produces +0 without evaluating image samples; schema and explicit
+description checks still apply. Compile a fixed input-tile superset covering the
+complete model capacity and the image support for all selected output tiles;
+runtime count never extends the Plan. No input/model scan or publication
+validator is added. Account for model retention and exact triangular-solve
+scratch, and poll across pixels/groups.
 
-Acceptance covers empty models, duplicate/nonpositive IDs, invalid triangles,
-negative/zero pivots, covariance correlation, groups with identical responses,
-shared threshold equality, both image dtypes, unrelated-channel exclusion and
-application to another image with matching descriptions. Numeric oracle inputs
-carry model ids/mean/cholesky only; real metadata codecs, public graph execution,
-Region reads, budgets and ownership require separate native validation.
+Production acceptance uses valid empty/nonempty models, covariance correlation,
+groups with identical responses, shared threshold equality, both image dtypes,
+unrelated-channel exclusion and another image with compatible interpretation.
+Duplicate/nonpositive IDs, invalid triangles and nonpositive pivots are oracle
+input diagnostics only. Numeric oracle inputs carry ids/mean/cholesky; actual SDK
+schemas, public execution, fixed reads, budgets and ownership require native checks.
 
 Oracle entry: `apply_color_groups` in [reference.py](../../../../oracle/ops/mask_morphology/mask04/reference.py).
 
-The consumer first requests the model count payload and uses only that effective prefix. Padding entries are zero and do not participate in positive-diagonal validation or response evaluation. The fixed capacity and zero-fill contract are inherited from MASK-04E/F.
+The consumer reads count from its prepared fixed input bindings and evaluates only
+the effective prefix. Zero padding does not participate in response evaluation
+and is not scanned for canonicality. MASK-04E/F define capacity and zero-fill.

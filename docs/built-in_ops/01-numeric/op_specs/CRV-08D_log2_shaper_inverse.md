@@ -35,7 +35,7 @@ Inherit the [family contract](CRV-08_shaper.md#mathematical-formulas-and-ieee-re
 
 Each selected output tile reads its matching input region and both scalar bounds through their source grids. It computes only selected global cells, uses preallocated ExactShaper scratch and writes the declared output tile. Metadata and exact read/write/scratch signatures are verified during preparation. Empty reads no payload. The [fixed family contract](CRV-08_shaper.md#fixed-log-execution) defines layout support, source closure, resource admission, Run ownership and ordered call publication.
 
-The engine preserves whole-expression exact/directed arithmetic and uses fixed state for retry, range and terminal failures. Refinement is bounded to 128..4096 fractional bits; unresolved precision or capacity returns ResourceExhausted. Cancellation remains terminal. Numerical bound preconditions have no diagnostic/precedence guarantee; a nonzero-significand guard protects integer decomposition. Shape/dtype mismatch is TypeMismatch, and unsupported profiles fail BackendUnavailable.
+The engine preserves whole-expression exact/directed arithmetic and uses fixed state for retry, range and terminal failures. Refinement is bounded to 128..4096 fractional bits; unresolved precision or capacity returns ResourceExhausted. Cancellation remains terminal. Numerical bound preconditions have no diagnostic/precedence guarantee; integer decomposition trusts the required nonzero significands. Shape/dtype mismatch is TypeMismatch, and unsupported profiles fail BackendUnavailable.
 
 ## Public acceptance
 

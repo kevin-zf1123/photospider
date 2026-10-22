@@ -162,8 +162,7 @@ consuming operation's static preparation selects the named identity from the
 or pointer-shaped string does not acquire a resource or cause file/network I/O.
 
 The edited description enters a workflow only as a static parameter value of the
-next operation, so it is part of that operation's invocation identity and cache
-key. Two consumers given different descriptions of the same source have
+next operation, so it is part of that operation's compiled invocation identity. Two consumers given different descriptions of the same source have
 distinct identities.
 
 ## Algorithms, resources and errors

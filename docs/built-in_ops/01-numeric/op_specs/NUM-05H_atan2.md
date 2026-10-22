@@ -102,8 +102,9 @@ with independently named constructors in `photospider/ops/numeric/binary.hpp`.
 The fixed adapter declares both intersecting input tile sets, including when a numeric identity determines a result.
 Floating elementary operations use controlled correctly rounded hardware
 arithmetic after exact special-value classification, with exact fallback; integer
-operations retain checked exact arithmetic. Accelerated ordinary positive-base
+operations use exact arithmetic under the caller premise of representable
+integer results; fixed arithmetic-capacity failures remain operational. Accelerated ordinary positive-base
 power and angle results use SLEEF binary64 enclosures within the shared admitted
 ranges. atan2pi divides an angle enclosure by an enclosed pi. Only rejected
 candidates dispatch the certified strict backend . See [math implementation](../math-implementation.md) for
-rounding, scratch, work accounting and unresolved-refinement limits.
+rounding, fixed scratch admission, cancellation and unresolved-refinement limits.

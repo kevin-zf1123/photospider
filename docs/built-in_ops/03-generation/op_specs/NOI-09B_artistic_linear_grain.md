@@ -19,7 +19,7 @@ and profile; within one version/profile, output bits and discrete decisions are 
 
 ## Interface and representation
 
-Complete linear RGB image[H,W,C], strength[1]>=0,kernel[Kh,Kw]; same described image.
+A Result explicitly interpreted as a complete linear RGB image[H,W,C], strength[1]>=0 and kernel[Kh,Kw]; output has the same sample shape. The caller supplies the color description to each consuming operation; no description is attached to the output Result.
 
 ## Parameters and domain
 
@@ -34,19 +34,20 @@ modify hidden RGB at alpha0. No clipping.
 
 ## Dependencies, resources and failures
 
-Execution rule: **Halo**. Read only the boundary-mapped source halo required by Q;
-read the kernel and shared controls required by the mathematics, assuming valid payloads. Full shared-control/topology/resource
-changes conservatively invalidate dependent output; sample changes follow the actual
-dependency map. Empty requests perform static preflight without payload reads or
-advancing a random sequence. Compute only requested output mathematics, retaining
-the declared mathematical dependencies and static structure checks.
+Execution support: **Halo**. Derive mathematical halo support from each selected
+complete output tile, apply the declared boundary mapping, and close reads on
+the source grid. Declare kernel/shared controls as fixed dependencies. Payload
+validity is a caller premise. Empty output selection performs static preparation
+without payload tasks; shared work uses explicit intermediate Results and edges.
 
 Halo-driven source/correlation plus regional mix; charge actual intermediates and
 preserve node rounding.
 
 All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
-InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
+cancellation in bounded loops. Preserve static structural failures and actual
+resource, cancellation, backend and upstream statuses. Member-specific no-solution,
+refinement or quality failures apply to valid inputs and the explicitly declared
+algorithm; numerical-premise violations have no prescribed runtime diagnostic.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
 
@@ -55,8 +56,8 @@ lifetime and actual returned coverage inherit GEN-common.
 Zero-strength and alpha signed-zero copies; hidden color changes; HDR/negative RGB;
 normalization and duplicate boundary-weight cases.
 
-Check requested-region/full-output equivalence, actual read/work bounds, legal
-strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
+Check selected-tile/full-output equivalence, source-grid read closure, legal
+strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
 not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit

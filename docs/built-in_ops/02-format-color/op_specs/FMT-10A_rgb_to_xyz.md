@@ -47,9 +47,10 @@ A has no destination white, adaptation method or arbitrary matrix parameter.
 
 Inherit complete-triple point support for nonidentity, pointwise native identity
 copy, source-grid tile closure and auto/view/materialize. Native exact
-I may copy bits while publishing new model roles; approximate I may not.
-All geometry/selector/representation checks apply before pixels, including Empty
-or alpha-only observations. Failure of a consumed peer is not suppressed by a
+I may copy bits; destination interpretation is supplied explicitly by the caller.
+Approximate I may not select this path. Static selector/representation checks
+apply before pixels, including Empty or alpha-only output. Geometry validity is
+an unchecked numerical caller premise. Failure of a consumed peer is not suppressed by a
 zero coefficient or by source alpha=0. No whole-image scan is introduced.
 
 Semantic sample validity is an unchecked caller precondition; raw keeps NUM special values. Required upstream failures, resource/exact-coefficient
@@ -64,10 +65,11 @@ the family. No source invalidation or relabel mutates another consumer.
 2. For any admitted preset, M*[1,1,1] equals exact W before final rounding.
    Verify actual stored output against RN_dtype(W), not a separately rounded
    published matrix. Include AP0's virtual blue primary and both dtypes.
-3. Duplicate primary columns, a zero normalization scale or malformed white
-   fail statically. Valid exactly invertible near-singular cases use the exact
-   oracle; lack of numeric work capacity reports resource failure, not an
-   invented epsilon-singular classification.
+3. Duplicate primary columns, a zero normalization scale or numerically invalid
+   white violate caller premises and have no required failure behavior. Malformed
+   parameter syntax/type remains a static error. Valid exactly invertible
+   near-singular cases use the exact oracle; exhausted arithmetic capacity
+   reports resource failure without an epsilon-singular classification.
 4. For the diagonal fixture, request only X with finite R=1,G=0,B=max_finite.
    Use a tile grid retaining X without Z. X succeeds with 1 although Z would overflow. Raw X with NaN in G returns that quieted source NaN despite M[X,G]=0; this NaN input is outside semantic caller preconditions.
 5. Nonidentity input [-0,-0,-0] yields +0 for each exact-zero output under the

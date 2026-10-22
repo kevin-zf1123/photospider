@@ -1,19 +1,19 @@
 ## Implementation
 
-The point-math callback now caches its output base pointer once. A packed input
-block is copied into its accounted workspace in one operation; Float32 lanes are
-classified once into a 64-bit rejection mask. Rejected input bits are retained
-for exact fallback and replaced with zero before SIMD arithmetic. The block
-result is copied out once and only rejected lanes are repaired. No output is
-published if admission, cancellation or fallback fails. The mathematical SIMD
-kernels and their coefficients/FMA graphs are unchanged.
+Each fixed point-math invocation gathers at most 64 operands through its
+prepared source views and records each dense destination address. Float32
+candidate lanes are classified into a 64-bit rejection mask. Rejected input bits
+remain available for exact fallback and are replaced with safe values before
+SIMD arithmetic. Each result is stored at its recorded destination; a required
+failure prevents successful publication of the call. The mathematical SIMD
+coefficients and FMA graphs retain their certified numerical contract.
 
-Coordinate increments are skipped only when every input port is packed. Mixed
-packed/transposed binary ports and arbitrary strides keep coordinate addressing.
-The generic SLEEF batch and scalar paths also use the cached output pointer and
-conditional coordinate advancement. Per-block indexing and fixed arithmetic
-charges, per-fallback work, cancellation boundaries and fenv restoration remain
-in place. Bit copies support unaligned storage and only cover valid tail lanes.
+Signed, zero and unaligned input strides use the prepared coordinate reader.
+Batch arithmetic and exact fallback share the invocation's normalized floating
+environment. Cancellation is queried between batches and within refinement.
+ABI 8 does not expose per-value work charging or numeric counters; output and
+scratch capacity are admitted from the fixed Plan before issue. Tail handling
+reads and writes only the retained output tile's valid samples.
 
 FP64 NUM-04 exp restores SLEEF 3.9.0 `xexp` in [-80,80]. Both scalar and batch
 paths retain binary64 inputs/output; the candidate is enclosed by four adjacent
@@ -24,11 +24,13 @@ out-of-domain/range uncertainty retain strict evaluation.
 
 NUM-01 also restores the binary64 SLEEF exp endpoint enclosures for its RN64
 AST. This does not substitute the Float32 IQK certificate into expressions.
-Final-result enclosure and strict replay preserve the original expression
-success/failure semantics, including cancellation and zero-denominator cases.
+Final-result enclosure and strict replay preserve expression arithmetic for
+valid inputs and retain cancellation. Nonzero denominators and valid numerical
+domains are caller premises; replay does not add runtime input validation.
 
-The exp operation's common workspace/trait now takes the maximum of the two
-batch workspaces: 2,624 bytes instead of 768 bytes in the previous Float32-only
-adapter. This adds **1,856 accounted payload bytes** for either exp dtype.
-The large exact workspace is still initialized, so this update does not claim
-to remove the fixed small-array cost. No public ABI or profile names changed.
+The current `PointMathScratch<Arithmetic>` contains the arithmetic object,
+`MathBatchWorkspace` and `FloatMathWorkspace` together, including the per-lane
+destination array. Preparation declares its actual size and block admission
+reserves the required scratch per active CPU lane. The exact workspace is still
+initialized; batching does not remove that fixed small-array cost. See
+[fixed mathematical execution](point-math-execution.md) for the public boundary.

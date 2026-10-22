@@ -189,22 +189,24 @@ old '-1 sentinel' comment. Changing alarm display colors cannot change B.
 
 ## Request, publication and resource contract
 
-Any A requested color or B mask sample consumes the entire source color group
-at exactly the same spatial position. A alpha/AOV-only requests consume and
-bit-copy only the corresponding bypass samples; B has no bypass output. Dirty
-mapping follows these dependencies, with no spatial halo. Hidden colors at zero
-alpha remain processed; neither member reads alpha to classify/convert colors.
+Every complete retained A color tile or B mask tile consumes the source color
+groups at its spatial positions, closed on the source grid. A alpha/AOV-only
+tiles consume and bit-copy their corresponding bypass samples; B has no bypass
+output. There is no spatial halo or incremental dirty-mapping service. Hidden
+colors at zero alpha remain processed; neither member reads alpha to classify
+or convert colors.
 Unavoidable upstream complete-input operations retain their scope. Requested outputs only
 are published without validation; actual internal construction errors still fail the node.
 
-auto/materialize default to auto and create requested canonical planar output
-pages in a new full virtual reservation; forced view fails. Private uniform-stride
-planar scratch is bounded and owned. No interleaved public image or per-node tile
-size. Unproduced pixels/padding do not become valid output.
+auto/materialize default to auto and create independent dense allocations for
+selected complete output tiles; forced view fails. Private uniform-stride planar
+scratch is bounded and preallocated. The prepared task layouts govern reads and
+writes; there is no required full-image virtual reservation. Unwritten storage
+does not become valid output.
 
 Inherit ALL FMT-12 resource integration prerequisites: context bootstrap, owned
 profile bytes, parser/transform/CLUT allocations, numerical scratch, callbacks,
-latched failures, cache-off behavior, page windows, ancestry and final teardown.
+latched failures, disabled engine caches, fixed views, retained owners and final teardown.
 B additionally accounts its entire static source-domain alarm grid and all three
 construction helper transforms, even for one requested pixel. This is static
 resource preprocessing, not a complete-input image scan. Complexity is O(grid_knots) for

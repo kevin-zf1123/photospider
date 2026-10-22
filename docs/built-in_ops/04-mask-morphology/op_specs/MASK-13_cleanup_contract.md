@@ -42,7 +42,7 @@ one giant hole. Diagonal openings are distinguished by complementary connectivit
 A fills all holes. B removes a foreground component iff its exact pixel count
 <=maximum_removed_area (Int64>=0); C fills a hole iff its exact pixel count
 <=maximum_area (Int64>=0). Both operations include equality in the processed
-range. A zero threshold preserves the input Binary values after validation.
+range. A zero threshold preserves valid input Binary values without scanning them.
 Area is pixel count (numerically px² at
 unit pixels), not physical area or sum of soft mask weights. Soft masks require
 explicit threshold first; restoring weights is a separately authored selection,

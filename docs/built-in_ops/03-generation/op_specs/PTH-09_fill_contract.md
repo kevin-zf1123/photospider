@@ -16,9 +16,9 @@ final area rounding remain separate.
 
 ## Current implementation scope
 
-GEN-01..04, NOI-01..04, PTH-01..02 and PTH-09A are implemented.
-Other schemas and members in this shared contract retain their own implementation
-status.
+PTH-09A is implemented by `plugins/ops/03-generation/polygon.cpp`; GEN-03C
+exposes that fill through the public generation authoring helper. PTH-09B
+remains unimplemented and depends on PTH-04D.
 
 ## Members
 

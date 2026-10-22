@@ -31,7 +31,7 @@ insufficient to define its geometry semantics or approve feature removal. comple
 execution and complete associated publication apply. Grid scale/origin and backend
 algorithm version participate in identity; changing legal output needs a version.
 
-Acceptance: half-grid ties, signed coordinates, range/overflow limits, narrow gaps,
+Acceptance: half-grid ties, signed coordinates, representable grid-coordinate boundaries and arithmetic resource limits, narrow gaps,
 small holes, deterministic topology, exact grid round-trip and hard-budget failures.
 Compare against the declared quantized algorithm, not an unrelated exact-input oracle.
 

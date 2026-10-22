@@ -41,7 +41,10 @@ start/step port is required.
 All kernel parameters are static and explicitly supplied. Sinc windows require
 finite 0<cutoff<0.5 cycles/sample. Kaiser additionally requires finite beta>=0.
 Gaussian requires finite sigma>0 in samples and uses radius for truncation.
-No cutoff/support inference from a target resampling rate occurs.
+These Float64 numerical domains are unchecked caller premises at authoring,
+preparation and invocation. The integer radius limit is checked because it fixes
+support and scratch structure. No cutoff/support inference from a target
+resampling rate occurs.
 
 Static boundary is reflect/replicate/zero/wrap, default reflect with no endpoint
 repetition. Preserve output length and the same kernel at boundaries; do not
@@ -75,7 +78,9 @@ When all finite contributing extended samples have identical bits, return that
 constant including -0; all contributing samples are still read. Virtual
 zero padding has +0 bits. Otherwise an exact zero result is +0 and nonzero
 underflow retains sign. Infinite/NaN inputs use the explicit aggregation rules,
-not the finite-constant shortcut.
+not the finite-constant shortcut. Special-value, constant and exact-symmetry
+shortcuts trust positive full normalization and need no separate normalizer
+calculation. General sums retain denominator enclosure refinement for division.
 
 ## Kernel definitions and static parameters
 

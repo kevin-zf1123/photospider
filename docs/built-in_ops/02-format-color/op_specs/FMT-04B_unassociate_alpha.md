@@ -51,8 +51,9 @@ from zero premultiplied samples. Encoded payloads are unassociated as stored;
 transfer decoding, when needed, is a subsequent explicit stage.
 
 Raw applies NUM-05D divide(p,a) with the stated operand order and optional explicit
-plane/scalar weights. It skips semantic zero clearing and finite/range checks;
-0/0, division by zero and overflow follow NUM. It does not certify a straight
+plane/scalar weights. It omits semantic zero clearing and does not impose the
+semantic finite-color or normalized-coverage premises. Neither path validates
+sample domains at runtime; raw 0/0, division by zero and overflow follow NUM. It does not certify a straight
 image or change association interpretation merely because division occurred.
 
 ## Dependencies, resources and failures

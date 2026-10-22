@@ -23,13 +23,13 @@ Inherits the [RES-04 family contract](RES-04_contract.md), [FILTER common contra
 
 `input` is a single-plane Float32/Float64 field; `sigma` is Float64 `[1]`; output has the same shape. Require sigma≥0. At sigma=0, explicitly copy without executing denoising stages.
 
-Unless the member defines an explicit color interpretation, ports contain raw numerical Tensor samples; channel count does not imply RGB or alpha. Color descriptions are explicit operation parameters, never attached Result metadata. Positive extents, axis validation and explicit broadcasting follow the common contract. Host-created backing defaults to tiled planar without requiring a conformance declaration. Associated FilterBands/FrequencyGrid structures remain Proposed static Tensor schemas; each requested output records its actual tile Needs.
+Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands and FrequencyGrid are proposed SDK/workflow representations under the collection contract; lowering records each selected output's fixed reads and writes.
 
 ## Static Parameters and Valid Domains
 
 The family lists the native profile details that must be finalized before registration; it does not yet supply their values. This member accepts a grayscale single-plane input. Do not divide by 255 automatically; require one numerical plane; raw field metadata does not imply a color or alpha interpretation.
 
-Inherit NaN, Inf, overflow, signed-zero, payload, rounding, and precision semantics from the corresponding NUM operations. Validate any finite-parameter, finite-control-model, or narrower mathematical domain explicitly required by this member. Copy/bypass behavior and unconsumed data follow the dependency contract. Supply every parameter explicitly; constructors provide no defaults, except for constants fixed by a mathematical profile. Interpret real parameters as their stored Float64 values, not as infinitely precise decimal text.
+Inherit NaN, Inf, overflow, signed-zero, payload, rounding, and precision semantics from the corresponding NUM operations. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Copy/bypass behavior and unconsumed data follow the dependency contract. Supply every parameter explicitly; constructors provide no defaults, except for constants fixed by a mathematical profile. Interpret real parameters as their stored Float64 values, not as infinitely precise decimal text.
 
 ## Mathematical Reference and Rounding Boundaries
 
@@ -37,19 +37,19 @@ Numeric classification: **native mathematical profile; third-party comparison pe
 
 For sigma>0, use the native two-stage BM3D algorithm with an explicitly fixed mathematical profile; no callable key is registered while that profile is unresolved. Do not substitute NLM/TV or add video-frame or volumetric dimensions. Native arithmetic follows NUM for signed/HDR values. Parameter/control domains must be specified by the native mathematical profile, not inherited from a third-party library input restriction.
 
-If a formula calls another member, preserve any RN stage at the call site as specified here or by the family contract. Internal temporary operations must not introduce undeclared rounding. Signed zero, dynamic-domain failures, gradual underflow, and output range follow the common contract and NUM.
+If a formula calls another member, preserve any RN stage at the call site as specified here or by the family contract. Internal temporary operations must not introduce undeclared rounding. Signed zero, numerical-domain premises and explicit valid-input no-solution outcomes, gradual underflow, and output range follow the common contract and NUM.
 
-## Data / Control / Validation / Descriptor
+## Fixed reads, algorithmic control and schemas
 
 complete-input demand for the plane or RGB group; resource identity is Control. There is no fixed local halo. At sigma=0, copy input only and perform no algorithm-domain finite validation.
 
-Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Mathematical sample support is rounded to the current plan's member tiles for payload Needs, authorization and invalidation. Control and validation samples use ordinary payload Needs and participate in the same evidence. Empty payload demand reads no samples. Output structure derives only from static parameters and input schemas. The kernel has no support-role or Exact/Conservative/Unknown dependency mode.
+Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Lowering closes mathematical sample support on fixed input member-tile grids. Data-dependent selection uses a finite static superset of every address the task may consume; runtime selection does not expand the Plan. Data and control are algorithmic inputs, with no separate Validation read set. Empty retained selections introduce no payload tasks. Output schemas derive only from static parameters and input schemas. Numerical, encoding and association premises remain unchecked under the common contract.
 
 ## Algorithm, Resources, and Execution
 
 Account for native block matching, group transforms, both filtering stages, aggregation buffers and arbitrary-precision work. Complexity depends on the finalized block/search/group parameters; no generic O(P) bound is asserted. Publish only after required stages succeed. Native loops obey the shared cancellation polling bound, including long searches and transforms.
 
-In complexity expressions, P=HW, C is the number of independent planes, A is the number of taps, and T is the number of steps. Arbitrary-precision limb bit complexity is additional and is not a measured benchmark. The shared protocol defines work, memory, and stage admission; cancellation; failure status; and owner lifetime. Failure publishes no partial Tensor or CompleteBundle. Do not spill automatically, silently reduce precision, or call a retired implementation as a fallback.
+In complexity expressions, P=HW, C is the number of independent planes, A is the number of taps, and T is the number of steps. Arbitrary-precision limb bit complexity is additional and is not a measured benchmark. The shared protocol defines work, memory, and stage admission; cancellation; failure status; and owner lifetime. A failed call publishes no successful Result export; previously retired call exports remain valid, and final RET results require successful Run completion. Do not spill automatically, silently reduce precision, or call a retired implementation as a fallback.
 
 ## Oracle, Fixtures, and Acceptance
 
@@ -62,7 +62,7 @@ This member requires a native implementation and a comparison against a pinned t
 
 These are standalone oracle helper signatures, not operator constructors; their Python convenience defaults do not define operation parameter defaults.
 
-The [oracle README](../../../../oracle/ops/filter/README.md) documents reference scope. Runtime acceptance under the [runtime acceptance protocol](FILTER_oracle_protocol.md) must cover parameter boundaries, full rank/batch coverage, metadata, ROI/dirty behavior, budgets, cancellation, and ownership.
+The [oracle README](../../../../oracle/ops/filter/README.md) documents reference scope. Runtime acceptance under the [runtime acceptance protocol](FILTER_oracle_protocol.md) must cover parameter boundaries, full rank/batch coverage, metadata, compiled ROI/tile behavior, budgets, cancellation, and ownership.
 
 ## Backend and Registration Gates
 
@@ -72,7 +72,7 @@ Float64 accelerated profiles retain Float64 inputs, outputs, and exponent range;
 
 ## Conceptual DAG (Not an Existing API)
 
-`static + descriptors → preflight / demand → Data and Control declared by this member → exact expression / declared RN stages → requested owned output / complete result`
+`static parameters + schemas → compile fixed reads/tasks → prepare → unchecked arithmetic with declared RN stages → complete tiles → ordered call retirement`
 
 This diagram introduces no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-filling of missing data. Whether execution is complete-input or requires multistage buffers is specified by this member and its family contract.
 

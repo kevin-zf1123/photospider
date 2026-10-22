@@ -143,11 +143,12 @@ C twice can change a pixel twice; it is not idempotent.
 
 ## D: geometric diagnostic
 
-Read and validate the full triple. Return exactly 1 if any stored component is
-<0 or >1, otherwise +0. Bounds are inclusive; both signed zeros are inside.
-No epsilon, profile, alpha cutoff or perceptual threshold is involved. A legal
-HDR color can be outside this particular SDR target cube. Dirty source colors
-map to the same mask position; unrelated alpha/AOV changes do not invalidate it.
+Read the full caller-supplied finite triple. Return exactly 1 if any stored
+component is <0 or >1, otherwise +0. Bounds are inclusive; both signed zeros are
+inside. No epsilon, profile, alpha cutoff or perceptual threshold is involved.
+A legal HDR color can be outside this particular SDR target cube. Each retained
+mask tile declares the corresponding complete source triples through the source
+grid; alpha/AOV samples are not operands of this diagnostic.
 
 ## Demand, storage and resources
 
@@ -192,9 +193,11 @@ Independent oracle fixtures must include:
 - B identity copies all in-gamut bits; test both endpoint fallbacks, its neutral
   residual guard and exact iteration trace with an independently staged
   high-precision oracle. Every successful output must pass D with zero mask.
-- B/C source NaN peers fail a single color request; alpha-only preserves arbitrary
-  alpha bits. Cross-tile/nonzero/sparse requests and thread partitions agree.
-- Exercise low budgets, per-iteration cancellation, overflow in B's first XYZ,
+- B/C consume complete finite color triples as a caller premise. A source NaN
+  peer lies outside that domain with no required diagnostic. Alpha-only output
+  tiles preserve arbitrary alpha bits. Cross-tile/nonzero/sparse requests and
+  thread partitions agree for valid inputs.
+- Exercise low budgets, per-iteration cancellation, representable boundary cases in B's first XYZ,
   multi-consumer lifetime and absence of hidden complete-input or whole-image allocation.
 
 Public workflows explicitly compose transfer decode, FMT-10 basis/white,

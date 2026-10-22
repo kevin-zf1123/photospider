@@ -41,11 +41,11 @@ Continuous-disk containment is not a substitute for digital-set inclusion.
 At a retained center set axis=1 and radius=RN_T(r(p)); elsewhere emit +0 for
 both outputs. This includes removed foreground centers and original background.
 axis alone identifies centers: a positive exact radius can underflow to zero
-in the output dtype. NaN/Inf input is invalid; finite radius overflow is an error
-only for a requested radius observation. Axis-only requests do not round or
+in the output dtype. Binary input and representability of selected finite
+radius outputs are caller premises, without runtime validation. Axis-only requests do not round or
 allocate radius values. Radius-only requests still compute center maximality.
-All outputs use the same exact predicate; host joint/independent publication
-rules remain applicable. This member never emits a no-feature infinity.
+All outputs use the same exact predicate; outputs selected in one call share
+its publication outcome. This member never emits a no-feature infinity.
 
 The exact retained balls reconstruct the original foreground by union. Rounded
 radius samples do not certify that reconstruction. No one-pixel thickness,
@@ -53,9 +53,9 @@ connectivity, continuous-boundary width or minimal number of centers is promised
 
 ## Demand and resources
 
-Any nonempty axis or radius request requires complete-input input Data/Validation.
-Output buffers cover their requested global coordinates. Empty output demand
-requires descriptor checks only. Any input change may dirty the full outputs.
+Any nonempty axis or radius selection has complete-input Data support. The
+compiler emits fixed reads and complete selected output tiles. Empty selection
+adds no payload work; static schema checks still apply.
 There are no fixed-halo shortcuts to global maximality.
 
 A small-image reference enumerates foreground candidates, exact nearest sites,
@@ -78,7 +78,7 @@ A full 2x2 unit-grid image retains all four centers with radius=1.
 
 Test all three metrics, anisotropic spacing, equal support sets, exact strict
 membership at the background radius, empty/full/edge-touching shapes, mixed
-input/output dtypes, underflowed radius with axis=1, radius overflow, and
+input/output dtypes, underflowed radius with axis=1, representable radius limits, and
 axis-only requests. Verify exact ball-union reconstruction using independently
 constructed integer metric balls; do not reconstruct using rounded radii.
 

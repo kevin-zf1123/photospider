@@ -34,19 +34,22 @@ One requested mask sample consumes the complete source RGB triple. There is no a
 Use the corresponding family section for every branch and rounding boundary.
 There is no spatial halo or data-dependent demand elision. Static admission
 still runs for empty or bypass-only requests. Mapping hidden colors does not read
-alpha. Forward dirty support follows the exact source-to-output relation.
+alpha. Mathematical source support is closed on fixed input tiles; no incremental
+dirty-propagation service is defined.
 
 ## Storage, errors and implementation
 
-Native CPU strict primitive; no acceleration/GPU promise. Inherit planar virtual
-reservations, page preparation, transactional region publication, bounded scratch,
-NUM resource/cancellation and immutable owner lifetimes. A finite-domain error
-has its actual requested observation scope; required upstream failures propagate.
+Native CPU strict primitive; no acceleration/GPU promise. Each selected output
+tile has independent dense storage and preallocated bounded scratch. The call
+publishes after its required tasks succeed and retires in order. Finite-domain
+conditions are unchecked caller premises. Resource, cancellation and required
+upstream failures retain their operational status and drain accepted work;
+already retired Results remain valid while owned.
 No sample-dependent identity branch makes the whole node eligible for view.
 
 ## Independent acceptance and conceptual public workflow
 
-(-0,1,.5) gives +0, (0,1+2^-23,.5) Float32 gives 1. NaN fails instead of being classified inside. Rank-one RGB requires keepdims=true.
+(-0,1,.5) gives +0, (0,1+2^-23,.5) Float32 gives 1. A consumed NaN violates the finite caller premise; no mask value or diagnostic is specified for that input. Rank-one RGB requires keepdims=true.
 
 Also run the family sparse/ROI, dtype, metadata, resource and lifetime cases.
 Conceptual workflow: explicit source decoding/basis conversion -> this member ->

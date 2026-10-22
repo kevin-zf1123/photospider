@@ -189,6 +189,10 @@ struct UniformLowpassMath {
         if (m.active() && paired)
           shortcut = center & (signbit - 1) ? center : UINT64_C(0);
       }
+      // Positive full normalization is a caller premise. These exact special
+      // and symmetry results need no coefficient or denominator calculation.
+      if (shortcut)
+        return Answer(*shortcut);
       for (unsigned precision = 128; precision <= 4096; precision *= 2) {
         m.reset();
         m.precision = precision;
@@ -210,15 +214,13 @@ struct UniformLowpassMath {
             else
               m.copy(temp, coefficient);
             m.add(denominator, denominator, temp);
-            if (!shortcut) {
-              m.raw(source, samples[radius + j], narrow);
-              if (j) {
-                m.raw(temp, samples[radius - j], narrow);
-                m.add(source, source, temp);
-              }
-              m.multiply(temp, coefficient, source);
-              m.add(numerator, numerator, temp);
+            m.raw(source, samples[radius + j], narrow);
+            if (j) {
+              m.raw(temp, samples[radius - j], narrow);
+              m.add(source, source, temp);
             }
+            m.multiply(temp, coefficient, source);
+            m.add(numerator, numerator, temp);
           }
           if (m.fault == Math::Fault::Failure)
             return Answer(m.status());
@@ -226,8 +228,6 @@ struct UniformLowpassMath {
             continue;
           if (denominator.low.negative || m.top(denominator.low) < 0)
             continue;
-          if (shortcut)
-            return Answer(*shortcut);
           m.divide(quotient, numerator, denominator);
           const auto low = m.rounded(quotient.low, narrow),
                      high = m.rounded(quotient.high, narrow);

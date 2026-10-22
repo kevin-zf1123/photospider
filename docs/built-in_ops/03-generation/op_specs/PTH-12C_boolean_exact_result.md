@@ -27,12 +27,13 @@ contour orientation, collinear degree-two vertices, contour rotation and orderin
 specified by PTH-12A, using exact rational comparisons. Do not round coordinates. Store
 exact rational coordinates and incidence/contour structure in the new formal Result; its
 photospider.ops.exact_polygon v1 member directory and canonical rational representation are specified by the shared geometry contract. Runtime codec/factory and backend implementation remain absent. Subsequent exact
-consumers operate on these exact values, not a hidden Float64 copy. Run-shared complete-input computation
-reads complete geometry and associations. Allocation/large-integer limbs, events and
+consumers operate on these exact values, not a hidden Float64 copy. Complete-input lowering declares fixed tasks that read all required geometry and
+association members under their caller premises. Shared intermediate Results and
+all dependencies are explicit in the Plan. Allocation/large-integer limbs, events and
 retained backing must be charged; failure publishes no partial Result.
 
 Acceptance: analytic rectangle operations; shared edges, holes and rational non-dyadic
 intersections; exact-result chaining; permutation-independent canonical output;
-association/lifetime checks; low-budget/cancellation failure. No backend is selected.
+acceptance checks of constructed association bytes and retained-owner lifetime on valid inputs; low-budget/cancellation failure. No backend is selected.
 
 These are specification acceptance requirements, not completed execution evidence.

@@ -13,9 +13,24 @@ Inherit [GEN common](GEN_common_contract.md).
 
 ## Current implementation scope
 
-GEN-01..04, NOI-01..04, PTH-01..02 and PTH-09A are implemented.
-Other schemas and members in this shared contract retain their own implementation
-status.
+PTH-01 construction, concat, split and reverse, PTH-02 evaluation and PTH-09A polygon fill are implemented. Schema support is tracked separately from the numerical members:
+
+| Schema | Public SDK factory / implementation |
+| --- | --- |
+| `photospider.ops.path_core` | `generation::core_path_schema`, implemented. |
+| `photospider.ops.path_primitives` | `generation::primitive_path_schema`, implemented. |
+| `photospider.ops.path_partition` | `generation::path_partition_schema`, implemented and used by stable split. |
+| `photospider.ops.path_arclength_table` | Specified below; factory and producer not implemented. |
+| `photospider.ops.path_samples_param` | Specified below; factory and producer not implemented. |
+| `photospider.ops.path_samples_arc` | Specified below; factory and producer not implemented. |
+| `photospider.ops.path_width` | Specified below; factory and binding workflow not implemented. |
+| `photospider.ops.path_source_map` | Specified below; factory and producer not implemented. |
+| `photospider.ops.exact_polygon` | Specified below; factory and producer not implemented. |
+| `photospider.ops.grid_polygon` | Specified below; factory and producer not implemented. |
+| `photospider.ops.path_fit_report` | Specified below; factory and producer not implemented. |
+| `photospider.ops.geometry_report` | Specified below; factory and producer not implemented. |
+
+The implemented factories in [generation.hpp](../../../../plugins/ops/include/photospider/ops/generation.hpp) construct and validate static schemas only. They do not encode a persistent geometry object or validate runtime payloads. Member specifications retain their separate operation/backend status.
 
 ## PathSet schema family
 
@@ -96,11 +111,11 @@ E/S are bounded by source segment/subpath capacity; N is max_table_rows. Knot s 
 
 ## Linear width bindings
 
-`photospider.ops.path_width` represents only the standard width field with attached Linear profiles. It has profiles Int64 `[P,4]` (source_slot, domain, stop_begin, stop_end), bindings Int64 `[B,3]` (target_subpath, profile_row, source_subpath), stops Float64 `[K]`, widths Float64 `[K]`, source_object_ids UInt8 `[O,8]`, and counts Int64 `[4]` (bindings, profiles, stops, sources). P/B/K/O are static capacities from inputs or explicit output limits; concat sums the necessary capacities.
+`photospider.ops.path_width` is a separate Result representing the standard width binding with Linear profiles, paired with geometry by the workflow. It has profiles Int64 `[P,4]` (source_slot, domain, stop_begin, stop_end), bindings Int64 `[B,3]` (target_subpath, profile_row, source_subpath), stops Float64 `[K]`, widths Float64 `[K]`, source_object_ids UInt8 `[O,8]`, and counts Int64 `[4]` (bindings, profiles, stops, sources). P/B/K/O are static capacities from inputs or explicit output limits; concat sums the necessary capacities.
 
-Domains are 0=pathset_normalized_arclength, 1=subpath_normalized_arclength, 2=subpath_arclength_px. A path-wide profile uses source_subpath=-1; subpath-specific profiles use a valid source row. The standard key is the literal width and is not stored as a string table. Profile stop domains, nonnegative widths, bindings and source identity are unchecked. No other dynamic attribute keys or generic key/value codec are introduced. PCHIP remains the existing independent evaluation workflow and does not acquire an attached interpolation code.
+Domains are 0=pathset_normalized_arclength, 1=subpath_normalized_arclength, 2=subpath_arclength_px. A path-wide profile uses source_subpath=-1; subpath-specific profiles use a valid source row. The standard key is the literal width and is not stored as a string table. Profile stop domains, nonnegative widths, bindings and source identity are unchecked. No other dynamic attribute keys or generic key/value codec are introduced. PCHIP remains an independent evaluation workflow; path_width v1 has no PCHIP interpolation code.
 
-Attach-linear-width returns the unchanged complete path value paired with its width Result. Geometry is not copied to attach metadata. Existing metadata replacement follows the explicit replace_existing configuration; a conflicting existing binding when replacement is disabled is outside the caller premises. After geometry operations, the returned width Result is paired with the new geometry by the workflow; no consumer validates that pairing. Drop-unmappable reports the width key and unmappable reason using the geometry report below.
+PTH-05C returns the unchanged complete path value and a separate width Result. The workflow pairs them, retaining the path ObjectId and geometry bits. Replacing an explicit workflow binding follows replace_existing; a conflicting existing binding when replacement is disabled is outside the caller premises. After geometry operations, the returned width Result is paired with the new geometry by the workflow; no consumer validates that pairing. Drop-unmappable reports the width key and unmappable reason using the geometry report below.
 
 ## Exact rational fields and source maps
 
@@ -129,11 +144,12 @@ subpath. Z terminates the subpath, agrees with closed and represents one actual 
 segment; do not add another closure edge. Empty paths have zero verb, control and
 subpath rows and offsets=[0]. The separate Primitives schema requires correctly associated references/payloads; it has no CoreVerbs fields.
 
-A copied Result gets rebuilt associations, never stale source ObjectIds. Concat
-preserves port and subpath order. Dynamic splitting returns a flat PathSet and partition
+A materialized copy has a new ObjectId; COPY does not rewrite separate association
+Results. The workflow preserves source provenance or explicitly rebuilds any
+binding that must target the copy. Concat preserves port and subpath order. Dynamic splitting returns a flat PathSet and partition
 table with fixed output ports, not nested Results or variable arity.
 
-The path_width schema below defines the three source domains and attached Linear binding; independent PCHIP evaluation uses its own member contract. Default reject_unmappable; explicit drop_unmappable reports removed keys/reasons and preserves the remaining mappable fields. Width is finite nonnegative full diameter in pixels, with exactly one explicit attached or independent source. Bindings distinguish whole-path normalized length, subpath normalized length and subpath physical arc length. Complete-input-path accumulation excludes jumps between subpaths. Zero-length and seam behavior follows the width members. PCHIP evaluation alone does not establish an attribute codec or interpolation encoding.
+The separate path_width schema above defines the three source domains and Linear binding; independent PCHIP evaluation uses its own member contract. Default reject_unmappable; explicit drop_unmappable records dropped_width=1 in the geometry_report when a width binding is discarded and preserves any explicitly mappable binding. Width is finite nonnegative full diameter in pixels, with exactly one explicit source: a workflow-paired path_width Result or an independent width-evaluation input. Bindings distinguish whole-path normalized length, subpath normalized length and subpath physical arc length. Complete-input-path accumulation excludes jumps between subpaths. Zero-length and seam behavior follows the width members. PCHIP evaluation alone does not establish an attribute codec or interpolation encoding.
 
 Trim/dash retains original position/parameter and source-length mappings; explicit
 rebinding alone spreads the width function across each output fragment. Rounded output
@@ -172,7 +188,7 @@ The ArcLengthTable schema records source segment IDs and ranges, ordered t knots
 with cumulative lower/upper s bounds, totals and a correctly-rounded length. Fields bind
 to the source path snapshot and table identity. PathSamples variants carry positions,
 source segment and local t, with arc_s only when computed. PathPartition and quality
-reports use the schemas above. Their runtime factories/codecs remain unimplemented.
+reports use the schemas above. PathPartition has the implemented `generation::path_partition_schema` factory. ArcLengthTable, both PathSamples variants and both quality-report schemas remain specifications without public factories or producers, as listed in the implementation table.
 
 ## Deterministic flattening
 
@@ -252,8 +268,9 @@ minimum-segment guarantee or silent solver fallback is provided. Default topolog
 is allow_change, with optional reject_unproven and explicit proof requirements.
 
 Raster output is Regional; complete mathematical control reads may remain conservative. A BVH may discard only proven irrelevant candidates, including tie cases.
-Dirty stroke bounds include width, caps, miter extension and geometry error, not only
-control-point bounds. Length/binding changes can have global effects. Charge exact
-arithmetic, intersections (worst-case quadratic), indexes, dynamic backing and
-algorithmic certification work; output pages do not imply an inherently streaming algorithm. Public
+Compiled conservative stroke support includes width, caps, miter extension and
+geometry error, not only control-point bounds. If payload-dependent support cannot
+be bounded statically, declare the complete path as a fixed input. Charge exact
+arithmetic, intersections (worst-case quadratic), indexes, independent tile backing
+and algorithmic certification work; tiled output does not imply a streaming algorithm. Public
 execution must honor cancellation and preserve retained-owner lifetime.

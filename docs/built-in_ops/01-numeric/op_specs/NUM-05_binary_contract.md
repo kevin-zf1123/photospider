@@ -100,4 +100,4 @@ arithmetic. Accelerated ordinary positive-base power and angle results use
 SLEEF binary64 enclosures within the shared admitted ranges. `atan2pi` divides
 an angle enclosure by an enclosed pi. Rejected candidates use the certified
 strict backend. See [math implementation](../math-implementation.md) for
-rounding, scratch, work accounting and unresolved-refinement limits.
+rounding, fixed scratch admission, cancellation and unresolved-refinement limits.

@@ -28,37 +28,37 @@ Inherits the [FIL-18 family contract](FIL-18_contract.md), [FILTER common contra
 
 ``input,radius` → `output,valid`; radius is a Float32/Float64 scalar `[1]` or H/W field, with explicit broadcast=scalar|spatial; batches match and radius is shared across components.
 
-Unless the member defines an explicit color interpretation, ports contain raw numerical Tensor samples; channel count does not imply RGB or alpha. Color descriptions are explicit operation parameters, never attached Result metadata. Positive extents, axis validation and explicit broadcasting follow the common contract. Host-created backing defaults to tiled planar without requiring a conformance declaration. Associated FilterBands/FrequencyGrid structures remain Proposed static Tensor schemas; each requested output records its actual tile Needs.
+Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands and FrequencyGrid are proposed SDK/workflow representations under the collection contract; lowering records each selected output's fixed reads and writes.
 
 ## Static parameters and valid domains
 
 max_radius is finite and ≥0; axes are explicit; boundary=truncate|clamp|reflect_half|reflect_whole|wrap; radius is in [0,max_radius]; no cval.
 
-Exceptional values and floating-point overflow follow the corresponding NUM operations and the [FILTER common contract](FILTER_common_contract.md). Do not reject NaN/Inf or turn ordinary floating-point overflow into failure under a category-wide rule. Parameter domains, structure, integer overflow, resources, cancellation, and upstream errors remain governed by their contracts. Every parameter must explicitly state its type, valid domain, and value; constructors provide no implicit defaults. Floating-point parameters are interpreted using their actually stored values.
+Exceptional values and floating-point overflow follow the corresponding NUM operations and the [FILTER common contract](FILTER_common_contract.md). Do not reject NaN/Inf or turn ordinary floating-point overflow into failure under a category-wide rule. Static structural, parameter-type and capacity-arithmetic errors retain pre-execution diagnostics. Numerical-domain premises are unchecked; resource, cancellation and upstream failures retain their contracts. Every parameter must explicitly state its type, valid domain, and value; constructors provide no implicit defaults. Floating-point parameters are interpreted using their actually stored values.
 
 ## Mathematical reference and rounding boundaries
 
 Numerical class: **E**; see [FILTER_numeric_reference](FILTER_numeric_reference.md) for the E/B/S notation.
 
-At each q, read the exact stored floating-point value r. Candidate integer offsets dx/dy range over ±floor(r); retain those satisfying dx²+dy²≤r² using an exact comparison. Compute an equal-weight mean over valid taps with one exact RN_t. The center is always included; valid is always 1, but r is still validated. At r=0, explicitly bit-copy the center.
+At each q, read the exact stored floating-point value r. Candidate integer offsets dx/dy range over ±floor(r); retain those satisfying dx²+dy²≤r² using an exact comparison. Compute an equal-weight mean over valid taps with one exact RN_t. The center is always included; valid is always 1 under the caller premise 0≤r≤max_radius; r is not validated. At r=0, explicitly bit-copy the center.
 
-When a formula calls another member, preserve the RN stages produced at the call site as specified here or by the family contract; internal temporaries must not introduce undeclared rounding. Signed zero, dynamic-domain failures, gradual underflow, and output range follow the shared contract and NUM.
+When a formula calls another member, preserve the RN stages produced at the call site as specified here or by the family contract; internal temporaries must not introduce undeclared rounding. Signed zero, numerical-domain premises and explicit valid-input no-solution outcomes, gradual underflow, and output range follow the shared contract and NUM.
 
-## Data / Control / Validation / Descriptor
+## Fixed reads, algorithmic control and schemas
 
-radius is Control and retains its dirty witness. Data for actual taps after boundary mapping is Exact. Static max_radius provides only a Conservative halo; do not scan all radii to infer output shape.
+Radius is algorithmic control. Lowering declares a fixed source-tile superset from static max_radius and boundary mapping. At runtime the exact radius selects participating terms within the admitted views. It does not add producers, change output shape or introduce a radius-domain validation scan.
 
-Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Mathematical sample support is rounded to the current plan's member tiles for payload Needs, authorization and invalidation. Control and validation samples use ordinary payload Needs and participate in the same evidence. Empty payload demand reads no samples. Output structure derives only from static parameters and input schemas. The kernel has no support-role or Exact/Conservative/Unknown dependency mode.
+Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Lowering closes mathematical sample support on fixed input member-tile grids. Data-dependent selection uses a finite static superset of every address the task may consume; runtime selection does not expand the Plan. Data and control are algorithmic inputs, with no separate Validation read set. Empty retained selections introduce no payload tasks. Output schemas derive only from static parameters and input schemas. Numerical, encoding and association premises remain unchecked under the common contract.
 
 ## Algorithm, resources, and execution
 
 Direct cost is O(PC*max_radius²). Integral-box optimizations require explicit admission for their actual scan. Infer disk row spans with exact comparisons; floating-point sqrt rounding must not omit taps.
 
-In complexity notation, P=HW, C is the number of independent planes, A the number of taps, and T the number of steps. Arbitrary-precision limb bit complexity is additional and is not a measured benchmark. The shared protocol defines work/memory/stage admission, cancellation, failure state, and owner lifetime. Failures do not publish partial Values or CompleteBundles. Do not spill automatically, silently lower precision, or call retired implementations as fallback.
+In complexity notation, P=HW, C is the number of independent planes, A the number of taps, and T the number of steps. Arbitrary-precision limb bit complexity is additional and is not a measured benchmark. The shared protocol defines work/memory/stage admission, cancellation, failure state, and owner lifetime. A failed call publishes no successful Result export; previously retired call exports remain valid, and final RET results require successful Run completion. Do not spill automatically, silently lower precision, or call retired implementations as fallback.
 
 ## Oracle, fixtures, and acceptance
 
-r=0 bit-copies; at r=1 the disk has 5 taps and the square box 9. Near sqrt(2), the actual Float64 value determines whether the four corners are included. Truncation changes the valid count at edges. A radius above the limit fails locally and does not expand into a whole-image failure.
+r=0 bit-copies; at r=1 the disk has 5 taps and the square box 9. Near sqrt(2), the actual Float64 value determines whether the four corners are included. Truncation changes the valid count at edges. A radius above max_radius violates the caller premise; its reference-tool diagnostic is not a runtime failure requirement.
 
 Reference functions evaluate small numerical examples; they are neither production kernels nor complete port-schema/preflight simulators. ExactRational rounds rational expressions directly to IEEE formats. For transcendental functions, only DirectedMPFR results whose interval endpoints round to the same value are strict goldens. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
@@ -66,7 +66,7 @@ Reference functions evaluate small numerical examples; they are neither producti
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 
-See the [oracle README](../../../../oracle/ops/filter/README.md) for reproduction and evidence levels. The listed self-tests validate only the reference program; parameter boundaries, full rank/batch, metadata, ROI/dirty behavior, budgets, cancellation, and ownership still require [runtime acceptance](FILTER_oracle_protocol.md). Passing an identity/constant fixture does not accept the entire algorithm or every configuration.
+See the [oracle README](../../../../oracle/ops/filter/README.md) for reproduction and evidence levels. The listed self-tests validate only the reference program; parameter boundaries, full rank/batch, metadata, compiled ROI/tile behavior, budgets, cancellation, and ownership still require [runtime acceptance](FILTER_oracle_protocol.md). Passing an identity/constant fixture does not accept the entire algorithm or every configuration.
 
 ## Backend and registration gates
 
@@ -76,9 +76,9 @@ Float64 accelerated execution still uses Float64 inputs, outputs, and exponent r
 
 ## Conceptual DAG (not an existing API)
 
-`static + descriptors → preflight / demand → Data and Control declared by this member → exact expression / declared RN stages → requested owned output / complete result`
+`static parameters + schemas → compile fixed reads/tasks → prepare → unchecked arithmetic with declared RN stages → complete tiles → ordered call retirement`
 
-This sketch adds no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-filling of missing data. Computation scope and multistage buffers follow this member and its family contract; use a Run-shared stage only for the global work that contract requires.
+This sketch preserves explicit color interpretation, alpha arithmetic, spectral formulas and missing-coverage semantics. Computation scope and multistage storage follow this member and its family contract; shared work is represented by explicit tasks and private SSA outputs.
 
 ## Rationale and open decisions
 

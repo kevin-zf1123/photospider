@@ -393,9 +393,9 @@ def run_all(include_diagnostics=True):
     suite.case('local_variance_population',['FIL-20A'],'ExactRational',lambda:S_local_moments([[1,2,3]],1,3,(0,1))[1][0][1],expected=q(2,3))
     suite.case('local_variance_unbiased',['FIL-20A'],'ExactRational',lambda:S_local_moments([[1,2,3]],1,3,(0,1),ddof=1)[1][0][1],expected=1.0)
     suite.case('local_covariance_negative',['FIL-20B'],'ExactRational',lambda:S_local_moments([[1,2,3]],1,3,(0,1),other=[[-1,-2,-3]])[1][0][1],expected=-q(2,3))
-    v('straight_alpha_zero_hidden_color',['FIL-04B'],'spatial.straight_positive_blur',[[8,2],[0,1],[1,1]],{},(2.0,0.5))
-    v('straight_all_zero_alpha',['FIL-04B'],'spatial.straight_positive_blur',[[8,2],[0,0],[1,1]],{},(0.0,0.0))
-    v('straight_alpha_underflow_hidden_color',['FIL-04B'],'spatial.straight_positive_blur',[[8,2],[C_from_bits(1,'float32'),0],[1,1]],{'dtype':'float32'},(8.0,0.0),dtype='float32')
+    v('straight_alpha_zero_hidden_color',['FIL-01D'],'spatial.straight_positive_blur',[[8,2],[0,1],[1,1]],{},(2.0,0.5))
+    v('straight_all_zero_alpha',['FIL-01D'],'spatial.straight_positive_blur',[[8,2],[0,0],[1,1]],{},(0.0,0.0))
+    v('straight_alpha_underflow_hidden_color',['FIL-01D'],'spatial.straight_positive_blur',[[8,2],[C_from_bits(1,'float32'),0],[1,1]],{'dtype':'float32'},(8.0,0.0),dtype='float32')
     # Frequency transforms: roots-of-unity exact zeros are essential.
     for h,w in [(1,1),(1,5),(2,3),(3,2),(4,4)]:
         imp=[[float(y==0 and x==0) for x in range(w)] for y in range(h)]

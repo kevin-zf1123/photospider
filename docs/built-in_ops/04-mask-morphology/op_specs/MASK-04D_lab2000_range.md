@@ -24,8 +24,7 @@ Inherit [MASK-common](MASK_common_contract.md) and the
 
 image: Float32/Float64 planar[C,H,W], target: Float64[3] -> values: Coverage[H,W]
 in the image dtype. channels selects one complete CIELAB group in l,a*,b* order.
-Required statics: channels; interpretation respect|override; conditional
-source_description for override; kL,kC,kH positive finite Float64; inner,outer
+Required statics: channels; input_description; kL,kC,kH positive finite Float64; inner,outer
 finite Float64 with 0<=inner<=outer; curve linear|smoothstep. No raw mode or
 implicit color conversion. Target coordinates have the same effective Lab
 interpretation as the image; the native l coordinate is L*/100. Constructors
@@ -56,20 +55,21 @@ certification may refine; resource exhaustion fails rather than guessing.
 
 ## Demand, failures and verification
 
-For nonempty Q read selected image components at Q and the complete target.
-Respect/override additionally consumes the validation closure of that color
-group. No unrelated alpha/AOV or whole-image statistics. Empty Q is descriptor
-only. Dirty support follows these image/target dependencies. NaN/Inf in consumed
-coordinates is InvalidDomain; unsupported descriptions fail preflight. Refinement
-state and retained inputs are budgeted and cancellable. No native engine adapter
-or commercial compatibility is implied.
+For nonempty output selection, mathematical support is the selected image
+components and complete target, lowered for complete output tiles to fixed
+input-tile reads. No unrelated alpha/AOV or whole-image statistics are required.
+Empty selection adds no payload work. Finite consumed coordinates are caller
+premises; unsupported or structurally inconsistent descriptions fail preparation.
+Refinement state and retained inputs are budgeted and cancellable. No native
+engine adapter or commercial compatibility is implied.
 
 The MPFR interval oracle certifies the complete expression and exact branches;
 unresolved certification reports Uncertified under its bounded manual limit.
 Author decimal test data checks formula behavior only, not strict bits. Test
 zero chroma, +/-180 hue differences, mean-hue wrap, identical colors, finite
 non-unit factors, threshold equality, both dtypes, selected-channel demand,
-invalid parameters and low budgets. Native acceptance requires a real public
+invalid structural parameters and low budgets. Invalid numerical-premise
+fixtures test oracle diagnostics only. Native acceptance requires a real public
 workflow and host-level read/resource/lifetime checks.
 
 Oracle entry: `lab2000_range` in [reference.py](../../../../oracle/ops/mask_morphology/mask04/reference.py).

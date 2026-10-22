@@ -86,8 +86,9 @@ A copy-only output tile may preserve a NaN bit pattern without color-domain vali
 
 Raw fixtures include Inf*0 -> NUM NaN, -0*1 -> -0, operand-order NaN priority
 and weights outside [0,1]. Semantic and raw results cannot share an incorrect
-cache identity. A normal canonical-image consumer rejects A's boundary result;
-B explicitly restores straight interpretation, subject to its required coverage.
+compiled invocation identity. A normal straight-image consumer requires the
+caller to pair this boundary payload with an appropriate conversion or explicit
+interpretation. B explicitly restores straight samples, subject to its required coverage.
 
 Conceptual DAG: straight image with internal alpha -> A -> export adapter.
 The native Result implementation uses the public helper and registry contract described above. Runtime and performance claims are limited to checks actually run on the target host.

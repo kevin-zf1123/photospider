@@ -181,7 +181,7 @@ struct ExactElementary final {
     }
     // Single IEEE operations are correctly rounded by the hardware. Keep the
     // bit-level special table above; the owning guard restores flags/controls.
-    // A Whole callback can lend its live RN-even/gradual-underflow guard.
+    // A fixed invocation can lend its live RN-even/gradual-underflow guard.
     // A borrowed guard must live on this thread throughout the call; callers
     // must not alter fenv until its destruction restores the outer flags.
     // Standalone callers retain a local guard and restore their own flags.

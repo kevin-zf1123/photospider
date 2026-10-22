@@ -28,9 +28,7 @@ sum is not promised to equal exactly one.
 
 There is no public checkpoint format. Ordinary outputs supplied as a new initial
 state do not imply continuation of an uninterrupted solver, especially for TV dual
-states or the rational PSF. Execution diagnostics carry returned iteration and reason;
-there are no additional result ports. Diagnostic encoding uses the runtime's existing
-facility when implemented. Reason names below are logical contract labels.
+states or the rational PSF. Implementations track returned iteration and reason in invocation-owned state. Fixed invocation ABI 8 has no report-submission callback; it does not automatically export these logical outcome labels as execution diagnostics. An explicit SDK reporting interface would require its own specification before claiming that capability; no additional result port or kernel ABI change is implied.
 
 ## Stopping predicates
 
@@ -106,6 +104,10 @@ projection is the family's support-constrained projection. The check leaves stat
 unchanged and establishes only constrained first-order stationarity, not uniqueness,
 global optimality or perceptual quality.
 
+## Fixed execution boundary
+
+Fixed-step recurrences can use existing CFG loops, explicit edge arguments and declared intermediate tasks. The asynchronous profiles below retain their distinct timing semantics and remain unimplemented. Their concurrent solver/checker must be owned by one bounded operation invocation (or a separately specified host workflow); it cannot append tasks, rediscover dependencies or expose mutable state through a published Result. All worker state and scratch must fit declared bounds, and accepted work must be joined or drained before reporting completion. A serial CFG loop does not establish the asynchronous profile's acceptance.
+
 ## Trigger and ownership protocol
 
 Each algorithm uses a fixed positive interval K chosen through implementation
@@ -133,7 +135,7 @@ count; each solver's required live states determine it. Rational limb growth rem
 dynamically budgeted. On shortage, report resource failure, not synchronous checking,
 payload copying, overwrite, reduced precision or unaccounted allocation.
 
-## Termination and cache identity
+## Termination and invocation identity
 
 A passing checker atomically proposes (converged, checked_round, result_owners).
 Return that checked state after the member's final output conversion; discard newer
@@ -152,7 +154,7 @@ Scheduling can change checked rounds and returned bits across independent calls.
 Do not promise the earliest passing round or repeatability of the chosen round.
 The recurrence and predicate math remain fixed. Sharing within one invocation is
 legal; cross-independent-invocation result caching is forbidden for early-stop
-profiles. Fixed-step profile determinism/cache behavior is unchanged.
+profiles. Fixed-step profiles retain their deterministic recurrence; the frozen executor has no cross-Run result cache for either profile.
 
 Acceptance must cover dropped triggers, delayed starts, retained state immutability,
 coherent pairs, both termination race winners, max=0, no final check, nonfinite
@@ -172,7 +174,7 @@ a feasible simplex certificate and does not claim sum-one. Later computations
 consume those exceptional components under NUM; the exceptional PSF remains tagged.
 No early-stop check can pass on that state. Fixed-step execution still completes
 its declared count, and early-stop execution can end at max_iterations. Required
-initial finite PSF/domain validation, resource errors and cancellation remain errors.
+initial finite PSF/model domains remain unchecked caller premises. Resource errors and cancellation retain their actual failure behavior.
 The finite constrained state still uses exact rationals without intermediate Float64
 rounding. `special.exceptional_simplex` covers the projection branch, not a complete
 concurrent solver implementation.

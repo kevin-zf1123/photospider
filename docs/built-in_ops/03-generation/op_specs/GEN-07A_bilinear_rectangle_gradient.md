@@ -24,7 +24,7 @@ Positive-area bounds[4] and controls[2,2,C], C>=1; values[H,W,C].
 
 ## Parameters and domain
 
-canvas/dtype; outside=pad default or reject; finite numeric components. In reject mode, every requested query lies inside the parameter domain as an unchecked premise.
+canvas/dtype; outside=pad default or reject; finite numeric components. In reject mode, every consumed query in the complete selected output tiles lies inside the parameter domain as an unchecked premise.
 
 ## Mathematical specialization
 
@@ -34,17 +34,20 @@ color or alpha semantics.
 
 ## Dependencies, resources and failures
 
-Execution rule: **Regional**. Compute requested output coordinates only. Read
-corresponding query/sample inputs and the controls required by the mathematics. Complete control reads do not imply runtime payload validation. Full
-shared-control/topology/resource changes conservatively invalidate dependent output;
-sample changes follow the actual dependency map. Empty requests perform static preflight
-without payload reads or advancing a random sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
+Execution support: **Regional**. Lower each selected complete output tile to
+fixed tasks with explicit query/sample and control-member tile reads. Close each
+read on its source grid; payload validity over the consumed support is a caller
+premise. Empty output selection performs static preparation without payload tasks.
+Shared computation uses explicit task dependencies and private intermediate
+Results under GEN-common.
 
 Regional pixels; all four control vectors are assumed valid.
 
 All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
-InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
+cancellation in bounded loops. Preserve static structural failures and actual
+resource, cancellation, backend and upstream statuses. Member-specific no-solution,
+refinement or quality failures apply to valid inputs and the explicitly declared
+algorithm; numerical-premise violations have no prescribed runtime diagnostic.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
 
@@ -53,8 +56,8 @@ lifetime and actual returned coverage inherit GEN-common.
 Corner hits, four-corner mean, non-square bounds, four-component transparent-looking
 data still interpolated numerically.
 
-Check requested-region/full-output equivalence, actual read/work bounds, legal
-strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
+Check selected-tile/full-output equivalence, source-grid read closure, legal
+strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
 not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit

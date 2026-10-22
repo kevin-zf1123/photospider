@@ -23,13 +23,15 @@ no replacement kernel operators are assigned to them.
 - Alpha, when present, is another same-size plane within the image tensor.
   Complete colors remain straight. No heterogeneous-plane carrier or persistent
   external alpha binding is introduced for subsampled video/file data.
-- Every kernel image operator obeys the accepted planar storage contract:
-  common DAG tile geometry, whole-image virtual span, row/edge padding, page
-  alignment and explicit backing preparation. Explicit raw configuration cannot waive the
-  physical storage contract. Generic non-image arrays retain their own tensor
-  contracts; this does not make scalar/vector/table operands into images.
+- Image layout is explicit structural configuration. The host planar convention
+  does not add an implicit payload validator. Current physical execution uses
+  distinct dense output tile allocations and prepared input views; source/output
+  grids may differ. A consumer requiring a specific layout receives an explicit
+  conversion or COPY. Generic arrays retain their own tensor contracts; this
+  does not make scalar/vector/table operands into images.
 - [ADR 0022](../../../adr/0022-freeze-operation-c-abi-v3.md) D9 (Proposed)
-  records this image contract for the operation ABI shared by all categories.
+  records the domain boundary; its superseded execution/storage sections do not
+  override the current [physical execution contract](../../../kernel-architecture/Compiler-and-Execution.md).
 - Same spatial extent is an invariant within an image. It does not require every
   independent image in a workflow to have the same resolution. Geometric
   operators can produce a different output image resolution under their specs.
@@ -37,11 +39,12 @@ no replacement kernel operators are assigned to them.
 ## Input/output codec responsibilities
 
 Input codecs reconstruct externally subsampled channels and convert external
-packing/layout before publishing a canonical image tensor. Output codecs consume
-canonical planar tensors and perform any explicitly selected subsampling,
-packing and compression at the external boundary. External interleaved buffers,
-4:2:2/4:2:0 planes and packed 1/10/12-bit streams are codec representations,
-not alternative kernel image layouts or FMT operation outputs.
+packing/layout under an explicit import contract before supplying an image
+Result. Output codecs consume their declared layout and perform explicitly
+selected subsampling, packing and compression. Externally subsampled
+4:2:2/4:2:0 planes and packed 1/10/12-bit streams remain codec representations.
+Admitted affine interleaved storage does not imply subsampled channel semantics
+or waive a consumer's explicit layout requirements.
 
 Codec contracts still need concrete filters/siting, odd-edge behavior, input
 validation, region requests, resource limits, cancellation, errors and resulting
@@ -67,9 +70,9 @@ Physical layout conversion does not change color interpretation.
   duplicate their old numerical behavior.
 - Channel assembly and logical axis/shape operations retain their respective
   FMT/NUM responsibilities while preserving image storage invariants.
-- The kernel provides allocation and addressing. There is no image-layout op
-  permitting an interleaved image, different per-node tile size or metadata-only
-  bypass of planar requirements.
+- The kernel provides fixed tile allocation and addressing. Grid/layout changes
+  use existing explicit structural operations and COPY tasks. Metadata edits
+  never convert storage, and this boundary creates no new FMT-17 primitive.
 
 The conversion coverage proposal is in
 [FMT model conversion coverage](FMT_model_conversion_coverage.md). No I/O

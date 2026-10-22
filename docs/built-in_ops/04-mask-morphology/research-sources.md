@@ -121,7 +121,7 @@ Approximate Voronoi/distance propagation is relevant to fast previews. It is not
 
 [Primary source](https://scikit-image.org/docs/stable/api/skimage.segmentation.html#skimage.segmentation.flood). Opened stable documentation identifies skimage 0.26.0.
 
-Seed-relative flood and connectivity provide a comparison point. MASK explicitly distinguishes fixed and neighbor graphs, barriers, multiple seeds, exact comparisons and complete-input validation, rather than inheriting undocumented traversal choices.
+Seed-relative flood and connectivity provide a comparison point. MASK explicitly distinguishes fixed and neighbor graphs, barriers, multiple seeds, exact comparisons and complete-input mathematical support, rather than inheriting undocumented traversal choices.
 
 <a id="s16"></a>
 ## S16 — SciPy — ndimage.label

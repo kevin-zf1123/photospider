@@ -33,8 +33,7 @@ abs(accelerated - r) <= 4 * 2^(floor(log2(abs(r))) - 23)
 Compare the actual Float64 numbers; converting both results to Float32 before
 comparison is not an acceptance test. A reference of zero, a magnitude below
 2^-126, a magnitude above 0x1.fffffep127, or uncertain classification uses strict
-evaluation. Do not flush subnormals or turn an overflow/domain error into a
-finite answer. Strict may still return its specified resource failure.
+evaluation. Preserve the member's IEEE classifications and caller numerical premises. Strict may still return its specified resource failure.
 
 The bound applies to each final arithmetic output, each reduction result and
 each requested prefix. It is not a per-tap, per-channel-intermediate or per-node
@@ -68,14 +67,14 @@ This task selects the stronger four-ULP bound, not an additional image profile.
 | ln | Positive arguments, signed output, zero at 1; no image-domain clipping. The initial fast input range is [2^-100,2^100], followed by final range checking. |
 | radian trig and angles | Angles are radians, not normalized image values. sin/cos outputs are in [-1,1]; tan is unbounded near poles. Initial vector trig reduction is limited to [-1,1] radians. atan2 retains quadrant and signed-zero rules. |
 | pi/rational-pi/sinc | Inputs are exact binary or rational multiples as specified, not rounded radian conversions. Named zeros/poles remain exact. Integer/dyadic quadrant reduction precedes small-angle kernels; ordinary sinc admits |x|<=1. The full original argument is retained in sinc denominators. Uncertain poles and final ranges use strict. |
-| arithmetic, remap and interpolation | Signed finite numeric units; remap and extrapolation can be unbounded. Domain/edge validation and exact selected endpoints remain unchanged. smoothstep remains in [0,1]. |
+| arithmetic, remap and interpolation | Signed finite numeric units; remap and extrapolation can be unbounded. Caller numerical premises and exact selected endpoints remain unchanged. smoothstep remains in [0,1]. |
 | reductions, scans, matrix and calculus | Sum/prefix/integral magnitude grows with length and coefficients; derivative scales inversely with step. No universal [0,1] bound is inferred. Apply the bound independently to each final output and use strict for sensitive cancellation or range uncertainty. |
 | CRV interpolation/Bézier/inverse | Coordinates retain their declared units and finite domain. Tangent extrapolation can leave the endpoint range. Monotone segment/root selection is exact; approximate values must satisfy final output error and mathematical interval constraints. |
 | RGB/CMYK and coverage | Normalized reference channels conventionally use [0,1], while the primitive's explicit signed/HDR extension remains legal. Coverage/association constraints stay exact. |
 | CIELAB/CIELCh | Native TensorDescription tuple consumers store l=L*/100, nominally [0,1] with finite extensions; a*/b*, C* and hue keep their own scales. Apply the FP32 ULP rule in each actual native output coordinate, including l. Independent migrated fixtures use the same native scale; see the [scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md). |
 | OKLab/OKLCh, HSL, YCbCr, XYZ | Preserve model units, hue convention, white point, transfer and signed/HDR policy. Values outside [0,1] are permitted exactly where the model specification permits them. |
-| LUT/shapers/baking | Explicit axes/domain and out-of-domain policy govern input range. Bake error limits and success gates remain proof bounds; this numeric allowance cannot weaken a requested bake tolerance. |
-| uniform/nonuniform lowpass | Signed inputs and negative lobes permit output outside the input min/max. Preserve exact support, zero taps and positive-normalizer validation. Bound the complete normalized sum, not isolated rounded coefficients. |
+| LUT/shapers/baking | Explicit axes/domain and out-of-domain policy govern input range. Bake measurement and the explicitly requested quality gate retain their stated evidence level and tolerance; this numeric allowance cannot weaken a requested bake tolerance. |
+| uniform/nonuniform lowpass | Signed inputs and negative lobes permit output outside the input min/max. Preserve exact support, zero taps and the caller premise of a positive normalizer. Bound the complete normalized sum, not isolated rounded coefficients. |
 
 The FP32 output scale is magnitude-dependent in every row. It does not promise
 a fixed UNORM16 error for arbitrary HDR, Lab or integrated signals.
@@ -88,16 +87,17 @@ only when the complete enclosure fits its accuracy budget. Fall back for an
 uncertain sign/domain/overflow predicate or excessive propagated error. No
 probabilistic accuracy or sampled-only runtime guard replaces that enclosure.
 
-NUM-01 preserves strict success/failure decisions: uncertainty near a zero
-denominator or invalid function domain triggers strict replay for the affected
-sample. SIMD lane composition, tail length, partition and requested Region cannot
+NUM-01 preserves strict arithmetic on inputs satisfying its numerical premises.
+Enclosure uncertainty near a branch, denominator or range boundary triggers
+strict replay for the affected sample; this refinement does not validate inputs. SIMD lane composition, tail length, partition and requested Region cannot
 change a fixed profile's result. Only demanded input coordinates are read.
 
 Preserve the caller's floating environment and resource/cancellation obligations.
-Fallback cannot recover a resource, cancellation or upstream failure. Diagnostics
-record actual strict dispatches/fallbacks; cache hits fabricate no arithmetic.
-The concrete backend revision, ISA and source/build identity separate numeric
-cache entries. Public names, default strict profile and dtype defaults are unchanged.
+Fallback cannot recover a resource, cancellation or upstream failure. Fixed
+invocation ABI 8 has no per-value report callback or payload cache. An explicit
+benchmark may measure dispatch and fallback work. The concrete backend revision,
+ISA and source/build identity identify the numerical implementation. Public
+names, default strict profile and dtype defaults are unchanged.
 
 Independent Fraction/MPFR oracles check strict bits and accelerated final bounds,
 including cancellation, subnormal/overflow borders and sensitive compositions.
@@ -123,8 +123,8 @@ Binary64 u10 kernels use explicit AdvSIMD or AVX2/FMA after ISA admission;
 Float64 inputs are not narrowed to Float32. The adapter is embedded in static
 and shared kernel builds with hidden symbols, no configure-time download and
 no consumer SLEEF configuration. Fast-math remains disabled. Backend/source/build
-identities include this dependency, preventing reuse of old accelerated cache
-entries. Caller rounding modes, exception flags and gradual underflow are preserved.
+identities include this dependency. Fixed execution does not retain cross-Run
+numerical payload caches. Caller rounding modes, exception flags and gradual underflow are preserved.
 
 Kernel results are expanded by four binary64 steps into conservative intervals.
 Final acceptance uses a stricter two-ULP32 absolute guard to ensure the public
@@ -138,13 +138,13 @@ admitted ranges are listed above. Wider legal inputs remain supported by strict.
 | --- | --- |
 | NUM-01 | Four-sample node-by-lane scratch, scalar/coefficient reuse, outward RN64 reference intervals, per-sample strict replay and identical tail algorithms. Final output, success/failure and exact coordinate rules are checked separately. |
 | Elementary/shared exact arithmetic | Correctly rounded hardware arithmetic under a scoped floating environment; bit-level special cases and exact fallback. Dyadic final ratios use guard/sticky rounding; small divisors use active limbs; directed products share endpoint work. |
-| Remap/smoothstep | Exact formula construction, bounded final quotient candidates and strict fallback; regional mapped reads/publication. Smoothstep retains its proven [0,1] range. |
+| Remap/smoothstep | Exact formula construction, bounded final quotient candidates and strict fallback in fixed output-tile tasks. Smoothstep retains its proven [0,1] range. |
 | Sort | Stable exact ordering; project requested boxes to unique logical lines and reuse one accounted permutation per line and output, including non-last axes and disjoint boxes. |
-| Prefix/integration | Exact accumulation and at most 64 source samples per read window; every output retains its own prefix certificate. Dense association metadata can remain quadratic. Integral-image rectangles are still accumulated independently. |
+| Prefix/integration | Fixed tasks group selected tiles by non-scan coordinates and read their bounding source prefix. Exact carry is preserved before selected writes are rounded. Integral images reuse exact per-column rectangle carry; zero-only tasks need no payload reads or scratch. |
 | Curves, LUT1D and inverse | Accelerated curve candidates require uniquely rounded Float32 enclosures to preserve monotonicity; Float64 uses exact formulas. Exact cross products reduce collinear PCHIP stencils to linear formulas. Float32 inverse uses bracketed refinement, then strict fallback. General nonlinear Float64 inverse retains exact lattice refinement. |
-| Uniform lowpass | Accounted per-continuation coefficient-enclosure reuse, bounded full convolution/normalization and strict fallback. Fragment and per-observation certificate work remains. |
-| Matrix | complete-input callback with complete input/output and fixed block64 workspace; Apple Float32 selectable Accelerate DGEMM/direct SME FP64/scalar candidates, unique-RN32 certification and exact replay. Float64 retains exact arithmetic; all three candidate implementations are retained for comparison. See NUM-14 for configuration and resource boundaries. |
-| Other families | Shared arithmetic improvements apply where called. Nonuniform lowpass retains strict directed integration; LUT3D/parametric formulas retain exact construction; mix retains staged per-observation source selection. No private worker pool or general reduction/2D-scan rewrite is implemented. |
+| Uniform lowpass | Each fixed output-tile task reuses coefficient enclosures in private preallocated scratch, evaluates the full supported convolution/normalization and uses strict refinement when the final candidate is unresolved. |
+| Matrix | Each fixed output-tile task reads matching vectors, selected matrix rows and bias channels and uses a private block64 workspace. Apple Float32 selects Accelerate DGEMM/direct SME FP64/scalar candidates with unique-RN32 refinement and exact replay. Float64 retains exact arithmetic; all three candidate implementations remain available for comparison. See NUM-14 for configuration and resource boundaries. |
+| Other families | Shared arithmetic improvements apply within fixed tasks. Nonuniform lowpass retains directed integration; LUT3D/parametric formulas retain exact construction; mix declares all fixed operand tile dependencies while preserving endpoint bit copies. Operations use the executor worker pool and their documented task scratch. |
 
 ### Current validation
 
@@ -152,8 +152,9 @@ Strict acceptance uses bitwise comparisons; accelerated acceptance checks final
 FP32-scaled error directly, including Float64 error. Numerical checks do not
 establish a performance result.
 
-Temporary public checks should cover complete-input/ROI, partitions and tails; negative/unaligned/zero
-strides; caller fenv; cache changes; typed/upstream failures; resource limits,
+Temporary public checks should cover full/partial/empty tile selections,
+partitions and tails; negative/unaligned/zero strides; caller fenv; compatible
+binding replacement and independent Runs; typed/upstream failures; resource limits,
 cancellation and returned/unpublished owner lifetime. Include
 neighboring PCHIP queries, exact collinearity versus underflowed slopes,
 non-last-axis/disjoint sort lines and upper-edge smoothstep. These cases do not constitute exhaustive parameter/platform or all-input

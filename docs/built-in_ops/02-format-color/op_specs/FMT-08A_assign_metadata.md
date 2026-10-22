@@ -32,7 +32,7 @@ single call can change model/space and remove obsolete fields without producing
 an invalid intermediate description. Unknown field names are errors.
 
 The resulting description must be structurally self-consistent and fit
-`descriptor`, even if the samples it will later describe would fail its claimed
+`descriptor`, even if the samples it will later describe violate its claimed
 numerical meaning. A complete color group needs its required fields/references,
 while independent component roles/units are allowed without a complete group. A
 canonical image description remains straight with internal alpha. A description
@@ -59,9 +59,9 @@ returns an empty description.
   valid primary definition without changing other applicable fields. Require a
   changed result, an unchanged source description, and no sample access.
 - A component description assigning a coverage role is valid for a tensor whose
-  samples contain 1.6; `edit_description` never reads samples. A later coverage
-  consumer given this description must reject that sample when it uses the [0,1]
-  invariant.
+  samples contain 1.6; `edit_description` never reads samples. Supplying that
+  sample to a consumer requiring coverage in [0,1] violates the caller premise.
+  The consumer has no required sample-validation or diagnostic behavior.
 - Atomically replace a complete RGB group with a complete Lab group description
   and remove obsolete dependent fields explicitly. An incomplete requested Lab
   group fails and cascade cannot erase it to manufacture success.

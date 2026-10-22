@@ -42,12 +42,14 @@ The certificate must establish the four-step Float32 contract for the actual
 coefficients and FMA graph. Recreate this check when modifying either; a sampled
 accuracy test or an upstream error comment cannot replace it.
 
-The Result computation phase establishes nearest/gradual floating mode on its
-CPU worker and restores that worker's prior environment on exit. The caller
-thread's floating-point environment is checked separately around `execute`.
+Each fixed output-tile invocation establishes nearest/gradual floating mode on
+its CPU worker and restores that worker's prior environment on exit. Public
+checks also verify the caller thread's environment around submit/join.
 
-Per-lane indexing and mathematical work are still charged; checks are batched
-in groups of at most 64. Fallback owns its own admission/refinement charge,
-without double charging. Cancellation and failed work/capacity admission never
-publish a partial result. The operation executes as a complete-input Result computation
-and retains source/build cache identity.
+The invocation gathers and evaluates at most 64 samples per batch, querying
+cancellation between batches and within exact refinement. It borrows admitted
+`PointMathScratch<CertifiedMath>` and writes an independent preallocated output
+tile. ABI 8 exposes no per-value work counter or completed-result cache.
+Required failures prevent successful call retirement; previously retired Results
+retain their owners. Source/build identity identifies the numerical implementation
+and immutable preparation. See [fixed mathematical execution](point-math-execution.md).

@@ -57,9 +57,11 @@ coverage encoding in UInt8 generates 0. No encoding is guessed from a color
 channel or from the image's model name.
 
 Resolve the opaque code using exact descriptor arithmetic before generating
-pixels. After applying explicit/default selection, an unresolvable, noninvertible
-or ambiguous encoding, or the absence of a legal exactly representable
-coverage-one code, fails InvalidArgument/InvalidDomain.
+pixels. Encoding syntax and structural ambiguity are checked during authoring.
+The caller guarantees an invertible selected encoding with one legal exactly
+representable coverage-one code in the output dtype; these numeric premises
+are unchecked even though the descriptor is static. Exact-arithmetic capacity
+exhaustion remains an operational ResourceExhausted failure.
 Do not round to a neighboring code, pass Int64 maximum through Float64 or
 replace missing alpha with the dtype maximum despite an explicit encoding.
 The caller supplies the selected decoder and coverage interpretation to any later consumer; the output carries no description.
@@ -118,10 +120,12 @@ re-encode an existing alpha, including a NaN or out-of-range actual sample.
 Verify that opaque requires no image sample reads and that an existing but
 unproduced alpha is not replaced by an opaque code. Compare whole/disjoint/offset
 and cross-tile requests using an independent coordinate enumeration and byte oracle.
-For an invalid encoding fixture, let integer code k in {0,1} decode to 2*k:
-coverage one would require k=0.5, so opaque generation must fail. For a legal-domain
-fixture, let code k in [0,9] decode to k/10: the exact opaque code 10 is excluded,
-so fail without clamping to 9. Check both errors before source sample reads.
+An opaque encoding must represent decoded coverage one exactly within its
+legal stored interval. Integer codes {0,1} decoding to 2*k would require code
+0.5, and codes [0,9] decoding to k/10 would require excluded code 10. Both
+configurations violate unchecked numerical caller premises. Independent oracle
+diagnostics may identify them; production acceptance uses representable opaque
+codes and confirms that no image samples are read.
 
 The conceptual target workflow is a described image -> B -> alpha component
 processing. `format::extract_alpha` now appends the FMT-05B helper composition. Existing alpha

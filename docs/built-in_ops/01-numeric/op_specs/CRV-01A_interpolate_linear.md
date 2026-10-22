@@ -133,7 +133,7 @@ The [family resource contract](CRV-01_interpolate.md#fixed-execution-resources-a
 
 ## Error model
 
-Static parameter errors return `InvalidArgument`; incompatible port metadata returns `TypeMismatch`. Unsupported profiles, resource admission, cancellation, stale sources and required upstream task failures retain their operational categories. Finite-value, ordering, reject-domain and output-representability requirements are unchecked caller preconditions. Internal exact-arithmetic capacity and zero-denominator checks protect the bounded arithmetic implementation. Failed calls publish no partial successful Result.
+Static parameter errors return `InvalidArgument`; incompatible port metadata returns `TypeMismatch`. Unsupported profiles, resource admission, cancellation, stale sources and required upstream task failures retain their operational categories. Finite-value, ordering, reject-domain and output-representability requirements are unchecked caller preconditions. Internal exact-arithmetic capacity limits protect bounded storage; nonzero mathematical denominators follow from caller premises. Failed calls publish no partial successful Result.
 
 ## Acceptance requirements
 
@@ -152,7 +152,7 @@ irregular-spacing fixture [3,1,3] and the three domain-policy outcomes, plus:
   An interpolated/extrapolated query uses both endpoints. Verify that Plan reads contain all x, selected y columns and the selected query range, including source-grid tile rounding.
 - Constant -0, mixed signed-zero endpoints, zero cancellation and signed underflow;
   query repetitions/order, K=2 and size limits, dtype mixing and length errors.
-- Read witnesses, query/x/y invalidation, source strides, concurrent Runs and preparation reuse,
+- Fixed query/x/y read closure, compatible rebinding, source strides, concurrent Runs and preparation reuse,
   low work/capacity, cancellation, and owner lifetime after context teardown.
 
 Numerical precision, exact dependency support and resource behavior are separate

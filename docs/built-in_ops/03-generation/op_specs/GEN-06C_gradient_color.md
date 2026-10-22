@@ -66,11 +66,12 @@ Finite ordered stops, consumed queries, selected model-valid colors and represen
 
 ## Dependencies, resources and failures
 
-Execution rule: **Regional**. Compute requested output coordinates only. Read
-corresponding query/sample inputs and the controls required by the mathematics. Complete control reads do not imply runtime payload validation. Full
-shared-control/topology/resource changes conservatively invalidate dependent output;
-sample changes follow the actual dependency map. Empty requests perform static preflight
-without payload reads or advancing a random sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
+Execution support: **Regional**. Lower each selected complete output tile to
+fixed tasks with explicit query/sample and control-member tile reads. Close each
+read on its source grid; payload validity over the consumed support is a caller
+premise. Empty output selection performs static preparation without payload tasks.
+Shared computation uses explicit task dependencies and private intermediate
+Results under GEN-common.
 
 Regional query computation retains each composed producer's fixed-task dependency rules. Current CRV-06 reads the selected query tiles and conservatively declares complete stops/colors/p/q tile closures because row selection depends on payload values. Full declared reads do not imply numerical inspection of unselected rows. Empty requests retain static schema/parameter/resource checks and emit no CRV payload task.
 
@@ -80,8 +81,8 @@ Preserve static schema/parameter/resource failures and operational capacity, can
 
 Transparent red to opaque blue midpoint is blue with alpha 0.5. Cover native Lab/OKLab units, multi-turn hue, direct/identical-row zero signs and valid all-zero alpha-underflow canonicalization. An oracle may reject probes outside the CRV caller premises to delimit its reference domain; that rejection is not an expected runtime failure. Static description/resource errors and operational failures retain their separate acceptance cases.
 
-Check requested-region/full-output equivalence, actual read/work bounds, legal
-strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
+Check selected-tile/full-output equivalence, source-grid read closure, legal
+strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
 not runtime completion. No unverified GPU or third-party bit

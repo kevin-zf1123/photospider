@@ -31,8 +31,8 @@ String grammar is `dy:dx;dy:dx;...`, each integer canonical ASCII (0 or optional
 minus with no leading zeros, no +, no -0). Pairs are unique, lexicographically
 sorted; (0,0) is present and B=-B. Reject empty/noncanonical/asymmetric sets.
 Factories may canonicalize before serialization; direct nodes must be canonical.
-The array ABI is not extended for this static encoding. Coordinate/demand
-arithmetic is checked.
+The array ABI is not extended for this static encoding. Static support/capacity arithmetic is checked during preparation; runtime
+coordinate representability is an unchecked premise.
 
 B_square={(dy,dx):max(abs(dy),abs(dx))<=r}; B_diamond uses abs(dy)+abs(dx)<=r;
 B_disk uses exact integer dy²+dx²<=r². These are pixel-grid footprints, NOT
@@ -40,9 +40,9 @@ physical-space isotropic disks under non-square spacing; MASK-07A owns that.
 Dilation(p)=max_{b in B} extended_input(p+b); erosion uses min. Outside D is
 +0. B is symmetric, so reflection is immaterial. At equal extrema select the
 center when tied, otherwise the lexicographically first offset; selected bits
-are copied exactly, including -0. The sample domain is validated for the entire
-required footprint even when an early extremum is 0 or 1. Radius zero is an
-identity with required local validation, not a validation bypass.
+are copied exactly, including -0. The complete footprint is the declared
+mathematical support; finite Coverage/Binary values are caller premises, with
+no scan on early extrema or identity cases. Radius zero copies the input bits.
 
 Reference time O(|Q|*|B|), scratch O(|B|) for admitted offsets or bounded
 iteration. A rectangular separable min/max algorithm can use O(N) work

@@ -71,7 +71,7 @@ retirement, cancellation and owner lifetime follow the fixed executor contract.
 
 1. UInt8 [0,128,255] -> Float32 with defaults gives
    [0,RN32(128/255),1]. With rescale=false, it gives [0,128,255].
-   These modes must have different explicit parameters and cache identity.
+   These modes must have different explicit parameters and compiled invocation identity.
 2. Int8 [-128,-1,0,127] -> UInt8 with defaults gives [0,127,128,255]
    exactly. Int8 zero -> Float32 gives RN32(128/255), not zero.
 3. Int64 [minimum,-1,0,maximum] -> UInt8 defaults gives [0,127,128,255].

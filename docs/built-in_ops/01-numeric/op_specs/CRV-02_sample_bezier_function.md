@@ -97,7 +97,7 @@ Strict finds the unique mathematical root of Bx(t)=q and correctly rounds By(t) 
 
 The accelerated profiles follow the [final FP32 bound](NUM_accelerated_contract.md) relative to that exact reference, including exact endpoints, zero signs and range/fallback conditions. Current profiles use the same exact inverse/evaluation algorithm with scalar/NEON/AVX2 integer helpers. An x residual alone cannot establish y rounding near a stationary derivative. Unresolved y rounding must fail operationally rather than publish an unproved approximation.
 
-The implementation bisects a dyadic root bracket, bounds the entire ordinate through interval Horner and resolves common zeros and output midpoint ties with exact polynomial decisions. Refinement is bounded at 8192 fractional bits. Exact arena capacity and divisor guards remain; finite capacity does not promise success for every valid algebraic input. No per-value solver/fallback counters are exposed. Unsupported CPU profiles fail BackendUnavailable; profile names do not imply GPU execution.
+The implementation bisects a dyadic root bracket, bounds the entire ordinate through interval Horner and resolves common zeros and output midpoint ties with exact polynomial decisions. Refinement is bounded at 8192 fractional bits. Exact arena capacity limits and root-bracket refinement remain; finite capacity does not promise success for every valid algebraic input. No per-value solver/fallback counters are exposed. Unsupported CPU profiles fail BackendUnavailable; profile names do not imply GPU execution.
 
 ## Fixed execution and dependency projection
 

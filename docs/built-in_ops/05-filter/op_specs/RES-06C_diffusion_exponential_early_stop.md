@@ -33,7 +33,7 @@ Use the shared [FILTER iterative contract](FILTER_iterative_contract.md) for sch
 
 ## Errors and resource limits
 
-Parameter/control-model domains remain member-specific. Ordinary numeric propagation follows the corresponding NUM operation; a non-finite value needed by a stopping check makes that check inconclusive and it does not request convergence. Invalid parameters, resource exhaustion, cancellation, upstream failures and arithmetic errors retain their own failure behavior. Charge retained check states and concurrent work to the execution budget. Do not silently change algorithm, precision, or iteration limit.
+Parameter/control-model domains remain member-specific. Ordinary numeric propagation follows the corresponding NUM operation; a non-finite value needed by a stopping check makes that check inconclusive and it does not request convergence. Static structural and parameter-type errors retain pre-execution diagnostics. Numerical/model premises are caller obligations; resource exhaustion, cancellation, backend/upstream failures and explicit valid-input no-solution outcomes retain their defined operational behavior. Charge retained check states and concurrent work to the execution budget. Do not silently change algorithm, precision, or iteration limit.
 
 ## Acceptance
 

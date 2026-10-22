@@ -14,9 +14,9 @@ Inherit [GEN common](GEN_common_contract.md). The core algorithm is Philox4x64-1
 
 ## Current implementation scope
 
-GEN-01..04, NOI-01..04, PTH-01..02 and PTH-09A are implemented.
-Other schemas and members in this shared contract retain their own implementation
-status.
+The Philox core and addressed mappings are used by implemented NOI-01A, NOI-02A,
+NOI-04B and the NOI-06 gradient basis. Other GEN-08 and NOI-05/08/09/10 mappings
+remain specified targets; their member specifications state implementation status.
 
 ## Address range and identity
 
@@ -97,7 +97,7 @@ Rank midpoint mapping has its own specified open-range rule.
 Validate the official ten-round algorithm/constants using independent 4x64 known
 answers, then separately validate packing injectivity, seed/key mapping and float grids.
 Test signed coordinate limits, all 32-bit frame/draw/stream bits, channel/domain
-separation within the supported domain, nonzero origin, ROI and order invariance. Reference-tool rejection of out-of-domain probes is not a runtime requirement. Cache
+separation within the supported domain, nonzero origin, ROI and order invariance. Reference-tool rejection of out-of-domain probes is not a runtime requirement. Operation/static specialization
 identity includes core/layout/grid/member/resource versions and all relevant parameters;
 seed alone is insufficient. The old4x32 sequence is not a compatibility reference.
 Passing core KATs and finite mapping tests does not prove all-domain numerical admission or runtime delivery.

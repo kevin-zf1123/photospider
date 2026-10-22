@@ -43,22 +43,24 @@ A inputs original,processed Float32/64[C,H,W] with identical dtype/shape and
 compatible applicable spatial/description interpretation, plus mask Coverage[H,W]
 with the same floating dtype. Required channels String selects unique indices;
 unselected channels are bit copies of original, with no mask/processed reads.
-For every selected c,p, read and validate m and both numeric operands, including
+For every selected c,p, consume m and both numeric operands, including
 m=0 and m=1. Both operands must be finite. Return
 RN_T((1-m)*original+m*processed) as the complete expression at every weight.
-There are no endpoint copy or zero-weight input-omission branches. NaN/Inf in
-either selected operand fails even when its coefficient is zero. Arithmetic zero
+There are no endpoint copy or zero-weight input-omission branches. Both operands
+are finite caller premises even when their coefficient is zero; no scan or
+InvalidDomain diagnostic is promised. Arithmetic zero
 uses the NUM arithmetic-zero rule; no raw signed-zero or payload copy is promised.
 For semantic image mixing,
 author explicit FMT conversion and choose channels/alpha policy; averaging straight
-RGBA coordinates is not a premultiplied Porter-Duff blend. Applicable metadata
-may be retained without inherited sample-validity guarantees, as FMT specifies.
+RGBA coordinates is not a premultiplied Porter-Duff blend. The caller supplies
+any interpretation to later consumers explicitly; outputs carry no metadata or
+sample-validity certificate.
 
 B inputs image,mask with the same shapes/dtypes as A and channels selector.
 Unselected channels copy image without mask reads. Every selected output reads
-and validates both mask and image, including m=0 and m=1, and returns RN_T(m*image).
+both mask and image, including m=0 and m=1, and returns RN_T(m*image).
 Selected image samples must be finite at every weight. A zero coefficient does
-not suppress invalid input or its required upstream observation. This is numeric
+not waive the finite-input premise or the declared upstream dependency. This is numeric
 multiplication under the NUM rounding rules, not general alpha compositing.
 
 C inputs image:Field[C,H,W], mask:Coverage[H,W], same float dtype; output
@@ -66,38 +68,37 @@ values:Field[C,H,W] and valid:Binary[H,W]. Required footprint statics from MASK-
 empty_policy zero|error. For each p use S=(p+B) intersect D, with no virtual
 outside samples. M=sum_{q in S}mask(q). If M>0 return
 RN_T(sum_{q in S} mask(q)*image(c,q)/M), valid=1.
-If M=0, zero policy gives +0 in every requested value and valid=0; error policy
-fails requested values but the independently requested valid flag still reports0.
-This difference is per-output semantics, subject to host publication granularity.
-For requested values, every image sample in S for the requested channel is
-Data/finite Validation, including zero-weight samples and the M=0 case. Every
-mask sample in S is Control/Validation. Validate the full support and construct
-the weighted numerator before applying empty_policy. Requesting valid alone
-requires the mask support but no image payload, since it requests no mean value.
-The denominator is the exact sum of all weights. Zero-weight finite samples
-contribute zero, but NaN/Inf at those samples fails a requested mean value.
+If M=0, zero policy gives +0 in each selected value and valid=0. The explicit
+error policy fails evaluation when values are selected. Selecting only valid
+computes 0 without a mean failure; selecting values and valid in the same call
+shares that call's failure and publishes neither. For selected values, every
+image sample in S for that channel is Data, including zero weights and M=0.
+Every mask sample in S is Control. Construct the full weighted numerator before
+applying empty_policy. Selecting valid alone needs mask support and no image
+payload. The denominator is the exact weight sum. Finite image samples at every
+weight and Coverage masks are unchecked premises, without a validation scan.
+
 A requires same-position original, processed and mask; C has the declared halo.
 Reference O(Q*C*|B|), exact rational sums; O(|B|) mask/accumulator state plus
 budgeted limbs. A/B/D are O(Q) selected scalar work, constant scratch.
 
-D input image Float32/64[C,H,W] with straight color description and an INTERNAL
-alpha channel, plus same-dtype Coverage[H,W]. Required alpha_channel Int64 index
-must match effective description (respect|override following FMT). No separate
-external alpha attachment is created. Color/AOV outputs copy exactly and read
-only their original source component. Requested alpha reads/validates original
-alpha and mask as finite [0,1], returns RN_T(alpha*mask); mask=1 selects original
-alpha bits. Do not multiply straight color channels, do not unassociate/reassociate,
-do not infer alpha from C=4, and do not import old external-association metadata.
-The output retains the same straight group/alpha role and establishes validity
-only for actually checked alpha observations. A color-only request does not
-trigger hidden alpha/mask validation.
+D input image Float32/64[C,H,W] has a caller-supplied straight-color
+`input_description` with an internal alpha channel, plus same-dtype Coverage[H,W].
+Required alpha_channel Int64 must match the static description. No external alpha
+attachment is created. Color/AOV outputs copy their source components. Selected
+alpha consumes original alpha and mask under the finite [0,1] caller premise,
+returns RN_T(alpha*mask), and copies alpha bits for mask=1. Straight colors are
+not multiplied or unassociated/reassociated. Alpha is not inferred from C=4.
+The caller supplies the output interpretation explicitly to the next consumer;
+there is no attached description or sample-validity certificate. A color-only
+selection needs no alpha/mask computation or validation scan.
 
-For local members Data/Control/Validation are the sets above; descriptor
-inference checks even unused ports. Dirty mapping is their transpose. A/B
-selected-channel support is independent of mask values. C requested-value
-support is the full in-canvas footprint. Templates must preserve the specified
-NUM rounding boundary; separately rounded multiply/add passes are not implied
-by evaluation of the complete mathematical expression.
+For local members, the sets above describe mathematical Data/Control support;
+preparation checks static schemas even for unused ports. Lower complete selected
+output tiles to fixed input-tile reads. A/B selected-channel support is independent
+of weights, and C value support includes its entire in-canvas footprint. Templates
+preserve NUM rounding boundaries; the complete expression does not imply
+separately rounded multiply/add passes.
 
 ## Sources, independent evidence and review boundary
 

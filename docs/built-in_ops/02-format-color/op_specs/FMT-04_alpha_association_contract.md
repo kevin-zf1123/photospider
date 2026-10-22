@@ -34,9 +34,11 @@ produces explicitly described premultiplied numeric payloads for export or an
 external interface; semantic B converts explicitly described premultiplied
 payloads back to straight. A boundary payload is a generic tensor with a source
 or target representation description, not a second canonical image type.
-A normal image consumer must reject a premultiplied boundary interpretation
-unless its contract explicitly performs conversion or the caller explicitly
-reinterprets the numeric values without claiming preservation of color.
+The caller converts premultiplied boundary samples before supplying them to a
+consumer requiring straight colors, or explicitly reinterprets the numbers
+without claiming preservation of color. Results carry no attached representation
+label. A consumer may reject unsupported static interpretation choices; it does
+not infer or validate association from the payload.
 
 Both semantic adapters require alpha in the same tensor and preserve shape,
 dtype, channel locations and alpha bits. Independent planes/scalars are first

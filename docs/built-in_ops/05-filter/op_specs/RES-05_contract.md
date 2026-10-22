@@ -38,11 +38,11 @@ Initialize `u_0=f`, `ubar_0=f`, and `p_0=(0,0)`. A complete Jacobi iteration is 
 
 ## Numeric and execution obligations
 
-Ordinary arithmetic follows the corresponding NUM operation for NaN, Inf, floating overflow, signed zero, payload, rounding and precision. A member still validates its actual parameter, control-model and solver domains. Exact bits, gradual underflow, copy rules and discrete branches follow NUM; accelerated error budgets are not accumulated per tap, axis, stage or iteration.
+Ordinary arithmetic follows the corresponding NUM operation for NaN, Inf, floating overflow, signed zero, payload, rounding and precision. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Exact bits, gradual underflow, copy rules and discrete branches follow NUM; accelerated error budgets are not accumulated per tap, axis, stage or iteration.
 
 The member’s support is normative. A halo does not imply independent evaluation on arbitrary clipped ROIs, and paging does not make a global dependency cancellable. Preserve the declared round stages, global dependencies and iterative state. Independently requested outputs must not cause hidden reads of unrequested payloads.
 
-See [FILTER color composition](FILTER_color_composition.md), [boundary contract](FILTER_boundary_contract.md), [collections contract](FILTER_collections_contract.md), and [numeric reference](FILTER_numeric_reference.md). Shape inference uses descriptors; actual data/control/validation demand and dirty propagation follow each member.
+See [FILTER color composition](FILTER_color_composition.md), [boundary contract](FILTER_boundary_contract.md), [collections contract](FILTER_collections_contract.md), and [numeric reference](FILTER_numeric_reference.md). Shape inference uses descriptors; each member defines mathematical data/control support and fixed compiled reads.
 
 ## Acceptance
 

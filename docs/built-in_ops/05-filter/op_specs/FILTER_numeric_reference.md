@@ -47,7 +47,8 @@ A sum/reduction visits its contributing terms in logical row-major index order;
 within a term use written operand order. The first input NaN to that reduction
 wins over a newly generated invalid-arithmetic NaN. A member defining another
 logical order must say so. Repeated boundary taps retain multiplicity and tap order.
-Do not skip required reads or validation after observing a NaN.
+NaN propagation preserves the specified operand participation and ordering; it
+creates no numerical-input validation pass.
 
 Zero kernel taps explicitly excluded by a member have no source arithmetic. Other
 zeros are operands: 0*Inf generates NaN; Inf-Inf of equal sign and Inf/Inf generate
@@ -67,9 +68,10 @@ For sums use NUM reduction zero rules; for binary operations use NUM signed-zero
 rules. Finite exact cancellation yields +0 except explicitly inherited all-negative
 zero/selection cases. Nonzero underflow preserves its mathematical sign.
 
-Explicit parameter/control domains remain enforced (for example finite q in [0,1],
-coverage, positive finite spacing). Finite-only exceptions require an actual model
-or corresponding NUM rule, not a category-wide convenience check.
+Explicit parameter/control domains are unchecked caller premises, including
+finite q in [0,1], coverage and positive finite spacing. Finite-only restrictions
+require an actual mathematical model or corresponding NUM rule. No runtime scan
+is added to enforce those premises.
 
 ## Accelerated acceptance
 

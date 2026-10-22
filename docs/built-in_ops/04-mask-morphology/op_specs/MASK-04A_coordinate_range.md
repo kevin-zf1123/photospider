@@ -24,7 +24,7 @@ the proposed name is not a current registry entry or a compatibility alias.
 
 image: Field[C,H,W], target: Float64[K], scales: Float64[K] -> mask: Coverage[H,W]
 
-Required static parameters: channels; interpretation and conditional source_description; inner,outer; curve, as family. Values and controls use the stated
+Required static parameters: channels; optional input_description; inner,outer; curve, as family. Values and controls use the stated
 port order. Infer ordinary output dimensions from descriptors/statics only;
 Static Tensor capacities, payload counts and source-association rules, where relevant, are those of the family.
 No hidden default, conversion, color/alpha inference or optional port is added.
@@ -33,21 +33,23 @@ No hidden default, conversion, color/alpha inference or optional port is added.
 
 Use scaled Euclidean distance and the exact family radial ramp.
 
-E image selected components; complete-group Validation only if semantic. complete-input target/scales control arrays for any nonempty Q. Empty Q has no runtime sample/control/validation reads. Descriptor
-checks still run. The family defines validation closure, border extension,
-stage rounding, dynamic witnesses and the forward dirty relation. A bounding
-rectangle may not replace a smaller declared sparse support.
+E image selected components; no complete-group payload scan. complete-input target/scales control arrays for any nonempty Q. Empty Q adds no runtime payload work; static schema checks still apply.
+The family defines mathematical Data/Control support, border extension and
+rounding stages. Lower the selected complete output tiles to fixed input-tile
+reads, using a finite conservative superset for runtime-dependent addressing.
+There is no payload Validation read set or runtime dependency discovery.
 
 ## Implementation, resource and failure obligations
 
 Use the family reference algorithm and its stated work/scratch bounds. Strict
 CPU is the initial target; no implicit accelerated/GPU/third-party fallback is
 registered. Exact choices/copies stay exact; arithmetic uses the inherited
-rounding boundary and finite-domain error rules. Account for output, scratch,
+rounding boundary and unchecked numerical premises. Account for output, scratch,
 exact state, retained source owners and all simultaneous intermediates. Poll
-inside long loops/refinement. complete-input or CompleteBundle scopes do not expose
-partially converged or partially associated results. Preserve the host's
-upstream/cancellation/resource scope and immutable owner lifetime.
+inside long loops/refinement. Selected outputs of one call share its publication
+outcome; failure exposes no partial call Result. Already retired call exports
+remain valid. Preserve host upstream/cancellation/resource status and immutable
+owner lifetime.
 
 ## Independent acceptance and conceptual workflow
 
@@ -56,11 +58,13 @@ single coordinate image=[0,.5,1], target=[0], scales=[1], inner=0,outer=1,linear
 Independent reference entry: `coordinate_range` in
 [`mask04/reference.py`](../../../../oracle/ops/mask_morphology/mask04/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
-do not exercise kernel registration, resource accounting or exact Region reads.
+do not exercise kernel registration, resource accounting or compiled tile reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),
-then add the relevant common ROI/disjoint support, special-value, invalid
-parameter, dtype, association, cancellation and owner-lifetime checks before
-implementation acceptance.
+then add the relevant common fixed-tile support, valid special-value, static
+structural-parameter, dtype, correctly paired association, cancellation and
+owner-lifetime checks before implementation acceptance. Invalid payload or
+numerical-premise fixtures diagnose oracle requests only; they do not require
+production rejection.
 
 Conceptual DAG: explicit input preparation -> this member -> an explicit
 mask/measurement/image consumer appropriate to the listed output. A real

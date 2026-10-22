@@ -51,12 +51,13 @@ or curved gaps need other members. maximum_gap=0 is binary identity.
 A can be local: for each output pixel inspect horizontal/vertical offsets up
 to maximum_gap+1; exact admitted support is the union of these two axis stencils,
 clipped to D, not the whole square. Reference O(N*(gap+1)); dense run enumeration
-O(N), with exact dirty support still required. Huge statics need checked bounds.
+O(N), with its declared support lowered to fixed input-tile reads. Static
+support and capacity sizes use checked arithmetic.
 
 B: fill_axis_gaps takes barrier,seeds (Binary HW), applies A, then MASK-11C with
 required fill_connectivity 4|8. All four Binary outputs use the seeds floating dtype and input spatial basis.
-Ignore seeds on the ORIGINAL barrier: S = seeds AND NOT original. Validate
-all Binary samples before filtering. After preparing the base closure T, define
+Ignore seeds on the ORIGINAL barrier: S = seeds AND NOT original. Both inputs
+satisfy the unchecked Binary premise. After preparing the base closure T, define
 the effective barrier E = original OR (T AND NOT S).
 This removes newly added barrier pixels exactly at seed locations, simultaneously
 for all seeds; it never clears original barriers or an entire adjacent gap.
@@ -92,8 +93,8 @@ or a new primitive registration. The authoring templates expose these named
 values and preserve their explicit dependencies and host publication rules.
 Diagnostic-only requests do not require flood; no hidden full-image count or
 coordinate-list reduction is included. Consumers can explicitly reduce a mask
-if they need counts. Any nonempty output conservatively validates both complete
-Binary inputs; no diagnostic output bypasses input-domain validation.
+if they need counts. Any nonempty output declares complete-input support for
+both Binary inputs; the compiler emits those fixed reads without domain scans.
 
 B/C declare complete-input support for all outputs; fill requires global flood, while
 barrier preparation and diagnostic formulas do not themselves require flood. Reference scratch O(N) temporary, queue, visited; B work O(N*(gap+1)),

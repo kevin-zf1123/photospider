@@ -54,8 +54,9 @@ consumes all three source components at the same point, including no-op cases.
   config_default is explicit, even if the config has no named default and the
   engine selects its first eligible view transform.
 - isData is rejected in semantic mode and exercised with both data_bypass values
-  in raw. NaN in a source peer fails a requested color; NaN in bypass alpha does
-  not. Sparse/batched observations preserve the normative point result.
+  in raw. Participating source colors satisfy the finite caller premise; a NaN
+  peer has no required diagnostic. Bypass alpha preserves its NaN bits.
+  Sparse/batched output tiles preserve the normative point result.
 
 Public resource helpers, executable operation usage, independent oracle commands
 and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).

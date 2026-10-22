@@ -149,14 +149,15 @@ PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> set_alpha(
  * Generated primitives verify assertions at compile time, including forward
  * producer references. No sample reads occur. Existing alpha/surviving
  * channels are exact same-dtype copies; missing-alpha opaque constants are
- * solved in exact descriptor arithmetic. Both extraction branches use fixed
- * CPU output tiles; auto/materialize copy or fill, and nonempty view fails
- * InvalidArgument. The opaque branch uses fixed CPU
- * tasks with schema-only source dependencies and zero scratch. Auto/materialize
- * fill selected output tiles.
- * Empty executes no fill, and retained outputs own their storage independently
- * of the source and execution context. Callers must serialize mutations to the
- * same `WorkflowDocument`.
+ * solved in exact descriptor arithmetic. The encoding must represent coverage
+ * one exactly within its stored domain as an unchecked numerical caller
+ * premise. Both extraction branches use fixed CPU output tiles;
+ * auto/materialize copy or fill, and nonempty view fails InvalidArgument. The
+ * opaque branch uses fixed CPU tasks with schema-only source dependencies and
+ * zero scratch. Auto/materialize fill selected output tiles. Empty executes no
+ * fill, and retained outputs own their storage independently of the source and
+ * execution context. Callers must serialize mutations to the same
+ * `WorkflowDocument`.
  */
 PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> extract_alpha(
     WorkflowDocument& document, WorkflowInput input,

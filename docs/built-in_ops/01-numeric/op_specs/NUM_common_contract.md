@@ -77,8 +77,9 @@ accelerated, and x86-64 CPU accelerated. No implicit mode dispatcher, unsuffixed
 alias, GPU path or new runtime dtype is defined. Strict is portable across the
 CPU targets actually supported by a conforming build. Accelerated keys require
 their named CPU target and a verified ISA path; an incompatible target fails
-BackendUnavailable. Selection and diagnostics must record the concrete library,
-revision, build options, OS/architecture and ISA path. Using Clang alone selects
+BackendUnavailable. Build and validation records identify the concrete library,
+revision, build options, OS/architecture and ISA path. Ordinary invocation does
+not promise this information in each failure message. Using Clang alone selects
 none of these mathematical guarantees or library dependencies.
 
 The [accelerated contract](NUM_accelerated_contract.md) defines final FP32-scaled
@@ -87,8 +88,9 @@ indices and selected endpoints remain exact. Strict formulas retain their
 specified rounding boundaries. Finite
 rounding defaults to nearest/ties-to-even with gradual underflow. Preserve the
 caller's floating environment, including prior flags, without global changes.
-When an approximate path needs strict fallback, record actual per-node fallback
-counts and reasons through execution diagnostics, not an invented data output.
+An approximate path may use strict fallback to meet its numerical bound. Fixed
+invocation ABI 8 exposes no per-value or per-node numeric-report callback;
+explicit benchmark or SDK instrumentation is separate from ordinary execution.
 Resource, cancellation and upstream failure must not be hidden by fallback.
 
 ## Interface and descriptor conventions
@@ -150,22 +152,24 @@ a more specific existing Status. Names follow the current
 | Admitted capacity, work or stage exhausted | Admission or execution | ResourceExhausted / CapacityLimit, WorkLimit or StageLimit | Preserve host resource scope |
 | Cancellation, stale input or upstream failure | Respective host phase | Preserve original Status | Preserve original origin, scope and source identity |
 
-Diagnostics identify the operation/output and global coordinate, plus the offending
-port/index/value bits when relevant. Tags such as InvalidBounds or ViewUnavailable
-are bounded human diagnostics, not new FailureReason enumerators or branchable
-API fields. Metadata errors need not fabricate an atom key. Actual operational
-failures retain their existing observation scope; do not add a validation domain
-to revoke completed observations. Invalid dynamic steps, indices, bounds and
-unrepresentable arithmetic results governed by caller premises have no required
-error delivery. Ordinary execute remains fail-fast for actual failures.
+Fixed invocation reports bounded Status messages for actual operational failures.
+ABI 8 does not guarantee per-sample coordinates, operand bits or a numerical
+report stream. Member-specific diagnostics state what they actually provide.
+Invalid dynamic steps, indices, bounds and numerical results governed by caller
+premises have no required error delivery. A task failure establishes a call
+failure cut: earlier calls continue and retire in order, while unsubmitted work
+at or after the cut is skipped and accepted work drains. Run-abort failures
+follow the physical execution contract; neither path returns a successful final
+RET map.
 
-A failed observation publishes no partial Tensor or successful certificate.
-Independently completed observations retain their terminal outcomes. Dense
-results cover requested global coordinates with owned packed fragments. Explicit
-view policies may retain source owners or publish broader valid constant coverage
-only as stated by that operation. Missing coverage is not an implicit zero.
-All backing is immutable, survives context destruction while owners remain, and
-is released at the final owner; unpublished allocations are released on failure.
+Every produced tile owns its independent admitted allocation. Successful task
+completion enables internal dependencies; public Results appear after every
+required task of the call succeeds and the call retires in IR order. A failed
+call publishes no partial successful Result. Results already delivered from
+earlier retired calls remain valid; a failed Run returns no final RET map.
+Member-specific view restrictions follow fixed materialization. Missing coverage
+is not an implicit zero. Immutable output owners survive context destruction;
+unpublished storage is released after accepted work drains.
 
 ## SDK numeric reports
 
@@ -200,7 +204,7 @@ Reserve actual output, scratch, index/limb, metadata and retained-owner capaciti
 before allocation, including old/new growth overlap and simultaneously retained
 source ancestry. Charge structural preparation and each committed computational work/stage unit;
 failure does not refund committed work. A view's small output payload does not
-bound its retained source allocation. Cache-off preserves active ownership.
+bound its retained source allocation. Fixed execution retains active ownership without a payload-cache lifecycle.
 No implicit disk spill, private unbudgeted workers or RSS upper bound is promised.
 Each algorithm's stated cancellation interval also applies inside long exact
 arithmetic, sorting or refinement; a native call must have bounded work or a
@@ -211,7 +215,7 @@ Implementation acceptance supplies its actual target/run command,
 bindings, named outputs and inspected results through Compiler/ExecutionContext.
 Keep a separate independent integer/rational, bit-pattern or directed-precision
 oracle, and compare exact bits or the explicitly allowed ULP rule. Verify required
-reads and dirty support separately from numeric equality. Exercise only the
+fixed tile-read closure separately from numeric equality. Exercise only the
 relevant shape, special-value, layout, lifetime, low-budget and cancellation cases
 listed in the primitive/family contracts.
 

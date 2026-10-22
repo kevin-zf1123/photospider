@@ -67,9 +67,11 @@ fallback method or metadata-only adaptation is permitted.
 2. Verify K_reverse*K=I as rational matrices, but test the floating reverse
    composition against per-node rounded oracles instead of exact round-trip bits.
 3. Bradford with white xy=(0.05,0.05) has a negative first response although
-   the XYZ white is structurally positive. Reject the parameter in semantic/raw
-   mode, even if source and destination whites are equal. Do not substitute
-   XYZ Scaling or epsilon. Method-specific rejection is observable.
+   the XYZ white is structurally positive. This parameter violates the selected
+   method's numerical caller premise in semantic/raw mode, including equal
+   source and destination whites. An independent oracle may diagnose it;
+   production acceptance uses whites with positive responses and never
+   substitutes XYZ Scaling or epsilon.
 4. For valid equal whites, raw source [NaN,-0,1] queried only at the first
    component preserves its exact NaN bits. Semantic request of only the third
    returns 1 when its complete output tile excludes the first component. Including the first component violates the semantic finite-input precondition.

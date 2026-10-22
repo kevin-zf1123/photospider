@@ -34,19 +34,22 @@ Each requested RGB component reads only its corresponding source sample.
 Use the corresponding family section for every branch and rounding boundary.
 There is no spatial halo or data-dependent demand elision. Static admission
 still runs for empty or bypass-only requests. Mapping hidden colors does not read
-alpha. Forward dirty support follows the exact source-to-output relation.
+alpha. Mathematical source support is closed on fixed input tiles; no incremental
+dirty-propagation service is defined.
 
 ## Storage, errors and implementation
 
-Native CPU strict primitive; no acceleration/GPU promise. Inherit planar virtual
-reservations, page preparation, transactional region publication, bounded scratch,
-NUM resource/cancellation and immutable owner lifetimes. A finite-domain error
-has its actual requested observation scope; required upstream failures propagate.
+Native CPU strict primitive; no acceleration/GPU promise. Each selected output
+tile has independent dense storage and preallocated bounded scratch. The call
+publishes after its required tasks succeed and retires in order. Finite-domain
+conditions are unchecked caller premises. Resource, cancellation and required
+upstream failures retain their operational status and drain accepted work;
+already retired Results remain valid while owned.
 No sample-dependent identity branch makes the whole node eligible for view.
 
 ## Independent acceptance and conceptual public workflow
 
-For R=-0.25 and G=NaN, requesting only R returns +0; requesting G fails. Clipping can alter hue and luminance.
+For R=-0.25 and G=NaN, an output tile containing only R returns +0. A retained output tile that consumes G violates the finite caller premise and has no required diagnostic. Clipping can alter hue and luminance.
 
 Also run the family sparse/ROI, dtype, metadata, resource and lifetime cases.
 Conceptual workflow: explicit source decoding/basis conversion -> this member ->

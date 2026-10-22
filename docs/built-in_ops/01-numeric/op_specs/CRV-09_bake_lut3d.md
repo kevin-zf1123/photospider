@@ -107,9 +107,9 @@ the actual numeric range of every axis; no clamp or normalization is applied.
 An independent structured report output is required in addition to table and
 axis. report-only observation triggers the global baking/validation work. An
 error-threshold violation yields a successful report with passed=false while
-table remains gated and fails. Source computation errors, invalid inputs,
-cancellation or insufficient resources make dependent report/table evaluation
-fail. Axis remains
+table remains gated and fails. Actual source computation errors, cancellation
+or insufficient resources make dependent report/table evaluation fail. Invalid
+numerical inputs violate caller premises without a diagnostic guarantee. Axis remains
 independent. Never
 store all per-point results. Process cell centers in logical row-major order,
 then extra points in array order; this defines the first failure independently
@@ -121,7 +121,8 @@ count separately, as do centers which round to repeated coordinates.
 
 All validation points must pass for the current bound snapshot before any table
 observation is published. An exceeded threshold fails the table request with
-diagnostic point coordinates, component, source reference, LUT value and error.
+`LutApproximationToleranceExceeded` and `first_failure_index`. The explicit report
+contains the measured failure input, reference, LUT value and maximum errors.
 The supplied grid shape is fixed; no automatic refinement occurs. Partial table
 requests still require the global quality gate. No failed table is returned as a
 successful result with only a warning report.
@@ -153,8 +154,8 @@ axis; all execution batching must respect the asserted semantics.
 All source calls, grid generation, table conversion and validation share one
 immutable execution binding snapshot, including shared parameters. No mutable
 file, changing profile or new input snapshot may be silently read between grid
-and validation evaluations. A cached report cannot validate a new parameter
-snapshot or a different table dtype/method. A source which violates its pointwise
+and validation evaluations. The report and measured table belong to the same workflow pairing and immutable
+snapshot. No runtime report-cache or association-validation service is implied. A source which violates its pointwise
 assertion has no promised sampling-order-independent bake semantics.
 
 Finite model-valid grid colors, extra points and contributing source colors are caller preconditions for fixed geometry. Converted colors must remain finite and model-valid in their selected dtype. The geometry kernels perform no sample validation or narrowing-overflow diagnostic pass. Validation compares the
@@ -216,7 +217,7 @@ budgeted. Report observations cannot publish an incomplete prefix while later
 validation may alter counts/maxima. A passed report corresponds to the same
 owned bake state/binding provenance as its gated table, not merely equal shapes.
 
-## Demand, dirty propagation, ownership and resources
+## Fixed dependencies, ownership and resources
 
 An axis geometry task reads the selected axis cells, closed on the input grid, and has no source/extra-point payload support. report or nonempty table demand has global support: axis,
 all generated grid inputs, the complete source outputs for grid/validation
@@ -225,9 +226,9 @@ execution. Retain source typed/control/validation support, including exceptions
 to local reads required by the source contract. Calling a source pointwise does
 not erase its metadata/resource dependencies.
 
-Any participating axis, extra point or shared source dependency change invalidates
-the global report and every gated table observation. A source graph/descriptor
-change requires the corresponding authoring/compilation update. table and report
+A new Run using changed axis, extra-point or shared source inputs computes a new
+report and gated table. A source graph/descriptor change requires the corresponding
+authoring/compilation update; fixed execution has no incremental dirty invalidation. table and report
 may share physical bake work, but separate and joint observations have the same
 meaning. Table backing is immutable, with requested fragments mapped to global
 [i0,i1,i2,c] origins. axis is owned immutable Float64 data. ResultRef/descriptor
@@ -278,7 +279,7 @@ Validate exact report maxima/tie order, both methods/dtypes, mixed source precis
 explicit source casts, hue multi-turn values, XYZ white scale, shared parameter
 changes, rounded centers, extra-point bounds/count, and caller-asserted source
 limitations. Test report-only/table-only/axis-only and joint requests, all-grid
-source failures outside requested table fragments, cache-off, cancellation,
+source failures outside requested table fragments, independent Runs, cancellation,
 budget failure, strides and result/data lifetime. Verify finite sampled tests
 never become a CertifiedBound claim. Build a temporary public workflow from the template and inspect independently
 expected outputs. This specification remains Proposed.

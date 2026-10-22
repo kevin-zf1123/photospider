@@ -65,7 +65,7 @@ Reject missing ports, rank/dtype/length mismatch and shape/product violations at
 compile/preflight. Output metadata remains independent of numeric query order
 and layout choices. Scalar and vector forms are not implicitly interconverted.
 
-## Mapping, invalidation and ownership
+## Fixed mapping and ownership
 
 Execution, physical read closure, caller preconditions, resource admission and ownership follow the [family fixed execution contract](CRV-01_interpolate.md#fixed-execution-resources-and-caller-preconditions). Each selected output tile reads all x, all y rows for its selected columns, and its query row range through the corresponding input grids. Only the tile's global output coordinates are evaluated. Mathematical stencil selection remains defined by this member specification.
 

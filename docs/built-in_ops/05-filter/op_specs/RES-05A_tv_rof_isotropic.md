@@ -21,7 +21,7 @@ Inherit the [RES-05 family contract](RES-05_contract.md), [FILTER common contrac
 
 ## Ports and shape
 
-`input` → `output`, with the same shape and one independent solve per plane. The operation does not implement vector/color TV. Publish canonical planar output and preserve or rebuild applicable metadata under the shared contract.
+`input` and `output` are Results with matching fixed Tensor schemas and one independent solve per plane. The operation does not implement vector/color TV. Each materialized output tile has a distinct allocation. Color interpretation, if needed by a surrounding workflow, is explicit configuration rather than attached Result metadata.
 
 ## Required parameters and domain
 
@@ -40,7 +40,7 @@ For each plane minimize `0.5*Σ(u-f)^2 + lambda*Σ phi(K_y u,K_x u)`, with `phi(
 
 ## Demand and resource behavior
 
-Each output plane requires complete-input input for the fixed-step profile. Although a finite step count admits a theoretical expanded support, this proposal specifies Run-shared complete-input computation and no partial-state sharing. Energy and residual diagnostics are not public result ports. Shape/descriptor inference depends only on parameters and input descriptor.
+Each selected output plane has a complete-input mathematical dependency for the fixed-step profile. Lowering declares fixed whole-plane input reads and explicit shared state tasks; a theoretical finite-step halo does not authorize a different partial-state algorithm. Persistent state uses private SSA values and, when split into workflow iterations, explicit CFG arguments. Energy and residual diagnostics are not public result ports. Output schemas depend only on static parameters and input schemas. Numerical controls and model domains are unchecked caller premises, while shape/axis and parameter-type constraints are checked before execution.
 
 Work is `O(max_iterations*P*C)`, with dual planes and two generations each of `u`/`ubar`; P is plane pixel count and C plane count. Account for all stages and working buffers. Insufficient budget fails; do not shorten the iteration count, spill implicitly, lower precision, or publish a partial value. Cancellation, ownership and error publication follow FILTER shared contracts.
 

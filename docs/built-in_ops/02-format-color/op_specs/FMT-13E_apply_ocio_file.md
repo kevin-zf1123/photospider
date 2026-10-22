@@ -56,7 +56,8 @@ publish target semantics. Materialize requested output; view is forbidden.
   rather than producing a different interpolation result. Missing record IDs
   and unreadable/malformed resources fail.
 - Two frozen packages with the same logical filename and different LUT bytes
-  must not cross-hit caches. A missing proxy resource must not read a real host
+  must select their own immutable resources, processor construction and compiled
+  invocation identities. A missing proxy resource must not read a real host
   file at the same path. Construction allocation/work failures cannot cause fallback.
 - Check structural alpha admission, valid finite narrowing, hidden colors, bypass,
   exact cross-tile requests and both execution configurations.

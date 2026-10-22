@@ -137,7 +137,7 @@ Photospider contracts, not numerical compatibility claims about SciPy.
 ## Accelerated shape, classification and fallback
 
 For fixed input snapshots and a fixed accelerated profile, the result at a query
-must be independent of request order, batching, other queries, cache state and
+must be independent of request order, batching, other queries, Run scheduling and
 thread schedule. Within each segment, any two finite successful query results
 must respect its endpoint y direction: nondecreasing for increasing y,
 nonincreasing for decreasing y, and constant for equal y. The result is also
@@ -157,7 +157,7 @@ sort or repair a requested batch to create apparent monotonicity. Budget
 exhaustion returns ResourceExhausted; it does not authorize an unverified value.
 Exterior tangent extrapolation has no interior endpoint-range bound.
 
-## Demand, invalidation and ownership
+## Fixed demand and ownership
 
 Execution, physical read closure, caller preconditions, resource admission and ownership follow the [family fixed execution contract](CRV-01_interpolate.md#fixed-execution-resources-and-caller-preconditions). Each selected output tile reads all x, all y rows for its selected columns, and its query row range through the corresponding input grids. Only the tile's global output coordinates are evaluated. Mathematical stencil selection remains defined by this member specification.
 

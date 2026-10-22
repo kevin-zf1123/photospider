@@ -58,7 +58,7 @@ component arithmetic remains possible under the shared metadata policy.
 | XYZ | FMT-10 linear RGB <-> XYZ, with explicit white adaptation; FMT-11 XYZ <-> Lab, OKLab and xyY as separately admitted members. | Relative/absolute units, reference white and normalization. An arbitrary XYZ white cannot be fed to a fixed-white model without an explicit adaptation stage. |
 | CIELAB / CIELCh(ab) | FMT-11 XYZ <-> CIELAB and CIELAB <-> CIELCh(ab). | Explicit source white; normalized l=L*/100 with unchanged a*/b*/C* scale; signed principal atan2 hue, exact-zero hue=0 and finite extensions. "LCh" must name its underlying model. |
 | OKLab / OKLCh | FMT-11 reference XYZ <-> OKLab and OKLab <-> OKLCh; RGB routes through the explicit FMT-10 basis path. | Fixed W3C 2026-09-13 forward matrices with exact inverses; relative D65, real signed cube roots, principal polar hue and finite extensions. Opponent scales remain distinct from CIELAB. |
-| HSL | FMT-11 described RGB <-> HSL. | Explicit linear/encoded relative RGB interpretation; radian/pi_multiple hue, exact achromatic H/S=0, algebraic finite extension and requested-saturation singularity checks. HSL lightness is not generic luminance Gray. |
+| HSL | FMT-11 described RGB <-> HSL. | Explicit linear/encoded relative RGB interpretation; radian/pi_multiple hue, exact achromatic H/S=0, algebraic finite extension and caller-guaranteed nonsingular requested saturation. HSL lightness is not generic luminance Gray. |
 | HSV / HSB | FMT-11 described RGB <-> HSV, with HSB confirmed as authoring terminology canonicalized to HSV. | Canonical serialized model is HSV; HSB is an authoring alias. V=max(R,G,B), six-sector hue and finite algebraic extension with explicit singularity behavior; no duplicate HSB mathematics. |
 | YCbCr | FMT-11 described RGB' <-> same-size YCbCr coordinate conversion. FMT-09 handles transfer and FMT-06 handles storage/range encoding. | All three planes have the same shape and sample grid inside the DAG. M/N fix explicit BT.601/709/2020 NCL or custom coefficients and zero-centered chroma; constant luminance is a separate future member. Codec owns external 4:2:2/4:2:0 reconstruction/subsampling and siting. |
 | CMYK | FMT-12 profile-directed CMYK <-> admitted RGB/Gray/PCS (XYZ/Lab) paths, according to the selected engine and profiles. FMT-18 handles proofing. | Profile/printing condition, ink units and direction-specific intent/BPC. Four channels alone do not determine color. No unprofiled universal CMYK <-> RGB formula is claimed. A future algebraic "generic CMYK" would need a separately named, explicitly non-device-color definition. Profile transforms need not be invertible or recover original ink separation. |
@@ -117,9 +117,10 @@ same-tensor, and unrelated alpha/AOV-only requests bypass color arithmetic.
   and [FMT-18](FMT-18_softproof_contract.md) ICC proofing/alarms. BT.2020 CL remains
   a future member. All enumerated active conversion members are implemented;
   their family documents record exact supported behavior and validation scope.
-- For every model, record forward/reverse prerequisites, units/ranges, singular
-  cases, exact rounding or external-engine tolerance, metadata updates, exact
-  demands/dirty support, cancellation/resources and failure behavior.
+- For every model, record forward/reverse caller premises, units/ranges,
+  singular cases, exact rounding or external-engine tolerance, explicit downstream
+  descriptions, complete retained tile support, cancellation/resources and actual
+  operational failure behavior.
 - Cover each admitted model with independently checked reference coordinates,
   explicit composition workflows and applicable round-trip tests. Lossy Gray,
   binary, gamut/tone and profile paths require loss/reconstruction assertions,

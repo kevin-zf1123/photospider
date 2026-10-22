@@ -63,8 +63,10 @@ cannot silently substitute the source data or a different link.
   BPC/adaptation/intent parameters. Check resource retention by prepared operations, plans and active calls.
 - Compare header-selected tag/fallback against a direct-CMM harness. Different explicit entry-profile parameters produce distinct computation
   identities, even when input data and structure are identical.
-- Check NaN/Inf and formatter overflow in raw, valid out-of-range finite raw
-  CMYK, alpha-only requests and cross-tile exact support.
+- Use raw fixtures satisfying the finite input, unit-adapter, pipeline and
+  output premises, including valid out-of-range finite CMYK. Check alpha-only
+  requests, raw bypass bits and complete retained tile support. Invalid numeric
+  payloads have no required runtime failure outcome.
 
 Public resource helpers, executable operation usage, independent oracle commands
 and measured validation coverage are recorded in [implementation, validation and performance](../FMT-12-13-18_implementation.md).

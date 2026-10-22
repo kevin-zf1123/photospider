@@ -26,13 +26,13 @@ Inherits the [RES-14 family contract](RES-14_contract.md), [FILTER common contra
 
 The explicitly selected, linear opaque RGB `input` and Float64 `[3]` `airlight` → single-plane `transmission`. The selected color group has no associated alpha plane; reject alpha-associated structure at preflight without scanning alpha samples. Input RGB must be finite and nonnegative.
 
-Unless the member defines an explicit color interpretation, ports contain raw numerical Tensor samples; channel count does not imply RGB or alpha. Color descriptions are explicit operation parameters, never attached Result metadata. Positive extents, axis validation and explicit broadcasting follow the common contract. Host-created backing defaults to tiled planar without requiring a conformance declaration. Associated FilterBands/FrequencyGrid structures remain Proposed static Tensor schemas; each requested output records its actual tile Needs.
+Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands and FrequencyGrid are proposed SDK/workflow representations under the collection contract; lowering records each selected output's fixed reads and writes.
 
 ## Static parameters and legal domains
 
-radius ≥ 0; omega ∈ [0,1] (0.95 is illustrative, not a default); boundary=truncate; axes/component_axis; metadata_mode=respect|override as in RES-14A. For omega>0, each consumed airlight component must be finite and >0. At omega=0, the exact constant-one branch consumes no input or airlight samples.
+radius ≥ 0; omega ∈ [0,1] (0.95 is illustrative, not a default); boundary=truncate; axes/component_axis; explicit `input_description` and RGB `group` as in RES-14A. For omega>0, each consumed airlight component must be finite and >0. At omega=0, the exact constant-one branch consumes no input or airlight samples.
 
-Inherit NaN, Inf, overflow, signed-zero, payload, rounding, and precision semantics from the corresponding NUM operation. A member must still validate finite parameters, finite control models, or narrower mathematical domains when specified. Copy/bypass and unconsumed data follow their dependency contracts. Every parameter must be supplied explicitly; constructors provide no defaults, except constants fixed by a named mathematical profile. Real parameters denote their stored Float64 values; decimal text is not treated as an exact real.
+Inherit NaN, Inf, overflow, signed-zero, payload, rounding, and precision semantics from the corresponding NUM operation. Callers guarantee the member's finite-parameter, control-model and numerical-domain premises; production execution does not validate those premises. Copy/bypass and unconsumed data follow their dependency contracts. Every parameter must be supplied explicitly; constructors provide no defaults, except constants fixed by a named mathematical profile. Real parameters denote their stored Float64 values; decimal text is not treated as an exact real.
 
 ## Mathematical reference and rounding boundaries
 
@@ -40,23 +40,23 @@ Numeric classification: **E**. See [FILTER_numeric_reference](FILTER_numeric_ref
 
 `t(q)=RN_t(clamp(1-omega*min_(p∈Bq,c)(I(p,c)/A_c),0,1))`. Compare quotients exactly without prior rounding; the clamp is an explicit part of the estimation model. Refinement uses FIL-07A followed by an explicit clamp; it is not hidden in this node.
 
-When a formula calls another member, preserve the RN stages produced by that call as specified here or by the family contract. Internal temporary operations must not add undeclared rounding. Signed zero, dynamic-domain failures, gradual underflow, and output range follow the common contract and NUM.
+When a formula calls another member, preserve the RN stages produced by that call as specified here or by the family contract. Internal temporary operations must not add undeclared rounding. Signed zero, numerical-domain premises and explicit valid-input no-solution outcomes, gradual underflow, and output range follow the common contract and NUM.
 
-## Data / Control / Validation / Descriptor
+## Fixed reads, algorithmic control and schemas
 
-The radius-r halo of input and all three airlight components are Control. When omega=0, the result is the explicit constant 1 and input/airlight sample values are not read; descriptors and metadata are still validated.
+The radius-r halo of input and all three airlight components are Control. When omega=0, the result is the explicit constant 1 and input/airlight sample values are not read; static schemas, selected group structure and explicit interpretation remain part of preparation.
 
-Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Mathematical sample support is rounded to the current plan's member tiles for payload Needs, authorization and invalidation. Control and validation samples use ordinary payload Needs and participate in the same evidence. Empty payload demand reads no samples. Output structure derives only from static parameters and input schemas. The kernel has no support-role or Exact/Conservative/Unknown dependency mode.
+Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Lowering closes mathematical sample support on fixed input member-tile grids. Data-dependent selection uses a finite static superset of every address the task may consume; runtime selection does not expand the Plan. Data and control are algorithmic inputs, with no separate Validation read set. Empty retained selections introduce no payload tasks. Output schemas derive only from static parameters and input schemas. Numerical, encoding and association premises remain unchecked under the common contract.
 
 ## Algorithm, resources, and execution
 
 O(PA*3), with exact ratio ordering.
 
-Here P=HW, C is the number of independent planes, A is the tap count, and T is the iteration count. Arbitrary-precision limb complexity is additional and is not a measured benchmark. Shared contracts govern work/memory/stage admission, cancellation, failure status, and owner lifetime; failures publish no partial Tensor or CompleteBundle. Do not spill automatically, silently reduce precision, or fall back to retired implementations.
+Here P=HW, C is the number of independent planes, A is the tap count, and T is the iteration count. Arbitrary-precision limb complexity is additional and is not a measured benchmark. Shared contracts govern work/memory/stage admission, cancellation, failure status, and owner lifetime; a failed call publishes no successful Result export, while previously retired call exports remain valid and final RET results require successful Run completion. Do not spill automatically, silently reduce precision, or fall back to retired implementations.
 
 ## Oracle, fixtures, and acceptance
 
-If I=A at every neighbor, t=1-omega. omega=0 yields 1. For HDR input, a minimum ratio above 1 may clamp to 0. A≤0 fails, except for the omega=0 bypass.
+If I=A at every neighbor, t=1-omega. omega=0 yields 1. For HDR input, a minimum ratio above 1 may clamp to 0. Positive finite A is a caller premise when consumed. The omega=0 bypass consumes no A samples; nonpositive A reference diagnostics do not impose a runtime validation requirement.
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational rounds rational expressions directly to IEEE format. For transcendental functions, only a DirectedMPFR result whose interval endpoints round to the same value is a strict golden. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
@@ -64,7 +64,7 @@ The reference function evaluates the numerical formula on small inputs; it is ne
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 
-See the [oracle README](../../../../oracle/ops/filter/README.md) for reproduction and evidence classes. The listed self-checks validate only the reference program. Parameter boundaries, full rank/batch behavior, metadata, ROI/dirty propagation, budgets, cancellation, and ownership still require the [runtime acceptance protocol](FILTER_oracle_protocol.md). Passing an identity or constant fixture does not accept the whole algorithm or every configuration.
+See the [oracle README](../../../../oracle/ops/filter/README.md) for reproduction and evidence classes. The listed self-checks validate only the reference program. Parameter boundaries, full rank/batch behavior, metadata, compiled ROI/tile selection, budgets, cancellation, and ownership still require the [runtime acceptance protocol](FILTER_oracle_protocol.md). Passing an identity or constant fixture does not accept the whole algorithm or every configuration.
 
 ## Backend and registration gates
 
@@ -74,7 +74,7 @@ Float64 acceleration retains Float64 inputs, outputs, and exponent range; it doe
 
 ## Conceptual DAG (not an existing API)
 
-`static + descriptors → preflight / demand → Data and Control declared by this member → exact expression / declared RN stages → requested owned output / complete result`
+`static parameters + schemas → compile fixed reads/tasks → prepare → unchecked arithmetic with declared RN stages → complete tiles → ordered call retirement`
 
 This sketch introduces no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-filling of missing data. complete-input behavior and multi-stage buffers are governed by this member and its family contract.
 

@@ -21,7 +21,7 @@ Inherit the [RES-05 family contract](RES-05_contract.md), [FILTER common contrac
 
 ## Ports and shape
 
-`input` → `output`, with the same shape and one independent solve per plane. The operation does not implement vector/color TV. Publish canonical planar output and preserve or rebuild applicable metadata under the shared contract.
+`input` and `output` are Results with matching fixed Tensor schemas and one independent solve per plane. The operation does not implement vector/color TV. Each materialized output tile has a distinct allocation. Color interpretation, if needed by a surrounding workflow, is explicit configuration rather than attached Result metadata.
 
 ## Required parameters and domain
 
@@ -40,7 +40,7 @@ For each plane minimize `0.5*Σ(u-f)^2 + lambda*Σ phi(K_y u,K_x u)`, with `phi(
 
 ## Demand and resource behavior
 
-Each output plane requires complete-input input for the fixed-step profile. Although a finite step count admits a theoretical expanded support, this proposal specifies Run-shared complete-input computation and no partial-state sharing. Energy and residual diagnostics are not public result ports. Shape/descriptor inference depends only on parameters and input descriptor.
+Each selected output plane has a complete-input mathematical dependency for the fixed-step profile. Lowering declares fixed whole-plane input reads and explicit shared state tasks; a theoretical finite-step halo does not authorize a different partial-state algorithm. Persistent state uses private SSA values and, when split into workflow iterations, explicit CFG arguments. Energy and residual diagnostics are not public result ports. Output schemas depend only on static parameters and input schemas. Numerical controls and model domains are unchecked caller premises, while shape/axis and parameter-type constraints are checked before execution.
 
 Work is `O(max_iterations*P*C)`, with dual planes and two generations each of `u`/`ubar`; P is plane pixel count and C plane count. Account for all stages and working buffers. Insufficient budget fails; do not shorten the iteration count, spill implicitly, lower precision, or publish a partial value. Cancellation, ownership and error publication follow FILTER shared contracts.
 
@@ -48,6 +48,6 @@ Work is `O(max_iterations*P*C)`, with dual planes and two generations each of `u
 
 Check the zero-lambda and zero-step bit-copy branches, constant preservation, a hand-computed 2×2 one-step result, and the exact adjoint identity `<Ku,p>=<u,K^T p>`. Isotropic TV does not claim rotational invariance under grid rotation. Do not require the objective to decrease monotonically at every Chambolle–Pock step.
 
-The oracle function is `res05.restoration.tv_cp(image, *, lam, iterations=100, tau=0.24, sigma=0.24, theta=1, dx=1, dy=1, isotropic=True, dtype="float64")` in [res05/restoration.py](../../../../oracle/ops/filter/res05/restoration.py). Its `iterations` argument corresponds to the proposed public `max_iterations` parameter. The `tv_one_step_False` fixture covers the reference formula using `ExactRationalStaged`; it does not establish runtime support or the full parameter, metadata, ROI, budget or cancellation contract. See the [oracle README](../../../../oracle/ops/filter/README.md).
+The oracle function is `res05.restoration.tv_cp(image, *, lam, iterations=100, tau=0.24, sigma=0.24, theta=1, dx=1, dy=1, isotropic=True, dtype="float64")` in [res05/restoration.py](../../../../oracle/ops/filter/res05/restoration.py). For this anisotropic member, pass `isotropic=False`. Its `iterations` argument corresponds to the proposed public `max_iterations` parameter. The `tv_one_step_False` fixture covers the reference formula using `ExactRationalStaged`; it does not establish runtime support or the full parameter, metadata, ROI, budget or cancellation contract. See the [oracle README](../../../../oracle/ops/filter/README.md).
 
 The proposed strict and CPU accelerated keys are not registered or implemented. Accelerated variants must meet NUM’s final FP32-scaled four-ULP bound and use strict fallback where required. Float64 paths retain Float64 input/output and exponent domain; Float32 out-of-range cases follow NUM fallback. No kernel/CPU/ISA performance or differential conformance is claimed here.

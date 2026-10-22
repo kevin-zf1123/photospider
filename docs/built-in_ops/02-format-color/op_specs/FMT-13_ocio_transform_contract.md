@@ -199,19 +199,19 @@ NamedTransform as a color space; D selects that separate object class.
 ## Confirmed demand and layout
 
 Every requested transformed coordinate consumes the complete source triple at
-that point, even for a reported no-op. Spatial demand is exact, without halo or
-unrequested pixels. Bypass alpha/AOV requests consume only their corresponding
+that point, even for a reported no-op. Mathematical support has no halo.
+Lowering closes retained output tiles and each input's tile grid before issue.
+Bypass alpha/AOV output tiles consume only their corresponding
 source component; alpha=0 does not suppress requested hidden-color processing.
 Evaluate full target triples in scratch if needed and publish requested
 components without a validation pass. Actual shared engine execution failures
 propagate; violated sample premises have no required diagnostic.
 
-layout=auto (default) and materialize both use requested regions of one legal
-full-shape planar output reservation. Reject view, including Float32 no-op cases.
-Bypass read-window reuse does not create a cross-owner output image. Changed
-source color samples invalidate all target color components at the same points;
-bypass dirty propagation is individual. Required upstream complete-input failure/support
-rules remain intact, and physical page/padding access is not logical sample demand.
+layout=auto (default) and materialize both allocate distinct dense output tiles.
+Reject view, including Float32 no-op cases. Bypass read-window reuse concerns
+source access only and does not alias produced storage. Fixed execution has no
+incremental dirty invalidation. Required upstream tasks retain their declared
+read/write support and operational failures; complete tile closure is explicit.
 
 ## Static interface and member identity
 
@@ -430,8 +430,10 @@ OperationFailed; no sample-domain diagnostic is promised. ResourceExhausted pres
 root limit reason; Cancelled/stale retains inherited precedence and attribution.
 Integration invariant failures are not misreported as invalid user configs.
 
-Diagnostics identify member/coordinate/component, immutable resource, selected
-route and engine error without dumping resource bytes. Actual execution
+Construction inspection identifies immutable resources and selected routes
+without dumping resource bytes. Fixed runtime invocation reports a bounded
+Status message for actual engine execution failure; it does not promise
+per-sample coordinates, component values or a numeric report stream. Actual execution
 failure publishes no successful result and does not substitute a different
 engine/config/optimization/identity copy. There is no output validation gate. Actual host failures cannot trigger config or Look alternatives.
 

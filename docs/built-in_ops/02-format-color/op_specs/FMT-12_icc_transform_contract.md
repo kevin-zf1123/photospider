@@ -224,8 +224,9 @@ components without a result-validity scan. Actual shared engine execution
 failures still propagate; sample-domain violations have no required diagnostic.
 Bypass alpha/AOV requests read only their mapped source component and do not
 evaluate color. Requested hidden color is still transformed at alpha=0 without
-reading alpha. Dirty propagation maps a changed source color component to every
-target color component at the same coordinates; bypass mapping stays individual.
+reading alpha. Lowering closes these mathematical dependencies after output
+requests expand to complete tiles, then closes each read on its input grid.
+Fixed execution has no incremental dirty-propagation service.
 
 ## Confirmed execution-profile scope
 
@@ -245,15 +246,14 @@ and the optimizer must not substitute it for a requested reference invocation.
 
 ## Confirmed layout and identity policy
 
-layout=auto (default) or materialize produces transformed samples into requested
-regions of the output's full logical planar reservation. Reject forced view.
+layout=auto (default) or materialize produces independent dense allocations for
+selected complete output tiles. Reject forced view.
 Equal source/destination profile identities do not turn an invocation into a
 copy: retain the engine path, its PCS/curve processing and rounding. An alpha-only
 bypass may reuse a valid read window but does not make the complete node a view.
-Such reuse concerns source access; published materialized output still uses one
-legal result owner/reservation and never stitches source-owned bypass planes
-into a new cross-owner image. Forced materialize copies requested bypass samples
-as well as transformed samples.
+Such reuse concerns source access. Every materialized output tile has its own
+allocation; bypass samples are copied into those tiles together with transformed
+samples. No source-owned plane is installed as a produced tile alias.
 
 ## Static interface and member identity
 
@@ -401,7 +401,7 @@ does not waive these phase-specific obligations.
 Engine identity includes the exact release/integration revision, compiler and
 numerically relevant build options, platform/math runtime, formatters and chosen
 execution configuration. The integer LCMS_VERSION value alone is insufficient
-to distinguish releases. Cache/validation identity also includes all frozen
+to distinguish releases. Compiled processor identity also includes all frozen
 profile identities, ordered stages, requested/effective settings, group mapping,
 mode, endpoint interpretation and dtype. No hidden system profile lookup occurs.
 
@@ -409,7 +409,8 @@ Per-context memory hooks require audited bootstrap/global-allocation handling;
 do not assume all context-creation memory passes through the installed local
 allocator. Reserve audited fixed overhead or correct and validate the integration
 path, without mutating a process-global allocator to serve one DAG. Temporary
-engine/formatter storage is private scratch; public images remain planar.
+engine/formatter storage is private scratch; public outputs use their declared
+fixed tile layouts and independent allocations.
 
 Upstream memory callbacks alone do not account work throughout parse/link/BPC
 loops. The private integration adds audited allocation and work hooks without

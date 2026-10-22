@@ -105,7 +105,7 @@ encoding of coverage [0,1]: Float32/64 one, UInt8 255, UInt16 65535, Int8 127,
 Int16 32767 or Int64 2^63-1. An explicit 10-bit encoding in UInt16 yields 1023;
 an explicit reversed encoding can yield zero. Do not infer the new alpha encoding
 from another color channel. The chosen code must be in its legal domain and
-exactly representable in output dtype; otherwise fail before pixel generation.
+exactly representable in output dtype as an unchecked numerical caller premise.
 Do not quantize an almost-opaque substitute or silently clamp it.
 
 The alpha_encoding parameter describes the missing-alpha fallback only. It is
@@ -263,7 +263,8 @@ no sample checks from A and no persistent alpha relation.
 | Missing/ambiguous group or selector, invalid axis/placement, overlapping color and target alpha roles, shared-slot overwrite, malformed input_description | Compile/direct preflight | InvalidArgument / InvalidDomain. |
 | Missing alpha without the selected fallback | Static preflight | InvalidArgument / InvalidDomain; identify selected group. |
 | Unsupported dtype, mixed A dtypes, nonchannel shape mismatch or noncanonical premultiplied input | Static preflight | TypeMismatch / None. |
-| Invalid opaque encoding, or coverage one has no legal exactly representable output code | Static preflight | InvalidArgument / InvalidDomain. |
+| Malformed opaque-encoding syntax/type/structure | Static preflight | InvalidArgument / InvalidDomain. |
+| Coverage one has no legal exactly representable output code | Outside the numerical caller premises | No validation or diagnostic guarantee. |
 | Nonempty forced view | Invocation | InvalidArgument; reason follows the selected fixed primitive. Set and mapped removal use ViewUnavailable. |
 | Size/offset overflow, budget/work, missing source coverage, backend, cancellation or stale failure | Inherited phase | Preserve NUM/kernel code, origin and scope. |
 

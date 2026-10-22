@@ -24,7 +24,7 @@ This family specifies a concrete constrained solver rather than an underspecifie
 
 For a single numerical plane, minimize `E(x,k)=0.5*||K*x-y||^2 + 0.5*lambda_x*||x||^2 + 0.5*lambda_k*||k||^2`, subject to `x>=0`, `k>=0`, `sum(k)=1`, and `k` supported only on the supplied support mask. No automatic multiscale processing is part of the member. The caller supplies image, observation, initial PSF, binary UInt8 PSF support and anchor. Image and observation have equal shape; PSF/support have `[Kh,Kw]`, and support contains at least one selected tap. The selected color group must have alpha removed or be explicitly extracted/composited by the caller.
 
-For any positive iteration count, validate initial image/PSF against their constraints; initial PSF must sum exactly to one and is not silently normalized. PSF iterates remain exact rational values, satisfying exact simplex constraints. Ordinary image/residual/gradient states follow main input dtype `t` and use RN_t at declared stages. Public PSF output is rounded directly from the exact rational state with RN_t; do not first round through RN64 or renormalize the published PSF. Consequently, the sum of rounded public taps need not equal exactly one. The rounded public PSF is not an internal continuation checkpoint.
+For any positive iteration count, callers guarantee the initial image/PSF constraints; initial PSF must sum exactly to one and is not silently normalized. PSF iterates remain exact rational values, satisfying exact simplex constraints. Ordinary image/residual/gradient states follow main input dtype `t` and use RN_t at declared stages. Public PSF output is rounded directly from the exact rational state with RN_t; do not first round through RN64 or renormalize the published PSF. Consequently, the sum of rounded public taps need not equal exactly one. The rounded public PSF is not an internal continuation checkpoint.
 
 ## Profile behavior
 
@@ -36,7 +36,7 @@ RES-10B uses the same recurrence and separate early-stop profile. Both projected
 
 The image and gradient stages have their declared per-stage rounding. Exact rational PSF projection entails numerator/denominator limb growth, which is charged to execution resources. Strict resource shortage is a failure; do not lower precision, omit a projection, silently adapt step sizes, or change the algorithm. Work is `O(T*P*C*A)` plus `O(A log A)` for each support simplex sort, where T is iteration count, P image pixels, C planes (this profile requires C=1), and A PSF taps. Sorting and projection ties are deterministic; ties in sorted values use original tap order.
 
-complete-input image and PSF are needed; support is control data. Image and PSF outputs belong to the same iteration result. Errors do not publish partial outputs. Cancellation, ownership and budgets follow FILTER common contracts. Ordinary numerical NaN/Inf/overflow behavior follows NUM, while parameter, support, initialization and constrained-model validation remain explicit.
+complete-input image and PSF are needed; support is control data. Image and PSF outputs belong to the same iteration result. Errors do not publish partial outputs. Cancellation, ownership and budgets follow FILTER common contracts. Ordinary numerical NaN/Inf/overflow behavior follows NUM, while parameter, support, initialization and constrained-model numerical domains remain unchecked caller premises.
 
 ## Acceptance
 
@@ -58,8 +58,8 @@ if there is only infinity, generate the fixed positive quiet NaN. This tag is no
 a feasible simplex certificate and does not claim sum-one. Later computations
 consume those exceptional components under NUM; the exceptional PSF remains tagged.
 No early-stop check can pass on that state. Fixed-step execution still completes
-its declared count, and early-stop execution can end at max_iterations. Required
-initial finite PSF/domain validation, resource errors and cancellation remain errors.
+its declared count, and early-stop execution can end at max_iterations. The initial finite PSF and model domains remain caller premises. Resource errors
+and cancellation retain their operational failure behavior.
 The finite constrained state still uses exact rationals without intermediate Float64
 rounding. `special.exceptional_simplex` covers the projection branch, not a complete
 concurrent solver implementation.

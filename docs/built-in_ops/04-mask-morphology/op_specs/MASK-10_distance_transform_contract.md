@@ -53,16 +53,16 @@ B/D always return ordinary signed distance, never a signed square.
 A outputs `distance:[H,W]` and `nearest:Int64[2,H,W]` (y plane then x).
 No sites: distance=+Inf, nearest=(-1,-1). With sites, distance is finite and
 coordinates may legitimately be outside D. Do not infer absence from coordinates
-alone. There is no valid output. Metadata records feature, metric, spacing,
-exterior and the no-feature infinity convention. All requested outputs use the
-same selected site and complete input validation.
+alone. There is no valid output. Caller-owned configuration records feature,
+metric, spacing, exterior and the no-feature infinity convention. All requested outputs use the
+same selected site and unchecked Binary input premise.
 
 B outputs `distance` only. For input=1 it is minus distance to background;
 for input=0 it is plus distance to foreground. No opposite feature gives -Inf
 for foreground, +Inf for background. This is signed CENTER distance: adjacent
 0/1 centers yield +1/-1 at unit spacing, not +.5/-.5. No half-pixel correction
-or continuous boundary reconstruction is implied. Finite arithmetic overflow is
-an error in both A and B, never a no-feature sentinel.
+or continuous boundary reconstruction is implied. Finite distance representability is a caller premise for A and B; overflow
+is outside that domain and never denotes a no-feature result.
 
 C/D require `limit` finite Float64>0. Search only candidates at true metric
 distance<=limit. C returns distance=min(nearest_distance,limit), or its square
@@ -73,11 +73,11 @@ clamped magnitude with negative foreground/positive background sign and within.
 No-feature foreground therefore gets -limit, with no infinity. This is explicitly
 a truncated field whose flag means "opposite site within limit", not a full
 field existence flag. It does not distinguish distant sites from absent sites. Limit rounding
-happens only after exact membership/sign decisions. A squared output can overflow
-where an ordinary distance does not; that is a demanded-output arithmetic error.
+happens only after exact membership/sign decisions. A squared output can overflow where an ordinary distance does not; callers
+must ensure representability for each selected numerical output.
 
-A/B declare complete-input input support and validation for every nonempty requested
-output; changing any input may dirty the whole field. C/D declare a finite
+A/B declare complete-input mathematical support for every nonempty output
+selection, compiled into fixed input-tile reads. C/D declare a finite
 metric stencil around Q (plus center classification for D, already in it):
 axis bounds floor(limit/sy), floor(limit/sx), then exact metric membership.
 Out-of-canvas background candidates are mathematical constants and do not

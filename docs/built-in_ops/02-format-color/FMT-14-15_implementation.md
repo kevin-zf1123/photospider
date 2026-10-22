@@ -47,8 +47,9 @@ Native coordinates require linear transfer, a straight-compatible association
 and identity numeric encoding. A profile/configured source needs an explicit,
 complete analytic binding with matching model, roles, order and units; no
 external engine is run to discover such an equivalence. Overlapping selected
-color groups are rejected. All geometry and description validation runs before
-request lowering, including for Empty or bypass-only observations.
+color groups are rejected. Description syntax, structural relationships and
+required parameter fields are checked before lowering, including Empty or
+bypass-only selections. Numerical geometry remains an unchecked caller premise.
 
 Relative coordinates accept units `relative` or `1`; Gray additionally accepts
 `relative_luminance`. Absolute display coordinates accept `cd/m2` or
@@ -238,7 +239,9 @@ Temporary public compile/prepare/submit/join checks covered:
 - FMT-05B/C public compositions across all seven copy dtypes: 21 extraction,
   removal and default-opaque workflows, including NaN payloads, negative zero
   and exact Int64 maximum; explicit UInt16 10-bit and reversed UInt8 opaque
-  encodings, rejected nonintegral opaque codes, and shared-alpha preservation.
+  encodings with exactly representable coverage-one codes and shared-alpha
+  preservation. Coverage-one representability is an unchecked static numerical
+  premise.
 - Low-budget rejection, latched cancellation within exact OKLab arithmetic,
   and cancelled public submissions.
 

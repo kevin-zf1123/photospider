@@ -38,13 +38,13 @@ The state follows main input dtype `t`; conductance is RN64. This scheme can exh
 
 Fixed-step members require `max_iterations>=0`, use that as the exact number of updates, and do not stop early. Zero steps return an input bit-copy. Early-stop members are separate profiles with `rate_tolerance` and explicit check interval and iteration bound; their rate predicates and asynchronous semantics follow [FILTER iterative contract](FILTER_iterative_contract.md). No fixed maximum image size or iteration count is implied beyond checked representation and execution budgets.
 
-Ordinary arithmetic follows NUM, including NaN, Inf, overflow, signed zero, payload and precision behavior. Validate finite positive algorithm controls and the stated control-model/stability domain. Resource exhaustion fails explicitly and must not change the algorithm, precision or requested step limit.
+Ordinary arithmetic follows NUM, including NaN, Inf, overflow, signed zero, payload and precision behavior. Callers guarantee finite positive algorithm controls and the stated control-model/stability domain; production evaluation does not validate them. Resource exhaustion fails explicitly and must not change the algorithm, precision or requested step limit.
 
-complete-input-plane dependency applies to each fixed-step profile. Members declare exact support and dirty behavior; a theoretical finite halo does not authorize partial-state sharing. Account for two state generations, baked edge conductances, work, checker-held state and checker workspace for early-stop members. Cancellation and owner lifetime follow common execution contracts.
+complete-input-plane dependency applies to each fixed-step profile. Members declare mathematical support and fixed compiled reads; a theoretical finite halo does not authorize partial-state sharing. Account for two state generations, baked edge conductances, work, checker-held state and checker workspace for early-stop members. Cancellation and owner lifetime follow common execution contracts.
 
 ## Acceptance
 
-Independently check the one-step equation, shared conductance symmetry, constant preservation, stability rejection and each early-stop predicate. Runtime ROI, dirty, ownership, cancellation and budget claims require runtime evidence beyond reference fixtures.
+Independently check the one-step equation, shared conductance symmetry, constant preservation, oracle-only diagnostics for invalid stability bounds and each early-stop predicate. Runtime compiled ROI/tile selection, ownership, cancellation and budget claims require runtime evidence beyond reference fixtures.
 
 ## References
 

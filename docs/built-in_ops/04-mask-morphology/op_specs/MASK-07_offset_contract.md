@@ -35,7 +35,7 @@ lattice distances; D can give fractional coverage at noninteger radii.
 A takes Binary; radius is finite signed Float64, sy,sx positive finite; metric
 l1|l2|linf. Let B_r be integer offsets with metric((dy*sy,dx*sx),0)<=abs(radius).
 For radius>=0 take max over B_r; for radius<0 take min, source zero outside D.
-Radius ±0 copies bits after Binary validation. Membership is exact, using squared
+Radius ±0 copies bits under the Binary input premise. Membership is exact, using squared
 radii for l2. Do not threshold a rounded distance to decide inclusion. Cost
 O(Q|B_r|), finite support B_r. Halo bounds use floor(abs(r)/s) but the exact
 metric stencil decides taps, not a rectangle. Capacity/work limits govern huge
@@ -96,12 +96,12 @@ abs(radius) from the boundary. Edge equality is included. This is exact for the
 selected sample pattern but only an approximation to true pixel area: no uniform
 area-error bound or commercial antialiasing match is asserted. Extremely thin
 shapes can be missed. The profile, applicable count, fixed table definition and boundary rule are semantic
-and enter cache identity. A contour-exact
+and enter the operation/static specialization identity. A contour-exact
 coverage integrator would be a separate member.
 
-D reads all vertices for any nonempty pixel demand, validates the whole polygon,
-and supports arbitrary output Q; O(V²) naive polygon validation and O(Q*N*V)
-reference work, O(V) scratch. Coordinate products and exact predicates are
+D reads all vertices for any nonempty output selection and assumes the polygon
+premises without a production polygon scan. Its reference work is O(Q*N*V),
+with O(V) scratch; an oracle may additionally diagnose malformed polygons. Coordinate products and exact predicates are
 budgeted. Continuous contour construction/reinitialization is outside this
 bounded D2 integration draft, not an unspecified branch of A/B/C.
 
@@ -114,6 +114,7 @@ choice in this draft. Member examples and the [oracle suite](../../../../oracle/
 are the acceptance starting point. Proposed scope does not relax the inherited
 NUM numerical standard.
 
-Distance inputs admit signed no-feature infinities and reject NaN. Finite
-shift preserves infinities; finite threshold and feather map -Inf to 1 and
-+Inf to 0, as applicable. Finite arithmetic overflow remains an error.
+Distance inputs admit signed no-feature infinities and exclude NaN as a caller
+premise. Finite shift preserves infinities; finite threshold and feather map
+-Inf to 1 and +Inf to 0, as applicable. Finite results must be representable;
+violated numerical premises have no runtime diagnostic guarantee.

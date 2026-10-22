@@ -36,11 +36,11 @@ Each member file defines its complete formula. Members do not share implicit pre
 
 E means exact expression followed by one final RN_t; B means explicitly generated, fixed coefficients; S means declared intermediate rounding stages. See [numeric reference](FILTER_numeric_reference.md). FILTER has no blanket finite-only rule. Inherit each corresponding NUM operation's NaN/Inf, signed-zero, payload, overflow, rounding, and strict/accelerated rules. Ordinary floating-point overflow does not by itself become operation failure. Retain member-specific NUM finite-domain preconditions, exact discrete branches, copy behavior, and gradual underflow requirements.
 
-Positive-weight normalization, signed kernels, local regression, and global inverse problems have distinct alpha semantics; do not apply one generic alpha filter. See [color composition](FILTER_color_composition.md). Spatial extension, anchor, and origin follow [boundary contract](FILTER_boundary_contract.md); structured outputs follow [collections contract](FILTER_collections_contract.md). Shapes derive from descriptors; actual demand and dirty mapping are member-specific.
+Positive-weight normalization, signed kernels, local regression, and global inverse problems have distinct alpha semantics; do not apply one generic alpha filter. See [color composition](FILTER_color_composition.md). Spatial extension, anchor, and origin follow [boundary contract](FILTER_boundary_contract.md); structured outputs follow [collections contract](FILTER_collections_contract.md). Shapes derive from descriptors; each member defines mathematical support and fixed compiled reads.
 
 ## Demand and acceptance
 
-A declared support is normative. A halo does not make an arbitrarily cropped ROI an independent image boundary; paging does not remove a whole-image dependency. Preserve staged rounding, global connectivity, transforms, and iterative state as specified. Independent output requests must not cause hidden payload validation for unrequested components.
+A declared support is normative. A halo does not make an arbitrarily cropped ROI an independent image boundary; paging does not remove a whole-image dependency. Preserve staged rounding, global connectivity, transforms, and iterative state as specified. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
 
 All members use the [acceptance protocol](FILTER_oracle_protocol.md). Mathematical reference self-checks are described in the [oracle README](../../../../oracle/ops/filter/README.md); they do not establish Photospider runtime implementation. D1/D2 indicate document maturity, not acceptance.
 

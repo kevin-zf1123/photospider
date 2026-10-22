@@ -33,7 +33,7 @@ not remove hidden-color work. Required upstream failures keep their scope.
 
 ## Storage and numerical identity
 
-auto/materialize create requested planar values; forced view fails. Native CPU strict arithmetic only in this revision. Account exact arithmetic, scratch, output pages and ancestry; honor cancellation and immutable lifetime.
+auto/materialize create independent dense output tiles; forced view fails. Native CPU strict arithmetic only in this revision. Admit exact arithmetic scratch, output allocations and retained owners before issue; honor cancellation, call-retirement publication and immutable lifetime.
 Metadata and sample-validity guarantees remain separate. Runtime evidence and its limits are recorded in the linked implementation page.
 
 ## Acceptance and conceptual use

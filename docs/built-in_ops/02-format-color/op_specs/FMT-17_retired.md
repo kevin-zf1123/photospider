@@ -15,7 +15,7 @@ the number for traceability; do not reuse it, renumber subsequent families or
 create an FMT-17 operation/compatibility alias.
 
 External planar/interleaved/packed conversion and bit packing belong to
-input/output codecs. Image allocation, tile/page organization and addressing
+input/output codecs. Independent tile allocation, fixed layout and addressing
 remain kernel storage responsibilities.
 
 Logical axis/shape and channel transformations remain in their NUM/FMT
@@ -23,9 +23,11 @@ families and must preserve image storage invariants.
 
 All internal image channels have the same spatial shape and sample grid;
 Y/Cb/Cr use a 1:1:1 plane-size relationship (4:4:4), with any alpha inside the
-same tensor. Every kernel image operator obeys canonical planar storage,
-including calls using explicit raw configuration. External codec representations do not
-introduce a second internal image layout or heterogeneous-plane carrier.
+same tensor. Explicit layout requirements are satisfied through prepared
+physical bindings or a declared layout/COPY conversion. The host planar
+convention does not create a payload validator or require full-image virtual
+backing. External codec representations do not introduce a heterogeneous-plane
+semantic carrier.
 
 The [shared codec boundary](FMT_codec_boundary.md) records the selected scope.
 Its detailed codecs, algorithms, interfaces, resources and regional contracts

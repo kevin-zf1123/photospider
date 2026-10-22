@@ -42,7 +42,7 @@ RES-11A 现命名为低对比区域平滑，RES-11B 为成对块边界平滑；�
 
 ## 关键选择
 
-DFT backward 正向不缩放、逆向除 HW，ortho 独立；半谱只压缩 x 轴并保存原始奇偶宽。Hermitian 校验/投影分开，不能丢弃虚部假修复。FFT/OLA/OLS 卷积的 strict 数学与直接卷积一致，执行 strategy 不产生新的舍入自由度。DCT I–IV 的矩阵和 inverse/ortho 权重明确；首版小波是三个具名 profile，不接受任意 basis 字符串。
+DFT backward 正向不缩放、逆向除 HW，ortho 独立；半谱只压缩 x 轴并保存原始奇偶宽。Hermitian 共轭关系由调用方保证；显式投影是独立算子，逆变换不扫描校验或静默丢弃虚部来修复输入。FFT/OLA/OLS 卷积的 strict 数学与直接卷积一致，执行 strategy 不产生新的舍入自由度。DCT I–IV 的矩阵和 inverse/ortho 权重明确；首版小波是三个具名 profile，不接受任意 basis 字符串。
 
 恢复中 Wiener NSR 与 Tikhonov 正则不同；RL 必须使用有限 A 的真实 Aᵀ 和 sensitivity，并明确每步 RN。每种迭代算法同时提供固定 `max_iterations` profile 与独立早停 profile；固定 profile 不暗中早停。Anscombe 代数逆和均值域逆分版；后者两项 oracle 仅诊断级。BM3D/CBM3D 定义为自行原生实现，并须与固定版本的第三方实现对照；当前尚未指定对照实现或版本，不据此宣称已完成对照。
 

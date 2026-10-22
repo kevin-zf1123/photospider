@@ -93,7 +93,8 @@ applied to those imported declarations.
 ### Alpha, demand and channel replacement
 
 Any requested color consumes its complete source color group at that point.
-Only requested color results are validated and written. Bypass-only alpha/AOV
+All colors in retained output tiles are computed and written under caller
+numerical premises, without a result-validation pass. Bypass-only alpha/AOV
 requests neither read color samples nor call the pixel engine, but still require
 complete static engine construction. Alpha and AOVs are copied as raw bits,
 including NaN payloads and signed zero; hidden straight color is not suppressed.

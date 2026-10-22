@@ -1,34 +1,32 @@
-The subsequent
-[trigonometric update](trig-performance.md) replaces eligible Float32 sin/cos
-and pi/sinc calculations with certified polynomial kernels.
+The [trigonometric implementation](trig-performance.md) uses certified
+polynomial kernels for eligible Float32 sin/cos and pi/sinc calculations.
 
-NUM-04/05 accelerated ln, sin, cos, tan, pow and atan2 now gather up to 64
-Float32/Float64 operands and call the existing binary64 SLEEF adapter once per
-block. The original bit-level special cases, exact power/angle landmarks,
-per-result enclosure and strict refinement remain in CertifiedMath. Rejected
-lanes are sanitized before SIMD and retain their original bits for fallback.
-The fixed workspace is 2,624 bytes, admitted together with CertifiedMath;
-indexing and arithmetic admission are charged before batch arithmetic. Exact
-work totals match the scalar path. Cancellation is checked at each batch and
-within scalar refinement, and no partial output is published.
+Fixed NUM-04/05 point invocations gather up to 64 Float32/Float64 operands and
+call the binary64 SLEEF adapter once per eligible block. The original bit-level
+special cases, exact power/angle landmarks, per-result enclosure and strict
+refinement remain in CertifiedMath. Unsupported lanes are sanitized before
+SIMD and retain their original bits for fallback.
 
-All NUM-04/05 certified point calculations now borrow one complete-input callback
-nearest/gradual-underflow environment, including reduced pi/rational-pi
-calculations. CRV-10 inverse curves and CRV-11 uniform lowpass similarly borrow
-one environment over the complete output loop. Independent scalar calls still
-own a guard. These CRV changes amortize setup; they do not vectorize inverse
-bisection or reorder lowpass taps. NUM-01 already batches AST evaluation and
-forward CRV interpolation already borrows a complete-input environment. Exact integer,
-reduction, scan and nonuniform-integration arithmetic is unchanged by this
-commit; a mechanical batch wrapper would not establish an arithmetic speedup.
+`PointMathScratch<Arithmetic>` contains the arithmetic state, general batch
+workspace and Float32 SIMD workspace together. The Plan declares its actual
+size, and admission reserves the required capacity per active CPU lane before
+issue. Runtime callbacks query cancellation at each batch and within scalar
+refinement; they do not charge per-value work or submit numeric counters through
+ABI 8. A required failure prevents successful call publication.
 
-The lowpass execution
-fixture covered ten families, negative/unaligned/zero strides, four host rounding
-modes, complete-input work/output/workspace limits, active cancellation and release.
+Each NUM-04/05 invocation establishes one nearest/gradual-underflow environment
+for its selected output tile, including reduced pi/rational-pi calculations.
+CRV-01/10 curves and CRV-11 uniform lowpass similarly borrow one environment
+within each fixed invocation. Independent scalar calls retain a local guard.
+This amortizes setup without vectorizing inverse bisection or reordering lowpass
+taps. NUM-01 batches AST evaluation within its selected values tile. Exact
+integer, reduction, scan and nonuniform-integration formulas remain unchanged.
 
-The new batch fixture compares scalar and batch bits for both dtypes, mixed
-special/ordinary inputs, chunks 1/3/7/64/65/257, unaligned/negative/zero strides,
-all four rounding modes and preexisting exception flags. It checks exact work
-admission, a one-unit deficit, actual managed output/workspace allocation, a
-one-byte capacity deficit, and release after success/failure. This directly
-covers batch mechanics; independent public oracles establish numerical bounds.
+Temporary public checks should compare scalar and batched bits for both dtypes,
+mixed special/ordinary inputs, batch boundaries and tails, signed/unaligned/zero
+strides, all four host rounding modes and preexisting flags. Exercise complete
+and sparse tile selections, exact source-tile closure, scratch/output admission,
+cancellation, concurrent Runs and retained output lifetime. Separate scalar
+helper work-budget checks from the fixed invocation protocol. Independent public
+oracles establish numerical bounds; batching correctness does not by itself
+establish performance on every profile or platform.

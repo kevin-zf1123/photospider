@@ -24,7 +24,8 @@ The operations-domain schema identifier is `photospider.ops.dynamic_points`, ver
 | `ids` | Int64 `[P]` | Nonnegative unique IDs in the valid prefix. |
 | `count` | Int64 `[1]` | Number of valid rows, 0<=count<=P. |
 
-Generators assign IDs 0..count-1 in output order. A later filtering operation may preserve source IDs; consumers must not assume every input ID equals its row index. Rows count..P-1 are canonical padding: positions=(+0,+0), ids=0. Padding does not participate in geometry or ID uniqueness checks.
+Generators assign IDs 0..count-1 in output order. A later filtering operation may preserve source IDs; consumers must not assume every input ID equals its row index. Rows count..P-1 are canonical padding: positions=(+0,+0), ids=0. Padding does not participate in geometry; the ID-uniqueness premise applies
+only to the valid prefix.
 
 For rejection and Bridson, max_count may be zero and P=max(1,max_count). A zero target succeeds with count=0 and count_reached without taking any random sample. Bounds, distance and numerical parameter requirements remain unchecked premises; only static structure is checked. Grid and jitter have P=nx*ny and count=P after checked capacity computation.
 

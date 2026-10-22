@@ -32,14 +32,14 @@ Image inputs use distinct static Int64 `y_axis` and `x_axis`; all other axes are
 
 Inputs are observation `y`, PSF `K`, initial estimate `x0`, background `b`, and mask `m`; outputs are `estimate` and UInt8 `unobserved`. Image-like inputs have the same H/W. Explicit scalar broadcasting for background and mask is allowed only on declared axes. Require nonnegative PSF taps and exact positive sum; normalize the PSF exactly before defining the finite convolution matrix `A`. Boundary is explicitly selected from `constant0` or `wrap`; kernel anchor is mandatory. The true `Aᵀ` is obtained by scattering every tap over the actual input/output domain. Reversing the PSF under the same boundary rule is not generally the correct adjoint. Let exact sensitivity `s=Aᵀm`; `unobserved[i]=1` iff `s_i=0`.
 
-Poisson-model values have their stated nonnegative domain when finite. NUM-permitted NaN/Inf arithmetic propagates according to NUM; do not impose a blanket all-data-finite scan. Negative values that violate the selected Poisson/control model are `InvalidDomain`. Mask values are in `[0,1]`. Bypass/unrequested inputs are not read except for required shape, structure, parameter and descriptor validation.
+Poisson-model values have their stated nonnegative domain when finite. NUM-permitted NaN/Inf arithmetic propagates according to NUM; do not impose a blanket all-data-finite scan. The stated nonnegative numerical/model domains are unchecked caller premises. Mask values are in `[0,1]`. Bypass/unrequested inputs are not read and create no numerical-validation demand; static shape, schema and parameter-type construction remains independent of those payloads.
 
 ## Recurrence
 
 Initialize from `x0` converted to the main input dtype `t`. For each complete synchronous iteration, use the family’s exact forward operator and true transpose:
 
 1. `v = RN_t(A*x + b)`.
-2. At `m_i=0`, set `r_i=+0` without reading `y_i`. Otherwise use `r=RN_t(m*y/(v+epsilon))`. In the no-epsilon profile, if the exact denominator is zero, define `r=0` for `y=0` and fail `InvalidDomain` for `y>0`.
+2. At `m_i=0`, set `r_i=+0` without reading `y_i`. Otherwise use `r=RN_t(m*y/(v+epsilon))`. In the no-epsilon profile, if the exact denominator is zero, define `r=0` for `y=0` and report the explicitly defined no-solution outcome `InvalidDomain` for `y>0` on otherwise valid model inputs.
 3. `q = RN_t(Aᵀ*r)`.
 4. Update `x_new[i] = RN_t(x_i*q_i/s_i)` when `s_i>0`; if `s_i=0`, bit-copy `x_i`.
 
@@ -49,7 +49,7 @@ Fixed-step members require explicit `max_iterations>=0`; zero steps returns `ini
 
 ## Demand, resources and errors
 
-The estimate requests complete-input for its plane and full PSF. An unobserved-only request does not read observation, background or initial estimate. A zero-step estimate-only request bit-copies initial; PSF and mask still undergo descriptor/preflight checks as needed. If estimate is not requested, do not read unused observation/background/initial payloads beyond required parameter/model validation. Both outputs share a coherent result owner. The descriptor and mask/PSF structural requirements can be validated independently of image samples.
+The estimate uses fixed reads covering its complete plane and PSF. An unobserved-only selected computation does not require observation, background or initial-estimate arithmetic. A zero-step estimate-only path preserves initial bits through explicit COPY when materialized. Static shape/schema and parameter-type preparation remain, while numerical model and association premises introduce no payload reads. Selected outputs describe one coherent algorithmic state with independent tile allocations, and operational failure/publication follow their call.
 
 The direct reference is `O(max_iterations*P*C*A)` and retains `A`, `Aᵀ` support/plan and `s`; FFT replacement must preserve the exact finite operator and declared stages, not switch to circular convolution. Charge all operator plans, state buffers and work. Resource exhaustion is an explicit failure. No implicit spill, reduced precision, fallback algorithm or partial output. Cancellation and ownership follow shared FILTER contracts.
 
@@ -63,10 +63,10 @@ Verify the exact dot-product identity `<Ax,z>=<x,Aᵀz>`, delta PSF with zero ba
 
 ### Exceptional ratio branch
 
-After required control/model validation, a zero mask excludes observation arithmetic.
+Under the caller-supplied control/model premises, a zero mask excludes observation arithmetic.
 For a positive mask, an observation NaN propagates with NUM operand priority even
 when the prediction denominator is zero; it is neither the y=0 branch nor the y>0
-domain-error branch. A prediction NaN also propagates when no earlier numerator NaN
+no-solution branch. A prediction NaN also propagates when no earlier numerator NaN
 has priority. Valid finite zero denominators retain the explicit zero/positive
 observation rules above. Scalar fixtures are provided by `special.rl_ratio`;
 complete exceptional solver trajectories remain outside the finite-rational oracle.

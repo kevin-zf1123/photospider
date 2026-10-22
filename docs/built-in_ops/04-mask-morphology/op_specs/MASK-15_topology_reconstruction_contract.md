@@ -61,8 +61,8 @@ Balls are defined on the complete lattice, without a separate canvas-clipping
 step; their strict radius bound excludes all background sites and thus keeps
 them inside the foreground set. An all-background input has no candidates and
 an empty axis. A full foreground canvas is processed using exterior distances,
-not an infinite-radius sentinel. If a finite exact radius cannot be represented
-in the requested output dtype, the common arithmetic-overflow rule applies.
+not an infinite-radius sentinel. Representability of each selected finite
+radius output is an unchecked caller premise.
 
 For each foreground center p let r(p) be its exact distance to the nearest
 background center under the specified metric and exterior domain. Define the
@@ -127,8 +127,8 @@ Synchronous reference O(iterations*N*degree), O(N) double buffer. Finite-valued
 monotonic updates guarantee termination; an efficient queue algorithm must match
 this exact final numeric result (and canonical zero), despite its different
 schedule. Reconstruction by erosion is the numeric complement dual of dilation
-under neutral boundaries. complete-input marker/limit validation includes inequalities
-at all pixels, even if a requested output could not be reached from that pixel.
+under neutral boundaries. The marker/limit inequalities hold over the complete
+inputs as caller premises, without a runtime validation pass.
 All A-G have complete-input dependence; radius output B depends on original binary input,
 not only the thinned skeleton. Independent/joint output requests are numerically
 consistent but require the same global skeleton if radius is requested.

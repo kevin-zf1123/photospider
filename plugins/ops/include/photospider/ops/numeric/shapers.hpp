@@ -211,8 +211,8 @@ inline Result<WorkflowNodeOutput> linear_shaper_inverse(
  * arithmetic state carries retry/range/failure without exception allocation.
  * Refinement uses 128..4096 fractional bits; unresolved precision/capacity
  * fails ResourceExhausted. Cancellation is checked in output and arithmetic
- * work. A zero-significand guard protects integer decomposition, not full bound
- * validation; invalid numerical bounds have no diagnostic precedence guarantee.
+ * work. Integer decomposition trusts the nonzero significands implied by the
+ * caller premises; invalid numerical bounds have no diagnostic guarantee.
  *
  * Preparation validates metadata, exact source slots, output and scratch.
  * Views are borrowed during invocation; Runs share immutable preparation and

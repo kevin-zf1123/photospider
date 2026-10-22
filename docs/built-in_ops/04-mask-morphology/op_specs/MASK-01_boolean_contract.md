@@ -41,7 +41,7 @@ A has exact 0/1 outputs in the operands' dtype. B extrema select an operand
 exactly; equal extrema choose a, including its signed zero. Fuzzy subtract
 computes the whole formula once, not `RN(1-b)` before min. C and B's arithmetic
 branches round the complete expression once. All outputs remain in [0,1].
-For nonempty Q both operand samples at Q are Data+Validation, even where Boolean
+For nonempty Q both operand samples at Q are Data, even where Boolean
 short-circuiting could avoid b. Cost O(|Q|), O(1) arithmetic scratch per lane.
 CPU SIMD must preserve ties and exact domains. Use mask set operations before
 feathering; use vector-path Boolean before rasterizing for exact geometry.

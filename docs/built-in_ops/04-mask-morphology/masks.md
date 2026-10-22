@@ -17,7 +17,7 @@
 [NUM 共同契约](../01-numeric/op_specs/NUM_common_contract.md)和
 [NUM accelerated 契约](../01-numeric/op_specs/NUM_accelerated_contract.md)。
 MASK 不另设舍入模式或误差容限；各成员只明确公式、舍入阶段和数值域。
-二值消费者不隐式阈值化。完整距离的无特征点 Inf 与有限计算溢出分开处理。
+数值域、几何、count/ID、padding 和来源配对均为 unchecked 调用方前提；生产执行不扫描或诊断这些前提，结构与静态 schema 检查仍在准备期执行。二值消费者不隐式阈值化。完整距离的无特征点 Inf 与有限计算溢出分开处理。
 完整规定见[共同契约](op_specs/MASK_common_contract.md)。各规格的实现状态在文件头标明。
 
 ## 族目录

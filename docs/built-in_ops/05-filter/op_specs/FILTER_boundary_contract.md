@@ -54,11 +54,13 @@ the minimum coordinate read from the source.
 ## Exact support and normalization
 
 Map each contributing tap and deduplicate source reads, retaining mathematical
-multiplicity when taps map to the same source. K==+0 or -0 excludes its source and
-performs no 0*Inf. The coefficient remains a Control/validation input. A dynamic
-kernel reads the entire table to establish support and normalization. Source demand
-is otherwise independent of source values; observing NaN does not remove required
-reads. Boundary constants participate as ordinary specified operands.
+multiplicity when taps map to the same source. K==+0 or -0 excludes its source from
+arithmetic and performs no 0*Inf. The coefficient remains an algorithmic control
+input. A runtime kernel is consumed within its complete statically bounded table
+for support and normalization. Lowering admits a finite source-tile superset for
+every legal kernel; zero-valued coefficients do not change fixed producers.
+Observing NaN does not change the specified operand participation or ordering.
+Boundary constants participate as ordinary specified operands.
 
 Explicit normalization=none|sum|l1 uses denominator 1, sum(K), sum(abs(K)). sum requires
 a nonzero exact denominator (which may be negative); l1 requires a positive one.
@@ -74,6 +76,8 @@ only copy_center consumes the center on that branch. Members may support a subse
 of these policies. Constant-border mask weight is 1 where permitted; truncate has
 no border tap. Ordinary convolution has no implicit mask port.
 
-Identity/bypass validation is explicit per member. Optimizations must preserve
-Control witnesses. Static sparse support may establish Exact; a radius box alone
-is Conservative. Configurable boundary and anchors have no constructor defaults.
+Identity and bypass branches are specified by each member. Optimizations preserve
+those branches and algorithmic control dependencies. Static sparse kernels may
+permit precise fixed reads; runtime kernels or radii require a finite static
+superset. Numerical premises do not introduce validation reads. Configurable
+boundary and anchors have no constructor defaults.

@@ -11,10 +11,11 @@ ExactRational/DirectedMPFR apply only to the expression and finite input subset 
 exercised. ExactSpecial covers targeted IEEE classification, payload and signed-zero
 branches. A ContractFixture may be just a manifest/schema assertion. No member has
 production runtime, asynchronous stopping, owner, demand, named-backend or quality-score
-acceptance from this oracle. Band-lazy runtime carriers and complete nonfinite
-restoration trajectories are not implemented. Oracle work caps are not spec size limits.
+acceptance from this oracle. Compiled band selection through the proposed SDK/workflow representation and
+complete nonfinite restoration trajectories are not implemented. Oracle work caps are not spec size limits. Malformed reference-input fixtures
+exercise oracle diagnostics only and do not impose runtime payload validation.
 
- Native BM3D/CBM3D/SMAA comparisons need pinned implementations and actual
+Native BM3D/CBM3D/SMAA comparisons need pinned implementations and actual
 runs. No synthetic substitute is used as their golden output. Quality metric formulas,
 datasets and thresholds remain implementation-time work under the agreed principles.
 
@@ -23,13 +24,13 @@ datasets and thresholds remain implementation-time work under the agreed princip
 | [FIL-01A](op_specs/FIL-01A_convolve2d.md) | ContractFixture, ExactRational, ExactSpecial | `convolution_overflow`, `convolution_negative_zero_float32`, `convolution_negative_denominator_zero_float32`; additional cases in tests.py | Small-array arithmetic/rank fixtures include special values; full payload combinations and runtime remain untested. |
 | [FIL-01B](op_specs/FIL-01B_correlate2d.md) | ContractFixture, ExactRational | `boundary_reflect_half`, `boundary_reflect_whole`, `boundary_wrap`; additional cases in tests.py | Small-array arithmetic/rank fixtures include special values; full payload combinations and runtime remain untested. |
 | [FIL-01C](op_specs/FIL-01C_normalized_convolution.md) | ExactRational | `normalized_mask_poison_float32`, `normalized_mask_poison_float64` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
-| [FIL-01D](op_specs/FIL-01D_positive_color_blur.md) | ExactRational, ExactSpecial | `zero_inf_product`, `transparent_finite`, `fused_coverage`; additional cases in tests.py | Single component/window formula including exceptional values; geometry, group metadata and lazy requests untested. |
+| [FIL-01D](op_specs/FIL-01D_positive_color_blur.md) | ExactRational, ExactSpecial | `zero_inf_product`, `transparent_finite`, `fused_coverage`, `straight_alpha_zero_hidden_color`, `straight_all_zero_alpha`, `straight_alpha_underflow_hidden_color`; additional cases in tests.py | Single component/window formula including exceptional values; geometry, explicit group configuration and compiled output selection untested. |
 | [FIL-02A](op_specs/FIL-02A_separable_convolution.md) | ExactRational | `separable_convolve` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [FIL-02B](op_specs/FIL-02B_separable_correlation.md) | ExactRational | `separable_correlate` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [FIL-03A](op_specs/FIL-03A_box_sum.md) | ExactRational | `box_False_float32`, `box_False_float64` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [FIL-03B](op_specs/FIL-03B_box_mean.md) | ExactRational | `box_True_float32`, `box_True_float64` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [FIL-04A](op_specs/FIL-04A_gaussian_coefficients.md) | ContractFixture, DirectedMPFR | `gaussian_coefficients`, `gaussian_zero_sigma`, `gaussian_zero_sigma_nonzero_radius` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
-| [FIL-04B](op_specs/FIL-04B_gaussian_filter.md) | DirectedMPFR+ExactRational, ExactRational | `gaussian_constant`, `straight_alpha_zero_hidden_color`, `straight_all_zero_alpha`; additional cases in tests.py | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
+| [FIL-04B](op_specs/FIL-04B_gaussian_filter.md) | DirectedMPFR+ExactRational | `gaussian_constant` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [FIL-05A](op_specs/FIL-05A_median.md) | ExactRational, ExactSpecial | `median_mean`, `median_even_lower`, `median_even_higher`; additional cases in tests.py | Small-array arithmetic/rank fixtures include special values; full payload combinations and runtime remain untested. |
 | [FIL-05B](op_specs/FIL-05B_percentile.md) | ExactRational, ExactSpecial | `rank_opposite_infinities`, `rank_same_infinities`, `percentile_linear_float32`; additional cases in tests.py | Small-array arithmetic/rank fixtures include special values; full payload combinations and runtime remain untested. |
 | [FIL-06A](op_specs/FIL-06A_bilateral.md) | DirectedMPFR+ExactRational | `bilateral_symmetric` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |

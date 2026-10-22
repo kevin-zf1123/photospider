@@ -246,9 +246,6 @@ class ExactShaper final {
     const auto type = narrow ? ElementType::Float32 : ElementType::Float64;
     const auto one =
         narrow ? UINT64_C(0x3f800000) : UINT64_C(0x3ff0000000000000);
-    // Guard integer decomposition and division, not the full bound contract.
-    if (!l.significand || !u.significand)
-      return Answer(Status{ErrorCode::InvalidArgument, {}});
     if (x.nan)
       return Answer(converted_nan(bits, type, type));
     if (inverse) {

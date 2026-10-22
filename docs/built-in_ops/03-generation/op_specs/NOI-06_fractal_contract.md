@@ -53,9 +53,9 @@ seed or random stream.
 
 Each selected output tile has one fixed Host CPU invocation reading matching
 coordinate tiles including all D components, plus matching footprint tiles for D.
-Each read closes on its source grid. Empty creates no sample task. Changes to
-shared static parameters invalidate the affected call; coordinate and footprint
-changes follow these pointwise dependencies.
+Each read closes on its source grid. Empty creates no sample task. Changed
+static parameters require a new compiled specialization; coordinate and footprint
+inputs are read through the fixed pointwise dependencies.
 
 Strict imports exact binary inputs, forms exact octave scales and weights,
 evaluates the unrounded polynomial basis and rounds only the complete sum. The

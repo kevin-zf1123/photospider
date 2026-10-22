@@ -117,7 +117,7 @@ Large support may traverse many periods. Fixed memory does not bound traversal t
 
 ## Errors and acceptance
 
-Invalid static shape/axis/parameters fail preparation with InvalidArgument/InvalidDomain; dtype/shape mismatch uses TypeMismatch. Numerical position ordering, endpoint finiteness and selected-output representability are caller preconditions, so the kernel performs no full-input validation pass. ResourceExhausted, BackendUnavailable, binding/upstream failures and cancellation retain their execution categories. Operational failures never become a numerical retry or success.
+Invalid static shape/axis or parameter syntax/type fails preparation with InvalidArgument/InvalidDomain; dtype/shape mismatch uses TypeMismatch. Numeric support_radius/cutoff/sigma/beta domains, position ordering, endpoint finiteness and selected-output representability are unchecked caller preconditions at authoring and execution, so no helper or kernel adds a numerical-domain validation pass. ResourceExhausted, BackendUnavailable, binding/upstream failures and cancellation retain their execution categories. Operational failures never become a numerical retry or success.
 
 Independent oracle uses the exact piecewise-linear reconstruction and certified
 continuous convolution. Finite constants under reflect/replicate/wrap are exactly

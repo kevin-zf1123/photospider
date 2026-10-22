@@ -29,7 +29,7 @@ contract. Branch/domain decisions and all explicit copy results remain exact.
 
 Semantic callers guarantee finite participating inputs and rounded outputs, plus the curve-specific input domain, throughout complete retained output tiles. Fixed invocation does not validate these sample-domain preconditions. There is no extra output clipping. Intrinsic max/floor/saturation below is part of the
 curve and remains in raw mode. Raw retains
-NUM nonfinite/domain outcomes and static parameter checks. In nonidentity evaluations, NaN inputs follow
+NUM nonfinite/domain outcomes, static structural checks and caller-supplied numerical parameter premises. In nonidentity evaluations, NaN inputs follow
 NUM propagation before ordered branch comparisons; they cannot accidentally
 fall into a finite cap branch. Nonfinite inputs other than NaN may select a
 formula-intrinsic constant branch, such as the ACES decoding upper cap.

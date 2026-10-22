@@ -37,12 +37,6 @@ struct DirectedFunctionsStorage final {
   void logarithm(Interval output, const BinaryParts& input) {
     if (!math.active())
       return;
-    if constexpr (Checked) {
-      if (!input.significand) {
-        math.fail(ErrorCode::InvalidArgument);
-        return;
-      }
-    }
     Frame frame(math);
     const int exponent =
         input.exponent + 63 - __builtin_clzll(input.significand);

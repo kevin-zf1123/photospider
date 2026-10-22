@@ -40,11 +40,13 @@ symbols. The old oracle filename is replaced by `common/color_geometry.py`.
 | Exported ordinary table | Unchanged `photospider.tensor` v1, member `samples` |
 | Fixed operation contracts | `color-ramp-fixed-v2`, `lut3d-fixed-v2`, `bake-geometry-fixed-v2`, `bake-result-unchecked-v3` |
 
-The report still contains thirteen static tensor members and 361 payload bytes.
-`measured_table_id` still binds the actual owned Result ObjectId. Gate order is
-configuration, table identity, then measured tolerance. Old v3 table/report
-schemas are rejected. Schema versions, description codec versions and the hash
-domain version are distinct.
+The report contains thirteen static tensor members and 361 payload bytes.
+`measured_table_id` records the owned table Result ObjectId; the workflow supplies
+its correctly paired report and configuration. Gate trusts that association and
+reads `passed` and `first_failure_index` to enforce the explicit tolerance gate.
+It performs no configuration or ObjectId comparison. Old v3 schemas are rejected
+during static table/report layout admission. Schema versions, description codec
+versions and the hash domain version are distinct.
 
 A numeric description represents one logical tuple of shape `[C]` with
 `channel_axis=0`, one complete canonical model group and optional independent
@@ -103,9 +105,10 @@ descriptions with different explicit records need not have the same identity.
 ## Implementation and performance decisions
 
 The tuple resolver reuses the existing TensorDescription structural checker,
-FMT RGB basis/white admission and transfer codec. It does not modify the shared
-codec or add runtime numeric scans. Exact geometry checks run with the required
-floating environment and restore caller state.
+FMT RGB basis/white canonicalization and codecs, and the transfer codec. It
+checks supported description structure and consistency; numerical geometry
+conditions remain caller premises and are not validated. Preparation uses the
+required floating environment and restores caller state.
 
 RGB preparation resolves transfer kind, gamma bits and alpha presence once.
 `ExactRgb` removes premultiplied storage decode/output branches and the exact
@@ -199,14 +202,11 @@ Additional acceptance:
 
 | Check | Passed cases/checks |
 | --- | ---: |
-| Independent exact white/primary geometry admission | 1,847 |
 | Valid tuple/codec/shape assertions | 16 |
 | Invalid tuple/codec/shape assertions | 26 |
 | Removed/static ramp workflow parameters | 5 |
 | Empty selection still rejects static/resource errors | 6 |
 | Legacy description endpoints and old Gate schemas | 17 |
-| Actual fully populated v3 report rejected by public reader | 1 |
-| Bake schema/configuration digest/reader checks | 120 |
 | Multidimensional query shape preserving logical tuple meaning | 1 |
 | Actual normalized Lab ramp followed by FMT Lab-to-XYZ | 1 |
 
@@ -214,7 +214,9 @@ Static checks cover old ColorArray bytes, explicit L*/percent units, conflicting
 global/channel metadata, wrong axes/order, encoding/sampling, alpha mistakes and
 split rational hue misuse. The removed `output_association` parameter was tested
 on the actual RGB member. Both input and output description changes alter the
-bake digest and cause report-reader rejection. Old descriptors were injected
+bake digest. The current reader requires a statically prepared v4 layout,
+decodes configuration/table IDs as data and trusts the caller's association;
+configuration mismatch is not a runtime rejection requirement. Old descriptors were injected
 into each affected parameter position in an authored bake graph, including its
 LUT application and result stages.
 

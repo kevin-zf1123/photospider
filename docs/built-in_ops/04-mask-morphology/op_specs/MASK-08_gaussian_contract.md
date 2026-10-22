@@ -28,15 +28,15 @@ radius_y,radius_x Int64>=0; boundary zero|replicate|reflect_half. Radius is
 explicit: no hidden truncate=4 or library default rounding of truncate*sigma.
 A constructor may derive radii externally, but records the chosen integers.
 There is no fixed semantic radius cap and no image-dimension-derived cap.
-Each radius is a nonnegative Int64. Support sizes, coordinate offsets, tap
-counts and byte-size calculations use checked arithmetic. Admission accounts
+Each radius is a nonnegative Int64. Static support sizes, coordinate offsets, tap counts and byte-size
+calculations use checked arithmetic during preparation. Admission accounts
 for the actual requested support, coefficient/refinement state, intermediates,
 output and retained inputs under host capacity, work and stage budgets.
 A valid radius can fail with ResourceExhausted when admitted work cannot be
 completed within these budgets; parameter validity is not a completion promise.
 Resource exhaustion must not silently shorten the radius, truncate positive
-coefficients, reduce precision or substitute an approximate filter. Arithmetic
-overflow follows the common failure contract. Cancellation polling includes
+coefficients, reduce precision or substitute an approximate filter. Static support/capacity overflow is a preparation error; runtime numerical
+premises are unchecked. Cancellation polling includes
 coefficient generation and precision refinement. Oracle-only workload caps
 are not native parameter limits.
 If a sigma is zero, that axis has exactly one tap at zero and MUST have radius
@@ -49,14 +49,14 @@ Coefficients, pass intermediates and Z are not individually rounded to T in
 the reference. An implementation using separable passes must certify against
 this complete 2D reference or use exact/refined intermediates. g>0 for every
 finite active tap even where a hardware exp underflows; those taps remain in
-support. All required input values are validated finite [0,1].
+support. All required input values are finite [0,1] as an unchecked caller premise.
 
 Zero: samples outside D are +0, and the denominator is NOT edge-renormalized.
 Replicate: map index i to min(max(i,0),n-1). Reflect-half: take j=i mod (2*n)
 with Euclidean modulo, map j if j<n else 2*n-1-j; for n=1 this always yields 0.
-This is not whole-sample mirror. Validate/read the union of mapped source cells,
-not repeated physical copies or an enclosing sparse gap. Radius 0 in both axes
-copies the input bits after validation. Interior constant fields preserve DC;
+This is not whole-sample mirror. The mathematical support is the union of
+mapped source cells, lowered to a fixed set of covering input tiles. Radius 0
+in both axes copies the input bits without sample validation. Interior constant fields preserve DC;
 zero-border images do not preserve their constant value at canvas edges.
 
 Reference O(Q*(2ry+1)*(2rx+1)) work plus coefficient precision refinement;
@@ -75,7 +75,7 @@ response. Include support growth with radius, cold/warm coefficient reuse,
 Float32/Float64, and the actual requested/source regions. A full-image average
 does not establish interactive ROI performance. Implementations may select
 different conforming paths by request size without changing observable results.
-Record hardware, compiler, workers, cache policy, image/ROI dimensions, sigma,
+Record hardware, compiler, workers, Plan/coefficient reuse, image/ROI dimensions, sigma,
 radii and refinement/fallback counts. Numerical latency or memory targets require
 implementation measurements and an explicit acceptance target; this specification
 does not assert unmeasured millisecond limits or production performance.

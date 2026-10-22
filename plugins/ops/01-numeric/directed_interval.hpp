@@ -744,18 +744,13 @@ struct DirectedIntervalStorage final {
       }
     copy(output, result);
   }
+  // The caller supplies a nonzero divisor; Checked tracks work/capacity faults.
   void divide_small(Number& output, const Number& value, std::uint64_t divisor,
                     bool lower) const {
     if (!active())
       return;
     if (!work(kWords * 4))
       return;
-    if constexpr (Checked) {
-      if (!divisor) {
-        fail(ErrorCode::InvalidArgument);
-        return;
-      }
-    }
     std::uint64_t remainder = 0;
     const auto words = static_cast<std::size_t>((top(value) + 64) / 64);
     // High words are zero even when output aliases value or reuses a slot.

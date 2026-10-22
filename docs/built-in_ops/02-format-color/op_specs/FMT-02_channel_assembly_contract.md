@@ -148,8 +148,8 @@ Y[j] = Xi[q]
 
 The equations describe element-byte copies, with no rescaling, dtype promotion,
 rounding or alpha/color arithmetic. All inputs must share a dtype; dtype changes
-are explicit preceding operations. Supported target dtypes follow FMT-common;
-unimplemented native integer widths remain dependencies. Float signed zeros,
+are explicit preceding operations. Implemented dtypes are UInt8, Int8, UInt16,
+Int16, Int64, Float32 and Float64. Float signed zeros,
 Inf and NaN payloads are preserved exactly when successfully supplied.
 
 For A, [H,W] planes may produce [C,H,W] or [H,W,C]. For B, [3,H,W] and

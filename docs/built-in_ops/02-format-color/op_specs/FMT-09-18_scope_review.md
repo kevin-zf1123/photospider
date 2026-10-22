@@ -15,7 +15,7 @@ and FMT-01..08 decisions to the remaining catalog. It records completed
 active-family designs and implementation scope. Member contracts retain their
 Proposed decision status independently of the recorded runtime evidence.
 The subsequent maintainer decision retires FMT-16/17 and assigns their external
-sampling/layout work to input/output codecs; the same-size planar boundary
+sampling/layout work to input/output codecs; the same-size image boundary
 below supersedes the original heterogeneous-plane alternatives.
 
 ## Changes that already follow from confirmed contracts
@@ -35,12 +35,12 @@ below supersedes the original heterogeneous-plane alternatives.
   GRD-29/30 own future dither/halftone. Do not put these back into transfer/model
   conversion as undocumented side effects. Decode code-domain samples explicitly
   before an operation requiring native coordinates or normalized alpha.
-- Images are planar with fixed DAG tile geometry and the kernel's virtual-span,
-  page-backing, edge-row and lifetime rules. All image channels share spatial
-  dimensions and a sample grid, including full-resolution Y/Cb/Cr and alpha.
-  [FMT-16/17 are retired](FMT_codec_boundary.md); I/O codecs handle external
-  sampling/packing. No operator publishes an interleaved image or a private
-  tile size.
+- All image channels share spatial dimensions and a sample grid, including
+  full-resolution Y/Cb/Cr and alpha. Layout requirements are explicit; current
+  physical execution uses prepared input views, per-value grids and independent
+  dense output tile allocations. [FMT-16/17 are retired](FMT_codec_boundary.md);
+  I/O codecs handle external sampling/packing, and explicit layout/COPY
+  operations bridge required storage boundaries.
 - Native mathematics inherits NUM, with each formula stating exact rounding
   boundaries. A blanket Float64-intermediate implementation is not the strict
   reference. ICC/OCIO use separately fixed engine/resource/numerical contracts;
@@ -63,7 +63,7 @@ below supersedes the original heterogeneous-plane alternatives.
 | [FMT-14 gamut mapping](FMT-14_gamut_mapping_contract.md) | Design complete: A component clip, B fixed-step OKLab chroma reduction, C neutral-ray knee compression, D exact RGB-box mask. | Explicit target linear RGB cube; strict native CPU, exact dependencies, bounded search and endpoint/residual policies. All four strict fixed ABI 8 CPU keys are implemented and independently checked. Algorithms are versioned project definitions, not CSS/ACES compatibility claims. |
 | [FMT-15 tone/view](FMT-15_tone_view_contract.md) | Design complete: A explicit-exposure Reinhard luminance, B relative/nits display range, C explicit view composition. | Native rational formulas and units; no image-statistics exposure, implicit gamut mapping or duplicated OCIO rendering. A/B strict fixed ABI 8 operations and native/configured C authoring are implemented. C retains each stage rounding/failure. |
 | [FMT-16 retired](FMT-16_retired.md) | Confirmed: internal Y/Cb/Cr planes remain same-size, co-sited 1:1:1 (4:4:4), with same-tensor alpha. | External subsampling/reconstruction moves to input/output codecs. No heterogeneous-plane DAG carrier or FMT-16 primitive; RGB/YCbCr mathematics remains FMT-11. |
-| [FMT-17 retired](FMT-17_retired.md) | Confirmed: all kernel image operators strictly obey planar storage. | External layout/packing moves to input/output codecs; allocation/addressing remains kernel-owned, logical axis/channel transformations remain NUM/FMT. No image.layout_convert primitive or per-node tile override. |
+| [FMT-17 retired](FMT-17_retired.md) | Confirmed: layout is an explicit boundary; current physical execution materializes independent tiles. | External layout/packing belongs to input/output codecs; allocation/addressing remains kernel-owned, logical axis/channel transformations remain NUM/FMT. This retirement introduces no new image.layout_convert primitive. |
 | [FMT-18 proof/check](FMT-18_softproof_contract.md) | Design complete: A ICC proof display colors, B independent sampled CMM alarm mask. | Fixed LCMS foundation; proof intents/BPC explicit, no alarm-color comparison. Both fixed ABI 8 CPU keys are implemented. B includes the source-dimension correction and budgeted synchronous source-domain table construction; pixel execution remains cancellable. |
 
 ## Cross-family obligations and extension boundaries
@@ -83,8 +83,8 @@ below supersedes the original heterogeneous-plane alternatives.
 3. **HDR reference and transfer versus view.** Set the common vocabulary for
    native-coordinate units/reference before selecting FMT-09/15 members. This
    does not choose an HDR standard, viewing environment or tone operator.
-4. **I/O codec details outside the FMT operator catalog.** Same-size planes and
-   planar internal storage are settled. External codecs still need filters,
+4. **I/O codec details outside the FMT operator catalog.** Same-size image
+   channels and explicit layout boundaries are defined. External codecs still need filters,
    siting, odd edges, packed formats, regions, resources and exact output
    metadata.
 5. **Complete model coverage.** The [coverage proposal](FMT_model_conversion_coverage.md)

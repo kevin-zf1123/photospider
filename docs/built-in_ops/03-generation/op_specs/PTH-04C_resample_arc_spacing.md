@@ -38,17 +38,20 @@ already-rounded published approximation. Invert as PTH-04B.
 
 ## Dependencies, resources and failures
 
-Computation scope: **complete input in a Run-shared stage**. Read complete structural/global inputs and publish the
-selected complete Result atomically. Full shared-control/topology/resource changes
-conservatively invalidate dependent output; sample changes follow the actual dependency
-map. Empty requests perform static preflight without payload reads or advancing a random
-sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
+Execution support: **complete input**. Lower the complete mathematical input
+support and required output member tiles into explicit tasks. Share global work
+through private intermediate Results and fixed dependencies. Required members
+publish on successful call retirement. Empty output selection performs static
+preparation without payload tasks; there is no runtime dependency discovery or
+dirty propagation.
 
 complete-input; allocate from the statically inferred max_count capacity, determine effective count by refining true-length comparisons, and report an operational capacity failure if the constructed result exceeds that capacity.
 
 All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
-InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
+cancellation in bounded loops. Preserve static structural failures and actual
+resource, cancellation, backend and upstream statuses. Member-specific no-solution,
+refinement or quality failures apply to valid inputs and the explicitly declared
+algorithm; numerical-premise violations have no prescribed runtime diagnostic.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
 
@@ -57,8 +60,8 @@ lifetime and actual returned coverage inherit GEN-common.
 L100/delta30 emits0,30,60,90,100 when open; closed excludes100; exact multiples and
 near-boundary lengths.
 
-Check requested-region/full-output equivalence, actual read/work bounds, legal
-strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
+Check selected-tile/full-output equivalence, source-grid read closure, legal
+strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
 not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit

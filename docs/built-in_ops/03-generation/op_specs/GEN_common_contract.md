@@ -33,7 +33,7 @@ Canvas H,W>=1 is static; rank1..8 and logical element count<=2^40 with checked
 arithmetic. origin_x/y are Int64, default0. Pixel cells are [ox+x,ox+x+1] by
 [oy+y,oy+y+1], centers at half units, x right/y down. Logical HW/HWC axes do not imply
 interleaved storage. Images use planar storage. normalized_edge uses local
-(x+1/2)/W,(y+1/2)/H, while pixel coordinates include global origin. Cache identity
+(x+1/2)/W,(y+1/2)/H, while pixel coordinates include global origin. Operation/static specialization identity
 includes origin; ROI does not reset it. Construct large coordinates exactly; never
 recover discrete addresses from rounded floating coordinates.
 
@@ -93,13 +93,16 @@ An explicitly declared process-object association field, such as the GEN-08 repo
 Changes to FMA use, reduction order, approximations, fallback selection or solver
 behavior require a new version when they change otherwise legal outputs. Bit-preserving
 optimization can retain the version. Contract violations are bugs; a version bump does
-not legalize them. A correction affecting stored results must invalidate affected caches
-and document its impact.
+not legalize them. Callers maintaining external stored-result caches are responsible
+for versioned invalidation; the executor has no cross-Run payload cache.
 
 ## Execution and backend scope
 
-Use exact requested-region computation for local members, necessary input halos for
-neighborhood members, and Run-shared complete-input computation for genuinely global algorithms. Each member separately specifies output computation, mathematical input reads and dirty propagation. A local fill may require the complete path as mathematical input; it does not validate that path payload.
+Regional, neighborhood and global members declare mathematical support that is
+lowered for complete selected output tiles to fixed reads and tasks. Shared global
+work requires explicit intermediate Results and dependencies. A local fill may
+require the complete path as input without validating that payload. Input premises
+cover every consumed query/sample in the executed tiles, not only the original ROI.
 
 Regional, Halo and complete-input describe mathematical support. Implement them with fixed tasks, explicit member-tile reads/writes, private intermediate Results and dependencies. Output requests are normalized to complete retained tiles; each read closes on the source's own grid. Payload validity is an unchecked premise, separate from physical read authority. Successful call Results publish in retirement order after required tasks succeed; a failed required task prevents successful publication of that call's output.
 
@@ -136,7 +139,7 @@ true-curve distance still require their own algorithms.
 
 Flatten accepts epsilon_geom_px > 0 in target-canvas pixel units. Constructors write
 0.05 by default; an explicit preview preset writes 0.25. Persist the numeric value and
-include it in cache identity. These are engineering defaults, not measured optimal
+include it in operation/static specialization identity. These are engineering defaults, not measured optimal
 settings. Include flattening and coordinate-publication error in the bound. Subsequent
 transforms propagate that bound or compute the required new bound as part of their mathematics. Do not silently loosen it on
 budget exhaustion.
@@ -156,10 +159,7 @@ unmappable attributes and reports their keys and reasons. Propagate attributes w
 defined correct mappings; do not invent interpolation for labels or IDs. Failure must
 not publish a successful result with silently missing attributes.
 
-Width denotes finite nonnegative full stroke width (diameter), in geometry pixel units.
-Support a formal attached width attribute and an independent width input; each
-invocation explicitly selects exactly one source, with no fallback/override precedence.
-The v1 standard key is width. Its fixed schema supports attached Linear profiles; independent PCHIP evaluation remains a separate member.
+Width denotes finite nonnegative full stroke width (diameter), in geometry pixel units. Each invocation explicitly selects either a separate path_width Result paired with its PathSet by the workflow, or an independent width-evaluation input. The v1 standard key is width; the separate schema stores Linear profiles and source bindings. PTH-05C preserves the original path identity and returns that path together with the new width Result. Independent PCHIP evaluation remains a separate member; geometry Results carry no implicit width attribute.
 
 Explicitly distinguish these parameter domains (field spelling remains a schema
 requirement): pathset_normalized_arclength, subpath_normalized_arclength, and
@@ -242,7 +242,7 @@ and parallel candidate evaluation must preserve decisions.
 max_count is a normal stop target: reaching it succeeds; exhausting candidates or the
 active list first succeeds with fewer points. Report stop_reason and points_object_id
 using the fixed GEN-08 report schema. Candidate count, attempt count and max_count are algorithm inputs
-in cache identity. Neither completion nor count satisfaction proves maximal packing or a
+in operation/static specialization identity. Neither completion nor count satisfaction proves maximal packing or a
 fixed density. No promise of exactly N points is made.
 
 Memory/work/iteration safety budgets remain separate hard limits. Exhaustion fails

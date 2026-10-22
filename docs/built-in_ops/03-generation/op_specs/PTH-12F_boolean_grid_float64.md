@@ -30,7 +30,8 @@ publication gate checks them; report topology_status=0 (unverified). Do not clai
 original-input exactness. Canonical output must agree with an
 explicit compatible grid-result publication path, once that codec/conversion is frozen.
 
-Run-shared complete-input computation; no partial Result on failure. Tests include large grid indices,
+Complete-input lowering uses fixed tasks, explicit private intermediate Results and
+fixed dependencies; a failed call exports no successful Result. Tests include large grid indices,
 non-power-of-two scale, valid topology-preserving publication, scale/origin identity,
 capacity exhaustion and cancellation. Invalid publication geometry has no promised
 runtime diagnostic. Backend and codec remain gates.

@@ -78,7 +78,7 @@ FFTW 自身正逆不归一。本稿 backward 逆除HW、ortho另定，且 strict
 
 [原始资料](https://www.fftw.org/fftw3_doc/Real_002ddata-DFT-Array-Format.html)。版本/定位：页面显示 3.3.11。
 
-实DFT只压缩一个轴，原长度奇偶不能从half宽唯一恢复。本稿保存original_shape并对boundary列逐共轭轨道验证。
+实 DFT 只压缩一个轴，原长度奇偶不能从 half 宽唯一恢复。本稿保存 original_shape，正向变换按定义构造 boundary 列的共轭轨道；逆变换以调用方保证的共轭关系为前提。独立 oracle 可以诊断不满足该前提的参考输入。
 
 <a id="s11"></a>
 ### S11 · SciPy fftconvolve

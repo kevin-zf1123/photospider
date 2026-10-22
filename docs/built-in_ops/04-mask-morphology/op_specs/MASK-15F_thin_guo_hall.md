@@ -24,7 +24,7 @@ MASK-15A/B's immediate-update and endpoint rules do not apply.
 ## Ports, parameters and output inference
 
 input: Binary[H,W] -> skeleton: Binary[H,W], same Float32/Float64 dtype and shape.
-No static parameters. Consume exact 0/1; reject soft values and NaN/Inf.
+No static parameters. Consume exact 0/1 under the unchecked Binary premise; soft values and NaN/Inf are outside that domain.
 Canonicalize output zero to +0. The output is an index-grid thinning, with no
 physical-spacing interpretation, radius output or implicit pruning.
 
@@ -40,13 +40,13 @@ There is no successful early iteration cutoff. At most H*W successful cycles
 are possible, followed by the terminating cycle. A work/stage budget failure
 returns ResourceExhausted, and cancellation publishes no partial skeleton.
 
-Any nonempty output request requires complete-input input validation and iterative
-computation; an empty Region requires descriptors only. Input changes may dirty
-all output pixels. Charge the input retention, output/state and deletion mask;
+Any nonempty output selection has complete-input mathematical support and
+iterative computation. An empty selection adds no payload work. Compile the
+complete input-tile reads and selected output tiles before execution. Charge the input retention, output/state and deletion mask;
 reference work is O(iterations*H*W), scratch O(H*W). Poll at the common cancellation
 bound, including predicate scans. The local 3x3 predicate does not imply a fixed
 halo for the converged output. Mathematical references do not certify native
-publication, resource accounting or exact Region reads.
+publication, resource accounting or compiled tile reads.
 
 ## Neighborhood
 
@@ -72,8 +72,8 @@ not match Zhang-Suen or the project's distance-ordered thinning.
 Single pixels and a one-pixel horizontal chain remain unchanged; empty input
 foreground remains empty. Test diagonal pairs, 2x2 blocks, thick rectangles,
 T/X junctions, rings and edge-touching shapes. Check exact output, subset of
-input and fixed-point idempotence. Exercise both floating dtypes and reject
-nonbinary inputs. Compare any library only with aligned padding and phase order.
+input and fixed-point idempotence. Exercise both floating dtypes on valid Binary inputs; nonbinary fixtures
+exercise oracle diagnostics only. Compare any library only with aligned padding and phase order.
 
 The oracle entry is `thin_guo_hall` in
 [reference.py](../../../../oracle/ops/mask_morphology/mask15/reference.py).

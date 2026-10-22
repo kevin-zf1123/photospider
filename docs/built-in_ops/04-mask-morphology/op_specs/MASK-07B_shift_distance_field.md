@@ -33,21 +33,23 @@ No hidden default, conversion, color/alpha inference or optional port is added.
 
 RN_T(d-radius); radius ±0 exact copy. Output is level_set, not newly certified SDF.
 
-E: input[Q]. Empty Q has no runtime sample/control/validation reads. Descriptor
-checks still run. The family defines validation closure, border extension,
-stage rounding, dynamic witnesses and the forward dirty relation. A bounding
-rectangle may not replace a smaller declared sparse support.
+E: input[Q]. Empty Q adds no runtime payload work; static schema checks still apply.
+The family defines mathematical Data/Control support, border extension and
+rounding stages. Lower the selected complete output tiles to fixed input-tile
+reads, using a finite conservative superset for runtime-dependent addressing.
+There is no payload Validation read set or runtime dependency discovery.
 
 ## Implementation, resource and failure obligations
 
 Use the family reference algorithm and its stated work/scratch bounds. Strict
 CPU is the initial target; no implicit accelerated/GPU/third-party fallback is
 registered. Exact choices/copies stay exact; arithmetic uses the inherited
-rounding boundary and finite-domain error rules. Account for output, scratch,
+rounding boundary and unchecked numerical premises. Account for output, scratch,
 exact state, retained source owners and all simultaneous intermediates. Poll
-inside long loops/refinement. complete-input or CompleteBundle scopes do not expose
-partially converged or partially associated results. Preserve the host's
-upstream/cancellation/resource scope and immutable owner lifetime.
+inside long loops/refinement. Selected outputs of one call share its publication
+outcome; failure exposes no partial call Result. Already retired call exports
+remain valid. Preserve host upstream/cancellation/resource status and immutable
+owner lifetime.
 
 ## Independent acceptance and conceptual workflow
 
@@ -56,11 +58,13 @@ d=[-1,0,1], radius=.25 -> [-1.25,-.25,.75].
 Independent reference entry: `shift_distance_field` in
 [`mask07/reference.py`](../../../../oracle/ops/mask_morphology/mask07/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
-do not exercise kernel registration, resource accounting or exact Region reads.
+do not exercise kernel registration, resource accounting or compiled tile reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),
-then add the relevant common ROI/disjoint support, special-value, invalid
-parameter, dtype, association, cancellation and owner-lifetime checks before
-implementation acceptance.
+then add the relevant common fixed-tile support, valid special-value, static
+structural-parameter, dtype, correctly paired association, cancellation and
+owner-lifetime checks before implementation acceptance. Invalid payload or
+numerical-premise fixtures diagnose oracle requests only; they do not require
+production rejection.
 
 Conceptual DAG: explicit input preparation -> this member -> an explicit
 mask/measurement/image consumer appropriate to the listed output. A real
@@ -68,6 +72,7 @@ Compiler/ExecutionContext workflow is still required after registration; this
 document does not invent a callable public API. Sources and compatibility
 limits are recorded in the family and [research notes](../research-sources.md).
 
-Distance inputs admit signed no-feature infinities and reject NaN. Finite
-shift preserves infinities; finite threshold and feather map -Inf to 1 and
-+Inf to 0, as applicable. Finite arithmetic overflow remains an error.
+Distance inputs admit signed no-feature infinities and exclude NaN as a caller
+premise. Finite shift preserves infinities; finite threshold and feather map
+-Inf to 1 and +Inf to 0, as applicable. Finite results must be representable;
+violated numerical premises have no runtime diagnostic guarantee.

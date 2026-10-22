@@ -32,25 +32,25 @@ Inputs are `input`, `mask`, and `kernel`; outputs are `output` and UInt8 `valid`
 
 Require axes and anchor, `shape=same`, an explicit boundary (`truncate` is supported), and `empty` chosen from `copy_center`, `zero`, or `error`. Do not expose bias or normalization parameters. Inputs are a raw field, participation mask, and nonnegative kernel. No constructor defaults.
 
-NUM special-value, floating-point overflow, signed-zero, payload, rounding, and precision behavior follows the corresponding operation and [FILTER common contract](FILTER_common_contract.md). Do not reject NaN/Inf under a family-wide rule or convert ordinary floating-point overflow into failure. Parameter-domain, structural, integer-overflow, resource, cancellation, and upstream errors retain their own contracts. Every parameter is explicit in the node; constructors have no implicit defaults. Interpret floating-point parameters as their stored values.
+NUM special-value, floating-point overflow, signed-zero, payload, rounding, and precision behavior follows the corresponding operation and [FILTER common contract](FILTER_common_contract.md). Do not reject NaN/Inf under a family-wide rule or convert ordinary floating-point overflow into failure. Static structural, parameter-type and capacity-arithmetic errors retain pre-execution diagnostics. Numerical-domain premises are unchecked; resource, cancellation and upstream failures retain their contracts. Every parameter is explicit in the node; constructors have no implicit defaults. Interpret floating-point parameters as their stored values.
 
 ## Mathematical reference and rounding
 
-For each output, let `D=Σ K M`. Require `K≥0` and `M∈[0,1]`. If `D>0`, return `RN_t(Σ K M I / D)` and `valid=1`. If `D=0`, apply the required `empty` strategy and return `valid=0`. When `M=0`, do not read or validate I; when `K=0`, do not read M or I. Validate the complete kernel. Constant-boundary exterior taps use `M=1`; truncated exterior taps do not participate.
+For each output, let `D=Σ K M`. Callers guarantee `K≥0` and `M∈[0,1]`. If `D>0`, return `RN_t(Σ K M I / D)` and `valid=1`. If `D=0`, apply the required `empty` strategy; successful zero/copy results have `valid=0`, while the explicit error policy reports an empty-support outcome. When `M=0`, I does not participate in arithmetic; when `K=0`, M and I do not participate. Consume the kernel for algorithmic support and normalization without validating its numerical domain. Constant-boundary exterior taps use `M=1`; truncated exterior taps do not participate.
 
 The numeric class and E/B/S meanings are defined in [FILTER numeric reference](FILTER_numeric_reference.md). Retain every declared rounding stage; helper calls do not introduce extra intermediate rounding unless the member says so. Signed zero, discrete choices, gradual underflow, and output range follow the member and NUM contracts.
 
-Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Mathematical sample support is rounded to the current plan's member tiles for payload Needs, authorization and invalidation. Control and validation samples use ordinary payload Needs and participate in the same evidence. Empty payload demand reads no samples. Output structure derives only from static parameters and input schemas. The kernel has no support-role or Exact/Conservative/Unknown dependency mode.
+Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Lowering closes mathematical sample support on fixed input member-tile grids. Data-dependent selection uses a finite static superset of every address the task may consume; runtime selection does not expand the Plan. Data and control are algorithmic inputs, with no separate Validation read set. Empty retained selections introduce no payload tasks. Output schemas derive only from static parameters and input schemas. Numerical, encoding and association premises remain unchecked under the common contract.
 
-Per output, read the kernel and actual mask control first, then read data only where `K*M>0`. Preserve all participating mask samples as dirty witnesses. Complexity is O(PCA) with two exact sums. Do not reuse this profile for signed derivative kernels.
+Per output, the kernel and mask determine participating arithmetic terms. Lowering declares a finite source/mask tile superset from the static kernel footprint; runtime zero weights select terms within those admitted views and do not change producers. Complexity is O(PCA) with two exact sums. This profile requires nonnegative kernels and is not a signed-derivative profile.
 
-Complexity uses P=HW samples, C independent planes, A taps, and T iterations where applicable; arbitrary-precision limb cost is additional and is not a measured benchmark. Follow FILTER admission, work/memory/stage accounting, cancellation, failure, and owner-lifetime rules. Failure publishes no partial Tensor or CompleteBundle. Do not spill implicitly, lower precision silently, or fall back to retired implementations.
+Complexity uses P=HW samples, C independent planes, A taps, and T iterations where applicable; arbitrary-precision limb cost is additional and is not a measured benchmark. Follow FILTER admission, work/memory/stage accounting, cancellation, failure, and owner-lifetime rules. A failed call publishes no successful Result export; previously retired call exports remain valid, and final RET results require successful Run completion. Do not spill implicitly, lower precision silently, or fall back to retired implementations.
 
 ## Oracle, fixtures, and acceptance
 
 Use input `[1,NaN,5]`, mask `[1,0,1]`, and a three-tap unit kernel: the center output is 3 and succeeds. With an all-zero mask, exercise each empty policy. A NaN mask and a negative kernel entry are invalid.
 
-The linked reference function is a small mathematical oracle, not a production kernel or a complete port-schema/preflight simulator. ExactRational uses exact rational expressions followed by IEEE rounding. For transcendental functions, only a DirectedMPFR interval that uniquely determines the result is a strict golden; otherwise report Inconclusive. Fixture identifiers describe reference-case scope only and make no claim about runtime implementation, full rank/batch behavior, metadata, ROI/dirty behavior, budgets, cancellation, or ownership. See the [runtime acceptance protocol](FILTER_oracle_protocol.md).
+The linked reference function is a small mathematical oracle, not a production kernel or a complete port-schema/preflight simulator. ExactRational uses exact rational expressions followed by IEEE rounding. For transcendental functions, only a DirectedMPFR interval that uniquely determines the result is a strict golden; otherwise report Inconclusive. Fixture identifiers describe reference-case scope only and make no claim about runtime implementation, full rank/batch behavior, metadata, compiled ROI/tile behavior, budgets, cancellation, or ownership. See the [runtime acceptance protocol](FILTER_oracle_protocol.md).
 
 See the member's linked reference source and oracle README.
 
@@ -64,7 +64,7 @@ The proposed keys are `filter.normalized_convolution_strict`, `filter.normalized
 
 ## Conceptual DAG (not an existing API)
 
-`static parameters + descriptors -> preflight/demand -> declared data and control -> exact expression and declared rounding stages -> requested owned output/result`
+`static parameters + schemas -> compile fixed reads/tasks -> prepare -> unchecked arithmetic with declared rounding stages -> complete tiles -> ordered call retirement`
 
 This sketch introduces no implicit color conversion, alpha premultiplication, frequency correction, or zero-fill for missing data. complete-input and staged-buffer requirements are those declared by the member and family.
 

@@ -12,9 +12,7 @@ implementation_status: not_implemented
 
 Raw field filters do not infer color or alpha from channel count. Semantic entry
 points explicitly select a group and its same-tensor alpha slot and respect FMT
-canonical straight color. metadata_mode=respect|override follows FMT; override does
-not decode transfer functions. Decode, model conversion, gamut mapping, tone mapping
-and quantization remain explicit operations.
+canonical straight color. Interpretation is an explicit static TensorDescription v4/v5 parameter checked against the input's structural descriptor; Results carry no attached description or implicit metadata override mode. Decode, model conversion, gamut mapping, tone mapping and quantization remain explicit operations.
 
 ## Fused positive-weight blur
 
@@ -22,9 +20,7 @@ and quantization remain explicit operations.
 linear-Y Gray. Its nonnegative Float64 kernel K has finite positive exact sum S.
 An associated coverage alpha is finite in [0,1]; absent alpha means coverage 1 and
 does not create an alpha output. The public output remains straight. This primitive explicitly overrides the FMT
-common finite-color-sample validation rule for participating color values: NaN/Inf
-colors are accepted and propagated under NUM. The exception changes neither FMT
-metadata/group validation nor the finite [0,1] coverage-alpha domain. It applies
+common finite-color input premise for participating color values: NaN/Inf colors are accepted and propagated under NUM. The exception retains FMT static description/group checks and the unchecked finite [0,1] coverage-alpha premise. It applies
 only to FIL-01D, not automatically to other semantic color operations. For each
 component and nonzero tap:
 
@@ -44,8 +40,7 @@ participating invalid product/NaN still propagates. Positive A_exact rounded to 
 retains the corresponding hidden straight color, including NUM exceptional results.
 Zero taps are excluded. Alpha-only requests do not read color; color-only requests
 read needed color and alpha but do not publish an unrequested alpha plane. Unselected
-AOV/emission channels are bit copies, not coverage weighted. Output metadata points
-only to its own slots.
+AOV/emission channels are bit copies, not coverage weighted. The caller's downstream description refers to the output's own slots.
 
 This E formula is distinct from the explicit staged FMT associate -> field filter
 -> unassociate chain, which has additional rounding boundaries. Box/Gaussian kernel
@@ -78,7 +73,6 @@ upstream errors of other consumers.
 Required fixtures include (C,A)=(8,0),(2,1) with equal weights yielding (2,1/2),
 finite all-transparent windows yielding +0, zero-alpha NaN/Inf contamination,
 first-NaN payload priority, alpha underflow, alpha-only independence and unselected
-AOV NaNs. Runtime validation additionally checks metadata identity, group extraction,
-output ownership and demand. Conceptual workflows include FMT decode -> select group
+AOV NaNs. Temporary public-path acceptance checks static description identity, group selection, output ownership and fixed tile support using valid alpha/kernel payloads. Production invocation adds no alpha scan or output certification. Conceptual workflows include FMT decode -> select group
 -> fused blur -> FMT encode, and model conversion -> extract luminance -> restoration
 -> replace -> inverse model. These do not establish commercial preset equivalence.

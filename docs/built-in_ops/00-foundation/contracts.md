@@ -2,6 +2,21 @@
 
 本页保留研究期数据、空间、颜色与数值设计约定。涉及当前运行行为时，以 0.39.0 package 的公开头文件和[kernel 架构指南](../../kernel-architecture/README.md)为准，尤其是[数据模型](../../kernel-architecture/Data-Model.md)、[依赖采样](../../kernel-architecture/Dependency-Sampling.md)、[资源](../../kernel-architecture/Managed-Resources.md)和[全局结果](../../kernel-architecture/Global-Results.md)。本文中的 Proposed 设计不是当前实现承诺；分类页参数仍须与已实现节点的具体规格区分。
 
+## Unchecked 执行边界
+
+01–05 的成员规格、族契约及 SDK helper 统一遵循 [Compiler and Execution](../../kernel-architecture/Compiler-and-Execution.md) 的 unchecked 契约。成员定义各自的数学输入域、输出构造和算法分支，并继承以下阶段划分。
+
+| 阶段 | 责任 |
+| --- | --- |
+| 编译、导入及静态 preparation | 校验 schema/version、成员目录、dtype、rank、固定 extent、轴与 shape 关系、参数存在性/类型/语法、固定读写与 scratch 结构及其容量算术。 |
+| Run preflight 与协调 | 按现有内核契约检查 binding 的物理覆盖、layout、owner、currentness、资源准入、completion 身份与生命周期。 |
+| 算子调用 | 直接使用固定 views。调用方保证运行时 count、offset、index、ID、关联、padding、编码规范与数值/几何前提；生产者按规格构造完整输出，消费者直接使用这些前提。 |
+| 独立 oracle 与验收程序 | 在参考工具中诊断非法请求，并检查合法输入的结果、容差和存储规则。此类诊断不构成生产执行的失败承诺。 |
+
+静态参数的有限性、正值、顺序及几何可表示性也属于 unchecked 前提；决定静态结构的约束仍在准备阶段检查。违反 payload 或数值前提时，结果、诊断与恢复行为均无保证。生产者不在发布前扫描输出，消费者不重复验证 payload；将这些检查命名为质量认证不会改变其性质。
+
+保留规格明确要求的数学分支、候选筛选、正确舍入细化、显式 clip/NaN 策略、质量测量与显式质量门控。资源耗尽、取消、设备失败及合法输入下定义的 NoSolution/NotConverged 等运行结果仍按各自契约处理。数据有效性、物理访问权限和算法精度是分别定义的责任。
+
 ## 数据对象与输出
 
 | 概念对象 | 研究期形状示意 | 规格需要说明的语义 |
@@ -19,7 +34,7 @@
 静态命名多输出使用 `WorkflowNodeOutput{node, port}` 和
 `WorkflowOutput{name, node, port}`，各输出可有不同 shape、Region 和依赖。
 pure 算子的未请求端口不执行。
-所有端口都传递 Result，每个 Result 的 Tensor 成员名称、数量、dtype、rank 和正 extent 在 preparation 后固定。数据依赖数量使用静态容量与普通 payload，例如 `records[N,R]` 和 `count:Int64[1]`，或同形状数据加 mask。Count、mask、offsets 没有内核特殊含义，读取它们需要编译后的 payload grant；descriptor-only 不提供这些值。有效数量可以为零，shape 仍保持正 extent。每个公开 tile 完整初始化，未使用位置按算子规则填充。未生产 tile 不缩短数组，要求完整结果的算子在容量不足时失败。
+所有端口都传递 Result，每个 Result 的 Tensor 成员名称、数量、dtype、rank 和正 extent 在 preparation 后固定。数据依赖数量使用静态容量与普通 payload，例如 `records[N,R]` 和 `count:Int64[1]`，或同形状数据加 mask。Count、mask、offsets 没有内核特殊含义，读取它们需要编译后的固定 payload read；descriptor-only 不提供这些值。有效数量可以为零，shape 仍保持正 extent。每个公开 tile 完整初始化，未使用位置按算子规则填充。未生产 tile 不缩短数组，要求完整结果的算子在容量不足时失败。
 
 Planner 根据成员 publication policy 编译固定 selection 闭包；每个 task 完整初始化其声明的输出 tile。Task 完成后可向内部后继转发；CallGroup 在全部成员 task settle 后按 IR 顺序退休，成功时才向 observer 交付声明的 Result exports。共享计算使用显式 task 和 call 私有 value。外部 ResultBuilder 的 coverage/capture 规则独立于 call 退休，旧 descriptor 不随之后生产增长。见[全局结果](../../kernel-architecture/Global-Results.md)。
 
@@ -79,15 +94,14 @@ IR identity 包含静态 operation contract、参数、schema、输入关系和�
 
 ## 错误与数值质量
 
-规格分别记录 `Status.code`、`reason` 和 `detail`；诊断字符串不作为分支条件。Task 操作失败形成 call failure cut：更早 call 继续完成并有序退休，cut 及之后未提交的工作被跳过，已接受工作排空。同一 call 从实际失败 task 中选择最小 TaskId。用户取消、Stale、device/context/observer 失败按 Run abort 契约处理。`join()` 等待 task quiescence 与 observer settlement；失败不返回最终成功结果。此前已退休的 call Result 保持有效。数值输入前提、质量检查与 typed failure 由各算子固定 kernel 契约定义。
+规格分别记录 `Status.code`、`reason` 和 `detail`；诊断字符串不作为分支条件。Task 操作失败形成 call failure cut：更早 call 继续完成并有序退休，cut 及之后未提交的工作被跳过，已接受工作排空。同一 call 从实际失败 task 中选择最小 TaskId。用户取消、Stale、device/context/observer 失败按 Run abort 契约处理。`join()` 等待 task quiescence 与 observer settlement；失败不返回最终成功结果。此前已退休的 call Result 保持有效。各算子的固定 kernel 契约定义数学前提、算法精度细化和合法输入下的实际失败；unchecked 前提不增加数值域或 payload 违约诊断。
 
 ops SDK 的 `QualityReport` 区分 Measured 与 CertifiedBound。有限 residual 包括零 residual 都不自动
 成为误差证明；当前 CertifiedBound factory 仅覆盖受限整数对角系统及匹配的 Float64 estimate。
 依赖 Exact、数值误差界、受管理容量是不同保证。见
 [Atom errors and quality](../../kernel-architecture/Atom-Errors-and-Quality.md)。
 
-未实现随机算子的建议仍为 seed/global coordinate/channel/frame/stream 的 counter-based 序列，
-并单列浮点变换的后端误差；没有新增随机 registry key。[^random]
+随机算子的 key/counter 布局、seed、全局坐标、channel/frame/stream 及浮点变换误差以 [NOI 随机契约](../03-generation/op_specs/NOI_random_contract.md)和各成员规格为准；注册状态见 [Generation 目录](../03-generation/generators.md)。Counter-based 序列的研究来源与具体算子实现状态分别记录。[^random]
 
 ## 公共验收
 
@@ -96,4 +110,4 @@ ops SDK 的 `QualityReport` 区分 Measured 与 CertifiedBound。有限 residual
 特定容差契约优先。局部算法按需要检查 whole/ROI/tile；全局 Result 检查页大小、静态容量下的零/非零 count、
 关联、独立 Run、取消排空、低预算准入、上下文销毁后寿命。
 
-[^random]: John K. Salmon 等，*Parallel Random Numbers: As Easy as 1, 2, 3*，SC11，2011；[作者与项目页](https://random123.com/)。原研究参考；Photospider 随机键布局仍为建议。
+[^random]: John K. Salmon 等，*Parallel Random Numbers: As Easy as 1, 2, 3*，SC11，2011；[作者与项目页](https://random123.com/)。Counter-based RNG 的研究参考；Photospider 的具体键布局由 NOI 规格定义。

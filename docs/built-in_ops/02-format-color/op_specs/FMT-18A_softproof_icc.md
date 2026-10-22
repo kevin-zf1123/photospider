@@ -36,8 +36,9 @@ Static construction is required even for empty requests; it does not scan pixels
 
 ## Resources, precision and failures
 
-Only auto/materialize layouts; forced view fails. Inherit planar reservations,
-explicit page preparation, immutable lifetimes and all FMT-12 host-engine resource
+Only auto/materialize layouts; forced view fails. Selected output tiles use
+independent dense allocations and fixed preallocated scratch. Inherit immutable
+owner lifetimes, call-retirement publication and all FMT-12 host-engine resource
 hooks. B is not built or evaluated by this member.
 The external engine/build identity determines numerical behavior. No native NUM
 precision label or commercial CMM equivalence is claimed. Failures preserve their

@@ -48,8 +48,8 @@ This retains off-diagonal covariance terms and gives a positive-definite exact
 matrix for a valid nonempty group with positive total weight. Squaring and
 addition follow the specified NUM rounding boundaries; an implementation must
 not silently lose regularization by premature underflow. The fitted-model
-representation must preserve or certify the positive-definite matrix required
-by application. This rule does not define a mean for an empty group.
+representation is constructed from the positive-definite matrix required by
+application; representability of its stored positive diagonal is a caller premise. This rule does not define a mean for an empty group.
 Two separately named fitting entry points are provided. The table entry consumes
 samples:Float32/Float64[N,C] and group_ids:Int64[N]. This is a generic numeric
 sample table, not interleaved image storage. The image entry consumes a planar
@@ -78,15 +78,15 @@ boundaries, without an implicit rounded-mean intermediate in the covariance.
 Both fitting entries use Int64 group IDs: zero excludes the sample, positive
 IDs identify groups, and negative IDs are invalid. IDs need not be contiguous.
 Models are ordered by ascending positive ID, never by first encounter or hash
-iteration. Validate the complete group-ID domain for a nonempty model request.
-At ID zero, color samples and weights are neither Data nor sample Validation;
+iteration. The complete group-ID domain is an unchecked caller premise.
+At ID zero, color samples and weights are not mathematical Data;
 their descriptors are still checked. A positive-ID sample with zero weight is
 distinct from an excluded sample. No artificial group zero is emitted.
 For a positive-ID group with exactly zero total weight, emit no fitted model
 row and include its ID in skipped_group_ids, sorted ascending. The diagnostic
 reason is zero_total_weight. Diagnostics enumerate only positive IDs present
-in the input, not missing integers between IDs. Illegal weights remain errors,
-not skipped-group conditions. Effective model rows contain only groups with
+in the input, not missing integers between IDs. Illegal weights are outside
+the caller premise and have no diagnostic or skipped-group guarantee. Effective model rows contain only groups with
 positive total weight. If all IDs are zero or all present groups have zero
 weight, return an empty model with payload count=0 with unchanged static capacity. Applying an empty model
 produces an all-zero Coverage mask; there is no inferred fallback group.
@@ -111,8 +111,9 @@ with positive diagonal satisfying Sigma_eff=L*L^T. The fitting output is an
 explicit NUM rounding boundary: store RN64(mu_j) and RN64(L_jk) for k<=j;
 upper-triangular entries are +0. Do not first round mu or Sigma_eff and factor
 that different matrix. Required stored entries must be finite and every stored
-diagonal must be positive. Failure to represent the required model is an error,
-not permission to change epsilon, clip eigenvalues or use a pseudoinverse.
+diagonal must be positive. These representability conditions are caller
+premises; execution adds no output validator and does not change epsilon, clip
+eigenvalues or use a pseudoinverse.
 
 Application treats the stored mean and factor as exact binary inputs. Define
 z by the mathematical triangular solve L_stored*z=x-mu_stored and
@@ -120,40 +121,34 @@ d=sqrt(sum_j z_j^2). The effective covariance of the exported model is therefore
 L_stored*L_stored^T; it is not claimed to equal an independently rounded full
 covariance. The solve introduces no unlisted Float64 per-step rounding. Distance
 threshold predicates and final response rounding follow NUM and the member's
-explicit boundaries. Model validation checks finite entries, triangular form,
-positive diagonal, dimensions and coordinate interpretation. Coverage output
-uses the image dtype.
+explicit boundaries. Static preparation checks model schema/dimensions and the
+explicit coordinate description. Finite entries, triangular form and positive
+diagonal are unchecked payload premises. Coverage output uses the image dtype.
 
-For every positive group ID, fitting reads and validates all consumed color
-coordinates and the weight, including when the weight is exactly zero. Color
-coordinates must be finite and satisfy any consumed semantic description;
-weights must be finite and nonnegative. A zero coefficient contributes zero
-but does not omit input validation. Validate these admitted samples before
-classifying zero-total-weight groups: NaN/Inf colors or illegal weights fail
-rather than becoming skipped-group diagnostics. Only ID-zero samples exclude
-both color and weight payloads from Data/Validation. These rules apply equally
-to the table and image fitting entries.
+For every positive group ID, fitting consumes the color coordinates and weight,
+including when the weight is exactly zero. Color coordinates are finite and
+consistent with the explicit description; weights are finite and nonnegative.
+These are unchecked premises. A zero coefficient contributes zero without
+removing the sample from the declared support. Only ID-zero samples are excluded
+from mathematical color/weight support; the compiler still prepares a finite
+conservative tile superset for this runtime selection. Zero-total-weight groups
+are an ordinary algorithmic outcome on valid input, with the specified skipped ID.
 
-Statistical fitting and application consume an explicitly described complete
-nonperiodic color-coordinate group supported by FMT. Raw arbitrary-feature mode
-is not part of these members. The model records the effective coordinate
-interpretation, ordered component roles and all applicable FMT description
-fields (including transfer, reference white/profile identity where meaningful).
-Application requires the same interpretation after any explicit upstream
-conversion. Equal component counts alone are insufficient. Model coordinates
-and epsilon use the native FMT scales, including CIELAB l=L*/100. No hidden
-color conversion, rescaling, channel permutation or semantic override is
-inferred from sample values. A call-local explicit FMT override is validated
-and recorded as its effective description, not silently substituted later.
-Periodic hue coordinates are not admitted as ordinary covariance dimensions.
-Image entry selectors identify exactly one complete color group; unrelated
-alpha/AOV channels are not fitting data. Table columns carry that same ordered
-group description. Models may be applied to other images with compatible
-descriptions; they are not tied to a source-image ObjectId.
-CIEDE2000 does not replace DeltaE76. No member silently
-estimates its target, selects a color space, or performs a hidden conversion.
-All seven members have explicit contracts; native metadata/Result registration
-is still an implementation gate.
+Statistical fitting and application require caller-owned `input_description`
+configuration for one complete nonperiodic FMT color-coordinate group. Raw
+arbitrary-feature mode is not offered. The workflow pairs the model Result with
+this explicit interpretation and passes it to each consumer; the Result carries
+no attached description. Application uses the same coordinate interpretation
+after any explicit upstream conversion, as a caller premise. Equal component
+counts alone do not establish that premise. Coordinates and epsilon use native
+FMT scales, including CIELAB l=L*/100. No color conversion, rescaling, channel
+permutation or interpretation is inferred from samples. Static preparation
+checks the supplied description and selectors against the schemas. Periodic hue
+coordinates are not covariance dimensions. Unrelated alpha/AOV channels are not
+fitting data. Table columns carry the same ordered group interpretation in the
+caller's configuration. Models can be applied to other compatible images and
+are not tied to a source-image ObjectId. CIEDE2000 does not replace DeltaE76.
+The members and their SDK schema/factory/lowering remain unimplemented.
 
 The CIEDE2000 selector requires kL,kC,kH as explicit positive finite Float64
 static parameters. Authoring helpers recommend 1,1,1 and serialize them; no
@@ -171,32 +166,32 @@ For A-C, input is planar Field[C,H,W]. Required `channels` is an ordered unique 
 String. A uses any K>=1 selected coordinates, `target: Float64[K]` and
 `scales: Float64[K]` required Tensor ports; B uses K=3, `target: Float64[3]`;
 C uses two selected raw coordinates hue and chroma, no target Tensor.
-Runtime targets/scales are controls: all are validated/read for nonempty Q.
-They cannot be executed during output descriptor inference. Output Coverage
-[H,W] uses the image dtype. `interpretation=raw|respect|override` and optional
-conditional `source_description` follow FMT; override applies only to this call.
-A raw coordinate metric assigns no perceptual meaning. Respect/override require
-a complete selected group and validate that group's consumed color coordinates.
-Targets use the same native coordinate convention and compatible description;
-scales are positive finite numeric coordinate-unit scales, not a color profile.
-Unselected alpha/AOV is not read. No hidden alpha exclusion or color conversion.
+Runtime targets/scales are controls read for nonempty output selection; their
+finite/positive domains are unchecked premises. They are not executed during
+output schema inference. Output Coverage[H,W] uses the image dtype. Optional
+`input_description` selects the semantic form; its absence selects the documented
+raw form. There is no respect/override or separate interpretation mode. A raw
+coordinate metric assigns no perceptual meaning. Semantic descriptions and
+selectors are checked structurally during preparation; their completeness adds
+no payload validation closure. Targets use the same native coordinate convention
+and compatible interpretation. Scales are positive finite coordinate-unit scales,
+not a color profile. Unselected alpha/AOV samples are not mathematical inputs.
 
 A distance is sqrt(sum_j(((c_j-t_j)/s_j)^2)). B requires CIELAB l,a*,b* and
 uses sqrt((100*(l-lt))^2+(a-at)^2+(b-bt)^2); never first round 100*l.
 Thus l=.50 vs .51 with equal a,b is about DeltaE76=1 for stored inputs,
 not .01. B raw still explicitly means these three normalized-Lab coordinates.
 C is an explicit hue/chroma coordinate primitive: raw selection or a recognized
-polar group whose angle has first been explicitly converted to turns. For
-respect/override complete-group validation can require the other color channels;
-that additional Validation closure is declared and must not be confused with
-hue/chroma Data. Let h0 be center_turns and delta=(h-h0)-floor(h-h0+1/2).
+polar group whose angle has first been explicitly converted to turns. Only
+hue/chroma enter mathematical support; the complete static group description
+does not add reads of other color coordinates. Let h0 be center_turns and delta=(h-h0)-floor(h-h0+1/2).
 Hue distance is abs(delta) in [0,.5]; arbitrary finite winding is preserved at
 input and reduced exactly for this comparison. chroma=0 or
 chroma<minimum_chroma uses explicit neutral_policy include|exclude: include
 returns 1 and exclude returns +0 without a hue-distance decision. Positive
 chroma equal to minimum_chroma uses the hue branch. Authoring recommends exclude;
-the node serializes both fields. Color coordinates still undergo required validation;
-consumed semantic group validation still applies. No RGB->HSL hidden transform.
+the node serializes both fields. Finite consumed coordinates and nonnegative
+chroma are caller premises, without sample or complete-group validation. No RGB->HSL hidden transform.
 
 A-D and G use required `inner,outer` finite Float64 with 0<=inner<=outer
 (C also outer<=.5), plus curve linear|smoothstep. A/B use distance units above;

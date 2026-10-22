@@ -40,8 +40,9 @@ point. Floating infinities participate in the ordinary numerical order.
 
 If either operand is NaN, propagate that input's payload/sign and quiet it.
 If both are NaN, propagate the first input `a` under the shared priority rule.
-This is not a NaN-ignoring operation. Both source operands are still read and
-validated, even if a NaN determines the output.
+This is not a NaN-ignoring operation. Both source operands remain declared
+reads even if a NaN determines the output; their schemas are checked during
+static preparation, without runtime sample validation.
 
 For mixed signed zeros, return -0. For same-sign zeros, retain that sign.
 For equal nonzero operands, return their common value. These exact selection
@@ -54,7 +55,7 @@ expected values [-2,0,3] in both ordinary and disjoint requests. Include all fou
 zero combinations, infinities, each single-NaN placement, two NaNs with different
 payload/sign bits, signaling NaNs, and Int64 values beyond Float64's exact range.
 Use an independent integer/bit-classification oracle; apply shared resource,
-validation, lifetime, invalidation and cancellation cases.
+static validation, lifetime, compatible rebinding and cancellation cases.
 
 The unsuffixed `numeric.minimum` key uses fixed CPU tile tasks and an unchecked finite Float32/Float64 domain. It returns negative zero for every zero pair. The suffixed keys below have the separate dtype and IEEE propagation rules specified here.
 
@@ -65,8 +66,9 @@ with independently named constructors in `photospider/ops/numeric/binary.hpp`.
 The fixed adapter declares both intersecting input tile sets, including when a numeric identity determines a result.
 Floating elementary operations use controlled correctly rounded hardware
 arithmetic after exact special-value classification, with exact fallback; integer
-operations retain checked exact arithmetic. Accelerated ordinary positive-base
+operations use exact arithmetic under the caller premise of representable
+integer results; fixed arithmetic-capacity failures remain operational. Accelerated ordinary positive-base
 power and angle results use SLEEF binary64 enclosures within the shared admitted
 ranges. atan2pi divides an angle enclosure by an enclosed pi. Only rejected
 candidates dispatch the certified strict backend . See [math implementation](../math-implementation.md) for
-rounding, scratch, work accounting and unresolved-refinement limits.
+rounding, fixed scratch admission, cancellation and unresolved-refinement limits.

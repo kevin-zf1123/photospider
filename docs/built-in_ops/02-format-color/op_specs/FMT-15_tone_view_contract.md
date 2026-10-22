@@ -178,9 +178,10 @@ when its entry/exit assertions agree; no native tone/gamut stage is implied.
 
 Reserve collision-free node IDs and stage the expansion atomically; a failed
 inference leaves the graph and exports unchanged. Keep every constituent's
-rounding, failure, request, cache identity and owner lifetime. No matrix/curve
-fusion, no-op elision or engine replacement is presumed bit-equivalent. Dirty
-sets are the composition of actual support. Each constituent's numeric and
+rounding, operational failure, fixed tile dependencies, compiled invocation
+identity and owner lifetime. No matrix/curve fusion, no-op elision or engine
+replacement is presumed bit-equivalent. The expanded graph retains the exact
+read/write sets of every required task. Each constituent's numeric and
 representability premises also apply to intermediate values without a scan. The helper cannot upgrade a constituent's execution guarantees.
 
 ## Demand, storage, resource and error contract

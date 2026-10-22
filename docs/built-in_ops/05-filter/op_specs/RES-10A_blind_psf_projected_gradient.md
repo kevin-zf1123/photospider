@@ -25,7 +25,7 @@ Inherit the [RES-10 family contract](RES-10_contract.md), [FILTER common contrac
 
 ## Required parameters and domain
 
-Require explicit `max_iterations>=0`, `step_image=eta_x>0`, `step_psf=eta_k>0`, `image_l2=lambda_x>=0`, `psf_l2=lambda_k>=0`, `y_axis`, `x_axis`, `anchor_y`, and `anchor_x`; boundary is fixed to wrap. Constructors have no defaults. For any positive iteration count, `initial_image>=0` and `initial_psf>=0`, the initial PSF must be supported only on the selected footprint and have exact sum one. Do not normalize a violating initial PSF. The image, observation, support and parameters are validated before iteration as required by the family; NUM propagation applies to ordinary arithmetic values.
+Require explicit `max_iterations>=0`, `step_image=eta_x>0`, `step_psf=eta_k>0`, `image_l2=lambda_x>=0`, `psf_l2=lambda_k>=0`, `y_axis`, `x_axis`, `anchor_y`, and `anchor_x`; boundary is fixed to wrap. Constructors have no defaults. For any positive iteration count, `initial_image>=0` and `initial_psf>=0`, the initial PSF must be supported only on the selected footprint and have exact sum one. Do not normalize a violating initial PSF. The image, observation, support and numerical parameters satisfy the family's unchecked caller premises; NUM propagation applies to ordinary arithmetic values.
 
 ## Objective and recurrence
 
@@ -61,8 +61,8 @@ if there is only infinity, generate the fixed positive quiet NaN. This tag is no
 a feasible simplex certificate and does not claim sum-one. Later computations
 consume those exceptional components under NUM; the exceptional PSF remains tagged.
 No early-stop check can pass on that state. Fixed-step execution still completes
-its declared count, and early-stop execution can end at max_iterations. Required
-initial finite PSF/domain validation, resource errors and cancellation remain errors.
+its declared count, and early-stop execution can end at max_iterations. The initial finite PSF and model domains remain caller premises. Resource errors
+and cancellation retain their operational failure behavior.
 The finite constrained state still uses exact rationals without intermediate Float64
 rounding. `special.exceptional_simplex` covers the projection branch, not a complete
 concurrent solver implementation.

@@ -37,7 +37,7 @@ coverage 1 at d=0; outer=0 gives coverage 0 at d=0. Thus the hard double-zero
 branch is intentionally not a continuous limit from every one-sided family.
 Symmetric positive widths give exactly .5 at d=0; asymmetric widths generally
 do not. Sum and numerator are constructed exactly even if a floating sum would
-overflow. Time O(Q), constant scratch; Data+Validation at Q only. This is not
+overflow. Time O(Q), constant scratch; Data at Q only. This is not
 Gaussian blur and does not automatically preserve the area of a selection.
 
 ## Sources, independent evidence and review boundary
@@ -49,6 +49,7 @@ choice in this draft. Member examples and the [oracle suite](../../../../oracle/
 are the acceptance starting point. Proposed scope does not relax the inherited
 NUM numerical standard.
 
-Distance inputs admit signed no-feature infinities and reject NaN. Finite
-shift preserves infinities; finite threshold and feather map -Inf to 1 and
-+Inf to 0, as applicable. Finite arithmetic overflow remains an error.
+Distance inputs admit signed no-feature infinities and exclude NaN as a caller
+premise. Finite shift preserves infinities; finite threshold and feather map
+-Inf to 1 and +Inf to 0, as applicable. Finite results must be representable;
+violated numerical premises have no runtime diagnostic guarantee.

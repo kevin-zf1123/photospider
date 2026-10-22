@@ -115,7 +115,7 @@ distinct ports, formulas and acceptance. An ID does not impose one registry key.
 | Profiles and configuration | FMT-12/13 | ICC and OCIO have different resource/transform semantics; neither is a generic pair of gamut names. |
 | Output rendering | FMT-14/15/18 | Gamut mapping, tone/view transforms, proofing and gamut masks are separate observable functions. |
 | Chroma sampling | Input/output codec | Internal Y/Cb/Cr planes are same-size and co-sited; external subsampling/reconstruction belongs to the codec boundary. RGB/YCbCr mathematics remains FMT-11. |
-| External layout / packing | Input/output codec and kernel storage | All kernel images are planar; external packing/layout is handled at I/O. Logical tensor/channel transforms keep their NUM/FMT responsibilities. |
+| External layout / packing | Input/output codec and kernel storage | External packing/layout is handled at I/O or explicit layout/COPY boundaries. Logical tensor/channel transforms keep their NUM/FMT responsibilities; prepared views and distinct output tile allocations obey current physical storage. |
 
 The existing category boundaries provide the following allocation for detailed
 specification work: model-defined gray conversion belongs to
@@ -166,16 +166,15 @@ Current public types:
 
 ## Shared decisions
 
-That decision supersedes the initial
-ColorArray-plus-Image/Layer-adapters direction. The later planar/virtual-storage
-decisions are specified in the shared kernel contract linked below; operator-local
-and migration details remain explicit.
-Confirmation does not imply implementation completion.
-[ADR 0022](../../../adr/0022-freeze-operation-c-abi-v3.md) (Proposed), decision D9,
-applies C02, C05 and C11 to the operation ABI for every category: Float32 and
-Float64 images, explicit logical axis roles, in-tensor alpha at any channel
-index, physical planar storage and explicit migration of legacy image and
-ColorArray consumers.
+Generic tensor Results and explicit call-local descriptions replace the former
+ColorArray-plus-Image/Layer adapter direction. Current fixed execution defines
+independent physical tile allocations, explicit layouts and declared read/write
+sets; the architecture links below govern storage and call retirement. Float32
+and Float64 image conventions retain explicit logical axis roles and in-tensor
+alpha at any channel index. Planar host formatting remains an explicit boundary
+convention rather than a hidden kernel payload requirement. The historical
+[ADR 0022](../../../adr/0022-freeze-operation-c-abi-v3.md) is not authority for
+reviving its former global tiling or virtual-reservation model.
 
 | ID | Shared decision | Selected contract | Status |
 | --- | --- | --- | --- |
@@ -189,28 +188,26 @@ ColorArray consumers.
 | C08 | Output interpretation | Outputs carry no description. A caller that needs the destination interpretation constructs it explicitly, for example with `format::edit_description`, and passes it to the next consumer. | C13 replaces description retention |
 | C09 | Per-call interpretation | Every interpretation is local to one invocation and enters that invocation's identity; the source and other consumers are unaffected. | Confirmed 2026-09-22; generalized by C13 |
 | C10 | Static structure and unchecked domains | Compile static schema, descriptors, parameter syntax/types and structural relations. Runtime structure and all numerical/geometric premises are trusted at both publication and consumption. | Revised 2026-10-21 |
-| C11 | Image storage | Mandatory planar and one DAG-wide tile geometry. Interior payloads are tight full blocks; edge tiles retain valid rows and pad their width to Tw. Every next tile starts page-aligned, with gaps distinct from row padding. | Revised and confirmed 2026-09-22 |
-| C12 | Virtual image backing | Reserve one full-image continuous virtual range; explicitly prepare page backing before operator access, retain produced pages until final owner retirement and fail on budget exhaustion. | Confirmed 2026-09-22 |
+| C11 | Image storage | Logical image layout and tile grids are explicit static structure. Lowering closes mathematical support on each input grid. Every produced physical tile owns a distinct dense allocation; imports use compatible bindings or explicit COPY/layout operations. | Current fixed execution contract |
+| C12 | Physical backing | Admit selected output allocations and fixed task scratch before issue. Retain tile owners through their final readers and exported Result owners. Resource exhaustion remains operational; no full-image contiguous virtual reservation is required. | Current fixed execution contract |
 | C13 | Explicit static interpretation | Result/Tensor carry structure, data and storage owners only. Color space, white, transfer, alpha association, sampling and LUT interpretation are explicit static parameters of each consuming operation. No attached description, automatic propagation, `metadata_mode`, or connection-time label matching. Same-structure data with different intended meanings connects without rejection; domain legality is an unchecked caller premise. | Approved by the maintainer as a breaking boundary change |
 
 ### Representation and source authority
 
-The subsequent storage clarification requires every image to use planar storage.
-Interleaved image imports must undergo an explicit layout conversion; planar is
-a requirement, not merely an allocation preference. Generic raw tensors retain
-their independent layout capabilities. This image storage requirement is enforced
-by the consuming operations and the physical layout contract, without
-restoring a special Image/Layer carrier type. An interpretation parameter cannot
-change actual address maps or satisfy a required storage conversion.
+Image channel/spatial axes and any member-specific layout requirements are
+explicit structural configuration. Generic inputs may use admitted affine
+strides; an operation requiring a particular layout receives it through an
+explicit conversion or COPY. An interpretation parameter does not change
+address maps, allocate storage or certify a boundary conversion.
 
-The [kernel tensor-storage specification](../../../kernel-specs/Tensor-Storage-and-Region-Access.md)
-owns address mapping, tile lookup, page provisioning, access windows and ownership.
-It requires one DAG-wide tile size, row-contiguous planar samples, valid edge rows
-padded to the tile width, page-aligned tile starts, and a full-image continuous virtual range with backing supplied
-by page. Operators do not choose their own tile geometry. Produced pages remain
-until final owner retirement; budget exhaustion fails without automatic eviction,
-replay or temporary-file paging. FMT operations consume this contract rather than
-independently defining physical layout. Its Chinese reader version is linked there.
+The [current tile-storage model](../../../kernel-architecture/Cache-Model.md) and
+[physical execution contract](../../../kernel-architecture/Compiler-and-Execution.md)
+define independent tile allocations, explicit layouts, preparation and owner
+lifetimes. Input and output grids are explicit and can differ. Lowering
+fixes dependencies and output/scratch requirements; execution admits their
+capacity before issue, and kernels access only their prepared views. Tile allocations remain alive through
+accepted work and escaped Result owners. There is no payload cache, automatic
+eviction/replay or required full-image contiguous backing.
 
 The carrier is a generic tensor or explicitly related tensor collection.
 Storage dtype, shape, strides, bounds, `atomic_trailing_axes` and owners are
@@ -289,12 +286,13 @@ premise. Neither operation adds a range scan or a publication gate.
 
 Identity and association fields in runtime data are trusted caller premises;
 there is no sample-validity flag or automatic input certificate. Interpretation parameters are static parameters, so they enter
-the compiled invocation identity and cache keys; two consumers reading the same
+the compiled invocation identity; two consumers reading the same
 source with different descriptions have distinct identities and outcomes.
 
-No downstream raw request cancels an already required producer's intrinsic
-failure or manufactures an unpublished value. A color-transform producer that
-fails its own formula still fails.
+A downstream raw request retains every required producer task and cannot
+manufacture an unpublished value. Actual resource, cancellation, backend,
+algorithmic-precision or explicit quality-gate failures follow the call
+retirement protocol; numerical-premise violations do not add a failure check.
 
 ### Stage composition and alpha
 
@@ -383,9 +381,9 @@ only cast/range allocation and the old catalog defaults. The operation takes
 explicit `source_range`/`target_range` parameters and reads no description; it
 does not silently change color-model units.
 UInt8 covers 0..255 and UInt16 covers 0..65535; Int8 and Int16 represent signed
-integer values. The proposed native widths must be implemented before claiming
-those storage types at public ports. Float16/Int32/UInt32/UInt64 are outside this
-selected expansion. Existing Int64 remains supported.
+integer values. The implemented numeric storage widths are UInt8, Int8, UInt16,
+Int16, Int64, Float32 and Float64. Float16/Int32/UInt32/UInt64 are outside this
+selected expansion; each member states its supported subset.
 
 NUM/CRV native tuple consumers accept Float32/64 and reject numeric encodings.
 An integer output needs a `TensorDescription` with an explicit `TensorEncoding`
@@ -437,9 +435,9 @@ proofing from an OCIO display/view label.
 The kernel has no implicit validation hooks, facet propagation or label-based
 tuple closure: sample closure comes only from `atomic_trailing_axes`, and domain
 validity is supplied by caller premises. Image/Layer
-operations consume explicit parameters. Compiler inference, partial requests,
-cache identity, immutable resources and generic collection
-correspondence follow C13. Reintroducing a dedicated Layer schema behind a
+operations consume explicit parameters. Compiler inference, fixed output-tile
+selection, compiled invocation identity, immutable resources and caller-guaranteed
+collection correspondence follow C13. Reintroducing a dedicated Layer schema behind a
 renamed image tensor does not satisfy the selected target.
 
 Operation changes must satisfy at least these independent checks:
@@ -460,7 +458,7 @@ Operation changes must satisfy at least these independent checks:
   conflicts with the supplied description fails.
 - Outputs carry no description; the caller-supplied description for the next
   consumer is validated against that consumer's input descriptor.
-- Distinct descriptions produce distinct invocation and cache identities;
+- Distinct descriptions produce distinct compiled invocation identities;
   resources selected by preparation stay alive while the plan or a Run needs them.
 - Raw processing preserves the relevant numeric oracle, static structural
   requirements, resource limits, cancellation and required upstream failures.
@@ -485,8 +483,8 @@ review the following shared artifacts:
 | Generic description codec | Canonical tensor/axis/component/group/reference/encoding records, structural invariants, unknown-field policy and equality. Each exact description value has one canonical encoding; semantic equivalence does not collapse distinct explicit records. |
 | Version and migration | Existing TensorDescription v4/v5 discriminators identify the native convention. Old ColorArray v1 interfaces and decoding are retired; old payloads are rejected. CRV-09 report/table schema v4 and configuration hash domain v2 distinguish migrated bake metadata. The Markdown `spec_schema_version` is not a runtime discriminator. |
 | Typed parameters | Exact integer endpoints, Float64 bit patterns where significant, enum/default normalization and conditional-field rejection. Preserve signed zero where FMT-06 endpoint/identity rules observe it; do not pass Int64 endpoints through Float64. |
-| Resource binding | Immutable profile/configuration and transitive resource content identities selected by preparation from the compiler's `ResourceSet`, execution/build settings, owned lifetimes and cache-key rules. Names or host paths alone cannot identify engine results. |
-| Consumer migration | Compiler inference, NUM/CRV consumers, LUT axes, import paths, fixtures and cache/validation identity must agree on the version and coordinate units. |
+| Resource binding | Immutable profile/configuration and transitive resource content identities selected by preparation from the compiler's `ResourceSet`, execution/build settings, owned lifetimes and compiled invocation identity. Names or host paths alone cannot identify engine results. |
+| Consumer migration | Compiler inference, NUM/CRV consumers, LUT axes, import paths, fixtures and compiled configuration identity must agree on the version and coordinate units. |
 
 The active FMT and NUM/CRV consumers implement these version/resource checks;
 executed validation is recorded in their implementation documents. NUM/CRV
@@ -500,8 +498,9 @@ Compile immutable per-invocation plans from the explicit description and typed
 parameters. Resolve roles, axes, encodings, exact basis/inverse matrices, branch
 thresholds and coefficient enclosures once where possible. For each output,
 represent `Data` support for formula/copy operands and `Descriptor` support for
-static schema/resource structure. Data support determines sample reads and its
-transpose determines dirty propagation. There is no additional validation read
+static schema/resource structure. Mathematical Data support determines fixed source-tile closure after the
+requested outputs are closed to complete output tiles. Fixed execution has no
+incremental dirty-propagation service. There is no additional validation read
 set: numerical/geometric premises and runtime payload structure are unchecked.
 Descriptor checks do not imply sample reads.
 Honor member-defined static support even when a pixel-dependent branch could
@@ -556,7 +555,7 @@ changed FMT-14B iteration/termination algorithm requires a separate contract.
 2. Exercise a minimal public workflow spanning channel mapping, an SDK
    description edit passed to the next node, FMT-06, a transfer, RGB/XYZ and
    XYZ/Lab. Check bits, descriptors, sparse ROI,
-   dirty propagation and failure scope against independent expectations.
+   fixed read closure and call-retirement failure behavior against independent expectations.
 3. Prototype difficult native paths early: FMT-14B's fixed 32/64 iterations,
    ill-conditioned bases, near-neutral cancellation and strict/accelerated
    boundaries. Report input distribution, certification/fallback frequency,
@@ -570,17 +569,18 @@ changed FMT-14B iteration/termination algorithm requires a separate contract.
 
 Focused regression inputs include adjacent floats at branch thresholds, signed
 zero/NaN payload copies, exact Int64 endpoints, tiny alpha, large hue, near-singular
-bases, one-component requests with invalid unrequested peers, missing alpha
+bases, output tiles containing only selected components, with unused peers outside the retained formulas, missing alpha
 coverage, low construction budgets and cancellation during native refinement
 or bounded pixel execution. FMT-12/13/18 external-engine construction is
 synchronous and noncancellable; it retains memory/work admission. Member
 formulas decide which of these inputs are accepted; the list adds no new domains.
 
-Memory measurements distinguish virtual reservation, committed backing, retained
-ancestor owners, valid sample bytes and private scratch/engine state. A view can
-retain a large backing; a full virtual reservation does not prove full physical
-allocation. Page retention until final owner retirement and the prohibition on
-automatic eviction/replay remain unchanged. Gamut containment and luminance
+Memory measurements distinguish selected output-tile allocations, retained input
+owners, valid sample bytes, private scratch/engine state and total process memory.
+A borrowed input view can retain a larger owner than its visible samples. Selected
+tiles have independent backing retained through admitted readers and exported
+Result owners; complete logical coverage does not imply contiguous storage.
+The fixed executor provides no automatic eviction or payload replay. Gamut containment and luminance
 bounds must be reported separately from perceptual quality; FMT-14B does not
 promise maximum chroma/minimum color difference and FMT-14C is not idempotent.
 These are regression coverage requirements. The family implementation documents
@@ -622,8 +622,9 @@ records; the external references alone do not establish that evidence.
 The maintainer confirmed that internal color planes, including Y/Cb/Cr, retain
 same-size 1:1:1 sampling, with alpha in the same tensor. External chroma
 subsampling/reconstruction and physical import/export layout belong to separate
-input/output codecs. Every kernel image operator obeys planar storage, including
-raw calls. See the [boundary contract](FMT_codec_boundary.md).
+input/output codecs. The host planar convention and any member-specific layout
+requirements are explicit boundaries; generic physical bindings follow fixed
+tile storage. See the [boundary contract](FMT_codec_boundary.md).
 The maintainer also confirmed the basis-pair/explicit-composition direction in
 [model conversion coverage](FMT_model_conversion_coverage.md). It separates model descriptions, explicit conversion pairs and composable routes;
 named model entries alone do not establish complete support.

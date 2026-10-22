@@ -49,7 +49,7 @@ Gaussian表示分布，white/blue表示频谱，Perlin/Voronoi表示构造。将
 
 Perlin2002的固定gradient/permutation与五次fade为明确可实现的版本，换hash或seed展开就改变图样，应纳入算法身份。[^perlin] Random123的counter-based方法适合按全局坐标取样；整数序列和正态浮点变换的跨后端一致性分别定义。[^random] 时空blue noise具有独立时间频谱设计，不能以每帧新2D蓝噪声替代。[^blue]
 
-随机寻址由 seed、stream、绝对坐标、channel 及 frame/draw 等字段构成，不依赖tile顺序或局部ROI原点。cache依赖seed和全部生成参数。signed 噪声输出数值 field；颜色消费者通过显式静态描述解释样本，输出 Result 不附带颜色描述。
+随机寻址由 seed、stream、绝对坐标、channel 及 frame/draw 等字段构成，不依赖tile顺序或局部ROI原点。seed 和全部静态生成参数参与编译 specialization 身份；执行器没有跨 Run 的 payload cache。signed 噪声输出数值 field；颜色消费者通过显式静态描述解释样本，输出 Result 不附带颜色描述。
 Philox4x64-10 的全局 x/y 为 signed32，frame/draw/stream 取 uint32 范围。生产 v1 counter 按低位到高位依次打包为 c0=(x,y)、c1=(frame,draw)、c2=(stream,channel,domain)、c3=0；channel 占 16 位，domain 占 8 位，其余 72 位固定为 0；地址范围由调用方保证，运行时不检查。key=(seed_bits,0)，完整保留 seed 的 64 位比特。
 
 Float32 均匀数取输出 word 0 的高 24 位 j，返回精确的 j/2^24。Float64 均匀数取 word 0 的高 53 位 j，返回精确的 j/2^53。open52 取所选输出字的高 52 位 j，返回 (2j+1)/2^53。

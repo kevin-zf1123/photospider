@@ -67,21 +67,25 @@ mandatory manual-review gate or universal cross-effect score is implied.
 
 | ID | Required evidence |
 | --- | --- |
-| H01 | Missing/type/domain/shape/axis validation before prohibited reads |
-| H02 | complete-input versus nonzero ROI/tile crops where mathematically applicable |
-| H03 | Exact sparse support, excluded mask/tap data and dynamic radius demand |
-| H04 | Control dirty witnesses for guide/mask/kernel/radius changes |
-| H05 | Independent/joint outputs and failure scope |
+| H01 | Compile/preparation diagnostics for parameter presence/type/syntax and static schema/shape/axis constraints; illegal-payload diagnostics belong only to oracle tools |
+| H02 | Complete-input mathematics versus nonzero ROI/complete-tile selections where applicable |
+| H03 | Specified sparse arithmetic support and excluded mask/tap operands, with fixed finite supersets for runtime kernel/radius selection |
+| H04 | Fixed algorithmic control reads and immutable Run bindings for guide/mask/kernel/radius inputs |
+| H05 | Independent/joint output selection, shared operational failure within a call, ordered retirement and validity of previously retired exports |
 | H06 | Strict bits across parallelism/fenv, gradual underflow and NUM special values |
 | H07 | Named ISA accelerated final bounds and strict fallback |
 | H08 | Capacity/work/stage/limb limits, cancellation and no spill/degradation |
 | H09 | Immutable owners/read windows beyond context lifetime and final release |
-| H10 | FMT metadata, straight/alpha, arbitrary group slots, Lab units and AOV |
-| H11 | Grid conjugacy, original shape, lazy bands and edited reconstruction |
-| H12 | Descriptor/profile/resource/parameter cache identity and early-stop cache exclusion |
+| H10 | Explicit FMT interpretation, straight/alpha, arbitrary group slots, Lab units and AOV |
+| H11 | Correct conjugate-pair construction on valid inputs, explicit original shape, compiled band selection and edited reconstruction |
+| H12 | Static Plan/profile/resource/parameter identity and independent Run state |
 | H13 | Actual BM3D/CBM3D/SMAA comparisons with pinned configurations |
-| H14 | Same-semantics benchmarks with temporary peaks and certificate costs |
+| H14 | Same-semantics benchmarks with temporary peaks and numerical-refinement costs |
 | H15 | Asynchronous stopping state retention, triggers, races and safe cleanup |
 
 These are acceptance requirements, not completed runtime tests. Mathematical oracle
 success does not establish registration, backend availability, performance or quality.
+Production acceptance supplies valid numerical and association payloads;
+malformed-reference fixtures establish only oracle input diagnostics. Output
+conformance is checked by acceptance tools, without producer or consumer runtime
+validation passes.

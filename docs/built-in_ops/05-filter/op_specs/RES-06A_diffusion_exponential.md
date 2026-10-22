@@ -21,7 +21,7 @@ Inherit [RES-06](RES-06_contract.md), the [FILTER common contract](FILTER_common
 
 ## Ports
 
-`input` → `output` with identical shape. Each plane is an independent raw numerical field; channel count and color metadata do not imply RGB/vector/alpha behavior. Publish canonical planar output and applicable metadata under the shared contract.
+`input` and `output` are Results with matching fixed Tensor schemas. Each plane is an independent raw numerical field; channel count does not imply RGB/vector/alpha behavior. Each materialized output tile has a distinct allocation. Downstream color interpretation, if needed, is explicit caller-supplied configuration.
 
 ## Required parameters
 
@@ -31,7 +31,7 @@ Require finite `kappa>0`, `dt>0`, `max_iterations>=0`, finite `dx>0`, finite `dy
 
 For each complete synchronous iteration and each undirected in-domain edge `(i,j)`, let `d=(u_j-u_i)/spacing_ij` and compute one baked64 conductance ``c_ij=RN64(exp(-(d/kappa)^2))``. Use that same coefficient in both edge directions and update `u_new[i]=RN_t(u_i+dt*Σ_j c_ij*(u_j-u_i)/spacing_ij^2)`. States use main input dtype `t`; do not calculate all iterations in a separate Float64 state. At zero iterations return input bit-copy. No external boundary flux is added. Do not claim bitwise mass conservation; stage rounding may cause small drift.
 
-The profile is S+B: stage rounding is normative and conductance is a baked RN64 value. Ordinary arithmetic otherwise follows NUM. A finite legal-data parameter/control model is still explicitly validated; do not blanket-reject propagated NaN/Inf when NUM permits it. Do not clamp output.
+The profile is S+B: stage rounding is normative and conductance is a baked RN64 value. Ordinary arithmetic otherwise follows NUM. The finite parameter/control-model and stability domains are caller premises; do not blanket-reject propagated NaN/Inf when NUM permits it. Do not clamp output.
 
 ## Demand and resources
 
@@ -41,6 +41,6 @@ Work is `O(max_iterations*P*C)`, with two state generations and edge conductance
 
 ## Reference and acceptance
 
-The oracle function is `res06.restoration.diffusion(image, *, kappa, dt=1/4, steps=1, dx=1, dy=1, exponential=True, dtype="float64")` in [res06/restoration.py](../../../../oracle/ops/filter/res06/restoration.py). Its `steps` argument corresponds to the proposed public `max_iterations` parameter. The `diffusion_exponential_one_step` fixture covers the formula with `DirectedMPFRStaged`; it establishes neither runtime support nor the complete acceptance contract. Check constant preservation, the two-pixel `[0,1]` case with `kappa=1, dt=1/4` yielding `RN_t([c/4,1-c/4])` with `c=RN64(exp(-1))`, conductance symmetry, zero steps, invalid stability bound, ROI/dirty demand, cancellation and resource failure. See [oracle README](../../../../oracle/ops/filter/README.md).
+The oracle function is `res06.restoration.diffusion(image, *, kappa, dt=1/4, steps=1, dx=1, dy=1, exponential=True, dtype="float64")` in [res06/restoration.py](../../../../oracle/ops/filter/res06/restoration.py). Its `steps` argument corresponds to the proposed public `max_iterations` parameter. The `diffusion_exponential_one_step` fixture covers the formula with `DirectedMPFRStaged`; it establishes neither runtime support nor the complete acceptance contract. Check constant preservation, the two-pixel `[0,1]` case with `kappa=1, dt=1/4` yielding `RN_t([c/4,1-c/4])` with `c=RN64(exp(-1))`, conductance symmetry, zero steps, oracle-only diagnostics for invalid stability bounds, compiled ROI/tile reads, cancellation and resource failure. See [oracle README](../../../../oracle/ops/filter/README.md).
 
 The proposed strict and accelerated keys are not registered. Accelerated variants must meet NUM’s final FP32-scaled four-ULP bound with required fallback. Float64 remains Float64; do not route through Float32. No runtime or performance evidence is implied.

@@ -18,10 +18,7 @@ Primitive 反向保留静态池容量，可重排有效记录并更新引用、�
 独立 Bézier 的 Int64 `degree` 决定静态控制点 shape，必须先检查原值属于 1..3，再转换内部整数类型。独立 B-spline 记录的第五列是 `weighted`：0 表示数学单位权重，显式 weights 输入仍保留；Primitive 对应列是 `knot_count`，始终使用自身的权重池。
 
 坐标采用[公共约定](../00-foundation/contracts.md)，width 单位 px，表示完整直径。
-线宽可使用正式附着字段或独立输入，每次显式选择唯一来源；支持整 PathSet 归一弧长、
-每子路径归一弧长和每子路径实际弧长三种定义域。trim/dash 保留原始来源映射，不能
-将截断后的片段重新归一后静默改变宽度。关联字段默认 reject_unmappable；显式 drop
-必须报告丢弃内容。具体绑定与零长规则见[几何契约](op_specs/PTH_geometry_contract.md)。
+线宽来源由 workflow 显式选择：与 PathSet 配对的独立 `path_width` Result，或独立的线宽求值输入。PTH-05C 返回原 PathSet 与单独的 Linear width Result，保留几何 ObjectId，不向几何 Result 增添隐式属性。支持整 PathSet 归一弧长、每子路径归一弧长和每子路径实际弧长三种定义域。trim/dash 保留原始来源映射；关联数据无法映射时默认 reject_unmappable，显式 drop 必须报告丢弃内容。具体绑定与零长规则见[几何契约](op_specs/PTH_geometry_contract.md)。
 
 ## 派生数据的最小 schema
 
@@ -32,7 +29,7 @@ Primitive 反向保留静态池容量，可重排有效记录并更新引用、�
 | `path_arclength_table` | segment IDs、knot offsets、`(t,s_lower,s_upper)`、子路径 offsets、总长及上下界、counts、source ID；表误差不能替代真实长度求值。 |
 | `path_samples_param` / `path_samples_arc` | positions、source_segment、local_t、子路径 offsets、counts、source ID；arc 版本增加子路径内的 arc_s。local_t 独立舍入，不能用于重建原 position。 |
 | `path_partition` | group_offsets、subpath_count、source ID；几何和顺序由配对的扁平 PathSet 提供。 |
-| `path_width` | 固定标准键 width 的 Linear profiles、bindings、stops、widths、source IDs 和 counts；PCHIP 保持独立求值，不新增附着编码。 |
+| `path_width` | 固定标准键 width 的 Linear profiles、bindings、stops、widths、source IDs 和 counts；PCHIP 保持独立求值；此 Result 与几何由 workflow 配对。 |
 | `path_source_map` | 目标段到单一来源段的精确有理仿射参数映射；固定 limb 容量，不使用表达式图。无法精确表示时沿用 reject_unmappable 或显式 drop。 |
 | `exact_polygon` / `grid_polygon` | 前者使用约分有理坐标及轮廓 offsets，后者使用 Int64 坐标；均有有效 counts。网格参数显式提供，backend 的交点处理规则仍需落实。 |
 | `path_fit_report` / `geometry_report` | 仅保存现有算法要求的误差上界、拓扑状态、来源身份，以及显式丢弃 width 的标志；不记录迭代轨迹或新增校验数据。 |
@@ -75,7 +72,7 @@ coverage与SDF独立：前者为像素面积比例[0,1]，后者为px距离。�
 
 ## Region、使用和验收
 
-输出tile需读取所有可能覆盖其footprint的段，stroke扩张包含半宽、join/miter与AA。PathSet schema 不提供 stroke 专用空间索引；目标实现把完整路径或经证明的数学段支持转换为 fixed invocation ABI 8 的成员 tile reads，并通过静态 schema 读取和普通 task 依赖表达拓扑需求。路径中一次编辑的dirty不能只用控制点bbox，要覆盖曲线与描边的真实/保守范围。
+输出tile需读取所有可能覆盖其footprint的段，stroke扩张包含半宽、join/miter与AA。PathSet schema 不提供 stroke 专用空间索引；目标实现把完整路径或经证明的数学段支持转换为 fixed invocation ABI 8 的成员 tile reads，并通过静态 schema 读取和普通 task 依赖表达拓扑需求。编译期保守支持必须覆盖曲线与描边，包含线宽、端点、miter 和几何误差；无法静态证明局部范围时声明完整路径输入。
 
 概念流程：`controls→arc-length→width curve→stroke coverage→color ramp/constant→over`；另可`path→SDF→mask offset→feather`。解析验收包括100px直线、圆/矩形面积、孔洞、自交、闭合接缝、宽度0/.25/1/10px、非均匀变换和不同tile一致。边界与迭代使用Float64参考，GPU 按独立后端 profile 声明数值契约，同版本同 profile 保持确定性；几何误差与数值误差分别验收。
 

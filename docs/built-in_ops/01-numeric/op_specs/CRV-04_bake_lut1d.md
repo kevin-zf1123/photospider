@@ -105,7 +105,7 @@ Interpolation expansions use fixed linspace and curve tasks. Sparse values propa
 
 ## Acceptance and implementation boundary
 
-For every template and CPU profile, construct the generated graph and its explicit WorkflowDocument expansion through the public authoring APIs. Compare output schemas and coverage, requested Result bits, analytic fixture values, source support and dirty mapping. Exercise both table dtypes and the four demand modes: full values, axis-only, joint values and axis, and sparse values. Keep template-equivalence checks distinct from the numeric oracles that validate the underlying samplers and interpolators.
+For every template and CPU profile, construct the generated graph and its explicit WorkflowDocument expansion through the public authoring APIs. Compare output schemas and coverage, requested Result bits, analytic fixture values and fixed source-tile support. Exercise both table dtypes and the four demand modes: full values, axis-only, joint values and axis, and sparse values. Keep template-equivalence checks distinct from the numeric oracles that validate the underlying samplers and interpolators.
 
 For expression, Bezier and interpolation expansions, cover count one with a failing end producer, empty selection, axis-only with failing coefficients, mixed dtypes, static preparation reuse after binding changes, sparse maximum count, resource rejection, cancellation and output lifetime. Compare generated and explicit graphs through actual fixed public execution. For Bezier, also cover axis-only with failing control producers and explicit graph equivalence.
 

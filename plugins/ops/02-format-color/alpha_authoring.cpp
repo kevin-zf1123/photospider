@@ -223,32 +223,14 @@ Result<std::string> opaque_bits(ElementType type,
                 Rational::multiply(Rational::subtract(Rational::integer(1), d0),
                                    Rational::subtract(s1, s0)),
                 Rational::subtract(d1, d0)));
-    if (code.compare(s0) < 0 || code.compare(s1) > 0) {
-      return R(invalid(
-          "opaque coverage 1 is outside the legal stored encoding interval"));
-    }
+    // The stored interval and exact representability of opaque coverage one
+    // are numerical caller premises, including for this authoring helper.
     std::uint64_t bits = 0;
     if (type == ElementType::Float32 || type == ElementType::Float64) {
       const bool narrow = type == ElementType::Float32;
       bits = code.floating_bits(narrow);
-      const auto inf =
-          narrow ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
-      if ((bits & inf) == inf ||
-          Rational::binary(bits, narrow).compare(code) != 0) {
-        return R(
-            invalid("opaque code is not exactly representable in source "
-                    "floating dtype"));
-      }
     } else {
-      const auto limits = default_encoding(type);
-      if (code.compare(exact_endpoint(limits.stored[0])) < 0 ||
-          code.compare(exact_endpoint(limits.stored[1])) > 0) {
-        return R(invalid("opaque code is outside source integer dtype"));
-      }
       auto divided = Natural::divide(code.n, code.d);
-      if (!divided.second.zero()) {
-        return R(invalid("opaque code is not an integer"));
-      }
       bits = divided.first.low64();
       if (code.negative) {
         bits = UINT64_C(0) - bits;
@@ -260,7 +242,9 @@ Result<std::string> opaque_bits(ElementType type,
   } catch (const data_internal::format_numeric::ExactWorkFailure& e) {
     return R(e.status);
   } catch (const std::overflow_error&) {
-    return R(invalid("opaque encoding exceeds exact arithmetic capacity"));
+    return R(Status{ErrorCode::ResourceExhausted,
+                    "opaque encoding exceeds exact arithmetic capacity",
+                    FailureReason::CapacityLimit});
   }
 }
 }  // namespace

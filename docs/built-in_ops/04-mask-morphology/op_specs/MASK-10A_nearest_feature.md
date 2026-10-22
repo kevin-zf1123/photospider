@@ -36,21 +36,23 @@ supported; the node must explicitly serialize exterior.
 
 Exact nearest site and lexicographic tie; distance is RN_T(metric distance), or RN_T(squared L2); explicit no-feature +Inf.
 
-complete-input Binary input for any nonempty output demand; buffers are separately requestable, shared site choice. Empty Q has no runtime sample/control/validation reads. Descriptor
-checks still run. The family defines validation closure, border extension,
-stage rounding, dynamic witnesses and the forward dirty relation. A bounding
-rectangle may not replace a smaller declared sparse support.
+complete-input Binary input for any nonempty output demand; buffers are separately requestable, shared site choice. Empty Q adds no runtime payload work; static schema checks still apply.
+The family defines mathematical Data/Control support, border extension and
+rounding stages. Lower the selected complete output tiles to fixed input-tile
+reads, using a finite conservative superset for runtime-dependent addressing.
+There is no payload Validation read set or runtime dependency discovery.
 
 ## Implementation, resource and failure obligations
 
 Use the family reference algorithm and its stated work/scratch bounds. Strict
 CPU is the initial target; no implicit accelerated/GPU/third-party fallback is
 registered. Exact choices/copies stay exact; arithmetic uses the inherited
-rounding boundary and finite-domain error rules. Account for output, scratch,
+rounding boundary and unchecked numerical premises. Account for output, scratch,
 exact state, retained source owners and all simultaneous intermediates. Poll
-inside long loops/refinement. complete-input or CompleteBundle scopes do not expose
-partially converged or partially associated results. Preserve the host's
-upstream/cancellation/resource scope and immutable owner lifetime.
+inside long loops/refinement. Selected outputs of one call share its publication
+outcome; failure exposes no partial call Result. Already retired call exports
+remain valid. Preserve host upstream/cancellation/resource status and immutable
+owner lifetime.
 
 ## Independent acceptance and conceptual workflow
 
@@ -59,11 +61,13 @@ input=[1,0,1], feature=foreground,exterior=none,l2 -> distances=[0,1,0]; middle 
 Independent reference entry: `nearest_feature` in
 [`mask10/reference.py`](../../../../oracle/ops/mask_morphology/mask10/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
-do not exercise kernel registration, resource accounting or exact Region reads.
+do not exercise kernel registration, resource accounting or compiled tile reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),
-then add the relevant common ROI/disjoint support, special-value, invalid
-parameter, dtype, association, cancellation and owner-lifetime checks before
-implementation acceptance.
+then add the relevant common fixed-tile support, valid special-value, static
+structural-parameter, dtype, correctly paired association, cancellation and
+owner-lifetime checks before implementation acceptance. Invalid payload or
+numerical-premise fixtures diagnose oracle requests only; they do not require
+production rejection.
 
 Conceptual DAG: explicit input preparation -> this member -> an explicit
 mask/measurement/image consumer appropriate to the listed output. A real

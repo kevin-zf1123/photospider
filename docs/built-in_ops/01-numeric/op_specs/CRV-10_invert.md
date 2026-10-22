@@ -106,7 +106,7 @@ Only selected global output coordinates are evaluated and allocated. Each invoca
 
 Empty selection emits no payload task while static metadata remains checked. Rebinding reuses immutable preparation and creates independent Run-owned output; there is no content-cache or repeated-demand identity guarantee. Legal immutable signed/zero strides and unaligned offsets are supported through the compiled views. Result owners survive context destruction. Successful task tiles can feed internal dependencies; public call Results appear only after all required tasks succeed and ordered retirement occurs.
 
-Cancellation is polled during binary search, output traversal and exact root/limb operations. Internal arena, product, shift and zero-denominator guards remain active. PCHIP lattice comparison retains its segment-interior bounds, exact infinity-boundary midpoints and finite termination rules. Accelerated candidates require the existing unique-rounding certificate; otherwise exact evaluation proceeds. Fixed invocations do not expose per-value fallback counters.
+Cancellation is polled during binary search, output traversal and exact root/limb operations. Internal arena, product and shift capacity limits remain active; mathematical denominators follow from caller premises and algorithmic branch selection. PCHIP lattice comparison retains its segment-interior bounds, exact infinity-boundary midpoints and finite termination rules. Accelerated candidates require the existing unique-rounding certificate; otherwise exact evaluation proceeds. Fixed invocations do not expose per-value fallback counters.
 
 ## Errors and acceptance
 

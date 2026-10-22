@@ -39,8 +39,8 @@ using cropped closing could produce negative black-hat residuals near an edge;
 that is a different signed Field contract, not this member.
 
 All masks are nonnegative residuals, not signed Laplacians or derivative fields.
-Identity B={(0,0)} gives exact generated +0 for all five members, but full local
-input validation still occurs. A/B/C require support Q+B (I is included by
+Identity B={(0,0)} gives exact generated +0 for all five members under the
+unchecked input premise; it adds no validation scan. A/B/C require support Q+B (I is included by
 origin-containing B). D/E require Q+B+B. No support elision on a found zero.
 Reference cost O(Q|B|) for A-C, O(Q|B|²) D/E; admitted staged optimization and
 scratch as in MASK-06. These are native reference primitives or compiler

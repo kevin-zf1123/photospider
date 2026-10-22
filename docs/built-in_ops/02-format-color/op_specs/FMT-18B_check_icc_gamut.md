@@ -36,8 +36,9 @@ Static construction is required even for empty requests; it does not scan pixels
 
 ## Resources, precision and failures
 
-Only auto/materialize layouts; forced view fails. Inherit planar reservations,
-explicit page preparation, immutable lifetimes and all FMT-12 host-engine resource
+Only auto/materialize layouts; forced view fails. Selected output tiles use
+independent dense allocations and fixed preallocated scratch. Inherit immutable
+owner lifetimes, call-retirement publication and all FMT-12 host-engine resource
 hooks. The complete static alarm grid and helper transforms are budgeted;
 construction budget or sampler failure invalidates the build and never produces
 a successful all-zero mask. Construction has no cancellation checks; pixel
