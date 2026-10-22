@@ -5,12 +5,12 @@ kind: primitive
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 parent_id: MASK-04
 function: apply_color_groups
 oracle_entry: apply_color_groups
-proposed_operation_keys:
+registered_operation_keys:
   - mask.apply_color_groups_strict
 ---
 
@@ -18,7 +18,8 @@ proposed_operation_keys:
 
 Inherit [MASK-common](MASK_common_contract.md) and the
 [family contract](MASK-04_color_range_contract.md). Numerical rules follow
-01-numeric. This spec does not claim native registration or production execution.
+01-numeric. This Proposed member is registered in the bundled strict CPU set
+through fixed invocation ABI 8.
 
 ## Ports, parameters and output inference
 
@@ -69,3 +70,11 @@ Oracle entry: `apply_color_groups` in [reference.py](../../../../oracle/ops/mask
 The consumer reads count from its prepared fixed input bindings and evaluates only
 the effective prefix. Zero padding does not participate in response evaluation
 and is not scanned for canonicality. MASK-04E/F define capacity and zero-fill.
+
+## Registered model binding
+
+The model input requires schema photospider.ops.mask.color_groups version 1
+from [photospider/ops/mask.hpp](../../../../plugins/ops/include/photospider/ops/mask.hpp),
+with the exact count/ids/mean/cholesky directory and CompleteBundle publication
+specified by MASK-04E/F. Static capacity and selected component count determine
+the schema; the runtime effective count does not change compiled reads.

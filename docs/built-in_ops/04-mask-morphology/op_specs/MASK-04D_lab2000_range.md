@@ -5,12 +5,12 @@ kind: primitive
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 parent_id: MASK-04
 function: lab2000_range
 oracle_entry: lab2000_range
-proposed_operation_keys:
+registered_operation_keys:
   - mask.lab2000_range_strict
 ---
 
@@ -18,7 +18,8 @@ proposed_operation_keys:
 
 Inherit [MASK-common](MASK_common_contract.md) and the
 [family contract](MASK-04_color_range_contract.md). Numerical rules follow
-01-numeric. This spec does not claim native registration or production execution.
+01-numeric. This Proposed member is registered in the bundled strict CPU set
+through fixed invocation ABI 8.
 
 ## Ports, parameters and output inference
 
@@ -73,3 +74,15 @@ fixtures test oracle diagnostics only. Native acceptance requires a real public
 workflow and host-level read/resource/lifetime checks.
 
 Oracle entry: `lab2000_range` in [reference.py](../../../../oracle/ops/mask_morphology/mask04/reference.py).
+
+## Registered strict evaluation
+
+The CPU implementation uses exact rational branch predicates and directed
+intervals from 128 through 4096 bits. Exact identity, equal-chroma lightness
+distance and selected algebraic angular cases avoid undecidable interval ties.
+Every successful response is certified to the stated RN_T result. A bounded
+refinement can still fail to resolve another exact threshold or rounding tie;
+it returns OperationFailed with an algorithmic domain code instead of an
+approximate result. The implementation page records those codes and work limits.
+input_description is required even for empty output demand; missing or empty
+descriptions fail static preparation. A-C retain their separate raw-mode rules.

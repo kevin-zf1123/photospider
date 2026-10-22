@@ -118,6 +118,10 @@ struct Program {
   bool complete = false;
   bool whole_inputs = false;
   virtual ~Program() = default;
+  // Operator-owned scratch is specialized to the retained output tile.
+  virtual std::uint64_t task_scratch(unsigned, const Region&) const {
+    return scratch_bytes;
+  }
   virtual std::vector<ReadRegion> support(unsigned output,
                                           const Region& region) const;
   virtual void run(const Kernel& kernel,

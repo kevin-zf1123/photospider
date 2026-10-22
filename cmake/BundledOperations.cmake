@@ -46,6 +46,13 @@ if(NOT PHOTOSPIDER_FMT10_SIMD)
 endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
+  plugins/ops/04-mask-morphology/common.cpp
+  plugins/ops/04-mask-morphology/color.cpp
+  plugins/ops/04-mask-morphology/color_math.cpp
+  plugins/ops/04-mask-morphology/color_statistics.cpp
+  plugins/ops/04-mask-morphology/pointwise.cpp
+  plugins/ops/04-mask-morphology/morphology.cpp
+  plugins/ops/04-mask-morphology/restricted_mean.cpp
   plugins/ops/03-generation/paths.cpp
   plugins/ops/03-generation/path_math.cpp
   plugins/ops/03-generation/path_evaluation.cpp

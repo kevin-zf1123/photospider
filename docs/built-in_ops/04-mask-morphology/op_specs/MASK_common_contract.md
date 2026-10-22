@@ -5,18 +5,20 @@ kind: shared_operator_contract
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: partially_implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 ---
 
 # MASK: shared specification and execution baseline
 
 This specification defines the selected MASK-01..17 semantics through explicit
-members and family contracts. Native implementation remains pending. The target
-registry keys are declared by the member specifications.
-The current bundled registry contains no MASK or paged-components implementation.
-The supplied Python oracles evaluate proposed mathematics independently of the
-C++ kernel. Passing them is not evidence that any proposed key is registered.
+members and family contracts. MASK-01..06, MASK-14 and MASK-17 have all 29
+members registered in the bundled strict CPU set through fixed invocation ABI 8.
+The remaining 34 members are unimplemented proposals. Member front matter
+separates registered keys and implementation status from the Proposed spec status.
+Independent Python
+oracle coverage also includes unimplemented members and does not establish their
+registration. No paged-components backend is registered.
 
 ## Authority and inherited numerical rules
 
@@ -53,7 +55,7 @@ represent their actual binary values. Numerically consumed samples exclude NaN a
 The distance no-feature infinity convention below defines a domain value, not an
 arithmetic rounding exception or permission to suppress finite overflow.
 
-Strict is the initial proposed registry profile. An accelerated profile requires
+Strict is the registered profile for the implemented subset. An accelerated profile requires
 an explicit member/key and inherits NUM-acceleration, including exact discrete
 decisions and its prescribed fallback rules. Backend/ISA identity belongs in
 operation/profile identity and implementation measurements. Integer dimensions, coordinates, IDs and counts
@@ -93,7 +95,7 @@ primary mask input dtype; flood outputs use the seeds dtype, MASK-12G uses an
 explicit output_dtype, and validity/within flags use their associated value dtype.
 Skeleton outputs preserve the input Binary dtype independently of radius dtype. Binary-only consumers assume the binary domain on their required sample set. Floating coverage morphology computes directly on soft samples.
 
-Results carry structural schemas and samples. Spatial coordinates, coverage/binary meaning, distance units/metric and label basis are explicit operation configuration or declared schema semantics. Outputs carry no attached descriptions or sample-validity proofs. The caller supplies the next consumer's interpretation. Semantic color selection checks a complete static group description using the operations-SDK TensorDescription v4/v5 codec and native CIELAB/CIELCh l=L*/100. Only the formula's selected coordinates are numerical inputs; group completeness adds no sample read closure. Raw channel arithmetic reads only its formula operands. New domain schema helpers require implementation before registration; descriptive names do not add kernel facets or codecs.
+Results carry structural schemas and samples. Spatial coordinates, coverage/binary meaning, distance units/metric and label basis are explicit operation configuration or declared schema semantics. Outputs carry no attached descriptions or sample-validity proofs. The caller supplies the next consumer's interpretation. Semantic color selection checks a complete static group description using the operations-SDK TensorDescription v4/v5 codec and native CIELAB/CIELCh l=L*/100. Only the formula's selected coordinates are numerical inputs; group completeness adds no sample read closure. Raw channel arithmetic reads only its formula operands. MASK-04E/F use the registered operations-SDK model/skipped schema factories described in their specs. Other proposed domain helpers remain implementation gates; descriptive names do not add kernel facets or codecs.
 
 All statics listed by a member must be supplied by direct WorkflowDocument
 nodes; authoring recommendations are serialized by helpers. Reject unknown,
@@ -102,7 +104,7 @@ Finite Float64 statics must not accept a Boolean as a number. Enum tokens are
 case-sensitive. Integer parameters are true Int64, never routed through double.
 Selectors use NUM's canonical comma-separated nonnegative index String syntax.
 An ordered unique channel list preserves order and has exactly the declared C
-entries. Proposed custom footprint encoding is described in MASK-05. Output
+entries. The custom footprint encoding is described in MASK-05. Output
 shapes and static Result schemas are inferred solely from descriptors/statics.
 Effective K is an ordinary Int64[1] payload; fixed positive capacity is derived during preparation and unused rows are zero-filled.
 
@@ -178,12 +180,25 @@ cross-tile connectivity and explicitly no fixed-halo shortcut. Exercise invalid
 static structure, parameter presence/types/syntax, signed zeros, dtype extremes, no-feature/empty-component results,
 correctly paired associations, cancellation, low budgets, independent Runs and retained owner lifetime after context destruction. Test independent/joint output selection at call granularity. Invalid sample/association fixtures may exercise only the oracle's diagnostics; production checks use valid payloads and do not require rejection of violated premises.
 
-Each future implementation must provide a real public Compiler/ExecutionContext
-workflow, registry inventory, source-support observations and status checks.
-Current conceptual DAGs and Python oracle calls are not those workflows. Report
-hardware/backend/revisions/dtype/N/radius/workers/Plan/repetitions, median/tail
-latency, managed output/scratch/retained peaks, cancellation latency and actual
-fallback counts using acceptance instrumentation where needed; fixed invocation
-ABI 8 provides no per-sample diagnostic callback. No performance numbers or runtime conformance are claimed by
-this documentation delivery. External sources establish definitions or feature
-existence only; commercial bit identity remains unverified.
+Native acceptance requires public Compiler/ExecutionContext workflows, fixed-view checks and retained Result reads. Conceptual DAGs and Python oracle calls do not establish native execution.
+Performance measurements identify hardware, build, dtype,
+dimensions, radius, workers, Plan, repetitions, latency and managed backing.
+The fixed ABI has no per-sample diagnostic callback; fallback frequency is
+reported only when instrumented. External sources establish definitions or
+feature existence only; commercial bit identity remains unverified.
+
+## Registered implementation limits
+
+The 29 implemented members accept the optional max_work Int64 operational guard,
+default INT64_MAX, checked as nonnegative during preparation. It limits counted
+work per kernel invocation; it is not a global per-Run sample quota. Work and
+cancellation polls occur within at most 1024 elementary visits and at every
+refinement. Host output/scratch admission still follows ExecutionContext limits.
+
+Exact rational storage, fixed-width accumulation and directed refinement have
+bounded capacity. Work or capacity exhaustion returns ResourceExhausted; an
+unresolved algebraic/transcendental certification returns OperationFailed.
+These are operational failures on a strict path, never approximate fallbacks.
+MASK-17C empty_policy=error with a zero denominator is OperationFailed; selecting
+valid alone evaluates no image samples and returns zero validity without that
+value failure.

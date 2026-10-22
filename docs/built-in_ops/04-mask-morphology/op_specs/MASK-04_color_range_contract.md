@@ -5,7 +5,7 @@ kind: operator_family
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 ---
 
@@ -13,7 +13,8 @@ clarification_status: draft_for_review
 
 Inherit the complete [MASK baseline](MASK_common_contract.md), including its
 precision, descriptor, error, demand, ownership and acceptance obligations.
-This family proposes distinct members.
+All members in this Proposed family are registered in the bundled strict CPU
+set.
 
 ## Members
 
@@ -148,9 +149,12 @@ coordinates are not covariance dimensions. Unrelated alpha/AOV channels are not
 fitting data. Table columns carry the same ordered group interpretation in the
 caller's configuration. Models can be applied to other compatible images and
 are not tied to a source-image ObjectId. CIEDE2000 does not replace DeltaE76.
-The members and their SDK schema/factory/lowering remain unimplemented.
+All seven members are registered. The operations SDK supplies version-1
+fixed-capacity model/skipped schemas and the CPU lowering emits fixed reads and
+complete publication scopes.
 
-The CIEDE2000 selector requires kL,kC,kH as explicit positive finite Float64
+The CIEDE2000 selector requires input_description for one complete native
+CIELAB group, with no raw mode. It also requires kL,kC,kH as explicit positive finite Float64
 static parameters. Authoring helpers recommend 1,1,1 and serialize them; no
 image-dependent factor selection or hidden default is allowed. They are the
 parametric factors of the complete CIEDE2000 expression, distinct from the

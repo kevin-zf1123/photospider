@@ -22,29 +22,31 @@ MASK 不另设舍入模式或误差容限；各成员只明确公式、舍入阶
 
 ## 族目录
 
-| 族 | 功能 | 成员数 | 成员 |
-| --- | --- | ---: | --- |
-| [MASK-01](op_specs/MASK-01_boolean_contract.md) | Boolean / 软逻辑 | 3 | binary_logic、fuzzy_logic、independent_coverage |
-| [MASK-02](op_specs/MASK-02_invert_contract.md) | 反相 | 1 | invert |
-| [MASK-03](op_specs/MASK-03_threshold_contract.md) | 阈值与软区间 | 5 | threshold、range_mask、soft_threshold、soft_range、nonzero_to_binary |
-| [MASK-04](op_specs/MASK-04_color_range_contract.md) | 颜色范围 | 7 | coordinate_range、lab76_range、hue_range、lab2000_range、fit_color_groups_table、fit_color_groups_image、apply_color_groups |
-| [MASK-05](op_specs/MASK-05_morphology_contract.md) | 膨胀 / 腐蚀 | 2 | dilate、erode |
-| [MASK-06](op_specs/MASK-06_open_close_contract.md) | 开 / 闭运算 | 2 | opening、closing |
-| [MASK-07](op_specs/MASK-07_offset_contract.md) | 几何 offset | 4 | offset_discrete、shift_distance_field、threshold_distance_field、offset_polygon_grid |
-| [MASK-08](op_specs/MASK-08_gaussian_contract.md) | 高斯羽化 | 1 | gaussian_feather |
-| [MASK-09](op_specs/MASK-09_distance_feather_contract.md) | 距离羽化 | 2 | distance_feather_linear、distance_feather_smoothstep |
-| [MASK-10](op_specs/MASK-10_distance_transform_contract.md) | 距离场 / nearest | 4 | nearest_feature、signed_center_distance、truncated_nearest_feature、truncated_signed_distance |
-| [MASK-11](op_specs/MASK-11_flood_contract.md) | flood / region grow | 3 | flood_fixed、flood_neighbor、flood_barrier |
-| [MASK-12](op_specs/MASK-12_components_contract.md) | 连通分量与属性 | 7 | label_compact、label_min_pixel、component_count、component_areas、component_bboxes、component_bundle、filter_area_index |
-| [MASK-13](op_specs/MASK-13_cleanup_contract.md) | 填洞 / 去小区域 | 3 | fill_holes、remove_small、fill_small_holes |
-| [MASK-14](op_specs/MASK-14_residuals_contract.md) | 边界与形态学残差 | 5 | morph_gradient、inner_border、outer_border、white_top_hat、black_top_hat |
-| [MASK-15](op_specs/MASK-15_topology_reconstruction_contract.md) | 骨架 / 重建 | 7 | thin_topological、thin_distance_ordered、reconstruct_dilate、reconstruct_erode、thin_zhang_suen、thin_guo_hall、medial_axis_maximal_balls |
-| [MASK-16](op_specs/MASK-16_close_gap_contract.md) | 封口填充 | 3 | bridge_axis_gaps、fill_axis_gaps、fill_morphological_gaps |
-| [MASK-17](op_specs/MASK-17_apply_contract.md) | 应用 / 限制样本 | 4 | affect_result、multiply_mask、restricted_mean、apply_alpha |
+| 族 | 功能 | 成员数 | 成员 | 当前实现 |
+| --- | --- | ---: | --- | --- |
+| [MASK-01](op_specs/MASK-01_boolean_contract.md) | Boolean / 软逻辑 | 3 | binary_logic、fuzzy_logic、independent_coverage | strict CPU，全部成员 |
+| [MASK-02](op_specs/MASK-02_invert_contract.md) | 反相 | 1 | invert | strict CPU，全部成员 |
+| [MASK-03](op_specs/MASK-03_threshold_contract.md) | 阈值与软区间 | 5 | threshold、range_mask、soft_threshold、soft_range、nonzero_to_binary | strict CPU，全部成员 |
+| [MASK-04](op_specs/MASK-04_color_range_contract.md) | 颜色范围 | 7 | coordinate_range、lab76_range、hue_range、lab2000_range、fit_color_groups_table、fit_color_groups_image、apply_color_groups | strict CPU，全部成员 |
+| [MASK-05](op_specs/MASK-05_morphology_contract.md) | 膨胀 / 腐蚀 | 2 | dilate、erode | strict CPU，全部成员 |
+| [MASK-06](op_specs/MASK-06_open_close_contract.md) | 开 / 闭运算 | 2 | opening、closing | strict CPU，全部成员 |
+| [MASK-07](op_specs/MASK-07_offset_contract.md) | 几何 offset | 4 | offset_discrete、shift_distance_field、threshold_distance_field、offset_polygon_grid | 待实现 |
+| [MASK-08](op_specs/MASK-08_gaussian_contract.md) | 高斯羽化 | 1 | gaussian_feather | 待实现 |
+| [MASK-09](op_specs/MASK-09_distance_feather_contract.md) | 距离羽化 | 2 | distance_feather_linear、distance_feather_smoothstep | 待实现 |
+| [MASK-10](op_specs/MASK-10_distance_transform_contract.md) | 距离场 / nearest | 4 | nearest_feature、signed_center_distance、truncated_nearest_feature、truncated_signed_distance | 待实现 |
+| [MASK-11](op_specs/MASK-11_flood_contract.md) | flood / region grow | 3 | flood_fixed、flood_neighbor、flood_barrier | 待实现 |
+| [MASK-12](op_specs/MASK-12_components_contract.md) | 连通分量与属性 | 7 | label_compact、label_min_pixel、component_count、component_areas、component_bboxes、component_bundle、filter_area_index | 待实现 |
+| [MASK-13](op_specs/MASK-13_cleanup_contract.md) | 填洞 / 去小区域 | 3 | fill_holes、remove_small、fill_small_holes | 待实现 |
+| [MASK-14](op_specs/MASK-14_residuals_contract.md) | 边界与形态学残差 | 5 | morph_gradient、inner_border、outer_border、white_top_hat、black_top_hat | strict CPU，全部成员 |
+| [MASK-15](op_specs/MASK-15_topology_reconstruction_contract.md) | 骨架 / 重建 | 7 | thin_topological、thin_distance_ordered、reconstruct_dilate、reconstruct_erode、thin_zhang_suen、thin_guo_hall、medial_axis_maximal_balls | 待实现 |
+| [MASK-16](op_specs/MASK-16_close_gap_contract.md) | 封口填充 | 3 | bridge_axis_gaps、fill_axis_gaps、fill_morphological_gaps | 待实现 |
+| [MASK-17](op_specs/MASK-17_apply_contract.md) | 应用 / 限制样本 | 4 | affect_result、multiply_mask、restricted_mean、apply_alpha | strict CPU，全部成员 |
 
 ## 逐成员入口
 
-| ID / spec | 类别 | 拟议 key / template | oracle entry |
+已实现族中的 key 为当前注册入口；其余为提议名称。
+
+| ID / spec | 类别 | 注册或提议 key / template | oracle entry |
 | --- | --- | --- | --- |
 | [MASK-01A — Binary Boolean operations](op_specs/MASK-01A_binary_logic.md) | primitive / D1_draft | `mask.binary_logic_strict` | `binary_logic` |
 | [MASK-01B — Fuzzy mask operations](op_specs/MASK-01B_fuzzy_logic.md) | primitive / D1_draft | `mask.fuzzy_logic_strict` | `fuzzy_logic` |

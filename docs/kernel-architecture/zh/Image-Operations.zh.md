@@ -23,6 +23,7 @@
 | ICC、OCIO 与打样 | icc_operations.cpp、ocio_operations.cpp；format/external_color.hpp | FMT-12 A-C、FMT-13 A-F 和 FMT-18 A/B 共十一个固定 ABI 8 CPU keys；私有固定引擎、Float32/64、闭合不可变资源、精确颜色/旁路依赖。 |
 | 显式 view | `view_authoring.cpp`；`photospider/ops/format/view.hpp` | `format::compose_view` 事务式组合 native FMT-09/10/14/15 与 configured FMT-13A..F 阶段；资源感知重载验证真实 processor 及 native/configured 最终显示断言。 |
 | 描述编辑 | SDK `common/domain/description_editor.cpp`；`photospider/ops/format/metadata.hpp` | `format::edit_description` 返回配置值，不创建图节点；`metadata.assign/remove` 未注册。 |
+| 蒙版与形态学 | `plugins/ops/04-mask-morphology/`；SDK `photospider/ops/mask.hpp` | MASK-01～06、14、17 注册 29 个 strict CPU 固定 ABI 8 key，覆盖精确颜色分组拟合、固定容量 model Result、有限 footprint 形态学与受限均值。 |
 | LUT bake 与应用 | `plugins/ops/01-numeric/`；`photospider/ops/numeric/lut3d_bake.hpp` | 使用普通数值 Result 和显式配置；报告/表 schema 与校验属于 SDK，不属于内核空间存储机制。 |
 
 各族的运行调用协议见[通道与颜色算子](Channel-and-Color-Operations.zh.md)。原生数值 CPU profile 为 `strict`、`accelerated_apple_silicon` 和 `accelerated_x86_64`；加速 profile 要求匹配的主机能力。注册不代表支持全部空间布局或 GPU 后端。

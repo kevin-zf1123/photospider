@@ -142,14 +142,14 @@ Result<OperationProgram> lower(const OperationLowering& query) {
       return builder.finish();
     }
     const auto add = [&](unsigned port, unsigned member, TileIndex tile) {
-      const auto task = take(builder.add_task(kSymbol, kContract, {},
-                                              {state.scratch_bytes, 0, 0}));
       Region region;
       if (!state.complete) {
         const auto grid = take(TileGrid::from_schema(
             *state.outputs[port].result_schema, query.tile_extent, member));
         region = take(grid.region(tile));
       }
+      const auto task = take(builder.add_task(
+          kSymbol, kContract, {}, {state.task_scratch(port, region), 0, 0}));
       for (const auto& read : reads(state, port, region, query.tile_extent,
                                     budget, query.limits.maximum_records)) {
         check(builder.read_input(task, std::get<0>(read), std::get<1>(read),
@@ -227,10 +227,8 @@ Result<ps_prepared_kernel_v8> prepare(const physical::KernelDesc& description,
                    "generation kernel requires CPU Host"};
     }
     const auto& state = *static_cast<const Program*>(query.static_state);
-    require(query.task_parameters.empty() &&
-                query.scratch ==
-                    std::array<std::uint64_t, 3>{state.scratch_bytes, 0, 0},
-            "generation task scratch/parameters mismatch");
+    require(query.task_parameters.empty(),
+            "generation task parameters mismatch");
     require(
         query.outputs.size() == state.outputs.size() && !query.writes.empty(),
         "generation output arity mismatch");
@@ -241,6 +239,12 @@ Result<ps_prepared_kernel_v8> prepare(const physical::KernelDesc& description,
               "generation output schema mismatch");
     }
     const auto& first = query.writes[0];
+    const auto scratch_region =
+        state.complete ? Region{} : fixed_tensor::view_region(first.layout);
+    require(query.scratch ==
+                std::array<std::uint64_t, 3>{
+                    state.task_scratch(first.port, scratch_region), 0, 0},
+            "generation task scratch mismatch");
     unsigned write_index = 0;
     const auto validate_write = [&](const Address& expected) {
       require(write_index < query.writes.size(),
@@ -377,7 +381,11 @@ OperationDefinition operation(
       auto state = make(inputs, p);
       state->inputs = inputs;
       const auto work = integer(p, "max_work", INT64_MAX);
-      require(work >= 0, "generation max_work must be nonnegative");
+      if (work < 0) {
+        throw Status{ErrorCode::InvalidArgument,
+                     "generation max_work must be nonnegative",
+                     FailureReason::InvalidDomain};
+      }
       state->work_limit = static_cast<std::uint64_t>(work);
       return Result<OperationPreparation>(prepared(std::move(state)));
     } catch (const Status& failure) {

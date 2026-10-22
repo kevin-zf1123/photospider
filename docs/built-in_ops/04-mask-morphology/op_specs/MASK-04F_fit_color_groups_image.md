@@ -5,12 +5,12 @@ kind: primitive
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 parent_id: MASK-04
 function: fit_color_groups_image
 oracle_entry: fit_color_groups_image
-proposed_operation_keys:
+registered_operation_keys:
   - mask.fit_color_groups_image_strict
 ---
 
@@ -18,7 +18,8 @@ proposed_operation_keys:
 
 Inherit [MASK-common](MASK_common_contract.md) and the
 [family contract](MASK-04_color_range_contract.md). Numerical rules follow
-01-numeric. This spec does not claim native registration or production execution.
+01-numeric. This Proposed member is registered in the bundled strict CPU set
+through fixed invocation ABI 8.
 
 ## Ports, parameters and output inference
 
@@ -60,9 +61,9 @@ checked during preparation:
 
 Each count may be zero. Unused entries are zero-filled; positive-ID and positive-
 diagonal constraints apply only to effective model rows. Both counts are ordinary
-payload included in the compiled fixed reads. No absent ID creates an effective row. The complete
-schema/codec and fixed publication scopes remain registration gates for these
-Proposed members. The global fitting computation is not repeated per output tile.
+payload included in the compiled fixed reads. No absent ID creates an effective row. The SDK schemas below define the
+registered fixed publication scopes. The global fitting computation runs once
+per call, including a request for only one output, and is not repeated per tile.
 Source ownership follows the host contract; applying the model to another
 compatible image requires no source ObjectId match.
 
@@ -74,6 +75,24 @@ caller premises, with no output scan or adaptive increase of epsilon. Sample ord
 these numeric values. epsilon is a required Float64[C] Tensor of positive finite
 scales; its units match each native color coordinate. The model represents the
 actual stored mean and L, with effective covariance L*L^T.
+
+## Registered Result schemas
+
+The operations SDK header [photospider/ops/mask.hpp](../../../../plugins/ops/include/photospider/ops/mask.hpp)
+provides color_group_model_schema(N,C) and skipped_color_groups_schema(N).
+Their schema IDs are photospider.ops.mask.color_groups and
+photospider.ops.mask.skipped_color_groups, both version 1. Member order is
+exactly the directory above; all fields have no spatial/channel axes. mean has
+one atomic trailing axis and cholesky has two, so a row's coordinates/factor
+cannot be split across tiles. Each Result has one CompleteBundle scope covering
+its complete directory. Both named outputs belong to the same call retirement.
+
+Factories allocate owned metadata, with no tensor backing or attached color
+description. Capacity is positive and every field has at most 2^40 samples.
+A user-built model publishes its buffers with an explicit StridedLayout matching
+that storage; field directory order does not imply physical byte strides.
+The fitting producer initializes the whole capacity and writes each output
+exactly once. Consumers trust the ordinary count and canonical padding premises.
 
 ## Ownership, fixed support and acceptance
 

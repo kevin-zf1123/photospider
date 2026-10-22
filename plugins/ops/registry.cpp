@@ -12,7 +12,12 @@ Status register_builtin_operations(OperationRegistry* registry) {
   if (!diagnostics.ok()) {
     return diagnostics;
   }
-  for (const auto function : {register_paths,
+  for (const auto function : {register_mask_color,
+                              register_mask_statistics,
+                              register_mask_pointwise,
+                              register_mask_morphology,
+                              register_mask_restricted,
+                              register_paths,
                               register_path_evaluation,
                               register_polygon_area,
                               register_noise,

@@ -19,7 +19,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-01A_binary_logic.md",
-      "proposed_name": "mask.binary_logic_strict"
+      "registered_name": "mask.binary_logic_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-01B",
@@ -36,7 +38,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-01B_fuzzy_logic.md",
-      "proposed_name": "mask.fuzzy_logic_strict"
+      "registered_name": "mask.fuzzy_logic_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-01C",
@@ -53,7 +57,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-01C_independent_coverage.md",
-      "proposed_name": "mask.independent_coverage_strict"
+      "registered_name": "mask.independent_coverage_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-02A",
@@ -70,7 +76,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-02A_invert.md",
-      "proposed_name": "mask.invert_strict"
+      "registered_name": "mask.invert_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-03A",
@@ -87,7 +95,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-03A_threshold.md",
-      "proposed_name": "mask.threshold_strict"
+      "registered_name": "mask.threshold_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-03B",
@@ -104,7 +114,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-03B_range_mask.md",
-      "proposed_name": "mask.range_mask_strict"
+      "registered_name": "mask.range_mask_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-03C",
@@ -121,7 +133,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-03C_soft_threshold.md",
-      "proposed_name": "mask.soft_threshold_strict"
+      "registered_name": "mask.soft_threshold_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-03D",
@@ -138,7 +152,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-03D_soft_range.md",
-      "proposed_name": "mask.soft_range_strict"
+      "registered_name": "mask.soft_range_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-03E",
@@ -155,7 +171,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-03E_nonzero_to_binary.md",
-      "proposed_name": "mask.nonzero_to_binary_strict"
+      "registered_name": "mask.nonzero_to_binary_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-04A",
@@ -163,7 +181,7 @@
       "n": 4,
       "function": "coordinate_range",
       "title": "Scaled coordinate-distance mask",
-      "ports": "image: Field[C,H,W], target: Float64[K], scales: Float64[K] -> mask: Coverage[H,W]",
+      "ports": "image: Field[C,H,W], target: Float64[K], scales: Float64[K] -> values: Coverage[H,W]",
       "params": "channels; optional input_description; inner,outer; curve, as family.",
       "math": "Use scaled Euclidean distance and the exact family radial ramp.",
       "support": "E: selected image components and complete target/scales controls for any nonempty Q; no complete-group payload scan. Lower support for complete selected output tiles to fixed source-grid reads under MASK-common, using finite supersets for runtime-selected addresses. Payload/numerical/association premises are unchecked; no Validation read set or runtime dependency discovery is added. Empty output selection adds no payload work; publication follows call retirement.",
@@ -172,7 +190,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-04A_coordinate_range.md",
-      "proposed_name": "mask.coordinate_range_strict"
+      "registered_name": "mask.coordinate_range_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-04B",
@@ -180,7 +200,7 @@
       "n": 4,
       "function": "lab76_range",
       "title": "Normalized-Lab DeltaE76 selector",
-      "ports": "image: Field[C,H,W], target: Float64[3] -> mask: Coverage[H,W]",
+      "ports": "image: Field[C,H,W], target: Float64[3] -> values: Coverage[H,W]",
       "params": "channels selects l,a*,b*; optional input_description; inner,outer in DeltaE76; curve.",
       "math": "Use the Lab76 formula with exact factor 100 on the lightness difference; white/description must match.",
       "support": "E: selected Lab triple and all three target controls; no complete-group payload scan. Lower support for complete selected output tiles to fixed source-grid reads under MASK-common, using finite supersets for runtime-selected addresses. Payload/numerical/association premises are unchecked; no Validation read set or runtime dependency discovery is added. Empty output selection adds no payload work; publication follows call retirement.",
@@ -189,7 +209,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-04B_lab76_range.md",
-      "proposed_name": "mask.lab76_range_strict"
+      "registered_name": "mask.lab76_range_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-04C",
@@ -197,7 +219,7 @@
       "n": 4,
       "function": "hue_range",
       "title": "Periodic hue selector with explicit neutral policy",
-      "ports": "image: Field[C,H,W] -> mask: Coverage[H,W]",
+      "ports": "image: Field[C,H,W] -> values: Coverage[H,W]",
       "params": "channels selects hue,chroma; optional input_description; center_turns finite; minimum_chroma>=0 finite; neutral_policy include|exclude; inner,outer in [0,.5]; curve.",
       "math": "Use exact turn reduction. A sample is neutral when chroma is exactly zero or\nstrictly below minimum_chroma. The explicit neutral_policy returns 1 for include\nand 0 for exclude; the authoring recommendation is exclude. Equality to a positive\nminimum_chroma uses the hue branch. Selected-coordinate domains are unchecked\npremises; unused polar coordinates add no reads.",
       "support": "E: hue/chroma Data only; no reads of unused polar coordinates and no spatial halo. Lower support for complete selected output tiles to fixed source-grid reads under MASK-common, using finite supersets for runtime-selected addresses. Payload/numerical/association premises are unchecked; no Validation read set or runtime dependency discovery is added. Empty output selection adds no payload work; publication follows call retirement.",
@@ -206,7 +228,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-04C_hue_range.md",
-      "proposed_name": "mask.hue_range_strict"
+      "registered_name": "mask.hue_range_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-04D",
@@ -223,7 +247,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-04D_lab2000_range.md",
-      "proposed_name": "mask.lab2000_range_strict"
+      "registered_name": "mask.lab2000_range_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-04E",
@@ -240,7 +266,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-04E_fit_color_groups_table.md",
-      "proposed_name": "mask.fit_color_groups_table_strict"
+      "registered_name": "mask.fit_color_groups_table_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-04F",
@@ -257,7 +285,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-04F_fit_color_groups_image.md",
-      "proposed_name": "mask.fit_color_groups_image_strict"
+      "registered_name": "mask.fit_color_groups_image_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-04G",
@@ -274,7 +304,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-04G_apply_color_groups.md",
-      "proposed_name": "mask.apply_color_groups_strict"
+      "registered_name": "mask.apply_color_groups_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-05A",
@@ -291,7 +323,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-05A_dilate.md",
-      "proposed_name": "mask.dilate_strict"
+      "registered_name": "mask.dilate_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-05B",
@@ -308,7 +342,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-05B_erode.md",
-      "proposed_name": "mask.erode_strict"
+      "registered_name": "mask.erode_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-06A",
@@ -325,7 +361,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-06A_opening.md",
-      "proposed_name": "mask.opening_strict"
+      "registered_name": "mask.opening_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-06B",
@@ -342,7 +380,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-06B_closing.md",
-      "proposed_name": "mask.closing_strict"
+      "registered_name": "mask.closing_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-07A",
@@ -767,7 +807,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-14A_morph_gradient.md",
-      "proposed_name": "mask.morph_gradient_strict"
+      "registered_name": "mask.morph_gradient_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-14B",
@@ -784,7 +826,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-14B_inner_border.md",
-      "proposed_name": "mask.inner_border_strict"
+      "registered_name": "mask.inner_border_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-14C",
@@ -801,7 +845,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-14C_outer_border.md",
-      "proposed_name": "mask.outer_border_strict"
+      "registered_name": "mask.outer_border_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-14D",
@@ -818,7 +864,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-14D_white_top_hat.md",
-      "proposed_name": "mask.white_top_hat_strict"
+      "registered_name": "mask.white_top_hat_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-14E",
@@ -835,7 +883,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-14E_black_top_hat.md",
-      "proposed_name": "mask.black_top_hat_strict"
+      "registered_name": "mask.black_top_hat_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-15A",
@@ -1022,7 +1072,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-17A_affect_result.md",
-      "proposed_name": "mask.affect_result_strict"
+      "registered_name": "mask.affect_result_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-17B",
@@ -1039,7 +1091,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-17B_multiply_mask.md",
-      "proposed_name": "mask.multiply_mask_strict"
+      "registered_name": "mask.multiply_mask_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-17C",
@@ -1056,7 +1110,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-17C_restricted_mean.md",
-      "proposed_name": "mask.restricted_mean_strict"
+      "registered_name": "mask.restricted_mean_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-17D",
@@ -1073,7 +1129,10 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-17D_apply_alpha.md",
-      "proposed_name": "mask.apply_alpha_strict"
+      "registered_name": "mask.apply_alpha_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     }
-  ]
+  ],
+  "implemented_member_count": 29
 }

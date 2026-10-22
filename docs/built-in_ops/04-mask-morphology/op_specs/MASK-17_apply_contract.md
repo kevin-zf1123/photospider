@@ -5,7 +5,7 @@ kind: operator_family
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 ---
 
@@ -13,7 +13,8 @@ clarification_status: draft_for_review
 
 Inherit the complete [MASK baseline](MASK_common_contract.md), including its
 precision, descriptor, error, demand, ownership and acceptance obligations.
-This family proposes distinct members.
+All members in this Proposed family are registered in the bundled strict CPU
+set.
 
 ## Members
 
