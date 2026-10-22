@@ -1,6 +1,6 @@
 # 图形、坐标、渐变与噪声生成
 
-本页按功能整理已接受的规格。GEN-01～04、NOI-01～04、PTH-01～02 已实现，GEN-03C 所需的 PTH-09A 精确多边形面积填充也已实现；其余功能按各成员的实现状态区分。当前新增 77 个注册 key，包含 CPU 数值 profile、PathSet 求值适配器和原生 Metal Perlin。Core、Primitive、partition 的公开 schema factory 及三项 workflow helper 位于 `photospider/ops/generation.hpp`。
+本页按功能整理已接受的规格。GEN-01～04、GEN-05A～E、GEN-06、NOI-01～04、NOI-06、PTH-01～02 已实现，GEN-03C 所需的 PTH-09A 精确多边形面积填充也已实现；其余功能按各成员的实现状态区分。生成类别共有 110 个注册 key，其中本次梯度／分形实现提供 33 个 CPU key。Core、Primitive、partition 的公开 schema factory 及四项 workflow helper 位于 `photospider/ops/generation.hpp`。GEN-05F/G 保持独立的未实现状态。
 
 [共享契约](op_specs/GEN_common_contract.md)、[oracle 覆盖说明](oracle-coverage.md)、[oracle 使用说明](../../../oracle/ops/generation/README.md)与[研究来源及采用边界](research-sources.md)分别定义公共语义和独立参考的证据范围。英文成员规格继续作为数学行为的权威定义。
 
@@ -25,7 +25,7 @@ Linear用`dot(p-a,b-a)/|b-a|²`；radial用`|p-c|/r`，椭圆先变换局部坐�
 
 颜色解释使用算子 SDK 的 `TensorDescription`，由每个消费算子的静态参数显式提供。Result 仅携带结构、样本和存储 owner。完整图像采用 planar straight 表示，alpha 为同一 tensor 内的独立平面；通道数量不决定颜色模型或 alpha 角色。
 
-GEN-06C 组合现有 CRV-06，继承各模型的数值前置条件、静态检查、公共节点舍入及读取规则。RGB/RGBA 使用 straight 输入输出；正 exact alpha 舍入为零时，各 RGB 分量也必须舍入为零，这是调用方前置条件。满足条件的透明输出统一为 +0，数值前置条件违例不构成运行时错误验收。Lab 使用 `l=L*/100`，极坐标保留原始 hue 与圈数。CRV 的逻辑 tuple 描述使用 `channel_axis=0`；下游 FMT 消费 `[H,W,C]` 时显式提供 `channel_axis=2` 的描述。CSS Color 4 提供命名语义来源。[^css]
+公开 `generation::gradient_color(document, color_ramp, method, spread_profile)` helper 先追加独立的 spread 节点，再追加传入的 CRV-06 节点；支持 RGB、XYZ、CMYK、Lab、LCh、OKLab、OKLCh、HSL、YCbCr 及 pi／rational-pi 共 15 个模型／单位变体。GEN-06C 组合现有 CRV-06，继承各模型的数值前置条件、静态检查、公共节点舍入及读取规则。RGB/RGBA 使用 straight 输入输出；正 exact alpha 舍入为零时，各 RGB 分量也必须舍入为零，这是调用方前置条件。满足条件的透明输出统一为 +0，数值前置条件违例不构成运行时错误验收。Lab 使用 `l=L*/100`，极坐标保留原始 hue 与圈数。CRV 的逻辑 tuple 描述使用 `channel_axis=0`；下游 FMT 消费 `[H,W,C]` 时显式提供 `channel_axis=2` 的描述。CSS Color 4 提供命名语义来源。[^css]
 repeat 与 angular 的数学周期归一后正常舍入；舍入到上端点不再次 wrap 或 nextDown。
 此规则独立于 rank/cell 成员明确规定的端点修正；pad 复制区间内输入，保留负零。
 GEN-07 三个成员统一为通用数值插值，颜色与 alpha 处理通过显式 workflow 组合。
@@ -41,7 +41,7 @@ Gaussian表示分布，white/blue表示频谱，Perlin/Voronoi表示构造。将
 | [NOI-03 correlated noise](op_specs/NOI-03_correlated_contract.md) | white field+filter→field | correlation length px、边界与方差归一 | H/W；与white频谱不同；成员：[NOI-03A](op_specs/NOI-03A_correlate_kernel.md)、[NOI-03B](op_specs/NOI-03B_correlated_gaussian.md) |
 | [NOI-04 Perlin](op_specs/NOI-04_gradient_noise_contract.md) | coordinates→field | NOI-04A 固定 permutation、无 seed；坐标缩放由上游完成；NOI-04B 独立使用 Philox | O(P)，E；格点连续性和周期，输出范围按版本；成员：[NOI-04A](op_specs/NOI-04A_perlin2002_3d.md)、[NOI-04B](op_specs/NOI-04B_gradient2d_philox.md) |
 | [NOI-05 cellular/Voronoi](op_specs/NOI-05_cellular_contract.md) | coords+feature process→F1/F2/ID | L2 距离；每 cell 点数与随机寻址显式 | 最近点搜索；F2-F1不是精确边界距离；成员：[NOI-05A](op_specs/NOI-05A_cellular2d_l2.md)、[NOI-05B](op_specs/NOI-05B_nearest_point_distances.md) |
-| [NOI-06 fractal](op_specs/NOI-06_fractal_contract.md) | base noise→field | octaves、lacunarity、gain 显式；fBm/turbulence/ridged分别具名 | O(P·octaves)；按采样足迹截断 octave；不声称严格带限；成员：[NOI-06A](op_specs/NOI-06A_fbm_sum.md)、[NOI-06B](op_specs/NOI-06B_turbulence_sum.md)、[NOI-06C](op_specs/NOI-06C_ridged_sum.md)、[NOI-06D](op_specs/NOI-06D_footprint_fbm.md) |
+| [NOI-06 fractal](op_specs/NOI-06_fractal_contract.md) | coordinates+[footprint]→field | basis、octaves、frequency、lacunarity、gain 显式；fBm/turbulence/ridged分别具名 | O(P·octaves)；按采样足迹截断 octave；不声称严格带限；成员：[NOI-06A](op_specs/NOI-06A_fbm_sum.md)、[NOI-06B](op_specs/NOI-06B_turbulence_sum.md)、[NOI-06C](op_specs/NOI-06C_ridged_sum.md)、[NOI-06D](op_specs/NOI-06D_footprint_fbm.md) |
 | [NOI-07 blue noise](op_specs/NOI-07_blue_noise_contract.md) | rank tile/volume+coords→field/points | 通用 rank lookup 与具名 blue/STBN 资源分离 | PSD低频抑制、周期重复；生成点集不等于像素mask；成员：[NOI-07A](op_specs/NOI-07A_blue_rank_tile.md)、[NOI-07B](op_specs/NOI-07B_blue_threshold_points.md) |
 | [NOI-08 Poisson/shot](op_specs/NOI-08_poisson_contract.md) | 非负期望计数或期望电子数→同形状 Int64 计数 | 上游显式完成电子单位标定；read noise、gain、clipping 和 ADC 各自显式处理 | 有限随机网格分位数近似；与理想 Poisson 均值/方差分别说明；成员：[NOI-08A](op_specs/NOI-08A_poisson_icdf.md)、[NOI-08B](op_specs/NOI-08B_shot_electrons.md) |
 | [NOI-09 speckle/grain](op_specs/NOI-09_grain_contract.md) | signal+model→field/image | multiplicative speckle与艺术film grain独立 | grain 显式 none/sum/l2；strength 仅作最终乘数；隐藏 RGB 同样处理、alpha 按位复制；成员：[NOI-09A](op_specs/NOI-09A_speckle_integer_looks.md)、[NOI-09B](op_specs/NOI-09B_artistic_linear_grain.md) |
@@ -64,6 +64,12 @@ DynamicPoints v1 使用 `photospider.ops.dynamic_points`：Float64 `positions[P,
 有限候选拒绝与 FIFO Bridson 分别定义；max_count 是正常停止目标，候选／active list
 耗尽可成功返回较少点，独立资源预算耗尽按错误处理。具名 blue/STBN 需要生产资源
 与独立质量验收；普通 rank 结构合法不代表已经满足频谱质量。
+
+## 梯度与分形的实现和优化
+
+GEN-05A～E、GEN-06A/B 和 NOI-06A～D 均提供 strict、Apple Silicon、x86-64 三个 CPU profile；加速 profile 按目标架构准入。Float32 快路径通过完整结果区间两端舍入一致证明正确舍入；accelerated Float64 使用 NUM 的最终 FP32 四 ULP 上限，不能把误差额度分配给各 octave。无法证明时使用精确算术，工作量耗尽和取消直接保留失败状态。
+
+NOI-06 的 octave 坐标、权重与 basis 都在最终舍入前保持精确。`gain=0` 不构造后续坐标；footprint 按显式输入衰减，并使用未衰减振幅和作归一化分母。算法不会从 ROI 大小推断 footprint。默认 basis 为 `gradient2d_philox`，需显式 seed/stream；三维 Perlin 必须显式选择 `perlin2002_3d`，使用固定 permutation，不接收 gradient 专属随机参数。
 
 ## 使用与验收
 

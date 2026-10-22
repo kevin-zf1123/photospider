@@ -6,9 +6,9 @@ function: turbulence_sum
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - noise.turbulence_sum_v1_strict
   - noise.turbulence_sum_v1_accelerated_apple_silicon
   - noise.turbulence_sum_v1_accelerated_x86_64
@@ -18,7 +18,7 @@ proposed_operation_keys:
 
 Inherit [NOI-06](NOI-06_fractal_contract.md), [GEN common](GEN_common_contract.md), and
 the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. Proposed keys are not runtime registrations. A key includes algorithm version
+contracts. A key includes algorithm version
 and profile; within one version/profile, output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -58,5 +58,5 @@ Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

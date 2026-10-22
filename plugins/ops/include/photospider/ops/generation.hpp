@@ -208,6 +208,68 @@ inline Result<WorkflowNodeOutput> correlated_gaussian(
   return Result<WorkflowNodeOutput>(
       WorkflowNodeOutput{ids.value()[1], "values"});
 }
+/** @brief GEN-06C appends explicit spread followed by an existing CRV-06 node.
+ * Build color_ramp with the public numeric::color_ramp_*_node constructors.
+ * Its first input is the unspread query; its temporary id is replaced by an
+ * unused document id. All 15 CRV model/unit variants, including rational-pi
+ * numerator/denominator ports, retain their parameters, resources and profile.
+ * Spread preserves the query dtype and is a separate public rounding stage.
+ * A tuple description uses channel_axis=0; downstream image consumers supply
+ * their own description for the resulting S+[C] tensor.
+ *
+ * The caller grants exclusive document access. Inputs and parameters are
+ * copied/moved into two nodes; no samples, execution state or cache are
+ * retained. Invalid helper arguments or ID allocation leave document unchanged.
+ * Allocation may throw std::bad_alloc. Compiler checks the selected CRV
+ * schema/description/resources. Numerical validity remains a caller premise.
+ */
+inline Result<WorkflowNodeOutput> gradient_color(
+    WorkflowDocument* document, WorkflowNode color_ramp,
+    std::string method = "pad", Profile spread_profile = Profile::Strict) {
+  using Answer = Result<WorkflowNodeOutput>;
+  if (!document ||
+      (method != "pad" && method != "repeat" && method != "reflect") ||
+      (spread_profile != Profile::Strict &&
+       spread_profile != Profile::AppleSilicon &&
+       spread_profile != Profile::X86_64))
+    return Answer(
+        Status{ErrorCode::InvalidArgument, "invalid gradient color arguments"});
+  bool known = false;
+  unsigned inputs = 0;
+  for (const auto* model :
+       {"rgb", "xyz", "cmyk", "cielab", "oklab", "ycbcr", "cielch", "cielch_pi",
+        "cielch_rational_pi", "oklch", "oklch_pi", "oklch_rational_pi", "hsl",
+        "hsl_pi", "hsl_rational_pi"}) {
+    for (auto profile :
+         {Profile::Strict, Profile::AppleSilicon, Profile::X86_64}) {
+      if (color_ramp.operation == std::string("curve.color_ramp_") + model +
+                                      "_" + detail::profile_suffix(profile)) {
+        known = true;
+        inputs =
+            std::string(model).find("rational_pi") != std::string::npos ? 5 : 3;
+      }
+    }
+  }
+  if (!known || color_ramp.inputs.size() != inputs)
+    return Answer(Status{ErrorCode::InvalidArgument,
+                         "gradient color requires a CRV-06 node"});
+  auto ids =
+      numeric::available_workflow_node_ids(*document, 2, color_ramp.inputs);
+  if (!ids.ok())
+    return Answer(ids.status());
+  auto staged = *document;
+  staged.nodes.push_back({ids.value()[0],
+                          "generation.spread_coordinate_v1_" +
+                              detail::profile_suffix(spread_profile),
+                          {color_ramp.inputs[0]},
+                          {{"method", std::move(method)}}});
+  color_ramp.id = ids.value()[1];
+  color_ramp.inputs[0] = WorkflowNodeOutput{ids.value()[0], "values"};
+  staged.nodes.push_back(std::move(color_ramp));
+  *document = std::move(staged);
+  return Answer(WorkflowNodeOutput{ids.value()[1], "values"});
+}
+
 struct PathEvaluation final {
   WorkflowNodeOutput position, derivative, tangent, tangent_valid;
 };

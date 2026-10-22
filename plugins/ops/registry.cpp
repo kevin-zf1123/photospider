@@ -18,6 +18,8 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_noise,
                               register_perlin_gpu,
                               register_generation,
+                              register_gradients,
+                              register_fractals,
                               register_ocio_color,
                               register_icc_color,
                               register_gamut_tone,

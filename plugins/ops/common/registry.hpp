@@ -9,6 +9,8 @@ Status register_paths(OperationRegistry* registry);
 Status register_perlin_gpu(OperationRegistry* registry);
 Status register_noise(OperationRegistry* registry);
 Status register_generation(OperationRegistry* registry);
+Status register_gradients(OperationRegistry* registry);
+Status register_fractals(OperationRegistry* registry);
 Status register_ocio_color(OperationRegistry* registry);
 Status register_icc_color(OperationRegistry* registry);
 Status register_gamut_tone(OperationRegistry* registry);

@@ -55,6 +55,8 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/03-generation/runtime.cpp
   plugins/ops/03-generation/math.cpp
   plugins/ops/03-generation/generators.cpp
+  plugins/ops/03-generation/gradients.cpp
+  plugins/ops/03-generation/fractals.cpp
   plugins/ops/03-generation/geometry.cpp
   plugins/ops/01-numeric/expression.cpp
   plugins/ops/01-numeric/expression_metadata.cpp

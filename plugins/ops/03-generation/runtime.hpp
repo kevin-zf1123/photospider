@@ -80,12 +80,13 @@ inline ElementType dtype(const Parameters& p) {
 inline bool floating(ElementType type) {
   return type == ElementType::Float32 || type == ElementType::Float64;
 }
-inline const ResultTensorSpec& tensor(const OperationMetadata& input) {
+inline const ResultTensorSpec& tensor(const OperationMetadata& input,
+                                      bool allow_batch = false) {
   require(input.result_schema && input.result_schema->tensors.size() == 1,
           "generation input requires exactly one tensor");
   check(input.result_schema->validate());
   const auto& result = input.result_schema->tensors[0];
-  require(result.batch_axes.empty(),
+  require(allow_batch || result.batch_axes.empty(),
           "generation inputs use explicit logical axes");
   size_product(result.sample_shape());
   return result;
