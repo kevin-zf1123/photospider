@@ -6,9 +6,9 @@ function: concat_paths
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - path.concat_paths_v1_strict
 ---
 
@@ -16,8 +16,7 @@ proposed_operation_keys:
 
 Inherit [PTH-01](PTH-01_construction_contract.md), [GEN common](GEN_common_contract.md),
 and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -35,6 +34,11 @@ Concatenate subpaths in input-port order without connecting equal endpoints. Rei
 offsets and associations. Path-constant attributes merge only with identical
 values/descriptions. Arc-domain bindings must map using actual source lengths and
 explicit parameter domain; otherwise reject or explicitly drop.
+
+The v1 geometry schema contains no attached attribute members. These geometry-only
+ports do not consume separate width or source-map Results. Workflows carrying such
+Results must apply the association rules explicitly; selecting an attribute policy
+does not copy a separate Result implicitly.
 
 ## Dependencies, resources and failures
 
@@ -61,5 +65,5 @@ Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

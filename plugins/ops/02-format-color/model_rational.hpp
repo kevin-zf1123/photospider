@@ -18,9 +18,11 @@ namespace ps::plugin_internal::model_ops {
 // Source NaN payload selection is performed before entering this field.
 // Arithmetic records the first operational failure and stops consuming work.
 // Results are usable only while active(); reset starts a new evaluation.
-class RationalMath final {
+template <unsigned Words = 256>
+class RationalMathStorage final {
  public:
-  static constexpr unsigned kWords = 256;
+  static constexpr unsigned kWords = Words;
+  static_assert(Words >= 4 && Words % 4 == 0);
   using Integer = numeric_ops::FixedInteger<kWords>;
   using Workspace = numeric_ops::ExactRatioWorkspace<kWords>;
   using Work = core_internal::WorkConsumer;
@@ -197,6 +199,29 @@ class RationalMath final {
       return a;
     const unsigned a_zeros = trailing(a), b_zeros = trailing(b);
     const unsigned common = std::min(a_zeros, b_zeros);
+    // A power-of-two operand makes the GCD a power of two immediately.
+    // Dyadic arithmetic must not walk every bit of an odd numerator.
+    if (top(a) == static_cast<int>(a_zeros) ||
+        top(b) == static_cast<int>(b_zeros)) {
+      Integer result;
+      result.words[common / 64] = UINT64_C(1) << (common % 64);
+      if (!work(1))
+        return {};
+      return result;
+    }
+    if (a_count == 1 && b_count == 1) {
+      auto x = a.words[0], y = b.words[0];
+      while (y) {
+        if (!work(1))
+          return {};
+        const auto remainder = x % y;
+        x = y;
+        y = remainder;
+      }
+      Integer result;
+      result.words[0] = x;
+      return result;
+    }
     right_active(&a, a_zeros, &a_count);
     right_active(&b, b_zeros, &b_count);
     // Binary Euclid retains bounded progress and a fuel/cancellation check
@@ -295,7 +320,7 @@ class RationalMath final {
   }
 
  public:
-  explicit RationalMath(numeric_ops::SequenceProfile profile)
+  explicit RationalMathStorage(numeric_ops::SequenceProfile profile)
       : rounding_(profile) {}
   void bind(Work work) { consume_ = std::move(work); }
   void reset() {
@@ -582,6 +607,7 @@ class RationalMath final {
                  const Rational& a) const {
     if (!active())
       return 0;
+    static_assert(kWords >= numeric_ops::CheckedDirectedInterval::kWords);
     using Frame = numeric_ops::CheckedDirectedInterval::Frame;
     Frame frame(math);
     auto n = math.interval(), d = math.interval();
@@ -646,4 +672,5 @@ class RationalMath final {
       math.negate(out, out);
   }
 };
+using RationalMath = RationalMathStorage<>;
 }  // namespace ps::plugin_internal::model_ops

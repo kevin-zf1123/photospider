@@ -21,6 +21,7 @@
 | Numeric、expression 与 LUT | 默认 registry 的数值、curve、field、统计和 expression/LUT operation；从[基础算子](../../kernel-architecture/Basic-Operations.md)、[数值操作](../../kernel-architecture/Numeric-Operations.md)、[表达式与 LUT](../../kernel-architecture/Expression-and-LUT-Operations.md)查看 key 契约。 | 仅按具体 key 公开的 dtype、shape、参数和 complete-input/Region 规则执行；普通数值 Result 不因形状而获得额外图像领域约束。 |
 | Channel 与 color | 默认 registry 中明确注册的通道构造、提取、颜色模型转换和 RGB 基底节点，见[通道与颜色操作](../../kernel-architecture/Channel-and-Color-Operations.md)。 | 各节点校验显式配置、dtype、结构与布局；ICC/OCIO 资源封装不等于完整颜色转换引擎。 |
 | Image 与 mask | 内置图像 operation 通过 Result tensor storage 执行；当前清单与各 key 的输入约束见[图像操作](../../kernel-architecture/Image-Operations.md)。 | 图像样本使用 typed `photospider.image` Result；空间与非空间成员使用统一 Tensor backing。 |
+| Generation、noise 与 PathSet | GEN-01～04、NOI-01～04、PTH-01～02 及 PTH-09A；77 个注册 key 和公开 schema/workflow helper，见[生成器](../03-generation/generators.md)与[路径](../03-generation/paths.md)。 | CPU 精确数学、原生 Metal Perlin、CompleteBundle 路径与显式区域依赖；x86_64 未运行验证，Vulkan 当前不可用。 |
 | Layer 纯值计算 | `LayerPixel` 及纯计算 helper 位于 SDK 的 [`ops/composite/layer.hpp`](../../../include/photospider/ops/composite/layer.hpp)。 | 当前没有 Layer operation factory 或 Result schema helper；kernel 不按 Layer schema 名称分派或拒绝。调用者选择一致的线性空间；见 [Layer runtime](../../kernel-architecture/Layer-Runtime.md)。 |
 
 ## 编译与产物

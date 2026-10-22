@@ -12,7 +12,13 @@ Status register_builtin_operations(OperationRegistry* registry) {
   if (!diagnostics.ok()) {
     return diagnostics;
   }
-  for (const auto function : {register_ocio_color,
+  for (const auto function : {register_paths,
+                              register_path_evaluation,
+                              register_polygon_area,
+                              register_noise,
+                              register_perlin_gpu,
+                              register_generation,
+                              register_ocio_color,
                               register_icc_color,
                               register_gamut_tone,
                               register_alpha_operations,

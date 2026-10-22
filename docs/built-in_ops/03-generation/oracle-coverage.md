@@ -5,16 +5,15 @@ protocol and evidence boundaries. This table covers all 95 current member specs.
 callable is a helper, not an implemented operator or public Result interface. E = finite
 exact helper; B = specific proved bound; M = Measured; A = analytic or structural
 subset/necessary check; G = no executable reference. Combined levels apply to different
-helper parts, not the complete member. Every row still lacks kernel execution, GPU,
-accounting/cancellation, layout and Result-lifetime acceptance.
+helper parts, not the complete member. This table describes reference helpers only.
 
 Philox core known-answer tests are independent of the specified v1 addressed mapping. Exact finite mapping checks and Measured transcendental transforms have separate evidence limits. Published test counts
 measure test methods, not operator coverage or proof of all input domains.
 
 | Member | Level | Helpers / tests | Covered subset and remaining limits |
 | --- | --- | --- | --- |
-| [GEN-01A](op_specs/GEN-01A_constant_tensor.md) | E | [gen01.exact.constant_bits](../../../oracle/ops/generation/gen01/exact.py); [test_exact.py](../../../oracle/ops/generation/test_exact.py) | Bit-fill fixture only; complete color description and tensor publication are not implemented. |
-| [GEN-01B](op_specs/GEN-01B_constant_image.md) | A | [gen01.exact.constant_bits](../../../oracle/ops/generation/gen01/exact.py); [test_exact.py](../../../oracle/ops/generation/test_exact.py) | Bit-fill fixture only; complete color description and tensor publication are not implemented. |
+| [GEN-01A](op_specs/GEN-01A_constant_tensor.md) | E | [gen01.exact.constant_bits](../../../oracle/ops/generation/gen01/exact.py); [test_exact.py](../../../oracle/ops/generation/test_exact.py) | Bit-fill fixture only; C++ color-description handling and Result publication require public execution checks. |
+| [GEN-01B](op_specs/GEN-01B_constant_image.md) | A | [gen01.exact.constant_bits](../../../oracle/ops/generation/gen01/exact.py); [test_exact.py](../../../oracle/ops/generation/test_exact.py) | Bit-fill fixture only; C++ color-description handling and Result publication require public execution checks. |
 | [GEN-02A](op_specs/GEN-02A_coordinates_xy.md) | E | [gen02.exact.coordinate](../../../oracle/ops/generation/gen02/exact.py); [test_exact.py](../../../oracle/ops/generation/test_exact.py); [test_protocol.py](../../../oracle/ops/generation/test_protocol.py) | Exact pixel-center and edge-normalized formulas; no runtime Region/layout validation. |
 | [GEN-02B](op_specs/GEN-02B_coordinate_axis.md) | E | [gen02.exact.coordinate](../../../oracle/ops/generation/gen02/exact.py); [test_exact.py](../../../oracle/ops/generation/test_exact.py); [test_protocol.py](../../../oracle/ops/generation/test_protocol.py) | Exact pixel-center and edge-normalized formulas; no runtime Region/layout validation. |
 | [GEN-03A](op_specs/GEN-03A_rectangle_coverage.md) | E | [gen03.exact.rectangle_coverage](../../../oracle/ops/generation/gen03/exact.py); [test_exact.py](../../../oracle/ops/generation/test_exact.py) | Exact rectangle/polygon/disk cases; general ellipse area/distance and star coordinates remain Measured. |

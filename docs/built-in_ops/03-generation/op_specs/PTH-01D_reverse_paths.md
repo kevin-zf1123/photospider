@@ -6,9 +6,9 @@ function: reverse_paths
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - path.reverse_paths_v1_strict
 ---
 
@@ -16,13 +16,12 @@ proposed_operation_keys:
 
 Inherit [PTH-01](PTH-01_construction_contract.md), [GEN common](GEN_common_contract.md),
 and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
 
-PathSet; same-authority reversed PathSet, subpath order unchanged.
+PathSet; same-authority reversed PathSet, subpath order unchanged. Core output capacities are V+S, C+S, S; Primitive pool capacities are retained. Effective spline/arc records and their pool offsets may be compacted or remapped. Output counts describe the rebuilt prefixes; unused rows retain canonical zero padding.
 
 ## Parameters and domain
 
@@ -36,6 +35,30 @@ becomes(P1,P0,-d1,-d0); negate arc direction; reverse spline controls/weights an
 knots k_i to a+b-k_(m-i). Mirror arc bindings within each original subpath length
 interval, not whole-PathSet u->1-u.
 
+Shared source slices are read immutably. For an effective control/weight pool of
+N rows, reverse the complete paired pool once and map each spline's control
+begin to N-control_begin-control_count. This preserves partial overlap,
+containment and repeated references without overwriting another curve.
+
+Each referenced spline receives its complete RN64 reflected knot sequence.
+Compatible shared positions may retain their old offsets. Conflicting sequences
+are placed in disjoint slices when capacity permits. Tight layouts eliminate
+contained sequences and use maximum-weight suffix/prefix overlap matching on the
+remaining nondecreasing sequences. Positive overlap edges form a DAG, so their
+matched chains give minimum total storage for these prescribed sequences.
+Containment offsets are resolved relative to their emitted owner.
+
+ArcSweep uses RN64(theta0+sweep) and negated sweep; FullTurn retains theta0 and
+negates its direction. References of both kinds may share an input arc row.
+Preserve each reference kind and allocate or reuse its transformed eight-field
+tuple independently. Identical transformed tuples can share one output row.
+Unreferenced spline/arc records need not occupy the rebuilt effective prefixes.
+
+The v1 geometry schema contains no attached attribute members. These geometry-only
+ports do not consume separate width or source-map Results. Workflows carrying such
+Results must apply the association rules explicitly; selecting an attribute policy
+does not copy a separate Result implicitly.
+
 ## Dependencies, resources and failures
 
 Computation scope: **complete input in a Run-shared stage**. Read complete structural/global inputs and publish the
@@ -44,8 +67,16 @@ conservatively invalidate dependent output; sample changes follow the actual dep
 map. Empty requests perform static preflight without payload reads or advancing a random
 sequence. Compute only requested output mathematics, following the declared dependencies and static structure checks.
 
-complete-input O(rows) plus binding remap; RN64 for new arc/spline values, assume representable output connections
-without epsilon snapping.
+Complete-input staging and control/weight mirroring are linear in their stored
+rows. Knot processing visits the referenced slices; the capacity-tight packing
+fallback uses metadata linear in the static spline capacity and at most
+O(T^3*L^2) exact-bit comparisons, where T is the number of retained referenced
+spline records before containment elimination and L their maximum knot length.
+The current implementation computes overlaps on demand. Arc tuple deduplication
+uses an admitted hash table with full-tuple collision checks. Scratch is bounded
+by static capacities; arithmetic, search and matching loops consume the work
+budget and poll cancellation. New arc/knot values use RN64; output connections
+remain subject to the representability premise without epsilon snapping.
 
 All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
 cancellation in bounded loops. Preserve static structural errors and operational NoSolution, NotConverged,
@@ -55,12 +86,20 @@ lifetime and actual returned coverage inherit GEN-common.
 
 ## Independent fixtures and acceptance
 
-Reverse twice on the supported domain, fixed closed Core anchor, 3-4-5 line, multisubpath width mapping and signed
-derivative zeros.
+Reverse twice restores geometry and orientation on the supported domain, allowing a redundant zero-length line, fixed closed Core anchor, 3-4-5 line, multisubpath width mapping and signed
+derivative zeros. Also include overlapping control slices [0,1] and [1,2]
+within the three-row pool [0,1,2], which must reverse to [1,0] and [2,1].
+For tight knot packing, use K=[0,1,1,2,2,3] with two degree-one,
+three-control records at knot_begin 0 and 1: their reversed five-knot slices fit
+in the same six-row capacity after remapping to begins 1 and 0.
+Cover contained/duplicate knot slices, nonmonotone first-reference order,
+multi-level containment at nonzero output offsets, canonical tails after
+compaction, and one arc row shared by ArcSweep and FullTurn with static capacity
+for both transformed tuples.
 
 Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

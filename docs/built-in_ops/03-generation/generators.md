@@ -1,14 +1,14 @@
 # 图形、坐标、渐变与噪声生成
 
-本页按功能整理已接受的目标规格。本类别的 GEN、NOI、PTH 成员尚未注册，保留的 Python oracle 提供独立数学参考。Perlin2002 的 CPU complete-input、CPU tiled 和 GPU 形式是待实现的目标成员，当前没有对应的原生后端执行证据。具体英文规格记录端口、参数、数学定义与依赖规则，继承当前 01-numeric 与 02-format-color 契约。
-[共享契约](op_specs/GEN_common_contract.md)、[oracle 覆盖说明](oracle-coverage.md)、
-[oracle 使用说明](../../../oracle/ops/generation/README.md)与
-[研究来源及采用边界](research-sources.md)分别说明公共语义、可运行参考及证据范围。
-本文及英文规格定义目标 schema 和随机映射；运行时 codec/factory、数值算法和后端仍需实现并验证，明确未选定的求解器和 backend 不视为已经交付。
+本页按功能整理已接受的规格。GEN-01～04、NOI-01～04、PTH-01～02 已实现，GEN-03C 所需的 PTH-09A 精确多边形面积填充也已实现；其余功能按各成员的实现状态区分。当前新增 77 个注册 key，包含 CPU 数值 profile、PathSet 求值适配器和原生 Metal Perlin。Core、Primitive、partition 的公开 schema factory 及三项 workflow helper 位于 `photospider/ops/generation.hpp`。
+
+[共享契约](op_specs/GEN_common_contract.md)、[oracle 覆盖说明](oracle-coverage.md)、[oracle 使用说明](../../../oracle/ops/generation/README.md)与[研究来源及采用边界](research-sources.md)分别定义公共语义和独立参考的证据范围。英文成员规格继续作为数学行为的权威定义。
 
 schema 与随机协议均为 unchecked 契约：只检查静态成员、dtype、shape、轴和参数类型；count、offset、ID、关联、padding、随机地址及数值/几何域都由调用方保证。上游按规格构造输出，下游直接消费，均不增加 payload 扫描或关联比较。算法本身的候选选择、收敛、质量计算、容量预算和取消规则保留。
 
 ## 图形与坐标
+
+GEN-03B 椭圆覆盖率与 GEN-03F 椭圆距离的 `max_refinements` 是 Int64 参数，默认 4096。实现完整保留正 Int64 上限，不按 32 位截断；工作量预算与可用区间精度仍独立限制计算。只要在默认次数内得到同一舍入证书，`2^32`、`2^32+1` 和 `INT64_MAX` 等较大上限应给出相同结果。
 
 | ID / 功能 | 输入 → 输出 | 参数与方法 | 验收 |
 | --- | --- | --- | --- |

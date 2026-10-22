@@ -14,4 +14,5 @@
 #include "photospider/ops/format/rgb_basis.hpp"
 #include "photospider/ops/format/transfer.hpp"
 #include "photospider/ops/format/view.hpp"
+#include "photospider/ops/generation.hpp"
 #include "photospider/photospider.hpp"

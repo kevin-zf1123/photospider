@@ -4,12 +4,12 @@ id: GEN-common
 kind: shared_operator_contract
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
+implementation_status: partially_implemented
 ---
 
 # Generation shared contract
 
-These are target specifications, not registry/ABI implementation claims. Inherit [NUM
+These specifications define the category contracts. Inherit [NUM
 common](../../01-numeric/op_specs/NUM_common_contract.md), [NUM
 accelerated](../../01-numeric/op_specs/NUM_accelerated_contract.md), [FMT
 common](../../02-format-color/op_specs/FMT_common_contract.md) and [FMT
@@ -17,7 +17,7 @@ color](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md). The
 [generators](../generators.md) and [paths](../paths.md) indexes link every member;
 [oracle coverage](../oracle-coverage.md) states current mathematical evidence.
 
-The GEN, NOI and PTH members in this category are target contracts without current bundled-operation registrations. Existing NUM/CRV and FMT operations are reusable dependencies under their current public contracts. Generation implementations and domain SDK helpers must consume the frozen kernel APIs and fixed invocation ABI 8; this category does not authorize kernel changes.
+GEN-01..04, NOI-01..04, PTH-01..02 and PTH-09A have bundled-operation implementations and public SDK helpers. Other members retain their individual implementation status. Existing NUM/CRV and FMT operations are reusable dependencies under their current public contracts. Generation implementations and domain SDK helpers must consume the frozen kernel APIs and fixed invocation ABI 8; this category does not authorize kernel changes.
 
 ## Unchecked schema and payload contract
 
@@ -107,9 +107,7 @@ Global-coordinate outputs are invariant under request size, tile partition, requ
 order and thread scheduling. Do not derive RNG addresses from tile IDs, thread IDs,
 execution order or local ROI origins.
 
-Implement selected GPU members through the existing native backend interfaces; Perlin noise is a candidate workload. Validate through public workflows including demand,
-allocation, transfers, dependencies and result return, rather than only isolated device
-kernels. GPU profiles are separated by backend. All admitted devices within one backend
+Selected GPU members use the existing native backend interfaces. NOI-04A implements a native Metal Perlin path, validated through public workflows including demand, allocation, explicit transfers, dependencies and result return. The current native implementation does not provide a Vulkan path. Other GPU members retain their individual implementation status. GPU profiles are separated by backend. All admitted devices within one backend
 profile must reproduce its versioned result bits. Cross-backend substitution requires
 explicit workflow permission to change profile; it is not an invisible scheduling
 optimization.
@@ -151,7 +149,7 @@ Fixed algorithm/version/parameters also fix the approximation bits.
 
 ## Structured results, attributes and width
 
-Use the fixed member directories in [PTH geometry](PTH_geometry_contract.md) for paths, arc-length tables, samples, partitions, linear width, source maps, exact/grid polygons and minimal reports. Runtime factories/codecs are not implemented. Counts, references and association payloads are unchecked; explicit workflow values retain any source owners required by later mathematics. No generic attribute dictionary or expression graph is added.
+Use the fixed member directories in [PTH geometry](PTH_geometry_contract.md) for paths, arc-length tables, samples, partitions, linear width, source maps, exact/grid polygons and minimal reports. The public generation SDK implements the Core PathSet, Primitive PathSet and partition schema factories. Other factories/codecs retain the implementation status of their corresponding members. Counts, references and association payloads are unchecked; explicit workflow values retain any source owners required by later mathematics. No generic attribute dictionary or expression graph is added.
 
 Default attribute_policy=reject_unmappable. Explicit drop_unmappable drops only
 unmappable attributes and reports their keys and reasons. Propagate attributes with

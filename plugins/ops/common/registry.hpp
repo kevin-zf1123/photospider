@@ -3,6 +3,12 @@
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::plugin_internal {
+Status register_path_evaluation(OperationRegistry* registry);
+Status register_polygon_area(OperationRegistry* registry);
+Status register_paths(OperationRegistry* registry);
+Status register_perlin_gpu(OperationRegistry* registry);
+Status register_noise(OperationRegistry* registry);
+Status register_generation(OperationRegistry* registry);
 Status register_ocio_color(OperationRegistry* registry);
 Status register_icc_color(OperationRegistry* registry);
 Status register_gamut_tone(OperationRegistry* registry);

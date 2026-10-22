@@ -6,9 +6,9 @@ function: evaluate_bezier_path
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - path.evaluate_bezier_path_v1_strict
   - path.evaluate_bezier_path_v1_accelerated_apple_silicon
   - path.evaluate_bezier_path_v1_accelerated_x86_64
@@ -18,8 +18,7 @@ proposed_operation_keys:
 
 Inherit [PTH-02](PTH-02_evaluation_contract.md), [GEN common](GEN_common_contract.md),
 and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -29,8 +28,10 @@ position[N,2],derivative[N,2],tangent[N,2],UInt8 tangent_valid[N].
 
 ## Parameters and domain
 
-degree1/2/3; Float32/64 controls/query, explicit output dtype; t in [0,1], positive
-Tensor extents.
+Int64 degree 1/2/3; Float32/64 controls/query, explicit output dtype; t in [0,1],
+positive Tensor extents. Degree determines the static control shape. Check the
+original Int64 value against 1..3 before any narrowing conversion, including
+during empty-request preflight.
 
 ## Mathematical specialization
 
@@ -58,11 +59,13 @@ lifetime and actual returned coverage inherit GEN-common.
 ## Independent fixtures and acceptance
 
 3-4-5 line midpoint/derivative/unit tangent, cubic endpoint derivatives, exact-zero
-tangent and reversal identity.
+tangent and reversal identity. Static degree checks reject 0, 4, 2^32+1,
+2^32+2, 2^32+3 and negative values even if their low 32 bits match a supported
+degree and the supplied control shape matches that truncated value.
 
 Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

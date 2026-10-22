@@ -6,17 +6,21 @@ function: polygon_coverage
 kind: composite_workflow
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
+implementation_status: implemented_public_authoring_helper
+clarification_status: resolved
 ---
 
 # GEN-03C: polygon coverage
 
 Inherit [GEN-03](GEN-03_basic_shapes_contract.md), [GEN common](GEN_common_contract.md),
 and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
+
+## Runtime implementation
+
+The public `ps::generation::polygon_coverage` helper in
+`photospider/ops/generation.hpp` implements this composition.
 
 ## Interface and representation
 
@@ -56,5 +60,5 @@ Check requested-region/full-output equivalence, actual read/work bounds, legal
 strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

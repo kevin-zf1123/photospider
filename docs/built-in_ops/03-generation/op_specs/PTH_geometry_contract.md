@@ -4,12 +4,18 @@ id: PTH-geometry
 kind: shared_operator_contract
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
+implementation_status: partially_implemented
 ---
 
 # Path geometry, associations and publication
 
 Inherit [GEN common](GEN_common_contract.md).
+
+## Current implementation scope
+
+GEN-01..04, NOI-01..04, PTH-01..02 and PTH-09A are implemented.
+Other schemas and members in this shared contract retain their own implementation
+status.
 
 ## PathSet schema family
 
@@ -26,9 +32,9 @@ The CoreVerbs schema is `photospider.ops.path_core`, version 1, with positive st
 | `closed` | UInt8 `[S]` | Closed flags for valid subpaths. |
 | `counts` | Int64 `[3]` | Effective verb, control and subpath counts, in that order. |
 
-Counts are bounded by V/C/S respectively. An empty path has all three counts zero and the first offset in each offset member equal to zero. Verb codes M/L/Q/C/Z are 1/2/3/4/5, and valid closed flags are 0/1. Unused verbs and closed flags are zero; unused controls are positive zero. control_offsets entries after the effective verb terminator repeat the effective control count; subpath_offsets entries after the effective subpath terminator repeat the effective verb count. Thus a valid full offsets array remains nondecreasing, and the empty representation is all zero. These are unchecked payload invariants, not validation obligations. The Core constructor takes the six field tensors explicitly; counts is an ordinary input, not inferred by inspecting verbs or offsets. Capacities V/C/S come from the input shapes, with offsets of size V+1/S+1. Concat sums corresponding input capacities with checked static arithmetic; reverse, affine centerline transform and stable split reuse those capacities. Algorithms whose output bound is not structurally derivable take explicit max_verbs/max_controls/max_subpaths capacities. A logical zero bound uses one physical row and zero effective count. Insufficient output capacity is an operational failure, never permission for dynamic extent growth.
+Counts are bounded by V/C/S respectively. An empty path has all three counts zero and the first offset in each offset member equal to zero. Verb codes M/L/Q/C/Z are 1/2/3/4/5, and valid closed flags are 0/1. Unused verbs and closed flags are zero; unused controls are positive zero. control_offsets entries after the effective verb terminator repeat the effective control count; subpath_offsets entries after the effective subpath terminator repeat the effective verb count. Thus a valid full offsets array remains nondecreasing, and the empty representation is all zero. These are unchecked payload invariants, not validation obligations. The Core constructor takes the six field tensors explicitly; counts is an ordinary input, not inferred by inspecting verbs or offsets. Capacities V/C/S come from the input shapes, with offsets of size V+1/S+1. Concat sums corresponding input capacities with checked static arithmetic; Core reverse reserves V+S verb rows and C+S control rows while retaining S subpaths, so a reversed old closing edge can be explicit when the first segment is curved. Affine centerline transform and stable split reuse input capacities. Reverse-twice equivalence is geometric; a redundant zero-length line can remain. Algorithms whose output bound is not structurally derivable take explicit max_verbs/max_controls/max_subpaths capacities. A logical zero bound uses one physical row and zero effective count. Insufficient output capacity is an operational failure, never permission for dynamic extent growth.
 
-All six members are non-spatial with no batch axes. controls has component axis 1 and one trailing atomic axis; counts has one atomic trailing axis containing its three entries. Other members use scalar observations and no component axis. One CompleteBundle scope covers all members. Lowering explicitly writes the complete fixed capacity, including padding, and the workflow exports the complete value; the metadata does not add automatic validation or scheduling. Existing physical strides/offsets apply. Neither schema has a public SDK implementation.
+All six members are non-spatial with no batch axes. controls has component axis 1 and one trailing atomic axis; counts has one atomic trailing axis containing its three entries. Other members use scalar observations and no component axis. One CompleteBundle scope covers all members. Lowering explicitly writes the complete fixed capacity, including padding, and the workflow exports the complete value; the metadata does not add automatic validation or scheduling. Existing physical strides/offsets apply. The public generation SDK provides Core and Primitive schema factories.
 
 ## Shared representation rules
 

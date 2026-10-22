@@ -46,6 +46,16 @@ if(NOT PHOTOSPIDER_FMT10_SIMD)
 endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
+  plugins/ops/03-generation/paths.cpp
+  plugins/ops/03-generation/path_math.cpp
+  plugins/ops/03-generation/path_evaluation.cpp
+  plugins/ops/03-generation/polygon.cpp
+  plugins/ops/03-generation/noise.cpp
+  plugins/ops/03-generation/perlin_gpu.cpp
+  plugins/ops/03-generation/runtime.cpp
+  plugins/ops/03-generation/math.cpp
+  plugins/ops/03-generation/generators.cpp
+  plugins/ops/03-generation/geometry.cpp
   plugins/ops/01-numeric/expression.cpp
   plugins/ops/01-numeric/expression_metadata.cpp
   plugins/ops/02-format-color/alpha_authoring.cpp

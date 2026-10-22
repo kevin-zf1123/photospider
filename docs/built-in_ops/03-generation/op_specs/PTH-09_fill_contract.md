@@ -4,7 +4,7 @@ id: PTH-09
 kind: shared_operator_contract
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
+implementation_status: partially_implemented
 ---
 
 # PTH-09: Area filling
@@ -13,6 +13,12 @@ Fill_rule defaults to nonzero; evenodd is explicit. Coverage is true pixel area 
 chosen filled geometry, not sample counts or smoothstep SDF. Flatten-based fill first
 publishes a polyline and retains that numerical boundary. Geometric approximation and
 final area rounding remain separate.
+
+## Current implementation scope
+
+GEN-01..04, NOI-01..04, PTH-01..02 and PTH-09A are implemented.
+Other schemas and members in this shared contract retain their own implementation
+status.
 
 ## Members
 

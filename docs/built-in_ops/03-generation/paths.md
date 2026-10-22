@@ -1,19 +1,21 @@
 # 路径、变化线宽与光栅化
 
-本页按功能整理当前已接受的目标规格；各新成员尚未实现。具体英文规格记录端口、
-参数、数学定义与依赖规则，继承 01-numeric 与 02-format-color。
-[共享契约](op_specs/GEN_common_contract.md)、[oracle 覆盖说明](oracle-coverage.md)、
-[oracle 使用说明](../../../oracle/ops/generation/README.md)与
-[研究来源及采用边界](research-sources.md)分别说明公共语义、可运行参考及证据范围。
-本文及英文规格定义目标 schema 和随机映射；运行时 codec/factory、数值算法和后端仍需实现并验证，明确未选定的求解器和 backend 不视为已经交付。
+本页按功能整理已接受的路径规格。PTH-01 构造、拼接、稳定分组与反向，PTH-02 Bézier、椭圆弧、Hermite、B-spline 和 PathSet 求值，以及 PTH-09A 精确多边形填充已实现。其余路径成员保留各自的未实现状态。
+
+Core 与 Primitive 使用独立的 CompleteBundle schema，partition 显式保存本次输入的 ObjectId。公开操作消费冻结的 fixed invocation ABI 8，不改变内核契约。
+[共享契约](op_specs/GEN_common_contract.md)、[oracle 覆盖说明](oracle-coverage.md)、[oracle 使用说明](../../../oracle/ops/generation/README.md)与[研究来源及采用边界](research-sources.md)分别提供公共规则和独立数学参考。后续求解器与后端的实现状态见对应成员。
 
 schema 与关联均使用 unchecked 契约。只检查静态结构；运行时 counts、offsets、引用、padding、源对象身份和几何数值合法性都由调用方保证。发布端和消费端不扫描或比较 payload，生产端按规定构造结果。长度计算、舍入细化、逼近算法及显式请求的质量测量保留。Float64 转换在构造坐标时累计位移界，舍入后的可表示性、位移预算与连接/拓扑条件由调用方保证，不再完成后扫描并决定是否发布；普通转换报告 topology_status=0。
 
 ## 表示
 
-固定次数的目标接口使用 quadratic controls `[S,3,2]`、cubic controls `[S,4,2]` 和每段固定样本 `[S,N,2]`。PathSet 是逻辑类型族，CoreVerbs 与 Primitives 使用独立 schema，转换必须显式。CoreVerbs 使用 `photospider.ops.path_core` v1，六个成员为 UInt8 `verbs[V]`、Int64 `control_offsets[V+1]`、Float64 `controls[C,2]`、Int64 `subpath_offsets[S+1]`、UInt8 `closed[S]` 和 Int64 `counts[3]`；三个计数依次表示有效 verb/control/subpath 数，空路径全部为 0，V/C/S 为正静态容量。Primitives 使用 `photospider.ops.path_primitives` v1 的 13 个固定成员，分别存引用、子路径、孤立点及 Bézier、ArcSweep/FullTurn、Hermite、非周期 B-spline 的数据池。Close 引用表达数学端点之间的闭合边，不要求把非有理端点塞进 Float64 控制点。属性和来源映射使用独立关联 Result。M/L/Q/C/Z 编码为 1..5，closed 为 0/1；未使用 verbs/closed 为 0、controls 为 +0，offsets 尾部重复各自的有效终值。构造器显式接收 counts，容量从输入 shape 推导；concat 按输入容量相加，reverse/仿射变换/split 复用输入容量，其余需要容量上界的生成算子使用显式 max 参数。controls 的 x/y 和 counts 的三个计数分别作为原子观察，六成员由 lowering 完整写入并以 CompleteBundle 完整交付；不增加验证扫描。当前公共算子 SDK 尚无这些 schema、factory 或 codec，保留 oracle 中的逻辑结构不代表运行时支持。SVG2 提供路径与子路径的公开语义词汇。[^svg]
+固定次数求值接口使用 quadratic controls `[S,3,2]`、cubic controls `[S,4,2]`，查询为显式 `segment_indices[N]` 与 `t[N]`，输出 position/derivative/tangent `[N,2]` 和 tangent_valid `[N]`。PathSet 是逻辑类型族，CoreVerbs 与 Primitives 使用独立 schema，转换必须显式。CoreVerbs 使用 `photospider.ops.path_core` v1，六个成员为 UInt8 `verbs[V]`、Int64 `control_offsets[V+1]`、Float64 `controls[C,2]`、Int64 `subpath_offsets[S+1]`、UInt8 `closed[S]` 和 Int64 `counts[3]`；三个计数依次表示有效 verb/control/subpath 数，空路径全部为 0，V/C/S 为正静态容量。Primitives 使用 `photospider.ops.path_primitives` v1 的 13 个固定成员，分别存引用、子路径、孤立点及 Bézier、ArcSweep/FullTurn、Hermite、非周期 B-spline 的数据池。Close 引用表达数学端点之间的闭合边，不要求把非有理端点塞进 Float64 控制点。属性和来源映射使用独立关联 Result。M/L/Q/C/Z 编码为 1..5，closed 为 0/1；未使用 verbs/closed 为 0、controls 为 +0，offsets 尾部重复各自的有效终值。构造器显式接收 counts，容量从输入 shape 推导；concat 按输入容量相加，Core reverse 使用 V+S、C+S、S 容量，为固定 M 起点后的显式闭合边预留空间；Primitive reverse、仿射变换及 split 复用输入容量，其余需要容量上界的生成算子使用显式 max 参数。controls 的 x/y 和 counts 的三个计数分别作为原子观察，六成员由 lowering 完整写入并以 CompleteBundle 完整交付；不增加验证扫描。公开算子 SDK 已提供 Core、Primitive 与 partition schema factory；其余派生 schema 仍按各自成员的实现状态区分。Core 反向两次恢复几何与方向，表示中可能保留冗余的零长度直线。SVG2 提供路径与子路径的公开语义词汇。[^svg]
 
 Primitive 的 terminal Close 可以表达非 Float64 端点间的闭合边，但 v1 reverse 不承诺保留起点并反向这类闭合子路径；调用方须满足该成员的可表示输入域。该限制不增加运行时准入校验或隐式转换。
+
+Primitive 反向保留静态池容量，可重排有效记录并更新引用、起始索引和 counts。控制点与权重按有效池长度 N 一起反转，各 spline 的新起点为 `N-control_begin-control_count`，因此共享、嵌套或交叉切片不会互相覆盖。knot 反射从不可变输入计算；原位置冲突时重新放置，容量紧张时通过去包含和最大权重叠匹配压缩序列。ArcSweep 与 FullTurn 即使引用同一个输入 arc 行，也分别使用各自的反向角度规则；按变换后的完整记录去重。压缩后的尾区按规范归零，工作量、匹配搜索和 scratch 均计入预算。
+
+独立 Bézier 的 Int64 `degree` 决定静态控制点 shape，必须先检查原值属于 1..3，再转换内部整数类型。独立 B-spline 记录的第五列是 `weighted`：0 表示数学单位权重，显式 weights 输入仍保留；Primitive 对应列是 `knot_count`，始终使用自身的权重池。
 
 坐标采用[公共约定](../00-foundation/contracts.md)，width 单位 px，表示完整直径。
 线宽可使用正式附着字段或独立输入，每次显式选择唯一来源；支持整 PathSet 归一弧长、
