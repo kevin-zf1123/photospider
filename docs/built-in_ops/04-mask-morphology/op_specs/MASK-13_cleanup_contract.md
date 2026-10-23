@@ -5,7 +5,7 @@ kind: operator_family
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 ---
 
@@ -13,7 +13,8 @@ clarification_status: draft_for_review
 
 Inherit the complete [MASK baseline](MASK_common_contract.md), including its
 precision, descriptor, error, demand, ownership and acceptance obligations.
-This family proposes distinct members.
+All three members are registered in the bundled strict CPU set through fixed
+invocation ABI 8. The Proposed specification status remains separate.
 
 ## Members
 
@@ -59,6 +60,29 @@ component. Reference BFS O(N), O(N) queue/visited scratch. A/C first classify
 exterior, then enumerate enclosed background. B computes components and areas.
 Do not apply repeated per-tile local filling/removal. Poll during flood/count
 loops; no completed-looking partial image on cancelled cleanup.
+
+## Native implementation
+
+[`cleanup.cpp`](../../../../plugins/ops/04-mask-morphology/cleanup.cpp) registers
+`mask.fill_holes_strict`, `mask.remove_small_strict` and
+`mask.fill_small_holes_strict`. A nonempty selection lowers to one collective
+fixed invocation with complete input support. Shared row/BFS helpers reside in
+[`components.hpp`](../../../../plugins/ops/04-mask-morphology/components.hpp).
+
+The implementation enumerates each target component once, collecting its exact
+area and bounds. For A/C, a component is exterior exactly when its bounds touch
+a canvas edge; only enclosed components can be filled. B applies the inclusive
+removal threshold under foreground adjacency. Scratch is 16N bytes for the
+label/visited array and queue; time is O(N), in addition to fixed output storage
+and host metadata. B/C with zero threshold use a bit-preserving copy path,
+including negative zero, with no scratch or numerical classification.
+
+Contiguous Float32/Float64 binary loading uses exact AArch64 NEON comparisons
+when available; scalar loads cover other builds and strides. Output stores
+honor each fixed view. Nonidentity paths generate canonical +0/1. Flood,
+classification, output and copy loops poll cancellation/max_work in bounded
+spans. Operational failure publishes no partial call Result. Empty output
+selection emits no runtime task.
 
 ## Sources, independent evidence and review boundary
 

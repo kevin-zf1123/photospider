@@ -23,6 +23,8 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_mask_offset,
                               register_mask_polygon_offset,
                               register_mask_gaussian,
+                              register_mask_components,
+                              register_mask_cleanup,
                               register_paths,
                               register_path_evaluation,
                               register_polygon_area,

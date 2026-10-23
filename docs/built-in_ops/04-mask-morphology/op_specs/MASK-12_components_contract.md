@@ -5,7 +5,7 @@ kind: operator_family
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 ---
 
@@ -13,7 +13,8 @@ clarification_status: draft_for_review
 
 Inherit the complete [MASK baseline](MASK_common_contract.md), including its
 precision, descriptor, error, demand, ownership and acceptance obligations.
-This family proposes distinct members.
+All seven members are registered in the bundled strict CPU set through fixed
+invocation ABI 8. The Proposed specification status remains separate.
 
 ## Members
 
@@ -85,9 +86,10 @@ count:Int64[1], N=H*W. Effective rows have columns
 id,area,min_pixel,y_min,x_min,y_max_exclusive,x_max_exclusive; unused rows are
 zero-filled. Labels and table retain the same generated Labels ObjectId/basis.
 The output Result contains all three fixed members; materializing the complete
-Result requires all of their capacity tiles and corresponding work/storage. The precise
-SDK schema/factory and fixed lowering remain registration gates. No
-components4.labels factory is registered by the current bundled operations.
+Result requires all of their capacity tiles and corresponding work/storage.
+The operations SDK provides `ps::mask::component_bundle_schema(H,W)`;
+D/E use `component_area_index_schema(N)` and `component_bbox_index_schema(N)`.
+All three factories declare CompleteBundle publication scopes.
 
 G consumes labels:Labels Tensor plus area_index:complete D Result, with required
 minimum_area Int64>=1. Callers provide the correctly paired table with exact
@@ -105,11 +107,54 @@ and cannot use maximum ID as count. Each retained output tile has its own backin
 publication follows call retirement, including multi-member Results. Reference
 BFS is O(N) work with O(N) queue/labels; measurements are O(N+K log K) with O(K)
 index scratch. A hash map does not define row ordering. F accounts for all labels
-and table capacity. These proposed members have no registered paged-components
+and table capacity. These members have no registered paged-components
 factory or implicit disk spill.
 
-Their SDK schemas/factories and fixed lowering remain implementation work under
-the existing frozen module ABI.
+## Native implementation
+
+[`components.cpp`](../../../../plugins/ops/04-mask-morphology/components.cpp)
+registers all seven member keys and uses the shared bounded row/BFS helpers in
+[`components.hpp`](../../../../plugins/ops/04-mask-morphology/components.hpp).
+A/B/F flood whole components in first-pixel order. F accumulates area, minimum
+pixel and half-open bounds during that same traversal; it does not relabel a
+second time. Each nonempty request lowers to one collective fixed invocation
+with complete source support. D/E/F close every member to all capacity tiles,
+including count-only selection. The call-retirement export contains the complete
+bundle. A deliberately partial workflow RET remains a projected Result under
+the frozen kernel's selection rules; pass a complete export or complete RET as
+G's area_index input. Compiling an empty selection emits no runtime task.
+Selecting fewer RET tiles from an existing Plan preserves its compiled call
+exports under the kernel's `select_outputs` contract.
+
+C/D/E aggregate exact Int64 IDs in a growing hash index. Only the K aggregate
+records are sorted for D/E; C needs no ordering. The active index/records use
+O(K) space and expected measurement work is O(N+K log K), including geometric
+index growth. Hash placement never determines output order. Worst-case scratch
+capacity is admitted statically from N before execution. Let P be the smallest
+power of two at least 2N. Admitted scratch bytes are:
+
+| Members | Scratch bytes |
+| --- | ---: |
+| A/B | 16N |
+| C | 8P + 8N |
+| D | 8P + 16N |
+| E | 8P + 40N |
+| F | 16N + 56 maximum_count |
+| G | 9N |
+
+This excludes input owners, per-tile outputs and host metadata, which are also
+charged by the execution context. G reads the effective table prefix once into
+an ID/selection lookup, uses exact integer binary search and reuses the previous
+positive label's lookup. It neither scans padding nor validates payload premises.
+Work is O(K + Q log(K+1)) in the worst case for Q emitted samples.
+
+Contiguous binary source spans use exact AArch64 NEON zero comparisons when
+available; other builds/layouts use scalar loads. All fixed views honor their
+origins, offsets and strides. Generated binary output is canonical +0/1.
+Cancellation and the optional max_work guard are polled in bounded spans,
+hash probes, sorting and flood loops. Exceeding maximum_count returns
+ResourceExhausted/CapacityLimit without publishing a partial call Result.
+The frozen kernel, ABI and source association rules are unchanged.
 
 ## Sources, independent evidence and review boundary
 

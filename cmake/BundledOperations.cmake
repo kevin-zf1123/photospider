@@ -59,6 +59,8 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/04-mask-morphology/offset.cpp
   plugins/ops/04-mask-morphology/polygon_offset.cpp
   plugins/ops/04-mask-morphology/gaussian.cpp
+  plugins/ops/04-mask-morphology/components.cpp
+  plugins/ops/04-mask-morphology/cleanup.cpp
   plugins/ops/03-generation/paths.cpp
   plugins/ops/03-generation/path_math.cpp
   plugins/ops/03-generation/path_evaluation.cpp

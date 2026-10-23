@@ -14,6 +14,8 @@ Status register_mask_distance_transform(OperationRegistry* registry);
 Status register_mask_offset(OperationRegistry* registry);
 Status register_mask_polygon_offset(OperationRegistry* registry);
 Status register_mask_gaussian(OperationRegistry* registry);
+Status register_mask_components(OperationRegistry* registry);
+Status register_mask_cleanup(OperationRegistry* registry);
 Status register_path_evaluation(OperationRegistry* registry);
 Status register_polygon_area(OperationRegistry* registry);
 Status register_paths(OperationRegistry* registry);

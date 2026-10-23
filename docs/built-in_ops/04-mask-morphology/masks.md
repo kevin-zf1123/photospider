@@ -35,8 +35,8 @@ MASK 不另设舍入模式或误差容限；各成员只明确公式、舍入阶
 | [MASK-09](op_specs/MASK-09_distance_feather_contract.md) | 距离羽化 | 2 | distance_feather_linear、distance_feather_smoothstep | strict CPU，全部成员 |
 | [MASK-10](op_specs/MASK-10_distance_transform_contract.md) | 距离场 / nearest | 4 | nearest_feature、signed_center_distance、truncated_nearest_feature、truncated_signed_distance | strict CPU，全部成员 |
 | [MASK-11](op_specs/MASK-11_flood_contract.md) | flood / region grow | 3 | flood_fixed、flood_neighbor、flood_barrier | strict CPU，全部成员 |
-| [MASK-12](op_specs/MASK-12_components_contract.md) | 连通分量与属性 | 7 | label_compact、label_min_pixel、component_count、component_areas、component_bboxes、component_bundle、filter_area_index | 待实现 |
-| [MASK-13](op_specs/MASK-13_cleanup_contract.md) | 填洞 / 去小区域 | 3 | fill_holes、remove_small、fill_small_holes | 待实现 |
+| [MASK-12](op_specs/MASK-12_components_contract.md) | 连通分量与属性 | 7 | label_compact、label_min_pixel、component_count、component_areas、component_bboxes、component_bundle、filter_area_index | strict CPU，全部成员 |
+| [MASK-13](op_specs/MASK-13_cleanup_contract.md) | 填洞 / 去小区域 | 3 | fill_holes、remove_small、fill_small_holes | strict CPU，全部成员 |
 | [MASK-14](op_specs/MASK-14_residuals_contract.md) | 边界与形态学残差 | 5 | morph_gradient、inner_border、outer_border、white_top_hat、black_top_hat | strict CPU，全部成员 |
 | [MASK-15](op_specs/MASK-15_topology_reconstruction_contract.md) | 骨架 / 重建 | 7 | thin_topological、thin_distance_ordered、reconstruct_dilate、reconstruct_erode、thin_zhang_suen、thin_guo_hall、medial_axis_maximal_balls | 待实现 |
 | [MASK-16](op_specs/MASK-16_close_gap_contract.md) | 封口填充 | 3 | bridge_axis_gaps、fill_axis_gaps、fill_morphological_gaps | 待实现 |

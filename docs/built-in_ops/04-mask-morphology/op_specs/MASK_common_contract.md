@@ -12,9 +12,9 @@ clarification_status: draft_for_review
 # MASK: shared specification and execution baseline
 
 This specification defines the selected MASK-01..17 semantics through explicit
-members and family contracts. MASK-01..11, MASK-14 and MASK-17 have all 43
+members and family contracts. MASK-01..14 and MASK-17 have all 53
 members registered in the bundled strict CPU set through fixed invocation ABI 8.
-The remaining 20 members are unimplemented proposals. Member front matter
+The remaining 10 members are unimplemented proposals. Member front matter
 separates registered keys and implementation status from the Proposed spec status.
 Independent Python
 oracle coverage also includes unimplemented members and does not establish their
@@ -95,7 +95,7 @@ primary mask input dtype; flood outputs use the seeds dtype, MASK-12G uses an
 explicit output_dtype, and validity/within flags use their associated value dtype.
 Skeleton outputs preserve the input Binary dtype independently of radius dtype. Binary-only consumers assume the binary domain on their required sample set. Floating coverage morphology computes directly on soft samples.
 
-Results carry structural schemas and samples. Spatial coordinates, coverage/binary meaning, distance units/metric and label basis are explicit operation configuration or declared schema semantics. Outputs carry no attached descriptions or sample-validity proofs. The caller supplies the next consumer's interpretation. Semantic color selection checks a complete static group description using the operations-SDK TensorDescription v4/v5 codec and native CIELAB/CIELCh l=L*/100. Only the formula's selected coordinates are numerical inputs; group completeness adds no sample read closure. Raw channel arithmetic reads only its formula operands. MASK-04E/F use the registered operations-SDK model/skipped schema factories described in their specs. Other proposed domain helpers remain implementation gates; descriptive names do not add kernel facets or codecs.
+Results carry structural schemas and samples. Spatial coordinates, coverage/binary meaning, distance units/metric and label basis are explicit operation configuration or declared schema semantics. Outputs carry no attached descriptions or sample-validity proofs. The caller supplies the next consumer's interpretation. Semantic color selection checks a complete static group description using the operations-SDK TensorDescription v4/v5 codec and native CIELAB/CIELCh l=L*/100. Only the formula's selected coordinates are numerical inputs; group completeness adds no sample read closure. Raw channel arithmetic reads only its formula operands. MASK-04E/F use the registered operations-SDK model/skipped schema factories described in their specs. MASK-12D/E/F use the complete area-index, bbox-index and component-bundle factories in the same operations SDK. Other proposed domain helpers remain implementation gates; descriptive names do not add kernel facets or codecs.
 
 All statics listed by a member must be supplied by direct WorkflowDocument
 nodes; authoring recommendations are serialized by helpers. Reject unknown,
@@ -189,7 +189,7 @@ feature existence only; commercial bit identity remains unverified.
 
 ## Registered implementation limits
 
-The 43 implemented members accept the optional max_work Int64 operational guard,
+The 53 implemented members accept the optional max_work Int64 operational guard,
 default INT64_MAX, checked as nonnegative during preparation. It limits counted
 work per kernel invocation; it is not a global per-Run sample quota. Work and
 cancellation polls occur within at most 1024 elementary visits and at every

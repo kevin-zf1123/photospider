@@ -665,7 +665,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-12A_label_compact.md",
-      "proposed_name": "mask.label_compact_strict"
+      "registered_name": "mask.label_compact_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-12B",
@@ -682,7 +684,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-12B_label_min_pixel.md",
-      "proposed_name": "mask.label_min_pixel_strict"
+      "registered_name": "mask.label_min_pixel_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-12C",
@@ -691,7 +695,7 @@
       "function": "component_count",
       "title": "Count declared positive label IDs",
       "ports": "labels: Int64[H,W] -> count: Int64[1]",
-      "params": "None..",
+      "params": "None.",
       "math": "Count distinct positive IDs under the nonnegative-label premise; no connectivity revalidation.",
       "support": "complete-input labels. Lower support for complete selected output tiles to fixed source-grid reads under MASK-common, using finite supersets for runtime-selected addresses. Payload/numerical/association premises are unchecked; no Validation read set or runtime dependency discovery is added. Empty output selection adds no payload work; publication follows call retirement.",
       "fixture": "labels [[0,7],[7,42]] -> count=2, not 42.",
@@ -699,7 +703,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-12C_component_count.md",
-      "proposed_name": "mask.component_count_strict"
+      "registered_name": "mask.component_count_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-12D",
@@ -716,7 +722,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-12D_component_areas.md",
-      "proposed_name": "mask.component_areas_strict"
+      "registered_name": "mask.component_areas_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-12E",
@@ -733,7 +741,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-12E_component_bboxes.md",
-      "proposed_name": "mask.component_bboxes_strict"
+      "registered_name": "mask.component_bboxes_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-12F",
@@ -741,7 +751,7 @@
       "n": 12,
       "function": "component_bundle",
       "title": "MinPixel labels with complete component attributes",
-      "ports": "input: Binary[H,W] -> complete Result labels:Int64[H,W], rows:Int64[N,7], count:Int64[1], N=H*W",
+      "ports": "input: Binary[H,W] -> components: complete Result labels:Int64[H,W], rows:Int64[N,7], count:Int64[1], N=H*W",
       "params": "connectivity 4|8; maximum_count in [0,N].",
       "math": "B labels plus exact area,min,bbox columns as family; labels and table share one source identity.",
       "support": "Complete-input input; one fixed multi-member Result contains count, rows and labels. Shared computation uses explicit prepared dependencies; publication follows call retirement. Lower support for complete selected output tiles to fixed source-grid reads under MASK-common, using finite supersets for runtime-selected addresses. Payload/numerical/association premises are unchecked; no Validation read set or runtime dependency discovery is added. Empty output selection adds no payload work; publication follows call retirement.",
@@ -750,7 +760,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-12F_component_bundle.md",
-      "proposed_name": "mask.component_bundle_strict"
+      "registered_name": "mask.component_bundle_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-12G",
@@ -767,7 +779,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-12G_filter_area_index.md",
-      "proposed_name": "mask.filter_area_index_strict"
+      "registered_name": "mask.filter_area_index_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-13A",
@@ -784,7 +798,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-13A_fill_holes.md",
-      "proposed_name": "mask.fill_holes_strict"
+      "registered_name": "mask.fill_holes_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-13B",
@@ -801,7 +817,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-13B_remove_small.md",
-      "proposed_name": "mask.remove_small_strict"
+      "registered_name": "mask.remove_small_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-13C",
@@ -818,7 +836,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-13C_fill_small_holes.md",
-      "proposed_name": "mask.fill_small_holes_strict"
+      "registered_name": "mask.fill_small_holes_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-14A",
@@ -1162,5 +1182,5 @@
       "backend": "cpu"
     }
   ],
-  "implemented_member_count": 43
+  "implemented_member_count": 53
 }
