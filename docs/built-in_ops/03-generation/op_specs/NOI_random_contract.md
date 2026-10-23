@@ -15,7 +15,7 @@ Inherit [GEN common](GEN_common_contract.md). The core algorithm is Philox4x64-1
 ## Current implementation scope
 
 The Philox core and addressed mappings are used by implemented NOI-01A, NOI-02A,
-NOI-04B and the NOI-06 gradient basis. Other GEN-08 and NOI-05/08/09/10 mappings
+NOI-04B, the NOI-06 gradient basis and GEN-08B/C/D. Other NOI-05/08/09/10 mappings
 remain specified targets; their member specifications state implementation status.
 
 ## Address range and identity

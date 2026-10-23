@@ -6,9 +6,9 @@ function: jittered_grid_points
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - generation.jittered_grid_points_v1_strict
 ---
 
@@ -16,8 +16,7 @@ proposed_operation_keys:
 
 Inherit [GEN-08](GEN-08_point_distributions_contract.md), [GEN
 common](GEN_common_contract.md), and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -53,6 +52,22 @@ algorithm; numerical-premise violations have no prescribed runtime diagnostic.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
 
+## CPU implementation
+
+The registered strict CPU operation takes Float32/64 `bounds[4]` and returns
+`points`. Required Int64 parameters are `nx`, `ny`, `seed` and `stream`.
+Optional Float64 `jitter=1`, Int64 `max_points=1048576` and
+Int64 `max_work=INT64_MAX` retain independent numerical, capacity and work meanings.
+Seed uses all 64 bits of its signed Int64 representation.
+
+The CPU path reuses exact cell steps and boundaries, evaluates the complete
+expression in rational arithmetic, and rounds once before the cell endpoint
+correction. Its compact/full arithmetic dispatch has the same result bits.
+`jitter=0` uses the regular-grid calculation while seed/stream remain part of
+operation identity. CompleteBundle publication, scratch accounting and the public
+DynamicPoints schema factory are shared with GEN-08A. No GPU implementation is
+registered.
+
 ## Independent fixtures and acceptance
 
 One point per cell, jitter zero equivalence, reproducibility; changing nx changes cells
@@ -62,5 +77,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

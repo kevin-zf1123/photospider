@@ -6,16 +6,17 @@ function: triangle_mesh_gradient
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
+  - generation.triangle_mesh_gradient_v1_strict
 ---
 
 # GEN-07B: triangle mesh gradient
 
 Inherit [GEN-07](GEN-07_mesh_gradients_contract.md), [GEN
 common](GEN_common_contract.md), and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -54,6 +55,24 @@ algorithm; numerical-premise violations have no prescribed runtime diagnostic.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
 
+## CPU implementation
+
+The registered strict CPU operation takes vertices, triangles and controls in that
+order. Named outputs are `values` and `valid`. Canvas/dtype parameters and the
+independent `max_work=INT64_MAX` budget follow GEN-common. The `valid` output
+depends only on vertices and triangles; requesting it alone does not read controls.
+
+Faces are visited in row order. Outward intervals can prove a face irrelevant or
+certify containment; uncertain determinants or boundaries use exact orientation.
+Exact numerators establish containment before barycentric division, and one pixel's
+weights are reused across all components. Float32 interpolation is accepted only
+with a complete-expression rounding certificate; other cases use exact arithmetic.
+A vertex hit copies that vertex's control with destination dtype conversion,
+preserving signed zero. Outside values are canonical +0 with validity 0.
+The reference traversal is O(area(Q)*(F+C)); no topology payload validator is run.
+Arithmetic storage and retained weights are admitted as Host scratch.
+No GPU implementation or architecture-dependent approximate profile is registered.
+
 ## Independent fixtures and acceptance
 
 Shared-edge continuity, reversed triangle orientation, valid nonoverlapping interiors, outside
@@ -63,5 +82,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

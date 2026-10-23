@@ -4,7 +4,7 @@ id: GEN-07
 kind: shared_operator_contract
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
+implementation_status: implemented
 ---
 
 # GEN-07: Numeric mesh fields
@@ -37,4 +37,4 @@ topology guarantees are separate. Source associations are unchecked caller premi
 Use member-specific independent fixtures plus actual public workflow execution. The
 [oracle coverage](../oracle-coverage.md) identifies finite exact helpers, Measured
 diagnostics and remaining unsupported cases. It cannot establish public schema support,
-GPU admission or complete domain certification. The specified schemas and RNG mappings require implementation and validation before registration. Unresolved numerical solver or backend choices remain explicit member limitations.
+GPU admission or complete domain certification. The members have strict CPU implementations using the existing fixed invocation ABI 8. Member specifications identify the registered keys, public helpers, numerical methods and resource limits. GPU implementations are not registered for this family.

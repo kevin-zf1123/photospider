@@ -6,16 +6,17 @@ function: bicubic_parameter_patch
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
+  - generation.bicubic_parameter_patch_v1_strict
 ---
 
 # GEN-07C: bicubic parameter patch
 
 Inherit [GEN-07](GEN-07_mesh_gradients_contract.md), [GEN
 common](GEN_common_contract.md), and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -52,6 +53,21 @@ algorithm; numerical-premise violations have no prescribed runtime diagnostic.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
 
+## CPU implementation
+
+The registered strict CPU operation takes bounds and controls, and returns `values`.
+Canvas/dtype parameters follow GEN-common; `outside` defaults to `pad` and
+`max_work=INT64_MAX` is an independent hard arithmetic budget.
+
+The tensor-product Bernstein weights are reused across components. All sixteen
+terms contribute to one exact expression before destination rounding. A fast
+outward interval may certify a Float32 result; uncertain cases and Float64 retain
+the exact rational evaluation. Corner selection copies the selected control with
+destination dtype conversion, including its zero sign. Interior exact cancellation
+produces +0. Arithmetic storage and retained weights are admitted as Host scratch;
+input reads close on each source grid and only selected output tiles execute.
+No GPU implementation or architecture-dependent approximate profile is registered.
+
 ## Independent fixtures and acceptance
 
 Constant control vectors, cubic edges, corner hits; interior controls need not be
@@ -61,5 +77,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

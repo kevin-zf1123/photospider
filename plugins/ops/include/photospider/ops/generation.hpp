@@ -66,6 +66,36 @@ inline Result<SchemaTemplate> path_schema(
   return Result<SchemaTemplate>(std::move(schema));
 }
 }  // namespace detail
+/** @brief DynamicPoints v1: Float64 positions[P,2], Int64 ids[P], count[1].
+ * P is at least one even for a zero logical target. All members publish as one
+ * CompleteBundle. Valid prefixes, ordinal IDs and zero padding are payload
+ * premises. The factory owns metadata only and does not inspect samples.
+ *
+ * @param capacity Requested row capacity in [0, 2^39]; zero uses P=1.
+ * @return Owned schema metadata on success. Returns InvalidArgument when
+ * capacity exceeds 2^39, since positions[P,2] is limited to 2^40 elements;
+ * otherwise propagates schema validation failures.
+ */
+inline Result<SchemaTemplate> dynamic_points_schema(std::uint64_t capacity) {
+  using detail::path_member;
+  const auto p = std::max(UINT64_C(1), capacity);
+  return detail::path_schema(
+      "photospider.ops.dynamic_points",
+      {path_member("positions", ElementType::Float64, {p, 2}, 1, 1),
+       path_member("ids", ElementType::Int64, {p}),
+       path_member("count", ElementType::Int64, {1})});
+}
+/** @brief Termination reason and Run-local identity of the complete points.
+ * stop_reason is 0=count_reached, 1=candidates_exhausted, 2=active_exhausted.
+ * points_object_id stores eight little-endian bytes. Pairing is unchecked.
+ */
+inline Result<SchemaTemplate> point_generation_report_schema() {
+  using detail::path_member;
+  return detail::path_schema(
+      "photospider.ops.point_generation_report",
+      {path_member("stop_reason", ElementType::Int64, {1}),
+       path_member("points_object_id", ElementType::UInt8, {8})});
+}
 /** @brief CoreVerbs v1: verbs, control_offsets, controls, subpath_offsets,
  * closed, counts. All six members publish as one CompleteBundle. */
 inline Result<SchemaTemplate> core_path_schema(CorePathCapacity capacity) {
@@ -304,6 +334,71 @@ inline Result<WorkflowNodeOutput> append(WorkflowDocument* document,
   return Result<WorkflowNodeOutput>(WorkflowNodeOutput{id, port});
 }
 }  // namespace detail
+struct GeneratedPoints final {
+  WorkflowNodeOutput points, report;
+};
+namespace detail {
+inline Result<GeneratedPoints> point_workflow(WorkflowDocument* document,
+                                              WorkflowInput bounds,
+                                              WorkflowInput distance,
+                                              Parameters parameters,
+                                              const char* producer) {
+  using Answer = Result<GeneratedPoints>;
+  if (!document)
+    return Answer(
+        Status{ErrorCode::InvalidArgument, "null generation workflow"});
+  auto ids =
+      numeric::available_workflow_node_ids(*document, 2, {bounds, distance});
+  if (!ids.ok())
+    return Answer(ids.status());
+  auto staged = *document;
+  const WorkflowNodeOutput points{ids.value()[0], "points"};
+  staged.nodes.push_back({ids.value()[0],
+                          producer,
+                          {std::move(bounds), std::move(distance)},
+                          std::move(parameters)});
+  staged.nodes.push_back(
+      {ids.value()[1],
+       "generation.bind_point_generation_report_v1",
+       {points, WorkflowNodeOutput{ids.value()[0], "stop_reason"}},
+       {}});
+  *document = std::move(staged);
+  return Answer(GeneratedPoints{points, {ids.value()[1], "report"}});
+}
+}  // namespace detail
+/** @brief GEN-08C finite-candidate rejection and report binding.
+ * bounds is Float32/64 [4], min_distance is Float32/64 [1]. Parameters include
+ * required candidate_count, seed, stream and optional max_count (1048576).
+ * Returns the same complete Produced points object consumed by the binder.
+ * Export that complete value alongside report; copying or partially projecting
+ * points after binding creates a different object identity.
+ *
+ * Requires exclusive document access. Metadata and node references are owned;
+ * no payload, runtime state or cache is retained. Authoring failure leaves the
+ * document unchanged. Allocation may throw std::bad_alloc. Payload domains,
+ * counts and associations remain unchecked; static compiler checks still apply.
+ */
+inline Result<GeneratedPoints> poisson_rejection_points(
+    WorkflowDocument* document, WorkflowInput bounds,
+    WorkflowInput min_distance, Parameters parameters) {
+  return detail::point_workflow(
+      document, std::move(bounds), std::move(min_distance),
+      std::move(parameters),
+      "generation.poisson_rejection_candidates_v1_strict");
+}
+/** @brief GEN-08D FIFO Bridson with the same ownership contract as GEN-08C.
+ * Required seed/stream; optional k=30, max_count=1048576,
+ * max_iterations=2097153, max_refinements=4096 and max_work=INT64_MAX.
+ * The iteration budget is independent of normal target/active-list completion.
+ */
+inline Result<GeneratedPoints> bridson_points(WorkflowDocument* document,
+                                              WorkflowInput bounds,
+                                              WorkflowInput min_distance,
+                                              Parameters parameters) {
+  return detail::point_workflow(document, std::move(bounds),
+                                std::move(min_distance), std::move(parameters),
+                                "generation.bridson_candidates_v1_strict");
+}
 /** @brief GEN-03C expands to exact PTH-09A polygon filling.
  * Parameters are the explicit height, width, origin, dtype, and fill_rule.
  * Open contours close only for this fill consumption. The compiler checks

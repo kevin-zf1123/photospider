@@ -15,6 +15,8 @@ Status register_perlin_gpu(OperationRegistry* registry);
 Status register_noise(OperationRegistry* registry);
 Status register_generation(OperationRegistry* registry);
 Status register_gradients(OperationRegistry* registry);
+Status register_mesh_generation(OperationRegistry* registry);
+Status register_point_generation(OperationRegistry* registry);
 Status register_two_circle_radial(OperationRegistry* registry);
 Status register_path_basic_edit(OperationRegistry* registry);
 Status register_path_boolean(OperationRegistry* registry);

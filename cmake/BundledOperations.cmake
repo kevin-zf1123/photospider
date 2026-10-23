@@ -63,6 +63,8 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/03-generation/math.cpp
   plugins/ops/03-generation/generators.cpp
   plugins/ops/03-generation/gradients.cpp
+  plugins/ops/03-generation/mesh.cpp
+  plugins/ops/03-generation/points.cpp
   plugins/ops/03-generation/radial_two_circle.cpp
   plugins/ops/03-generation/path_edit_basic.cpp
   plugins/ops/03-generation/polygon_arrangement.cpp

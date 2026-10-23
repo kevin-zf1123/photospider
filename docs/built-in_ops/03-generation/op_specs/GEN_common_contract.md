@@ -17,7 +17,7 @@ color](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md). The
 [generators](../generators.md) and [paths](../paths.md) indexes link every member;
 [oracle coverage](../oracle-coverage.md) states current mathematical evidence.
 
-GEN-01..04, GEN-05A..E, GEN-06, NOI-01..04, NOI-06, PTH-01..02 and PTH-09A have bundled-operation implementations and public SDK helpers. The gradient/fractal additions provide 33 CPU operation keys and the GEN-06C composition helper. Other members retain their individual implementation status. Existing NUM/CRV and FMT operations are reusable dependencies under their current public contracts. Generation implementations and domain SDK helpers must consume the frozen kernel APIs and fixed invocation ABI 8; this category does not authorize kernel changes.
+All GEN-01..08 members have bundled-operation implementations or public SDK composition helpers. GEN-07 adds three strict CPU mesh-field keys; GEN-08 adds four strict point producers, the Run-local report binder, DynamicPoints/report schema factories and two public point workflows. NOI and PTH members retain their individual implementation status; category-wide completion is not implied. Existing NUM/CRV and FMT operations are reusable dependencies under their current public contracts. Generation implementations and domain SDK helpers must consume the frozen kernel APIs and fixed invocation ABI 8; this category does not authorize kernel changes.
 
 ## Unchecked schema and payload contract
 

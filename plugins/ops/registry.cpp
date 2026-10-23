@@ -24,6 +24,8 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_perlin_gpu,
                               register_generation,
                               register_gradients,
+                              register_mesh_generation,
+                              register_point_generation,
                               register_two_circle_radial,
                               register_path_basic_edit,
                               register_path_boolean,

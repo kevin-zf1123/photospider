@@ -4,7 +4,7 @@ id: GEN-08
 kind: shared_operator_contract
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
+implementation_status: implemented
 ---
 
 # GEN-08: Point distributions
@@ -31,7 +31,7 @@ For rejection and Bridson, max_count may be zero and P=max(1,max_count). A zero 
 
 All three members are non-spatial, with no batch axes. positions has component axis 1 and atomic_trailing_axes=1, so an observation contains both coordinates. ids and count have no component axis and use scalar observations. Physical strides and offsets follow the existing Tensor interface; the schema does not impose contiguous interleaved point storage.
 
-One CompleteBundle scope contains all three member slots. The operator must deliver them together after complete coverage, including canonical padding. In fixed invocation ABI 8 the scope is schema metadata, not an automatic scheduling or coverage closure: lowering must explicitly arrange all required member tile writes and successful call retirement. Fixed tile tasks may still compute rows in parallel. Counts, ID uniqueness and padding are unchecked premises, with no producer or consumer validation pass. The members share row identity within this Result; no internal ObjectId foreign key is needed. This target schema does not establish an SDK implementation.
+One CompleteBundle scope contains all three member slots. The operator must deliver them together after complete coverage, including canonical padding. In fixed invocation ABI 8 the scope is schema metadata, not an automatic scheduling or coverage closure: lowering must explicitly arrange all required member tile writes and successful call retirement. Fixed tile tasks may still compute rows in parallel. Counts, ID uniqueness and padding are unchecked premises, with no producer or consumer validation pass. The members share row identity within this Result; no internal ObjectId foreign key is needed. The public SDK factory is `ps::generation::dynamic_points_schema` in `photospider/ops/generation.hpp`.
 
 ## Point generation report v1
 
@@ -39,7 +39,7 @@ GEN-08C and GEN-08D return a separate fixed report output with schema `photospid
 
 These members are delivered through a two-stage workflow. First produce the final ordinary Produced points value and the internal raw stop reason. A downstream report binder reads all three points members and the raw reason, obtains the points input_object_ids identity, and writes the bound report. Return the same complete points value directly alongside the report. A copy or partial projection creates a different Result identity; perform any required copy before binding and bind the copied value instead. CompleteBundle metadata does not make a partial export complete.
 
-The report binder has deterministic=false because its ObjectId bytes can differ across Runs. Point coordinates, ordinal IDs, counts and stop_reason retain the specified deterministic behavior. ObjectId association is valid only for the corresponding process object, not serialized/recreated or cross-Run copies. This uses existing ABI 8 input identities and complete-value export; no binder or public DynamicPoints workflow is implemented yet.
+The report binder has deterministic=false because its ObjectId bytes can differ across Runs. Point coordinates, ordinal IDs, counts and stop_reason retain the specified deterministic behavior. ObjectId association is valid only for the corresponding process object, not serialized/recreated or cross-Run copies. This uses existing ABI 8 input identities and complete-value export; `generation.bind_point_generation_report_v1` and the public `poisson_rejection_points` / `bridson_points` workflow helpers implement this sequence. The report schema is exposed by `ps::generation::point_generation_report_schema`.
 
 ## Members
 
@@ -64,4 +64,4 @@ topology guarantees are separate. Source associations are unchecked caller premi
 Use member-specific independent fixtures plus actual public workflow execution. The
 [oracle coverage](../oracle-coverage.md) identifies finite exact helpers, Measured
 diagnostics and remaining unsupported cases. It cannot establish public schema support,
-GPU admission or complete domain certification. The specified schemas and RNG mappings require implementation and validation before registration. Unresolved numerical solver or backend choices remain explicit member limitations.
+GPU admission or complete domain certification. The members have strict CPU implementations using the existing fixed invocation ABI 8. Member specifications identify the registered keys, public helpers, numerical methods and resource limits. GPU implementations are not registered for this family.

@@ -6,16 +6,17 @@ function: bilinear_rectangle_gradient
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
+  - generation.bilinear_rectangle_gradient_v1_strict
 ---
 
 # GEN-07A: bilinear rectangle gradient
 
 Inherit [GEN-07](GEN-07_mesh_gradients_contract.md), [GEN
 common](GEN_common_contract.md), and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -51,6 +52,23 @@ algorithm; numerical-premise violations have no prescribed runtime diagnostic.
 Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
 lifetime and actual returned coverage inherit GEN-common.
 
+## CPU implementation
+
+The registered strict CPU operation takes bounds at input 0 and controls at input 1,
+and returns the named output `values`. Required Int64 `height`/`width`, optional
+Int64 `origin_x`/`origin_y` (zero), and String `dtype` (float64) follow GEN-common.
+`outside` is a String, default `pad`; `max_work` is an independent Int64 hard
+budget, default INT64_MAX.
+
+Weights are reused across components of each pixel. An outward binary64 interval
+may certify the complete Float32 result; uncertain results and Float64 use exact
+rational arithmetic with one destination rounding. Exact corner selection, including
+a corner selected by padding, copies the corresponding control with destination dtype
+conversion and preserves signed zero. Computed exact zero elsewhere is +0.
+Fixed arithmetic storage and retained weights are admitted as Host scratch.
+Only selected output tiles run; bounds and control reads close on their own grids.
+No GPU implementation or architecture-dependent approximate profile is registered.
+
 ## Independent fixtures and acceptance
 
 Corner hits, four-corner mean, non-square bounds, four-component transparent-looking
@@ -60,5 +78,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

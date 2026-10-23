@@ -1,6 +1,6 @@
 # 图形、坐标、渐变与噪声生成
 
-本页按功能整理已接受的规格。GEN-01～06、NOI-01～04、NOI-06、PTH-01～12 已实现；其余功能按各成员的实现状态区分。GEN-05F 通过公开路径距离 workflow helper 保留距离发布与 NUM 除法两个舍入阶段，GEN-05G 已提供精确二圆根选择及有效性输出。路径及派生 Result 的公开 schema factory、线宽绑定和复合 workflow helper 位于 `photospider/ops/generation.hpp`。
+本页按功能整理已接受的规格。GEN-01～08、NOI-01～04、NOI-06、PTH-01～12 已实现；其余功能按各成员的实现状态区分。GEN-05F 通过公开路径距离 workflow helper 保留距离发布与 NUM 除法两个舍入阶段，GEN-05G 已提供精确二圆根选择及有效性输出。DynamicPoints／点生成报告和路径及派生 Result 的公开 schema factory、线宽绑定、点生成及路径复合 workflow helper 位于 `photospider/ops/generation.hpp`。
 
 [共享契约](op_specs/GEN_common_contract.md)、[oracle 覆盖说明](oracle-coverage.md)、[oracle 使用说明](../../../oracle/ops/generation/README.md)与[研究来源及采用边界](research-sources.md)分别定义公共语义和独立参考的证据范围。英文成员规格继续作为数学行为的权威定义。
 
