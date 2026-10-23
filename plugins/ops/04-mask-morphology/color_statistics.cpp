@@ -132,6 +132,8 @@ struct Fit final : Program {
       width = dims[2];
       shape(in[1], {dims[1], dims[2]}, false);
       shape(in[2], {dims[1], dims[2]});
+      spatial_axes(tensor(in[1]), 2);
+      spatial_axes(tensor(in[2]), 2);
     } else {
       require(dims[1] <= 4, "mask fitting requires one complete color group");
       selected.resize(dims[1]);

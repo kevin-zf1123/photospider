@@ -144,7 +144,7 @@ Result<OperationProgram> lower(const OperationLowering& query) {
     }
     const auto add = [&](unsigned port, unsigned member, TileIndex tile) {
       Region region;
-      if (!state.complete) {
+      if (!state.complete && !state.collective) {
         const auto grid = take(TileGrid::from_schema(
             *state.outputs[port].result_schema, query.tile_extent, member));
         region = take(grid.region(tile));
@@ -161,11 +161,16 @@ Result<OperationProgram> lower(const OperationLowering& query) {
           check(builder.write_output(task, std::get<0>(write),
                                      std::get<1>(write), std::get<2>(write)));
         });
+      } else if (state.collective) {
+        for (unsigned p = 0; p < query.requests.size(); ++p)
+          for (const auto& m : query.requests[p].members)
+            for (auto selected : m.second)
+              check(builder.write_output(task, p, m.first, selected));
       } else {
         check(builder.write_output(task, port, member, tile));
       }
     };
-    if (state.complete) {
+    if (state.complete || state.collective) {
       add(0, 0, 0);
     } else {
       for (unsigned p = 0; p < query.requests.size(); ++p) {
@@ -240,8 +245,9 @@ Result<ps_prepared_kernel_v8> prepare(const physical::KernelDesc& description,
               "generation output schema mismatch");
     }
     const auto& first = query.writes[0];
-    const auto scratch_region =
-        state.complete ? Region{} : fixed_tensor::view_region(first.layout);
+    const auto scratch_region = state.complete || state.collective
+                                    ? Region{}
+                                    : fixed_tensor::view_region(first.layout);
     require(query.scratch ==
                 std::array<std::uint64_t, 3>{
                     state.task_scratch(first.port, scratch_region), 0, 0},
@@ -267,15 +273,29 @@ Result<ps_prepared_kernel_v8> prepare(const physical::KernelDesc& description,
     };
     if (state.complete) {
       each_write(state, query.tile_extent, validate_write);
+    } else if (state.collective) {
+      std::set<Address> unique;
+      for (const auto& write : query.writes) {
+        require(write.port < state.outputs.size() &&
+                    write.member <
+                        state.outputs[write.port].result_schema->tensors.size(),
+                "collective output directory mismatch");
+        const Address address{write.port, write.member, write.tile_index};
+        require(unique.insert(address).second,
+                "duplicate collective output tile");
+        validate_write(address);
+      }
     } else {
       validate_write(Address{first.port, first.member, first.tile_index});
     }
     require(write_index == query.writes.size(),
             "generation output tile arity mismatch");
-    const auto expected_reads = reads(
-        state, first.port,
-        state.complete ? Region{} : fixed_tensor::view_region(first.layout),
-        query.tile_extent, ResourceBudget{}, query.reads.size());
+    const auto expected_reads =
+        reads(state, first.port,
+              state.complete || state.collective
+                  ? Region{}
+                  : fixed_tensor::view_region(first.layout),
+              query.tile_extent, ResourceBudget{}, query.reads.size());
     require(query.reads.size() == expected_reads.size(),
             "generation input tile arity mismatch");
     auto kernel = std::make_unique<Kernel>();

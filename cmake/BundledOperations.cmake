@@ -53,6 +53,12 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/04-mask-morphology/pointwise.cpp
   plugins/ops/04-mask-morphology/morphology.cpp
   plugins/ops/04-mask-morphology/restricted_mean.cpp
+  plugins/ops/04-mask-morphology/distance_fields.cpp
+  plugins/ops/04-mask-morphology/flood.cpp
+  plugins/ops/04-mask-morphology/distance_transform.cpp
+  plugins/ops/04-mask-morphology/offset.cpp
+  plugins/ops/04-mask-morphology/polygon_offset.cpp
+  plugins/ops/04-mask-morphology/gaussian.cpp
   plugins/ops/03-generation/paths.cpp
   plugins/ops/03-generation/path_math.cpp
   plugins/ops/03-generation/path_evaluation.cpp

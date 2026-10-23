@@ -116,6 +116,9 @@ struct Program {
   std::uint64_t scratch_bytes = 0;
   std::uint64_t work_limit = INT64_MAX;
   bool complete = false;
+  // One invocation shares global work and writes only requested output tiles.
+  // Its support and scratch are independent of the individual tile/port.
+  bool collective = false;
   bool whole_inputs = false;
   virtual ~Program() = default;
   // Operator-owned scratch is specialized to the retained output tile.

@@ -5,7 +5,7 @@ kind: operator_family
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 ---
 
@@ -13,7 +13,8 @@ clarification_status: draft_for_review
 
 Inherit the complete [MASK baseline](MASK_common_contract.md), including its
 precision, descriptor, error, demand, ownership and acceptance obligations.
-This family proposes distinct members.
+All members are registered in the bundled strict CPU set through fixed
+invocation ABI 8; the specification status remains Proposed.
 
 ## Members
 
@@ -57,6 +58,28 @@ O(N) scratch reused per seed plus output union; budget seed multiplicity rather
 than promising O(N). Poll within BFS and between seed passes. No successful
 partial flood on cancellation/work exhaustion. Use barrier thresholding and
 explicit color conversion before flood; do not advertise a color-managed fill.
+
+## Native implementation
+
+[`flood.cpp`](../../../../plugins/ops/04-mask-morphology/flood.cpp) registers
+all three members with the `values` output key and the seeds floating dtype.
+One task computes the global closure and publishes only the selected output
+tiles. Empty output demand emits no payload task; zero seeds skip image
+arithmetic and produce zeros.
+
+A uses an independent visited stamp for each seed and a separate union bitmap.
+B/C use a shared multi-source queue. A rejected neighbor edge may be reconsidered
+from another predecessor in B. Rounded subtraction provides a fast strict
+comparison when separated from tolerance; equality is resolved using exact
+binary rationals, including subtraction-overflow cases.
+
+Admitted scratch includes an N-entry queue and seed list, one byte of flags per
+pixel, A's N-entry stamp array, bounded exact state and an O(N*C) double input
+cache for A/B. A retains O(S*N*C) worst-case work; B/C retain O(N*C)/O(N).
+No cropped-seed shortcut or cross-seed reference switching is performed.
+Input copy, component comparisons, BFS, seed passes and output writes poll
+work/cancellation. The optional `max_work` guard follows MASK-common; a failed
+call exports no partial flood.
 
 ## Sources, independent evidence and review boundary
 

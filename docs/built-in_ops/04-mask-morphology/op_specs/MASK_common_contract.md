@@ -12,9 +12,9 @@ clarification_status: draft_for_review
 # MASK: shared specification and execution baseline
 
 This specification defines the selected MASK-01..17 semantics through explicit
-members and family contracts. MASK-01..06, MASK-14 and MASK-17 have all 29
+members and family contracts. MASK-01..11, MASK-14 and MASK-17 have all 43
 members registered in the bundled strict CPU set through fixed invocation ABI 8.
-The remaining 34 members are unimplemented proposals. Member front matter
+The remaining 20 members are unimplemented proposals. Member front matter
 separates registered keys and implementation status from the Proposed spec status.
 Independent Python
 oracle coverage also includes unimplemented members and does not establish their
@@ -189,7 +189,7 @@ feature existence only; commercial bit identity remains unverified.
 
 ## Registered implementation limits
 
-The 29 implemented members accept the optional max_work Int64 operational guard,
+The 43 implemented members accept the optional max_work Int64 operational guard,
 default INT64_MAX, checked as nonnegative during preparation. It limits counted
 work per kernel invocation; it is not a global per-Run sample quota. Work and
 cancellation polls occur within at most 1024 elementary visits and at every

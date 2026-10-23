@@ -5,7 +5,7 @@ kind: operator_family
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 ---
 
@@ -13,7 +13,8 @@ clarification_status: draft_for_review
 
 Inherit the complete [MASK baseline](MASK_common_contract.md), including its
 precision, descriptor, error, demand, ownership and acceptance obligations.
-This family proposes distinct members.
+All members are registered in the bundled strict CPU set through fixed
+invocation ABI 8; the specification status remains Proposed.
 
 ## Members
 
@@ -94,6 +95,32 @@ distance error. GPU PBA is a candidate; JFA is approximate and not conforming
 without exact repair/certification. Versioned approximate fields need their own
 error class and downstream restrictions. No nearest-label identity is returned;
 compose exact coordinate gather from a separately associated label image.
+
+## Native implementation
+
+[`distance_transform.cpp`](../../../../plugins/ops/04-mask-morphology/distance_transform.cpp)
+uses the balanced site index in
+[`distance_metric.hpp`](../../../../plugins/ops/04-mask-morphology/distance_metric.hpp).
+Isotropic site ordering uses exact unsigned 128-bit lattice keys; anisotropic
+ordering uses certified intervals with exact rational fallback. Bounding-box
+pruning retains the global lexicographic tie, including exterior ring sites.
+Unit-spacing L2 rounding uses a correctly rounded binary64 square root and
+exact integer comparisons to adjacent Float32 midpoints when narrowing.
+General distances retain certified/exact rounding.
+
+A/B prepare one task sharing the complete input/site index and writing only the
+requested output tiles. A's `nearest` remains planar Int64[2,H,W], y then x.
+A nearest-only request performs no numerical distance rounding. C/D build an
+index for each requested tile's local metric support; extra rectangular-bound
+samples outside that support are not consumed. Within-only requests do not
+evaluate the unrequested rounded limit or distance.
+
+For S candidate sites, index scratch is O(S), in addition to classification and
+bounded exact state. Balanced construction and pruning improve typical
+queries; the worst case can still visit every site per requested sample.
+This implementation makes no linear-time EDT claim and has no paged, GPU or
+approximate backend. The optional `max_work` guard applies per invocation;
+all selected outputs retain the common call publication/failure contract.
 
 ## Sources, independent evidence and review boundary
 

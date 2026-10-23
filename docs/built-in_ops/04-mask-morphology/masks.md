@@ -30,11 +30,11 @@ MASK 不另设舍入模式或误差容限；各成员只明确公式、舍入阶
 | [MASK-04](op_specs/MASK-04_color_range_contract.md) | 颜色范围 | 7 | coordinate_range、lab76_range、hue_range、lab2000_range、fit_color_groups_table、fit_color_groups_image、apply_color_groups | strict CPU，全部成员 |
 | [MASK-05](op_specs/MASK-05_morphology_contract.md) | 膨胀 / 腐蚀 | 2 | dilate、erode | strict CPU，全部成员 |
 | [MASK-06](op_specs/MASK-06_open_close_contract.md) | 开 / 闭运算 | 2 | opening、closing | strict CPU，全部成员 |
-| [MASK-07](op_specs/MASK-07_offset_contract.md) | 几何 offset | 4 | offset_discrete、shift_distance_field、threshold_distance_field、offset_polygon_grid | 待实现 |
-| [MASK-08](op_specs/MASK-08_gaussian_contract.md) | 高斯羽化 | 1 | gaussian_feather | 待实现 |
-| [MASK-09](op_specs/MASK-09_distance_feather_contract.md) | 距离羽化 | 2 | distance_feather_linear、distance_feather_smoothstep | 待实现 |
-| [MASK-10](op_specs/MASK-10_distance_transform_contract.md) | 距离场 / nearest | 4 | nearest_feature、signed_center_distance、truncated_nearest_feature、truncated_signed_distance | 待实现 |
-| [MASK-11](op_specs/MASK-11_flood_contract.md) | flood / region grow | 3 | flood_fixed、flood_neighbor、flood_barrier | 待实现 |
+| [MASK-07](op_specs/MASK-07_offset_contract.md) | 几何 offset | 4 | offset_discrete、shift_distance_field、threshold_distance_field、offset_polygon_grid | strict CPU，全部成员 |
+| [MASK-08](op_specs/MASK-08_gaussian_contract.md) | 高斯羽化 | 1 | gaussian_feather | strict CPU，全部成员 |
+| [MASK-09](op_specs/MASK-09_distance_feather_contract.md) | 距离羽化 | 2 | distance_feather_linear、distance_feather_smoothstep | strict CPU，全部成员 |
+| [MASK-10](op_specs/MASK-10_distance_transform_contract.md) | 距离场 / nearest | 4 | nearest_feature、signed_center_distance、truncated_nearest_feature、truncated_signed_distance | strict CPU，全部成员 |
+| [MASK-11](op_specs/MASK-11_flood_contract.md) | flood / region grow | 3 | flood_fixed、flood_neighbor、flood_barrier | strict CPU，全部成员 |
 | [MASK-12](op_specs/MASK-12_components_contract.md) | 连通分量与属性 | 7 | label_compact、label_min_pixel、component_count、component_areas、component_bboxes、component_bundle、filter_area_index | 待实现 |
 | [MASK-13](op_specs/MASK-13_cleanup_contract.md) | 填洞 / 去小区域 | 3 | fill_holes、remove_small、fill_small_holes | 待实现 |
 | [MASK-14](op_specs/MASK-14_residuals_contract.md) | 边界与形态学残差 | 5 | morph_gradient、inner_border、outer_border、white_top_hat、black_top_hat | strict CPU，全部成员 |

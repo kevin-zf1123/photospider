@@ -51,8 +51,8 @@ inline void parameter(bool valid, const char* message) {
                  FailureReason::InvalidDomain};
 }
 inline std::uint64_t bytes(unsigned __int128 n) {
-  require(n <= static_cast<unsigned __int128>(PTRDIFF_MAX),
-          "mask scratch capacity overflow");
+  parameter(n <= static_cast<unsigned __int128>(PTRDIFF_MAX),
+            "mask scratch capacity overflow");
   return static_cast<std::uint64_t>(n);
 }
 inline bool boolean(const Parameters& p, const char* key) {
@@ -63,13 +63,7 @@ inline ElementType output_dtype(const Parameters& p) {
   parameter(name == "float32" || name == "float64", "mask output_dtype");
   return name == "float32" ? ElementType::Float32 : ElementType::Float64;
 }
-inline const ResultTensorSpec& image(const OperationMetadata& input,
-                                     unsigned rank, bool raw_byte = false) {
-  const auto& s = tensor(input);
-  require(s.descriptor.shape.size() == rank &&
-              (raw_byte ? s.descriptor.element_type == ElementType::UInt8
-                        : floating(s.descriptor.element_type)),
-          "mask input rank/dtype");
+inline void spatial_axes(const ResultTensorSpec& s, unsigned rank) {
   if (s.layout.spatial)
     require(s.layout.height_axis == rank - 2 &&
                 s.layout.width_axis == rank - 1 &&
@@ -77,6 +71,15 @@ inline const ResultTensorSpec& image(const OperationMetadata& input,
                                               ? std::optional<std::uint32_t>{0}
                                               : std::optional<std::uint32_t>{}),
             "mask requires planar spatial axes");
+}
+inline const ResultTensorSpec& image(const OperationMetadata& input,
+                                     unsigned rank, bool raw_byte = false) {
+  const auto& s = tensor(input);
+  require(s.descriptor.shape.size() == rank &&
+              (raw_byte ? s.descriptor.element_type == ElementType::UInt8
+                        : floating(s.descriptor.element_type)),
+          "mask input rank/dtype");
+  spatial_axes(s, rank);
   return s;
 }
 inline void same(const OperationMetadata& a, const OperationMetadata& b) {

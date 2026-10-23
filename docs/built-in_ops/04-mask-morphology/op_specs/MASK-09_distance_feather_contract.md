@@ -5,7 +5,7 @@ kind: operator_family
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 ---
 
@@ -13,7 +13,8 @@ clarification_status: draft_for_review
 
 Inherit the complete [MASK baseline](MASK_common_contract.md), including its
 precision, descriptor, error, demand, ownership and acceptance obligations.
-This family proposes distinct members.
+All members are registered in the bundled strict CPU set through fixed
+invocation ABI 8; the specification status remains Proposed.
 
 ## Members
 
@@ -39,6 +40,23 @@ Symmetric positive widths give exactly .5 at d=0; asymmetric widths generally
 do not. Sum and numerator are constructed exactly even if a floating sum would
 overflow. Time O(Q), constant scratch; Data at Q only. This is not
 Gaussian blur and does not automatically preserve the area of a selection.
+
+## Native implementation
+
+Both registered members use `values` as the output key and preserve the input
+dtype and shape. Required String statics are a nonempty `distance_unit` and
+`distance_basis` in `signed_center|continuous_sdf|level_set`; they express the
+caller's interpretation without attaching metadata to Results.
+
+[`distance_fields.cpp`](../../../../plugins/ops/04-mask-morphology/distance_fields.cpp)
+evaluates exact endpoint/zero-width branches before arithmetic. A certified
+binary64 interval handles unambiguous results; bounded rational arithmetic
+resolves the remaining single-rounding results, including width sums that
+would overflow binary64. For A with inner=outer=1, a fused multiply-add
+`fma(-0.5,d,0.5)` gives the specified single rounding; contiguous ARM64 rows
+also use strict NEON. Other widths and B retain the certified/exact path.
+Work is O(Q) with constant admitted scratch, including exact state. The
+optional `max_work` guard and arithmetic-capacity limits follow MASK-common.
 
 ## Sources, independent evidence and review boundary
 

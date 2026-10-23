@@ -5,7 +5,7 @@ kind: operator_family
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 ---
 
@@ -13,7 +13,8 @@ clarification_status: draft_for_review
 
 Inherit the complete [MASK baseline](MASK_common_contract.md), including its
 precision, descriptor, error, demand, ownership and acceptance obligations.
-This family proposes distinct members.
+All members are registered in the bundled strict CPU set through fixed
+invocation ABI 8; the specification status remains Proposed.
 
 ## Members
 
@@ -59,7 +60,7 @@ nonzero exact signed area, no repeated vertices, zero edges, self-crossings or
 nonadjacent touching; adjacent edges may meet only at the shared endpoint.
 Either orientation is accepted. Collinear intermediate vertices are allowed
 when edges do not overlap. No holes, multiple rings, Bezier flattening or
-soft-mask isocontour reconstruction is implied. Statics: positive H,W; sy,sx;
+soft-mask isocontour reconstruction is implied. Statics: positive height,width (H,W); sy,sx;
 radius finite; output_dtype float32|float64; sample_pattern is required.
 For grid_center, samples_per_axis is required Int64 1..64 and sample_count is
 forbidden. For vulkan_standard, sample_count is required Int64 in {1,2,4,8,16}
@@ -104,6 +105,37 @@ premises without a production polygon scan. Its reference work is O(Q*N*V),
 with O(V) scratch; an oracle may additionally diagnose malformed polygons. Coordinate products and exact predicates are
 budgeted. Continuous contour construction/reinitialization is outside this
 bounded D2 integration draft, not an unspecified branch of A/B/C.
+
+## Native implementation
+
+The registered keys are listed in the member front matter. A/B/C/D use the
+`values` output key. D serializes its output dimensions as positive Int64
+`height` and `width`; H and W below denote those dimensions.
+B/C require a nonempty String `distance_unit` and String `distance_basis`
+chosen from `signed_center`, `continuous_sdf` and `level_set`.
+These parameters declare the caller's interpretation; Results gain no attached
+distance metadata.
+
+[Discrete offset](../../../../plugins/ops/04-mask-morphology/offset.cpp)
+builds a balanced site index over the exact support union of each selected tile.
+Bounds may bind a rectangular input-tile superset, but samples outside the
+metric stencil are not read as operands. Erosion includes the exterior zero
+sites. Index scratch is O(S), where S is the clipped support rectangle size;
+building and querying the index replaces the reference's repeated stencil scan,
+without promising linear worst-case nearest-site work.
+[Field operations](../../../../plugins/ops/04-mask-morphology/distance_fields.cpp)
+use correctly rounded native subtraction or certified interval/exact-rational
+evaluation. Contiguous ARM64 shift/threshold rows have strict NEON paths.
+Radius zero preserves source bits.
+
+[Polygon coverage](../../../../plugins/ops/04-mask-morphology/polygon_offset.cpp)
+uses interval-certified winding and segment-distance predicates with exact
+rational fallback. It implements both normative sample tables, inclusive
+boundaries and either winding orientation. Scratch holds O(V) vertices and
+bounded exact state; work remains O(Q*N*V). The hit fraction uses one native
+division in the output dtype, with both integer operands exactly representable.
+No polygon validity scan or contour reconstruction is added. All members
+inherit the optional `max_work` guard and operational limits in MASK-common.
 
 ## Sources, independent evidence and review boundary
 

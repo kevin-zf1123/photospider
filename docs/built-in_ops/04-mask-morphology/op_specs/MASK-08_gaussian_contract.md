@@ -5,7 +5,7 @@ kind: operator_family
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 ---
 
@@ -13,7 +13,8 @@ clarification_status: draft_for_review
 
 Inherit the complete [MASK baseline](MASK_common_contract.md), including its
 precision, descriptor, error, demand, ownership and acceptance obligations.
-This family proposes distinct members.
+All members are registered in the bundled strict CPU set through fixed
+invocation ABI 8; the specification status remains Proposed.
 
 ## Members
 
@@ -79,6 +80,32 @@ Record hardware, compiler, workers, Plan/coefficient reuse, image/ROI dimensions
 radii and refinement/fallback counts. Numerical latency or memory targets require
 implementation measurements and an explicit acceptance target; this specification
 does not assert unmeasured millisecond limits or production performance.
+
+## Native implementation
+
+[`gaussian.cpp`](../../../../plugins/ops/04-mask-morphology/gaussian.cpp)
+and [its fixed-point helper](../../../../plugins/ops/04-mask-morphology/gaussian_fixed.hpp)
+implement the `values` output in the input dtype. Coefficient exponents are
+constructed as exact rationals, including tiny positive sigma; the native
+directed arithmetic produces normalized coefficient enclosures.
+The separable path carries unsigned Q120 lower/upper bounds through both
+passes. It accepts a sample only when rounding both bounds gives identical
+target bits, so there is no target-dtype intermediate rounding.
+
+Ambiguous samples use a complete mapped-support constant test, then directed
+evaluation of the full two-dimensional expression at 128 through 4096 fractional
+bits. Unresolved certification returns OperationFailed; capacity/work
+exhaustion preserves the MASK-common resource failure. Positive coefficients
+are never dropped. The retained independent oracle uses MPFR directed
+enclosures; production uses the existing native rational/directed workspaces.
+
+Each selected output tile admits its coefficient arrays, refinement workspace
+and horizontal intermediates for the mapped source rows. Normal separable work
+is O(source_rows*Q_width*(2rx+1) + |Q|*(2ry+1)); refinement has the full reference
+cost. Coefficients are generated per invocation and are not cached between
+Runs. Both-zero radii copy bits with no coefficient workspace. All loops,
+including coefficient generation and refinement, participate in work and
+cancellation polling. The optional `max_work` guard follows MASK-common.
 
 ## Sources, independent evidence and review boundary
 

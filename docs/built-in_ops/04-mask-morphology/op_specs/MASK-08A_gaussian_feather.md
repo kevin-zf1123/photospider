@@ -5,20 +5,20 @@ kind: primitive
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 parent_id: MASK-08
 function: gaussian_feather
 oracle_entry: gaussian_feather
-proposed_operation_keys:
+registered_operation_keys:
   - mask.gaussian_feather_strict
 ---
 
 # MASK-08A: Finite normalized Gaussian mask feather
 
 Inherit the complete [family contract](MASK-08_gaussian_contract.md) and
-[MASK-common](MASK_common_contract.md). This member is Proposed and unimplemented;
-the proposed name is not a current registry entry or a compatibility alias.
+[MASK-common](MASK_common_contract.md). This Proposed member is registered in the bundled strict CPU set through
+fixed invocation ABI 8.
 
 ## Ports, parameters and output inference
 
@@ -41,9 +41,9 @@ There is no payload Validation read set or runtime dependency discovery.
 
 ## Implementation, resource and failure obligations
 
-Use the family reference algorithm and its stated work/scratch bounds. Strict
-CPU is the initial target; no implicit accelerated/GPU/third-party fallback is
-registered. Exact choices/copies stay exact; arithmetic uses the inherited
+The native implementation is in [gaussian.cpp](../../../../plugins/ops/04-mask-morphology/gaussian.cpp);
+its algorithm, scratch and strict-path limits are described in the family.
+Exact choices/copies stay exact; arithmetic uses the inherited
 rounding boundary and unchecked numerical premises. Account for output, scratch,
 exact state, retained source owners and all simultaneous intermediates. Poll
 inside long loops/refinement. Selected outputs of one call share its publication
@@ -51,7 +51,7 @@ outcome; failure exposes no partial call Result. Already retired call exports
 remain valid. Preserve host upstream/cancellation/resource status and immutable
 owner lifetime.
 
-## Independent acceptance and conceptual workflow
+## Independent acceptance and public workflow
 
 constant 1 with replicate or reflect_half ->1; full 1x1 with zero and positive radius -> less than1; both radii0 -> bit identity.
 
@@ -66,8 +66,9 @@ owner-lifetime checks before implementation acceptance. Invalid payload or
 numerical-premise fixtures diagnose oracle requests only; they do not require
 production rejection.
 
-Conceptual DAG: explicit input preparation -> this member -> an explicit
-mask/measurement/image consumer appropriate to the listed output. A real
-Compiler/ExecutionContext workflow is still required after registration; this
-document does not invent a callable public API. Sources and compatibility
-limits are recorded in the family and [research notes](../research-sources.md).
+Use the registered operation key above with explicit static parameters and
+input Results in the listed port order. Compile with `Compiler`, then execute
+with `ExecutionContext::prepare`, `submit` and `RunHandle::join`. Select the
+listed output keys; partial requests retain global output coordinates.
+Sources and compatibility limits remain in the family and
+[research notes](../research-sources.md).

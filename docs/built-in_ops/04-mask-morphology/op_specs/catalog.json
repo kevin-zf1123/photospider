@@ -399,7 +399,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-07A_offset_discrete.md",
-      "proposed_name": "mask.offset_discrete_strict"
+      "registered_name": "mask.offset_discrete_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-07B",
@@ -416,7 +418,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-07B_shift_distance_field.md",
-      "proposed_name": "mask.shift_distance_field_strict"
+      "registered_name": "mask.shift_distance_field_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-07C",
@@ -433,7 +437,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-07C_threshold_distance_field.md",
-      "proposed_name": "mask.threshold_distance_field_strict"
+      "registered_name": "mask.threshold_distance_field_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-07D",
@@ -441,8 +447,8 @@
       "n": 7,
       "function": "offset_polygon_grid",
       "title": "Continuous polygon offset with fixed sample-grid coverage",
-      "ports": "vertices: Field[V,2] -> mask: Coverage[H,W]",
-      "params": "H,W; sy,sx; radius; sample_pattern; output_dtype; grid_center requires samples_per_axis, vulkan_standard requires sample_count, as family.",
+      "ports": "vertices: Field[V,2] -> values: Coverage[H,W]",
+      "params": "height,width (positive Int64 output dimensions H,W); sy,sx; radius; sample_pattern; output_dtype; grid_center requires samples_per_axis, vulkan_standard requires sample_count, as family.",
       "math": "Use exact signed point-to-polygon distance membership at the selected profile's N sample points; final rational count rounding.",
       "support": "Complete-input vertices satisfying the polygon premises for any nonempty Q; output pixels independently evaluable. Lower support for complete selected output tiles to fixed source-grid reads under MASK-common, using finite supersets for runtime-selected addresses. Payload/numerical/association premises are unchecked; no Validation read set or runtime dependency discovery is added. Empty output selection adds no payload work; publication follows call retirement.",
       "fixture": "polygon cell corners (-.5,-.5),(-.5,.5),(.5,.5),(.5,-.5), H=W=1,n=2: r=0 ->1; r=-.3 ->0.",
@@ -450,7 +456,9 @@
       "kind": "primitive",
       "maturity": "D2_draft",
       "file": "MASK-07D_offset_polygon_grid.md",
-      "proposed_name": "mask.offset_polygon_grid_strict"
+      "registered_name": "mask.offset_polygon_grid_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-08A",
@@ -467,7 +475,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-08A_gaussian_feather.md",
-      "proposed_name": "mask.gaussian_feather_strict"
+      "registered_name": "mask.gaussian_feather_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-09A",
@@ -475,7 +485,7 @@
       "n": 9,
       "function": "distance_feather_linear",
       "title": "Linear signed-distance feather",
-      "ports": "input: Distance[H,W] -> mask: Coverage, same dtype/shape",
+      "ports": "input: Distance[H,W] -> values: Coverage, same dtype/shape",
       "params": "inner,outer>=0 finite Float64; distance_unit,distance_basis, as family.",
       "math": "Use exact family width branches and RN_T(1-u); both-zero is hard d<=0.",
       "support": "E: input[Q]. Lower support for complete selected output tiles to fixed source-grid reads under MASK-common, using finite supersets for runtime-selected addresses. Payload/numerical/association premises are unchecked; no Validation read set or runtime dependency discovery is added. Empty output selection adds no payload work; publication follows call retirement.",
@@ -484,7 +494,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-09A_distance_feather_linear.md",
-      "proposed_name": "mask.distance_feather_linear_strict"
+      "registered_name": "mask.distance_feather_linear_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-09B",
@@ -492,7 +504,7 @@
       "n": 9,
       "function": "distance_feather_smoothstep",
       "title": "Smoothstep signed-distance feather",
-      "ports": "input: Distance[H,W] -> mask: Coverage, same dtype/shape",
+      "ports": "input: Distance[H,W] -> values: Coverage, same dtype/shape",
       "params": "inner,outer>=0 finite Float64; distance_unit,distance_basis, as family.",
       "math": "Use exact family width branches and RN_T(1-u*u*(3-2*u)); both-zero is hard d<=0.",
       "support": "E: input[Q]. Lower support for complete selected output tiles to fixed source-grid reads under MASK-common, using finite supersets for runtime-selected addresses. Payload/numerical/association premises are unchecked; no Validation read set or runtime dependency discovery is added. Empty output selection adds no payload work; publication follows call retirement.",
@@ -501,7 +513,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-09B_distance_feather_smoothstep.md",
-      "proposed_name": "mask.distance_feather_smoothstep_strict"
+      "registered_name": "mask.distance_feather_smoothstep_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-10A",
@@ -518,7 +532,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-10A_nearest_feature.md",
-      "proposed_name": "mask.nearest_feature_strict"
+      "registered_name": "mask.nearest_feature_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-10B",
@@ -535,7 +551,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-10B_signed_center_distance.md",
-      "proposed_name": "mask.signed_center_distance_strict"
+      "registered_name": "mask.signed_center_distance_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-10C",
@@ -552,7 +570,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-10C_truncated_nearest_feature.md",
-      "proposed_name": "mask.truncated_nearest_feature_strict"
+      "registered_name": "mask.truncated_nearest_feature_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-10D",
@@ -569,7 +589,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-10D_truncated_signed_distance.md",
-      "proposed_name": "mask.truncated_signed_distance_strict"
+      "registered_name": "mask.truncated_signed_distance_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-11A",
@@ -577,7 +599,7 @@
       "n": 11,
       "function": "flood_fixed",
       "title": "Fixed-seed-range region growing",
-      "ports": "image: Field[C,H,W], seeds: Binary[H,W], barrier: Binary[H,W] -> mask: Binary[H,W]",
+      "ports": "image: Field[C,H,W], seeds: Binary[H,W], barrier: Binary[H,W] -> values: Binary[H,W]",
       "params": "connectivity: 4|8; tolerance finite Float64>=0; authoring 4,0.",
       "math": "Union independent seed-conditioned reachable sets, as family.",
       "support": "complete-input image, seeds and barrier; all nonempty Q share full closure. Lower support for complete selected output tiles to fixed source-grid reads under MASK-common, using finite supersets for runtime-selected addresses. Payload/numerical/association premises are unchecked; no Validation read set or runtime dependency discovery is added. Empty output selection adds no payload work; publication follows call retirement.",
@@ -586,7 +608,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-11A_flood_fixed.md",
-      "proposed_name": "mask.flood_fixed_strict"
+      "registered_name": "mask.flood_fixed_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-11B",
@@ -594,7 +618,7 @@
       "n": 11,
       "function": "flood_neighbor",
       "title": "Neighbor-relative region growing",
-      "ports": "image: Field[C,H,W], seeds: Binary[H,W], barrier: Binary[H,W] -> mask: Binary[H,W]",
+      "ports": "image: Field[C,H,W], seeds: Binary[H,W], barrier: Binary[H,W] -> values: Binary[H,W]",
       "params": "connectivity: 4|8; tolerance finite Float64>=0.",
       "math": "Reachability in the fixed exact neighbor-difference graph.",
       "support": "complete-input image, seeds and barrier. Lower support for complete selected output tiles to fixed source-grid reads under MASK-common, using finite supersets for runtime-selected addresses. Payload/numerical/association premises are unchecked; no Validation read set or runtime dependency discovery is added. Empty output selection adds no payload work; publication follows call retirement.",
@@ -603,7 +627,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-11B_flood_neighbor.md",
-      "proposed_name": "mask.flood_neighbor_strict"
+      "registered_name": "mask.flood_neighbor_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-11C",
@@ -611,7 +637,7 @@
       "n": 11,
       "function": "flood_barrier",
       "title": "Flood regions bounded by a binary barrier",
-      "ports": "seeds: Binary[H,W], barrier: Binary[H,W] -> mask: Binary[H,W]",
+      "ports": "seeds: Binary[H,W], barrier: Binary[H,W] -> values: Binary[H,W]",
       "params": "connectivity: 4|8, authoring 4.",
       "math": "Reachability from all seeds through barrier=0; callers guarantee that seeds are not blocked.",
       "support": "complete-input seeds/barrier. Lower support for complete selected output tiles to fixed source-grid reads under MASK-common, using finite supersets for runtime-selected addresses. Payload/numerical/association premises are unchecked; no Validation read set or runtime dependency discovery is added. Empty output selection adds no payload work; publication follows call retirement.",
@@ -620,7 +646,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-11C_flood_barrier.md",
-      "proposed_name": "mask.flood_barrier_strict"
+      "registered_name": "mask.flood_barrier_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-12A",
@@ -1134,5 +1162,5 @@
       "backend": "cpu"
     }
   ],
-  "implemented_member_count": 29
+  "implemented_member_count": 43
 }
