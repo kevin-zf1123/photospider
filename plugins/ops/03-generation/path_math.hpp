@@ -40,6 +40,11 @@ class CurveMath final {
   std::uint64_t sample(const Curve& curve, const Rational& t, unsigned output,
                        unsigned axis, bool narrow);
   bool valid(const Curve& curve, const Rational& t);
+  // Internal certified consumers retain the mathematical endpoint expression.
+  void enclose_component(const Curve& curve, const Rational& t, Interval output,
+                         unsigned axis, bool derivative) {
+    component(curve, t, output, axis, derivative);
+  }
 
  private:
   Rational control(const Curve&, unsigned point, unsigned axis) const;

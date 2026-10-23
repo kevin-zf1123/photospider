@@ -2,21 +2,23 @@
 spec_schema_version: 1
 id: PTH-12E
 status: Accepted
-implementation_status: not_implemented
-registration_status: backend_and_implementation_gates
+implementation_status: implemented
+registration_status: registered
+operation_keys:
+  - path.publish_exact_geometry_v1_strict
 ---
 
 # PTH-12E: Publish exact geometry as Float64 PathSet
 
 Inherits [PTH-12](PTH-12_boolean_offset_contract.md),
 [GEN-common](GEN_common_contract.md) and [PTH geometry](PTH_geometry_contract.md). This
-is a distinct versioned member; concrete registry spelling remains a freeze gate. Same
+is a distinct registered versioned member. Same
 version/profile means bit-identical public output; no backend substitution changes that
 contract.
 
 Input: exact polygon Result from PTH-12C or a formally compatible exact consumer.
 Outputs: Float64 CoreVerbs PathSet and publication report with source association.
-Parameters: epsilon_publication_px > 0 (candidate default 1e-9), attribute_policy
+Parameters: epsilon_publication_px > 0 (default 1e-9), attribute_policy
 (default reject_unmappable), work/capacity limits.
 
 Canonicalize exact contours, round each rational coordinate once with RN64, canonicalize
@@ -32,7 +34,7 @@ failures. Do not snap, delete holes or silently loosen epsilon.
 Output is the rounded geometry; its later consumers do not retain implicit exact
 history.
 
-The algorithm reads the complete valid exact geometry and constructs a complete Result without an input or publication validator. Exact owner references,
+`path_boolean.cpp` implements the exact codec and RN64/RU64 construction stages. The algorithm reads the complete valid exact geometry and constructs a complete Result without an input or publication validator. Exact owner references,
 publication scratch and output associations are charged and lifetime-safe.
 PTH-12A and exact Boolean followed by this member produce equivalent published coordinates, error stages and topology outcomes under equivalent explicit parameters and canonicalization. Provenance records each operation's actual inputs: PTH-12A has two original source IDs, while this member has the single exact-geometry input ID. Their source-ID shape, values and complete report bytes need not match; no ancestry lookup or additional binding stage is required.
 
@@ -41,4 +43,4 @@ features satisfying the publication premises, construction-time displacement rep
 output association and retained owner. Out-of-domain collisions and new crossings do
 not impose runtime rejection requirements.
 
-These are specification acceptance requirements, not completed execution evidence.
+The strict CPU implementation is registered. The acceptance list defines required behavior; finite validation does not establish every valid-input success domain or a GPU backend.

@@ -6,16 +6,17 @@ function: boolean_polygon_regions
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
+  - path.boolean_polygon_regions_v1_strict
 ---
 
 # PTH-12A: boolean polygon regions
 
 Inherit [PTH-12](PTH-12_boolean_offset_contract.md), [GEN
 common](GEN_common_contract.md), and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -27,7 +28,7 @@ The associated Result uses `photospider.ops.geometry_report` v1 from the [shared
 ## Parameters and domain
 
 union/intersection/difference/xor; independent nonzero/evenodd fill rules;
-epsilon_publication_px>0 candidate default1e-9; hard max_events; attribute_policy
+epsilon_publication_px>0 default1e-9; hard max_events; attribute_policy
 default reject_unmappable.
 
 ## Mathematical specialization
@@ -42,6 +43,10 @@ while constructing coordinates and report unverified topology; no publication sc
 No snapping or
 silent tiny-hole removal.
 
+## Runtime implementation
+
+`path_boolean.cpp` uses the in-repository exact rational `PolygonArrangement` backend specified by PTH-12. It then runs the same canonical RN64 publication and construction-time bound calculation as PTH-12E. Defaults are `max_events=65536`, `max_vertices=4096`, `max_contours=256`, `limb_capacity=128` and 64 MiB algorithm scratch. The production arrangement splits all candidate edge pairs; it does not promise sweep-line complexity.
+
 ## Dependencies, resources and failures
 
 Execution support: **complete input**. Lower the complete mathematical input
@@ -51,8 +56,8 @@ publish on successful call retirement. Empty output selection performs static
 preparation without payload tasks; there is no runtime dependency discovery or
 dirty propagation.
 
-complete-input Result; typical arrangement O((E+I)log E), O(E^2) reference; all
-events/limbs/publication work charged.
+Complete-input Result; pairwise intersection splitting and exposed-edge classification
+are bounded by explicit event/work/scratch limits; all limb and publication work is charged.
 
 All output, scratch, indices, algorithmic work and retained owners are accounted. Poll
 cancellation in bounded loops. Preserve static structural failures and actual
@@ -72,5 +77,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
 identity is implied by these requirements.

@@ -6,9 +6,9 @@ function: stroke_variable_round_area
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - path.stroke_variable_round_area_v1_strict
   - path.stroke_variable_round_area_v1_accelerated_apple_silicon
   - path.stroke_variable_round_area_v1_accelerated_x86_64
@@ -18,7 +18,7 @@ proposed_operation_keys:
 
 Inherit [PTH-10](PTH-10_stroke_contract.md), [GEN common](GEN_common_contract.md), and
 the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. Proposed keys are not runtime registrations. A key includes algorithm version
+contracts. A key includes algorithm version
 and profile; within one version/profile, output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -35,6 +35,10 @@ Region is union over edges and t in[0,1] of
 disks(center=(1-t)P0+tP1,radius=((1-t)w0+t*w1)/2). Each edge equals convex hull of
 endpoint disks; radius difference>=edge length yields the larger disk. Zero-length edge
 uses larger radius; closed endpoint widths agree.
+
+## Runtime implementation
+
+`path_stroke.cpp` constructs the convex hull of each pair of endpoint disks, including the exact engulfment case, and unions these shapes through `CircularArrangement`. Its width tensor is Float64 `[C]`, explicitly produced by a width-binding helper or an independent width workflow. Exact exposed-union integration supplies all three CPU profiles; there is no implicit width lookup.
 
 ## Dependencies, resources and failures
 
@@ -65,5 +69,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
 identity is implied by these requirements.

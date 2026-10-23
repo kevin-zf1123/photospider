@@ -4,13 +4,85 @@
 
 namespace ps::plugin_internal::generation {
 namespace {
-void shift_small(Directed::Integer* value, unsigned bits, unsigned words) {
+template <class Integer>
+void shift_small(Integer* value, unsigned bits, unsigned words) {
   std::uint64_t carry = 0;
   for (unsigned i = 0; i < words; ++i) {
     const auto next = value->words[i] >> (64 - bits);
     value->words[i] = (value->words[i] << bits) | carry;
     carry = next;
   }
+}
+bool integer_sqrt_exact(const Exact::Integer& source, Exact::Integer* output,
+                        const Work& work) {
+  using Workspace = Exact::Workspace;
+  const int highest = Workspace::top(source);
+  output->words.fill(0);
+  if (highest < 0) {
+    return true;
+  }
+  // A square has an even binary valuation and one of these residues mod 64.
+  constexpr std::uint64_t residues = UINT64_C(0x0202021202030213);
+  if (!((residues >> (source.words[0] & 63)) & 1)) {
+    return false;
+  }
+  unsigned lowest = 0;
+  while (!source.words[lowest / 64]) {
+    work.poll();
+    lowest += 64;
+  }
+  lowest += static_cast<unsigned>(__builtin_ctzll(source.words[lowest / 64]));
+  if (lowest & 1) {
+    return false;
+  }
+  if (lowest == static_cast<unsigned>(highest)) {
+    output->words[lowest / 128] = UINT64_C(1) << ((lowest / 2) % 64);
+    return true;
+  }
+  Exact::Integer root, remainder, trial;
+  const unsigned pairs = static_cast<unsigned>(highest / 2 + 1);
+  const unsigned words = (pairs + 65) / 64;
+  for (int pair = static_cast<int>(pairs) - 1; pair >= 0; --pair) {
+    if ((pairs - static_cast<unsigned>(pair) - 1) % 32 == 0) {
+      work.poll(std::min(32U, static_cast<unsigned>(pair) + 1) *
+                (7 * words + 4));
+    }
+    shift_small(&remainder, 2, words);
+    const auto bit = static_cast<unsigned>(2 * pair);
+    remainder.words[0] |= (source.words[bit / 64] >> (bit % 64)) & 3;
+    shift_small(&root, 1, words);
+    std::copy_n(root.words.begin(), words, trial.words.begin());
+    shift_small(&trial, 1, words);
+    trial.words[0] |= 1;
+    int order = 0;
+    for (unsigned j = words; j; --j) {
+      if (remainder.words[j - 1] != trial.words[j - 1]) {
+        order = remainder.words[j - 1] < trial.words[j - 1] ? -1 : 1;
+        break;
+      }
+    }
+    if (order >= 0) {
+      std::uint64_t borrow = 0;
+      for (unsigned j = 0; j < words; ++j) {
+        const auto sub =
+            static_cast<unsigned __int128>(trial.words[j]) + borrow;
+        const auto old = remainder.words[j];
+        remainder.words[j] = static_cast<std::uint64_t>(
+            static_cast<unsigned __int128>(old) - sub);
+        borrow = static_cast<unsigned __int128>(old) < sub;
+      }
+      for (unsigned j = 0; j < words; ++j) {
+        if (++root.words[j]) {
+          break;
+        }
+      }
+    }
+  }
+  if (Workspace::top(remainder) >= 0) {
+    return false;
+  }
+  *output = root;
+  return true;
 }
 void root_endpoint(Directed& math, Directed::Number& output,
                    const Directed::Number& input, bool upper) {
@@ -70,6 +142,58 @@ void root_endpoint(Directed& math, Directed::Number& output,
   }
 }
 }  // namespace
+void Math::enclose(Interval output, const Rational& value) {
+  if (!exact.active() || !d.active())
+    return;
+  if (!Exact::finite(value) || Exact::zero(value)) {
+    exact.enclose(d, output, value);
+    return;
+  }
+  const int numerator_top = Exact::Workspace::top(value.n);
+  const int denominator_top = Exact::Workspace::top(value.d);
+  // Common path coefficients are integers or small rational ratios. Import
+  // their signed numerator directly in Q_precision units, then use one-limb
+  // directed division. This avoids normalized full-width long division while
+  // retaining exact floor/ceiling bounds, including gradual underflow.
+  if (denominator_top < 64 && numerator_top + static_cast<int>(d.precision) <
+                                  static_cast<int>(64 * Directed::kWords)) {
+    work.poll(Directed::kWords);
+    Directed::Frame frame(d);
+    auto& source = d.number();
+    std::copy_n(value.n.words.begin(), Directed::kWords,
+                source.magnitude.words.begin());
+    source.negative = value.negative;
+    d.shift(output.low, source, static_cast<int>(d.precision), true);
+    d.copy(output.high, output.low);
+    if (value.d.words[0] != 1)
+      d.divide_small(output, output, value.d.words[0]);
+    return;
+  }
+  // Powers of two need only a signed directed shift; large binary exponents
+  // therefore never enter the rational divider either.
+  bool dyadic = denominator_top >= 0;
+  for (unsigned j = 0; j <= static_cast<unsigned>(denominator_top) / 64; ++j) {
+    work.poll();
+    const auto expected = j == static_cast<unsigned>(denominator_top) / 64
+                              ? UINT64_C(1) << (denominator_top % 64)
+                              : 0;
+    dyadic &= value.d.words[j] == expected;
+  }
+  const int shift = static_cast<int>(d.precision) - denominator_top;
+  if (dyadic && numerator_top < static_cast<int>(64 * Directed::kWords) &&
+      numerator_top + shift < static_cast<int>(64 * Directed::kWords)) {
+    work.poll(Directed::kWords);
+    Directed::Frame frame(d);
+    auto& source = d.number();
+    std::copy_n(value.n.words.begin(), Directed::kWords,
+                source.magnitude.words.begin());
+    source.negative = value.negative;
+    d.shift(output.low, source, shift, true);
+    d.shift(output.high, source, shift, false);
+    return;
+  }
+  exact.enclose(d, output, value);
+}
 void Math::sqrt(Interval output, Interval input) {
   if (!d.active()) {
     return;
@@ -216,6 +340,20 @@ void Math::asin(Interval output, const Rational& input) {
     d.negate(output, output);
   }
 }
+bool Math::rational_sqrt(const Rational& value, Rational* root) {
+  check(exact.status());
+  work.poll(Exact::kWords);
+  if (!Exact::finite(value) || (value.negative && !Exact::zero(value))) {
+    return false;
+  }
+  Rational result;
+  if (!integer_sqrt_exact(value.n, &result.n, work) ||
+      !integer_sqrt_exact(value.d, &result.d, work)) {
+    return false;
+  }
+  *root = result;
+  return true;
+}
 std::uint64_t Math::affine_sqrt(const Rational& bias, const Rational& factor,
                                 const Rational& radicand, bool narrow) {
   if (Exact::zero(factor) || Exact::zero(radicand)) {
@@ -224,6 +362,13 @@ std::uint64_t Math::affine_sqrt(const Rational& bias, const Rational& factor,
   if (Exact::zero(bias)) {
     const auto result = rounded_sqrt(mul(sq(factor), radicand), narrow);
     return result | (factor.negative ? UINT64_C(1) << (narrow ? 31 : 63) : 0);
+  }
+  // Rational roots include exact cancellation and every possible IEEE midpoint.
+  // Evaluate them in the exact field before interval rounding loses
+  // correlation.
+  Rational root;
+  if (rational_sqrt(radicand, &root)) {
+    return rounded(add(bias, mul(factor, root)), narrow);
   }
   return certify(narrow, [&](Interval out) {
     auto b = d.interval(), f = d.interval(), r = d.interval();

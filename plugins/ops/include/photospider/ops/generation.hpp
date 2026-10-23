@@ -9,6 +9,9 @@
 #include <vector>
 
 #include "photospider/data/result.hpp"
+#include "photospider/ops/numeric/arrays.hpp"
+#include "photospider/ops/numeric/binary.hpp"
+#include "photospider/ops/numeric/curves.hpp"
 #include "photospider/ops/numeric/workflow_authoring.hpp"
 
 namespace ps::generation {
@@ -128,6 +131,148 @@ inline Result<SchemaTemplate> path_partition_schema(std::uint64_t groups) {
       {path_member("group_offsets", ElementType::Int64, {groups + 1}),
        path_member("subpath_count", ElementType::Int64, {1}),
        path_member("source_object_id", ElementType::UInt8, {8}, 1)});
+}
+
+/** @brief Fixed backing for certified length tables. Effective prefixes and
+ * source identity are runtime payload. Factories own metadata only. */
+inline Result<SchemaTemplate> path_arclength_schema(std::uint64_t segments,
+                                                    std::uint64_t knots,
+                                                    std::uint64_t subpaths) {
+  using detail::path_member;
+  segments = std::max(UINT64_C(1), segments);
+  knots = std::max(UINT64_C(1), knots);
+  subpaths = std::max(UINT64_C(1), subpaths);
+  if (segments >= (UINT64_C(1) << 40) || subpaths >= (UINT64_C(1) << 40))
+    return Result<SchemaTemplate>(Status{
+        ErrorCode::InvalidArgument, "length table offset capacity overflow"});
+  return detail::path_schema(
+      "photospider.ops.path_arclength_table",
+      {path_member("segment_ids", ElementType::Int64, {segments}),
+       path_member("segment_offsets", ElementType::Int64, {segments + 1}),
+       path_member("knots", ElementType::Float64, {knots, 3}, 1),
+       path_member("subpath_offsets", ElementType::Int64, {subpaths + 1}),
+       path_member("totals", ElementType::Float64, {subpaths + 1, 3}, 1),
+       path_member("counts", ElementType::Int64, {3}, 1),
+       path_member("source_object_id", ElementType::UInt8, {8}, 1)});
+}
+/** @brief Parameter or true-arc samples. Source geometry remains an explicit
+ * workflow input; the identity bytes do not reconstruct an owning reference. */
+inline Result<SchemaTemplate> path_samples_schema(std::uint64_t points,
+                                                  std::uint64_t subpaths,
+                                                  bool arc = false) {
+  using detail::path_member;
+  points = std::max(UINT64_C(1), points);
+  subpaths = std::max(UINT64_C(1), subpaths);
+  if (subpaths >= (UINT64_C(1) << 40))
+    return Result<SchemaTemplate>(
+        Status{ErrorCode::InvalidArgument, "sample offset capacity overflow"});
+  std::vector<ResultTensorSpec> fields{
+      path_member("positions", ElementType::Float64, {points, 2}, 1, 1),
+      path_member("source_segment", ElementType::Int64, {points}),
+      path_member("local_t", ElementType::Float64, {points}),
+      path_member("subpath_offsets", ElementType::Int64, {subpaths + 1}),
+      path_member("counts", ElementType::Int64, {2}, 1),
+      path_member("source_object_id", ElementType::UInt8, {8}, 1)};
+  if (arc)
+    fields.push_back(path_member("arc_s", ElementType::Float64, {points}));
+  return detail::path_schema(arc ? "photospider.ops.path_samples_arc"
+                                 : "photospider.ops.path_samples_param",
+                             std::move(fields));
+}
+/** @brief Canonical rational polygons; limbs are base-2^32, little endian.
+ * No numerical or topological payload is inspected by this schema factory. */
+inline Result<SchemaTemplate> exact_polygon_schema(std::uint64_t vertices,
+                                                   std::uint64_t contours,
+                                                   std::uint64_t limbs) {
+  using detail::path_member;
+  vertices = std::max(UINT64_C(1), vertices);
+  contours = std::max(UINT64_C(1), contours);
+  if (contours >= (UINT64_C(1) << 40))
+    return Result<SchemaTemplate>(
+        Status{ErrorCode::InvalidArgument, "polygon offset capacity overflow"});
+  return detail::path_schema(
+      "photospider.ops.exact_polygon",
+      {path_member("coordinate_signs", ElementType::UInt8, {vertices, 2}, 1),
+       path_member("coordinate_sizes", ElementType::Int64, {vertices, 2, 2}, 2),
+       path_member("coordinate_limbs", ElementType::UInt8,
+                   {vertices, 2, 2, limbs, 4}, 4),
+       path_member("contour_offsets", ElementType::Int64, {contours + 1}),
+       path_member("counts", ElementType::Int64, {2}, 1)});
+}
+/** @brief Integer grid coordinates. Grid origin and spacing remain explicit
+ * parameters of every producer and consumer. */
+inline Result<SchemaTemplate> grid_polygon_schema(std::uint64_t vertices,
+                                                  std::uint64_t contours) {
+  using detail::path_member;
+  vertices = std::max(UINT64_C(1), vertices);
+  contours = std::max(UINT64_C(1), contours);
+  if (contours >= (UINT64_C(1) << 40))
+    return Result<SchemaTemplate>(
+        Status{ErrorCode::InvalidArgument, "polygon offset capacity overflow"});
+  return detail::path_schema(
+      "photospider.ops.grid_polygon",
+      {path_member("coordinates", ElementType::Int64, {vertices, 2}, 1, 1),
+       path_member("contour_offsets", ElementType::Int64, {contours + 1}),
+       path_member("counts", ElementType::Int64, {2}, 1)});
+}
+/** @brief Construction-time geometry error and provenance, with no implicit
+ * validity gate or hidden ownership binding. */
+inline Result<SchemaTemplate> geometry_report_schema(std::uint64_t sources) {
+  using detail::path_member;
+  sources = std::max(UINT64_C(1), sources);
+  return detail::path_schema(
+      "photospider.ops.geometry_report",
+      {path_member("error_bounds_px", ElementType::Float64, {3}, 1),
+       path_member("topology_status", ElementType::Int64, {1}),
+       path_member("dropped_width", ElementType::UInt8, {1}),
+       path_member("source_object_ids", ElementType::UInt8, {sources, 8}, 1)});
+}
+inline Result<SchemaTemplate> path_fit_report_schema() {
+  using detail::path_member;
+  return detail::path_schema(
+      "photospider.ops.path_fit_report",
+      {path_member("error_bound_px", ElementType::Float64, {1}),
+       path_member("topology_status", ElementType::Int64, {1}),
+       path_member("source_object_id", ElementType::UInt8, {8}, 1)});
+}
+/** @brief Linear width bindings. Counts are bindings, profiles, stops, sources.
+ * The caller pairs the Result with geometry and retains explicit source inputs.
+ */
+inline Result<SchemaTemplate> path_width_schema(std::uint64_t profiles,
+                                                std::uint64_t bindings,
+                                                std::uint64_t stops,
+                                                std::uint64_t sources) {
+  using detail::path_member;
+  profiles = std::max(UINT64_C(1), profiles);
+  bindings = std::max(UINT64_C(1), bindings);
+  stops = std::max(UINT64_C(1), stops);
+  sources = std::max(UINT64_C(1), sources);
+  return detail::path_schema(
+      "photospider.ops.path_width",
+      {path_member("profiles", ElementType::Int64, {profiles, 4}, 1),
+       path_member("bindings", ElementType::Int64, {bindings, 3}, 1),
+       path_member("stops", ElementType::Float64, {stops}),
+       path_member("widths", ElementType::Float64, {stops}),
+       path_member("source_object_ids", ElementType::UInt8, {sources, 8}, 1),
+       path_member("counts", ElementType::Int64, {4}, 1)});
+}
+/** @brief Exact affine parameter maps a+b*t for complete target segments.
+ * Source IDs are copied provenance; they are not lookup handles. */
+inline Result<SchemaTemplate> path_source_map_schema(std::uint64_t mappings,
+                                                     std::uint64_t sources,
+                                                     std::uint64_t limbs) {
+  using detail::path_member;
+  mappings = std::max(UINT64_C(1), mappings);
+  sources = std::max(UINT64_C(1), sources);
+  return detail::path_schema(
+      "photospider.ops.path_source_map",
+      {path_member("records", ElementType::Int64, {mappings, 4}, 1),
+       path_member("source_object_ids", ElementType::UInt8, {sources, 8}, 1),
+       path_member("affine_signs", ElementType::UInt8, {mappings, 2}, 1),
+       path_member("affine_sizes", ElementType::Int64, {mappings, 2, 2}, 2),
+       path_member("affine_limbs", ElementType::UInt8,
+                   {mappings, 2, 2, limbs, 4}, 4),
+       path_member("counts", ElementType::Int64, {2}, 1)});
 }
 
 /** @brief Explicit numerical profiles; availability is checked at compilation.
@@ -329,6 +474,230 @@ inline Result<PathEvaluation> evaluate_pathset(
                                {id, "derivative"},
                                {id, "tangent"},
                                {id, "tangent_valid"}});
+}
+
+/** @brief PTH-05B: source query operands, NUM division, then CRV PCHIP.
+ * s and source_length are Float64 [N] and Float64 [1] or [N]. They already
+ * refer to the explicit source domain, after any caller-owned source mapping.
+ * Zero length constructs operands 0/1. The NUM node publishes RN64 u before
+ * CRV-01B consumes it. Controls may use either floating dtype.
+ * Owns all authored metadata. Requires exclusive document access; failure
+ * leaves it unchanged. Numerical domains and source associations are unchecked.
+ */
+inline Result<WorkflowNodeOutput> width_profile_pchip(
+    WorkflowDocument* document, WorkflowInput s, WorkflowInput source_length,
+    WorkflowInput stops, WorkflowInput widths,
+    std::string domain = "subpath_normalized_arclength",
+    ElementType output_type = ElementType::Float64) {
+  using Answer = Result<WorkflowNodeOutput>;
+  if (!document || (domain != "pathset_normalized_arclength" &&
+                    domain != "subpath_normalized_arclength" &&
+                    domain != "subpath_arclength_px"))
+    return Answer(Status{ErrorCode::InvalidArgument, "invalid width domain"});
+  auto ids = numeric::available_workflow_node_ids(
+      *document, 3, {s, source_length, stops, widths});
+  if (!ids.ok())
+    return Answer(ids.status());
+  const auto a = ids.value()[0], b = ids.value()[1], c = ids.value()[2];
+  auto divided = numeric::divide_node(b, WorkflowNodeOutput{a, "numerator"},
+                                      WorkflowNodeOutput{a, "denominator"});
+  if (!divided.ok())
+    return Answer(divided.status());
+  auto interpolated = numeric::interpolate_pchip_node(
+      c, std::move(stops), std::move(widths), WorkflowNodeOutput{b, "values"},
+      output_type);
+  if (!interpolated.ok())
+    return Answer(interpolated.status());
+  auto staged = *document;
+  staged.nodes.push_back({a,
+                          "path.width_query_operands_v1_strict",
+                          {std::move(s), std::move(source_length)},
+                          {{"domain", std::move(domain)}}});
+  staged.nodes.push_back(divided.take_value());
+  staged.nodes.push_back(interpolated.take_value());
+  *document = std::move(staged);
+  return Answer(WorkflowNodeOutput{c, "values"});
+}
+
+struct PathWithWidth final {
+  WorkflowInput path;
+  WorkflowNodeOutput width;
+};
+/** @brief PTH-05C preserves the original geometry reference and ObjectId.
+ * profiles is Int64 [P,3]: domain, stop_begin, stop_end; source_slot is zero.
+ * bindings is Int64 [B,3]: target_subpath, profile_row, source_subpath.
+ * stops/widths are Float64 [K]. Optional static prefix counts are authored in
+ * parameters; source IDs are recorded by the width producer without checking
+ * payload associations. The returned pair owns references, not geometry data.
+ * An existing binding is supplied explicitly; replacement is never implicit.
+ */
+inline Result<PathWithWidth> attach_linear_width(
+    WorkflowDocument* document, WorkflowInput path, WorkflowInput profiles,
+    WorkflowInput bindings, WorkflowInput stops, WorkflowInput widths,
+    Parameters parameters = {}, bool replace_existing = false,
+    const WorkflowNodeOutput* existing_width = nullptr) {
+  using Answer = Result<PathWithWidth>;
+  if (existing_width && !replace_existing)
+    return Answer(
+        Status{ErrorCode::InvalidArgument, "width binding already exists"});
+  auto result = detail::append(document, "path.linear_width_binding_v1_strict",
+                               {path, std::move(profiles), std::move(bindings),
+                                std::move(stops), std::move(widths)},
+                               std::move(parameters), "width");
+  if (!result.ok())
+    return Answer(result.status());
+  return Answer(PathWithWidth{std::move(path), result.take_value()});
+}
+
+/** @brief Publish RN64 vertex widths from an explicitly retained source
+ * binding. Sources are ordered by the binding's source slots. With source_map,
+ * the binding remains paired with the source geometry; the map connects target
+ * segments to those source segments. Without a map, segment/subpath identity
+ * is a caller premise. Source ObjectIds are never used to discover inputs.
+ * The resulting Float64 [target control capacity] value is the independent
+ * width input of the variable-round stroke, outline or stroke-SDF operation.
+ * Interior vertices use the following positive segment, final endpoints the
+ * preceding segment's end. A closed seam reuses its single published M width.
+ */
+inline Result<WorkflowNodeOutput> evaluate_linear_width_binding(
+    WorkflowDocument* document, WorkflowInput target, WorkflowInput binding,
+    std::vector<WorkflowInput> sources, Parameters parameters = {},
+    const WorkflowInput* source_map = nullptr) {
+  if (sources.empty())
+    return Result<WorkflowNodeOutput>(Status{
+        ErrorCode::InvalidArgument, "width source geometry is required"});
+  std::vector<WorkflowInput> inputs{std::move(target), std::move(binding)};
+  if (source_map)
+    inputs.push_back(*source_map);
+  inputs.insert(inputs.end(), sources.begin(), sources.end());
+  return detail::append(document,
+                        source_map
+                            ? "path.bound_linear_width_mapped_values_v1_strict"
+                            : "path.bound_linear_width_values_v1_strict",
+                        std::move(inputs), std::move(parameters), "values");
+}
+
+/** @brief GEN-05F explicitly publishes distance, broadcasts scale, divides.
+ * distance_source selects centerline_unsigned, fill_signed or stroke_signed.
+ * Additional distance_inputs follow the geometry port (for example stroke
+ * width); parameters contain the complete PTH-11 canvas and stroke/fill policy.
+ * scale must match the requested distance dtype and has shape [1]. The
+ * explicit broadcast maps its singleton axis onto output axis 1.
+ * Authoring is transactional and requires exclusive document access. No
+ * execution state, sample backing or runtime owner is retained by this helper.
+ */
+inline Result<WorkflowNodeOutput> path_distance_coordinate(
+    WorkflowDocument* document, WorkflowInput path, WorkflowInput scale,
+    std::uint64_t height, std::uint64_t width,
+    std::string distance_source = "centerline_unsigned",
+    Parameters parameters = {}, std::vector<WorkflowInput> distance_inputs = {},
+    Profile profile = Profile::Strict) {
+  using Answer = Result<WorkflowNodeOutput>;
+  const char* key =
+      distance_source == "centerline_unsigned" ? "path.centerline_distance_v1_"
+      : distance_source == "fill_signed"       ? "path.fill_region_sdf_v1_"
+      : distance_source == "stroke_signed"     ? "path.stroke_region_sdf_v1_"
+                                               : nullptr;
+  if (!document || !key || height > INT64_MAX || width > INT64_MAX ||
+      (profile != Profile::Strict && profile != Profile::AppleSilicon &&
+       profile != Profile::X86_64))
+    return Answer(
+        Status{ErrorCode::InvalidArgument, "invalid distance workflow"});
+  distance_inputs.insert(distance_inputs.begin(), path);
+  auto dependencies = distance_inputs;
+  dependencies.push_back(scale);
+  auto ids = numeric::available_workflow_node_ids(*document, 3, dependencies);
+  if (!ids.ok())
+    return Answer(ids.status());
+  auto broadcast = numeric::broadcast_node(ids.value()[1], std::move(scale),
+                                           {height, width}, {1});
+  if (!broadcast.ok())
+    return Answer(broadcast.status());
+  auto divided = numeric::divide_node(
+      ids.value()[2], WorkflowNodeOutput{ids.value()[0], "distance"},
+      WorkflowNodeOutput{ids.value()[1], "values"});
+  if (!divided.ok())
+    return Answer(divided.status());
+  parameters["height"] = static_cast<std::int64_t>(height);
+  parameters["width"] = static_cast<std::int64_t>(width);
+  auto staged = *document;
+  staged.nodes.push_back({ids.value()[0],
+                          std::string(key) + detail::profile_suffix(profile),
+                          std::move(distance_inputs), std::move(parameters)});
+  staged.nodes.push_back(broadcast.take_value());
+  staged.nodes.push_back(divided.take_value());
+  *document = std::move(staged);
+  return Answer(WorkflowNodeOutput{ids.value()[2], "values"});
+}
+
+struct PathRasterization final {
+  WorkflowNodeOutput coverage, report;
+};
+/** @brief PTH-09B: deterministic flattening, followed by exact polygon area.
+ * The intermediate polyline and its RN64 publication are observable stages.
+ * The report refers to the source curve; it is a geometry-distance certificate,
+ * not an area-error certificate. Parameters are separate for both nodes.
+ */
+inline Result<PathRasterization> fill_bezier_path(
+    WorkflowDocument* document, WorkflowInput path,
+    Parameters flatten_parameters, Parameters fill_parameters,
+    Profile fill_profile = Profile::Strict) {
+  using Answer = Result<PathRasterization>;
+  if (!document || (fill_profile != Profile::Strict &&
+                    fill_profile != Profile::AppleSilicon &&
+                    fill_profile != Profile::X86_64))
+    return Answer(Status{ErrorCode::InvalidArgument, "invalid fill workflow"});
+  auto ids = numeric::available_workflow_node_ids(*document, 2, {path});
+  if (!ids.ok())
+    return Answer(ids.status());
+  auto staged = *document;
+  staged.nodes.push_back({ids.value()[0],
+                          "path.flatten_bezier_path_v1_strict",
+                          {std::move(path)},
+                          std::move(flatten_parameters)});
+  staged.nodes.push_back(
+      {ids.value()[1],
+       "path.fill_polygon_area_v1_" + detail::profile_suffix(fill_profile),
+       {WorkflowNodeOutput{ids.value()[0], "path"}},
+       std::move(fill_parameters)});
+  *document = std::move(staged);
+  return Answer(PathRasterization{{ids.value()[1], "coverage"},
+                                  {ids.value()[0], "report"}});
+}
+
+struct PathWithReport final {
+  WorkflowNodeOutput path, report;
+};
+/** @brief PTH-06B authors affine geometry and a separate propagated report.
+ * The prior report is an explicit dependency. Approximation, quantization and
+ * prior publication bounds scale by the exact spectral norm; the new affine
+ * publication contributes another directed bound. The affine is nonsingular
+ * by caller premise. Fill the returned outline explicitly with PTH-09.
+ * This helper owns metadata only and transactionally updates the document.
+ */
+inline Result<PathWithReport> transform_stroke_outline(
+    WorkflowDocument* document, WorkflowInput outline, WorkflowInput affine,
+    WorkflowInput prior_report) {
+  using Answer = Result<PathWithReport>;
+  if (!document)
+    return Answer(Status{ErrorCode::InvalidArgument, "null outline workflow"});
+  auto ids = numeric::available_workflow_node_ids(
+      *document, 2, {outline, affine, prior_report});
+  if (!ids.ok())
+    return Answer(ids.status());
+  auto staged = *document;
+  staged.nodes.push_back({ids.value()[0],
+                          "path.transform_centerline_v1_strict",
+                          {outline, affine},
+                          {}});
+  staged.nodes.push_back(
+      {ids.value()[1],
+       "path.transform_outline_report_v1_strict",
+       {std::move(outline), std::move(affine), std::move(prior_report)},
+       {}});
+  *document = std::move(staged);
+  return Answer(
+      PathWithReport{{ids.value()[0], "path"}, {ids.value()[1], "report"}});
 }
 
 }  // namespace ps::generation

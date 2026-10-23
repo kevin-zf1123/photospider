@@ -4,7 +4,7 @@ id: PTH-10
 kind: shared_operator_contract
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
+implementation_status: implemented
 ---
 
 # PTH-10: Stroke coverage and outlines
@@ -36,4 +36,4 @@ topology guarantees are separate. Source associations are unchecked caller premi
 Use member-specific independent fixtures plus actual public workflow execution. The
 [oracle coverage](../oracle-coverage.md) identifies finite exact helpers, Measured
 diagnostics and remaining unsupported cases. It cannot establish public schema support,
-GPU admission or complete domain certification. The specified schemas and RNG mappings require implementation and validation before registration. Unresolved numerical solver or backend choices remain explicit member limitations.
+GPU admission or complete domain certification. The CPU members and public authoring helpers are implemented. Finite arithmetic, refinement and capacity limits remain operational bounds; member-specific conservative topology proofs may reject unproven results. No GPU execution is registered for these members.

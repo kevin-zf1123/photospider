@@ -6,9 +6,9 @@ function: stroke_region_sdf
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - path.stroke_region_sdf_v1_strict
   - path.stroke_region_sdf_v1_accelerated_apple_silicon
   - path.stroke_region_sdf_v1_accelerated_x86_64
@@ -18,7 +18,7 @@ proposed_operation_keys:
 
 Inherit [PTH-11](PTH-11_distance_contract.md), [GEN common](GEN_common_contract.md), and
 the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. Proposed keys are not runtime registrations. A key includes algorithm version
+contracts. A key includes algorithm version
 and profile; within one version/profile, output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -35,6 +35,10 @@ Distance to the actual exposed boundary of the exact stroke union, negative insi
 Isolated round point is disk SDF. Min of component SDFs is not a general exact union
 distance inside overlaps. Using polygonized outlines requires an explicit
 PTH-10C->PTH-11B workflow with its geometry error.
+
+## Runtime implementation
+
+`path_stroke.cpp` computes signed distance against the exposed exact line/circle boundary from `CircularArrangement`. The same constant/variable-round recipe as PTH-10 is explicit. The three CPU profiles do not approximate the result with the minimum of component SDFs or with a polygonized outline.
 
 ## Dependencies, resources and failures
 
@@ -64,5 +68,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
 identity is implied by these requirements.

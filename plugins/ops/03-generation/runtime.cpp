@@ -59,7 +59,8 @@ std::vector<ReadRegion> Program::support(unsigned, const Region&) const {
 }
 std::uint64_t Reader::bits(unsigned port, unsigned member,
                            const Coordinate& at) const {
-  const auto& group = kernel.groups[kernel.input_base[port] + member];
+  const auto& group =
+      kernel.groups[kernel.input_base[port + input_offset] + member];
   const unsigned slot =
       group.slots.size() == 1
           ? group.slots[0].second
@@ -80,7 +81,7 @@ std::uint64_t Reader::bits(unsigned port, unsigned member,
 double Reader::number(unsigned port, unsigned member,
                       const Coordinate& at) const {
   const auto value = bits(port, member, at);
-  if (kernel.groups[kernel.input_base[port] + member].type ==
+  if (kernel.groups[kernel.input_base[port + input_offset] + member].type ==
       ElementType::Float32) {
     const auto raw = static_cast<std::uint32_t>(value);
     float result;

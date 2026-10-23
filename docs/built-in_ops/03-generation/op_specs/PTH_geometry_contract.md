@@ -4,7 +4,7 @@ id: PTH-geometry
 kind: shared_operator_contract
 category: 03-generation
 status: Accepted
-implementation_status: partially_implemented
+implementation_status: implemented
 ---
 
 # Path geometry, associations and publication
@@ -13,22 +13,22 @@ Inherit [GEN common](GEN_common_contract.md).
 
 ## Current implementation scope
 
-PTH-01 construction, concat, split and reverse, PTH-02 evaluation and PTH-09A polygon fill are implemented. Schema support is tracked separately from the numerical members:
+PTH-01 through PTH-12 are implemented as registered CPU members or explicit public authoring helpers. Member specs define their frozen algorithms, finite resource limits and conservative quality-success domains. All derived schemas have public SDK factories:
 
 | Schema | Public SDK factory / implementation |
 | --- | --- |
 | `photospider.ops.path_core` | `generation::core_path_schema`, implemented. |
 | `photospider.ops.path_primitives` | `generation::primitive_path_schema`, implemented. |
 | `photospider.ops.path_partition` | `generation::path_partition_schema`, implemented and used by stable split. |
-| `photospider.ops.path_arclength_table` | Specified below; factory and producer not implemented. |
-| `photospider.ops.path_samples_param` | Specified below; factory and producer not implemented. |
-| `photospider.ops.path_samples_arc` | Specified below; factory and producer not implemented. |
-| `photospider.ops.path_width` | Specified below; factory and binding workflow not implemented. |
-| `photospider.ops.path_source_map` | Specified below; factory and producer not implemented. |
-| `photospider.ops.exact_polygon` | Specified below; factory and producer not implemented. |
-| `photospider.ops.grid_polygon` | Specified below; factory and producer not implemented. |
-| `photospider.ops.path_fit_report` | Specified below; factory and producer not implemented. |
-| `photospider.ops.geometry_report` | Specified below; factory and producer not implemented. |
+| `photospider.ops.path_arclength_table` | `generation::path_arclength_schema`, implemented with producers. |
+| `photospider.ops.path_samples_param` | `generation::path_samples_schema (parameter variant)`, implemented with producers. |
+| `photospider.ops.path_samples_arc` | `generation::path_samples_schema (arc variant)`, implemented with producers. |
+| `photospider.ops.path_width` | `generation::path_width_schema`, implemented with producers. |
+| `photospider.ops.path_source_map` | `generation::path_source_map_schema`, implemented with producers. |
+| `photospider.ops.exact_polygon` | `generation::exact_polygon_schema`, implemented with producers. |
+| `photospider.ops.grid_polygon` | `generation::grid_polygon_schema`, implemented with producers. |
+| `photospider.ops.path_fit_report` | `generation::path_fit_report_schema`, implemented with producers. |
+| `photospider.ops.geometry_report` | `generation::geometry_report_schema`, implemented with producers. |
 
 The implemented factories in [generation.hpp](../../../../plugins/ops/include/photospider/ops/generation.hpp) construct and validate static schemas only. They do not encode a persistent geometry object or validate runtime payloads. Member specifications retain their separate operation/backend status.
 
@@ -129,7 +129,7 @@ This v1 map supports identity, reverse, exact rational subintervals and source r
 
 `photospider.ops.exact_polygon` has coordinate_signs UInt8 `[V,2]`, coordinate_sizes Int64 `[V,2,2]`, coordinate_limbs UInt8 `[V,2,2,L,4]`, contour_offsets Int64 `[C+1]`, and counts Int64 `[2]` (vertices, contours). It uses the rational encoding above. Contours store cyclic vertices without repeating the initial vertex; consecutive vertices and cyclic closure define edges. Coincident exact coordinates preserve contact relations. No separate general graph representation is required. Orientation, contour rotation and ordering follow PTH-12A. V/C/L are explicit static capacities; exhausting them fails operationally without substituting Float64 or grid geometry.
 
-`photospider.ops.grid_polygon` has coordinates Int64 `[V,2]`, contour_offsets Int64 `[C+1]`, and counts Int64 `[2]`. Grid origin and positive spacing remain explicit static operation parameters, supplied consistently to producers and consumers. Grid coordinates are signed64; required input and output range representability is a caller premise. The schema does not select a Boolean backend or its intermediate intersection-rounding policy. Those mathematical choices remain separate implementation gates; they cannot be inferred from this storage layout.
+`photospider.ops.grid_polygon` has coordinates Int64 `[V,2]`, contour_offsets Int64 `[C+1]`, and counts Int64 `[2]`. Grid origin and positive spacing remain explicit static operation parameters, supplied consistently to producers and consumers. Grid coordinates are signed64; required input and output range representability is a caller premise. The storage schema itself does not imply a Boolean algorithm. [PTH-12D](PTH-12D_boolean_grid_result.md) freezes the implemented v1 choices: exact ties-even input quantization, exact rational arrangement, then ties-even result-vertex snapping with cycle order and degeneracies retained.
 
 ## Minimal quality reports
 
@@ -188,7 +188,7 @@ The ArcLengthTable schema records source segment IDs and ranges, ordered t knots
 with cumulative lower/upper s bounds, totals and a correctly-rounded length. Fields bind
 to the source path snapshot and table identity. PathSamples variants carry positions,
 source segment and local t, with arc_s only when computed. PathPartition and quality
-reports use the schemas above. PathPartition has the implemented `generation::path_partition_schema` factory. ArcLengthTable, both PathSamples variants and both quality-report schemas remain specifications without public factories or producers, as listed in the implementation table.
+reports use the schemas above. The public SDK implements PathPartition, ArcLengthTable, both PathSamples variants and both quality-report factories, with producers in the corresponding PTH members as listed above.
 
 ## Deterministic flattening
 

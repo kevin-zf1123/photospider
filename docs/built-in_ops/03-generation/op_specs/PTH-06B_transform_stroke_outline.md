@@ -6,16 +6,15 @@ function: transform_stroke_outline
 kind: composite_workflow
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
+implementation_status: implemented_public_authoring_helper
+clarification_status: resolved
 ---
 
 # PTH-06B: transform stroke outline
 
 Inherit [PTH-06](PTH-06_transforms_contract.md), [GEN common](GEN_common_contract.md),
 and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -32,6 +31,10 @@ Transform the outline geometry, then fill explicitly using PTH-09. A round cap b
 elliptical under nonuniform scaling; do not scale a raster mask instead. Propagate prior
 polygonization error by at most spectral norm(A) and account subsequent publication
 error.
+
+## Runtime implementation
+
+`generation::transform_stroke_outline` is a public authoring helper. It composes PTH-06A with `path.transform_outline_report_v1_strict`; its explicit inputs include the prior GeometryReport. The report kernel computes the affine spectral norm with certified radicals, scales prior stage bounds, and adds construction-time coordinate publication error. Filling the transformed closed outline is a separate PTH-09 call.
 
 ## Dependencies, resources and failures
 
@@ -61,5 +64,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
 identity is implied by these requirements.

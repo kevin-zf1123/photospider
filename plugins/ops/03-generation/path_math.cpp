@@ -94,8 +94,10 @@ bool CurveMath::compact_polynomial(const Curve& curve, const Rational& input,
                                      : Coordinate{curve.row, j, axis};
     return e.binary(
         reader.bits(0, curve.field, at),
-        reader.kernel.groups[reader.kernel.input_base[0] + curve.field].type ==
-            ElementType::Float32);
+        reader.kernel
+                .groups[reader.kernel.input_base[reader.input_offset] +
+                        curve.field]
+                .type == ElementType::Float32);
   };
   std::array<Value, 2> result;
   std::array<bool, 2> copy{};

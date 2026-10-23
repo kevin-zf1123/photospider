@@ -63,7 +63,12 @@ def _angle_compare(a,b):
     return -1 if z>0 else (1 if z<0 else 0)
 
 
-def canonical_polygon(contour):
+def canonical_polygon(contour, protected_vertices=frozenset()):
+    """Remove only unprotected forward-collinear vertices, then rotate exactly.
+
+    A regularized arrangement can have a point contact with degree greater than
+    two. Such vertices remain explicit even if one incident cycle is straight.
+    """
     pp=list(map(point,contour))
     if len(pp)>1 and pp[0]==pp[-1]:pp.pop()
     changed=True
@@ -71,7 +76,7 @@ def canonical_polygon(contour):
         changed=False
         for i in range(len(pp)):
             a,b,c=pp[i-1],pp[i],pp[(i+1)%len(pp)]
-            if not orientation(a,b,c) and _on_segment(b,a,c):
+            if b not in protected_vertices and not orientation(a,b,c) and _on_segment(b,a,c):
                 pp.pop(i);changed=True;break
     if len(pp)<3 or not polygon_area(pp):return []
     candidates=[pp[i:]+pp[:i] for i,v in enumerate(pp) if v==min(pp)]
@@ -80,8 +85,11 @@ def canonical_polygon(contour):
 
 def boundary_contours(edges):
     if not edges:return []
-    outgoing={}
-    for i,(a,b) in enumerate(edges):outgoing.setdefault(a,[]).append(i)
+    outgoing={};degree={}
+    for i,(a,b) in enumerate(edges):
+        outgoing.setdefault(a,[]).append(i)
+        degree[a]=degree.get(a,0)+1;degree[b]=degree.get(b,0)+1
+    protected={p for p,n in degree.items() if n!=2}
     nxt={}
     for i,(a,b) in enumerate(edges):
         opts=outgoing.get(b,[])
@@ -99,7 +107,7 @@ def boundary_contours(edges):
         while i not in used:
             used.add(i);cycle.append(edges[i][0]);i=nxt[i]
         if i!=first:raise ArithmeticError('non-permutation boundary traversal')
-        cc=canonical_polygon(cycle)
+        cc=canonical_polygon(cycle,protected)
         if cc:out.append(cc)
     return sorted(out)
 

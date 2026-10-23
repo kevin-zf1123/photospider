@@ -6,9 +6,9 @@ function: flatten_bezier_path
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - path.flatten_bezier_path_v1_strict
 ---
 
@@ -16,8 +16,7 @@ proposed_operation_keys:
 
 Inherit [PTH-04](PTH-04_resampling_contract.md), [GEN common](GEN_common_contract.md),
 and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -35,6 +34,10 @@ Exact t=1/2 de Casteljau, DFS left first. Bound parameter-matched curve/chord de
 by differences between degree-d controls and degree-elevated endpoint chord controls.
 Add maximum RN64 endpoint displacement before accepting leaf. Shared vertices once,
 closed Z without duplicate M. Never use perpendicular flatness alone.
+
+## Runtime implementation
+
+`path_flatten.cpp` publishes `path`, `report`, `samples` and `source_map` as explicit associated outputs. Exact dyadic subdivision parameters are encoded in `path_source_map`; its limb capacity follows the configured subdivision depth. The parameter-matched bound includes publication displacement and is checked on each accepted leaf. `topology=reject_unproven` currently accepts only the sufficient exact geometric-identity certificate; a nonzero bound returns `InvalidQuality`. This is a conservative success domain, not a general topology solver.
 
 ## Dependencies, resources and failures
 
@@ -65,5 +68,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
 identity is implied by these requirements.

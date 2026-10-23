@@ -128,7 +128,7 @@ struct Dense final {
 };
 inline std::uint64_t linear_read(const Reader& reader, unsigned port,
                                  unsigned member, std::uint64_t index) {
-  const auto& shape = reader.kernel.program->inputs[port]
+  const auto& shape = reader.kernel.program->inputs[port + reader.input_offset]
                           .result_schema->tensors[member]
                           .sample_shape();
   Coordinate at{};

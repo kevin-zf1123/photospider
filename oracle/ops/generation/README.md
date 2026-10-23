@@ -37,6 +37,21 @@ lists the available helper subset and remaining limitations for all 95 current m
 specifications. No coverage level means the corresponding operator is implemented.
 A helper test is not complete validation of every member using it.
 
+## PTH-04 exact irrational-length relations
+
+`pth04/geometry.py::polyline_arc_relation(points, fraction, segment, local_t, closed=False)` proves a supplied arc-coordinate relation for rational vertices and rational parameters. It groups squared lengths by exact rational square ratios using Python `Fraction` and `math.isqrt`; distinct square classes cannot cancel. This includes equal diagonal lengths, scaled roots and cancellation across mixed square classes. It is a candidate-equality oracle, not a solver for arbitrary curves, a junction-ownership validator or an IEEE publication certificate. The existing sampling helpers still require rational segment lengths.
+
+## PTH-12 exact Boolean and grid references
+
+The C++ production backend is the in-repository rational `PolygonArrangement`, with a separate radical `CircularArrangement` for circular strokes and offsets. These Python modules are independent, offline references:
+
+- `pth12/slab.py::verify_boolean(a, b, result, operation, fill_rule_a, fill_rule_b)` verifies the whole regularized region using exact `Fraction` arithmetic and a vertical decomposition. Critical x coordinates include all source/output vertices and finite-edge intersections. Every open slab compares complete affine interval boundaries, rather than sampled pixels or area totals. Vertical edges and point contacts follow from regular closure. This proves region equality for the finite polygon input; it does not prove canonical contour serialization.
+- `pth12/geometry.py::boolean_regions` supplies a separate exact boundary/halfedge reference for canonical cycles. Collinear simplification respects global boundary degree, retaining vertices where contours contact.
+- `pth12/grid.py::boolean_grid` freezes ties-even input quantization, exact intermediate arrangement, then ties-even result-vertex snapping with cycle order and degenerate snapped edges retained. It invokes the slab checker on the exact intermediate region. `publish_grid` maps signed64 coordinates through exact origin/spacing and RN64, returning the exact squared publication-error maximum.
+- `pth12/fixtures.py` contains 13 named cases covering an empty counterpart, rectangle configurations, shared edges, point contacts (including a collinear contact), holes, self-crossing, thin dyadic slivers and non-dyadic intersections. Callers may apply each of the four set operations and compare region, canonical encoding and independently known areas where available.
+
+The slab proof relies on finite closed line contours, exact intersection enumeration, simultaneous same-height winding events, and equality of affine interval endpoints throughout each slab. It does not apply to circular offsets, and does not certify the Float64 publication topology premises. Temporary native execution adapters are removed after implementation; the algorithm references and fixtures remain reusable.
+
 ## RNG v1 reference
 
 The selected Philox4x64-10 core, counter layout, key `(seed_bits,0)` and finite-grid mappings follow [production v1](../../../docs/built-in_ops/03-generation/op_specs/NOI_random_contract.md). Counter words encode x/y, frame/draw and stream/channel/domain in that order, with 72 reserved bits fixed to zero. Float32 halfopen24 uses the high 24 bits of word 0; Float64 halfopen53 uses the high 53 bits. Open52 uses the high 52 bits of its selected word.

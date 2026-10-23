@@ -6,16 +6,15 @@ function: path_distance_coordinate
 kind: composite_workflow
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
+implementation_status: implemented_public_authoring_helper
+clarification_status: resolved
 ---
 
 # GEN-05F: path distance coordinate
 
 Inherit [GEN-05](GEN-05_gradient_coordinates_contract.md), [GEN
 common](GEN_common_contract.md), and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -32,6 +31,10 @@ provide required fill/stroke parameters.
 Compose the corresponding PTH-11 member followed by NUM division. Preserve the
 published-distance rounding stage; do not replace the workflow with one rounded
 true-distance/scale expression.
+
+## Runtime implementation
+
+`generation::path_distance_coordinate` is the public C++ authoring helper in `photospider/ops/generation.hpp`. It chooses the explicit PTH-11 distance member, publishes its `distance`, broadcasts the positive scale (same dtype as the published distance), then invokes NUM division. `stroke_signed` additionally requires the explicit stroke width input. The returned workflow output preserves the distance rounding stage and supports all three declared distance sources; no monolithic GEN-05F registry key is introduced.
 
 ## Dependencies, resources and failures
 
@@ -61,5 +64,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
 identity is implied by these requirements.

@@ -4,7 +4,7 @@ id: GEN-05
 kind: shared_operator_contract
 category: 03-generation
 status: Accepted
-implementation_status: partially_implemented
+implementation_status: implemented
 ---
 
 # GEN-05: Gradient coordinates
@@ -15,17 +15,17 @@ premises; no SVG fallback or numerical-domain diagnostic is implied. Angular/rep
 rounding keeps an upper endpoint rounded to 1. Two-circle validity is separate from
 alpha.
 
-## Registered CPU interface for GEN-05A through E
+## Registered CPU interface for GEN-05A through E and G
 
-A through E are implemented; F and G retain their separate unimplemented status.
-Each registered member has `strict`, `accelerated_apple_silicon`, and
+A through E and G are implemented primitives. F is the implemented public authoring helper `generation::path_distance_coordinate`, composing PTH-11 distance, scale broadcast and NUM division.
+Each primitive registered member has `strict`, `accelerated_apple_silicon`, and
 `accelerated_x86_64` keys. Strict runs on supported CPU hosts; the accelerated
 profiles require their named architecture. These members do not register a GPU key.
 
 Each ordered input is a Result with one Float32 or Float64 tensor and no batch
 axes; input dtypes may differ. Controls have the exact shapes in the member spec.
 The named output `t` is `photospider.tensor` v1 / `samples`, shape `[height,width]`,
-with spatial axes 0/1, no color description and dtype selected independently.
+with spatial axes 0/1, no color description and dtype selected independently. G also publishes UInt8 `valid[height,width]`; F exposes its composed workflow output.
 
 | Static parameter | Type | Default / meaning |
 | --- | --- | --- |
@@ -34,9 +34,9 @@ with spatial axes 0/1, no color description and dtype selected independently.
 | `dtype` | String | `float64`; alternatively `float32` |
 | `max_work` | Int64 | INT64_MAX; per-invocation operational work cap |
 | `center_policy` (C only) | String | `zero`, the only admitted policy |
-| `max_refinements` (C only) | Int64 | 4096; full positive Int64 refinement cap |
+| `max_refinements` (C/G only) | Int64 | 4096; full positive Int64 refinement cap |
 
-Strict evaluates the complete exact expression before destination rounding.
+For A through E, strict evaluates the complete exact expression before destination rounding.
 The Float32 interval path also proves correct rounding; accelerated Float64
 uses the [NUM final FP32 four-ULP contract](../../01-numeric/op_specs/NUM_accelerated_contract.md)
 with strict fallback outside its admitted range. Exact zeros, discrete branches
@@ -52,6 +52,8 @@ Resource capacity and work exhaustion remain `ResourceExhausted`, cancellation
 remains `Cancelled`. C uses 128..4096-bit directed refinement; exhausting its
 refinement allowance without a rounding certificate returns `OperationFailed`
 with generation domain code `0x47454e0001`.
+
+G instead uses certified exact quadratic/radical selection and rounding in all three CPU profiles, as specified by [GEN-05G](GEN-05G_two_circle_radial_coordinate.md). Its no-solution policy does not absorb arithmetic, work or cancellation failures.
 
 ## Members
 

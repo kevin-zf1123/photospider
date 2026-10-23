@@ -2,19 +2,21 @@
 spec_schema_version: 1
 id: PTH-12F
 status: Accepted
-implementation_status: not_implemented
-registration_status: backend_and_implementation_gates
+implementation_status: implemented
+registration_status: registered
+operation_keys:
+  - path.boolean_grid_float64_v1_strict
 ---
 
 # PTH-12F: Explicit-grid Boolean with Float64 output
 
 Inherits [PTH-12](PTH-12_boolean_offset_contract.md),
 [GEN-common](GEN_common_contract.md) and [PTH geometry](PTH_geometry_contract.md). This
-is a distinct versioned member; concrete registry spelling remains a freeze gate. Same
+is a distinct registered versioned member. Same
 version/profile means bit-identical public output; no backend substitution changes that
 contract.
 
-Inputs and quantized Boolean semantics match PTH-12D. Outputs are a Float64 CoreVerbs
+Inputs and quantized Boolean semantics match PTH-12D. Outputs are `path`, a Float64 CoreVerbs
 PathSet and both quantization/publication diagnostics. Parameters include the same grid
 origin/scale and algorithm identity, plus a positive publication displacement budget and
 separate hard work/capacity limits.
@@ -28,12 +30,12 @@ publication budget, preserved incidence/topology and distinct required grid poin
 remaining distinct in Float64 are unchecked caller preconditions. No output scan or
 publication gate checks them; report topology_status=0 (unverified). Do not claim
 original-input exactness. Canonical output must agree with an
-explicit compatible grid-result publication path, once that codec/conversion is frozen.
+explicit PTH-12D result followed by exact `origin + spacing * integer` evaluation and one RN64 per coordinate. The same exact-cycle order, duplicate snapped vertices and degenerate contours are retained; no post-publication reclip or canonicalization changes them.
 
 Complete-input lowering uses fixed tasks, explicit private intermediate Results and
 fixed dependencies; a failed call exports no successful Result. Tests include large grid indices,
 non-power-of-two scale, valid topology-preserving publication, scale/origin identity,
 capacity exhaustion and cancellation. Invalid publication geometry has no promised
-runtime diagnostic. Backend and codec remain gates.
+runtime diagnostic. `path_boolean.cpp`, the grid codec and `generation::grid_polygon_schema` implement the frozen path. `pth12/grid.py::publish_grid` is its exact independent publication reference. The quantization stage equals PTH-12D; the publication stage is RU64 of the square root of the maximum exact squared coordinate displacement.
 
-These are specification acceptance requirements, not completed execution evidence.
+The strict CPU implementation is registered. The acceptance list defines required behavior; finite validation does not establish every valid-input success domain or a GPU backend.

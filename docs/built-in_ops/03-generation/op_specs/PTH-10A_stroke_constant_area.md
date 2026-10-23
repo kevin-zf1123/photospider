@@ -6,9 +6,9 @@ function: stroke_constant_area
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - path.stroke_constant_area_v1_strict
   - path.stroke_constant_area_v1_accelerated_apple_silicon
   - path.stroke_constant_area_v1_accelerated_x86_64
@@ -18,7 +18,7 @@ proposed_operation_keys:
 
 Inherit [PTH-10](PTH-10_stroke_contract.md), [GEN common](GEN_common_contract.md), and
 the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. Proposed keys are not runtime registrations. A key includes algorithm version
+contracts. A key includes algorithm version
 and profile; within one version/profile, output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -41,6 +41,10 @@ their intersection. Union these regions before pixel-area RN. Miter compares exa
 distance/radius to limit, equality keeps miter, excess bevels. At a 180-degree reversal
 round adds a semicircle; bevel/miter do not produce an infinite spike. Zero width empty;
 isolated point round=disk,square=axis-aligned width square,butt=empty.
+
+## Runtime implementation
+
+`path_stroke.cpp` constructs strips, caps and joins; `circular_arrangement.cpp` computes the exposed union using exact radical predicates and line/circle intersections. Pixel clipping uses that union and certified Green-integral arc contributions, then rounds coverage once. The strict and architecture-named CPU profiles share this certified backend. No per-component alpha accumulation or polygonized-area substitution is used.
 
 ## Dependencies, resources and failures
 
@@ -71,5 +75,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
 identity is implied by these requirements.

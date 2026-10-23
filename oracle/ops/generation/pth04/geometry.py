@@ -64,6 +64,33 @@ def _exact_segment_length(a,b):
     return F(sn,sd)
 
 
+def polyline_arc_relation(points,fraction,segment,local_t,closed=False):
+    """Prove fraction*total = prefix(segment)+local_t*length(segment).
+
+    All inputs are exact rationals. Segment lengths may be irrational square
+    roots. This verifies a candidate relation; it does not choose junction
+    ownership, invert arbitrary curves, or certify published IEEE coordinates.
+    """
+    pp=list(map(point,points))
+    if closed and pp and pp[-1]!=pp[0]:pp.append(pp[0])
+    f,t=frac(fraction),frac(local_t)
+    if not 0<=f<=1 or not 0<=t<=1 or not 0<=segment<len(pp)-1:
+        raise ValueError('arc relation input')
+    groups=[]
+    for i,(a,b) in enumerate(zip(pp,pp[1:])):
+        q=norm2(sub(b,a));weight=f-int(i<segment)-(t if i==segment else 0)
+        if not q or not weight:continue
+        for group in groups:
+            ratio=q/group[0]
+            n,d=math.isqrt(ratio.numerator),math.isqrt(ratio.denominator)
+            if n*n==ratio.numerator and d*d==ratio.denominator:
+                group[1]+=weight*F(n,d)
+                break
+        else:groups.append([q,weight])
+    # Square roots from distinct rational square classes are Q-linearly independent.
+    return all(not weight for _,weight in groups)
+
+
 def _polyline_lengths(points,closed=False):
     pp=list(map(point,points))
     if not pp:return pp,[],F(0)

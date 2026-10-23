@@ -1,6 +1,6 @@
 # 图形、坐标、渐变与噪声生成
 
-本页按功能整理已接受的规格。GEN-01～04、GEN-05A～E、GEN-06、NOI-01～04、NOI-06、PTH-01～02 已实现，GEN-03C 所需的 PTH-09A 精确多边形面积填充也已实现；其余功能按各成员的实现状态区分。生成类别共有 110 个注册 key，其中本次梯度／分形实现提供 33 个 CPU key。Core、Primitive、partition 的公开 schema factory 及四项 workflow helper 位于 `photospider/ops/generation.hpp`。GEN-05F/G 保持独立的未实现状态。
+本页按功能整理已接受的规格。GEN-01～06、NOI-01～04、NOI-06、PTH-01～12 已实现；其余功能按各成员的实现状态区分。GEN-05F 通过公开路径距离 workflow helper 保留距离发布与 NUM 除法两个舍入阶段，GEN-05G 已提供精确二圆根选择及有效性输出。路径及派生 Result 的公开 schema factory、线宽绑定和复合 workflow helper 位于 `photospider/ops/generation.hpp`。
 
 [共享契约](op_specs/GEN_common_contract.md)、[oracle 覆盖说明](oracle-coverage.md)、[oracle 使用说明](../../../oracle/ops/generation/README.md)与[研究来源及采用边界](research-sources.md)分别定义公共语义和独立参考的证据范围。英文成员规格继续作为数学行为的权威定义。
 
@@ -21,7 +21,7 @@ GEN-03B 椭圆覆盖率与 GEN-03F 椭圆距离的 `max_refinements` 是 Int64 �
 | [GEN-07 mesh/bilinear numeric field](op_specs/GEN-07_mesh_gradients_contract.md) | 网格/四角数值→通用数值张量 | 显式拓扑与插值基函数；不隐式解释颜色、alpha 或 gamut | 控制点值、边界连续、非方形画布；成员：[GEN-07A](op_specs/GEN-07A_bilinear_rectangle_gradient.md)、[GEN-07B](op_specs/GEN-07B_triangle_mesh_gradient.md)、[GEN-07C](op_specs/GEN-07C_bicubic_parameter_patch.md) |
 | [GEN-08 point distributions](op_specs/GEN-08_point_distributions_contract.md) | bounds+seed+参数→DynamicPoints（静态 positions[P,2]、ids[P]、count[1]） | grid/jitter/Poisson disk；min_distance>0 | 最近距离、seed、有效前缀与静态容量上界；成员：[GEN-08A](op_specs/GEN-08A_grid_points.md)、[GEN-08B](op_specs/GEN-08B_jittered_grid_points.md)、[GEN-08C](op_specs/GEN-08C_poisson_rejection_points.md)、[GEN-08D](op_specs/GEN-08D_bridson_points.md) |
 
-Linear用`dot(p-a,b-a)/|b-a|²`；radial用`|p-c|/r`，椭圆先变换局部坐标；angular用`atan2`并映射到周期，中心与接缝显式；diamond/box采用L1/L∞等值线。two-circle radial选择最大有效根；无可返回坐标默认 valid=0，可显式 reject；相同圆非法。退化为全参数解时仍须检查是否存在有限最大有效参数。SVG明确包含坐标系、变换和spread method，只有颜色数组与尺寸不足以决定二维渐变。[^svg]
+Linear用`dot(p-a,b-a)/|b-a|²`；radial用`|p-c|/r`，椭圆先变换局部坐标；angular用`atan2`并映射到周期，中心与接缝显式；diamond/box采用L1/L∞等值线。two-circle radial选择最大有效根；二次根式在区间舍入前检查有理平方根，精确相消返回 `+0, valid=1`，并处理 Float32/64 中点的 ties-even 舍入，负非零值下溢仍保留 `-0`；无可返回坐标默认 valid=0，可显式 reject；相同圆非法。退化为全参数解时仍须检查是否存在有限最大有效参数。SVG明确包含坐标系、变换和spread method，只有颜色数组与尺寸不足以决定二维渐变。[^svg]
 
 颜色解释使用算子 SDK 的 `TensorDescription`，由每个消费算子的静态参数显式提供。Result 仅携带结构、样本和存储 owner。完整图像采用 planar straight 表示，alpha 为同一 tensor 内的独立平面；通道数量不决定颜色模型或 alpha 角色。
 

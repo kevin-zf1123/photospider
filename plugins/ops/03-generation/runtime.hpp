@@ -160,6 +160,7 @@ struct Work final {
 struct Reader final {
   const Kernel& kernel;
   const ps_kernel_invocation_v8& invocation;
+  unsigned input_offset = 0;
   std::uint64_t bits(unsigned port, unsigned member,
                      const Coordinate& at) const;
   double number(unsigned port, unsigned member, const Coordinate& at) const;

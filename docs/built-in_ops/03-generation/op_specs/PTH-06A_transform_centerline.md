@@ -6,9 +6,9 @@ function: transform_centerline
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - path.transform_centerline_v1_strict
 ---
 
@@ -16,8 +16,7 @@ proposed_operation_keys:
 
 Inherit [PTH-06](PTH-06_transforms_contract.md), [GEN common](GEN_common_contract.md),
 and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -32,6 +31,10 @@ attribute_policy; width_policy=preserve_px. The caller guarantees that the selec
 
 Control points RN64(Ap+b), derivatives/arc axes RN64(Av). Core/Bezier/Hermite can degenerate within their representation domain. Arc axes must remain representable under the caller premises; explicitly flatten an arc before applying a transform that would leave that domain. No runtime singularity scan or failure is required. Splines retain knots/weights. Identity copies bits. Non-similarity arc-domain bindings require valid
 remapping or reject/drop; width numeric px value remains unchanged.
+
+## Runtime implementation
+
+`path_edit_basic.cpp` implements the strict member for CoreVerbs and Primitives. Points and vector controls are transformed according to their authority; identity transforms preserve the input bits. `width_policy=preserve_px` is explicit. Associated width/mapping Results remain explicit workflow inputs and are not hidden geometry attributes.
 
 ## Dependencies, resources and failures
 
@@ -60,5 +63,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
 identity is implied by these requirements.

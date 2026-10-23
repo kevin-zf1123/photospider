@@ -4,7 +4,7 @@ id: PTH-12
 kind: shared_operator_contract
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
+implementation_status: implemented
 ---
 
 # PTH-12: Boolean regions, exact results and offsets
@@ -13,10 +13,27 @@ Exact-input and explicit-grid members have separate identities. Exact rational R
 and Float64 conversion with its construction-time displacement report are separate
 outputs/operators. Float64 representability and preserved publication geometry are
 unchecked caller premises; conversion does not validate completed geometry. Do not silently fall
-back to grid, snap or remove small exact features. Candidate backend validation must
-cover geometry, canonical output, codecs, allocation, cancellation, lifetime and
-publication. No library is preselected. Circular offset may require nonrational
-constructions.
+back to grid, snap or remove small exact features. The selected production backend is the
+in-repository exact rational `PolygonArrangement`; circular offsets use the separate
+exact-radical `CircularArrangement`. No external geometry library is required.
+
+## Frozen production algorithms and independent oracle
+
+`plugins/ops/03-generation/polygon_arrangement.cpp` implements v1 polygon Boolean:
+
+1. Lift each finite Float64 coordinate to its exact dyadic rational, or consume the canonical exact-polygon codec directly.
+2. Enumerate edge pairs, split at exact rational intersections, and split collinear overlaps at their exact endpoints. No rounded intersection is used in a predicate.
+3. Classify both sides of each atomic directed edge with exact winding/even-odd rules and symbolic infinitesimal side probes. Keep an edge only where the requested union/intersection/difference/xor changes region membership.
+4. Trace the exposed oriented boundary. Remove shape-neutral collinear vertices only when their global boundary degree is two, preserving contacts shared by contours. Rotate each contour to its lexicographically minimal full cycle and sort cycles using exact comparisons.
+5. Publish exact reduced rationals (C), or apply the separately specified RN64 publication stage (A/E). D/F use their explicit input quantization and final intersection snap; they are never an exact-input fallback.
+
+The pairwise arrangement is deliberately bounded by `max_events`, `max_work`, output capacities, exact-arithmetic capacity and preadmitted scratch. It does not promise sweep-line asymptotics. All loops poll cancellation and exhaustion publishes no partial Result. The exact codec is base-2^32 little-endian with canonical reduced numerator/positive denominator and zeroed inactive storage.
+
+`oracle/ops/generation/pth12/slab.py::verify_boolean` is an independent Python `Fraction` region oracle. It builds critical x coordinates from all input/output vertices and finite-edge intersections. Within each open slab, it compares complete affine upper/lower interval boundaries after fill-rule and set-operation evaluation. Edge order cannot change within a slab, so equality of these interval functions proves equality of the regularized two-dimensional regions, including holes, overlaps, self-crossings and point contacts. It does not certify canonical serialization or multiplicity by itself.
+
+`pth12/geometry.py::boolean_regions` separately checks canonical directed contour output; its collinear removal preserves non-degree-two contact vertices. `pth12/grid.py` freezes the D/F quantization and publication reference. `pth12/fixtures.py` supplies rectangle, contact, hole, self-crossing and rational-intersection fixtures. These references are not linked into the production backend.
+
+`circular_arrangement.cpp` supplies exact radical line/circle and circle/circle intersections, exposed-union classification and certified circular area/distance machinery for PTH-10, PTH-11C and PTH-12B. Finite directed refinement may fail when a predicate or final rounding cannot be certified within its limit; that failure is not an approximate answer.
 
 ## Members
 
@@ -43,4 +60,4 @@ topology guarantees are separate. Source associations are unchecked caller premi
 Use member-specific independent fixtures plus actual public workflow execution. The
 [oracle coverage](../oracle-coverage.md) identifies finite exact helpers, Measured
 diagnostics and remaining unsupported cases. It cannot establish public schema support,
-GPU admission or complete domain certification. The specified schemas and RNG mappings require implementation and validation before registration. Unresolved numerical solver or backend choices remain explicit member limitations.
+GPU admission or complete domain certification. The CPU members and public authoring helpers are implemented. Finite arithmetic, refinement and capacity limits remain operational bounds; member-specific conservative topology proofs may reject unproven results. No GPU execution is registered for these members.

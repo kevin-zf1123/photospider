@@ -6,9 +6,9 @@ function: trim_path
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - path.trim_path_v1_strict
 ---
 
@@ -16,8 +16,7 @@ proposed_operation_keys:
 
 Inherit [PTH-07](PTH-07_trim_dash_contract.md), [GEN common](GEN_common_contract.md),
 and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -38,6 +37,14 @@ trim then RN64 controls; connection and publication geometry are unchecked calle
 premises, with no completed-output validation. Preserve source-position width
 using source snapshot and original lengths; explicit rebind alone reapplies full
 profile.
+
+## Runtime implementation
+
+`path_trim.cpp` uses certified true-length inversion and de Casteljau restriction. The outputs are `path`, `source_map` and `report`. Defaults include `max_output_segments=4096`, `max_integration_panels=1048576`, `max_refinements=4096`, `limb_capacity=128` and 64 MiB of algorithm scratch.
+
+The source map is an exact rational affine parameter map. If a true-arc cut needs an unrepresentable irrational mapping, the default `attribute_policy=reject_unmappable` fails; explicit `drop_unmappable` omits that mapping and reports the drop. A rounded cut parameter is never encoded as an exact source correspondence.
+
+Normalized and pixel-arc cuts retain their exact target expressions when using the shared PTH-04B traversal. Analytic irrational-length junctions and rational inverse parameters are resolved before constructing a source map. For monotone collinear polynomial cuts, continued-fraction reconstruction can retain non-dyadic rational parameters such as `1/3`; only a proved irrational root enters the unmappable policy, while an exhausted rationality certificate fails refinement.
 
 ## Dependencies, resources and failures
 
@@ -65,13 +72,13 @@ lifetime and actual returned coverage inherit GEN-common.
 ## Independent fixtures and acceptance
 
 100px line25..75, empty interval, closed wrap, full-range bit identity and three width
-domains.
+domains. Include diagonal irrational-length junction cuts and exact `t=1/3` maps for the monotone quadratic `C(t)=-1+3.5t-1.5t^2` and cubic `C(t)=27t^3`; distinguish these from proved irrational cuts.
 
 Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
 identity is implied by these requirements.
 
 ## Source width mapping

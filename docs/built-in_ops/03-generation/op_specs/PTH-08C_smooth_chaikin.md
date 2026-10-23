@@ -6,9 +6,9 @@ function: smooth_chaikin
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - path.smooth_chaikin_v1_strict
 ---
 
@@ -16,7 +16,7 @@ proposed_operation_keys:
 
 Inherit [PTH-08](PTH-08_editing_contract.md), [GEN common](GEN_common_contract.md), and
 the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. Proposed keys are not runtime registrations. A key includes algorithm version
+contracts. A key includes algorithm version
 and profile; within one version/profile, output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -33,6 +33,10 @@ require explicit splitting.
 Each edge produces Q=(3P_i+P_(i+1))/4 and R=(P_i+3P_(i+1))/4, RN64 each round before
 next iteration. Preserve open endpoints; closed loops omit duplicate closure vertex.
 Zero iterations copy bits. This changes shape without an epsilon or topology guarantee.
+
+## Runtime implementation
+
+`path_edit_basic.cpp` implements the strict member. Defaults are one iteration and `max_vertices=1048576`; each round publishes RN64 Q/R points before the next. Scratch, vertex growth and output capacities are bounded. No geometry-error or topology certificate is inferred from Chaikin smoothing.
 
 ## Dependencies, resources and failures
 
@@ -61,5 +65,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
 identity is implied by these requirements.

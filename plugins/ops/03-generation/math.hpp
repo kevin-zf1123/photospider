@@ -35,7 +35,10 @@ class Math final {
   Rational input(const Reader& reader, unsigned port, unsigned field,
                  const Coordinate& at) const {
     const auto type =
-        reader.kernel.groups[reader.kernel.input_base[port] + field].type;
+        reader.kernel
+            .groups[reader.kernel.input_base[port + reader.input_offset] +
+                    field]
+            .type;
     return exact.binary(reader.bits(port, field, at),
                         type == ElementType::Float32);
   }
@@ -90,9 +93,10 @@ class Math final {
     check(exact.status());
     return result;
   }
-  void enclose(Interval output, const Rational& value) {
-    exact.enclose(d, output, value);
-  }
+  // Input is a reduced, nonnegative rational from the exact arithmetic field.
+  // Return false for an irrational root; operational failures still propagate.
+  bool rational_sqrt(const Rational& value, Rational* root);
+  void enclose(Interval output, const Rational& value);
   void sqrt(Interval output, Interval input);
   void sincos(Interval sine, Interval cosine, Interval input);
   void atan2(Interval output, const Rational& y, const Rational& x);

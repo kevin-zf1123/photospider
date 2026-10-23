@@ -172,7 +172,7 @@ mapping; reapplying the full width function to each output fragment requires an 
 rebind. An unrepresentable mapping follows the attribute failure policy, not approximate
 interpolation. This preserves width, not every raster pixel: new endpoints can introduce
 new caps. Zero length, closed seams, domain bounds and exact mapping representation
-follow the member rules and bounded rational source-map representation; runtime implementation remains absent.
+follow the member rules and bounded rational source-map representation. PTH-05 public authoring helpers and PTH-07 runtime producers implement these explicit bindings and source maps.
 
 ## Periodic coordinates and two-circle roots
 

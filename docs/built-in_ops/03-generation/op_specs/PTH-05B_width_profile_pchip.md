@@ -6,16 +6,15 @@ function: width_profile_pchip
 kind: composite_workflow
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
+implementation_status: implemented_public_authoring_helper
+clarification_status: resolved
 ---
 
 # PTH-05B: width profile pchip
 
 Inherit [PTH-05](PTH-05_width_profiles_contract.md), [GEN
 common](GEN_common_contract.md), and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
 
 ## Interface and representation
@@ -31,6 +30,10 @@ Same unchecked domain premises; PCHIP slopes and short-table behavior inherit CR
 Explicitly publish NUM-computed u=s/L or s (zero length0), then evaluate CRV-01B.
 Preserve this intermediate RN difference from A's direct expression. Shape preservation
 needs no post-hoc max(0,w).
+
+## Runtime implementation
+
+The public C++ authoring helper is `generation::width_profile_pchip` in `photospider/ops/generation.hpp`. It publishes query operands through `path.width_query_operands_v1_strict`, performs the explicit NUM division stage, and invokes the CRV PCHIP workflow. The zero-length query is constructed as 0/1. There is no monolithic PTH-05B runtime key; the public workflow retains the specified intermediate rounding.
 
 ## Dependencies, resources and failures
 
@@ -61,5 +64,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. The registered CPU implementation uses the bounded algorithms and failure rules specified here. No unverified GPU or third-party bit
 identity is implied by these requirements.

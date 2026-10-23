@@ -63,6 +63,19 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/03-generation/math.cpp
   plugins/ops/03-generation/generators.cpp
   plugins/ops/03-generation/gradients.cpp
+  plugins/ops/03-generation/radial_two_circle.cpp
+  plugins/ops/03-generation/path_edit_basic.cpp
+  plugins/ops/03-generation/polygon_arrangement.cpp
+  plugins/ops/03-generation/path_boolean.cpp
+  plugins/ops/03-generation/path_flatten.cpp
+  plugins/ops/03-generation/path_width.cpp
+  plugins/ops/03-generation/path_distance.cpp
+  plugins/ops/03-generation/path_length.cpp
+  plugins/ops/03-generation/path_arc_sampling.cpp
+  plugins/ops/03-generation/circular_arrangement.cpp
+  plugins/ops/03-generation/path_stroke.cpp
+  plugins/ops/03-generation/path_refit.cpp
+  plugins/ops/03-generation/path_trim.cpp
   plugins/ops/03-generation/fractals.cpp
   plugins/ops/03-generation/geometry.cpp
   plugins/ops/01-numeric/expression.cpp
