@@ -11,11 +11,12 @@ inline std::array<std::uint64_t, 4> philox(std::int64_t x, std::int64_t y,
                                            std::uint64_t channel,
                                            unsigned domain, std::uint64_t seed,
                                            std::uint64_t stream,
-                                           std::uint64_t frame) {
+                                           std::uint64_t frame,
+                                           std::uint64_t draw = 0) {
   std::array<std::uint64_t, 4> c{
       static_cast<std::uint32_t>(x) |
           (static_cast<std::uint64_t>(static_cast<std::uint32_t>(y)) << 32),
-      frame,
+      frame | (draw << 32),
       stream | (channel << 32) | (static_cast<std::uint64_t>(domain) << 48), 0};
   std::uint64_t k0 = seed, k1 = 0;
   for (unsigned round = 0; round < 10; ++round) {

@@ -6,17 +6,31 @@ function: blue_threshold_points
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
+implementation_status: implemented
+clarification_status: resolved
+implementation_scope: generic_rank_resource
+qualified_asset_status: not_provided
+operation_keys:
+  - noise.rank_threshold_points_v1_strict
 ---
 
 # NOI-07B: blue threshold points
 
 Inherit [NOI-07](NOI-07_blue_noise_contract.md), [GEN common](GEN_common_contract.md),
 and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
+
+## Runtime implementation
+
+The registered CPU key `noise.rank_threshold_points_v1_strict` implements generic
+rank thresholding. Descriptor parameters follow NOI-07A. Height, width and
+`threshold_count` are required; origins/offsets default to zero, `max_count`
+defaults to 1,048,576 and `max_work` bounds actual work. There is no dtype parameter:
+`points` is the canonical DynamicPoints v1 bundle. A complete-bundle task fills
+positions/ordinal IDs/count and zero padding. A zero threshold reads no rank payload.
+Capacity exhaustion returns ResourceExhausted/CapacityLimit without a successful
+prefix. No named blue-quality or GPU key is registered.
 
 ## Interface and representation
 
@@ -60,5 +74,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

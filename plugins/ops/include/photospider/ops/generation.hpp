@@ -13,6 +13,7 @@
 #include "photospider/ops/numeric/binary.hpp"
 #include "photospider/ops/numeric/curves.hpp"
 #include "photospider/ops/numeric/workflow_authoring.hpp"
+#include "photospider/ops/tensor_description.hpp"
 
 namespace ps::generation {
 /** @brief Fixed positive backing capacities; effective counts remain payload.
@@ -447,6 +448,110 @@ inline Result<WorkflowNodeOutput> correlated_gaussian(
   *document = std::move(staged);
   return Result<WorkflowNodeOutput>(
       WorkflowNodeOutput{ids.value()[1], "values"});
+}
+/** @brief Bind a canonical little-endian Int64 rank tensor to immutable bytes.
+ * The caller supplies the content identity of the row-major rank payload.
+ * Static preparation checks byte length against the tensor shape. The supplied
+ * Result owns its immutable tiles; this descriptor owns no bytes. Permutation
+ * and equality to the named content remain unchecked caller premises.
+ * No provenance or blue/STBN quality is asserted by this generic descriptor.
+ * Pure and thread-safe; returns owned parameters, or InvalidArgument for an
+ * impossible byte length. Container allocation may throw std::bad_alloc.
+ */
+inline Result<Parameters> rank_resource_parameters(
+    const ResourceIdentity& identity) {
+  if (!identity.byte_length || identity.byte_length % 8 ||
+      identity.byte_length > (UINT64_C(1) << 43))
+    return Result<Parameters>(
+        Status{ErrorCode::InvalidArgument, "rank resource byte length"});
+  constexpr char digits[] = "0123456789abcdef";
+  std::string hash;
+  hash.reserve(64);
+  for (const auto byte : identity.sha256) {
+    hash.push_back(digits[byte >> 4]);
+    hash.push_back(digits[byte & 15]);
+  }
+  return Result<Parameters>(Parameters{
+      {"resource_sha256", std::move(hash)},
+      {"resource_byte_length", static_cast<std::int64_t>(identity.byte_length)},
+      {"resource_encoding", std::string("little_endian_int64")}});
+}
+/** @brief NOI-08B: expected electrons to Int64 electron counts through NOI-08A.
+ * Inputs are explicitly calibrated upstream. Parameters are seed/stream,
+ * optional origin/frame, max_count_search and max_work/max_refinements.
+ * No gain, read noise, clipping or ADC is inserted. Finite open52 sampling
+ * preserves the specified quantile and is not an ideal continuous random
+ * source. Requires exclusive document access; owns node references, not sample
+ * data. Authoring errors leave document unchanged; allocation may throw
+ * std::bad_alloc.
+ */
+inline Result<WorkflowNodeOutput> shot_electrons(
+    WorkflowDocument* document, WorkflowInput expected_electrons,
+    Parameters parameters) {
+  return detail::append(document, "noise.poisson_icdf_v1_strict",
+                        {std::move(expected_electrons)}, std::move(parameters),
+                        "counts");
+}
+/** @brief NOI-09B: domain-10 white source, correlation, then linear RGB mixing.
+ * white_parameters specify canvas, origin, seed/stream/frame and source dtype.
+ * correlation_parameters separately select dtype, boundary and normalization.
+ * Both public intermediate rounding stages remain explicit workflow nodes.
+ * The complete straight linear RGB description uses channel_axis=2; the
+ * selected group may have a same-tensor alpha. Source channels are one for
+ * monochrome or three in red/green/blue order for independent_rgb.
+ * The mix preserves input dtype and alpha bits, including signed zero. Strength
+ * zero copies RGB bits; nonzero strength also affects hidden RGB at alpha zero.
+ * Returned image carries no color description. Downstream consumers receive
+ * their own explicit description. Numerical domains remain caller premises.
+ *
+ * Requires exclusive document access. The description is borrowed only during
+ * this call; nodes own serialized configuration and input references, with no
+ * runtime samples or cache retained. Invalid arguments/ID
+ * allocation/description encoding leave document unchanged. Allocation may
+ * throw std::bad_alloc.
+ */
+inline Result<WorkflowNodeOutput> artistic_linear_grain(
+    WorkflowDocument* document, WorkflowInput image, WorkflowInput strength,
+    WorkflowInput kernel, const TensorDescription& description,
+    std::string color_group, Parameters white_parameters,
+    Parameters correlation_parameters, std::string mode = "monochrome",
+    Profile profile = Profile::Strict) {
+  using Answer = Result<WorkflowNodeOutput>;
+  if (!document || (mode != "monochrome" && mode != "independent_rgb") ||
+      (profile != Profile::Strict && profile != Profile::AppleSilicon &&
+       profile != Profile::X86_64))
+    return Answer(
+        Status{ErrorCode::InvalidArgument, "invalid artistic grain arguments"});
+  auto encoded = tensor_description_parameter(description);
+  if (!encoded.ok())
+    return Answer(encoded.status());
+  auto ids = numeric::available_workflow_node_ids(*document, 3,
+                                                  {image, strength, kernel});
+  if (!ids.ok())
+    return Answer(ids.status());
+  white_parameters["channels"] =
+      static_cast<std::int64_t>(mode == "monochrome" ? 1 : 3);
+  auto staged = *document;
+  const auto suffix = detail::profile_suffix(profile);
+  staged.nodes.push_back({ids.value()[0],
+                          "noise.grain_white_v1_" + suffix,
+                          {},
+                          std::move(white_parameters)});
+  staged.nodes.push_back(
+      {ids.value()[1],
+       "noise.correlate_kernel_v1_" + suffix,
+       {WorkflowNodeOutput{ids.value()[0], "values"}, std::move(kernel)},
+       std::move(correlation_parameters)});
+  staged.nodes.push_back(
+      {ids.value()[2],
+       "noise.artistic_grain_mix_v1_" + suffix,
+       {std::move(image), WorkflowNodeOutput{ids.value()[1], "values"},
+        std::move(strength)},
+       {{"mode", std::move(mode)},
+        {"input_description", encoded.take_value()},
+        {"color_group", std::move(color_group)}}});
+  *document = std::move(staged);
+  return Answer(WorkflowNodeOutput{ids.value()[2], "image"});
 }
 /** @brief GEN-06C appends explicit spread followed by an existing CRV-06 node.
  * Build color_ramp with the public numeric::color_ramp_*_node constructors.

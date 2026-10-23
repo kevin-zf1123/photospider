@@ -6,17 +6,34 @@ function: blue_rank_tile
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
+implementation_status: implemented
+clarification_status: resolved
+implementation_scope: generic_rank_resource
+qualified_asset_status: not_provided
+operation_keys:
+  - noise.rank_tile_v1_strict
 ---
 
 # NOI-07A: blue rank tile
 
 Inherit [NOI-07](NOI-07_blue_noise_contract.md), [GEN common](GEN_common_contract.md),
 and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
-registrations. A key includes algorithm version and profile; within one version/profile,
+[geometry](PTH_geometry_contract.md) contracts. A key includes algorithm version and profile; within one version/profile,
 output bits and discrete decisions are fixed.
+
+## Runtime implementation
+
+The registered CPU key `noise.rank_tile_v1_strict` implements generic resource
+lookup. Required parameters are height, width, `resource_sha256` (64 lowercase hex
+digits) and `resource_byte_length` (=8N). `resource_encoding` defaults to and
+only accepts `little_endian_int64`; shape comes from the rank input schema.
+Origins and offsets default to zero; dtype defaults to float64.
+`ps::generation::rank_resource_parameters(ResourceIdentity)` authors the descriptor.
+The caller binds it to the immutable input Result; payload identity and permutation
+are not scanned. Widened integer modulo and quotient/remainder rounding implement
+exact addressing and midpoint mapping. Reads cover only the demanded periodic support.
+`max_work` is an operational budget. No named blue-quality or GPU key is registered;
+no approved blue asset is bundled.
 
 ## Interface and representation
 
@@ -63,5 +80,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

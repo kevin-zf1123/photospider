@@ -6,9 +6,9 @@ function: advected_gradient2d
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - noise.advected_gradient2d_v1_strict
   - noise.advected_gradient2d_v1_accelerated_apple_silicon
   - noise.advected_gradient2d_v1_accelerated_x86_64
@@ -18,8 +18,19 @@ proposed_operation_keys:
 
 Inherit [NOI-10](NOI-10_temporal_contract.md), [GEN common](GEN_common_contract.md), and
 the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. Proposed keys are not runtime registrations. A key includes algorithm version
+contracts. A key includes algorithm version
 and profile; within one version/profile, output bits and discrete decisions are fixed.
+
+## Runtime implementation
+
+The registered CPU profiles above accept Float32/Float64 coordinates and controls;
+`values` dtype defaults to float64. Seed/stream are required; period_x/y default
+to zero (no declared period). Basis frame is fixed at zero, with no frame parameter.
+Both transformed coordinates and the gradient polynomial retain exact arithmetic
+until final rounding. Interval evaluation is accepted only with a proved final-output
+bound; uncertain lattice cells use exact evaluation. Coordinate tuples are regional
+reads and velocity/time are complete scalar/vector controls. `max_work` bounds
+actual work. No GPU key is registered.
 
 ## Interface and representation
 
@@ -64,5 +75,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

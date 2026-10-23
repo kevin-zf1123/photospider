@@ -4,7 +4,8 @@ id: NOI-random
 kind: shared_operator_contract
 category: 03-generation
 status: Accepted
-implementation_status: partially_implemented
+implementation_status: implemented
+implementation_scope: registered_member_mappings
 clarification_status: specified
 ---
 
@@ -15,8 +16,11 @@ Inherit [GEN common](GEN_common_contract.md). The core algorithm is Philox4x64-1
 ## Current implementation scope
 
 The Philox core and addressed mappings are used by implemented NOI-01A, NOI-02A,
-NOI-04B, the NOI-06 gradient basis and GEN-08B/C/D. Other NOI-05/08/09/10 mappings
-remain specified targets; their member specifications state implementation status.
+NOI-04B, NOI-05A, the NOI-06 gradient basis, NOI-08A/08B, NOI-09A/09B,
+NOI-10A and GEN-08B/C/D. Speckle uses the explicit draw field for each look;
+advection fixes its gradient-basis frame at zero. Generic rank resources and fixed
+Perlin time slices introduce no random address. The general integer rejection rule
+below remains a shared rule for explicit consumers, not a standalone registered sampler.
 
 ## Address range and identity
 

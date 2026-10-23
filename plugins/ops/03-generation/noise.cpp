@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "01-numeric/accelerated_math.hpp"
+#include "03-generation/fast_math.hpp"
 #include "03-generation/noise_math.hpp"
 #include "03-generation/perlin_dyadic.hpp"
 #include "common/registry.hpp"
@@ -18,9 +19,40 @@ struct PolynomialScratch {
   Exact wide{numeric_ops::SequenceProfile::Strict};
   CompactExact compact{numeric_ops::SequenceProfile::Strict};
 };
+// Reduce the integer phase before multiplying by pi. The selected SLEEF
+// sin/cos argument is in [0,pi/4]; its four-ULP enclosure is enlarged by the
+// complete argument interval using |sin'|,|cos'| <= 1. A successful result
+// proves the same final RN32 as the full Box-Muller expression.
+std::optional<std::uint64_t> grain_white_fast(double u, std::uint64_t phase) {
+  if (!numeric_ops::accelerated_math_available())
+    return {};
+  double logarithm = 0;
+  photospider_sleef_evaluate(1, &u, &u, &logarithm, 1);
+  const auto radius = fast_sqrt(
+      -numeric_ops::accelerated_math_enclosure(logarithm) * Fast::point(2));
+  const unsigned quadrant = static_cast<unsigned>(phase >> 51);
+  auto remainder = phase & ((UINT64_C(1) << 51) - 1);
+  bool sine = quadrant & 1;
+  if (remainder > (UINT64_C(1) << 50)) {
+    remainder = (UINT64_C(1) << 51) - remainder;
+    sine = !sine;
+  }
+  const Fast pi{0x1.921fb54442d18p+1, 0x1.921fb54442d19p+1};
+  const auto angle = pi * Fast::point(static_cast<double>(remainder) * 0x1p-52);
+  double trigonometric = 0;
+  photospider_sleef_evaluate(sine ? 2 : 3, &angle.low, &angle.low,
+                             &trigonometric, 1);
+  const double error = numeric_ops::numeric_up(angle.high - angle.low);
+  auto cosine = numeric_ops::accelerated_math_enclosure(trigonometric) +
+                Fast{-error, error};
+  if (quadrant == 1 || quadrant == 2)
+    cosine = -cosine;
+  return fast_result(radius * cosine, true, false);
+}
 enum class NoiseKind { Uniform, Gaussian, Perlin, Gradient };
 struct Noise final : Program {
   NoiseKind kind;
+  bool grain_white = false;
   ElementType type = ElementType::Float64;
   std::uint64_t height = 1, width = 1, channels = 1;
   std::int64_t origin_x = 0, origin_y = 0;
@@ -42,6 +74,8 @@ struct Noise final : Program {
   }
   std::vector<ReadRegion> support(unsigned out,
                                   const Region& region) const override {
+    if (grain_white)
+      return {};
     if (kind == NoiseKind::Uniform || whole_inputs) {
       return Program::support(out, region);
     }
@@ -78,15 +112,18 @@ struct Noise final : Program {
       samples(out, [&](const Coordinate& at, std::uint64_t) {
         work.poll();
         m.exact.reset();
-        const auto mean = m.input(reader, 0, 0, {at[2]}),
-                   sigma = m.input(reader, 1, 0, {at[2]});
+        const auto mean = grain_white ? m.exact.integer(0)
+                                      : m.input(reader, 0, 0, {at[2]}),
+                   sigma = grain_white ? m.exact.integer(1)
+                                       : m.input(reader, 1, 0, {at[2]});
         if (Exact::zero(sigma)) {
           store(out, at, m.rounded(mean, narrow, true));
           return;
         }
-        const auto block = philox(origin_x + static_cast<std::int64_t>(at[1]),
-                                  origin_y + static_cast<std::int64_t>(at[0]),
-                                  at[2], 2, seed, stream, frame);
+        const auto block =
+            philox(origin_x + static_cast<std::int64_t>(at[1]),
+                   origin_y + static_cast<std::int64_t>(at[0]), at[2],
+                   grain_white ? 10 : 2, seed, stream, frame);
         const double u =
             static_cast<double>(2 * (block[0] >> 12) + 1) * 0x1p-53;
         const auto phase = block[1] >> 11;
@@ -95,6 +132,15 @@ struct Noise final : Program {
           store(out, at, m.rounded(mean, narrow));
           return;
         }
+#ifndef PHOTOSPIDER_NOI_EXACT_ONLY
+        if (grain_white && narrow) {
+          work.poll(128);
+          if (const auto result = grain_white_fast(u, phase)) {
+            store(out, at, *result);
+            return;
+          }
+        }
+#endif
         const double v = static_cast<double>(phase) * 0x1p-53;
         const auto result = m.certify(narrow, [&](Interval value) {
           auto logarithm = m.d.interval(), radius = m.d.interval(),
@@ -565,6 +611,33 @@ Status register_noise(OperationRegistry* registry) {
                           static_cast<numeric_ops::SequenceProfile>(profile)));
                       return std::make_shared<Correlation>(inputs, p);
                     })));
+    }
+    auto white_parameters = canvas_parameters();
+    append(&white_parameters, rng_parameters());
+    white_parameters.push_back({"channels", OperationParameterType::Int64});
+    for (unsigned profile = 0; profile < 3; ++profile) {
+      check(registry->register_operation(operation(
+          std::string("noise.grain_white_v1_") + suffix[profile], 0,
+          white_parameters, {{"values", prototype}},
+          [profile](const auto&, const auto& p) {
+            check(numeric_ops::sequence_profile_available(
+                static_cast<numeric_ops::SequenceProfile>(profile)));
+            auto state =
+                std::make_shared<generation::Noise>(NoiseKind::Gaussian, p);
+            state->grain_white = true;
+            generation::Canvas canvas(p);
+            state->height = canvas.height;
+            state->width = canvas.width;
+            state->channels = generation::integer(p, "channels");
+            generation::require(state->channels == 1 || state->channels == 3,
+                                "grain white requires one or three channels");
+            generation::add_output(
+                state.get(),
+                tensor_schema(state->type,
+                              {state->height, state->width, state->channels},
+                              true, true));
+            return state;
+          })));
     }
     return Status::success();
   } catch (const Status& failure) {

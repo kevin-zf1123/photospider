@@ -6,16 +6,32 @@ function: stbn_rank_volume
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
+implementation_status: implemented
+clarification_status: resolved
+implementation_scope: generic_rank_resource
+qualified_asset_status: not_provided
+operation_keys:
+  - noise.rank_volume_v1_strict
 ---
 
 # NOI-10C: stbn rank volume
 
 Inherit [NOI-10](NOI-10_temporal_contract.md), [GEN common](GEN_common_contract.md), and
 the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. Proposed keys are not runtime registrations. A key includes algorithm version
+contracts. A key includes algorithm version
 and profile; within one version/profile, output bits and discrete decisions are fixed.
+
+## Runtime implementation
+
+The registered CPU key `noise.rank_volume_v1_strict` implements generic rank-volume
+lookup. Descriptor parameters and the SDK descriptor helper follow NOI-07A, with
+N=T*Th*Tw<=2^40 and byte length 8N. Height, width and signed Int64 frame are required.
+Origins and offsets x/y/t default to zero; dtype defaults to float64. Widened integer
+sums avoid signed-64 overflow before Euclidean modulo. Selected tiles read only
+their addressed frame slice and periodic spatial support. Payload permutation and
+content binding are caller premises; midpoint rounding is exact. `max_work`
+bounds actual work. No named STBN-quality or GPU key is registered, and no qualified
+STBN volume is bundled.
 
 ## Interface and representation
 
@@ -61,5 +77,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

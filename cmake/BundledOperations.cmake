@@ -58,6 +58,11 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/03-generation/path_evaluation.cpp
   plugins/ops/03-generation/polygon.cpp
   plugins/ops/03-generation/noise.cpp
+  plugins/ops/03-generation/noise_spatial.cpp
+  plugins/ops/03-generation/noise_rank.cpp
+  plugins/ops/03-generation/noise_distribution.cpp
+  plugins/ops/03-generation/noise_temporal.cpp
+  plugins/ops/03-generation/noise_grain.cpp
   plugins/ops/03-generation/perlin_gpu.cpp
   plugins/ops/03-generation/runtime.cpp
   plugins/ops/03-generation/math.cpp

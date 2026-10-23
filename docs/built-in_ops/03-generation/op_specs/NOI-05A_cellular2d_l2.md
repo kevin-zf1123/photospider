@@ -6,9 +6,9 @@ function: cellular2d_l2
 kind: primitive
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
-proposed_operation_keys:
+implementation_status: implemented
+clarification_status: resolved
+operation_keys:
   - noise.cellular2d_l2_v1_strict
   - noise.cellular2d_l2_v1_accelerated_apple_silicon
   - noise.cellular2d_l2_v1_accelerated_x86_64
@@ -18,8 +18,21 @@ proposed_operation_keys:
 
 Inherit [NOI-05](NOI-05_cellular_contract.md), [GEN common](GEN_common_contract.md), and
 the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. Proposed keys are not runtime registrations. A key includes algorithm version
+contracts. A key includes algorithm version
 and profile; within one version/profile, output bits and discrete decisions are fixed.
+
+## Runtime implementation
+
+The three registered CPU keys above accept Float32/Float64 coordinate tuples and
+publish independent `f1`, `f2`, and atomic `nearest_cell` outputs. `dtype`
+defaults to `float64`; `seed` and `stream` are required, `frame` defaults to
+zero, and `max_search_rings` defaults to 64 (rings 0 through the limit inclusive).
+Outward distance bounds reject unambiguous candidates; overlapping bounds use exact
+squared-distance ordering and the specified integer tie key. The exterior search
+certificate is strict. Square roots preserve final RN32/RN64, including in the
+accelerated profiles. `max_work` charges search and certification work. Exhausting
+the ring limit without the F2 certificate returns OperationFailed with the
+NotConverged domain code `0x4e4f490001`. No GPU key is registered.
 
 ## Interface and representation
 
@@ -64,5 +77,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.

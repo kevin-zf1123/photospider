@@ -6,16 +6,35 @@ function: artistic_linear_grain
 kind: composite_workflow
 category: 03-generation
 status: Accepted
-implementation_status: not_implemented
-clarification_status: member_technical_details_pending
+implementation_status: implemented_public_authoring_helper
+clarification_status: resolved
 ---
 
 # NOI-09B: artistic linear grain
 
 Inherit [NOI-09](NOI-09_grain_contract.md), [GEN common](GEN_common_contract.md), and
 the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
-contracts. Proposed keys are not runtime registrations. A key includes algorithm version
+contracts. A key includes algorithm version
 and profile; within one version/profile, output bits and discrete decisions are fixed.
+
+## Runtime implementation
+
+The public `ps::generation::artistic_linear_grain` helper in
+`photospider/ops/generation.hpp` transactionally appends domain-10
+`noise.grain_white_v1_*`, NOI-03A `noise.correlate_kernel_v1_*`, and
+`noise.artistic_grain_mix_v1_*` nodes. All three key families offer strict,
+accelerated_apple_silicon and accelerated_x86_64 CPU profiles.
+
+The helper takes image/strength/kernel references, a complete TensorDescription,
+selected color_group, separate white/correlation parameter maps, mode (default
+monochrome) and profile (default strict). The mix requires native identity encodings,
+straight linear RGB and optional same-tensor alpha. Permuted physical channels are
+mapped by logical red/green/blue roles. Source and filter dtypes separately define
+the two published RN stages. The mix retains image dtype, publishes `image`,
+and preserves alpha/zero-strength copies bitwise. Every node accepts max_work.
+The white FP32 path uses certified log/trigonometric enclosures after exact integer
+phase reduction; uncertain results retain strict certification. No additional
+composite runtime key or GPU key is registered.
 
 ## Interface and representation
 
@@ -60,5 +79,5 @@ Check selected-tile/full-output equivalence, source-grid read closure, legal
 strides/offsets, separate/joint outputs, version/profile identity, low budgets, cancellation,
 associations and retained owners as applicable. The [oracle
 coverage](../oracle-coverage.md) describes the available finite reference subset; it is
-not runtime completion. The specified schemas, member algorithms and backend implementations must be delivered and validated before registration. No unverified GPU or third-party bit
+not runtime completion. No unverified GPU or third-party bit
 identity is implied by these requirements.
