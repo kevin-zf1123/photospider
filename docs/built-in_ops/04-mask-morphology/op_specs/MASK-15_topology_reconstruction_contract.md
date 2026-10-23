@@ -5,7 +5,7 @@ kind: operator_family
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 ---
 
@@ -13,7 +13,10 @@ clarification_status: draft_for_review
 
 Inherit the complete [MASK baseline](MASK_common_contract.md), including its
 precision, descriptor, error, demand, ownership and acceptance obligations.
-This family proposes distinct members.
+All seven members are implemented as distinct bundled strict CPU operations
+through fixed invocation ABI 8 on branch `ops-impl`. Implementations are
+`plugins/ops/04-mask-morphology/{thinning,reconstruction,maximal_balls}.cpp`.
+The Proposed specification status remains separate from native implementation.
 
 ## Members
 

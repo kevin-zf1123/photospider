@@ -38,13 +38,13 @@ MASK 不另设舍入模式或误差容限；各成员只明确公式、舍入阶
 | [MASK-12](op_specs/MASK-12_components_contract.md) | 连通分量与属性 | 7 | label_compact、label_min_pixel、component_count、component_areas、component_bboxes、component_bundle、filter_area_index | strict CPU，全部成员 |
 | [MASK-13](op_specs/MASK-13_cleanup_contract.md) | 填洞 / 去小区域 | 3 | fill_holes、remove_small、fill_small_holes | strict CPU，全部成员 |
 | [MASK-14](op_specs/MASK-14_residuals_contract.md) | 边界与形态学残差 | 5 | morph_gradient、inner_border、outer_border、white_top_hat、black_top_hat | strict CPU，全部成员 |
-| [MASK-15](op_specs/MASK-15_topology_reconstruction_contract.md) | 骨架 / 重建 | 7 | thin_topological、thin_distance_ordered、reconstruct_dilate、reconstruct_erode、thin_zhang_suen、thin_guo_hall、medial_axis_maximal_balls | 待实现 |
-| [MASK-16](op_specs/MASK-16_close_gap_contract.md) | 封口填充 | 3 | bridge_axis_gaps、fill_axis_gaps、fill_morphological_gaps | 待实现 |
+| [MASK-15](op_specs/MASK-15_topology_reconstruction_contract.md) | 骨架 / 重建 | 7 | thin_topological、thin_distance_ordered、reconstruct_dilate、reconstruct_erode、thin_zhang_suen、thin_guo_hall、medial_axis_maximal_balls | strict CPU，全部成员 |
+| [MASK-16](op_specs/MASK-16_close_gap_contract.md) | 封口填充 | 3 | bridge_axis_gaps、fill_axis_gaps、fill_morphological_gaps | A 为 strict CPU；B/C 为公开 authoring workflow |
 | [MASK-17](op_specs/MASK-17_apply_contract.md) | 应用 / 限制样本 | 4 | affect_result、multiply_mask、restricted_mean、apply_alpha | strict CPU，全部成员 |
 
 ## 逐成员入口
 
-已实现族中的 key 为当前注册入口；其余为提议名称。
+61 个 primitive key 为当前 strict CPU 注册入口；MASK-16B/C 为已实现的组合 workflow，公开 C++ authoring API 见对应 spec。
 
 | ID / spec | 类别 | 注册或提议 key / template | oracle entry |
 | --- | --- | --- | --- |

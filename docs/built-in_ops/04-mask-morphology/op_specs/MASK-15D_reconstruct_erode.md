@@ -5,20 +5,21 @@ kind: primitive
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 parent_id: MASK-15
 function: reconstruct_erode
 oracle_entry: reconstruct_erode
-proposed_operation_keys:
+registered_operation_keys:
   - mask.reconstruct_erode_strict
 ---
 
 # MASK-15D: Grayscale reconstruction by erosion
 
 Inherit the complete [family contract](MASK-15_topology_reconstruction_contract.md) and
-[MASK-common](MASK_common_contract.md). This member is Proposed and unimplemented;
-the proposed name is not a current registry entry or a compatibility alias.
+[MASK-common](MASK_common_contract.md). This Proposed member is registered in the bundled strict CPU set through
+fixed invocation ABI 8. Implementation: `plugins/ops/04-mask-morphology/reconstruction.cpp`
+on branch `ops-impl`.
 
 ## Ports, parameters and output inference
 

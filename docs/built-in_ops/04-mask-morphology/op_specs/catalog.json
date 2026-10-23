@@ -68,7 +68,7 @@
       "function": "invert",
       "title": "Invert coverage on the current canvas",
       "ports": "input: Coverage or Binary[H,W] -> values: same dtype/shape",
-      "params": "None..",
+      "params": "None.",
       "math": "values=RN_T(1-input). Generated zero is +0.",
       "support": "E: input[Q] is Data. Lower support for complete selected output tiles to fixed source-grid reads under MASK-common, using finite supersets for runtime-selected addresses. Payload/numerical/association premises are unchecked; no Validation read set or runtime dependency discovery is added. Empty output selection adds no payload work; publication follows call retirement.",
       "fixture": "[0,.25,1] -> [1,.75,0]; Float64 2^-60 -> 1 -> 0 after two inversions.",
@@ -950,7 +950,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-15A_thin_topological.md",
-      "proposed_name": "mask.thin_topological_strict"
+      "registered_name": "mask.thin_topological_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-15B",
@@ -967,7 +969,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-15B_thin_distance_ordered.md",
-      "proposed_name": "mask.thin_distance_ordered_strict"
+      "registered_name": "mask.thin_distance_ordered_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-15C",
@@ -984,7 +988,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-15C_reconstruct_dilate.md",
-      "proposed_name": "mask.reconstruct_dilate_strict"
+      "registered_name": "mask.reconstruct_dilate_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-15D",
@@ -1001,7 +1007,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-15D_reconstruct_erode.md",
-      "proposed_name": "mask.reconstruct_erode_strict"
+      "registered_name": "mask.reconstruct_erode_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-15E",
@@ -1018,7 +1026,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-15E_thin_zhang_suen.md",
-      "proposed_name": "mask.thin_zhang_suen_strict"
+      "registered_name": "mask.thin_zhang_suen_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-15F",
@@ -1035,7 +1045,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-15F_thin_guo_hall.md",
-      "proposed_name": "mask.thin_guo_hall_strict"
+      "registered_name": "mask.thin_guo_hall_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-15G",
@@ -1052,7 +1064,9 @@
       "kind": "primitive",
       "maturity": "D1_draft",
       "file": "MASK-15G_medial_axis_maximal_balls.md",
-      "proposed_name": "mask.medial_axis_maximal_balls_strict"
+      "registered_name": "mask.medial_axis_maximal_balls_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-16A",
@@ -1069,7 +1083,9 @@
       "kind": "primitive",
       "maturity": "D2_draft",
       "file": "MASK-16A_bridge_axis_gaps.md",
-      "proposed_name": "mask.bridge_axis_gaps_strict"
+      "registered_name": "mask.bridge_axis_gaps_strict",
+      "implementation_status": "implemented_cpu_fixed_abi_8",
+      "backend": "cpu"
     },
     {
       "id": "MASK-16B",
@@ -1086,7 +1102,11 @@
       "kind": "composite_workflow",
       "maturity": "D2_draft",
       "file": "MASK-16B_fill_axis_gaps.md",
-      "proposed_name": "mask.fill_axis_gaps"
+      "implemented_template": "mask.fill_axis_gaps",
+      "implementation_status": "implemented_composite_workflow_cpu_fixed_abi_8",
+      "backend": "cpu",
+      "authoring_api": "ps::mask::fill_axis_gaps",
+      "authoring_header": "photospider/ops/mask/gap_fill.hpp"
     },
     {
       "id": "MASK-16C",
@@ -1103,7 +1123,11 @@
       "kind": "composite_workflow",
       "maturity": "D2_draft",
       "file": "MASK-16C_fill_morphological_gaps.md",
-      "proposed_name": "mask.fill_morphological_gaps"
+      "implemented_template": "mask.fill_morphological_gaps",
+      "implementation_status": "implemented_composite_workflow_cpu_fixed_abi_8",
+      "backend": "cpu",
+      "authoring_api": "ps::mask::fill_morphological_gaps",
+      "authoring_header": "photospider/ops/mask/gap_fill.hpp"
     },
     {
       "id": "MASK-17A",
@@ -1182,5 +1206,7 @@
       "backend": "cpu"
     }
   ],
-  "implemented_member_count": 53
+  "implemented_member_count": 63,
+  "registered_member_count": 61,
+  "implemented_workflow_count": 2
 }

@@ -5,7 +5,7 @@ kind: operator_family
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 ---
 
@@ -13,7 +13,14 @@ clarification_status: draft_for_review
 
 Inherit the complete [MASK baseline](MASK_common_contract.md), including its
 precision, descriptor, error, demand, ownership and acceptance obligations.
-This family proposes distinct members.
+All three members are implemented on branch `ops-impl`: A is the registered
+`mask.bridge_axis_gaps_strict` primitive; B/C are public C++ authoring templates
+in `photospider/ops/mask/gap_fill.hpp`. Their closure and seed-preparation nodes
+feed the existing barrier flood through fixed invocation ABI 8. The shared
+`mask.prepare_gap_fill_strict` stage preserves complete-input support, mixed
+barrier/seeds dtypes and independently selected diagnostic exports. Template
+names are not additional primitive registry entries. The optional `max_work`
+guard is forwarded to each node and limits work per invocation.
 
 ## Members
 

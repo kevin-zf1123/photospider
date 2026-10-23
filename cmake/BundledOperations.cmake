@@ -61,6 +61,11 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/04-mask-morphology/gaussian.cpp
   plugins/ops/04-mask-morphology/components.cpp
   plugins/ops/04-mask-morphology/cleanup.cpp
+  plugins/ops/04-mask-morphology/thinning.cpp
+  plugins/ops/04-mask-morphology/reconstruction.cpp
+  plugins/ops/04-mask-morphology/maximal_balls.cpp
+  plugins/ops/04-mask-morphology/gaps.cpp
+  plugins/ops/04-mask-morphology/gap_authoring.cpp
   plugins/ops/03-generation/paths.cpp
   plugins/ops/03-generation/path_math.cpp
   plugins/ops/03-generation/path_evaluation.cpp

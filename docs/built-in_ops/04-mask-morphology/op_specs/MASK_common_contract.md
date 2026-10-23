@@ -5,20 +5,21 @@ kind: shared_operator_contract
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: partially_implemented_cpu_fixed_abi_8
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 ---
 
 # MASK: shared specification and execution baseline
 
 This specification defines the selected MASK-01..17 semantics through explicit
-members and family contracts. MASK-01..14 and MASK-17 have all 53
-members registered in the bundled strict CPU set through fixed invocation ABI 8.
-The remaining 10 members are unimplemented proposals. Member front matter
-separates registered keys and implementation status from the Proposed spec status.
-Independent Python
-oracle coverage also includes unimplemented members and does not establish their
-registration. No paged-components backend is registered.
+members and family contracts. All 63 members are implemented: 61 member
+operations are registered in the bundled strict CPU set through fixed invocation
+ABI 8; MASK-16B/C are public composite authoring workflows. Their reusable
+`mask.prepare_gap_fill_strict` stage is an additional supporting registry key,
+not an extra member. Member front matter separates registered keys, implemented
+template names and implementation status from the Proposed spec status.
+Independent Python oracle coverage supplies numerical evidence and does not
+itself establish native registration. No paged-components backend is registered.
 
 ## Authority and inherited numerical rules
 
@@ -189,9 +190,10 @@ feature existence only; commercial bit identity remains unverified.
 
 ## Registered implementation limits
 
-The 53 implemented members accept the optional max_work Int64 operational guard,
+All 63 implemented members accept the optional max_work Int64 operational guard,
 default INT64_MAX, checked as nonnegative during preparation. It limits counted
-work per kernel invocation; it is not a global per-Run sample quota. Work and
+work per kernel invocation; it is not a global per-Run sample quota. MASK-16B/C
+forward the guard separately to each authored primitive. Work and
 cancellation polls occur within at most 1024 elementary visits and at every
 refinement. Host output/scratch admission still follows ExecutionContext limits.
 

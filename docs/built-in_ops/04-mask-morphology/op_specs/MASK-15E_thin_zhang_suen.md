@@ -5,12 +5,12 @@ kind: primitive
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 parent_id: MASK-15
 function: thin_zhang_suen
 oracle_entry: thin_zhang_suen
-proposed_operation_keys:
+registered_operation_keys:
   - mask.thin_zhang_suen_strict
 ---
 
@@ -19,7 +19,9 @@ proposed_operation_keys:
 Inherit [MASK-common](MASK_common_contract.md) and the
 [family contract](MASK-15_topology_reconstruction_contract.md), including the
 01-numeric rules. This member defines its own synchronous deletion predicates;
-MASK-15A/B's immediate-update and endpoint rules do not apply.
+MASK-15A/B's immediate-update and endpoint rules do not apply. This Proposed
+member is registered in the bundled strict CPU set through fixed invocation ABI 8;
+implementation is `plugins/ops/04-mask-morphology/thinning.cpp` on branch `ops-impl`.
 
 ## Ports, parameters and output inference
 

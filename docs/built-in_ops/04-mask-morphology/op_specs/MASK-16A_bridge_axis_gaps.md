@@ -5,20 +5,21 @@ kind: primitive
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D2_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_fixed_abi_8
 clarification_status: draft_for_review
 parent_id: MASK-16
 function: bridge_axis_gaps
 oracle_entry: bridge_axis_gaps
-proposed_operation_keys:
+registered_operation_keys:
   - mask.bridge_axis_gaps_strict
 ---
 
 # MASK-16A: Bridge bounded horizontal and vertical barrier gaps
 
 Inherit the complete [family contract](MASK-16_close_gap_contract.md) and
-[MASK-common](MASK_common_contract.md). This member is Proposed and unimplemented;
-the proposed name is not a current registry entry or a compatibility alias.
+[MASK-common](MASK_common_contract.md). This Proposed member is registered in the bundled strict CPU set through
+fixed invocation ABI 8. Implementation: `plugins/ops/04-mask-morphology/gaps.cpp`
+on branch `ops-impl`.
 
 ## Ports, parameters and output inference
 

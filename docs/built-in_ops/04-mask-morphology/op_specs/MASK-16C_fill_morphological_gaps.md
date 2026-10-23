@@ -5,20 +5,28 @@ kind: composite_workflow
 category: 04-mask-morphology
 status: Proposed
 document_maturity: D2_draft
-implementation_status: not_implemented
+implementation_status: implemented_composite_workflow_cpu_fixed_abi_8
 clarification_status: draft_for_review
 parent_id: MASK-16
 function: fill_morphological_gaps
 oracle_entry: fill_morphological_gaps
-proposed_template_names:
+authoring_api: ps::mask::fill_morphological_gaps
+authoring_header: photospider/ops/mask/gap_fill.hpp
+implemented_template_names:
   - mask.fill_morphological_gaps
 ---
 
 # MASK-16C: Flood using a temporary morphology-closed boundary
 
 Inherit the complete [family contract](MASK-16_close_gap_contract.md) and
-[MASK-common](MASK_common_contract.md). This member is Proposed and unimplemented;
-the proposed name is not a current registry entry or a compatibility alias.
+[MASK-common](MASK_common_contract.md). This Proposed member is implemented as the public authoring
+function `ps::mask::fill_morphological_gaps` in `photospider/ops/mask/gap_fill.hpp`.
+The template appends closure, `mask.prepare_gap_fill_strict` and
+`mask.flood_barrier_strict` nodes, returning four independently exportable edges.
+Its template name is not a primitive registry key. Implementation:
+`plugins/ops/04-mask-morphology/gap_authoring.cpp` on branch `ops-impl`.
+The optional `max_work` guard defaults to INT64_MAX and is forwarded separately
+to every primitive; it is not a shared workflow-wide quota.
 
 ## Ports, parameters and output inference
 
