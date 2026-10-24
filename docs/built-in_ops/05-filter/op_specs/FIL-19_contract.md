@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - FIL-19A
@@ -18,14 +18,14 @@ research_sources:
 
 Static directional smoothing is separate from native SMAA 1x. Temporal AA, coverage, and minification prefilters are excluded.
 
-Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT format/color contract](../../02-format-color/op_specs/FMT_common_contract.md).No member has been marked Accepted or implemented for production.
+Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT format/color contract](../../02-format-color/op_specs/FMT_common_contract.md). Both members are implemented; specification status remains Proposed.
 
 ## Members
 
 | ID | Operation spec | Composition type | Numerical reference |
 | --- | --- | --- | --- |
 | FIL-19A | [Bounded-direction post-process AA](FIL-19A_directional_post_aa_v1.md) | primitive | E |
-| FIL-19B | [Native SMAA 1x](FIL-19B_smaa_1x_native.md) | primitive | unresolved native specification |
+| FIL-19B | [Native SMAA 1x](FIL-19B_smaa_1x_native.md) | primitive | S: smaa_1x_low_luma_v1 |
 
 Member suffixes denote distinct mathematical/interface objects, not backend-selectable quality tiers. Primitives may propose separately named strict and accelerated variants; helpers only orchestrate explicit stages; external engines need fixed resources and approval before an executable configuration can be specified.
 
@@ -43,7 +43,7 @@ Positive-weight normalization, signed kernels, local regression, and global inve
 
 Each member’s support set is normative. A halo does not mean arbitrary cropped ROIs can run independently; paging does not eliminate a whole-image dependency. Follow each member’s definition for staged rounding, global connectivity, transforms, and iterative state. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
 
-All members must pass the [common acceptance protocol](FILTER_oracle_protocol.md). Mathematical references and related self-tests for this work are documented in the [oracle README](../../../../oracle/ops/filter/README.md); no new implementation was run in the Photospider runtime. D1/D2 indicate draft maturity, not pass rates.
+All members must pass the [common acceptance protocol](FILTER_oracle_protocol.md). Mathematical references and related self-tests for this work are documented in the [oracle README](../../../../oracle/ops/filter/README.md); both members have been exercised through the Photospider runtime on Apple M5. Backend and evidence limits are recorded in the member specifications. D1/D2 indicate draft maturity, not pass rates.
 
 ## Sources and review
 

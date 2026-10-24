@@ -7,6 +7,7 @@
 #include "02-format-color/color_point.hpp"
 #include "05-filter/advanced.hpp"
 #include "05-filter/common.hpp"
+#include "05-filter/effects.hpp"
 #include "05-filter/fields.hpp"
 #include "common/registry.hpp"
 
@@ -335,6 +336,16 @@ Status register_filters(OperationRegistry* registry) {
             make_local(std::string("filter.") + entry.first + suffix,
                        entry.second, profile)));
       }
+      for (auto entry :
+           {std::make_pair("local_contrast_tanh", EffectKind::Contrast),
+            std::make_pair("variable_box_gather", EffectKind::Box),
+            std::make_pair("variable_disk_gather", EffectKind::Disk),
+            std::make_pair("directional_post_aa_v1", EffectKind::Directional)})
+        check(registry->register_operation(
+            make_effect(std::string("filter.") + entry.first + suffix,
+                        entry.second, profile)));
+      check(registry->register_operation(make_local_laplacian(
+          std::string("filter.local_laplacian_reference") + suffix, profile)));
       check(registry->register_operation(make_gabor_kernel(
           std::string("filter.gabor_kernel") + suffix, profile)));
       check(registry->register_operation(make_gabor_response(
@@ -348,6 +359,7 @@ Status register_filters(OperationRegistry* registry) {
       check(registry->register_operation(make_coefficients(
           std::string("filter.gaussian_coefficients") + suffix, profile)));
     }
+    check(registry->register_operation(make_smaa()));
     check(registry->register_operation(make_hysteresis()));
     check(registry->register_operation(make_nms()));
     check(registry->register_operation(make_band()));

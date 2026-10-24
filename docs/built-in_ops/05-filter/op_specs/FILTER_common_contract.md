@@ -13,8 +13,10 @@ implementation_status: partially_implemented
 This category defines FIL-01..20, FRQ-01..10 and RES-01..14: 44 families.
 Member letters identify distinct mathematical/interface objects. Proposed keys,
 specification maturity, runtime registration and oracle coverage are separate facts.
-FIL-01..04, FIL-08..12, FIL-16 and FIL-20 are implemented as CPU operations through fixed invocation ABI 8; their member specifications record the 79 registered keys. Other families retain their own implementation status. Proposed/D1 describes specification acceptance
-and maturity separately from runtime availability.
+FIL-01..20 are implemented through fixed invocation ABI 8: 45 primitive members
+provide 129 registered keys, and two authoring helpers compose existing operations.
+FRQ and RES families retain their own implementation statuses. Proposed/D1 describes
+specification acceptance and maturity separately from runtime availability.
 
 ## Inheritance and representation
 

@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-18
 function: variable_disk_gather
 proposed_operation_keys:
@@ -26,13 +26,13 @@ Inherits the [FIL-18 family contract](FIL-18_contract.md), [FILTER common contra
 
 ## Ports, shape, and semantics
 
-``input,radius` → `output,valid`; radius is a Float32/Float64 scalar `[1]` or H/W field, with explicit broadcast=scalar|spatial; batches match and radius is shared across components.
+`input,radius` → `output,valid`; radius is a Float32/Float64 scalar `[1]` or H/W field, with explicit broadcast=scalar|spatial; batches match and radius is shared across components.
 
 Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands and FrequencyGrid are proposed SDK/workflow representations under the collection contract; lowering records each selected output's fixed reads and writes.
 
 ## Static parameters and valid domains
 
-max_radius is finite and ≥0; axes are explicit; boundary=truncate|clamp|reflect_half|reflect_whole|wrap; radius is in [0,max_radius]; no cval.
+Required Int64 `y_axis` and `x_axis` address distinct spatial axes. Required Int64 `component_axis` is -1 for no component axis, or a distinct nonspatial axis. Required String `broadcast` is `scalar` or `spatial`; scalar radius has sample shape [1], while spatial radius matches the complete input sample shape with component extent 1. Radius dtype is independently Float32 or Float64. Required Float64 `max_radius` is finite and nonnegative; its floor and doubled support must fit static coordinate/capacity arithmetic. Required String `boundary` is `truncate|clamp|reflect_half|reflect_whole|wrap`. Radius payload lies in [0,max_radius] as an unchecked caller premise. There is no cval parameter.
 
 Exceptional values and floating-point overflow follow the corresponding NUM operations and the [FILTER common contract](FILTER_common_contract.md). Do not reject NaN/Inf or turn ordinary floating-point overflow into failure under a category-wide rule. Static structural, parameter-type and capacity-arithmetic errors retain pre-execution diagnostics. Numerical-domain premises are unchecked; resource, cancellation and upstream failures retain their contracts. Every parameter must explicitly state its type, valid domain, and value; constructors provide no implicit defaults. Floating-point parameters are interpreted using their actually stored values.
 
@@ -46,13 +46,15 @@ When a formula calls another member, preserve the RN stages produced at the call
 
 ## Fixed reads, algorithmic control and schemas
 
+`valid` has the input sample shape and UInt8 dtype. A valid-only request produces ones without reading either payload. At static `max_radius=0`, the numerical output reads only source and copies its bits.
+
 Radius is algorithmic control. Lowering declares a fixed source-tile superset from static max_radius and boundary mapping. At runtime the exact radius selects participating terms within the admitted views. It does not add producers, change output shape or introduce a radius-domain validation scan.
 
 Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Lowering closes mathematical sample support on fixed input member-tile grids. Data-dependent selection uses a finite static superset of every address the task may consume; runtime selection does not expand the Plan. Data and control are algorithmic inputs, with no separate Validation read set. Empty retained selections introduce no payload tasks. Output schemas derive only from static parameters and input schemas. Numerical, encoding and association premises remain unchecked under the common contract.
 
 ## Algorithm, resources, and execution
 
-Direct cost is O(PC*max_radius²). Integral-box optimizations require explicit admission for their actual scan. Infer disk row spans with exact comparisons; floating-point sqrt rounding must not omit taps.
+Direct cost is O(PC*max_radius²). For admitted radii at most 16, a per-task mapped halo and certified exact row prefixes accelerate the same footprint; uncertain sums, signed-zero cases and exceptional values return to ordered tap arithmetic. Larger radii use the unrestricted direct path. Integral-box optimizations require explicit admission for their actual scan. Infer disk row spans with exact comparisons; floating-point sqrt rounding must not omit taps.
 
 In complexity notation, P=HW, C is the number of independent planes, A the number of taps, and T the number of steps. Arbitrary-precision limb bit complexity is additional and is not a measured benchmark. The shared protocol defines work/memory/stage admission, cancellation, failure state, and owner lifetime. A failed call publishes no successful Result export; previously retired call exports remain valid, and final RET results require successful Run completion. Do not spill automatically, silently lower precision, or call retired implementations as fallback.
 
@@ -70,9 +72,9 @@ See the [oracle README](../../../../oracle/ops/filter/README.md) for reproductio
 
 ## Backend and registration gates
 
-The keys above are naming proposals only; neither strict nor either CPU-accelerated variant is registered or implemented. Accelerated variants must meet NUM final-output FP32-scaled four-ULP bounds and provide strict fallback. Do not accumulate budgets by tap, axis, stage, or iteration; thresholds, ordering, boundaries, copies, and output support requiring exact selection cannot be changed approximately.
+All three keys above are registered CPU operations using fixed invocation ABI 8. Strict and Apple Silicon execution have been exercised on Apple M5; x86_64 registration and unavailable-backend rejection were checked, but execution on x86_64 hardware was not performed. Accelerated variants must meet NUM final-output FP32-scaled four-ULP bounds and provide strict fallback. Do not accumulate budgets by tap, axis, stage, or iteration; thresholds, ordering, boundaries, copies, and output support requiring exact selection cannot be changed approximately.
 
-Float64 accelerated execution still uses Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scaled range use strict NUM fallback. No kernel/CPU/ISA performance or differential acceptance was run for this package.
+Float64 accelerated execution still uses Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scaled range use strict NUM fallback. The implementation uses certified fast paths with strict rational/directed-interval fallback. Independent reference comparisons include both dtypes on small arrays, Float32 32×32/128×128/1024²/4096² image workloads, and targeted compiled ROI, batch, bypass, resource and cancellation cases. These checks do not establish acceptance of every possible input.
 
 ## Conceptual DAG (not an existing API)
 

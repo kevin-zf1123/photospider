@@ -4,7 +4,7 @@
 
 Gaussian 的拟议端口使用单 Tensor Result 并保留完整 sample shape（含 batch axes）。
 颜色解释遵循当前 FMT 显式参数契约，调用方为后续颜色消费者提供 TensorDescription
-及需要的 profile。FIL-01～15 已通过固定 invocation ABI 8 提供 CPU primitive 与显式 SDK/workflow helper 实现；固定 Plan 的输入读取、
+及需要的 profile。FIL-01～20 已通过固定 invocation ABI 8 提供 CPU primitive 与显式 SDK/workflow helper 实现；固定 Plan 的输入读取、
 输出 tile 与资源要求见成员规格。颜色配置本身不增加数值 payload 校验。
 
 Gaussian filter 的 x_axis/y_axis 索引完整 sample shape，包含 batch-axis 前缀。对 RGBA
@@ -41,7 +41,7 @@ shape {N,L,H,W,4}，使用 y_axis=2、x_axis=3。参数、边界和资源契约�
 
 语义图像沿用 FMT straight-color 语义，alpha 不是普通独立颜色通道；raw numerical field 与语义颜色组也须区分。FIL-01A 卷积与 FIL-01B 相关使用不同坐标方向；偶数核 anchor、full/valid 输出全局原点、reflect_half/reflect_whole 边界、参与 mask 与应用 mask 不能互换。FIL-01D 为正核语义颜色模糊提供融合 primitive，输出保持 straight；它与 raw-field 卷积及 FMT 的分阶段 associate/filter/unassociate 有不同舍入链。Gaussian 使用明确的 baked64 系数定义，不依赖库的中间 dtype 默认。
 
-可分离滤波要求两遍实现保留同一精确表达式，不能未经声明引入中间舍入。导向滤波由两层局部均值构成，最坏支持半径为 2r。Canny 滞后连通是全平面问题。金字塔各层保留奇偶尺寸与采样相位。Local Laplacian 不等同于直接细节增益。FIL-19A 是自定义方向后处理，不冒称 FXAA 或 SMAA；FIL-19B 是独立的原生 SMAA 1x 规格目标，第三方对照实现、版本、资源及验收细节仍待确定。
+可分离滤波要求两遍实现保留同一精确表达式，不能未经声明引入中间舍入。导向滤波由两层局部均值构成，最坏支持半径为 2r。Canny 滞后连通是全平面问题。金字塔各层保留奇偶尺寸与采样相位。Local Laplacian 不等同于直接细节增益。FIL-19A 是自定义方向后处理，不冒称 FXAA 或 SMAA；FIL-19B 使用固定的 smaa_1x_low_luma_v1 原生 profile、明确的 lookup 资源与 RN32 阶段，并已完成固定版本 shader 的实际 GPU 对照。具体语义、适用范围和对照误差见其成员规格。
 
 边界与 anchor 规则见[边界契约](op_specs/FILTER_boundary_contract.md)，数值类别与舍入规则见[数值参考](op_specs/FILTER_numeric_reference.md)，颜色模糊边界见[颜色组合](op_specs/FILTER_color_composition.md)，参考程序与验收要求见[oracle 协议](op_specs/FILTER_oracle_protocol.md)。规格提案不代表运行时已注册，也不代表性能或第三方兼容已经验证。
 

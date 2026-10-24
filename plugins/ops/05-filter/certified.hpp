@@ -47,12 +47,10 @@ inline std::optional<std::uint64_t> dd_round(Ball a, bool narrow) {
   }
   return BoundedArithmetic{narrow}.finish(BallValue{a});
 }
-inline std::optional<std::uint64_t> dd_exp_negative(Ball x, const Fuel& fuel) {
+inline std::optional<Ball> dd_exp_enclosure(Ball x, const Fuel& fuel) {
   if (!x.finite())
     return {};
   const auto bounds = x.bounds();
-  if (bounds.high <= -746)
-    return UINT64_C(0);
   if (bounds.low < -700 || bounds.high > 0)
     return {};
   // ln(2) is enclosed by these two binary64 components and 2^-108.
@@ -101,7 +99,14 @@ inline std::optional<std::uint64_t> dd_exp_negative(Ball x, const Fuel& fuel) {
   // exp(.36)*.36^25/25! < 2^-118.
   sum.error = Ball::up(sum.error + 0x1p-118);
   const double scale = std::ldexp(1.0, k);
-  return dd_round(sum.times(scale), false);
+  return sum.times(scale);
+}
+inline std::optional<std::uint64_t> dd_exp_negative(Ball x, const Fuel& fuel) {
+  if (x.finite() && x.bounds().high <= -746)
+    return UINT64_C(0);
+  const auto enclosure = dd_exp_enclosure(x, fuel);
+  return enclosure ? dd_round(*enclosure, false)
+                   : std::optional<std::uint64_t>{};
 }
 inline std::uint64_t exact_exp_negative(generation::Math& m,
                                         const Rational& x) {

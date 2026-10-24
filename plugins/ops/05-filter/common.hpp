@@ -61,7 +61,14 @@ struct Fuel {
     pending += count;
     return Status::success();
   }
-  void poll(std::uint64_t count = 1) const { check((*this)(count)); }
+  void poll(std::uint64_t count = 1) const {
+    // Avoid constructing a Status for the common, already-admitted batch.
+    if (count < 512 - pending) {
+      pending += count;
+      return;
+    }
+    check((*this)(count));
+  }
   void flush() const {
     check(work(pending));
     pending = 0;

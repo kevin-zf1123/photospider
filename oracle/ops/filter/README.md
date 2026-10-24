@@ -19,8 +19,9 @@ python3 -m oracle.ops.filter.run_oracles --self-test --no-diagnostics --report b
 ```
 
 安装诊断依赖后，移除 `--no-diagnostics` 可运行完整自测。报告由命令生成在忽略的
-`build/` 中；仓库不保存预生成向量或报告。SMAA 1x、BM3D、CBM3D 缺少固定第三方对照与
-真实像素结果，相关案例保持 pending。
+`build/` 中；仓库不保存预生成向量或报告。BM3D、CBM3D 的第三方对照仍待补齐。FIL-19B 已有固定 native
+参考和真实 GPU shader 对照；通用 manifest 演示案例的 pending 状态不代表该
+专门对照不存在，见下文。
 
 ## 参考程序
 
@@ -48,7 +49,8 @@ RES-07C/F 的均值域逆只提供诊断参考，不能当 strict golden。
 应在产品中报域错误。浮点最终溢出返回 Inf，迭代参考使用主输入 dtype 的阶段舍入。
 
 尚未覆盖：全部成员的非有限值/payload 组合、早停判据与并发调度、固定 Plan 下按 band
-选择的 SDK/workflow 表示、实际第三方 BM3D/CBM3D/SMAA 对照以及图像质量评分。
+选择的 SDK/workflow 表示、实际第三方 BM3D/CBM3D 对照。SMAA 的固定 14 图像对照和 RMSE/PSNR
+范围已单独记录，不能推广为所有输入或主观画质保证。
 未覆盖范围不能从成员出现在测试索引中推导为已通过。非法参考输入的诊断仅属于 oracle；
 生产执行以数值、编码及关联前提成立为条件，不增加输入或输出 payload 校验。
 
@@ -70,3 +72,45 @@ build/filter-oracle-venv/bin/python -m oracle.ops.filter.run_oracles --self-test
 系数集包含 312 个样本；二维集包含 94 个输入、707 个输出，覆盖两种 dtype、
 五种边界、特殊值、零半径、系数下溢和不能提前窄化的 Float64 cval。
 需要验证实现时现场编写适配器；参考模块不启动外部程序，也不报告实现通过。
+
+
+## FIL-17..19 的扩展参考
+
+`fil17/sparse.py` 的 `OneLevel` 按需计算 Local Laplacian 单层参考，
+允许在 1024²、4096² 图像上检查边界和内部坐标，而不运行完整的二次规模
+小图参考。原有 `fil17/multiscale.py` 继续负责多层小图参考。两者保留
+FIL-15 每个公开阶段的 RN，不能用普通 band gain 替代。
+
+`fil19/smaa.py` 的 `Reference(height, width, color, guide=None, components=1)`
+接受像素回调；components 为 3 时按明确的 RGB 顺序计算编码域 luma。
+`edge(y,x)`、`weight(y,x)` 和 `output(y,x,c=0)` 暴露三个参考阶段。
+它直接使用固定 lookup 字节，并在规定节点进行 RN32，与生产 C++ 实现独立。
+
+`fil19/samples.py` 将这个参考接入通用 runner。`evaluate(image, guide=None, coordinates=None)` 接受 H/W/C 数组（C 为 1 或 3）及可选 H/W 外部 guide，返回所选坐标的 luma、edge、weight、output。自测覆盖 Gray 退化尺寸与负零复制、阈值相等及相邻 Float32 值、局部对比抑制、四种 RGB 图案、外部 guide 和非零混合。向量保存各阶段的 Float32 位模式，可供临时生产适配器读取；`--replay` 重新计算独立参考。
+
+```sh
+python3 -B -m oracle.ops.filter.run_oracles --member FIL-19B --no-diagnostics --report build/filter-oracle/smaa.json --vectors-out build/filter-oracle/smaa-vectors.json
+python3 -B -m oracle.ops.filter.run_oracles --member FIL-19B --replay build/filter-oracle/smaa-vectors.json
+```
+
+`--member` 可重复指定，省略时运行全部 oracle 用例。报告的 `scope` 仍为独立 Python oracle；生产运行时与实际 GPU 对照需另行执行。`real_golden_smaa` 的 pending 表示此 runner 未运行 GPU helper，固定资源检查单独记录为 `smaa_pinned_resources`。
+
+`fil19/fixtures.py` 定义第三方比较的 14 个输入、RGB 像素生成函数和
+`verify_pins()`。先核对资源 hash；原始 shader、lookup 及许可证不得改写。
+`fil19/pinned_low.py` 提供固定 HLSL 函数体的机械 CPU 转写，供诊断使用；
+它的归一化软件插值与真实硬件 texture 结果有差异，不能替代 GPU 对照。
+
+`fil19/gpu_reference.hpp` 是可选 macOS 离线参考。调用
+`photospider_oracle::smaa_gpu::upstream_gpu(image, false, areaBytes,
+searchBytes, shaderPath)`，其中 image 提供 width、height 和连续的
+四分量 Float32 pixels。返回 edge、weight、output 三个 Float32 readback。
+使用 C++17、`-framework OpenGL`，且关闭 fast-math 与隐式 FMA contraction。
+该辅助代码编译并运行未改动的 pinned GLSL；生产算子没有 OpenGL 依赖。
+
+[明确的 native profile、资源、采样和对照容差](../../../docs/built-in_ops/05-filter/op_specs/FIL-19B_smaa_1x_native.md)
+将 native 逐位验证和第三方图像误差比较分别定义。14 个图像的实际 Apple M5
+GPU 比较覆盖 32²、128²、37×53、1024² 和 4096²。归一化坐标、硬件插值及
+方向平局会带来局部差异；通过 suite RMSE 不意味着逐像素四 ULP 或 bit identity。
+
+FIL-17..19 已通过临时公开运行时适配器检查；适配器与运行报告不作为 oracle
+源码保存。数学参考本身仍不模拟完整的 Plan、owner、取消与资源契约。

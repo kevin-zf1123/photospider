@@ -65,6 +65,8 @@ from oracle.ops.filter.common.special import fused_color as X_fused_color
 from oracle.ops.filter.common.special import quantile as X_quantile
 from oracle.ops.filter.common.special import rl_ratio as X_rl_ratio
 from oracle.ops.filter.common.special import sum_products as X_sum_products
+from oracle.ops.filter.fil19.samples import evaluate as smaa_evaluate
+from oracle.ops.filter.fil19.samples import add_cases as smaa_add_cases
 
 from oracle.ops.filter.common.core import frac as core_frac
 from oracle.ops.filter.common.core import pow2 as core_pow2
@@ -198,6 +200,7 @@ from oracle.ops.filter.common.comparison_protocol import bm3d as comparison_prot
 from oracle.ops.filter.common.comparison_protocol import cbm3d as comparison_protocol_cbm3d
 from oracle.ops.filter.common.comparison_protocol import golden_template as comparison_protocol_golden_template
 MODULES={
+    'smaa': {'evaluate': smaa_evaluate},
     'core': {'frac': core_frac, 'pow2': core_pow2, 'floor_log2': core_floor_log2, 'round_integer_even': core_round_integer_even, 'round_bits': core_round_bits, 'from_bits': core_from_bits, 'bits': core_bits, 'rn': core_rn, 'hex_bits': core_hex_bits, 'input_value': core_input_value, 'zeros': core_zeros, 'shape': core_shape, 'same_shape': core_same_shape, 'map_index': core_map_index, 'coordinate': core_coordinate, 'sample': core_sample, 'ordered_finite_key': core_ordered_finite_key, 'accelerated_accept': core_accelerated_accept, 'solve_linear': core_solve_linear, 'median_exact': core_median_exact},
     'spatial': {'convolution_geometry': spatial_convolution_geometry, 'tap_position': spatial_tap_position, 'support_for_output': spatial_support_for_output, 'convolve2d': spatial_convolve2d, 'separable': spatial_separable, 'normalized_convolution': spatial_normalized_convolution, 'window_samples': spatial_window_samples, 'box': spatial_box, 'percentile': spatial_percentile, 'local_moments': spatial_local_moments, 'gradient': spatial_gradient, 'laplacian': spatial_laplacian, 'hessian': spatial_hessian, 'structure_tensor': spatial_structure_tensor, 'clipped_box': spatial_clipped_box, 'guided': spatial_guided, 'variable_gather': spatial_variable_gather, 'zero_dc_filter': spatial_zero_dc_filter, 'hysteresis': spatial_hysteresis, 'canny': spatial_canny, 'post_aa': spatial_post_aa, 'straight_positive_blur': spatial_straight_positive_blur},
     'transcend': {'gaussian_kernel': transcend_gaussian_kernel, 'bilateral': transcend_bilateral, 'magnitude': transcend_magnitude, 'orientation': transcend_orientation, '_atan_interval': transcend__atan_interval, 'eigen2d': transcend_eigen2d, 'log_kernel': transcend_log_kernel, 'gabor_kernel': transcend_gabor_kernel, 'local_contrast': transcend_local_contrast},
@@ -243,8 +246,9 @@ def equal(actual,expected,dtype='float64'):
     else:require(actual==expected,f'{actual!r} != {expected!r}')
 
 class Suite:
-    def __init__(self):self.cases=[];self.vectors=[]
+    def __init__(self,members=None):self.cases=[];self.vectors=[];self.members=set(members or [])
     def case(self,name,ids,level,fn,check=None,expected=None,dtype='float64',request=None):
+        if self.members and not self.members.intersection(ids):return
         start=time.perf_counter();row={'case_id':name,'members':ids,'proof_level':level,'dtype':dtype}
         try:
             result=fn()
@@ -269,11 +273,12 @@ class Suite:
             raise AssertionError(f'expected {exception.__name__}')
         self.case(name,ids,'ContractFixture',call)
     def pending(self,name,ids,reason):
+        if self.members and not self.members.intersection(ids):return
         self.cases.append({'case_id':name,'members':ids,'proof_level':'PinnedThirdPartyComparison','status':'pending','reason':reason,'seconds':0})
 
 
-def run_all(include_diagnostics=True):
-    suite=Suite();v=suite.vector;q=C_Q
+def run_all(include_diagnostics=True,members=None):
+    suite=Suite(members);v=suite.vector;q=C_Q
     # Exact IEEE conversion: adversarial double rounding and range boundaries.
     for dtype,p,emin in [('float32',24,-126),('float64',53,-1022)]:
         suite.case(f'round_{dtype}_half_even',[],'ExactRational',lambda d=dtype,pp=p:C_rn(1+C_pow2(-pp),d),expected=1.0,dtype=dtype)
@@ -490,10 +495,13 @@ def run_all(include_diagnostics=True):
     suite.case('dehaze_workflow_constant',['RES-14D'],'StagedReference',lambda:R_apply_dehaze(rgb,R_airlight(rgb,radius=0)[1],R_transmission(rgb,R_airlight(rgb,radius=0)[1],radius=0,omega=.5)),expected=rgb)
     suite.rejects('airlight_black_fails_only_when_requested',['RES-14A'],lambda:R_airlight([[[0,0,0]]],radius=0))
     v('dark_channel_black_without_airlight',['RES-14A'],'restoration.airlight',[[[[0,0,0]]]],{'radius':0,'request_airlight':False},([[0.0]],None,None),level='DiscreteExact')
+    smaa_add_cases(suite)
     # Native algorithms: a manifest does not execute a third-party comparison.
     for engine,id_ in [('smaa','FIL-19B'),('bm3d','RES-04A'),('cbm3d','RES-04B')]:
         v('manifest_missing_'+engine,[id_],'comparison_protocol.'+engine,[{}],{},check=lambda x:require(not x['manifest_complete'] and not x['comparison_executed']),level='ContractFixture')
-        suite.pending('real_golden_'+engine,[id_],'No pinned third-party implementation/resources or actual comparison is available.')
+        reason=('Pinned shader/resources and a GPU helper are available; this Python self-test does not execute the GPU comparison.'
+                if engine=='smaa' else 'No pinned third-party implementation/resources or actual comparison is available.')
+        suite.pending('real_golden_'+engine,[id_],reason)
     # Random rational checks and optional independent-library diagnostics.
     rng=random.Random(20260926)
     for i in range(20):

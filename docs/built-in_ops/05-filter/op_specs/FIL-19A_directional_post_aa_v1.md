@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D2_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-19
 function: directional_post_aa_v1
 proposed_operation_keys:
@@ -32,7 +32,7 @@ Ports carry Results with fixed Tensor member schemas. Unless the member defines 
 
 ## Static parameters and valid domains
 
-threshold>0; blend∈[0,1/2]; boundary=clamp is fixed; axes are explicit.
+Required Int64 `y_axis`, `x_axis`, and `component_axis` use the complete sample-shape axis convention. Spatial axes are distinct; component_axis is -1 or a distinct nonspatial axis. The guide matches input dtype and shape with component extent 1. Required Float64 `threshold` is finite and >0; required Float64 `blend` is finite and in [0,1/2]. These numerical premises are unchecked. Clamp is the fixed boundary; there is no boundary parameter.
 
 Exceptional values and floating-point overflow follow the corresponding NUM operations and the [FILTER common contract](FILTER_common_contract.md). Do not reject NaN/Inf or turn ordinary floating-point overflow into failure under a category-wide rule. Static structural, parameter-type and capacity-arithmetic errors retain pre-execution diagnostics. Numerical-domain premises are unchecked; resource, cancellation and upstream failures retain their contracts. Every parameter must explicitly state its type, valid domain, and value; constructors provide no implicit defaults. Floating-point parameters are interpreted using their actually stored values.
 
@@ -40,7 +40,7 @@ Exceptional values and floating-point overflow follow the corresponding NUM oper
 
 Numerical class: **E**; see [FILTER_numeric_reference](FILTER_numeric_reference.md) for the E/B/S notation.
 
-Read the guide center and N/S/E/W neighbors; compute ex=abs(E-W), ey=abs(S-N) exactly. If max(ex,ey)≤threshold or blend=0, bit-copy the input center. Otherwise choose N/S when ex≥ey (along the approximate edge direction), else E/W; compute `RN_t((1-blend)*Icenter+blend*(Iu+Iv)/2)`. Equality at the threshold does not smooth; directional ties choose N/S. This heuristic is project-defined and is not called SMAA/FXAA.
+Read the guide center and N/S/E/W neighbors; compute ex=abs(E-W), ey=abs(S-N) exactly. If max(ex,ey)≤threshold or blend=0, bit-copy the input center. Otherwise choose N/S when ex≥ey (along the approximate edge direction), else E/W; compute `RN_t((1-blend)*Icenter+blend*(Iu+Iv)/2)`. For a NaN control result, evaluate the written subtraction and abs nodes first, then propagate the leftmost NaN of `max(ex,ey)`; abs clears its sign. A generated NaN in ex therefore precedes an input-derived NaN in ey. Equality at the threshold does not smooth; directional ties choose N/S. This heuristic is project-defined and is not called SMAA/FXAA.
 
 When a formula calls another member, preserve the RN stages produced at the call site as specified here or by the family contract; internal temporaries must not introduce undeclared rounding. Signed zero, numerical-domain premises and explicit valid-input no-solution outcomes, gradual underflow, and output range follow the shared contract and NUM.
 
@@ -70,9 +70,9 @@ See the [oracle README](../../../../oracle/ops/filter/README.md) for reproductio
 
 ## Backend and registration gates
 
-The keys above are naming proposals only; neither strict nor either CPU-accelerated variant is registered or implemented. Accelerated variants must meet NUM final-output FP32-scaled four-ULP bounds and provide strict fallback. Do not accumulate budgets by tap, axis, stage, or iteration; thresholds, ordering, boundaries, copies, and output support requiring exact selection cannot be changed approximately.
+All three keys above are registered CPU operations using fixed invocation ABI 8. Strict and Apple Silicon execution have been exercised on Apple M5; x86_64 registration and unavailable-backend rejection were checked, but execution on x86_64 hardware was not performed. Accelerated variants must meet NUM final-output FP32-scaled four-ULP bounds and provide strict fallback. Do not accumulate budgets by tap, axis, stage, or iteration; thresholds, ordering, boundaries, copies, and output support requiring exact selection cannot be changed approximately.
 
-Float64 accelerated execution still uses Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scaled range use strict NUM fallback. No kernel/CPU/ISA performance or differential acceptance was run for this package.
+Float64 accelerated execution still uses Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scaled range use strict NUM fallback. The implementation uses certified fast paths with strict rational/directed-interval fallback. Independent reference comparisons include both dtypes on small arrays, Float32 32×32/128×128/1024²/4096² image workloads, and targeted compiled ROI, batch, bypass, resource and cancellation cases. These checks do not establish acceptance of every possible input.
 
 ## Conceptual DAG (not an existing API)
 

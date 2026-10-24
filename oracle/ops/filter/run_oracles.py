@@ -21,9 +21,12 @@ def main():
     parser.add_argument('--vectors-out',type=Path)
     parser.add_argument('--no-diagnostics',action='store_true')
     parser.add_argument('--replay',type=Path)
+    parser.add_argument('--member',action='append',help='run or replay only cases for this member ID; repeatable')
     args=parser.parse_args()
     if args.replay:
         vectors=json.loads(args.replay.read_text(encoding='utf-8'))['vectors'];failed=[]
+        if args.member:vectors=[v for v in vectors if set(args.member).intersection(v['members'])]
+        if not vectors:parser.error('no reference vectors match the selection')
         for vector in vectors:
             try:
                 request=thaw(vector['request']);mod,name=request['function'].split('.',1)
@@ -33,7 +36,8 @@ def main():
             except Exception as exc:failed.append({'case_id':vector['case_id'],'error':str(exc)})
         print(json.dumps({'replayed':len(vectors),'failed':failed},ensure_ascii=False,indent=2))
         return bool(failed)
-    suite=run_all(not args.no_diagnostics);counts=Counter(c['status'] for c in suite.cases)
+    suite=run_all(not args.no_diagnostics,args.member);counts=Counter(c['status'] for c in suite.cases)
+    if not suite.cases:parser.error('no oracle cases match the selection')
     versions={}
     for package in ('mpmath','numpy','scipy'):
         try:versions[package]=importlib.metadata.version(package)

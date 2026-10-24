@@ -1,2 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Preserve pinned upstream SMAA bytes, including line endings and whitespace.
+plugins/ops/05-filter/smaa_resources/*.h -text -whitespace
+plugins/ops/05-filter/smaa_resources/LICENSE.txt -text -whitespace
+oracle/ops/filter/fil19/pinned/SMAA.hlsl -text -whitespace
+oracle/ops/filter/fil19/pinned/LICENSE.txt -text -whitespace

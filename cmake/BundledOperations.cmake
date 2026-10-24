@@ -46,6 +46,11 @@ if(NOT PHOTOSPIDER_FMT10_SIMD)
 endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
+  plugins/ops/05-filter/smaa.cpp
+  plugins/ops/05-filter/effect_operations.cpp
+  plugins/ops/05-filter/effect_math.cpp
+  plugins/ops/05-filter/effects.cpp
+  plugins/ops/05-filter/local_laplacian.cpp
   plugins/ops/05-filter/geometry.cpp
   plugins/ops/05-filter/local_operations.cpp
   plugins/ops/05-filter/rank.cpp

@@ -49,6 +49,10 @@
 !plugins/ops/03-generation/*.hpp.in
 !plugins/ops/05-filter/*.metal
 !plugins/ops/05-filter/*.hpp.in
+!plugins/ops/05-filter/smaa_resources/*.h
+!plugins/ops/05-filter/smaa_resources/LICENSE.txt
+!plugins/ops/05-filter/smaa_resources/pin.json
+!oracle/ops/filter/fil19/pinned/SMAA.hlsl
 !plugins/ops/gpu/*.metal
 !plugins/ops/gpu/integer.slang
 !plugins/ops/README.md

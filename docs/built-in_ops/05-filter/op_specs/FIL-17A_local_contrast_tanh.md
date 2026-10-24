@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D2_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-17
 function: local_contrast_tanh
 proposed_operation_keys:
@@ -26,13 +26,13 @@ Inherits the [FIL-17 family contract](FIL-17_contract.md), [FILTER common contra
 
 ## Ports, shape, and semantics
 
-`input,base` have the with the same shape → `output`; the caller explicitly creates base using FIL-04B or FIL-07.
+`input,base` have the same dtype and complete sample shape → `output`; the caller explicitly creates base using FIL-04B or FIL-07.
 
 Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands and FrequencyGrid are proposed SDK/workflow representations under the collection contract; lowering records each selected output's fixed reads and writes.
 
 ## Static parameters and valid domains
 
-amount is finite; detail_scale s>0 (no default).
+Both parameters are required Float64 values: `amount` is finite; `detail_scale` is finite and strictly positive. There are no implicit defaults or intensity-range assumptions.
 
 Exceptional values and floating-point overflow follow the corresponding NUM operations and the [FILTER common contract](FILTER_common_contract.md). Do not reject NaN/Inf or turn ordinary floating-point overflow into failure under a category-wide rule. Static structural, parameter-type and capacity-arithmetic errors retain pre-execution diagnostics. Numerical-domain premises are unchecked; resource, cancellation and upstream failures retain their contracts. Every parameter must explicitly state its type, valid domain, and value; constructors provide no implicit defaults. Floating-point parameters are interpreted using their actually stored values.
 
@@ -46,13 +46,13 @@ When a formula calls another member, preserve the RN stages produced at the call
 
 ## Fixed reads, algorithmic control and schemas
 
-Pointwise in input and base. The base node itself may have a halo/complete-input dependency, but this member does not redefine its algorithm.
+Pointwise in input and base. At `amount=0`, only input payload is read; base retains its static schema obligation. The base node itself may have a halo/complete-input dependency, but this member does not redefine its algorithm.
 
 Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Lowering closes mathematical sample support on fixed input member-tile grids. Data-dependent selection uses a finite static superset of every address the task may consume; runtime selection does not expand the Plan. Data and control are algorithmic inputs, with no separate Validation read set. Empty retained selections introduce no payload tasks. Output schemas derive only from static parameters and input schemas. Numerical, encoding and association premises remain unchecked under the common contract.
 
 ## Algorithm, resources, and execution
 
-O(PC) with certified tanh evaluation. As s approaches zero, do not automatically switch to hard clipping.
+O(PC) with certified tanh evaluation. RN32 endpoint certificates accelerate ordinary Float32 inputs. Exact rational bounds retain the sign of tiny cancellation residuals; stable exponential expressions and a proved same-sided rounding probe handle saturation. Uncertain cases retain directed refinement. As s approaches zero, do not automatically switch to hard clipping.
 
 In complexity notation, P=HW, C is the number of independent planes, A the number of taps, and T the number of steps. Arbitrary-precision limb bit complexity is additional and is not a measured benchmark. The shared protocol defines work/memory/stage admission, cancellation, failure state, and owner lifetime. A failed call publishes no successful Result export; previously retired call exports remain valid, and final RET results require successful Run completion. Do not spill automatically, silently lower precision, or call retired implementations as fallback.
 
@@ -70,9 +70,9 @@ See the [oracle README](../../../../oracle/ops/filter/README.md) for reproductio
 
 ## Backend and registration gates
 
-The keys above are naming proposals only; neither strict nor either CPU-accelerated variant is registered or implemented. Accelerated variants must meet NUM final-output FP32-scaled four-ULP bounds and provide strict fallback. Do not accumulate budgets by tap, axis, stage, or iteration; thresholds, ordering, boundaries, copies, and output support requiring exact selection cannot be changed approximately.
+All three keys above are registered CPU operations using fixed invocation ABI 8. Strict and Apple Silicon execution have been exercised on Apple M5; x86_64 registration and unavailable-backend rejection were checked, but execution on x86_64 hardware was not performed. Accelerated variants must meet NUM final-output FP32-scaled four-ULP bounds and provide strict fallback. Do not accumulate budgets by tap, axis, stage, or iteration; thresholds, ordering, boundaries, copies, and output support requiring exact selection cannot be changed approximately.
 
-Float64 accelerated execution still uses Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scaled range use strict NUM fallback. No kernel/CPU/ISA performance or differential acceptance was run for this package.
+Float64 accelerated execution still uses Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scaled range use strict NUM fallback. The implementation uses certified fast paths with strict rational/directed-interval fallback. Independent reference comparisons include both dtypes on small arrays, Float32 32×32/128×128/1024²/4096² image workloads, and targeted compiled ROI, batch, bypass, resource and cancellation cases. These checks do not establish acceptance of every possible input.
 
 ## Conceptual DAG (not an existing API)
 

@@ -1,7 +1,7 @@
 # Filter oracle coverage
 
 The [oracle README](../../../oracle/ops/filter/README.md) describes reproducible commands
-and optional dependencies. [tests.py](../../../oracle/ops/filter/tests.py) owns the
+and optional dependencies. [tests.py](../../../oracle/ops/filter/tests.py) dispatches the
 executable assertions and [shared acceptance](op_specs/FILTER_oracle_protocol.md)
 defines the separate runtime obligations. This index covers 114 proposed members
 in 44 families: 108 primitives and 6 authoring helpers. A listed fixture is not an
@@ -15,9 +15,10 @@ acceptance from this oracle. Compiled band selection through the proposed SDK/wo
 complete nonfinite restoration trajectories are not implemented. Oracle work caps are not spec size limits. Malformed reference-input fixtures
 exercise oracle diagnostics only and do not impose runtime payload validation.
 
-Native BM3D/CBM3D/SMAA comparisons need pinned implementations and actual
-runs. No synthetic substitute is used as their golden output. Quality metric formulas,
-datasets and thresholds remain implementation-time work under the agreed principles.
+Native BM3D/CBM3D comparisons still need pinned implementations and actual runs.
+FIL-19B has a separate pinned native reference and actual GPU comparison, with
+explicit inputs and RMSE/PSNR criteria in its member spec. No synthetic substitute
+is used as third-party golden output.
 
 | Member | Fixture evidence | Representative executable cases | Scope and gaps |
 | --- | --- | --- | --- |
@@ -61,11 +62,11 @@ datasets and thresholds remain implementation-time work under the agreed princip
 | [FIL-16A](op_specs/FIL-16A_unsharp_mask.md) | BitwiseCopy | `unsharp_disabled_preserves_bits` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [FIL-16B](op_specs/FIL-16B_detail_gain.md) | ExactRational | `detail_gain_float32`, `detail_gain_float64` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [FIL-17A](op_specs/FIL-17A_local_contrast_tanh.md) | DirectedMPFR | `local_contrast_equal_base` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
-| [FIL-17B](op_specs/FIL-17B_local_laplacian_reference.md) | BitwiseCopy, StagedReference | `local_laplacian_identity`, `local_laplacian_actual_remap_constant` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
+| [FIL-17B](op_specs/FIL-17B_local_laplacian_reference.md) | BitwiseCopy, StagedReference | `local_laplacian_identity`, `local_laplacian_actual_remap_constant`, `fil17/sparse.py` | Multi-level small-array reference and independent one-level large-image checkpoints; complete nonfinite trajectories remain outside this finite reference. |
 | [FIL-18A](op_specs/FIL-18A_variable_box_gather.md) | ExactRational | `variable_footprint_False` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [FIL-18B](op_specs/FIL-18B_variable_disk_gather.md) | ExactRational | `variable_footprint_True` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [FIL-19A](op_specs/FIL-19A_directional_post_aa_v1.md) | BitwiseCopy | `post_aa_flat_guide_copy` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
-| [FIL-19B](op_specs/FIL-19B_smaa_1x_native.md) | ContractFixture | `manifest_missing_smaa`, `real_golden_smaa` | Manifest structure only; actual native/third-party algorithm comparison pending. |
+| [FIL-19B](op_specs/FIL-19B_smaa_1x_native.md) | NativeFloat32Staged, PinnedResourceIdentity; separate PinnedThirdPartyComparison | `smaa_gray_zero_*`, `smaa_edge_threshold_*`, `smaa_local_contrast_suppression`, `smaa_rgb_pattern_*`, `smaa_external_pattern_*`, `smaa_flat_external_guide_copy`, `smaa_active_blend`, `smaa_pinned_resources`; `fil19/samples.py` | The common runner checks analytic cases and exports replayable luma/edge/weight/output vectors. Production bit comparisons and the pinned GPU edge/weight/color comparison use separate adapters; the runner retains GPU comparison as pending. Suite RMSE does not imply pointwise GPU equivalence. |
 | [FIL-20A](op_specs/FIL-20A_local_mean_variance.md) | ExactRational | `local_variance_population`, `local_variance_unbiased`, `rational_variance_offset_invariance_0`; additional cases in tests.py | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [FIL-20B](op_specs/FIL-20B_local_covariance.md) | ExactRational | `local_covariance_negative` | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
 | [FRQ-01A](op_specs/FRQ-01A_fft2.md) | Cyclotomic+DirectedMPFR, DirectedMPFR | `dft_normalized_impulse_backward`, `dft_normalized_constant_backward`, `dft_normalized_impulse_ortho`; additional cases in tests.py | Finite small-array fixtures; no full nonfinite, tensor/Region, resource or runtime coverage. |
