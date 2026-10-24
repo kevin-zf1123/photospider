@@ -5,7 +5,7 @@ kind: shared_data_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: partially_implemented
 ---
 
 # Frequency grids and multiscale collections
@@ -55,4 +55,4 @@ Edited coefficients form a new immutable collection retaining compatible reconst
 metadata. User-constructed bands are legal if shape/role/phase/profile constraints
 hold; original producer identity is not required.
 
-These logical collections remain unimplemented. Their SDK helpers, static schema inference, fixed task lowering and explicit parameter codecs must use the existing frozen kernel and ABI 8 before registration. Python/JSON oracle representations establish mathematical fixtures only. They do not provide a public collection API, deferred membership or runtime validation.
+The Gabor-bank and Gaussian/Laplacian forms of FilterBands/v1 are implemented by the public types and helpers in `photospider/ops/filter.hpp`, native fixed-schema operations, and explicit COPY composition. Their directories carry declared grid, shape, crop, role, phase, rounding and padding information. Pyramid helpers split deeper collections into blocks that respect the fixed 16-member Result limit. Reconstruction accepts compatible edited or reordered bands without producer-identity checks. These paths use the frozen kernel and ABI 8. FrequencyGrid and wavelet-specific forms remain proposed and unimplemented here. Python/JSON oracles remain independent mathematical references; the C++ SDK and compiled native nodes provide collection structure checks and runtime execution.

@@ -24,7 +24,7 @@ and [NUM acceleration](../../01-numeric/op_specs/NUM_accelerated_contract.md), o
 straight color and storage in [FMT](../../02-format-color/op_specs/FMT_common_contract.md),
 [relative coordinates](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 and [tensor storage](../../../kernel-specs/Tensor-Storage-and-Region-Access.md).
-The new logical collection schemas require runtime integration before registration.
+The Gabor and Gaussian/Laplacian FilterBands forms have explicit SDK/runtime integration; other proposed collection forms require their own integration before registration.
 FIL-01D explicitly admits NUM color-sample arithmetic as documented in [color composition](FILTER_color_composition.md), while retaining explicit FMT interpretation, straight representation and the unchecked finite-coverage premise.
 
 All operation ports carry Results with fixed Tensor member schemas in member-table order; authoring helpers compose those ports explicitly. Data use generic tensors, with no new Image, Layer or complex dtype. Arithmetic inputs are Float32/Float64; related image inputs have matching

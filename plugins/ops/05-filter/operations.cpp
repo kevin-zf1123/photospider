@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "02-format-color/color_point.hpp"
+#include "05-filter/advanced.hpp"
 #include "05-filter/common.hpp"
 #include "05-filter/fields.hpp"
 #include "common/registry.hpp"
@@ -324,9 +325,33 @@ Status register_filters(OperationRegistry* registry) {
             make_field(std::string("filter.") + entry.first + suffix,
                        entry.second, profile)));
       }
+      for (auto entry : {std::make_pair("median", LocalKind::Median),
+                         std::make_pair("percentile", LocalKind::Percentile),
+                         std::make_pair("bilateral", LocalKind::Bilateral),
+                         std::make_pair("joint_bilateral", LocalKind::Joint),
+                         std::make_pair("guided_scalar", LocalKind::Guided),
+                         std::make_pair("guided_vector", LocalKind::Vector)}) {
+        check(registry->register_operation(
+            make_local(std::string("filter.") + entry.first + suffix,
+                       entry.second, profile)));
+      }
+      check(registry->register_operation(make_gabor_kernel(
+          std::string("filter.gabor_kernel") + suffix, profile)));
+      check(registry->register_operation(make_gabor_response(
+          std::string("filter.gabor_response") + suffix, profile)));
+      for (auto entry : {std::make_pair("gaussian_pyramid", 0),
+                         std::make_pair("laplacian_pyramid", 1),
+                         std::make_pair("reconstruct_laplacian", 2)})
+        check(registry->register_operation(
+            make_pyramid(std::string("filter.") + entry.first + suffix,
+                         entry.second, profile)));
       check(registry->register_operation(make_coefficients(
           std::string("filter.gaussian_coefficients") + suffix, profile)));
     }
+    check(registry->register_operation(make_hysteresis()));
+    check(registry->register_operation(make_nms()));
+    check(registry->register_operation(make_band()));
+    check(registry->register_operation(make_pyramid_assembly()));
     check(registry->register_operation(make_filter(
         "filter.positive_color_blur_strict", Kind::Color, Profile::Strict)));
     return Status::success();

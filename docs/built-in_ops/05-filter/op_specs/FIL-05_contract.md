@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - FIL-05A
@@ -17,7 +17,7 @@ research_sources:
 
 Median and percentile use explicit order-statistic and interpolation rules. Nonfinite values follow NUM ordering semantics; they are not silently omitted.
 
-Inherit [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). Every member remains Proposed and is not implemented unless its metadata says otherwise.
+Inherit [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). Members remain Proposed; their implementation metadata records the delivered CPU operations.
 
 ## Members
 

@@ -5,7 +5,7 @@ kind: authoring_helper
 category: 05-filter
 status: Proposed
 document_maturity: D2_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-13
 function: canny_quantized4
 proposed_operation_keys: []
@@ -25,7 +25,7 @@ Inherits the [FIL-13 family contract](FIL-13_contract.md), [FILTER common contra
 
 `input` is a single-plane floating-point field → `edges` UInt8 with the same shape.
 
-Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands and FrequencyGrid are proposed SDK/workflow representations under the collection contract; lowering records each selected output's fixed reads and writes.
+Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands uses explicit SDK collections and fixed Result members under the collection contract; FrequencyGrid remains a separate proposed representation; lowering records each selected output's fixed reads and writes.
 
 ## Static parameters and valid domains
 
@@ -66,13 +66,13 @@ Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md)
 
 See the [oracle README](../../../../oracle/ops/filter/README.md) for reproduction and evidence levels. The listed self-tests validate only the reference program; parameter boundaries, full rank/batch, metadata, compiled ROI/tile behavior, budgets, cancellation, and ownership still require [runtime acceptance](FILTER_oracle_protocol.md). Passing an identity/constant fixture does not accept the entire algorithm or every configuration.
 
-## Backend and registration gates
+## Backend and registration
 
-This document proposes no native arithmetic key ready for registration. An authoring helper must explicitly connect finalized members; an external engine must first pass resource, licensing, real-golden, and numerical-configuration gates.
+`ps::filter::canny_quantized4` is implemented in `authoring.cpp` and declared in `photospider/ops/filter.hpp`. It transactionally appends explicit Gaussian, unit-ramp Sobel, magnitude, quantized-four-direction NMS and hysteresis stages, returning the final `edges` reference. There is no opaque native Canny arithmetic key. The internal `filter.canny_nms_quantized4_strict` node preserves the directional branches and asymmetric ties. `CannyOptions` explicitly supplies axes, sigmas, radii, norm, thresholds and connectivity; fixed boundaries and intermediate RN stages remain those specified above.
 
-Float64 accelerated execution still uses Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scaled range use strict NUM fallback. No kernel/CPU/ISA performance or differential acceptance was run for this package.
+Runtime checks use the public compiler, preparation, submission and Result-read interfaces. Numerical references, selected/empty output requests and relevant metadata, resource, cancellation and ownership paths have separate runtime evidence. Implementation does not change Proposed acceptance status or draft maturity.
 
-## Conceptual DAG (not an existing API)
+## Execution model
 
 `static parameters + schemas → compile fixed reads/tasks → prepare → unchecked arithmetic with declared RN stages → complete tiles → ordered call retirement`
 

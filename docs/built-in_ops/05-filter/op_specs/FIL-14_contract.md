@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - FIL-14A
@@ -20,7 +20,7 @@ research_sources:
 
 Complex values use separate real and imaginary tensors; orientation axes and phase sign are explicit.
 
-Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT format/color contract](../../02-format-color/op_specs/FMT_common_contract.md).No member has been marked Accepted or implemented for production.
+Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT format/color contract](../../02-format-color/op_specs/FMT_common_contract.md). Members have CPU implementations and retain Proposed specification status; their specifications describe the registered primitives and SDK helpers.
 
 ## Members
 
@@ -46,7 +46,7 @@ Positive-weight normalization, signed kernels, local regression, and global inve
 
 Each member’s support set is normative. A halo does not mean arbitrary cropped ROIs can run independently; paging does not eliminate a whole-image dependency. Follow each member’s definition for staged rounding, global connectivity, transforms, and iterative state. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
 
-All members must pass the [common acceptance protocol](FILTER_oracle_protocol.md). Mathematical references and related self-tests for this work are documented in the [oracle README](../../../../oracle/ops/filter/README.md); no new implementation was run in the Photospider runtime. D1/D2 indicate draft maturity, not pass rates.
+All members must pass the [common acceptance protocol](FILTER_oracle_protocol.md). The [oracle README](../../../../oracle/ops/filter/README.md) describes the independent mathematical references and their self-tests. Runtime acceptance separately checks the compiled operations and workflows, including Region, resource, cancellation and ownership behavior. D1/D2 indicate draft maturity, not pass rates.
 
 ## Sources and review
 

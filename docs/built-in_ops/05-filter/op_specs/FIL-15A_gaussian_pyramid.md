@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D2_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-15
 function: gaussian_pyramid
 proposed_operation_keys:
@@ -28,7 +28,7 @@ Inherits the [FIL-15 family contract](FIL-15_contract.md), [FILTER common contra
 
 `input` → FilterBands/v1 `bands`, with roles matching the family algorithm.
 
-Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands and FrequencyGrid are proposed SDK/workflow representations under the collection contract; lowering records each selected output's fixed reads and writes.
+Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands uses explicit SDK collections and fixed Result members under the collection contract; FrequencyGrid remains a separate proposed representation; lowering records each selected output's fixed reads and writes.
 
 ## Static parameters and valid domains
 
@@ -68,13 +68,17 @@ Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md)
 
 See the [oracle README](../../../../oracle/ops/filter/README.md) for reproduction and evidence levels. The listed self-tests validate only the reference program; parameter boundaries, full rank/batch, metadata, compiled ROI/tile behavior, budgets, cancellation, and ownership still require [runtime acceptance](FILTER_oracle_protocol.md). Passing an identity/constant fixture does not accept the entire algorithm or every configuration.
 
-## Backend and registration gates
+## Backend and registration
 
-The keys above are naming proposals only; neither strict nor either CPU-accelerated variant is registered or implemented. Accelerated variants must meet NUM final-output FP32-scaled four-ULP bounds and provide strict fallback. Do not accumulate budgets by tap, axis, stage, or iteration; thresholds, ordering, boundaries, copies, and output support requiring exact selection cannot be changed approximately.
+`pyramid.cpp` implements the three CPU profile keys listed above. Native members are `gaussian_0` through `gaussian_L` in schema `photospider.filter_bands.pyramid_binomial5_v1` version 1. Exact binomial coefficients and the RN_t reduce stage are preserved. Materialized level zero uses COPY; a selected band reads its required ancestors and selected nonspatial planes.
 
-Float64 accelerated execution still uses Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scaled range use strict NUM fallback. No kernel/CPU/ISA performance or differential acceptance was run for this package.
+The public `PyramidOptions`, `PyramidBand`, `PyramidBands` and analysis/reconstruction helpers in `photospider/ops/filter.hpp` implement the logical FilterBands/v1 directory. Entries carry source grid, dtype, original and level shapes, level/role, crop, even-phase sampling step, origin/spacing/unit and analysis/synthesis/rounding/padding profiles. Native Results hold at most 16 members (0..15 reductions); the SDK composes blocks of at most 15 reductions for deeper legal pyramids without an additional RN stage. `filter.select_band` and `filter.assemble_laplacian_bands` are structural COPY utilities. Reconstruction checks the complete logical directory and accepts compatible reordered or edited coefficient references.
 
-## Conceptual DAG (not an existing API)
+These are CPU/Host fixed-invocation-ABI-8 implementations. Strict and accelerated variants share certified arithmetic and exact fallback. Float64 inputs retain their precision and exponent range; final accelerated error does not accumulate across stages, and exact ordering, copying, exceptional values and gradual underflow are preserved. The available Apple Silicon profile was exercised against independent references. The guarded x86_64 profile is implemented but was not executed on the Apple test host.
+
+Runtime checks use the public compiler, preparation, submission and Result-read interfaces. Numerical references, selected/empty output requests and relevant metadata, resource, cancellation and ownership paths have separate runtime evidence. Implementation does not change Proposed acceptance status or draft maturity.
+
+## Execution model
 
 `static parameters + schemas → compile fixed reads/tasks → prepare → unchecked arithmetic with declared RN stages → complete tiles → ordered call retirement`
 

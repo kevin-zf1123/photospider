@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-14
 function: gabor_kernel
 proposed_operation_keys:
@@ -29,7 +29,7 @@ Inherits the [FIL-14 family contract](FIL-14_contract.md), [FILTER common contra
 
 No dynamic input → `kernel_real,kernel_imag` Float64 arrays of shape `[2ry+1,2rx+1]`.
 
-Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands and FrequencyGrid are proposed SDK/workflow representations under the collection contract; lowering records each selected output's fixed reads and writes.
+Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands uses explicit SDK collections and fixed Result members under the collection contract; FrequencyGrid remains a separate proposed representation; lowering records each selected output's fixed reads and writes.
 
 ## Static parameters and valid domains
 
@@ -69,13 +69,17 @@ Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md)
 
 See the [oracle README](../../../../oracle/ops/filter/README.md) for reproduction and evidence levels. The listed self-tests validate only the reference program; parameter boundaries, full rank/batch, metadata, compiled ROI/tile behavior, budgets, cancellation, and ownership still require [runtime acceptance](FILTER_oracle_protocol.md). Passing an identity/constant fixture does not accept the entire algorithm or every configuration.
 
-## Backend and registration gates
+## Backend and registration
 
-The keys above are naming proposals only; neither strict nor either CPU-accelerated variant is registered or implemented. Accelerated variants must meet NUM final-output FP32-scaled four-ULP bounds and provide strict fallback. Do not accumulate budgets by tap, axis, stage, or iteration; thresholds, ordering, boundaries, copies, and output support requiring exact selection cannot be changed approximately.
+The listed strict and CPU accelerated keys are registered through fixed invocation ABI 8 in `plugins/ops/05-filter/`.
 
-Float64 accelerated execution still uses Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scaled range use strict NUM fallback. No kernel/CPU/ISA performance or differential acceptance was run for this package.
+The implementation in `gabor.cpp` certifies the complete continuous-valued discrete expression with directed intervals, including DC removal before normalization. Shared statistics and cached taps remain intervals at their active precision; ambiguous cases refine and recompute. A common task can share statistics across selected real and imaginary output tiles without introducing a rounded normalization stage.
 
-## Conceptual DAG (not an existing API)
+Strict and accelerated variants use certified arithmetic with exact fallback; Float64 inputs retain their precision and exponent range. Accelerated final-output error cannot accumulate across internal stages. Copies, ordering, branch decisions, gradual underflow and exceptional values follow the same NUM contract. The available Apple Silicon path was compared against the independent references; the guarded x86_64 path is implemented but was not executed on the Apple test host.
+
+Runtime verification uses the public compiler, prepared execution and Result-read interfaces and covers finite oracle comparisons, selected/empty output requests and relevant exceptional/resource/ownership cases. Specification acceptance and draft maturity are unchanged; measured runtime evidence is distinct from oracle self-checks.
+
+## Execution model
 
 `static parameters + schemas → compile fixed reads/tasks → prepare → unchecked arithmetic with declared RN stages → complete tiles → ordered call retirement`
 

@@ -4,6 +4,7 @@
  * @brief Public authoring helpers and factories for bundled operators.
  */
 
+#include "photospider/ops/filter.hpp"
 #include "photospider/ops/format/alpha.hpp"
 #include "photospider/ops/format/channel.hpp"
 #include "photospider/ops/format/channel_assembly.hpp"

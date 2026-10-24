@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D2_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-15
 function: laplacian_pyramid
 proposed_operation_keys:
@@ -28,7 +28,7 @@ Inherits the [FIL-15 family contract](FIL-15_contract.md), [FILTER common contra
 
 `input` → FilterBands/v1 `bands`, with roles matching the family algorithm.
 
-Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands and FrequencyGrid are proposed SDK/workflow representations under the collection contract; lowering records each selected output's fixed reads and writes.
+Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands uses explicit SDK collections and fixed Result members under the collection contract; FrequencyGrid remains a separate proposed representation; lowering records each selected output's fixed reads and writes.
 
 ## Static parameters and valid domains
 
@@ -68,13 +68,23 @@ Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md)
 
 See the [oracle README](../../../../oracle/ops/filter/README.md) for reproduction and evidence levels. The listed self-tests validate only the reference program; parameter boundaries, full rank/batch, metadata, compiled ROI/tile behavior, budgets, cancellation, and ownership still require [runtime acceptance](FILTER_oracle_protocol.md). Passing an identity/constant fixture does not accept the entire algorithm or every configuration.
 
-## Backend and registration gates
+## Backend and registration
 
-The keys above are naming proposals only; neither strict nor either CPU-accelerated variant is registered or implemented. Accelerated variants must meet NUM final-output FP32-scaled four-ULP bounds and provide strict fallback. Do not accumulate budgets by tap, axis, stage, or iteration; thresholds, ordering, boundaries, copies, and output support requiring exact selection cannot be changed approximately.
+The listed strict and CPU accelerated keys are registered through fixed invocation ABI 8 in `plugins/ops/05-filter/`.
 
-Float64 accelerated execution still uses Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scaled range use strict NUM fallback. No kernel/CPU/ISA performance or differential acceptance was run for this package.
+The native key returns `detail_0` through `detail_(L-1)` followed by `base` in schema `photospider.filter_bands.pyramid_binomial5_v1` version 1. Reduction, expansion and residual subtraction retain separate RN_t stages. Selected bands materialize only their required ancestors and selected nonspatial planes. See the SDK collection representation below.
 
-## Conceptual DAG (not an existing API)
+### SDK collection representation
+
+The public `ps::filter::PyramidOptions`, `PyramidBand` and `PyramidBands` types and `gaussian_pyramid`, `laplacian_pyramid`, and `reconstruct_laplacian` helpers are declared in `photospider/ops/filter.hpp`. The logical `FilterBands/v1` directory records IDs, source grid, original and level shapes, dtype, level/role, full valid crop, even-phase sampling step, origin/spacing/unit, analysis/synthesis profile, rounding profile and padding history. Reconstruction accepts reordered entries and edited `WorkflowInput` references while rejecting incompatible directory metadata.
+
+A native Result holds at most 16 members (0..15 reductions). The SDK composes blocks of at most 15 reductions for deeper legal pyramids; it does not impose a 15-level semantic limit. Blocks are joined through the stored base without an extra rounding stage. `filter.select_band` and `filter.assemble_laplacian_bands` are structural COPY utilities. Optional native `expected_shape`/`expected_dtype` parameters bind descriptors to the SDK directory; the logical helper owns grid metadata that is not present in a plain Tensor descriptor.
+
+Strict and accelerated variants use certified arithmetic with exact fallback; Float64 inputs retain their precision and exponent range. Accelerated final-output error cannot accumulate across internal stages. Copies, ordering, branch decisions, gradual underflow and exceptional values follow the same NUM contract. The available Apple Silicon path was compared against the independent references; the guarded x86_64 path is implemented but was not executed on the Apple test host.
+
+Runtime verification uses the public compiler, prepared execution and Result-read interfaces and covers finite oracle comparisons, selected/empty output requests and relevant exceptional/resource/ownership cases. Specification acceptance and draft maturity are unchanged; measured runtime evidence is distinct from oracle self-checks.
+
+## Execution model
 
 `static parameters + schemas → compile fixed reads/tasks → prepare → unchecked arithmetic with declared RN stages → complete tiles → ordered call retirement`
 

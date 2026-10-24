@@ -4,7 +4,7 @@
 
 Gaussian 的拟议端口使用单 Tensor Result 并保留完整 sample shape（含 batch axes）。
 颜色解释遵循当前 FMT 显式参数契约，调用方为后续颜色消费者提供 TensorDescription
-及需要的 profile。FIL-01～04 已通过固定 invocation ABI 8 注册 CPU 实现；固定 Plan 的输入读取、
+及需要的 profile。FIL-01～15 已通过固定 invocation ABI 8 提供 CPU primitive 与显式 SDK/workflow helper 实现；固定 Plan 的输入读取、
 输出 tile 与资源要求见成员规格。颜色配置本身不增加数值 payload 校验。
 
 Gaussian filter 的 x_axis/y_axis 索引完整 sample shape，包含 batch-axis 前缀。对 RGBA

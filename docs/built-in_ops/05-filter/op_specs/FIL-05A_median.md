@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-05
 function: median
 proposed_operation_keys:
@@ -59,9 +59,13 @@ Reference callable: `percentile(image,footprint,anchor,*,q=Q(1,2),interpolation=
 
 ## Backend and registration
 
-The proposed keys are `filter.median_strict`, `filter.median_accelerated_apple_silicon`, `filter.median_accelerated_x86_64`. They remain unregistered and unimplemented. Accelerated variants must satisfy NUM's final FP32-scaled four-ULP requirement and fallback rules without accumulating a separate budget per tap, axis, stage, or iteration. Threshold, ordering, boundary, copy, and output-support choices that must be exact cannot change approximately. Float64 accelerated paths retain Float64 input/output and exponent range; they do not first convert to Float32. Performance and CPU/ISA differential acceptance are not established here.
+`rank.cpp` implements the three CPU profile keys listed above. It retains nonzero footprint coordinates in admitted scratch, observes NaNs in original tap order, and keeps stable ties including signed zeros. Pure selections copy stored sample bits; even-size means use a rounding certificate with exact rational fallback.
 
-## Conceptual DAG (not an existing API)
+These are CPU/Host fixed-invocation-ABI-8 implementations. Strict and accelerated variants share certified arithmetic and exact fallback. Float64 inputs retain their precision and exponent range; final accelerated error does not accumulate across stages, and exact ordering, copying, exceptional values and gradual underflow are preserved. The available Apple Silicon profile was exercised against independent references. The guarded x86_64 profile is implemented but was not executed on the Apple test host.
+
+Runtime checks use the public compiler, preparation, submission and Result-read interfaces. Numerical references, selected/empty output requests and relevant metadata, resource, cancellation and ownership paths have separate runtime evidence. Implementation does not change Proposed acceptance status or draft maturity.
+
+## Execution model
 
 `static parameters + schemas -> compile fixed reads/tasks -> prepare -> unchecked arithmetic with declared rounding stages -> complete tiles -> ordered call retirement`
 

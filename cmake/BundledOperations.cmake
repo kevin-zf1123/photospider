@@ -47,6 +47,16 @@ endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/05-filter/geometry.cpp
+  plugins/ops/05-filter/local_operations.cpp
+  plugins/ops/05-filter/rank.cpp
+  plugins/ops/05-filter/bilateral.cpp
+  plugins/ops/05-filter/guided.cpp
+  plugins/ops/05-filter/gabor.cpp
+  plugins/ops/05-filter/edges.cpp
+  plugins/ops/05-filter/pyramid.cpp
+  plugins/ops/05-filter/bands.cpp
+  plugins/ops/05-filter/authoring.cpp
+  plugins/ops/05-filter/pyramid_authoring.cpp
   plugins/ops/05-filter/operations.cpp
   plugins/ops/05-filter/gaussian.cpp
   plugins/ops/05-filter/evaluate.cpp
