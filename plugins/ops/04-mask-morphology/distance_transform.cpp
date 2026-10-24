@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "04-mask-morphology/distance_metric.hpp"
+#include "04-mask-morphology/lattice.hpp"
 #include "common/registry.hpp"
 
 namespace ps::plugin_internal::mask {
@@ -64,9 +64,64 @@ struct DistanceTransform final : Program {
     const auto d = source_region(q).dimensions();
     const auto pixels =
         static_cast<unsigned __int128>(d[0].extent) * d[1].extent;
+    if (!truncated && metric.kind == MetricKind::L2 && metric.isotropic)
+      return bytes(sizeof(Exact) + pixels * sizeof(Site) +
+                   static_cast<unsigned __int128>(height + 2) *
+                       (sizeof(FeatureParabola) + width + 2) +
+                   128);
     const auto ring = exterior ? 2 * (d[0].extent + d[1].extent) + 4 : 0;
     return bytes(sizeof(Exact) + (pixels + ring) * sizeof(SiteNode) + pixels +
                  128);
+  }
+  void separable(const Kernel& kernel, const ps_kernel_invocation_v8& inv,
+                 Exact& exact, const Work& work, Visits* visits) const {
+    const Reader reader{kernel, inv};
+    auto* nearest = reinterpret_cast<Site*>(&exact + 1);
+    auto* envelope =
+        reinterpret_cast<FeatureParabola*>(nearest + height * width);
+    auto* state = reinterpret_cast<std::uint8_t*>(envelope + height + 2);
+    lattice_input(reader, 0, state, height, width, work);
+    const bool narrow = type == ElementType::Float32;
+    const auto sign_mask =
+        narrow ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000);
+    const unsigned passes = signed_field ? 2 : 1;
+    for (unsigned pass = 0; pass < passes; ++pass) {
+      const bool feature_background = signed_field ? pass == 0 : background;
+      lattice_l2_sites(state, height, width, feature_background,
+                       exterior && feature_background, nearest, envelope,
+                       visits);
+      for (unsigned j = 0; j < inv.output_count; ++j) {
+        const auto port = kernel.writes[j].first;
+        const auto& output = inv.outputs[j];
+        samples(output, [&](const Coordinate& at, std::uint64_t) {
+          visits->step();
+          const auto rank = output.layout->rank;
+          const auto y = at[rank - 2], x = at[rank - 1];
+          const bool negative =
+              signed_field && state[(y + 1) * (width + 2) + x + 1];
+          if (signed_field && negative != feature_background)
+            return;
+          const auto site = nearest[y * width + x];
+          const bool found = site.y != INT64_MIN;
+          std::uint64_t result;
+          if (port == 1) {
+            const auto coordinate = !found       ? INT64_C(-1)
+                                    : at[0] == 0 ? site.y
+                                                 : site.x;
+            result = static_cast<std::uint64_t>(coordinate);
+          } else {
+            const Site point{static_cast<std::int64_t>(y),
+                             static_cast<std::int64_t>(x)};
+            result = found ? metric.rounded_distance(exact, point, site,
+                                                     squared, narrow)
+                           : convert(INFINITY, narrow);
+            if (negative)
+              result ^= sign_mask;
+          }
+          store(output, at, result);
+        });
+      }
+    }
   }
   void run(const Kernel& kernel,
            const ps_kernel_invocation_v8& inv) const override {
@@ -74,6 +129,11 @@ struct DistanceTransform final : Program {
     Visits visits{work};
     ExactArena arena(inv.scratch[0].allocation, work);
     auto& exact = *arena.p;
+    if (!truncated && metric.kind == MetricKind::L2 && metric.isotropic) {
+      separable(kernel, inv, exact, work, &visits);
+      visits.flush();
+      return;
+    }
     const Reader reader{kernel, inv};
     const auto q =
         truncated ? invocation_region(*inv.outputs[0].layout) : Region{};

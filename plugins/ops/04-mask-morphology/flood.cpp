@@ -4,7 +4,7 @@
 #include <utility>
 #include <vector>
 
-#include "04-mask-morphology/spatial.hpp"
+#include "04-mask-morphology/lattice.hpp"
 #include "common/registry.hpp"
 
 namespace ps::plugin_internal::mask {
@@ -91,41 +91,82 @@ struct Flood final : Program {
         seen + (kind == FloodKind::Fixed ? count : 0));
     auto* flags = reinterpret_cast<std::uint8_t*>(data + count * components);
     std::uint64_t seed_count = 0;
-    for (std::uint64_t y = 0; y < height; ++y) {
-      for (std::uint64_t x = 0; x < width; ++x) {
-        const auto index = y * width + x;
-        const bool seed = reader.value(seed_port, 0, {y, x}) != 0;
-        const bool barrier = reader.value(barrier_port, 0, {y, x}) != 0;
-        flags[index] = barrier ? 1 : 0;
-        if (seed) {
-          seeds[seed_count++] = index;
+    const auto read_rows = [&](unsigned port, std::uint64_t channel,
+                               auto receive) {
+      const bool narrow =
+          kernel.groups[kernel.input_base[port]].type == ElementType::Float32;
+      const bool planar = port == 0 && components;
+      const unsigned axis = planar ? 2 : 1;
+      for (std::uint64_t y = 0; y < height; ++y)
+        for (std::uint64_t x = 0; x < width;) {
+          const Coordinate at =
+              planar ? Coordinate{channel, y, x} : Coordinate{y, x};
+          const auto& view = reader.view(port, 0, at);
+          const auto n = std::min(
+              {UINT64_C(256), width - x,
+               view.layout->origin[axis] + view.layout->shape[axis] - x});
+          work.poll(n);
+          const auto* source =
+              static_cast<const std::uint8_t*>(view.allocation) +
+              offset(*view.layout, view.byte_offset, at);
+          const auto step = view.layout->strides[axis];
+          for (std::uint64_t i = 0; i < n; ++i)
+            receive(y * width + x + i,
+                    narrow ? static_cast<double>(load<float>(source, step, i))
+                           : load<double>(source, step, i));
+          x += n;
         }
-        if (kind == FloodKind::Fixed) {
-          seen[index] = 0;
-        }
-        visits.step();
-      }
-    }
+    };
+    read_rows(barrier_port, 0, [&](auto index, auto value) {
+      flags[index] = value != 0;
+      if (kind == FloodKind::Fixed)
+        seen[index] = 0;
+    });
+    read_rows(seed_port, 0, [&](auto index, auto value) {
+      if (value != 0)
+        seeds[seed_count++] = index;
+    });
     if (seed_count && components) {
-      for (std::uint64_t c = 0; c < components; ++c) {
-        for (std::uint64_t y = 0; y < height; ++y) {
-          for (std::uint64_t x = 0; x < width; ++x) {
-            data[c * count + y * width + x] = reader.value(0, 0, {c, y, x});
-            visits.step();
-          }
-        }
-      }
+      for (std::uint64_t c = 0; c < components; ++c)
+        read_rows(0, c, [&](auto index, auto value) {
+          data[c * count + index] = value;
+        });
     }
-    const auto passes = kind == FloodKind::Fixed ? seed_count : UINT64_C(1);
-    for (std::uint64_t pass = 0; pass < passes && seed_count; ++pass) {
+    const auto reference_order = [&](std::uint64_t a, std::uint64_t b) {
+      for (std::uint64_t c = 0; c < components; ++c) {
+        visits.step();
+        const auto x = data[c * count + a], y = data[c * count + b];
+        if (x < y)
+          return -1;
+        if (x > y)
+          return 1;
+      }
+      return 0;
+    };
+    if (kind == FloodKind::Fixed) {
+      std::sort(seeds, seeds + seed_count, [&](auto a, auto b) {
+        const auto order = reference_order(a, b);
+        return order < 0 || (!order && a < b);
+      });
+    }
+    for (std::uint64_t pass = 0; pass < seed_count;) {
       work.poll();
       const auto stamp = pass + 1;
       std::uint64_t head = 0, tail = 0;
+      auto end = seed_count;
       if (kind == FloodKind::Fixed) {
-        const auto s = seeds[pass];
-        queue[tail++] = s;
-        seen[s] = stamp;
-        flags[s] |= 2;
+        end = pass + 1;
+        while (end < seed_count && !reference_order(seeds[pass], seeds[end]))
+          ++end;
+        // Identical reference vectors define the same admissible graph.
+        // One multi-source traversal computes the union of their floods.
+        for (auto i = pass; i < end; ++i) {
+          visits.step();
+          const auto s = seeds[i];
+          queue[tail++] = s;
+          seen[s] = stamp;
+          flags[s] |= 2;
+        }
       } else {
         for (std::uint64_t j = 0; j < seed_count; ++j) {
           const auto s = seeds[j];
@@ -176,15 +217,12 @@ struct Flood final : Program {
           }
         }
       }
+      pass = end;
     }
-    for (unsigned j = 0; j < inv.output_count; ++j) {
-      samples(inv.outputs[j], [&](const Coordinate& at, std::uint64_t) {
-        store(inv.outputs[j], at,
-              convert((flags[at[0] * width + at[1]] & 2) != 0,
-                      type == ElementType::Float32));
-        visits.step();
+    for (unsigned j = 0; j < inv.output_count; ++j)
+      lattice_output(inv.outputs[j], work, [&](auto y, auto x, bool narrow) {
+        return convert((flags[y * width + x] & 2) != 0, narrow);
       });
-    }
     visits.flush();
   }
 };

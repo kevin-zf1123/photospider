@@ -293,6 +293,7 @@ std::uint64_t ciede2000(Math& m, const std::array<Rational, 3>& p,
   // Its sine has the sign of this exact expression; the shared a-axis scale
   // is positive. This also resolves an exact sum of 360 degrees.
   const auto sine_sum = m.add(m.mul(p[1], q[2]), m.mul(q[1], p[2]));
+  const bool zero_hue = neutral || (Exact::zero(cross) && !dot.negative);
   return m.certify(narrow, [&](Interval out) {
     auto& d = m.d;
     auto cp1 = d.interval(), cp2 = d.interval(), ap1 = d.interval(),
@@ -332,9 +333,9 @@ std::uint64_t ciede2000(Math& m, const std::array<Rational, 3>& p,
       d.add(cp2, cp2, b);
       m.sqrt(cp2, cp2);
     }
-    hue_degrees(m, h1, ap1, cp1, p[1], p[2]);
-    hue_degrees(m, h2, ap2, cp2, q[1], q[2]);
-    {
+    if (!zero_hue) {
+      hue_degrees(m, h1, ap1, cp1, p[1], p[2]);
+      hue_degrees(m, h2, ap2, cp2, q[1], q[2]);
       Directed::Frame frame(d);
       auto full = d.interval(), hs = d.interval();
       d.integer(full, 360);
@@ -370,7 +371,7 @@ std::uint64_t ciede2000(Math& m, const std::array<Rational, 3>& p,
          sc = d.interval(), sh = d.interval(), rt = d.interval();
     m.enclose(dl, m.sub(l2, l1));
     d.subtract(dc, cp2, cp1);
-    if (neutral || (Exact::zero(cross) && !dot.negative)) {
+    if (zero_hue) {
       d.integer(dh_big, 0);
     } else {
       Directed::Frame frame(d);
@@ -402,48 +403,53 @@ std::uint64_t ciede2000(Math& m, const std::array<Rational, 3>& p,
       times(d, sc, cm, 45, 1000);
       d.integer(v, 1);
       d.add(sc, sc, v);
-      d.integer(t, 1);
-      d.integer(temp, 30);
-      d.subtract(angle, hm, temp);
-      cosine_degrees(m, v, angle);
-      times(d, v, v, 17, 100);
-      d.subtract(t, t, v);
-      d.scale(angle, hm, 1);
-      cosine_degrees(m, v, angle);
-      times(d, v, v, 24, 100);
-      d.add(t, t, v);
-      times(d, angle, hm, 3);
-      d.integer(temp, 6);
-      d.add(angle, angle, temp);
-      cosine_degrees(m, v, angle);
-      times(d, v, v, 32, 100);
-      d.add(t, t, v);
-      d.scale(angle, hm, 2);
-      d.integer(temp, 63);
-      d.subtract(angle, angle, temp);
-      cosine_degrees(m, v, angle);
-      times(d, v, v, 20, 100);
-      d.subtract(t, t, v);
-      d.multiply(sh, cm, t);
-      times(d, sh, sh, 15, 1000);
-      d.integer(v, 1);
-      d.add(sh, sh, v);
-      d.integer(temp, 275);
-      d.subtract(angle, hm, temp);
-      times(d, angle, angle, 1, 25);
-      d.multiply(angle, angle, angle);
-      d.negate(angle, angle);
-      m.functions.exponential(angle, angle);
-      times(d, angle, angle, 60);
-      sine_degrees(m, rt, angle);
-      seventh(d, v, cm);
-      d.integer(temp, INT64_C(6103515625));
-      d.add(temp, temp, v);
-      d.divide(v, v, temp);
-      m.sqrt(v, v);
-      d.scale(v, v, 1);
-      d.multiply(rt, rt, v);
-      d.negate(rt, rt);
+      // Exact zero hue difference removes both the hue square and rotation
+      // cross term. Their hue angles, trigonometric scales and exponential
+      // are unnecessary even when the other two terms are nonzero.
+      if (!zero_hue) {
+        d.integer(t, 1);
+        d.integer(temp, 30);
+        d.subtract(angle, hm, temp);
+        cosine_degrees(m, v, angle);
+        times(d, v, v, 17, 100);
+        d.subtract(t, t, v);
+        d.scale(angle, hm, 1);
+        cosine_degrees(m, v, angle);
+        times(d, v, v, 24, 100);
+        d.add(t, t, v);
+        times(d, angle, hm, 3);
+        d.integer(temp, 6);
+        d.add(angle, angle, temp);
+        cosine_degrees(m, v, angle);
+        times(d, v, v, 32, 100);
+        d.add(t, t, v);
+        d.scale(angle, hm, 2);
+        d.integer(temp, 63);
+        d.subtract(angle, angle, temp);
+        cosine_degrees(m, v, angle);
+        times(d, v, v, 20, 100);
+        d.subtract(t, t, v);
+        d.multiply(sh, cm, t);
+        times(d, sh, sh, 15, 1000);
+        d.integer(v, 1);
+        d.add(sh, sh, v);
+        d.integer(temp, 275);
+        d.subtract(angle, hm, temp);
+        times(d, angle, angle, 1, 25);
+        d.multiply(angle, angle, angle);
+        d.negate(angle, angle);
+        m.functions.exponential(angle, angle);
+        times(d, angle, angle, 60);
+        sine_degrees(m, rt, angle);
+        seventh(d, v, cm);
+        d.integer(temp, INT64_C(6103515625));
+        d.add(temp, temp, v);
+        d.divide(v, v, temp);
+        m.sqrt(v, v);
+        d.scale(v, v, 1);
+        d.multiply(rt, rt, v);
+        d.negate(rt, rt);
+      }
     }
     {
       Directed::Frame frame(d);
@@ -454,17 +460,21 @@ std::uint64_t ciede2000(Math& m, const std::array<Rational, 3>& p,
       m.enclose(factor, m.value(factors[1]));
       d.multiply(sc, sc, factor);
       d.divide(dc, dc, sc);
-      m.enclose(factor, m.value(factors[2]));
-      d.multiply(sh, sh, factor);
-      d.divide(dh_big, dh_big, sh);
+      if (!zero_hue) {
+        m.enclose(factor, m.value(factors[2]));
+        d.multiply(sh, sh, factor);
+        d.divide(dh_big, dh_big, sh);
+      }
       d.multiply(distance, dl, dl);
       d.multiply(temp, dc, dc);
       d.add(distance, distance, temp);
-      d.multiply(temp, dh_big, dh_big);
-      d.add(distance, distance, temp);
-      d.multiply(temp, dc, dh_big);
-      d.multiply(temp, temp, rt);
-      d.add(distance, distance, temp);
+      if (!zero_hue) {
+        d.multiply(temp, dh_big, dh_big);
+        d.add(distance, distance, temp);
+        d.multiply(temp, dc, dh_big);
+        d.multiply(temp, temp, rt);
+        d.add(distance, distance, temp);
+      }
       m.sqrt(distance, distance);
       response.interval(m, out, distance);
     }

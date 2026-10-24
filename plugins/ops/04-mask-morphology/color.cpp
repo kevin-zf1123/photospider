@@ -5,17 +5,30 @@
 
 #include "04-mask-morphology/color_math.hpp"
 #include "04-mask-morphology/fast.hpp"
+#include "04-mask-morphology/memo.hpp"
+#include "04-mask-morphology/spatial.hpp"
+#include "04-mask-morphology/work.hpp"
 #include "common/registry.hpp"
 #include "photospider/ops/mask.hpp"
 
 namespace ps::plugin_internal::mask {
 namespace {
 enum class ColorKind { Coordinate, Lab76, Hue, Lab2000, Apply };
+// One fast charge is one selected coordinate or one model group (at most four
+// coordinates). Keep this cadence independent of exact arithmetic estimates.
+using ColorFastWork = BatchedWork<256>;
 struct ColorScratch final {
+  ScalarMemo<3> memo;
+  ArithmeticWork arithmetic;
   Math math;
   std::array<Rational, 4> z;
   std::array<Rational, 3> first, second;
-  explicit ColorScratch(const Work& work) : math(work) {}
+  ColorFastWork fast_work;
+  explicit ColorScratch(const Work& work)
+      : arithmetic{work}, math(work), fast_work{work} {
+    math.exact.bind(arithmetic);
+    math.d.consume = core_internal::WorkConsumer(arithmetic);
+  }
 };
 struct Color final : Program {
   ColorKind kind;
@@ -87,9 +100,47 @@ struct Color final : Program {
   }
   std::optional<std::uint64_t> fast(const Reader& r, const Coordinate& at,
                                     std::uint64_t count,
-                                    const Work& work) const {
-    if (kind == ColorKind::Hue || kind == ColorKind::Lab2000)
+                                    const ColorFastWork& work) const {
+    if (kind == ColorKind::Lab2000)
       return {};
+    if (kind == ColorKind::Hue) {
+      const bool narrow = type == ElementType::Float32;
+      const auto chroma = r.value(0, 0, {selected[1], at[0], at[1]});
+      if (chroma == 0 || chroma < minimum_chroma)
+        return convert(include_neutral, narrow);
+      const auto delta =
+          Fast::point(r.value(0, 0, {selected[0], at[0], at[1]})) -
+          Fast::point(center) + Fast::point(.5);
+      if (!delta.finite())
+        return {};
+      const auto period = std::floor(delta.low);
+      if (period != std::floor(delta.high))
+        return {};
+      // A single integer floor for the entire enclosure certifies the exact
+      // modulo branch. Wide or boundary-crossing intervals use rational math.
+      const auto wrapped = delta - Fast::point(period) - Fast::point(.5);
+      const Fast distance{
+          wrapped.low <= 0 && wrapped.high >= 0
+              ? 0
+              : std::min(std::abs(wrapped.low), std::abs(wrapped.high)),
+          std::max(std::abs(wrapped.low), std::abs(wrapped.high))};
+      if (distance.high <= response.inner)
+        return convert(1, narrow);
+      if (distance.low >= response.outer &&
+          (response.inner != response.outer || distance.low > response.inner))
+        return 0;
+      if (response.inner == response.outer)
+        return {};
+      const auto t =
+          (distance - Fast::point(response.inner)) /
+          (Fast::point(response.outer) - Fast::point(response.inner));
+      auto coverage = unit(Fast::point(1) - fast_curve(t, response.smooth));
+      if (coverage.low == 0)
+        coverage.low = 0;
+      if (coverage.high == 0)
+        coverage.high = 0;
+      return certified(coverage, narrow);
+    }
     auto distance = Fast::point(0);
     const auto coordinate = [&](unsigned j) {
       return Fast::point(r.value(0, 0, {selected[j], at[0], at[1]}));
@@ -132,6 +183,7 @@ struct Color final : Program {
   }
   void run(const Kernel& k, const ps_kernel_invocation_v8& inv) const override {
     Work work{inv, work_limit};
+    Visits visits{work};
     auto* scratch = new (inv.scratch[0].allocation) ColorScratch(work);
     struct Cleanup {
       ColorScratch* p;
@@ -143,68 +195,81 @@ struct Color final : Program {
     const bool narrow = type == ElementType::Float32;
     const auto count = kind == ColorKind::Apply ? r.raw(1, 0, {0}) : 0;
     samples(out, [&](const Coordinate& at, std::uint64_t) {
-      work.poll(1);
-      if (auto result = fast(r, at, count, work)) {
+      visits.step();
+      if (auto result = fast(r, at, count, scratch->fast_work)) {
         store(out, at, *result);
         return;
       }
-      m.exact.reset();
-      const auto coord = [&](unsigned j) {
-        return r.exact(m.exact, 0, 0, {selected[j], at[0], at[1]});
-      };
-      std::uint64_t result = 0;
-      if (kind == ColorKind::Hue) {
-        const auto chroma = r.value(0, 0, {selected[1], at[0], at[1]});
-        if (chroma == 0 || chroma < minimum_chroma) {
-          result = convert(include_neutral, narrow);
+      const auto calculate = [&]() -> std::uint64_t {
+        m.exact.reset();
+        const auto coord = [&](unsigned j) {
+          return r.exact(m.exact, 0, 0, {selected[j], at[0], at[1]});
+        };
+        std::uint64_t result = 0;
+        if (kind == ColorKind::Hue) {
+          const auto chroma = r.value(0, 0, {selected[1], at[0], at[1]});
+          if (chroma == 0 || chroma < minimum_chroma) {
+            result = convert(include_neutral, narrow);
+          } else {
+            const auto delta = m.sub(coord(0), m.value(center));
+            const auto half = m.exact.fraction(1, 2);
+            const auto wrapped =
+                m.sub(m.exact.modulo(m.add(delta, half), 1), half);
+            result = response.rational(m, m.exact.absolute(wrapped), narrow);
+          }
+        } else if (kind == ColorKind::Lab2000) {
+          for (unsigned j = 0; j < 3; ++j) {
+            scratch->first[j] = coord(j);
+            scratch->second[j] = r.exact(m.exact, 1, 0, {j});
+          }
+          result = ciede2000(m, scratch->first, scratch->second, factors,
+                             response, narrow);
+        } else if (kind == ColorKind::Apply) {
+          Rational minimum = m.exact.integer(0);
+          for (std::uint64_t g = 0; g < count; ++g) {
+            work.poll(1);
+            auto distance = m.exact.integer(0);
+            for (unsigned j = 0; j < selected.size(); ++j) {
+              auto value = m.sub(coord(j), r.exact(m.exact, 1, 2, {g, j}));
+              for (unsigned c = 0; c < j; ++c)
+                value = m.sub(value, m.mul(r.exact(m.exact, 1, 3, {g, j, c}),
+                                           scratch->z[c]));
+              scratch->z[j] = m.div(value, r.exact(m.exact, 1, 3, {g, j, j}));
+              distance = m.add(distance, m.sq(scratch->z[j]));
+            }
+            if (!g || m.exact.order(distance, minimum) < 0)
+              minimum = distance;
+          }
+          if (count)
+            result = response.squared(m, minimum, narrow);
         } else {
-          const auto delta = m.sub(coord(0), m.value(center));
-          const auto half = m.exact.fraction(1, 2);
-          const auto wrapped =
-              m.sub(m.exact.modulo(m.add(delta, half), 1), half);
-          result = response.rational(m, m.exact.absolute(wrapped), narrow);
-        }
-      } else if (kind == ColorKind::Lab2000) {
-        for (unsigned j = 0; j < 3; ++j) {
-          scratch->first[j] = coord(j);
-          scratch->second[j] = r.exact(m.exact, 1, 0, {j});
-        }
-        result = ciede2000(m, scratch->first, scratch->second, factors,
-                           response, narrow);
-      } else if (kind == ColorKind::Apply) {
-        Rational minimum = m.exact.integer(0);
-        for (std::uint64_t g = 0; g < count; ++g) {
-          work.poll(1);
           auto distance = m.exact.integer(0);
           for (unsigned j = 0; j < selected.size(); ++j) {
-            auto value = m.sub(coord(j), r.exact(m.exact, 1, 2, {g, j}));
-            for (unsigned c = 0; c < j; ++c)
-              value = m.sub(value, m.mul(r.exact(m.exact, 1, 3, {g, j, c}),
-                                         scratch->z[c]));
-            scratch->z[j] = m.div(value, r.exact(m.exact, 1, 3, {g, j, j}));
-            distance = m.add(distance, m.sq(scratch->z[j]));
+            work.poll(1);
+            auto diff = m.sub(coord(j), r.exact(m.exact, 1, 0, {j}));
+            if (kind == ColorKind::Coordinate)
+              diff = m.div(diff, r.exact(m.exact, 2, 0, {j}));
+            else if (!j)
+              diff = m.scale(diff, 100);
+            distance = m.add(distance, m.sq(diff));
           }
-          if (!g || m.exact.order(distance, minimum) < 0)
-            minimum = distance;
+          result = response.squared(m, distance, narrow);
         }
-        if (count)
-          result = response.squared(m, minimum, narrow);
+        check(m.exact.status());
+        return result;
+      };
+      if (kind == ColorKind::Hue || kind == ColorKind::Lab2000) {
+        std::array<std::uint64_t, 3> key{};
+        for (unsigned j = 0; j < selected.size(); ++j)
+          key[j] = r.raw(0, 0, {selected[j], at[0], at[1]});
+        store(out, at, scratch->memo.evaluate(key, calculate));
       } else {
-        auto distance = m.exact.integer(0);
-        for (unsigned j = 0; j < selected.size(); ++j) {
-          work.poll(1);
-          auto diff = m.sub(coord(j), r.exact(m.exact, 1, 0, {j}));
-          if (kind == ColorKind::Coordinate)
-            diff = m.div(diff, r.exact(m.exact, 2, 0, {j}));
-          else if (!j)
-            diff = m.scale(diff, 100);
-          distance = m.add(distance, m.sq(diff));
-        }
-        result = response.squared(m, distance, narrow);
+        store(out, at, calculate());
       }
-      check(m.exact.status());
-      store(out, at, result);
     });
+    visits.flush();
+    scratch->arithmetic.flush();
+    scratch->fast_work.flush();
   }
 };
 std::vector<Parameter> color_parameters(bool description_required = false) {

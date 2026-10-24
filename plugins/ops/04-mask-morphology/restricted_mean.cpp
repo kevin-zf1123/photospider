@@ -4,6 +4,8 @@
 #include <vector>
 
 #include "04-mask-morphology/exact_sum.hpp"
+#include "04-mask-morphology/spatial.hpp"
+#include "04-mask-morphology/work.hpp"
 #include "common/registry.hpp"
 
 namespace ps::plugin_internal::mask {
@@ -39,10 +41,14 @@ struct Restricted final : Program {
     }
     return result;
   }
-  std::uint64_t task_scratch(unsigned, const Region& q) const override {
+  std::uint64_t task_scratch(unsigned port, const Region& q) const override {
     const auto support_region = footprint.support(q, height, width);
     const auto columns =
         footprint.kind == "square" ? support_region.dimensions()[1].extent : 0;
+    if (port == 1)
+      return bytes(static_cast<unsigned __int128>(columns + 1) *
+                       sizeof(std::uint64_t) +
+                   64);
     if (type == ElementType::Float32)
       return bytes(sizeof(numeric_ops::ExactRatioWorkspace<12>) +
                    static_cast<unsigned __int128>(columns + 1) *
@@ -52,6 +58,94 @@ struct Restricted final : Program {
                  static_cast<unsigned __int128>(columns + 1) *
                      sizeof(WeightedSum<68>) +
                  64);
+  }
+  void valid(const Kernel& k, const ps_kernel_invocation_v8& inv) const {
+    const Reader reader{k, inv};
+    const Work work{inv, work_limit};
+    Visits visits{work};
+    const auto& out = inv.outputs[0];
+    const auto& l = *out.layout;
+    const auto sy = l.origin[0], sx = l.origin[1];
+    const auto ey = sy + l.shape[0], ex = sx + l.shape[1];
+    const auto rx = static_cast<std::uint64_t>(footprint.rx);
+    const auto ry = static_cast<std::uint64_t>(footprint.ry);
+    const auto left = sx > rx ? sx - rx : 0;
+    const auto columns = std::min(width, ex + rx) - left;
+    auto* counts = static_cast<std::uint64_t*>(inv.scratch[0].allocation);
+    const bool narrow = type == ElementType::Float32;
+    const auto row = [&](std::uint64_t y, bool subtract) {
+      for (auto x = left; x < left + columns;) {
+        const Coordinate at{y, x};
+        const auto& view = reader.view(1, 0, at);
+        const auto n =
+            std::min({UINT64_C(256), left + columns - x,
+                      view.layout->origin[1] + view.layout->shape[1] - x});
+        work.poll(n);
+        const auto* data = static_cast<const std::uint8_t*>(view.allocation) +
+                           offset(*view.layout, view.byte_offset, at);
+        for (std::uint64_t j = 0; j < n; ++j) {
+          const auto present =
+              narrow ? load<float>(data, view.layout->strides[1], j) != 0
+                     : load<double>(data, view.layout->strides[1], j) != 0;
+          if (subtract)
+            counts[x - left + j] -= present;
+          else
+            counts[x - left + j] += present;
+        }
+        x += n;
+      }
+    };
+    if (footprint.kind == "square") {
+      for (std::uint64_t j = 0; j < columns; ++j) {
+        counts[j] = 0;
+        visits.step();
+      }
+      for (auto y = sy > ry ? sy - ry : 0; y < std::min(height, sy + ry + 1);
+           ++y)
+        row(y, false);
+      for (auto y = sy; y < ey; ++y) {
+        if (y != sy) {
+          if (y > ry)
+            row(y - ry - 1, true);
+          if (y + ry < height)
+            row(y + ry, false);
+        }
+        std::uint64_t total = 0;
+        for (auto x = sx > rx ? sx - rx : 0; x < std::min(width, sx + rx + 1);
+             ++x) {
+          total += counts[x - left];
+          visits.step();
+        }
+        for (auto x = sx; x < ex; ++x) {
+          if (x != sx) {
+            if (x > rx)
+              total -= counts[x - rx - 1 - left];
+            if (x + rx < width)
+              total += counts[x + rx - left];
+          }
+          visits.step();
+          store(out, {y, x}, convert(total != 0, narrow));
+        }
+      }
+    } else {
+      for (auto y = sy; y < ey; ++y)
+        for (auto x = sx; x < ex; ++x) {
+          bool present = false;
+          footprint.each([&](std::int64_t dy, std::int64_t dx) {
+            const auto yy = static_cast<std::int64_t>(y) + dy;
+            const auto xx = static_cast<std::int64_t>(x) + dx;
+            visits.step();
+            if (yy >= 0 && xx >= 0 && static_cast<std::uint64_t>(yy) < height &&
+                static_cast<std::uint64_t>(xx) < width)
+              present = present ||
+                        reader.value(1, 0,
+                                     {static_cast<std::uint64_t>(yy),
+                                      static_cast<std::uint64_t>(xx)}) != 0;
+          });
+          store(out, {y, x}, convert(present, narrow));
+        }
+    }
+    visits.flush();
   }
   template <unsigned Words>
   void calculate(const Kernel& k, const ps_kernel_invocation_v8& inv) const {
@@ -74,12 +168,42 @@ struct Restricted final : Program {
         Ratio(numeric_ops::SequenceProfile::Strict);
     auto* sums = reinterpret_cast<Sum*>(ratio + 1);
     Work work{inv, work_limit};
+    Visits visits{work};
+    ArithmeticWork arithmetic{work};
     const auto insert = [&](Sum* s, std::uint64_t c, std::uint64_t y,
                             std::uint64_t x, bool subtract) {
       const auto w = reader.raw(1, 0, {y, x});
       const auto v = values ? reader.raw(0, 0, {c, y, x}) : 0;
-      work.poll(1);
+      visits.step();
       s->sample(v, w, narrow, subtract);
+    };
+    const auto row = [&](std::uint64_t c, std::uint64_t y, bool subtract) {
+      for (auto x = left; x < left + columns;) {
+        const Coordinate mask_at{y, x}, value_at{c, y, x};
+        const auto& mask = reader.view(1, 0, mask_at);
+        const auto& value = reader.view(0, 0, value_at);
+        const auto n =
+            std::min({UINT64_C(256), left + columns - x,
+                      mask.layout->origin[1] + mask.layout->shape[1] - x,
+                      value.layout->origin[2] + value.layout->shape[2] - x});
+        work.poll(n);
+        const auto* weights =
+            static_cast<const std::uint8_t*>(mask.allocation) +
+            offset(*mask.layout, mask.byte_offset, mask_at);
+        const auto* values =
+            static_cast<const std::uint8_t*>(value.allocation) +
+            offset(*value.layout, value.byte_offset, value_at);
+        for (std::uint64_t j = 0; j < n; ++j) {
+          const auto w =
+              narrow ? load<std::uint32_t>(weights, mask.layout->strides[1], j)
+                     : load<std::uint64_t>(weights, mask.layout->strides[1], j);
+          const auto v =
+              narrow ? load<std::uint32_t>(values, value.layout->strides[2], j)
+                     : load<std::uint64_t>(values, value.layout->strides[2], j);
+          sums[x - left + j].sample(v, w, narrow, subtract);
+        }
+        x += n;
+      }
     };
     const auto emit = [&](const Sum& s, std::uint64_t c, std::uint64_t y,
                           std::uint64_t x) {
@@ -93,7 +217,7 @@ struct Restricted final : Program {
                        DomainErrorCode{UINT64_C(0x4d41534b0001)}};
         v = 0;
       } else {
-        v = s.finish(*ratio, narrow, work);
+        v = s.finish(*ratio, narrow, arithmetic);
       }
       store(out, values ? Coordinate{c, y, x} : Coordinate{y, x}, v);
     };
@@ -101,21 +225,20 @@ struct Restricted final : Program {
       if (footprint.kind == "square") {
         for (std::uint64_t j = 0; j < columns; ++j) {
           new (sums + j) Sum{};
-          const auto low = sy > static_cast<std::uint64_t>(footprint.ry)
-                               ? sy - footprint.ry
-                               : 0;
-          const auto high = std::min(height, sy + footprint.ry + 1);
-          for (auto y = low; y < high; ++y)
-            insert(sums + j, c, y, left + j, false);
+          visits.step();
         }
+        const auto low = sy > static_cast<std::uint64_t>(footprint.ry)
+                             ? sy - footprint.ry
+                             : 0;
+        const auto high = std::min(height, sy + footprint.ry + 1);
+        for (auto y = low; y < high; ++y)
+          row(c, y, false);
         for (auto y = sy; y < ey; ++y) {
           if (y != sy) {
-            for (std::uint64_t j = 0; j < columns; ++j) {
-              if (y > static_cast<std::uint64_t>(footprint.ry))
-                insert(sums + j, c, y - footprint.ry - 1, left + j, true);
-              if (y + footprint.ry < height)
-                insert(sums + j, c, y + footprint.ry, left + j, false);
-            }
+            if (y > static_cast<std::uint64_t>(footprint.ry))
+              row(c, y - footprint.ry - 1, true);
+            if (y + footprint.ry < height)
+              row(c, y + footprint.ry, false);
           }
           Sum total;
           auto low = sx > static_cast<std::uint64_t>(footprint.rx)
@@ -124,7 +247,7 @@ struct Restricted final : Program {
           auto high = std::min(width, sx + footprint.rx + 1);
           for (auto x = low; x < high; ++x) {
             total.merge(sums[x - left], false);
-            work.poll(1);
+            visits.step();
           }
           for (auto x = sx; x < ex; ++x) {
             if (x != sx) {
@@ -132,7 +255,7 @@ struct Restricted final : Program {
                 total.merge(sums[x - footprint.rx - 1 - left], true);
               if (x + footprint.rx < width)
                 total.merge(sums[x + footprint.rx - left], false);
-              work.poll(1);
+              visits.step();
             }
             emit(total, c, y, x);
           }
@@ -145,7 +268,7 @@ struct Restricted final : Program {
           footprint.each([&](std::int64_t dy, std::int64_t dx) {
             const auto yy = static_cast<std::int64_t>(y) + dy;
             const auto xx = static_cast<std::int64_t>(x) + dx;
-            work.poll(1);
+            visits.step();
             if (yy >= 0 && xx >= 0 && static_cast<std::uint64_t>(yy) < height &&
                 static_cast<std::uint64_t>(xx) < width)
               insert(&total, c, yy, xx, false);
@@ -153,10 +276,14 @@ struct Restricted final : Program {
           emit(total, c, y, x);
         }
     }
+    visits.flush();
+    arithmetic.flush();
     ratio->~Ratio();
   }
   void run(const Kernel& k, const ps_kernel_invocation_v8& i) const override {
-    if (type == ElementType::Float32)
+    if (k.writes[0].first == 1)
+      valid(k, i);
+    else if (type == ElementType::Float32)
       calculate<12>(k, i);
     else
       calculate<68>(k, i);

@@ -2,6 +2,7 @@
 
 #include "01-numeric/exact_ratio.hpp"
 #include "04-mask-morphology/common.hpp"
+#include "04-mask-morphology/fast.hpp"
 
 namespace ps::plugin_internal::mask {
 template <std::size_t Words>
@@ -70,8 +71,46 @@ struct WeightedSum final {
   bool empty() const {
     return numeric_ops::ExactRatioWorkspace<Words>::top(denominator) < 0;
   }
+  template <class Consumer>
   std::uint64_t finish(numeric_ops::ExactRatioWorkspace<Words>& ratio,
-                       bool narrow, const Work& work) const {
+                       bool narrow, const Consumer& work) const {
+    if (narrow) {
+      work.poll(128);
+      const auto n_top =
+          numeric_ops::ExactRatioWorkspace<Words>::top(numerator);
+      const auto d_top =
+          numeric_ops::ExactRatioWorkspace<Words>::top(denominator);
+      if (n_top < 0)
+        return 0;
+      const int exponent = n_top - d_top + (Words == 12 ? -149 : -1074);
+      if (exponent >= -149 && exponent <= 128) {
+        const auto normalized = [](const Integer& value, int highest) {
+          std::uint64_t head;
+          if (highest <= 52) {
+            head = value.words[0] << (52 - highest);
+          } else {
+            const auto shift = static_cast<unsigned>(highest - 52);
+            const auto word = shift / 64, tail = shift % 64;
+            head = value.words[word] >> tail;
+            if (tail && word + 1 < Words)
+              head |= value.words[word + 1] << (64 - tail);
+          }
+          const auto low = std::ldexp(static_cast<double>(head), -52);
+          return Fast{low, highest > 52 ? numeric_ops::numeric_up(low) : low};
+        };
+        // The leading 53 integer bits and one outward ULP enclose every
+        // omitted bit. Accept only identical correctly rounded endpoints;
+        // exact midpoint, extreme exponent and Float64 cases retain division.
+        auto value =
+            normalized(numerator, n_top) / normalized(denominator, d_top);
+        value = {numeric_ops::numeric_down(std::ldexp(value.low, exponent)),
+                 numeric_ops::numeric_up(std::ldexp(value.high, exponent))};
+        if (negative)
+          value = -value;
+        if (auto result = certified(value, true))
+          return *result;
+      }
+    }
     ratio.numerator = numerator;
     ratio.denominator = denominator;
     ratio.negative = negative;

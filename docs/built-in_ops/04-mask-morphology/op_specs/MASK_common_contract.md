@@ -162,12 +162,9 @@ An operationally failed task prevents successful publication of its call. Alread
 For each member charge output, scratch, index structures, exact-integer limbs,
 coefficient enclosures, retained inputs and simultaneous old/new allocations.
 Python object sizes are NOT production resource accounting. CPU is required;
-GPU/JFA/FFT/engine adapters are not automatically admitted. Production execution
-loops must poll at most every 1024 elementary visits and every iteration,
-including exact arithmetic refinement. Work-cap exhaustion fails, not an early
-approximate answer. Complete-input members have no implicit spill, unbounded
-workers, auto-eviction or paging capability; none is registered by the current
-bundled MASK implementation set.
+GPU/JFA/FFT/engine adapters are not automatically admitted. Production execution loops and iterative refinement use cooperative cancellation checkpoints. Checkpoint placement accounts for the cost of the processing phase, including dimension-dependent inner loops and the cost of an individual arithmetic primitive. Implementation notes identify the checkpoint unit, local batching rule, and relevant size limits; a pixel, selected coordinate, model group and estimated arithmetic work unit are distinct measures.
+
+Batching cancellation queries must not defer the budget check and accounting for each submitted work charge. At an existing Work checkpoint, cancellation is checked before reporting work exhaustion. This ordering does not impose an ordering on a cancellation request racing with successful completion. Work-cap exhaustion fails, not an early approximate answer. Complete-input members have no implicit spill, unbounded workers, auto-eviction or paging capability; none is registered by the current bundled MASK implementation set.
 
 ## Independent acceptance and public implementation gate
 
@@ -190,12 +187,9 @@ feature existence only; commercial bit identity remains unverified.
 
 ## Registered implementation limits
 
-All 63 implemented members accept the optional max_work Int64 operational guard,
-default INT64_MAX, checked as nonnegative during preparation. It limits counted
-work per kernel invocation; it is not a global per-Run sample quota. MASK-16B/C
-forward the guard separately to each authored primitive. Work and
-cancellation polls occur within at most 1024 elementary visits and at every
-refinement. Host output/scratch admission still follows ExecutionContext limits.
+All 63 implemented members accept the optional max_work Int64 operational guard, default INT64_MAX, checked as nonnegative during preparation. It limits counted work per kernel invocation; it is not a global per-Run sample quota. MASK-16B/C forward the guard separately to each authored primitive. Counted work and cancellation-query batching are separate mechanisms. A batching threshold is not an elapsed-time bound, and an arithmetic charge may represent a single primitive whose own cost exceeds that threshold. Host output/scratch admission still follows ExecutionContext limits.
+
+Cancellation acceptance distinguishes request, callback observation, Program exit and execution join. Reports state the platform, input dimensions and numerical stress, workers/lanes, request timing, observed sample count, completion races and latency distribution. Measured percentiles describe the tested workloads and execution conditions; they do not establish a public real-time guarantee.
 
 Exact rational storage, fixed-width accumulation and directed refinement have
 bounded capacity. Work or capacity exhaustion returns ResourceExhausted; an

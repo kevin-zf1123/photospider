@@ -148,12 +148,19 @@ struct Thinning final : Program {
     auto* state = reinterpret_cast<std::uint8_t*>(deleted + count);
     const auto stride = width + 2;
     lattice_input(reader, 0, state, height, width, work);
+    const bool synchronous =
+        kind == ThinKind::ZhangSuen || kind == ThinKind::GuoHall;
     std::uint64_t candidates = 0;
     for (std::uint64_t y = 0; y < height; ++y)
       for (std::uint64_t x = 0; x < width; ++x) {
         visits.step();
-        if (state[(y + 1) * stride + x + 1])
+        const auto at = (y + 1) * stride + x + 1;
+        if (state[at] &&
+            (!synchronous || lattice_neighbors(state, at, stride) != 255)) {
           order[candidates++] = y * width + x;
+          if (synchronous)
+            state[at] = 3;
+        }
       }
     if (metric) {
       auto& exact = *arena->p;
@@ -195,8 +202,6 @@ struct Thinning final : Program {
       const auto p = order[i];
       order[i] = (p / width + 1) * stride + p % width + 1;
     }
-    const bool synchronous =
-        kind == ThinKind::ZhangSuen || kind == ThinKind::GuoHall;
     bool changed;
     do {
       work.poll();
@@ -225,6 +230,25 @@ struct Thinning final : Program {
         for (std::uint64_t i = 0; i < deletions; ++i) {
           state[deleted[i]] = 0;
           visits.step();
+        }
+        if (synchronous) {
+          // A fully surrounded pixel cannot pass either phase table. It
+          // becomes eligible only after a neighbor is deleted. Membership
+          // uses the high bit; all predicates still see the binary low bit.
+          for (std::uint64_t i = 0; i < deletions; ++i) {
+            const auto at = deleted[i];
+            for (unsigned j = 0; j < 8; ++j) {
+              visits.step();
+              const auto neighbor = static_cast<std::uint64_t>(
+                  static_cast<std::int64_t>(at) +
+                  kNeighborY[j] * static_cast<std::int64_t>(stride) +
+                  kNeighborX[j]);
+              if (state[neighbor] == 1) {
+                state[neighbor] = 3;
+                order[candidates++] = neighbor;
+              }
+            }
+          }
         }
       }
     } while (changed);

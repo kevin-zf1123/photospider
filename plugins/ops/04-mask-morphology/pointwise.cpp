@@ -7,6 +7,7 @@
 #include "01-numeric/exact_ratio.hpp"
 #include "04-mask-morphology/common.hpp"
 #include "04-mask-morphology/fast.hpp"
+#include "04-mask-morphology/memo.hpp"
 #include "common/registry.hpp"
 #include "photospider/ops/tensor_description.hpp"
 
@@ -33,6 +34,8 @@ enum class Kind {
 using Ratio = numeric_ops::RatioWorkspace;
 using Compact = model_ops::RationalMathStorage<32>;
 struct SoftScratch final {
+  ScalarMemo<1> memo;
+  unsigned probes = 0, misses = 0, bypass = 0;
   Exact wide{numeric_ops::SequenceProfile::Strict};
   Compact small{numeric_ops::SequenceProfile::Strict};
   explicit SoftScratch(const Work& work) {
@@ -215,7 +218,8 @@ struct Pointwise final : Program {
     }
     return rounded(e, r, narrow);
   }
-  std::uint64_t soft(SoftScratch& scratch, double a, bool narrow) const {
+  std::uint64_t soft_uncached(SoftScratch& scratch, double a,
+                              bool narrow) const {
     const auto edge = [&](double t, double w, bool upper) {
       if (w == 0)
         return Fast::point(upper ? a <= t : a >= t);
@@ -240,6 +244,24 @@ struct Pointwise final : Program {
     if (compact && compact_value(a))
       return soft_exact(scratch.small, a, narrow);
     return soft_exact(scratch.wide, a, narrow);
+  }
+  std::uint64_t soft(SoftScratch& scratch, double a, bool narrow) const {
+    if (scratch.bypass) {
+      --scratch.bypass;
+      return soft_uncached(scratch, a, narrow);
+    }
+    const auto result = scratch.memo.evaluate({bits(a)}, [&] {
+      ++scratch.misses;
+      return soft_uncached(scratch, a, narrow);
+    });
+    if (++scratch.probes == 64) {
+      // Probe again after a bounded uncached interval so a later repeated
+      // region can recover the cache benefit within the same invocation.
+      if (scratch.misses > 56)
+        scratch.bypass = 1024;
+      scratch.probes = scratch.misses = 0;
+    }
+    return result;
   }
   template <class T>
   T evaluate(T a, T b, T m, SoftScratch* exact, Ratio* ratio,

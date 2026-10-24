@@ -33,10 +33,11 @@ inline void lattice_input(const Reader& reader, unsigned port,
 }
 inline unsigned lattice_neighbors(const std::uint8_t* state, std::uint64_t p,
                                   std::uint64_t stride) {
-  return state[p - stride] | (state[p - stride + 1] << 1) |
-         (state[p + 1] << 2) | (state[p + stride + 1] << 3) |
-         (state[p + stride] << 4) | (state[p + stride - 1] << 5) |
-         (state[p - 1] << 6) | (state[p - stride - 1] << 7);
+  // Higher bits may carry invocation-local frontier membership.
+  return (state[p - stride] & 1) | ((state[p - stride + 1] & 1) << 1) |
+         ((state[p + 1] & 1) << 2) | ((state[p + stride + 1] & 1) << 3) |
+         ((state[p + stride] & 1) << 4) | ((state[p + stride - 1] & 1) << 5) |
+         ((state[p - 1] & 1) << 6) | ((state[p - stride - 1] & 1) << 7);
 }
 inline Site lattice_site(std::uint64_t p, std::uint64_t stride) {
   return {static_cast<std::int64_t>(p / stride) - 1,
@@ -79,6 +80,7 @@ inline std::uint64_t background_tree(const std::uint8_t* state,
 // Exact separable L2 transform for equal spacings. Distances stay as integer
 // coordinate deltas, so even subnormal spacing cannot change site ordering.
 // The admitted line workspace has height+2 entries, including exterior rows.
+inline constexpr std::uint64_t distance_stripe_width = 16;
 struct DistanceParabola final {
   std::int64_t row, dx, begin;
 };
@@ -90,7 +92,7 @@ inline unsigned __int128 lattice_l2_key(Site delta) {
 inline void lattice_l2_distances(const std::uint8_t* state,
                                  std::uint64_t height, std::uint64_t width,
                                  Site* distances, DistanceParabola* envelope,
-                                 Visits* visits) {
+                                 Visits* visits, Site* stripe = nullptr) {
   const auto stride = width + 2;
   for (std::uint64_t y = 0; y < height; ++y) {
     std::int64_t left = -1, right = static_cast<std::int64_t>(width);
@@ -108,24 +110,123 @@ inline void lattice_l2_distances(const std::uint8_t* state,
       dx = std::min(dx, right - static_cast<std::int64_t>(x));
     }
   }
-  for (std::uint64_t x = 0; x < width; ++x) {
-    std::uint64_t size = 1;
-    envelope[0] = {-1, 0, 0};
-    for (std::uint64_t y = 0; y <= height; ++y) {
+  const std::uint64_t block = stripe ? distance_stripe_width : 1;
+  for (std::uint64_t first = 0; first < width; first += block) {
+    const auto columns = std::min(block, width - first);
+    if (stripe) {
+      for (std::uint64_t y = 0; y < height; ++y)
+        for (std::uint64_t j = 0; j < columns; ++j) {
+          visits->step();
+          stripe[j * height + y] = distances[y * width + first + j];
+        }
+    }
+    for (std::uint64_t j = 0; j < columns; ++j) {
+      const auto x = first + j;
+      const auto at = [&](std::uint64_t y) -> Site& {
+        return stripe ? stripe[j * height + y] : distances[y * width + x];
+      };
+      std::uint64_t size = 1;
+      envelope[0] = {-1, 0, 0};
+      for (std::uint64_t y = 0; y <= height; ++y) {
+        visits->step();
+        const auto row = static_cast<std::int64_t>(y);
+        const auto dx = y == height ? 0 : at(y).x;
+        __int128 begin = 0;
+        while (size) {
+          visits->step();
+          const auto& old = envelope[size - 1];
+          const auto numerator = static_cast<__int128>(row) * row +
+                                 static_cast<__int128>(dx) * dx -
+                                 static_cast<__int128>(old.row) * old.row -
+                                 static_cast<__int128>(old.dx) * old.dx;
+          const auto denominator = 2 * static_cast<__int128>(row - old.row);
+          // First integer query at which the new parabola is strictly better.
+          // floor division is explicit for negative intersections.
+          begin = (numerator >= 0
+                       ? numerator / denominator
+                       : -((-numerator + denominator - 1) / denominator)) +
+                  1;
+          if (begin > old.begin)
+            break;
+          --size;
+        }
+        if (!size)
+          begin = 0;
+        if (begin < static_cast<__int128>(height))
+          envelope[size++] = {row, dx, static_cast<std::int64_t>(begin)};
+      }
+      std::uint64_t active = 0;
+      for (std::uint64_t y = 0; y < height; ++y) {
+        visits->step();
+        while (active + 1 < size &&
+               envelope[active + 1].begin <= static_cast<std::int64_t>(y)) {
+          visits->step();
+          ++active;
+        }
+        const auto& nearest = envelope[active];
+        at(y) = {static_cast<std::int64_t>(
+                     separation(static_cast<std::int64_t>(y), nearest.row)),
+                 nearest.dx};
+      }
+    }
+    if (stripe) {
+      for (std::uint64_t y = 0; y < height; ++y)
+        for (std::uint64_t j = 0; j < columns; ++j) {
+          visits->step();
+          distances[y * width + first + j] = stripe[j * height + y];
+        }
+    }
+  }
+}
+// Feature transform retains the actual nearest site. Horizontal ties select
+// the smaller x; the lower envelope keeps the older (smaller y) row on ties.
+// INT64_MIN marks an absent feature and is never used in distance arithmetic.
+struct FeatureParabola final {
+  Site site;
+  std::int64_t begin;
+};
+inline void lattice_l2_sites(const std::uint8_t* state, std::uint64_t height,
+                             std::uint64_t width, bool background,
+                             bool exterior, Site* nearest,
+                             FeatureParabola* envelope, Visits* visits) {
+  const auto stride = width + 2;
+  for (std::uint64_t y = 0; y < height; ++y) {
+    std::int64_t left = exterior ? -1 : INT64_MIN;
+    for (std::uint64_t x = 0; x < width; ++x) {
       visits->step();
-      const auto row = static_cast<std::int64_t>(y);
-      const auto dx = y == height ? 0 : distances[y * width + x].x;
+      if (static_cast<bool>(state[(y + 1) * stride + x + 1]) != background)
+        left = static_cast<std::int64_t>(x);
+      nearest[y * width + x] = {static_cast<std::int64_t>(y), left};
+    }
+    std::int64_t right =
+        exterior ? static_cast<std::int64_t>(width) : INT64_MIN;
+    for (auto x = width; x-- > 0;) {
+      visits->step();
+      if (static_cast<bool>(state[(y + 1) * stride + x + 1]) != background)
+        right = static_cast<std::int64_t>(x);
+      auto& site = nearest[y * width + x];
+      if (right != INT64_MIN &&
+          (site.x == INT64_MIN || right - static_cast<std::int64_t>(x) <
+                                      static_cast<std::int64_t>(x) - site.x))
+        site.x = right;
+    }
+  }
+  for (std::uint64_t x = 0; x < width; ++x) {
+    std::uint64_t size = 0;
+    const auto column = static_cast<std::int64_t>(x);
+    const auto append = [&](Site site) {
+      visits->step();
       __int128 begin = 0;
+      const auto dx = static_cast<__int128>(site.x) - column;
       while (size) {
         visits->step();
         const auto& old = envelope[size - 1];
-        const auto numerator = static_cast<__int128>(row) * row +
-                               static_cast<__int128>(dx) * dx -
-                               static_cast<__int128>(old.row) * old.row -
-                               static_cast<__int128>(old.dx) * old.dx;
-        const auto denominator = 2 * static_cast<__int128>(row - old.row);
-        // First integer query at which the new parabola is strictly better.
-        // floor division is explicit for negative intersections.
+        const auto ox = static_cast<__int128>(old.site.x) - column;
+        const auto numerator =
+            static_cast<__int128>(site.y) * site.y + dx * dx -
+            static_cast<__int128>(old.site.y) * old.site.y - ox * ox;
+        const auto denominator =
+            2 * (static_cast<__int128>(site.y) - old.site.y);
         begin =
             (numerator >= 0 ? numerator / denominator
                             : -((-numerator + denominator - 1) / denominator)) +
@@ -137,8 +238,18 @@ inline void lattice_l2_distances(const std::uint8_t* state,
       if (!size)
         begin = 0;
       if (begin < static_cast<__int128>(height))
-        envelope[size++] = {row, dx, static_cast<std::int64_t>(begin)};
+        envelope[size++] = {site, static_cast<std::int64_t>(begin)};
+    };
+    if (exterior)
+      append({-1, column});
+    for (std::uint64_t y = 0; y < height; ++y) {
+      visits->step();
+      const auto site = nearest[y * width + x];
+      if (site.x != INT64_MIN)
+        append(site);
     }
+    if (exterior)
+      append({static_cast<std::int64_t>(height), column});
     std::uint64_t active = 0;
     for (std::uint64_t y = 0; y < height; ++y) {
       visits->step();
@@ -147,11 +258,8 @@ inline void lattice_l2_distances(const std::uint8_t* state,
         visits->step();
         ++active;
       }
-      const auto& nearest = envelope[active];
-      distances[y * width + x] = {
-          static_cast<std::int64_t>(
-              separation(static_cast<std::int64_t>(y), nearest.row)),
-          nearest.dx};
+      nearest[y * width + x] =
+          size ? envelope[active].site : Site{INT64_MIN, INT64_MIN};
     }
   }
 }
