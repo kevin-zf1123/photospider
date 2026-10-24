@@ -4,10 +4,10 @@
 
 Gaussian 的拟议端口使用单 Tensor Result 并保留完整 sample shape（含 batch axes）。
 颜色解释遵循当前 FMT 显式参数契约，调用方为后续颜色消费者提供 TensorDescription
-及需要的 profile。FIL-04A/B 当前没有 registry 实现；固定 Plan 的输入读取、
+及需要的 profile。FIL-01～04 已通过固定 invocation ABI 8 注册 CPU 实现；固定 Plan 的输入读取、
 输出 tile 与资源要求见成员规格。颜色配置本身不增加数值 payload 校验。
 
-Gaussian 的 x_axis/y_axis 索引完整 sample shape，包含 batch-axis 前缀。对 RGBA
+Gaussian filter 的 x_axis/y_axis 索引完整 sample shape，包含 batch-axis 前缀。对 RGBA
 shape {N,L,H,W,4}，使用 y_axis=2、x_axis=3。参数、边界和资源契约见 [FIL-04B 规格](op_specs/FIL-04B_gaussian_filter.md)。
 
 空间滤波族列于本页；其余 24 个频域、去噪与恢复族见[频域、去噪与恢复](frequency-restoration.md)。

@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-03
 function: box_mean
 proposed_operation_keys:
@@ -35,7 +35,7 @@ NUM special-value, floating-point overflow, signed-zero, payload, rounding, and 
 
 ## Mathematical reference and rounding
 
-Every footprint tap has unit weight. Return `RN_t(ΣI/N_eff)`, where `N_eff` is the number of in-domain taps under truncation and otherwise `height*width`. The anchor lies inside the footprint, so `N_eff≥1`.
+Every footprint tap has unit weight. A tap `(j,i)` samples `(y+j-anchor_y,x+i-anchor_x)` using the correlation coordinate convention, including even and off-center footprints. Return `RN_t(ΣI/N_eff)`, where `N_eff` is the number of in-domain taps under truncation and otherwise `height*width`. The anchor lies inside the footprint, so `N_eff≥1`.
 
 The numeric class and E/B/S meanings are defined in [FILTER numeric reference](FILTER_numeric_reference.md). Retain every declared rounding stage; helper calls do not introduce extra intermediate rounding unless the member says so. Signed zero, discrete choices, gradual underflow, and output range follow the member and NUM contracts.
 
@@ -59,7 +59,7 @@ Reference callable: `box(image,height,width,anchor,*,mean=True,boundary='reflect
 
 ## Backend and registration
 
-The proposed keys are `filter.box_mean_strict`, `filter.box_mean_accelerated_apple_silicon`, `filter.box_mean_accelerated_x86_64`. They remain unregistered and unimplemented. Accelerated variants must satisfy NUM's final FP32-scaled four-ULP requirement and fallback rules without accumulating a separate budget per tap, axis, stage, or iteration. Threshold, ordering, boundary, copy, and output-support choices that must be exact cannot change approximately. Float64 accelerated paths retain Float64 input/output and exponent range; they do not first convert to Float32. Performance and CPU/ISA differential acceptance are not established here.
+The proposed keys are `filter.box_mean_strict`, `filter.box_mean_accelerated_apple_silicon`, `filter.box_mean_accelerated_x86_64`. These keys are registered CPU operations through fixed invocation ABI 8 in `plugins/ops/05-filter/`. Strict evaluation uses certified enclosures with exact-expression fallback; accelerated keys require their named CPU capability. The specification remains Proposed/D1. Accelerated variants must satisfy NUM's final FP32-scaled four-ULP requirement and fallback rules without accumulating a separate budget per tap, axis, stage, or iteration. Threshold, ordering, boundary, copy, and output-support choices that must be exact cannot change approximately. Float64 accelerated paths retain Float64 input/output and exponent range; they do not first convert to Float32. Implementation status records runtime availability; performance measurements and validation evidence are maintained separately from this normative specification.
 
 ## Conceptual DAG (not an existing API)
 

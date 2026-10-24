@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-01
 function: convolve2d
 proposed_operation_keys:
@@ -58,7 +58,7 @@ Fixture coverage identifiers: `boundary_reflect_half`, `boundary_reflect_whole`,
 
 ## Backend and registration
 
-The proposed keys are `filter.convolve2d_strict`, `filter.convolve2d_accelerated_apple_silicon`, `filter.convolve2d_accelerated_x86_64`. They remain unregistered and unimplemented. Accelerated variants must satisfy NUM's final FP32-scaled four-ULP requirement and fallback rules without accumulating a separate budget per tap, axis, stage, or iteration. Threshold, ordering, boundary, copy, and output-support choices that must be exact cannot change approximately. Float64 accelerated paths retain Float64 input/output and exponent range; they do not first convert to Float32. Performance and CPU/ISA differential acceptance are not established here.
+The proposed keys are `filter.convolve2d_strict`, `filter.convolve2d_accelerated_apple_silicon`, `filter.convolve2d_accelerated_x86_64`. These keys are registered CPU operations through fixed invocation ABI 8 in `plugins/ops/05-filter/`. Strict evaluation uses certified enclosures with exact-expression fallback; accelerated keys require their named CPU capability. The specification remains Proposed/D1. Accelerated variants must satisfy NUM's final FP32-scaled four-ULP requirement and fallback rules without accumulating a separate budget per tap, axis, stage, or iteration. Threshold, ordering, boundary, copy, and output-support choices that must be exact cannot change approximately. Float64 accelerated paths retain Float64 input/output and exponent range; they do not first convert to Float32. Implementation status records runtime availability; performance measurements and validation evidence are maintained separately from this normative specification.
 
 ## Conceptual DAG (not an existing API)
 

@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-01
 function: positive_color_blur
 proposed_operation_keys:
@@ -45,4 +45,4 @@ Mathematical support contains nonzero kernel taps mapped through the complete-im
 
 ## Acceptance
 
-The mathematical oracle must compare the fused expression independently from the multi-node FMT associate/filter/unassociate composition and demonstrate that their allowed rounding differences are intentional. Fixtures must cover opaque input, nonzero alpha, hidden finite color at zero alpha, hidden NaN color at zero alpha, zero kernel taps, fully transparent finite windows, fully transparent windows containing NaN, and alpha-only demand. The reference helper has no runtime registration; this member proposes its own node contract, independent from helper defaults. Runtime registration and execution remain unimplemented; no runtime or third-party conformance is implied by this specification.
+The mathematical oracle must compare the fused expression independently from the multi-node FMT associate/filter/unassociate composition and demonstrate that their allowed rounding differences are intentional. Fixtures must cover opaque input, nonzero alpha, hidden finite color at zero alpha, hidden NaN color at zero alpha, zero kernel taps, fully transparent finite windows, fully transparent windows containing NaN, and alpha-only demand. The reference helper has no runtime registration; this member proposes its own node contract, independent from helper defaults. `filter.positive_color_blur_strict` is registered as a CPU operation through fixed invocation ABI 8 in `plugins/ops/05-filter/`. Its fused exact expression uses certified enclosures and exact fallback, with independent alpha/AOV demand. The specification remains Proposed/D1; this registration does not claim third-party conformance.

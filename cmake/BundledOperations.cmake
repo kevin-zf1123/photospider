@@ -46,6 +46,10 @@ if(NOT PHOTOSPIDER_FMT10_SIMD)
 endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
+  plugins/ops/05-filter/geometry.cpp
+  plugins/ops/05-filter/operations.cpp
+  plugins/ops/05-filter/gaussian.cpp
+  plugins/ops/05-filter/evaluate.cpp
   plugins/ops/04-mask-morphology/common.cpp
   plugins/ops/04-mask-morphology/color.cpp
   plugins/ops/04-mask-morphology/color_math.cpp

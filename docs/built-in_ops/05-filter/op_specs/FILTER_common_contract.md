@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: partially_implemented
 ---
 
 # FILTER common contract
@@ -13,7 +13,10 @@ implementation_status: not_implemented
 This category defines FIL-01..20, FRQ-01..10 and RES-01..14: 44 families.
 Member letters identify distinct mathematical/interface objects. Proposed keys,
 specification maturity, runtime registration and oracle coverage are separate facts.
-The specifications do not claim that their proposed keys are registered.
+FIL-01..04 are implemented as CPU operations through fixed invocation ABI 8;
+their member specifications record the 28 registered keys. Other families retain
+their own implementation status. Proposed/D1 describes specification acceptance
+and maturity separately from runtime availability.
 
 ## Inheritance and representation
 

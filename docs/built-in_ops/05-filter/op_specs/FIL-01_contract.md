@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - FIL-01A
@@ -20,7 +20,7 @@ research_sources:
 
 Direction, anchor, output coordinates, normalization, masked positive-weight convolution, and semantic color blur are separate contracts.
 
-Inherit [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). Every member remains Proposed and is not implemented unless its metadata says otherwise.
+Inherit [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). All members in this family are implemented and registered as CPU operations through fixed invocation ABI 8 in `plugins/ops/05-filter/`. Specification acceptance remains Proposed and document maturity remains D1.
 
 ## Members
 

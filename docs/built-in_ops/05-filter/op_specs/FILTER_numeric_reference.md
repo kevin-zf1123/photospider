@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: partially_implemented
 ---
 
 # FILTER numerical reference

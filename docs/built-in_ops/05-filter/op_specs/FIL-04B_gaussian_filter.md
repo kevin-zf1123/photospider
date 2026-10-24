@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-04
 function: gaussian_filter
 proposed_operation_keys:
@@ -56,12 +56,6 @@ Use the Cartesian product of nonzero 1D taps; the kernel is derived static contr
 
 Complexity uses P=HW samples, C independent planes and A taps; arbitrary-precision limb cost is additional and is not a measured benchmark. Follow FILTER admission, work/memory/stage accounting, cancellation and owner-lifetime rules. Successful tasks enable internal dependents; a selected Result becomes externally visible at successful call retirement. A failed call publishes no successful export, while previously retired call exports remain valid. Resource exhaustion does not silently reduce precision, spill or change algorithms.
 
-## Implementation status
-
-The current operation registry contains no FIL-04B implementation. The proposed
-names below remain specification targets. A future implementation
-uses fixed lowering, preparation and invocation ABI 8 under the common contract.
-
 ## Oracle, fixtures, and acceptance
 
 Verify exact preservation of constants and impulse reflection. Compare Float32 and Float64 results with a baked64 rational oracle. Do not assert that two truncated blurs equal one blur with sigma `sqrt(s1²+s2²)`.
@@ -74,15 +68,16 @@ Fixture coverage identifier: `gaussian_constant`. The straight-alpha reference c
 
 The proposed keys are `filter.gaussian_filter_strict`,
 `filter.gaussian_filter_accelerated_apple_silicon`, and
-`filter.gaussian_filter_accelerated_x86_64`. All these
-keys are unregistered and unimplemented; no current strict CPU or native GPU
-execution form is claimed. Accelerated variants must
+`filter.gaussian_filter_accelerated_x86_64`. These keys are registered CPU operations through fixed invocation ABI 8 in
+`plugins/ops/05-filter/`. Certified separable enclosures retain the baked64
+coefficients and use exact-expression fallback whenever final rounding is not
+proved. The specification remains Proposed/D1; there is no native GPU implementation. Accelerated variants must
 satisfy NUM's final FP32-scaled four-ULP requirement and fallback rules without
 accumulating a separate budget per tap, axis, stage, or iteration. Threshold,
 ordering, boundary, copy, and output-support choices that must be exact cannot
 change approximately. Float64 accelerated paths retain Float64 input/output and
-exponent range; they do not first convert to Float32. Performance and CPU/ISA
-differential acceptance are not established here.
+exponent range; they do not first convert to Float32. Implementation status records runtime availability; performance measurements and
+validation evidence are maintained separately from this normative specification.
 
 ## Conceptual DAG (not an existing API)
 

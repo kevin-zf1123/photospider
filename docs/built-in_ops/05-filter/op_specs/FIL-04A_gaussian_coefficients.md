@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-04
 function: gaussian_coefficients
 proposed_operation_keys:
@@ -30,7 +30,7 @@ There is no dynamic data input. Outputs `kernel_x` and `kernel_y` are Float64 ve
 
 ## Explicit parameters and legal domain
 
-Require finite `sigma_x` and `sigma_y` with values ≥0, integer `radius_x` and `radius_y` with values ≥0, and the output axes. On any axis where sigma is zero, radius must be zero. A positive sigma may use radius zero, producing a one-tap discrete kernel. All are explicit; constructors do not infer radius or provide defaults.
+Require finite `sigma_x` and `sigma_y` with values ≥0, integer `radius_x` and `radius_y` with values ≥0, and explicit Int64 output axes `x_axis=0` and `y_axis=0`. Each axis parameter addresses its own rank-one output; the two axes are not indices into one shared tensor. On any axis where sigma is zero, radius must be zero. A positive sigma may use radius zero, producing a one-tap discrete kernel. All are explicit; constructors do not infer radius or provide defaults.
 
 NUM special-value, floating-point overflow, signed-zero, payload, rounding, and precision behavior follows the corresponding operation and [FILTER common contract](FILTER_common_contract.md). Do not reject NaN/Inf under a family-wide rule or convert ordinary floating-point overflow into failure. Static structural, parameter-type and capacity-arithmetic errors retain pre-execution diagnostics. Numerical-domain premises are unchecked; resource, cancellation and upstream failures retain their contracts. Every parameter is explicit in the node; constructors have no implicit defaults. Interpret floating-point parameters as their stored values.
 
@@ -58,7 +58,7 @@ Fixture coverage identifiers: `gaussian_coefficients`, `gaussian_zero_sigma`, `g
 
 ## Backend and registration
 
-The proposed keys are `filter.gaussian_coefficients_strict`, `filter.gaussian_coefficients_accelerated_apple_silicon`, `filter.gaussian_coefficients_accelerated_x86_64`. They remain unregistered and unimplemented. Accelerated variants must satisfy NUM's final FP32-scaled four-ULP requirement and fallback rules without accumulating a separate budget per tap, axis, stage, or iteration. Threshold, ordering, boundary, copy, and output-support choices that must be exact cannot change approximately. Float64 accelerated paths retain Float64 input/output and exponent range; they do not first convert to Float32. Performance and CPU/ISA differential acceptance are not established here.
+The proposed keys are `filter.gaussian_coefficients_strict`, `filter.gaussian_coefficients_accelerated_apple_silicon`, `filter.gaussian_coefficients_accelerated_x86_64`. These keys are registered CPU operations through fixed invocation ABI 8 in `plugins/ops/05-filter/`. Strict evaluation uses certified enclosures with exact-expression fallback; accelerated keys require their named CPU capability. The specification remains Proposed/D1. Accelerated variants must satisfy NUM's final FP32-scaled four-ULP requirement and fallback rules without accumulating a separate budget per tap, axis, stage, or iteration. Threshold, ordering, boundary, copy, and output-support choices that must be exact cannot change approximately. Float64 accelerated paths retain Float64 input/output and exponent range; they do not first convert to Float32. Implementation status records runtime availability; performance measurements and validation evidence are maintained separately from this normative specification.
 
 ## Conceptual DAG (not an existing API)
 

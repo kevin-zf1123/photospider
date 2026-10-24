@@ -3,6 +3,7 @@
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::plugin_internal {
+Status register_filters(OperationRegistry* registry);
 Status register_mask_color(OperationRegistry* registry);
 Status register_mask_statistics(OperationRegistry* registry);
 Status register_mask_pointwise(OperationRegistry* registry);
