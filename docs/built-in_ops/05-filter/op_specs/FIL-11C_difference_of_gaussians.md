@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-11
 function: difference_of_gaussians
 proposed_operation_keys:
@@ -33,6 +33,8 @@ Ports carry Results with fixed Tensor member schemas. Unless the member defines 
 Explicit positive finite Float64 `sigma_small`; explicit finite Float64 `ratio>1`; explicitly supplied Int64 radii for both Gaussian filters; explicit Int64 spatial axes; fixed `reflect_half` boundary and `cval=0`; explicit finite Float64 `gain`. No constructor defaults.
 
 Exceptional values and floating-point overflow follow the corresponding NUM operations and the [FILTER common contract](FILTER_common_contract.md). Do not reject NaN/Inf under a category-wide rule or convert ordinary floating-point overflow into failure. Static structural, parameter-type and capacity-arithmetic errors retain pre-execution diagnostics. Numerical-domain premises are unchecked; resource, cancellation and upstream failures retain their contracts. Every static parameter must be explicitly supplied with its type and valid domain; constructors have no implicit defaults. Floating-point parameters use their stored values.
+
+The explicit radius parameters are `radius_small` and `radius_large`. Each radius applies to both spatial axes of its corresponding Gaussian stage. Both stages use the baked64 FIL-04B kernel and strict destination-dtype rounding. The final expression applies `gain` to the exact difference of those rounded stage outputs, followed by one destination-dtype rounding.
 
 ## Mathematical reference and rounding boundaries
 
@@ -69,9 +71,9 @@ See the [oracle README](../../../../oracle/ops/filter/README.md) for reproductio
 
 ## Backend and registration gates
 
-The keys above are naming proposals only; strict and both CPU accelerated variants are not registered or implemented. Accelerated variants must satisfy NUM final FP32-scaled four-ULP bounds and fallback rules; error budgets cannot be accumulated across taps, axes, stages, or iterations. Thresholds, ordering, boundaries, copies, and output support that require exact selection cannot change approximately.
+The keys above are registered CPU operations through fixed invocation ABI 8 in `plugins/ops/05-filter/`. Strict execution uses certified enclosures with exact-expression fallback. Apple Silicon and x86_64 variants retain their named capability gates. Specification acceptance remains Proposed/D1. Accelerated variants must satisfy NUM final FP32-scaled four-ULP bounds and fallback rules; error budgets cannot be accumulated across taps, axes, stages, or iterations. Thresholds, ordering, boundaries, copies, and output support that require exact selection cannot change approximately.
 
-Float64 accelerated execution retains Float64 inputs/outputs and exponent range; it does not first convert to Float32. Values outside the Float32-scale range use strict NUM fallback. No kernel, CPU, or ISA performance or differential acceptance was performed here.
+Float64 accelerated execution retains Float64 inputs/outputs and exponent range; it does not first convert to Float32. Values outside the Float32-scale range use strict NUM fallback. Implementation status records runtime availability; validation and performance evidence are maintained separately from this normative specification.
 
 ## Conceptual DAG (not an existing API)
 

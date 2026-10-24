@@ -6,6 +6,7 @@
 
 #include "02-format-color/color_point.hpp"
 #include "05-filter/common.hpp"
+#include "05-filter/fields.hpp"
 #include "common/registry.hpp"
 
 namespace ps::plugin_internal::filter {
@@ -300,6 +301,28 @@ Status register_filters(OperationRegistry* registry) {
         check(registry->register_operation(
             make_filter(std::string("filter.") + entry.first + suffix,
                         entry.second, profile)));
+      }
+      for (auto entry :
+           {std::make_pair("central_gradient", FieldKind::Central),
+            std::make_pair("sobel_gradient", FieldKind::Sobel),
+            std::make_pair("scharr_gradient", FieldKind::Scharr),
+            std::make_pair("gradient_magnitude", FieldKind::Magnitude),
+            std::make_pair("gradient_orientation", FieldKind::Orientation),
+            std::make_pair("laplacian4", FieldKind::Laplacian4),
+            std::make_pair("laplacian8_isotropic", FieldKind::Laplacian8),
+            std::make_pair("log_kernel", FieldKind::LogKernel),
+            std::make_pair("log_filter", FieldKind::LogFilter),
+            std::make_pair("difference_of_gaussians", FieldKind::Difference),
+            std::make_pair("hessian2d", FieldKind::Hessian),
+            std::make_pair("structure_tensor2d", FieldKind::Structure),
+            std::make_pair("symmetric_eigen2d", FieldKind::Eigen),
+            std::make_pair("unsharp_mask", FieldKind::Unsharp),
+            std::make_pair("detail_gain", FieldKind::Detail),
+            std::make_pair("local_mean_variance", FieldKind::Moments),
+            std::make_pair("local_covariance", FieldKind::Covariance)}) {
+        check(registry->register_operation(
+            make_field(std::string("filter.") + entry.first + suffix,
+                       entry.second, profile)));
       }
       check(registry->register_operation(make_coefficients(
           std::string("filter.gaussian_coefficients") + suffix, profile)));

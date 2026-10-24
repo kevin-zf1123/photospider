@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-11
 function: log_filter
 proposed_operation_keys:
@@ -44,7 +44,7 @@ If the formula invokes another member, preserve the RN stages at the call site a
 
 ## Fixed reads, algorithmic control and schemas
 
-Read every nonzero off-center tap and the center; support extends by `radius`.
+Read every nonzero off-center tap and the center; support extends by `radius`. Lowering declares the radius-bounded support after global boundary mapping. Coefficients are baked during invocation, so their zero values do not shrink the compiled read set; zero taps do not participate in source arithmetic. This follows the same fixed-support rule as FIL-04B.
 
 Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Lowering closes mathematical sample support on fixed input member-tile grids. Data-dependent selection uses a finite static superset of every address the task may consume; runtime selection does not expand the Plan. Data and control are algorithmic inputs, with no separate Validation read set. Empty retained selections introduce no payload tasks. Output schemas derive only from static parameters and input schemas. Numerical, encoding and association premises remain unchecked under the common contract.
 
@@ -69,9 +69,9 @@ See the [oracle README](../../../../oracle/ops/filter/README.md) for reproductio
 
 ## Backend and registration gates
 
-The keys above are naming proposals only; strict and both CPU accelerated variants are not registered or implemented. Accelerated variants must satisfy NUM final FP32-scaled four-ULP bounds and fallback rules; error budgets cannot be accumulated across taps, axes, stages, or iterations. Thresholds, ordering, boundaries, copies, and output support that require exact selection cannot change approximately.
+The keys above are registered CPU operations through fixed invocation ABI 8 in `plugins/ops/05-filter/`. Strict execution uses certified enclosures with exact-expression fallback. Apple Silicon and x86_64 variants retain their named capability gates. Specification acceptance remains Proposed/D1. Accelerated variants must satisfy NUM final FP32-scaled four-ULP bounds and fallback rules; error budgets cannot be accumulated across taps, axes, stages, or iterations. Thresholds, ordering, boundaries, copies, and output support that require exact selection cannot change approximately.
 
-Float64 accelerated execution retains Float64 inputs/outputs and exponent range; it does not first convert to Float32. Values outside the Float32-scale range use strict NUM fallback. No kernel, CPU, or ISA performance or differential acceptance was performed here.
+Float64 accelerated execution retains Float64 inputs/outputs and exponent range; it does not first convert to Float32. Values outside the Float32-scale range use strict NUM fallback. Implementation status records runtime availability; validation and performance evidence are maintained separately from this normative specification.
 
 ## Conceptual DAG (not an existing API)
 

@@ -113,6 +113,8 @@ struct Filter final : Program {
   std::vector<ReadRegion> support(unsigned, const Region&) const override;
   std::uint64_t task_scratch(unsigned, const Region&) const override;
   void run(const Kernel&, const ps_kernel_invocation_v8&) const override;
+  void run_with_work(const Kernel&, const ps_kernel_invocation_v8&,
+                     const Work&) const;
   bool separable() const;
   bool box() const;
   bool selected(const Coordinate&) const;

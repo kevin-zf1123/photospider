@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FIL-20
 function: local_mean_variance
 proposed_operation_keys:
@@ -71,9 +71,9 @@ See the [oracle README](../../../../oracle/ops/filter/README.md) for reproductio
 
 ## Backend and registration gates
 
-The keys above are naming proposals only; neither strict nor either CPU-accelerated variant is registered or implemented. Accelerated variants must meet NUM final-output FP32-scaled four-ULP bounds and provide strict fallback. Do not accumulate budgets by tap, axis, stage, or iteration; thresholds, ordering, boundaries, copies, and output support requiring exact selection cannot be changed approximately.
+The keys above are registered CPU operations through fixed invocation ABI 8 in `plugins/ops/05-filter/`. Strict execution uses certified enclosures with exact-expression fallback; accelerated keys retain their named capability gates. Specification acceptance remains Proposed/D1. Accelerated variants must meet NUM final-output FP32-scaled four-ULP bounds and provide strict fallback. Do not accumulate budgets by tap, axis, stage, or iteration; thresholds, ordering, boundaries, copies, and output support requiring exact selection cannot be changed approximately.
 
-Float64 accelerated execution still uses Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scaled range use strict NUM fallback. No kernel/CPU/ISA performance or differential acceptance was run for this package.
+Float64 accelerated execution still uses Float64 inputs, outputs, and exponent range; it does not first convert to Float32. Values outside the Float32-scaled range use strict NUM fallback. Implementation status records runtime availability; validation and performance evidence are maintained separately from this normative specification.
 
 ## Conceptual DAG (not an existing API)
 

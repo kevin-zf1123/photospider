@@ -50,6 +50,10 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/05-filter/operations.cpp
   plugins/ops/05-filter/gaussian.cpp
   plugins/ops/05-filter/evaluate.cpp
+  plugins/ops/05-filter/field_operations.cpp
+  plugins/ops/05-filter/field_stencils.cpp
+  plugins/ops/05-filter/field_pointwise.cpp
+  plugins/ops/05-filter/field_composite.cpp
   plugins/ops/04-mask-morphology/common.cpp
   plugins/ops/04-mask-morphology/color.cpp
   plugins/ops/04-mask-morphology/color_math.cpp

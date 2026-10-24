@@ -13,9 +13,7 @@ implementation_status: partially_implemented
 This category defines FIL-01..20, FRQ-01..10 and RES-01..14: 44 families.
 Member letters identify distinct mathematical/interface objects. Proposed keys,
 specification maturity, runtime registration and oracle coverage are separate facts.
-FIL-01..04 are implemented as CPU operations through fixed invocation ABI 8;
-their member specifications record the 28 registered keys. Other families retain
-their own implementation status. Proposed/D1 describes specification acceptance
+FIL-01..04, FIL-08..12, FIL-16 and FIL-20 are implemented as CPU operations through fixed invocation ABI 8; their member specifications record the 79 registered keys. Other families retain their own implementation status. Proposed/D1 describes specification acceptance
 and maturity separately from runtime availability.
 
 ## Inheritance and representation
@@ -35,7 +33,7 @@ Kernel/calibration coefficients declared Float64 retain that precision. Integer
 images require explicit FMT conversion. Dtype never implies a 0..1 or 0..255 scale.
 
 Image logical rank is 2..8. Static Int64 y_axis and x_axis are distinct nonnegative
-axes; other axes are independent batch/channel planes. An explicit component_axis
+axes; other axes are independent batch/channel planes. Axis indices address the complete sample shape, including the batch-axis prefix. An explicit component_axis
 for vector guides, RGB or matrices cannot coincide with either spatial axis.
 Examples written [H,W,C] do not require interleaved storage. Extents are positive;
 the inherited 2^40 element limit and checked static shape/capacity arithmetic apply. Runtime indices and address-control payloads are unchecked caller premises.

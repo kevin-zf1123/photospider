@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - FIL-08A
@@ -17,7 +17,7 @@ members:
 
 The x axis points right and y points down. Positive spacing is required, and outputs are numerical fields with units.
 
-Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). No member is marked Accepted or implemented in production.
+Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). All listed members are implemented and registered as CPU operations through fixed invocation ABI 8 in `plugins/ops/05-filter/`. Specification acceptance remains Proposed and document maturity remains D1.
 
 ## Members
 
@@ -43,4 +43,4 @@ Positive-weight normalization, signed kernels, local regression, and global inve
 
 Each member’s support set is normative. Having a halo does not imply independent execution on an arbitrarily cropped ROI, and paged access does not remove a whole-image dependency. Follow each member’s declared staged rounding, global connectivity, transforms, and iterative state. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
 
-All members must follow the [acceptance protocol](FILTER_oracle_protocol.md). The [oracle README](../../../../oracle/ops/filter/README.md) describes mathematical references and recorded self-checks; no new Photospider runtime implementation was executed in this work. D1/D2 indicate draft maturity, not acceptance status.
+All members must follow the [acceptance protocol](FILTER_oracle_protocol.md). The [oracle README](../../../../oracle/ops/filter/README.md) describes mathematical references and recorded self-checks; reference self-checks and Photospider runtime/backend validation are separate evidence levels. D1/D2 indicate draft maturity, not acceptance status.

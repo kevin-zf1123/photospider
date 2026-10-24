@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - FIL-16A
@@ -18,7 +18,7 @@ research_sources:
 
 The amount=0 bypass and threshold rules are explicit; signed/HDR values are not clipped.
 
-Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT format/color contract](../../02-format-color/op_specs/FMT_common_contract.md).No member has been marked Accepted or implemented for production.
+Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT format/color contract](../../02-format-color/op_specs/FMT_common_contract.md). All listed members are implemented and registered as CPU operations through fixed invocation ABI 8 in `plugins/ops/05-filter/`. Specification acceptance remains Proposed and document maturity remains D1.
 
 ## Members
 
@@ -43,7 +43,7 @@ Positive-weight normalization, signed kernels, local regression, and global inve
 
 Each member’s support set is normative. A halo does not mean arbitrary cropped ROIs can run independently; paging does not eliminate a whole-image dependency. Follow each member’s definition for staged rounding, global connectivity, transforms, and iterative state. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
 
-All members must pass the [common acceptance protocol](FILTER_oracle_protocol.md). Mathematical references and related self-tests for this work are documented in the [oracle README](../../../../oracle/ops/filter/README.md); no new implementation was run in the Photospider runtime. D1/D2 indicate draft maturity, not pass rates.
+All members must pass the [common acceptance protocol](FILTER_oracle_protocol.md). Mathematical references and related self-tests for this work are documented in the [oracle README](../../../../oracle/ops/filter/README.md); reference self-checks and Photospider runtime/backend validation are separate evidence levels. D1/D2 indicate draft maturity, not pass rates.
 
 ## Sources and review
 
