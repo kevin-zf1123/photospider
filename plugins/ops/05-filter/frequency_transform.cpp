@@ -106,16 +106,57 @@ void fft_line(Complex* data, std::uint64_t n, std::uint64_t stride,
     if (i < j)
       std::swap(data[i * stride], data[j * stride]);
   }
-  for (std::uint64_t length = 2; length <= n; length *= 2)
-    for (std::uint64_t i = 0; i < n; i += length)
-      for (std::uint64_t j = 0; j < length / 2; ++j) {
+  // Binary-reversed input puts radix-four children in order 0,2,1,3.
+  // Three enclosed twiddle products replace four binary butterflies. Each
+  // product and the final add/rotate segment is admitted separately.
+  std::uint64_t length = 2;
+  unsigned levels = 0;
+  for (auto size = n; size > 1; size >>= 1)
+    ++levels;
+  if (levels & 1) {
+    for (std::uint64_t i = 0; i < n; i += 2) {
+      fuel.poll(512);
+      const auto a = data[i * stride], b = data[(i + 1) * stride];
+      data[i * stride] = add(a, b);
+      data[(i + 1) * stride] = minus(a, b);
+    }
+    length = 4;
+  }
+  const bool inverse = root_size >= 4 && roots[root_size / 4].im.hi > 0;
+  for (; length <= n / 2; length *= 4) {
+    const auto quarter = length / 2, step = root_size / (2 * length);
+    for (std::uint64_t i = 0; i < n; i += 2 * length)
+      for (std::uint64_t j = 0; j < quarter; ++j) {
+        const auto phase = j * step;
+        const auto twiddle = [&](Complex value, std::uint64_t index) {
+          fuel.poll(512);
+          if (index == 0)
+            return value;
+          const auto root =
+              roots[index < root_size / 2 ? index : index - root_size / 2];
+          return product(value, index < root_size / 2
+                                    ? root
+                                    : Complex{-root.re, -root.im});
+        };
+        const auto a = data[(i + j) * stride];
+        const auto b = twiddle(data[(i + j + 2 * quarter) * stride], phase);
+        const auto c = twiddle(data[(i + j + quarter) * stride], 2 * phase);
+        const auto d = twiddle(data[(i + j + 3 * quarter) * stride], 3 * phase);
+        // Eight Complex additions/subtractions at 64 scalar-work units each
+        // cover two Ball sums (four six-operation two_sum calls plus radius
+        // arithmetic per Ball), sign changes, and the quarter-turn rotation.
+        // This segment is prepaid independently of the three 512-unit products.
         fuel.poll(512);
-        const auto u = data[(i + j) * stride];
-        const auto v = product(data[(i + j + length / 2) * stride],
-                               roots[j * (root_size / length)]);
-        data[(i + j) * stride] = add(u, v);
-        data[(i + j + length / 2) * stride] = minus(u, v);
+        const auto ac = add(a, c), bd = add(b, d), amc = minus(a, c);
+        const auto bmd = minus(b, d);
+        const Complex rotated =
+            inverse ? Complex{-bmd.im, bmd.re} : Complex{bmd.im, -bmd.re};
+        data[(i + j) * stride] = add(ac, bd);
+        data[(i + j + quarter) * stride] = add(amc, rotated);
+        data[(i + j + 2 * quarter) * stride] = minus(ac, bd);
+        data[(i + j + 3 * quarter) * stride] = minus(amc, rotated);
       }
+  }
 }
 // Child transforms occupy j+r*k. One admitted line buffer combines them
 // into natural order, without any rounded intermediate transform outputs.
@@ -136,7 +177,60 @@ void mixed_line(Complex* data, std::uint64_t n, std::uint64_t stride,
     mixed_line(data + j * stride, m, stride * radix, roots, order, temporary,
                fuel);
   }
-  for (std::uint64_t k = 0; k < m; ++k)
+  for (std::uint64_t k = 0; k < m; ++k) {
+    if (radix == 2 || radix == 3 || radix == 5) {
+      Complex v[5];
+      for (std::uint64_t j = 0; j < radix; ++j) {
+        // One common twiddle per child, not one per output. As for the
+        // generic branch, 512 covers a Complex product and address arithmetic.
+        fuel.poll(512);
+        const auto phase = j * k * (order / n);  // strictly below order
+        v[j] = phase ? product(data[(j + radix * k) * stride], roots[phase])
+                     : data[(j + radix * k) * stride];
+      }
+      const auto scaled = [&](Complex a, Ball c) {
+        // Two certified real products, including internal radius propagation.
+        fuel.poll(512);
+        return Complex{dd_product(a.re, c), dd_product(a.im, c)};
+      };
+      const auto rotate = [](Complex a) { return Complex{-a.im, a.re}; };
+      if (radix == 2) {
+        fuel.poll(128);  // two Complex sums at 64 each
+        temporary[k] = add(v[0], v[1]);
+        temporary[k + m] = minus(v[0], v[1]);
+      } else if (radix == 3) {
+        fuel.poll(128);  // two Complex sums
+        const auto sum = add(v[1], v[2]), diff = minus(v[1], v[2]);
+        const auto half = scaled(sum, {-.5, 0, 0});
+        const auto sine = rotate(scaled(diff, roots[order / 3].im));
+        fuel.poll(256);  // center and three output Complex sums
+        const auto center = add(v[0], half);
+        temporary[k] = add(v[0], sum);
+        temporary[k + m] = add(center, sine);
+        temporary[k + 2 * m] = minus(center, sine);
+      } else {
+        fuel.poll(256);  // four pairwise Complex sums/differences
+        const auto s1 = add(v[1], v[4]), d1 = minus(v[1], v[4]);
+        const auto s2 = add(v[2], v[3]), d2 = minus(v[2], v[3]);
+        const auto c1 = roots[order / 5].re, c2 = roots[2 * (order / 5)].re;
+        const auto t1 = roots[order / 5].im, t2 = roots[2 * (order / 5)].im;
+        const auto a1 = scaled(s1, c1), a2 = scaled(s2, c2);
+        const auto b1 = scaled(s1, c2), b2 = scaled(s2, c1);
+        const auto e1 = scaled(d1, t1), e2 = scaled(d2, t2);
+        const auto f1 = scaled(d1, t2), f2 = scaled(d2, t1);
+        fuel.poll(512);  // eight Complex sums, including the two rotations
+        const auto a = add(v[0], add(a1, a2));
+        const auto b = add(v[0], add(b1, b2));
+        const auto e = rotate(add(e1, e2)), f = rotate(minus(f1, f2));
+        temporary[k] = add(v[0], add(s1, s2));
+        fuel.poll(256);  // four output Complex sums
+        temporary[k + m] = add(a, e);
+        temporary[k + 4 * m] = minus(a, e);
+        temporary[k + 2 * m] = add(b, f);
+        temporary[k + 3 * m] = minus(b, f);
+      }
+      continue;
+    }
     for (std::uint64_t l = 0; l < radix; ++l) {
       Complex sum{{0, 0, 0}, {0, 0, 0}};
       for (std::uint64_t j = 0; j < radix; ++j) {
@@ -148,6 +242,7 @@ void mixed_line(Complex* data, std::uint64_t n, std::uint64_t stride,
       }
       temporary[k + m * l] = sum;
     }
+  }
   for (std::uint64_t i = 0; i < n; ++i) {
     fuel.poll();
     data[i * stride] = temporary[i];
@@ -333,25 +428,54 @@ void Frequency::run_transform(const Kernel& k,
   const Reader reader{k, inv};
   const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa],
              root_size = std::max(h, w);
+  const auto width = transform_width();
+  const bool compact = width != w;
   auto* data = reinterpret_cast<Complex*>(arena.value + 1);
-  auto* roots = data + h * w;
+  auto* roots = data + h * width;
   auto* axis_roots = roots + root_size;
-  auto* temporary = axis_roots + h + w;
+  auto* temporary = axis_roots + h + width;
   for (std::uint64_t j = 0; j < root_size; ++j) {
     fuel.poll();
     new (temporary + j) Complex{};
   }
-  auto* blue = temporary + root_size;
-  const bool radix2 = power2(h) && power2(w);
+  auto* real_roots = temporary + root_size;
+  auto* blue = real_roots + (compact ? width + 1 : 0);
+  const bool radix2 = power2(h) && power2(width);
   const bool fft = true;
   if (radix2) {
     root_table(m, roots, root_size, root_size / 2, inverse(), fuel);
   }
+  if (compact) {
+    if (radix2) {
+      // Both axes divide root_size. Preserve a dedicated recombination table:
+      // the column gather below is permitted to overwrite other root storage.
+      for (std::uint64_t k = 0; k <= width; ++k) {
+        fuel.poll(4);
+        new (real_roots + k) Complex{k == width ? Complex{{-1, 0, 0}, {0, 0, 0}}
+                                                : roots[k * (root_size / w)]};
+      }
+    } else {
+      root_table(m, real_roots, w, width + 1, inverse(), fuel);
+    }
+  }
   if (!radix2) {
     for (auto axis :
-         {std::make_pair(h, axis_roots), std::make_pair(w, axis_roots + h)})
-      if (!bluestein_size(axis.first))
-        root_table(m, axis.second, axis.first, axis.first, inverse(), fuel);
+         {std::make_pair(h, axis_roots), std::make_pair(width, axis_roots + h)})
+      if (!bluestein_size(axis.first)) {
+        if (compact && axis.second == axis_roots + h) {
+          // Every width-th root is an even phase of the original 2*width
+          // table. The stored half-turn suffices; preserve its Ball radius.
+          for (std::uint64_t j = 0; j < width; ++j) {
+            fuel.poll(16);  // phase/address arithmetic, copy, at most four negs
+            const auto phase = 2 * j;
+            const auto root = real_roots[phase < width ? phase : phase - width];
+            new (axis.second + j)
+                Complex{phase < width ? root : Complex{-root.re, -root.im}};
+          }
+        } else {
+          root_table(m, axis.second, axis.first, axis.first, inverse(), fuel);
+        }
+      }
   }
   Ball scale{1, 0, 0};
   if (grid.norm == "ortho") {
@@ -378,6 +502,7 @@ void Frequency::run_transform(const Kernel& k,
       batches *= selected.dimensions()[a].extent;
   }
   for (std::uint64_t b = 0; b < batches; ++b) {
+    bool finite_input = true;
     bool positive_zero_witness[2] = {false, false};
     bool positive_sine_witness = false;
     const auto period_y = h > 1 && h % 2 == 0 ? 2U : 1U;
@@ -407,6 +532,10 @@ void Frequency::run_transform(const Kernel& k,
       const auto re = reader.value(0, 0, at);
       const auto im = real_input() ? 0 : reader.value(1, 0, at);
       return std::make_pair(re, conjugate ? -im : im);
+    };
+    const auto logical_ball = [&](std::uint64_t y, std::uint64_t x) {
+      const auto value = logical_value(y, x);
+      return Complex{Ball::point(value.first), Ball::point(value.second)};
     };
     const auto find_residual_period = [&] {
       if (residual_period_checked)
@@ -494,11 +623,12 @@ void Frequency::run_transform(const Kernel& k,
           periodic &= std::isfinite(re) && std::isfinite(im) &&
                       re == periodic_seed[seed] &&
                       im == periodic_seed[seed + 1];
+          finite_input &= std::isfinite(re) && std::isfinite(im);
           const auto imaginary = conjugate ? -im : im;
           if (kind == Kind::Irfft) {
             packed_y_periodic &= std::isfinite(re) && std::isfinite(imaginary);
             if (packed_y_periodic && y >= period_y) {
-              const auto& seed_value = data[(y % period_y) * w + x];
+              const auto seed_value = logical_ball(y % period_y, x);
               packed_y_periodic &= seed_value.re.point() &&
                                    seed_value.re.finite() &&
                                    re == seed_value.re.hi;
@@ -516,22 +646,23 @@ void Frequency::run_transform(const Kernel& k,
             real_periodic &= original.finite() && original.point() &&
                              std::isfinite(re) && re == original.hi;
           }
-          new (data + y * w + x)
-              Complex{Ball::point(re), Ball::point(imaginary)};
+          if (!compact)
+            new (data + y * w + x)
+                Complex{Ball::point(re), Ball::point(imaginary)};
         }
       if (kind == Kind::Irfft && packed_y_periodic) {
         for (std::uint64_t y = 0; y < h; ++y) {
           fuel.poll(4);
-          const auto& a = data[y * w].im;
-          const auto b = w % 2 == 0 ? data[y * w + w / 2].im : Ball{0, 0, 0};
+          const auto a = logical_ball(y, 0).im;
+          const auto b = w % 2 == 0 ? logical_ball(y, w / 2).im : Ball{0, 0, 0};
           boundary_equal &= a.point() && a.finite() && b.point() &&
                             b.finite() && a.hi == b.hi;
           boundary_opposite &= a.point() && a.finite() && b.point() &&
                                b.finite() && a.hi == -b.hi;
           if (boundary_antiperiodic) {
-            const auto& partner_a = data[((y + h / 2) % h) * w].im;
+            const auto partner_a = logical_ball((y + h / 2) % h, 0).im;
             const auto partner_b = w % 2 == 0
-                                       ? data[((y + h / 2) % h) * w + w / 2].im
+                                       ? logical_ball((y + h / 2) % h, w / 2).im
                                        : Ball{0, 0, 0};
             boundary_antiperiodic &=
                 a.point() && a.finite() && b.point() && b.finite() &&
@@ -549,9 +680,9 @@ void Frequency::run_transform(const Kernel& k,
               continue;
             Ball total{};
             for (unsigned y = 0; y < period_y; ++y) {
-              fuel.poll(4);
+              fuel.poll(64);  // one Ball sum and exact sign change
               total = total +
-                      data[y * w + x].im.times((y * frequency) & 1 ? -1 : 1);
+                      logical_ball(y, x).im.times((y * frequency) & 1 ? -1 : 1);
             }
             imaginary_y_zero[frequency] &=
                 total.finite() && total.point() && total.hi == 0;
@@ -562,39 +693,68 @@ void Frequency::run_transform(const Kernel& k,
         for (std::uint64_t y = 0; y < h && imaginary_x_antiperiodic; ++y)
           for (std::uint64_t x = 1; x < w / 2; ++x) {
             fuel.poll(4);
-            const auto& a = data[y * w + x].im;
-            const auto& b = data[y * w + x + w / 2].im;
+            const auto a = logical_ball(y, x).im;
+            const auto b = logical_ball(y, x + w / 2).im;
             imaginary_x_antiperiodic &= a.finite() && a.point() && b.finite() &&
                                         b.point() && a.hi == -b.hi;
           }
       }
-      if (bluestein_size(w)) {
-        bluestein_axis(m, data, w, 1, h, w, inverse(), blue, fuel);
-      } else if (w > 1) {
+      if (compact) {
         for (std::uint64_t y = 0; y < h; ++y)
-          if (power2(w))
-            fft_line(data + y * w, w, 1, radix2 ? roots : axis_roots + h,
-                     radix2 ? root_size : w, fuel);
+          for (std::uint64_t x = 0; x < width; ++x) {
+            if (kind == Kind::Rfft) {
+              fuel.poll(16);  // two Reader coordinates, classification, packing
+              const auto even = logical_value(y, 2 * x);
+              const auto odd = logical_value(y, 2 * x + 1);
+              new (data + y * width + x)
+                  Complex{Ball::point(even.first), Ball::point(odd.first)};
+            } else {
+              // k=0 reads Nyquist at width, not DC. Boundary conjugacy is
+              // caller-owned; interior coefficients may be independently
+              // edited.
+              const auto p = logical_ball(y, x);
+              auto q = logical_ball((h - y) % h, width - x);
+              q.im = -q.im;
+              fuel.poll(128);  // two Complex sums/differences at 64 each
+              const auto sum = add(p, q), diff = minus(p, q);
+              fuel.poll(512);  // enclosed twiddle product
+              const auto term = product(diff, real_roots[x]);
+              fuel.poll(64);  // final Complex sum and exact +i rotation
+              new (data + y * width + x) Complex{add(sum, {-term.im, term.re})};
+              // T intentionally omits /2. The original H*W normalization is
+              // retained below, giving the real inverse at even/odd positions.
+            }
+          }
+      }
+      if (bluestein_size(width)) {
+        bluestein_axis(m, data, width, 1, h, width, inverse(), blue, fuel);
+      } else if (width > 1) {
+        for (std::uint64_t y = 0; y < h; ++y)
+          if (power2(width))
+            fft_line(data + y * width, width, 1,
+                     radix2 ? roots : axis_roots + h,
+                     radix2 ? root_size : width, fuel);
           else
-            mixed_line(data + y * w, w, 1, axis_roots + h, w, temporary, fuel);
+            mixed_line(data + y * width, width, 1, axis_roots + h, width,
+                       temporary, fuel);
       }
       if (bluestein_size(h)) {
-        bluestein_axis(m, data, h, w, w, 1, inverse(), blue, fuel);
+        bluestein_axis(m, data, h, width, width, 1, inverse(), blue, fuel);
       } else if (h > 1) {
         if (root_size < 1024) {
-          for (std::uint64_t x = 0; x < w; ++x) {
+          for (std::uint64_t x = 0; x < width; ++x) {
             if (power2(h))
-              fft_line(data + x, h, w, radix2 ? roots : axis_roots,
+              fft_line(data + x, h, width, radix2 ? roots : axis_roots,
                        radix2 ? root_size : h, fuel);
             else
-              mixed_line(data + x, h, w, axis_roots, h, temporary, fuel);
+              mixed_line(data + x, h, width, axis_roots, h, temporary, fuel);
           }
         } else {
           auto* column = radix2 ? axis_roots : roots;
-          for (std::uint64_t x = 0; x < w; ++x) {
+          for (std::uint64_t x = 0; x < width; ++x) {
             for (std::uint64_t y = 0; y < h; ++y) {
               fuel.poll(2);
-              new (column + y) Complex{data[y * w + x]};
+              new (column + y) Complex{data[y * width + x]};
             }
             if (power2(h))
               fft_line(column, h, 1, radix2 ? roots : axis_roots,
@@ -603,12 +763,39 @@ void Frequency::run_transform(const Kernel& k,
               mixed_line(column, h, 1, axis_roots, h, temporary, fuel);
             for (std::uint64_t y = 0; y < h; ++y) {
               fuel.poll(2);
-              data[y * w + x] = column[y];
+              data[y * width + x] = column[y];
             }
           }
         }
       }
     }
+    const auto candidate_value = [&](std::uint64_t y, std::uint64_t x,
+                                     unsigned component) {
+      if (!compact) {
+        const auto value = data[y * w + x];
+        return component ? value.im : value.re;
+      }
+      if (kind == Kind::Irfft) {
+        const auto value = data[y * width + x / 2];
+        return x % 2 ? value.im : value.re;
+      }
+      const auto k = x % width;
+      const auto p = data[y * width + k];
+      auto q = data[((h - y) % h) * width + (width - k) % width];
+      fuel.poll(128);  // three Ball sums at 32 each plus conjugation/signs
+      q.im = -q.im;
+      const auto sum = component ? p.im + q.im : p.re + q.re;
+      const auto dr = p.re + (-q.re), di = p.im + (-q.im);
+      const auto root = real_roots[x];
+      // Only the requested component of -i*w*(P-Q) is needed. Two enclosed
+      // real products (128 each), one Ball sum (32), and signs fit 320.
+      fuel.poll(320);
+      const auto term =
+          component ? dd_product(di, root.im) + (-dd_product(dr, root.re))
+                    : dd_product(dr, root.im) + dd_product(di, root.re);
+      fuel.poll(128);  // Ball sum (32), times(.5) (64), and output addressing
+      return (sum + term).times(.5);
+    };
     for (unsigned i = 0; i < inv.output_count; ++i) {
       const auto component = k.writes[i].first;
       const auto& view = inv.outputs[i];
@@ -638,9 +825,19 @@ void Frequency::run_transform(const Kernel& k,
             conjugate = component == 1;
           }
         }
+        std::optional<Ball> candidate;
+        const auto candidate_at = [&] {
+          if (!candidate)
+            candidate =
+                candidate_value(source[grid.ya], source[grid.xa], component);
+          return *candidate;
+        };
         std::optional<std::uint64_t> result;
         bool exact_zero = false;
-        if (fft) {
+        // Algebraic butterflies enclose finite real expressions. Exceptional
+        // inputs use the original-coordinate E/NUM evaluator, including its
+        // written-order NaN priority and exclusion of structural zero terms.
+        if (fft && finite_input) {
           // Outside the y-periodic support, packed interior columns vanish.
           // The only remaining imaginary boundary columns cancel pointwise
           // when their coefficients 1 and (-1)^kx have opposite amplitudes.
@@ -655,7 +852,7 @@ void Frequency::run_transform(const Kernel& k,
             Ball total{};
             for (unsigned y = 0; y < period_y; ++y)
               for (unsigned x = 0; x < period_x; ++x) {
-                fuel.poll(4);
+                fuel.poll(64);  // one Ball sum, sign change, integer phase
                 const auto sign = (y * (source[grid.ya] / (h / period_y)) +
                                    x * (source[grid.xa] / (w / period_x))) &
                                   1;
@@ -677,10 +874,8 @@ void Frequency::run_transform(const Kernel& k,
               packed_real_zero || packed_excluded ||
               (periodic && (source[grid.ya] % (h / period_y) != 0 ||
                             source[grid.xa] % (w / period_x) != 0));
-          const auto value = excluded
-                                 ? Complex{{0, 0, 0}, {0, 0, 0}}
-                                 : data[source[grid.ya] * w + source[grid.xa]];
-          const auto v = dd_product(component ? value.im : value.re, scale);
+          const auto value = excluded ? Ball{0, 0, 0} : candidate_at();
+          const auto v = dd_product(value, scale);
           result = profile == Profile::Strict
                        ? dd_round(v, type == ElementType::Float32)
                        : FastArithmetic{type == ElementType::Float32, profile}
@@ -701,8 +896,7 @@ void Frequency::run_transform(const Kernel& k,
           }
         }
         if (!result) {
-          const auto value = data[source[grid.ya] * w + source[grid.xa]];
-          const auto enclosure = (component ? value.im : value.re).bounds();
+          const auto enclosure = candidate_at().bounds();
           if (!std::isfinite(enclosure.low) || !std::isfinite(enclosure.high) ||
               (enclosure.low <= 0 && enclosure.high >= 0)) {
             find_residual_period();

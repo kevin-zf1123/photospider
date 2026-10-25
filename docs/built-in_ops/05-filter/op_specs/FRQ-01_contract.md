@@ -35,9 +35,10 @@ Suffix letters identify distinct mathematical or interface objects, not quality 
 
 The two members are registered by `register_frequency` in
 `plugins/ops/05-filter/frequency_operations.cpp`, reached from the maintained
-built-in registry. `frequency_transform.cpp` implements certified radix-2 and
-mixed-radix FFT, Bluestein for large residual factors, and bounded block
-recurrences for enclosed roots/chirps. `frequency_direct.hpp` streams directed
+built-in registry. `frequency_transform.cpp` implements certified radix-2/radix-4
+FFT, common-twiddle radix-2/3/5 codelets, generic residual-radix combinations,
+Bluestein for large residual factors, and bounded block recurrences for enclosed
+roots/chirps. `frequency_direct.hpp` streams directed
 refinement and exact trace-square zero/midpoint decisions, including algebraically
 correlated ortho normalization. Scratch has a full-plane and linear-axis bound;
 it allocates no polynomial arrays proportional to the primitive root order. The SDK helper is declared in
@@ -59,7 +60,10 @@ before execution, and charges each explicit refinement attempt. One Run ledger
 covers all nodes, tiles and activations; repeated/concurrent Runs have independent
 limits under their shared Context root. A host budget refusal is `ResourceExhausted`
 with `WorkLimit` or `StageLimit`, `Resource`/`Run` attribution and known node/task;
-accepted work drains and no final Result is published. Cancellation retains
+accepted work drains and no final Result is published. The operator's
+invocation-local work consumer locks its first failure, including a node-local
+limit refusal, service refusal or cancellation; subsequent helper calls preserve
+that reason and issue no further admission. Run cancellation retains terminal
 priority and does not refund admitted work. The optional Int64 node `max_work`
 continues to limit each invocation independently; it is not the Run total.
 `ExecutionOptions::maximum_work` defaults to 268435456; callers must explicitly
@@ -75,6 +79,19 @@ remain supported. CPU x86 execution, GPU support and unmeasured platforms are no
 implied by the local Apple evidence. Exact fallback is finite-budget computation;
 its constant-storage trace test can require quadratic work in input terms and
 does not promise FFT-time completion for adversarial unresolved outputs.
+
+Power-of-two lines use binary bit reversal followed by an initial radix-2 stage
+when needed and radix-4 stages. Each radix-4 group prepays three 512-unit
+Complex products and a separate 512-unit add/rotate segment. Mixed-radix codelets
+apply one common twiddle per child before combining radix-2, radix-3 or radix-5
+outputs. Irrational coefficients retain certified Ball enclosures. Work units
+cover the internal certified scalar arithmetic, not CPU instruction counts;
+individual admission segments are at most 1024 units. The FFT candidate accepts
+only finite-input expressions whose final enclosure meets the selected profile.
+Nonfinite inputs and unresolved zero, midpoint or range cases use the original
+Reader-based directed/exact path, retaining structural-zero exclusions and
+written-order exceptional-value semantics. Real-input compact storage is
+described in [FRQ-02](FRQ-02_contract.md#runtime-integration-and-remaining-acceptance).
 
 ## Shared Mathematics, Units, and Profiles
 

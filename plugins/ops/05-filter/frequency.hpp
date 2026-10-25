@@ -72,6 +72,11 @@ struct Frequency final : Program {
   bool transform() const { return kind <= Kind::Irfft; }
   bool inverse() const { return kind == Kind::Ifft || kind == Kind::Irfft; }
   bool real_input() const { return kind == Kind::Rfft; }
+  std::uint64_t transform_width() const {
+    const auto w = grid.shape[grid.xa];
+    return (kind == Kind::Rfft || kind == Kind::Irfft) && w % 2 == 0 ? w / 2
+                                                                     : w;
+  }
   Region plane_region(const Region&) const;
   std::vector<ReadRegion> support(unsigned, const Region&) const override;
   std::uint64_t task_scratch(unsigned, const Region&) const override;

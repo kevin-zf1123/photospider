@@ -153,16 +153,27 @@ struct Work final {
   std::uint64_t limit;
   mutable std::uint64_t used = 0;
   ps_kernel_work_v9 service{};
+  // Invocation-local first failure is terminal, including helpers that return
+  // a soft numerical failure before another helper polls the same consumer.
+  mutable ErrorCode failure_code = ErrorCode::Ok;
+  mutable FailureReason failure_reason = FailureReason::None;
+  Status fail(ErrorCode code, FailureReason reason) const {
+    failure_code = code;
+    failure_reason = reason;
+    return {code, {}, reason};
+  }
   bool budgeted() const { return service.consume != nullptr; }
   Status stage() const { return consume(1, budgeted() ? 1 : 0); }
   Status operator()(std::uint64_t amount) const { return consume(amount, 0); }
   Status consume(std::uint64_t amount, std::uint64_t stages) const {
+    if (failure_code != ErrorCode::Ok)
+      return {failure_code, {}, failure_reason};
     if (invocation.cancellation.is_cancelled &&
         invocation.cancellation.is_cancelled(invocation.cancellation.context)) {
-      return {ErrorCode::Cancelled, {}, FailureReason::Cancelled};
+      return fail(ErrorCode::Cancelled, FailureReason::Cancelled);
     }
     if (amount > limit - used) {
-      return {ErrorCode::ResourceExhausted, {}, FailureReason::WorkLimit};
+      return fail(ErrorCode::ResourceExhausted, FailureReason::WorkLimit);
     }
     if (budgeted()) {
       const auto status = service.consume(service.context, amount, stages);
@@ -170,11 +181,10 @@ struct Work final {
       // owning message while propagating a resource failure from a checkpoint.
       if (status.code > PS_KERNEL_INTERNAL_V8 ||
           status.reason > PS_KERNEL_REASON_VIEW_UNAVAILABLE_V8)
-        return {ErrorCode::Internal, {}, FailureReason::MalformedEnvelope};
+        return fail(ErrorCode::Internal, FailureReason::MalformedEnvelope);
       if (status.code)
-        return {static_cast<ErrorCode>(status.code),
-                {},
-                static_cast<FailureReason>(status.reason)};
+        return fail(static_cast<ErrorCode>(status.code),
+                    static_cast<FailureReason>(status.reason));
     }
     used += amount;
     return Status::success();

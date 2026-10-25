@@ -2,6 +2,7 @@
 
 #include <array>
 #include <numeric>
+#include <optional>
 #include <utility>
 
 #include "05-filter/frequency.hpp"
@@ -126,6 +127,46 @@ void terms(const Frequency& s, const Reader& reader, Coordinate at,
     }
   }
 }
+// Cold certificate for an inverse output with primitive order 4. The caller
+// has already handled exceptional operands and all-zero signed reductions.
+inline std::optional<std::uint64_t> quarter_irfft(const Frequency& s, Math& m,
+                                                  const Reader& reader,
+                                                  const Coordinate& at,
+                                                  const Fuel& fuel) {
+  // Bound the exact area, integer-square normalization check and conversion.
+  // Grid construction caps shape products at 2^40; retain an explicit 2^53
+  // guard so every accepted integer denominator is exactly representable.
+  fuel.poll(64);
+  const auto h = s.grid.shape[s.grid.ya], w = s.grid.shape[s.grid.xa];
+  const auto area = static_cast<unsigned __int128>(h) * w;
+  if (area == 0 || area > (UINT64_C(1) << 53))
+    return {};
+  auto denominator = static_cast<std::uint64_t>(area);
+  if (s.grid.norm == "ortho") {
+    // Reuse the existing exact square-factor decomposition. No floating
+    // sqrt becomes an exact point without this integer-square certificate.
+    denominator = s.norm_squarefactor;
+    if (s.norm_squarefree != 1 || denominator == 0 ||
+        static_cast<unsigned __int128>(denominator) * denominator != area)
+      return {};
+  }
+  check(m.work.stage());
+  Ball sum{};
+  terms(s, reader, at, 0, 4, fuel, [&](auto, auto phase, Atom atom) {
+    // Ball sum 32, negation at most 2, conversion and local control fit 64.
+    // terms() separately prepays coordinate/port visits before source reads.
+    fuel.poll(64);
+    const auto value = Ball::point(atom.value());
+    sum = sum + (phase == 2 ? -value : value);
+  });
+  // Cover the complete existing certified finisher: two Ball.times(double),
+  // two Ball sums, bounds, candidate and exact midpoint tests, all prepaid.
+  fuel.poll(512);
+  if (sum.finite() && sum.point() && sum.hi == 0)
+    return 0;  // all-zero signed reductions have already returned in direct()
+  return BoundedArithmetic{s.type == ElementType::Float32}.finish(
+      BallValue{sum, {static_cast<double>(denominator), 0, 0}, true});
+}
 inline std::uint64_t direct(const Frequency& s, Math& m, const Reader& reader,
                             Coordinate at, unsigned component,
                             const Fuel& fuel) {
@@ -173,6 +214,9 @@ inline std::uint64_t direct(const Frequency& s, Math& m, const Reader& reader,
   auto scale = e.integer(1);
   if (s.inverse() && s.grid.norm == "backward")
     scale = e.fraction(1, h * w);
+  if (s.kind == Kind::Irfft && component == 0 && n == 4)
+    if (const auto result = quarter_irfft(s, m, reader, at, fuel))
+      return *result;
   // Rational trace invariants are evaluated only after interval rounding is
   // unresolved. No polynomial storage depends on the primitive root order.
   bool trace_ready = false;

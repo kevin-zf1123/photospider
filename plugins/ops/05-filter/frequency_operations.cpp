@@ -367,9 +367,12 @@ std::uint64_t Frequency::task_scratch(unsigned port,
     n += (static_cast<unsigned __int128>(dims[0]) + dims[1]) * 8;
   if (transform()) {
     const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa];
-    n += (static_cast<unsigned __int128>(h) * w + 2 * std::max(h, w) + h + w) *
+    const auto width = transform_width();
+    // Match run_transform: plane, roots, axis roots, line, real roots, blue.
+    n += (static_cast<unsigned __int128>(h) * width + 2 * std::max(h, w) + h +
+          width + (width != w ? width + 1 : 0)) *
          2 * sizeof(Ball);
-    const auto blue_size = std::max(bluestein_size(h), bluestein_size(w));
+    const auto blue_size = std::max(bluestein_size(h), bluestein_size(width));
     if (blue_size)
       n += (static_cast<unsigned __int128>(blue_size) * 3 + std::max(h, w)) *
            2 * sizeof(Ball);
