@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: not_implemented
+implementation_status: partially_implemented
 parent_id: FRQ-01
 function: fft2
 proposed_operation_keys:
@@ -72,7 +72,7 @@ Reproduction steps and proof levels are in [oracle README](../../../../oracle/op
 
 ## Backend and Registration Status
 
-The keys above are naming proposals only; strict and both CPU-accelerated variants are not registered or implemented. Accelerated variants must satisfy NUM’s final FP32-scaled four-ULP bound and fallback rules. Do not accumulate the error budget across taps, axes, stages, or iterations. Approximation may not change exact decisions, thresholds, ordering, boundaries, copy behavior, or output support.
+The listed keys are registered by `register_frequency` in `plugins/ops/05-filter/frequency_operations.cpp`; execution is in `frequency_transform.cpp`. The functional CPU implementation includes certified radix-2 FFT, exact cyclotomic/direct fallback and algebraically combined ortho normalization. CPU strict and named target-gated Apple Silicon/x86-64 profiles exist; local runtime evidence covers Apple CPU only, with no GPU backend. Overall acceptance retains the frozen-ABI H08 root-work/refinement-stage limitation described by the family contract. Accelerated variants must satisfy NUM’s final FP32-scaled four-ULP bound and fallback rules. Do not accumulate the error budget across taps, axes, stages, or iterations. Approximation may not change exact decisions, thresholds, ordering, boundaries, copy behavior, or output support.
 
 Float64 accelerated variants retain Float64 inputs, outputs, and exponent range; they do not convert through Float32. Float32 inputs outside the supported scale range use the NUM strict fallback.
 

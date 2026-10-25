@@ -47,7 +47,8 @@ inline std::optional<std::uint64_t> dd_round(Ball a, bool narrow) {
   }
   return BoundedArithmetic{narrow}.finish(BallValue{a});
 }
-inline std::optional<Ball> dd_exp_enclosure(Ball x, const Fuel& fuel) {
+template <unsigned Degree = 24, class Consumer>
+inline std::optional<Ball> dd_exp_enclosure(Ball x, const Consumer& fuel) {
   if (!x.finite())
     return {};
   const auto bounds = x.bounds();
@@ -91,13 +92,16 @@ inline std::optional<Ball> dd_exp_enclosure(Ball x, const Fuel& fuel) {
       {0x1.761b41316381ap-75, -0x1.3423c7d91404fp-130, 0x1.e6135bfc1194ap-185},
       {0x1.f2cf01972f578p-80, -0x1.9ada5fcc1ab14p-135, 0x1.440ce7fd610dcp-189},
   };
-  auto sum = coefficients[24];
-  for (int n = 23; n >= 0; --n) {
+  static_assert(Degree == 24 || Degree == 18);
+  auto sum = coefficients[Degree];
+  for (int n = static_cast<int>(Degree) - 1; n >= 0; --n) {
     fuel.poll(3);
     sum = dd_product(sum, r) + coefficients[n];
   }
-  // exp(.36)*.36^25/25! < 2^-118.
-  sum.error = Ball::up(sum.error + 0x1p-118);
+  // exp(.36)*.36^25/25! < 2^-118. For the private FRQ degree18
+  // candidate, 2*(9/25)^19/19! < 2^-83 bounds the absolute Taylor tail.
+  // Existing consumers retain the degree24 expression and radius.
+  sum.error = Ball::up(sum.error + (Degree == 18 ? 0x1p-83 : 0x1p-118));
   const double scale = std::ldexp(1.0, k);
   return sum.times(scale);
 }

@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: not_implemented
+implementation_status: partially_implemented
 parent_id: 05-filter
 members:
 - FRQ-01A
@@ -30,6 +30,31 @@ Inherits [FILTER shared contract](FILTER_common_contract.md), [NUM](../../01-num
 | FRQ-01B | [Two-dimensional complex inverse transform](FRQ-01B_ifft2.md) | primitive | E |
 
 Suffix letters identify distinct mathematical or interface objects, not quality tiers that a backend may select freely. A primitive may propose separately named strict and accelerated variants. A helper only orchestrates explicit stages. An external engine requires fixed resources and an approved executable configuration.
+
+## Runtime integration and remaining acceptance
+
+The two members are registered by `register_frequency` in
+`plugins/ops/05-filter/frequency_operations.cpp`, reached from the maintained
+built-in registry. `frequency_transform.cpp` implements certified radix-2 FFT
+and exact cyclotomic/direct refinement. The SDK helper is declared in
+`photospider/ops/frequency.hpp`. CPU strict and target-gated Apple Silicon and
+x86-64 keys exist; only the local Apple CPU has runtime evidence in this task.
+There is no GPU backend.
+
+Direct nodes supply the FrequencyGrid/v1 configuration explicitly:
+`schema_revision` Int64 1, `original_shape` canonical comma-separated String,
+`y_axis`, `x_axis` Int64, `packing`, `index_order`, `norm`, `unit`, `grid_id`
+Strings, and `spacing_y/x`, `origin_y/x` Float64. Origins/spacings use y,x order.
+`original_shape` includes batch prefixes. Forward inputs have original shape;
+the inverse checks its stored coefficient shape against this configuration.
+A different normalization override is not introduced by the helper.
+
+Functional execution is implemented; overall acceptance remains partial because
+H08 root cumulative arithmetic/limb work and refinement-stage charging cannot
+be supplied by frozen invocation ABI 8. The optional Int64 `max_work` limits
+each invocation independently; it is not a node-across-tiles or Run total.
+Output/scratch capacity, task/stage admission and ownership use the existing
+executor. This limitation does not revise the inherited target contract.
 
 ## Shared Mathematics, Units, and Profiles
 

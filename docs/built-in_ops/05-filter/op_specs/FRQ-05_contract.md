@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: not_implemented
+implementation_status: partially_implemented
 parent_id: 05-filter
 members:
 - FRQ-05A
@@ -31,6 +31,29 @@ Inherits [FILTER shared contract](FILTER_common_contract.md), [NUM](../../01-num
 | FRQ-05C | [Paired periodic-frequency notch response](FRQ-05C_paired_notch_response.md) | primitive | B |
 
 Suffix letters identify distinct mathematical or interface objects, not quality tiers that a backend may select freely. A primitive may propose separately named strict and accelerated variants. A helper only orchestrates explicit stages. An external engine requires fixed resources and an approved executable configuration.
+
+## Runtime integration and remaining acceptance
+
+All three members are registered by `register_frequency` in
+`plugins/ops/05-filter/frequency_operations.cpp`; exact/directed expressions
+are in `frequency_local.cpp`, certified candidates in `frequency_fast.hpp`.
+CPU strict and target-gated Apple Silicon/x86-64 keys exist; no GPU backend.
+Only local Apple CPU execution has been measured. Direct output grids use the
+[FRQ-01 explicit grid encoding](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance),
+with rank 2, y_axis=0, x_axis=1, full unshifted packing. Both output components
+are independently selectable; imaginary-only execution has no response arithmetic.
+
+For paired notches, the static center list is encoded by `centers_y_bits` and
+`centers_x_bits`: equally sized nonempty canonical comma-separated unsigned
+decimal uint64 IEEE-754 Float64 bit patterns. They preserve stored Float64
+values exactly. Descriptor canonicalization sorts the pairs, without a
+numerical distinctness/conjugacy-validation pass. `sigma_y/x` and `depth` retain
+the member's Float64 numerical premises. Int64 `order` is present only for
+Butterworth; `alpha` is not a response parameter.
+
+Overall acceptance retains the frozen-ABI H08 root-work/refinement-stage
+limitation documented by FRQ-01. Optional `max_work` is per invocation, not a
+node-across-tiles or Run accumulator. Mathematical targets remain unchanged.
 
 ### Grid and Parameters
 This family produces only real-valued, even, full and unshifted responses, with Float64 real values, +0 imaginary values, and a FrequencyGrid/v1 response descriptor. Require positive H/W and explicit spacing_y/x. Define signed index n(k)=k for k≤floor(N/2), otherwise k−N; positive and negative Nyquist indices are equivalent. Compute fy=n(ky)/(H*dy), fx=n(kx)/(W*dx), and exact frequency radius r=sqrt(fx²+fy²). Do not silently reinterpret pixel units when applying cutoffs. Require cutoff>0; values above the maximum frequency are allowed and are not clipped.

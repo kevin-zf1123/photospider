@@ -4,6 +4,7 @@
 
 namespace ps::plugin_internal {
 Status register_filters(OperationRegistry* registry);
+Status register_frequency(OperationRegistry* registry);
 Status register_mask_color(OperationRegistry* registry);
 Status register_mask_statistics(OperationRegistry* registry);
 Status register_mask_pointwise(OperationRegistry* registry);

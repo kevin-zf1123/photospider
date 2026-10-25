@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: not_implemented
+implementation_status: partially_implemented
 parent_id: 05-filter
 members:
 - FRQ-03A
@@ -29,6 +29,21 @@ Inherits [FILTER shared contract](FILTER_common_contract.md), [NUM](../../01-num
 | FRQ-03B | [Inverse centered frequency shift](FRQ-03B_ifftshift.md) | primitive | bitwise copy |
 
 Suffix letters identify distinct mathematical or interface objects, not quality tiers that a backend may select freely. A primitive may propose separately named strict and accelerated variants. A helper only orchestrates explicit stages. An external engine requires fixed resources and an approved executable configuration.
+
+## Runtime integration and remaining acceptance
+
+Both strict-only keys are registered by `register_frequency` in
+`plugins/ops/05-filter/frequency_operations.cpp`; bit-preserving execution is
+in `frequency_local.cpp`. No accelerated aliases or GPU backend are registered.
+Direct nodes take the explicit grid parameters documented by
+[FRQ-01](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance), plus
+`axes`, a required canonical sorted comma-separated String of selected axes.
+The SDK `frequency::shift` updates the returned caller-owned index order.
+Each output reads only its own component's permuted tiles.
+
+Overall acceptance retains the FRQ-01 frozen-ABI H08 root-work limitation.
+Optional `max_work` is a per-invocation limit, not a Run accumulator; the
+mathematical bit-copy and independent output contracts are unchanged.
 
 ## Shared Mathematics, Units, and Profiles
 

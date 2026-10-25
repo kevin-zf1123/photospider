@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: not_implemented
+implementation_status: partially_implemented
 parent_id: 05-filter
 members:
 - FRQ-06A
@@ -26,6 +26,26 @@ Inherits [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-num
 | FRQ-06A | [Pointwise Complex-Frequency Multiplication](FRQ-06A_frequency_multiply.md) | primitive | E |
 
 Letter suffixes identify distinct mathematical or interface objects, not quality tiers that a backend may choose arbitrarily. Primitives may propose separately named strict and accelerated variants. Helpers only orchestrate explicit stages. An external engine requires fixed resources and approval before it can have an executable configuration.
+
+## Runtime integration and remaining acceptance
+
+FRQ-06A is registered by `register_frequency` in
+`plugins/ops/05-filter/frequency_operations.cpp`, with exact/certified arithmetic
+in `frequency_local.cpp`. CPU strict and target-gated Apple Silicon/x86-64 keys
+exist; no GPU backend. Only local Apple CPU execution is measured.
+The SDK `photospider/ops/frequency.hpp` provides transactional composition.
+
+Direct nodes take the [FRQ-01 explicit grid encoding](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance)
+for F, a required canonical sorted `broadcast_axes` String (empty means none),
+and `response_unit=dimensionless`. H has the F dtype or Float64; its two
+components have matching dtype. Shape/packing/index-order compatibility is
+structural; sampling-unit/numerical association remains a caller premise.
+SDK composition checks both supplied static grids before appending the node.
+
+Overall acceptance remains partial for the FRQ-01 frozen-ABI H08 root cumulative
+arithmetic/limb and refinement-stage limitation. Optional Int64 `max_work` is
+per invocation, not a node-across-tiles or Run accumulator. No target contract
+is weakened to accommodate this limitation.
 
 ## Shared Mathematics, Units, and Profiles
 

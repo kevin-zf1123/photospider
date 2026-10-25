@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: not_implemented
+implementation_status: partially_implemented
 parent_id: 05-filter
 members:
 - FRQ-04A
@@ -31,6 +31,24 @@ Inherits [FILTER shared contract](FILTER_common_contract.md), [NUM](../../01-num
 | FRQ-04C | [Window statistics and equivalent noise bandwidth](FRQ-04C_window_statistics.md) | primitive | E |
 
 Suffix letters identify distinct mathematical or interface objects, not quality tiers that a backend may select freely. A primitive may propose separately named strict and accelerated variants. A helper only orchestrates explicit stages. An external engine requires fixed resources and an approved executable configuration.
+
+## Runtime integration and remaining acceptance
+
+All three members are registered by `register_frequency` in
+`plugins/ops/05-filter/frequency_operations.cpp`, with arithmetic in
+`frequency_local.cpp` and certified candidates in `frequency_fast.hpp`.
+CPU strict and target-gated Apple Silicon/x86-64 keys exist; no GPU backend.
+Only local Apple CPU execution has been measured.
+
+`window2d` takes the required member parameters directly. `apply_window` takes
+Int64 `y_axis`/`x_axis` and a required canonical sorted `broadcast_axes` String;
+an empty String denotes no broadcasting. `window_statistics` takes no required
+static parameter. It accepts independent selection of its three scalar ports.
+Optional Int64 `max_work` limits each invocation independently.
+
+Overall acceptance retains the frozen-ABI H08 root-work/refinement-stage
+limitation documented by [FRQ-01](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
+Capacity/ownership and mathematical targets are unchanged.
 
 ## Shared Mathematics, Units, and Profiles
 

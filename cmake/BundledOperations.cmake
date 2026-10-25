@@ -46,6 +46,10 @@ if(NOT PHOTOSPIDER_FMT10_SIMD)
 endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
+  plugins/ops/05-filter/frequency_operations.cpp
+  plugins/ops/05-filter/frequency_authoring.cpp
+  plugins/ops/05-filter/frequency_local.cpp
+  plugins/ops/05-filter/frequency_transform.cpp
   plugins/ops/05-filter/smaa.cpp
   plugins/ops/05-filter/effect_operations.cpp
   plugins/ops/05-filter/effect_math.cpp

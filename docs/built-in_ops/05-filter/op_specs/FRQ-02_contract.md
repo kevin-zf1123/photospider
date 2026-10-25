@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: not_implemented
+implementation_status: partially_implemented
 parent_id: 05-filter
 members:
 - FRQ-02A
@@ -30,6 +30,25 @@ Inherits [FILTER shared contract](FILTER_common_contract.md), [NUM](../../01-num
 | FRQ-02C | [Explicit Hermitian-symmetry projection](FRQ-02C_project_hermitian.md) | primitive | E |
 
 Suffix letters identify distinct mathematical or interface objects, not quality tiers that a backend may select freely. A primitive may propose separately named strict and accelerated variants. A helper only orchestrates explicit stages. An external engine requires fixed resources and an approved executable configuration.
+
+## Runtime integration and remaining acceptance
+
+All three members are registered by `register_frequency` in
+`plugins/ops/05-filter/frequency_operations.cpp`; transform execution is in
+`frequency_transform.cpp` and projection is in `frequency_local.cpp`.
+The public SDK is `photospider/ops/frequency.hpp`. The explicit grid parameter
+encoding and frozen-ABI H08 limitation are documented in
+[FRQ-01 runtime integration](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
+This family has CPU strict and target-gated Apple Silicon/x86-64 keys, no GPU.
+Runtime evidence is limited to the locally executed Apple CPU configurations;
+x86-64 execution has not been measured. Overall acceptance remains partial,
+including the known H08 root-work/refinement-stage implementation limitation.
+This does not weaken the mathematical, resource or ownership target or imply
+that unmeasured configurations have passed acceptance.
+
+`rfft2` and `irfft2` require `packing=r2c_x`, `index_order=unshifted`;
+`original_shape` contains the original spatial width. `project_hermitian`
+requires full unshifted storage. No numerical conjugacy scan is added.
 
 ## Shared Mathematics, Units, and Profiles
 
