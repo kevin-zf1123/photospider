@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: partially_implemented
+implementation_status: implemented
 parent_id: FRQ-03
 function: fftshift
 proposed_operation_keys:
@@ -69,7 +69,7 @@ Reproduction steps and proof levels are in [oracle README](../../../../oracle/op
 
 ## Backend and Registration Status
 
-`frequency.fftshift_strict` is registered by `register_frequency` in `plugins/ops/05-filter/frequency_operations.cpp`, with bit-preserving permutation in `frequency_local.cpp`. It consumes only the selected component's permuted tile support. There are no accelerated aliases or GPU backend. Overall acceptance retains the family's frozen-ABI H08 root-work limitation; the bit-copy target is unchanged.
+`frequency.fftshift_strict` is registered by `register_frequency` in `plugins/ops/05-filter/frequency_operations.cpp`, with bit-preserving permutation in `frequency_local.cpp`. It consumes only the selected component's permuted tile support. There are no accelerated aliases or GPU backend. Typed CPU9 supplies the family's H08 cumulative work admission; old FRQ ABI8 Plans require recompilation. The bit-copy target is unchanged.
 
 ## Conceptual DAG (Not an Existing API)
 

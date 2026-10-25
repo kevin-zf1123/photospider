@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: partially_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - FRQ-03A
@@ -41,8 +41,9 @@ Direct nodes take the explicit grid parameters documented by
 The SDK `frequency::shift` updates the returned caller-owned index order.
 Each output reads only its own component's permuted tiles.
 
-Overall acceptance retains the FRQ-01 frozen-ABI H08 root-work limitation.
-Optional `max_work` is a per-invocation limit, not a Run accumulator; the
+Typed CPU invocation 9 supplies the [FRQ-01 cumulative-budget contract](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
+Optional `max_work` remains a per-invocation limit; Run work accumulates through
+the separate borrowed service. Old FRQ ABI8 Plans require recompilation. The
 mathematical bit-copy and independent output contracts are unchanged.
 
 ## Shared Mathematics, Units, and Profiles

@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: partially_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - FRQ-06A
@@ -42,10 +42,11 @@ components have matching dtype. Shape/packing/index-order compatibility is
 structural; sampling-unit/numerical association remains a caller premise.
 SDK composition checks both supplied static grids before appending the node.
 
-Overall acceptance remains partial for the FRQ-01 frozen-ABI H08 root cumulative
-arithmetic/limb and refinement-stage limitation. Optional Int64 `max_work` is
-per invocation, not a node-across-tiles or Run accumulator. No target contract
-is weakened to accommodate this limitation.
+Typed CPU9 implements the [FRQ-01 cumulative-budget contract](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance),
+including arithmetic/limb work and refinement attempts across tiles and nodes.
+Optional Int64 `max_work` remains per invocation, separate from the Run ledger.
+Old FRQ ABI8 Plans require recompilation. Platform evidence remains limited to
+the locally executed Apple configurations.
 
 ## Shared Mathematics, Units, and Profiles
 

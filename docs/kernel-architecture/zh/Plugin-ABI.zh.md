@@ -108,6 +108,14 @@ Executor 也可链接使用 Host、Shared 或 Device 存储的异步 GPU 入口�
 
 `ps_kernel_completion_v8::report_timing` 是可选的计时请求与接收入口。接收入口非空时，provider 可在 `finish` 前串行调用一次，传入借用的固定大小 `ps_kernel_device_timing_v8`；拒绝提交不得报告计时。Host 将记录复制到已设置的槽，不分配内存。报告不会结算 task 或释放借用；非法 key 或重复报告不能结算其他 submission。不可用的计时可省略或使用零 clock domain；计时查询失败不改变 task 成功状态。Metal 使用 system mach 纳秒。Vulkan 报告 raw tick、有效位数、每 tick 纳秒数与进程内 clock instance。单个 pair 的差值按有效位数作模减；Vulkan 跨提交比较需要本接口之外的校准。两种时钟均不等于 Run 的 host steady clock。Native 实现在 quiescence 后报告 command 区间，原有完成与可见性契约继续生效。
 
+### Typed CPU invocation 9
+
+可信 C++ registration 可为 `abi_version=9` 的 CPU `KernelDesc` 提供 `OperationDefinition::prepare_kernel_v9`。`fixed_invocation_v9_api.h` 中独立声明 `ps_prepared_kernel_v9` 与 `ps_kernel_invocation_v9`，各自要求精确 `sizeof(record)` 和版本 9；外层 envelope 包含保持精确 size/version 8 的普通 `views` 记录及 `ps_kernel_work_v9` 服务。v8 记录的大小和语义保持不变，不作 prefix 协商。Preparation 与 invocation 使用对应的 typed 入口；没有匹配 factory 时拒绝，不降级 ABI。用 v8 invoke 重载调用 v9-only preparation 会在 provider 入口前拒绝。
+
+线程安全的 work 服务在数值计算前，对本次 Run 与共享 Context root 准入 `{work, stages}`。零/零调用查询取消或 sticky Run 预算失败。预算拒绝返回 `ResourceExhausted` 及 `WorkLimit`/`StageLimit`，取消可返回 `Cancelled`。服务 context 仅借用至同步 CPU 返回，属于本 invocation/Run，不得存入 prepared state 或传给其他 Run。Host 持有全部 owner 至 CPU 返回。Provider 算术建立所需舍入和 gradual-underflow 环境，host fence 保存并恢复 callback 环境；容量异常保留资源失败分类。
+
+FRQ-01..06 仅使用该 C++ CPU 路径，旧 FRQ invocation 8 Plan 需要重新编译。其他 invocation 8 CPU/GPU 算子及 operation module ABI 8 保持支持。Module 8 transport 不导出 C++ v9 factory；native kernel service ABI 2 及 psir/psxp v5 布局保持不变。
+
 ## Native kernel preparation
 
 包含 `photospider/plugin/native_kernel_api.h`，通过 kernel preparation query 中的 `ps_native_gpu_service_v2` 使用原生服务。调用 `prepare(context, program, query, result)` 前检查服务版本与 backend。服务表在外层 preparation callback 期间借用。调用成功时转交一个不可变 `ps_prepared_kernel_v8` owner；失败时，有效的输出记录保持为空。

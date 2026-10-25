@@ -343,6 +343,69 @@ Result<ps_prepared_kernel_v8> prepare(const physical::KernelDesc& description,
   }
 }
 }  // namespace
+OperationDefinition budgeted_operation(OperationDefinition definition) {
+  const auto lower = definition.lower;
+  definition.lower =
+      [lower](const OperationLowering& query) -> Result<OperationProgram> {
+    auto result = lower(query);
+    if (!result.ok())
+      return result;
+    auto program = result.take_value();
+    for (auto& kernel : program.program.kernels)
+      kernel.abi_version = 9;
+    auto status = physical::finalize_program(&program.program, query.limits);
+    if (!status.ok())
+      return Result<OperationProgram>(status);
+    return Result<OperationProgram>(std::move(program));
+  };
+  const auto prepare_v8 = definition.prepare_kernel;
+  definition.prepare_kernel_v9 =
+      [prepare_v8](const auto& description, const auto& placement,
+                   const auto& query, const auto& resources,
+                   const auto* native) -> Result<ps_prepared_kernel_v9> {
+    auto prepared =
+        prepare_v8(description, placement, query, resources, native);
+    if (!prepared.ok())
+      return Result<ps_prepared_kernel_v9>(prepared.status());
+    const auto inner = prepared.take_value();
+    ps_prepared_kernel_v9 result{};
+    result.struct_size = sizeof(result);
+    result.abi_version = PS_FIXED_INVOCATION_ABI_VERSION_9;
+    result.context = inner.context;
+    result.release = inner.release;
+    result.invoke_cpu = [](const ps_kernel_invocation_v9* invocation,
+                           ps_kernel_status_v8* status) {
+      try {
+        FloatingEnvironment environment;
+        if (!environment.active())
+          throw Status{ErrorCode::OperationFailed,
+                       "generation floating environment unavailable"};
+        const auto& kernel =
+            *static_cast<const Kernel*>(invocation->views.prepared_context);
+        Work{invocation->views, kernel.program->work_limit, 0, invocation->work}
+            .poll();
+        kernel.program->run_v9(kernel, *invocation);
+        *status = {};
+      } catch (const Status& failure) {
+        *status = kernel_failure(failure.code, failure.message.c_str(),
+                                 failure.reason);
+        status->domain_code = failure.detail.domain_code;
+      } catch (const std::bad_alloc&) {
+        *status = kernel_failure(ErrorCode::ResourceExhausted,
+                                 "generation workspace capacity",
+                                 FailureReason::CapacityLimit);
+      } catch (...) {
+        *status = kernel_failure(ErrorCode::OperationFailed,
+                                 "budgeted generation failed");
+      }
+    };
+    return Result<ps_prepared_kernel_v9>(result);
+  };
+  // The legacy factory is private to v9 preparation, never an alternative
+  // executable path that can silently omit Run numerical admission.
+  definition.prepare_kernel = {};
+  return definition;
+}
 OperationPreparation prepared(std::shared_ptr<Program> state) {
   OperationPreparation result;
   for (const auto& output : state->outputs) {

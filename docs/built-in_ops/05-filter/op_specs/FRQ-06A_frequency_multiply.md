@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: partially_implemented
+implementation_status: implemented
 parent_id: FRQ-06
 function: frequency_multiply
 proposed_operation_keys:
@@ -70,7 +70,7 @@ Reproduction steps and proof levels are in [oracle README](../../../../oracle/op
 
 ## Backend and Registration Status
 
-The listed keys are registered by `register_frequency` in `plugins/ops/05-filter/frequency_operations.cpp`; `frequency_local.cpp` evaluates exact/certified two-product sums with one final RN per component and written-operand NaN priority. CPU strict and target-gated Apple Silicon/x86-64 profiles exist; local evidence covers Apple CPU only, with no GPU backend. Overall acceptance retains the family's frozen-ABI H08 root-work/refinement-stage limitation. Accelerated implementations must satisfy the NUM final-value Float32-scaled four-ULP bound and fallback rules. Error budgets may not be accumulated per tap, axis, stage, or iteration. Approximation may not change exact decisions such as thresholds, ordering, boundaries, copies, or output support.
+The listed keys are registered by `register_frequency` in `plugins/ops/05-filter/frequency_operations.cpp`; `frequency_local.cpp` evaluates exact/certified two-product sums with one final RN per component and written-operand NaN priority. CPU strict and target-gated Apple Silicon/x86-64 profiles exist; local evidence covers Apple CPU only, with no GPU backend. Typed CPU9 supplies the family's H08 cumulative arithmetic/limb and refinement-stage admission; old FRQ ABI8 Plans require recompilation. Accelerated implementations must satisfy the NUM final-value Float32-scaled four-ULP bound and fallback rules. Error budgets may not be accumulated per tap, axis, stage, or iteration. Approximation may not change exact decisions such as thresholds, ordering, boundaries, copies, or output support.
 
 Float64 accelerated execution retains Float64 inputs, outputs, and exponent range; it does not convert to Float32 first. Values outside the Float32-scaled range use the strict NUM fallback. Runtime and performance evidence is scoped to the configurations actually executed; registration alone does not establish cross-platform acceptance.
 

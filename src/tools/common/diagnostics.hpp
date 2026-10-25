@@ -16,7 +16,8 @@ struct Diagnostics final {
   std::vector<std::string> warnings;
   void event(const std::string& severity, const std::string& id,
              const std::string& message, const std::string& code = {},
-             std::uint64_t node = 0, std::uint64_t input = 0) const;
+             std::uint64_t node = 0, std::uint64_t input = 0,
+             FailureReason reason = FailureReason::None) const;
   void warning(const std::string& group, const std::string& message) const;
   void timing(const std::string& name,
               std::chrono::steady_clock::time_point start) const;

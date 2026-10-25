@@ -4,6 +4,8 @@
 
 本页列出频域与恢复族；[空间滤波、边缘与细节](spatial.md)列出其余 20 族。
 
+FRQ-01～06 的 14 个成员已提供 CPU 实现与显式 FrequencyGrid SDK helper，通过 typed CPU invocation ABI 9 对同一 Run 内的算术、整数 limb 工作量和精化阶段累计计费。调用方通过 `psx --max-work N --max-stages N` 设置执行预算；`--max-stages 0` 禁止精化阶段。DFT 实现使用带误差包围的 radix-2、mixed-radix 和 Bluestein，并在候选值不能确定舍入时执行精确精化。FRQ-07～10 的 12 个成员仍未实现；各成员的规格状态继续为 Proposed。参数编码、预算与平台边界见 [FRQ-01 契约](op_specs/FRQ-01_contract.md#runtime-integration-and-remaining-acceptance)。
+
 ## 10 个频域族 / 26 个成员
 
 | 族 ID | 族契约 | 成员 |

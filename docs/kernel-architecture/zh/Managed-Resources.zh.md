@@ -38,7 +38,11 @@ Run 与 value-identity owner 对象、保留的 input-identity 和 delivery-ring
 
 每次 block activation 原子预留全部输出容量，以及各 backend、各 domain 的最大 task scratch 乘以该 backend 的活动 lane 数。Native reservation 使用查询后的取整容量。分配将 reservation 分成 storage lease；block 退出时释放未使用容量。导出 Result 保留其 storage lease。因此，只要先前导出的 Result 仍存活，后续 Run 就可能准入失败；释放该 Result 后可以成功。
 
-Run 不展开依赖，也不重新选择 placement。`maximum_block_activations` 默认是 1,048,576，`maximum_work` 默认是 268,435,456。准备阶段计算各 block 的簿记与 COPY work。每次 activation 进入前，从 Run 上限与 context 根扣除该费用；空循环也有正的费用。算子的数值循环受 prepared contract 约束，没有运行时 work-service 回调。
+Run 不展开依赖，也不重新选择 placement。`maximum_block_activations` 默认是 1,048,576，`maximum_work` 默认是 268,435,456。准备阶段计算各 block 的簿记与 COPY work。每次 activation 进入前，从 Run 上限与 context 根扣除该费用；空循环也有正的费用。Legacy invocation 8 的数值循环继续使用 prepared contract，没有 work-service 回调。显式启用的 typed CPU invocation 9 借用本次 Run 的 work/stage 服务，各数值段在计算前准入；`work` 包含声明的算术与 limb 单位，`stages` 包含显式精化 attempt。
+
+Coordinator 与 invocation 9 callback 共用同步的 Run admission。先检查各 Run 独立的 `maximum_work`、`maximum_refinement_stages`，再向共享 Context root 原子准入 `{work, stages}`，成功后才提交两维 Run 计数。拒绝不增加任一维度，按剩余额度检查 uint64 溢出。Context root 跨 Run 累计成功准入量；一次拒绝不会永久锁定 root 失败。每次 submit 创建新的 Run 账本与 sticky Run failure，prepared context 不持有这些计数。
+
+`ExecutionDiagnostics::issued_work` 表示本 Run 已成功准入的 coordinator/invocation 9 工作，不等于 CPU 指令数，也不包含 legacy invocation 8 内部数值工作。取消、task 失败与 drain 不退还已准入 work/stage。Host 预算拒绝保存 `Resource`/`Run` 归因及已知 node/task；coordinator 在有界安全点停止后续准入，排空已接受工作。拒绝与 issue 竞争时，可能留下一个已接受的在途 invocation。取消保持终态优先级；预算失败不通过设置取消标志表达。CPU 服务仅借用至同步返回，不得存入 prepared state 或跨 Run 复用。
 
 Task 状态、completion slot、有界失败消息与 retirement 投递记录在 issue 前预留。非法或重复 completion key 以 `Internal` 和 `MalformedEnvelope` 中止，不分配内存，也不结算其他 submission。已接受的工作持续保留 invocation、view 与 storage，直到 completion 确认所有访问结束。取消停止新工作，不提前释放已接受工作的存储。
 

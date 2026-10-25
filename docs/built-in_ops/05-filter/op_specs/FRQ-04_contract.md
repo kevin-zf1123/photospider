@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: partially_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - FRQ-04A
@@ -46,9 +46,10 @@ an empty String denotes no broadcasting. `window_statistics` takes no required
 static parameter. It accepts independent selection of its three scalar ports.
 Optional Int64 `max_work` limits each invocation independently.
 
-Overall acceptance retains the frozen-ABI H08 root-work/refinement-stage
-limitation documented by [FRQ-01](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
-Capacity/ownership and mathematical targets are unchanged.
+Typed CPU9 implements Run arithmetic/limb and refinement-stage admission under
+the [FRQ-01 cumulative-budget contract](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
+Old FRQ ABI8 Plans require recompilation. Capacity/ownership and mathematical
+targets are unchanged; local Apple evidence does not imply other platform acceptance.
 
 ## Shared Mathematics, Units, and Profiles
 

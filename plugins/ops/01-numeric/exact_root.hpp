@@ -16,32 +16,36 @@ namespace ps::plugin_internal::numeric_ops {
 template <std::size_t Words>
 Result<std::uint64_t> round_sqrt_ratio(
     ExactRatioWorkspace<Words>* ratio, bool narrow, int scale,
-    const core_internal::WorkConsumer& consume) {
+    const core_internal::WorkConsumer& consume, bool bounded_work = false) {
   using Workspace = ExactRatioWorkspace<Words>;
   using Answer = Result<std::uint64_t>;
   const auto capacity = [] {
     return Answer(
         Status{ErrorCode::ResourceExhausted, {}, FailureReason::CapacityLimit});
   };
-  auto status = consume(1024);
-  if (!status.ok())
-    return Answer(status);
-  const auto a_top = Workspace::top(ratio->numerator);
-  const auto b_top = Workspace::top(ratio->denominator);
+  typename Workspace::BoundedAccess access{*ratio, consume, bounded_work};
+  Status status;
+  if (!bounded_work) {
+    status = consume(1024);
+    if (!status.ok())
+      return Answer(status);
+  }
+  const auto a_top = access.top(ratio->numerator);
+  const auto b_top = access.top(ratio->denominator);
   if (a_top < 0)
     return Answer(UINT64_C(0));
   int top = a_top - b_top;
   if (top >= 0) {
-    if (!Workspace::shift(ratio->denominator, static_cast<unsigned>(top),
-                          &ratio->candidate))
+    if (!access.shift(ratio->denominator, static_cast<unsigned>(top),
+                      &ratio->candidate))
       return capacity();
-    if (ratio->compare(ratio->numerator, ratio->candidate) < 0)
+    if (access.compare(ratio->numerator, ratio->candidate) < 0)
       --top;
   } else {
-    if (!Workspace::shift(ratio->numerator, static_cast<unsigned>(-top),
-                          &ratio->candidate))
+    if (!access.shift(ratio->numerator, static_cast<unsigned>(-top),
+                      &ratio->candidate))
       return capacity();
-    if (ratio->compare(ratio->candidate, ratio->denominator) < 0)
+    if (access.compare(ratio->candidate, ratio->denominator) < 0)
       --top;
   }
   const int scaled_top = top + scale;
@@ -51,44 +55,50 @@ Result<std::uint64_t> round_sqrt_ratio(
   int quantum = std::max(minimum, root_top - static_cast<int>(fraction));
   const int alignment = 2 * quantum - scale;
   if (alignment >= 0) {
-    if (!Workspace::shift(ratio->denominator, static_cast<unsigned>(alignment),
-                          &ratio->shifted))
+    if (!access.shift(ratio->denominator, static_cast<unsigned>(alignment),
+                      &ratio->shifted))
       return capacity();
   } else {
-    if (!Workspace::shift(ratio->numerator, static_cast<unsigned>(-alignment),
-                          &ratio->candidate))
+    if (!access.shift(ratio->numerator, static_cast<unsigned>(-alignment),
+                      &ratio->candidate))
       return capacity();
-    ratio->numerator = ratio->candidate;
-    ratio->shifted = ratio->denominator;
+    access.copy(&ratio->numerator, ratio->candidate);
+    access.copy(&ratio->shifted, ratio->denominator);
   }
   std::uint64_t significand = 0;
   for (unsigned i = fraction + 1; i; --i) {
-    status = consume(512);
-    if (!status.ok())
-      return Answer(status);
+    if (!bounded_work) {
+      status = consume(512);
+      if (!status.ok())
+        return Answer(status);
+    }
+    access.charge(Words);
     const auto next = significand | (UINT64_C(1) << (i - 1));
     integer_coefficient(static_cast<unsigned __int128>(next) * next,
                         &ratio->candidate);
-    status =
-        multiply_fixed(ratio->shifted, ratio->candidate, &ratio->term, consume);
+    status = multiply_fixed(ratio->shifted, ratio->candidate, &ratio->term,
+                            consume, 0, bounded_work);
     if (!status.ok())
       return Answer(status);
-    if (ratio->compare(ratio->term, ratio->numerator) <= 0)
+    if (access.compare(ratio->term, ratio->numerator) <= 0)
       significand = next;
   }
-  status = consume(1024);
-  if (!status.ok())
-    return Answer(status);
+  if (!bounded_work) {
+    status = consume(1024);
+    if (!status.ok())
+      return Answer(status);
+  }
+  access.charge(Words);
   const auto midpoint = 2 * significand + 1;
   integer_coefficient(static_cast<unsigned __int128>(midpoint) * midpoint,
                       &ratio->candidate);
-  status =
-      multiply_fixed(ratio->shifted, ratio->candidate, &ratio->term, consume);
+  status = multiply_fixed(ratio->shifted, ratio->candidate, &ratio->term,
+                          consume, 0, bounded_work);
   if (!status.ok())
     return Answer(status);
-  if (!Workspace::shift(ratio->numerator, 2, &ratio->denominator))
+  if (!access.shift(ratio->numerator, 2, &ratio->denominator))
     return capacity();
-  const auto order = ratio->compare(ratio->denominator, ratio->term);
+  const auto order = access.compare(ratio->denominator, ratio->term);
   if (order > 0 || (!order && (significand & 1)))
     ++significand;
   if (significand == (UINT64_C(1) << (fraction + 1))) {

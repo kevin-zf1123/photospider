@@ -195,7 +195,6 @@ Frequency::Frequency(Kind k, Profile prof,
         dims = grid.shape;
       collective = true;
       const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa];
-      root_order = std::lcm(std::lcm(h, w), UINT64_C(4));
       if (grid.norm == "ortho") {
         auto remaining = h * w;
         for (std::uint64_t prime = 2; prime <= remaining / prime; ++prime) {
@@ -212,7 +211,6 @@ Frequency::Frequency(Kind k, Profile prof,
         norm_squarefree *= remaining;
         norm_discriminant =
             norm_squarefree % 4 == 1 ? norm_squarefree : 4 * norm_squarefree;
-        root_order = std::lcm(root_order, norm_discriminant);
       }
     } else {
       require(s.sample_shape() == dims, "frequency stored shape");
@@ -369,10 +367,12 @@ std::uint64_t Frequency::task_scratch(unsigned port,
     n += (static_cast<unsigned __int128>(dims[0]) + dims[1]) * 8;
   if (transform()) {
     const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa];
-    const auto roots = root_order;
-    n += (static_cast<unsigned __int128>(h) * w + std::max(h, w)) * 2 *
-         sizeof(Ball);
-    n += (static_cast<unsigned __int128>(roots) * 3 + 1) * sizeof(Rational);
+    n += (static_cast<unsigned __int128>(h) * w + 2 * std::max(h, w) + h + w) *
+         2 * sizeof(Ball);
+    const auto blue_size = std::max(bluestein_size(h), bluestein_size(w));
+    if (blue_size)
+      n += (static_cast<unsigned __int128>(blue_size) * 3 + std::max(h, w)) *
+           2 * sizeof(Ball);
   }
   if (port == 0 &&
       (((kind == Kind::Radial || kind == Kind::Band) && mode == "gaussian") ||
@@ -393,6 +393,13 @@ void Frequency::run(const Kernel& k, const ps_kernel_invocation_v8& inv) const {
     run_transform(k, inv);
   else
     run_local(k, inv);
+}
+void Frequency::run_v9(const Kernel& k,
+                       const ps_kernel_invocation_v9& inv) const {
+  if (transform())
+    run_transform(k, inv.views, inv.work);
+  else
+    run_local(k, inv.views, inv.work);
 }
 OperationDefinition make_frequency(const std::string& key, Kind k,
                                    Profile profile) {
@@ -463,6 +470,7 @@ OperationDefinition make_frequency(const std::string& key, Kind k,
       key, count, p, out, [=](const auto& in, const auto& args) {
         return std::make_shared<Frequency>(k, profile, in, args);
       });
+  def = generation::budgeted_operation(std::move(def));
   return k <= Kind::Irfft ? transform_tasks(std::move(def)) : def;
 }
 }  // namespace ps::plugin_internal::frequency

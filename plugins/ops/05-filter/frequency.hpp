@@ -11,6 +11,19 @@ using Math = generation::Math;
 using Directed = generation::Directed;
 using Interval = generation::Interval;
 
+inline std::uint64_t bluestein_size(std::uint64_t n) {
+  auto residual = n;
+  for (auto factor : {2U, 3U, 5U})
+    while (residual % factor == 0)
+      residual /= factor;
+  if (residual <= 31)
+    return 0;
+  // Shape products are bounded by 2^40 at static preparation.
+  std::uint64_t size = 1;
+  while (size < 2 * n - 1)
+    size *= 2;
+  return size;
+}
 enum class Kind {
   Fft,
   Ifft,
@@ -42,9 +55,9 @@ struct Frequency final : Program {
   Kind kind;
   Profile profile;
   Grid grid;
-  // sqrt(HW)=norm_squarefactor*sqrt(norm_squarefree). The primitive
-  // root order includes its positive quadratic Gauss-sum discriminant.
-  std::uint64_t root_order = 4, norm_squarefactor = 1;
+  // sqrt(HW)=norm_squarefactor*sqrt(norm_squarefree). Exact refinement uses
+  // a frequency-specific primitive order including the Gauss discriminant.
+  std::uint64_t norm_squarefactor = 1;
   std::uint64_t norm_squarefree = 1, norm_discriminant = 1;
   std::vector<unsigned> axes, broadcast;
   std::vector<std::uint64_t> dims;
@@ -63,8 +76,11 @@ struct Frequency final : Program {
   std::vector<ReadRegion> support(unsigned, const Region&) const override;
   std::uint64_t task_scratch(unsigned, const Region&) const override;
   void run(const Kernel&, const ps_kernel_invocation_v8&) const override;
-  void run_transform(const Kernel&, const ps_kernel_invocation_v8&) const;
-  void run_local(const Kernel&, const ps_kernel_invocation_v8&) const;
+  void run_v9(const Kernel&, const ps_kernel_invocation_v9&) const override;
+  void run_transform(const Kernel&, const ps_kernel_invocation_v8&,
+                     ps_kernel_work_v9 = {}) const;
+  void run_local(const Kernel&, const ps_kernel_invocation_v8&,
+                 ps_kernel_work_v9 = {}) const;
   std::uint64_t window1d(Math&, std::uint64_t, std::uint64_t) const;
   std::uint64_t response(Math&, std::uint64_t, std::uint64_t) const;
 };

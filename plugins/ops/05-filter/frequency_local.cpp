@@ -17,7 +17,7 @@ void sincos_turn(Math& m, Interval sine, Interval cosine,
   const unsigned q = e.small_floor(m.add(m.scale(t, 4), e.fraction(1, 2)));
   const auto r = m.sub(t, e.fraction(q, 4));
   auto s = d.interval(), c = d.interval();
-  if (Exact::zero(r)) {
+  if (m.is_zero(r)) {
     d.integer(s, 0);
     d.integer(c, 1);
   } else {
@@ -139,7 +139,7 @@ std::uint64_t Frequency::response(Math& m, std::uint64_t y,
     return bits((pass == "high" || pass == "reject" ? !inside : inside) ? 1
                                                                         : 0);
   }
-  if (kind != Kind::Notch && Exact::zero(r2))
+  if (kind != Kind::Notch && m.is_zero(r2))
     return bits(pass == "low" || pass == "reject" ? 1 : 0);
   if (kind == Kind::Notch && depth == 0)
     return bits(1);
@@ -153,8 +153,8 @@ std::uint64_t Frequency::response(Math& m, std::uint64_t y,
       for (const auto& center : centers) {
         const auto cy = m.mul(m.value(center.first), m.value(grid.dy));
         const auto cx = m.mul(m.value(center.second), m.value(grid.dx));
-        const bool self = Exact::zero(e.modulo(m.scale(cy, 2), 1)) &&
-                          Exact::zero(e.modulo(m.scale(cx, 2), 1));
+        const bool self = m.is_zero(e.modulo(m.scale(cy, 2), 1)) &&
+                          m.is_zero(e.modulo(m.scale(cx, 2), 1));
         for (int sign : {1, -1}) {
           if (sign == -1 && self)
             break;
@@ -164,7 +164,7 @@ std::uint64_t Frequency::response(Math& m, std::uint64_t y,
               m.div(e.negate(m.add(m.sq(m.div(yy, m.value(sy))),
                                    m.sq(m.div(xx, m.value(sx))))),
                     e.integer(2));
-          if (Exact::zero(exponent) && depth == 1) {
+          if (m.is_zero(exponent) && depth == 1) {
             d.integer(out, 0);
             return;
           }
@@ -188,9 +188,9 @@ std::uint64_t Frequency::response(Math& m, std::uint64_t y,
       d.copy(out, a);
   });
 }
-void Frequency::run_local(const Kernel& k,
-                          const ps_kernel_invocation_v8& inv) const {
-  const Work work{inv, work_limit};
+void Frequency::run_local(const Kernel& k, const ps_kernel_invocation_v8& inv,
+                          ps_kernel_work_v9 service) const {
+  const Work work{inv, work_limit, 0, service};
   const Fuel fuel{work};
   generation::MathArena arena(inv.scratch[0].allocation, work);
   auto& m = *arena;
@@ -237,6 +237,7 @@ void Frequency::run_local(const Kernel& k,
         samples(inv.outputs[i], [&](const Coordinate& at, std::uint64_t) {
           store(inv.outputs[i], at, *candidates[k.writes[i].first]);
         });
+      check(e.status());
       fuel.flush();
       return;
     }
@@ -262,11 +263,13 @@ void Frequency::run_local(const Kernel& k,
       const auto value = port == 0   ? m.div(sum, n)
                          : port == 1 ? m.div(square, n)
                                      : m.div(m.mul(n, square), m.sq(sum));
+      check(e.status());
       const auto result = nan ? *nan : m.rounded(value, false);
       samples(inv.outputs[i], [&](const Coordinate& at, std::uint64_t) {
         store(inv.outputs[i], at, result);
       });
     }
+    check(e.status());
     fuel.flush();
     return;
   }
@@ -359,6 +362,7 @@ void Frequency::run_local(const Kernel& k,
           const auto a = exact.from({reader.raw(port, 0, first), narrow});
           const auto b = exact.from({reader.raw(port, 0, second), narrow});
           auto v = m.div(port == 0 ? m.add(a, b) : m.sub(a, b), e.integer(2));
+          check(e.status());
           result =
               exact.first_nan ? *exact.first_nan : m.rounded(v, narrow, true);
           if (port == 1 && reversed)
@@ -409,8 +413,10 @@ void Frequency::run_local(const Kernel& k,
         const auto a = exact.from({reader.raw(0, 0, at), narrow});
         if (kind == Kind::Apply) {
           const auto b = exact.from({reader.raw(1, 0, coeff), false});
+          const auto value = m.mul(a, b);
+          check(e.status());
           result = exact.first_nan ? *exact.first_nan
-                                   : m.rounded(m.mul(a, b), narrow, true);
+                                   : m.rounded(value, narrow, true);
         } else {
           const bool response_narrow =
               k.groups[k.input_base[2]].type == ElementType::Float32;
@@ -424,6 +430,7 @@ void Frequency::run_local(const Kernel& k,
           const auto& d = port == 0 ? second_h : first_h;
           const auto value = port == 0 ? m.sub(m.mul(a, c), m.mul(b, d))
                                        : m.add(m.mul(a, d), m.mul(b, c));
+          check(e.status());
           result = exact.first_nan ? *exact.first_nan
                                    : m.rounded(value, narrow, true);
         }
@@ -431,6 +438,7 @@ void Frequency::run_local(const Kernel& k,
       store(inv.outputs[i], at, result);
     });
   }
+  check(e.status());
   fuel.flush();
 }
 }  // namespace ps::plugin_internal::frequency

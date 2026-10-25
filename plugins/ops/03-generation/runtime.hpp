@@ -127,6 +127,12 @@ struct Program {
   }
   virtual std::vector<ReadRegion> support(unsigned output,
                                           const Region& region) const;
+  // Explicit opt-in for a complete v9 envelope. Legacy programs retain their
+  // original v8 behavior and do not claim numerical Run charging.
+  virtual void run_v9(const Kernel& kernel,
+                      const ps_kernel_invocation_v9& invocation) const {
+    run(kernel, invocation.views);
+  }
   virtual void run(const Kernel& kernel,
                    const ps_kernel_invocation_v8& invocation) const = 0;
 };
@@ -146,14 +152,29 @@ struct Work final {
   const ps_kernel_invocation_v8& invocation;
   std::uint64_t limit;
   mutable std::uint64_t used = 0;
-  Status operator()(std::uint64_t amount) const {
+  ps_kernel_work_v9 service{};
+  bool budgeted() const { return service.consume != nullptr; }
+  Status stage() const { return consume(1, budgeted() ? 1 : 0); }
+  Status operator()(std::uint64_t amount) const { return consume(amount, 0); }
+  Status consume(std::uint64_t amount, std::uint64_t stages) const {
     if (invocation.cancellation.is_cancelled &&
         invocation.cancellation.is_cancelled(invocation.cancellation.context)) {
       return {ErrorCode::Cancelled, {}, FailureReason::Cancelled};
     }
     if (amount > limit - used) {
-      return {ErrorCode::ResourceExhausted, "generation arithmetic work limit",
-              FailureReason::WorkLimit};
+      return {ErrorCode::ResourceExhausted, {}, FailureReason::WorkLimit};
+    }
+    if (budgeted()) {
+      const auto status = service.consume(service.context, amount, stages);
+      // The host service uses the stable status vocabulary. Do not allocate an
+      // owning message while propagating a resource failure from a checkpoint.
+      if (status.code > PS_KERNEL_INTERNAL_V8 ||
+          status.reason > PS_KERNEL_REASON_VIEW_UNAVAILABLE_V8)
+        return {ErrorCode::Internal, {}, FailureReason::MalformedEnvelope};
+      if (status.code)
+        return {static_cast<ErrorCode>(status.code),
+                {},
+                static_cast<FailureReason>(status.reason)};
     }
     used += amount;
     return Status::success();
@@ -236,6 +257,8 @@ OperationDefinition operation(
     const std::vector<std::pair<std::string, SchemaTemplate>>& outputs,
     Prepare prepare, bool repeated = false, bool deterministic = true);
 OperationPreparation prepared(std::shared_ptr<Program> state);
+// Opt in only programs implementing run_v9 with complete numerical charging.
+OperationDefinition budgeted_operation(OperationDefinition definition);
 std::vector<OperationParameterSpec> canvas_parameters(bool output_dtype = true);
 std::vector<OperationParameterSpec> rng_parameters();
 void append(std::vector<OperationParameterSpec>* into,

@@ -98,9 +98,12 @@ int run(int argc, char** argv, Diagnostics* diagnostics) {
   if (o.has("--help")) {
     std::cout << "psx <plan.psxp|-> [options]\n";
     print_common_help();
-    std::cout << "psx options:\n"
-                 "  --bindings FILE --threads N --parallelism N\n"
-                 "  --max-live-bytes N\n";
+    std::cout
+        << "psx options:\n"
+           "  --bindings FILE --threads N --parallelism N\n"
+           "  --max-live-bytes N --max-work N --max-stages N\n"
+           "  --max-work: positive per-Run coordinator + v9 numerical work\n"
+           "  --max-stages: per-Run refinement attempts; zero is allowed\n";
     return 0;
   }
   if (o.has("--version")) {

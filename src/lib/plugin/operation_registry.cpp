@@ -593,8 +593,12 @@ Result<PreparedKernel> PreparedOperation::prepare_kernel(
     return Answer({ErrorCode::InvalidArgument, "invalid prepared kernel"});
   const auto& kernel = program.kernels[task.kernel];
   const auto& placement = program.placements[task.placement];
-  if (kernel.operation != impl_->definition->key || kernel.abi_version != 8 ||
-      !impl_->definition->prepare_kernel)
+  const bool budgeted = kernel.abi_version == 9 &&
+                        placement.backend == physical::Backend::Cpu &&
+                        impl_->definition->prepare_kernel_v9;
+  if (kernel.operation != impl_->definition->key ||
+      (!budgeted &&
+       (kernel.abi_version != 8 || !impl_->definition->prepare_kernel)))
     return Answer({ErrorCode::TypeMismatch, "kernel contract is not linked"});
   try {
     std::uint64_t bytes = sizeof(KernelPreparation);
@@ -656,6 +660,21 @@ Result<PreparedKernel> PreparedOperation::prepare_kernel(
     core_internal::ResourceMetadataAccess::commit(owners->metadata,
                                                   sizeof(Owners));
     ResourceAllocationScope bridge_scope(budget);
+    if (budgeted) {
+      auto prepared = core_internal::invoke_callback([&] {
+        return impl_->definition->prepare_kernel_v9(
+            kernel, placement, query, impl_->resources, native_gpu);
+      });
+      if (!prepared.ok())
+        return Answer(prepared.status());
+      auto raw = prepared.take_value();
+      auto result = PreparedKernel::adopt(raw, owners, budget);
+      if (!result.ok() && raw.release) {
+        core_internal::CallbackEnvironment environment;
+        raw.release(raw.context);
+      }
+      return result;
+    }
     auto prepared = core_internal::invoke_callback([&] {
       return impl_->definition->prepare_kernel(kernel, placement, query,
                                                impl_->resources, native_gpu);

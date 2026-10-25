@@ -33,6 +33,7 @@ photospider_add_kernel_test(test_fixed_cfg Photospider::kernel tests/integration
 photospider_add_kernel_test(test_result_identity photospider_internal_kernel tests/unit/kernel/test_result_identity.cpp)
 target_include_directories(test_result_identity PRIVATE src/lib)
 photospider_add_kernel_test(test_fixed_execution Photospider::kernel tests/integration/kernel/test_fixed_execution.cpp)
+photospider_add_kernel_test(test_run_work_v9 Photospider::kernel tests/integration/kernel/test_run_work_v9.cpp)
 photospider_add_kernel_test(test_execution_observation photospider_internal_kernel tests/integration/kernel/test_execution_observation.cpp)
 target_include_directories(test_execution_observation PRIVATE src/lib)
 photospider_add_kernel_test(test_fixed_async Photospider::kernel tests/integration/kernel/test_fixed_async.cpp)

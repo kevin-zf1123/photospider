@@ -5,6 +5,7 @@
 
 #include "photospider/compiler/physical_program.hpp"
 #include "photospider/plugin/fixed_invocation_api.h"
+#include "photospider/plugin/fixed_invocation_v9_api.h"
 
 struct ps_native_gpu_service_v2;
 
@@ -50,6 +51,21 @@ class PHOTOSPIDER_API PreparedKernel final {
   static Result<PreparedKernel> adopt(
       ps_prepared_kernel_v8 kernel, std::shared_ptr<const void> owners,
       const ResourceBudget& budget = ResourceBudget{});
+  /** @brief Adopt an explicit CPU v9 preparation with exact-size validation.
+   * Ownership, allocation failures and thread rules match the v8 overload.
+   */
+  static Result<PreparedKernel> adopt(
+      ps_prepared_kernel_v9 kernel, std::shared_ptr<const void> owners,
+      const ResourceBudget& budget = ResourceBudget{});
+  /** @brief True only for a preparation explicitly negotiated as v9. */
+  bool uses_work_v9() const noexcept;
+  /** @brief Bind/invoke a host-owned complete v9 envelope. The service and
+   * every borrowed owner must remain alive until synchronous CPU return.
+   * Invalid envelope size/version is rejected before provider entry.
+   */
+  void bind(ps_kernel_invocation_v9* invocation) const noexcept;
+  ps_kernel_status_v8 invoke(
+      const ps_kernel_invocation_v9& invocation) const noexcept;
   bool valid() const noexcept { return static_cast<bool>(state_); }
   bool supports(physical::Backend backend) const noexcept;
   const void* context() const noexcept;

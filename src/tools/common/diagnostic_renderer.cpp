@@ -47,13 +47,15 @@ void check(Status status) {
       status.message.empty() ? error_name(status.code) : status.message, code,
       "PS-" + error_name(status.code));
   error.status = error_name(status.code);
+  error.reason = status.reason;
   error.node = status.detail.node_id;
   error.input = status.detail.input_id;
   throw error;
 }
 void Diagnostics::event(const std::string& severity, const std::string& id,
                         const std::string& message, const std::string& code,
-                        std::uint64_t node, std::uint64_t input) const try {
+                        std::uint64_t node, std::uint64_t input,
+                        FailureReason reason) const try {
   if (json) {
     JsonWriter w(JsonWriter::InvalidUtf8::Replace);
     auto* root = w.object();
@@ -66,6 +68,9 @@ void Diagnostics::event(const std::string& severity, const std::string& id,
       w.put(root, "source", w.str(source));
     if (!code.empty())
       w.put(root, "status_code", w.str(code));
+    if (reason != FailureReason::None)
+      w.put(root, "failure_reason",
+            w.integer(static_cast<std::uint64_t>(reason)));
     if (revision)
       w.put(root, "ir_revision",
             w.integer(static_cast<std::uint64_t>(*revision)));
@@ -87,6 +92,8 @@ void Diagnostics::event(const std::string& severity, const std::string& id,
       std::cerr << " (node " << node << ')';
     if (input)
       std::cerr << " (input " << input << ')';
+    if (reason != FailureReason::None)
+      std::cerr << " (reason " << static_cast<unsigned>(reason) << ')';
     if (color)
       std::cerr << "\033[0m";
     std::cerr << '\n';
@@ -139,7 +146,8 @@ int report_exception(const Diagnostics& diagnostics, std::exception_ptr error) {
   try {
     std::rethrow_exception(error);
   } catch (const ToolError& e) {
-    diagnostics.event("error", e.id, e.what(), e.status, e.node, e.input);
+    diagnostics.event("error", e.id, e.what(), e.status, e.node, e.input,
+                      e.reason);
     return e.exit_code;
   } catch (const fs::filesystem_error& e) {
     diagnostics.event("error", "PS-IO", e.what());

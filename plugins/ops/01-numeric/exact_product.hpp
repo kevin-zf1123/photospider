@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 
@@ -14,21 +15,40 @@ template <std::size_t Words>
 Status multiply_fixed(const FixedInteger<Words>& a,
                       const FixedInteger<Words>& b, FixedInteger<Words>* output,
                       const core_internal::WorkConsumer& consume,
-                      unsigned checkpoint_words = 0) {
-  const auto& status = consume(4 * Words);
+                      unsigned checkpoint_words = 0,
+                      bool bounded_work = false) {
+  const auto& status = consume(bounded_work ? Words : 4 * Words);
   if (!status.ok())
     return status;
   output->words.fill(0);
-  const auto a_size = (ExactRatioWorkspace<Words>::top(a) + 64) / 64;
-  const auto b_size = (ExactRatioWorkspace<Words>::top(b) + 64) / 64;
-  for (int i = 0; i < a_size; ++i) {
-    const auto& status = consume(16 * b_size + 1);
+  if (bounded_work) {
+    const auto& status = consume(Words);
     if (!status.ok())
       return status;
+  }
+  const auto a_size = (ExactRatioWorkspace<Words>::top(a) + 64) / 64;
+  if (bounded_work) {
+    const auto& status = consume(Words);
+    if (!status.ok())
+      return status;
+  }
+  const auto b_size = (ExactRatioWorkspace<Words>::top(b) + 64) / 64;
+  for (int i = 0; i < a_size; ++i) {
+    if (!bounded_work) {
+      const auto& status = consume(16 * b_size + 1);
+      if (!status.ok())
+        return status;
+    }
     unsigned __int128 carry = 0;
     for (int j = 0; j < b_size; ++j) {
-      // Optional in-row cancellation polling does not change prepaid work.
-      if (checkpoint_words && j &&
+      if (bounded_work && static_cast<unsigned>(j) % 63 == 0) {
+        const auto batch = std::min(63, b_size - j);
+        const auto& status = consume(16 * batch + (j == 0 ? 1 : 0));
+        if (!status.ok())
+          return status;
+      }
+      // Optional legacy in-row polling does not change prepaid work.
+      if (!bounded_work && checkpoint_words && j &&
           static_cast<unsigned>(j) % checkpoint_words == 0) {
         const auto& checkpoint = consume(0);
         if (!checkpoint.ok())

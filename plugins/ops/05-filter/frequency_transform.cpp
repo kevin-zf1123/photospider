@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "05-filter/frequency.hpp"
+#include "05-filter/frequency_direct.hpp"
 
 namespace ps::plugin_internal::frequency {
 namespace {
@@ -21,244 +22,6 @@ std::vector<std::uint64_t> key_of(const Region& r) {
 }
 bool power2(std::uint64_t n) {
   return (n & (n - 1)) == 0;
-}
-int mobius(std::uint64_t n, const Fuel& fuel) {
-  int sign = 1;
-  for (std::uint64_t p = 2; p <= n / p; ++p) {
-    fuel.poll();
-    if (n % p)
-      continue;
-    n /= p;
-    sign = -sign;
-    if (n % p == 0)
-      return 0;
-  }
-  return n > 1 ? -sign : sign;
-}
-void cyclotomic(Math& m, Rational* phi, std::uint64_t n, const Fuel& fuel) {
-  auto& e = m.exact;
-  for (std::uint64_t j = 0; j <= n; ++j) {
-    fuel.poll(Exact::kWords * 2);
-    new (phi + j) Rational{};
-  }
-  phi[0] = e.integer(1);
-  if (power2(n)) {
-    phi[n / 2] = e.integer(1);
-    return;
-  }
-  // Product (1-x^d)^mu(n/d), truncated as an exact formal power series.
-  for (std::uint64_t d = 1; d <= n; ++d) {
-    fuel.poll();
-    if (n % d)
-      continue;
-    const int mu = mobius(n / d, fuel);
-    if (mu > 0) {
-      for (std::uint64_t j = n + 1; j-- > d;)
-        phi[j] = m.sub(phi[j], phi[j - d]);
-    }
-    if (mu < 0) {
-      for (std::uint64_t j = d; j <= n; ++j)
-        phi[j] = m.add(phi[j], phi[j - d]);
-    }
-  }
-  check(e.status());
-}
-int jacobi(std::uint64_t a, std::uint64_t n, const Fuel& fuel) {
-  int result = 1;
-  a %= n;
-  while (a) {
-    fuel.poll();
-    while ((a & 1) == 0) {
-      a >>= 1;
-      if (n % 8 == 3 || n % 8 == 5)
-        result = -result;
-    }
-    std::swap(a, n);
-    if (a % 4 == 3 && n % 4 == 3)
-      result = -result;
-    a %= n;
-  }
-  return n == 1 ? result : 0;
-}
-// Primitive real quadratic character chi_D(a)=(D/a), D>0 fundamental.
-// Its Gauss sum is the positive sqrt(D), not an independently rounded root.
-int quadratic_character(std::uint64_t discriminant, std::uint64_t a,
-                        const Fuel& fuel) {
-  if (!a)
-    return discriminant == 1 ? 1 : 0;
-  int result = 1;
-  while ((a & 1) == 0) {
-    if ((discriminant & 1) == 0)
-      return 0;
-    if (discriminant % 8 == 3 || discriminant % 8 == 5)
-      result = -result;
-    a >>= 1;
-  }
-  return result * jacobi(discriminant, a, fuel);
-}
-void reduce_polynomial(Math& m, Rational* poly, const Rational* phi,
-                       std::uint64_t n, std::uint64_t degree,
-                       const Fuel& fuel) {
-  for (std::uint64_t j = n; j-- > degree;) {
-    fuel.poll(Exact::kWords);
-    if (Exact::zero(poly[j]))
-      continue;
-    const auto c = poly[j];
-    for (std::uint64_t k = 0; k <= degree; ++k) {
-      fuel.poll(Exact::kWords);
-      if (!Exact::zero(phi[k]))
-        poly[j - degree + k] = m.sub(poly[j - degree + k], m.mul(c, phi[k]));
-    }
-  }
-}
-std::uint64_t direct(const Frequency& s, Math& m, const Reader& reader,
-                     Coordinate at, unsigned component, Rational* poly,
-                     Rational* phi, Rational* normalized, const Fuel& fuel) {
-  auto& e = m.exact;
-  const auto h = s.grid.shape[s.grid.ya], w = s.grid.shape[s.grid.xa];
-  const auto n = s.root_order, ky = at[s.grid.ya], kx = at[s.grid.xa];
-  for (std::uint64_t j = 0; j < n; ++j) {
-    fuel.poll(Exact::kWords * 2);
-    new (poly + j) Rational{};
-  }
-  std::optional<std::uint64_t> first_nan;
-  bool all_zero = true, all_negative_zero = true, any_term = false;
-  // Exceptional arithmetic is reduced in original logical sample order. The
-  // polynomial is used only for finite terms; zero trigonometric factors are
-  // structurally excluded before source arithmetic.
-  auto exceptional = e.integer(0);
-  const auto append = [&](const Rational& value, std::uint64_t phase) {
-    poly[phase] = m.add(poly[phase], value);
-    const auto mirror = (n - phase) % n;
-    poly[mirror] = m.add(poly[mirror], value);
-  };
-  const bool y_first = s.grid.ya < s.grid.xa;
-  for (std::uint64_t i = 0; i < h * w; ++i) {
-    fuel.poll(4);
-    const auto y = y_first ? i / w : i % h, x = y_first ? i % w : i / h;
-    auto source = at;
-    source[s.grid.ya] = y;
-    source[s.grid.xa] = x;
-    bool conjugated = false;
-    if (s.kind == Kind::Irfft && x > w / 2) {
-      source[s.grid.ya] = (h - y) % h;
-      source[s.grid.xa] = w - x;
-      conjugated = true;
-    }
-    const auto angle = static_cast<std::uint64_t>(
-        (static_cast<unsigned __int128>(ky) * y * (n / h) +
-         static_cast<unsigned __int128>(kx) * x * (n / w)) %
-        n);
-    const auto phase = s.inverse() ? angle : (n - angle) % n;
-    for (unsigned input = 0; input < (s.real_input() ? 1U : 2U); ++input) {
-      // Both components are real parts of powers of the same primitive root.
-      auto p =
-          (phase + (input ? n / 4 : 0) + (component ? 3 * (n / 4) : 0)) % n;
-      if (p == n / 4 || p == 3 * (n / 4))
-        continue;
-      const bool narrow = s.type == ElementType::Float32;
-      auto raw = reader.raw(input, 0, source);
-      if (input && conjugated)
-        raw ^= narrow ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000);
-      Atom a{raw, narrow};
-      if (a.nan() && !first_nan)
-        first_nan = numeric_ops::converted_nan(raw, s.type, s.type);
-      auto value = e.binary(raw, narrow);
-      any_term = true;
-      all_zero &= Exact::zero(value);
-      if (Exact::zero(value))
-        all_negative_zero &= value.negative != (p > n / 4 && p < 3 * (n / 4));
-      if (!Exact::finite(value)) {
-        if (p > n / 4 && p < 3 * (n / 4))
-          value = e.negate(value);
-        exceptional = m.add(exceptional, value);
-      } else {
-        append(value, p);
-      }
-    }
-  }
-  if (first_nan)
-    return *first_nan;
-  if (all_zero && s.kind == Kind::Rfft && component == 1 &&
-      (kx == 0 || (w % 2 == 0 && kx == w / 2)))
-    return 0;
-  if (all_zero)
-    return any_term && all_negative_zero
-               ? (s.type == ElementType::Float32 ? UINT64_C(0x80000000)
-                                                 : UINT64_C(0x8000000000000000))
-               : 0;
-  if (!Exact::finite(exceptional))
-    return m.rounded(exceptional, s.type == ElementType::Float32);
-  std::uint64_t degree = n;
-  while (degree && Exact::zero(phi[degree])) {
-    fuel.poll(Exact::kWords);
-    --degree;
-  }
-  reduce_polynomial(m, poly, phi, n, degree, fuel);
-  auto scale = e.fraction(1, 2);
-  if (s.grid.norm == "ortho") {
-    if (s.norm_squarefree == 1) {
-      scale = m.div(scale, e.integer(s.norm_squarefactor));
-    } else {
-      for (std::uint64_t j = 0; j < n; ++j) {
-        fuel.poll(Exact::kWords * 2);
-        new (normalized + j) Rational{};
-      }
-      // Multiply by the exact Gauss sum sqrt(D) in Q[zeta_n]/Phi_n.
-      // 1/sqrt(HW) = sqrt(D)/(q*d) for D=d, or sqrt(D)/(2*q*d)
-      // for D=4d. All algebraic dependencies survive until final RN.
-      for (std::uint64_t a = 0; a < s.norm_discriminant; ++a) {
-        fuel.poll();
-        const int sign = quadratic_character(s.norm_discriminant, a, fuel);
-        if (!sign)
-          continue;
-        const auto shift = a * (n / s.norm_discriminant);
-        for (std::uint64_t j = 0; j < degree; ++j) {
-          fuel.poll(Exact::kWords);
-          if (Exact::zero(poly[j]))
-            continue;
-          const auto k = (j + shift) % n;
-          normalized[k] = sign > 0 ? m.add(normalized[k], poly[j])
-                                   : m.sub(normalized[k], poly[j]);
-        }
-      }
-      reduce_polynomial(m, normalized, phi, n, degree, fuel);
-      poly = normalized;
-      scale = m.div(
-          scale, e.integer(s.norm_squarefactor * s.norm_squarefree *
-                           (s.norm_discriminant == s.norm_squarefree ? 1 : 2)));
-    }
-  }
-  if (s.inverse() && s.grid.norm == "backward")
-    scale = m.div(scale, e.integer(h * w));
-  bool rational = true;
-  for (std::uint64_t j = 1; j < degree; ++j) {
-    fuel.poll(Exact::kWords);
-    rational &= Exact::zero(poly[j]);
-  }
-  if (rational) {
-    const auto value = m.mul(poly[0], scale);
-    return m.rounded(value, s.type == ElementType::Float32);
-  }
-  return m.certify(s.type == ElementType::Float32, [&](Interval out) {
-    auto& d = m.d;
-    Directed::Frame frame(d);
-    d.integer(out, 0);
-    for (std::uint64_t j = 0; j < degree && d.active(); ++j) {
-      fuel.poll(Exact::kWords);
-      if (Exact::zero(poly[j]))
-        continue;
-      Directed::Frame term(d);
-      auto a = d.interval(), b = d.interval(), c = d.interval();
-      sincos_turn(m, b, c, e.fraction(j, n));
-      m.enclose(a, poly[j]);
-      d.multiply(a, a, c);
-      d.add(out, out, a);
-    }
-    auto factor = d.interval();
-    m.enclose(factor, scale);
-    d.multiply(out, out, factor);
-  });
 }
 struct Complex {
   Ball re, im;
@@ -280,6 +43,16 @@ Ball root_component(Math& m, std::uint64_t k, std::uint64_t n, bool imaginary,
     const int c[4] = {1, 0, -1, 0}, s[4] = {0, 1, 0, -1};
     return {static_cast<double>(imaginary ? s[q] : c[q]), 0, 0};
   }
+  // Exact rational components avoid certifying a zero residual by refinement.
+  if (!imaginary && (6 * k) % n == 0) {
+    const int cosine[6] = {2, 1, -1, -2, -1, 1};
+    return {cosine[6 * k / n] * .5, 0, 0};
+  }
+  if (imaginary && (12 * k) % n == 0) {
+    const auto phase = (12 * k / n) % 12;
+    if (phase == 1 || phase == 5 || phase == 7 || phase == 11)
+      return {(phase < 6 ? .5 : -.5) * (inverse ? 1 : -1), 0, 0};
+  }
   const auto turns = m.exact.fraction(
       inverse ? static_cast<std::int64_t>(k) : -static_cast<std::int64_t>(k),
       n);
@@ -296,6 +69,31 @@ Ball root_component(Math& m, std::uint64_t k, std::uint64_t n, bool imaginary,
   const auto lo =
       number(m.certify(false, [&](Interval out) { expression(out, hi); }));
   return {hi, lo, numeric_ops::numeric_up(std::abs(lo) * 0x1p-52 + 0x1p-1074)};
+}
+void root_table(Math& math, Complex* output, std::uint64_t n,
+                std::uint64_t count, bool inverse, const Fuel& fuel) {
+  if (!count)
+    return;
+  if (n <= 4 || 12 % n == 0) {
+    for (std::uint64_t j = 0; j < count; ++j) {
+      fuel.poll();
+      new (output + j) Complex{root_component(math, j, n, false, inverse),
+                               root_component(math, j, n, true, inverse)};
+    }
+    return;
+  }
+  const Complex step{root_component(math, 1 % n, n, false, inverse),
+                     root_component(math, 1 % n, n, true, inverse)};
+  Complex current{};
+  for (std::uint64_t j = 0; j < count; ++j) {
+    fuel.poll(512);
+    if (j % 32 == 0 || (12 * j) % n == 0)
+      current = {root_component(math, j, n, false, inverse),
+                 root_component(math, j, n, true, inverse)};
+    else
+      current = product(current, step);
+    new (output + j) Complex{current};
+  }
 }
 void fft_line(Complex* data, std::uint64_t n, std::uint64_t stride,
               const Complex* roots, std::uint64_t root_size, const Fuel& fuel) {
@@ -318,6 +116,105 @@ void fft_line(Complex* data, std::uint64_t n, std::uint64_t stride,
         data[(i + j) * stride] = add(u, v);
         data[(i + j + length / 2) * stride] = minus(u, v);
       }
+}
+// Child transforms occupy j+r*k. One admitted line buffer combines them
+// into natural order, without any rounded intermediate transform outputs.
+void mixed_line(Complex* data, std::uint64_t n, std::uint64_t stride,
+                const Complex* roots, std::uint64_t order, Complex* temporary,
+                const Fuel& fuel) {
+  if (n == 1)
+    return;
+  std::uint64_t radix = n;
+  for (auto candidate : {2U, 3U, 5U})
+    if (n % candidate == 0) {
+      radix = candidate;
+      break;
+    }
+  const auto m = n / radix;
+  for (std::uint64_t j = 0; j < radix; ++j) {
+    fuel.poll();
+    mixed_line(data + j * stride, m, stride * radix, roots, order, temporary,
+               fuel);
+  }
+  for (std::uint64_t k = 0; k < m; ++k)
+    for (std::uint64_t l = 0; l < radix; ++l) {
+      Complex sum{{0, 0, 0}, {0, 0, 0}};
+      for (std::uint64_t j = 0; j < radix; ++j) {
+        fuel.poll(512);
+        const auto phase =
+            static_cast<std::uint64_t>(static_cast<unsigned __int128>(j) *
+                                       (k + m * l) * (order / n) % order);
+        sum = add(sum, product(data[(j + radix * k) * stride], roots[phase]));
+      }
+      temporary[k + m * l] = sum;
+    }
+  for (std::uint64_t i = 0; i < n; ++i) {
+    fuel.poll();
+    data[i * stride] = temporary[i];
+  }
+}
+// Both transform axes reuse this admitted workspace, never root_order.
+void bluestein_axis(Math& math, Complex* data, std::uint64_t n,
+                    std::uint64_t stride, std::uint64_t lines,
+                    std::uint64_t line_step, bool inverse, Complex* workspace,
+                    const Fuel& fuel) {
+  const auto size = bluestein_size(n);
+  auto* roots = workspace;
+  auto* chirp = roots + size;
+  auto* kernel = chirp + n;
+  auto* line = kernel + size;
+  root_table(math, roots, size, size / 2, false, fuel);
+  for (std::uint64_t j = 0; j < size; ++j) {
+    fuel.poll();
+    new (kernel + j) Complex{{0, 0, 0}, {0, 0, 0}};
+    new (line + j) Complex{{0, 0, 0}, {0, 0, 0}};
+  }
+  const Complex delta{root_component(math, 1, n, false, inverse),
+                      root_component(math, 1, n, true, inverse)};
+  Complex current{}, ratio{};
+  for (std::uint64_t j = 0; j < n; ++j) {
+    fuel.poll(1024);
+    const auto phase = static_cast<std::uint64_t>(
+        static_cast<unsigned __int128>(j) * j % (2 * n));
+    if (j % 32 == 0) {
+      const auto next = (2 * j + 1) % (2 * n);
+      current = {root_component(math, phase, 2 * n, false, inverse),
+                 root_component(math, phase, 2 * n, true, inverse)};
+      ratio = {root_component(math, next, 2 * n, false, inverse),
+               root_component(math, next, 2 * n, true, inverse)};
+    } else if ((12 * phase) % (2 * n) == 0) {
+      current = {root_component(math, phase, 2 * n, false, inverse),
+                 root_component(math, phase, 2 * n, true, inverse)};
+    }
+    new (chirp + j) Complex{current};
+    kernel[j] = {current.re, -current.im};
+    if (j)
+      kernel[size - j] = kernel[j];
+    current = product(current, ratio);
+    ratio = product(ratio, delta);
+  }
+  fft_line(kernel, size, 1, roots, size, fuel);
+  for (std::uint64_t l = 0; l < lines; ++l) {
+    auto* input = data + l * line_step;
+    for (std::uint64_t j = 0; j < size; ++j) {
+      fuel.poll(512);
+      line[j] = j < n ? product(input[j * stride], chirp[j])
+                      : Complex{{0, 0, 0}, {0, 0, 0}};
+    }
+    fft_line(line, size, 1, roots, size, fuel);
+    for (std::uint64_t j = 0; j < size; ++j) {
+      fuel.poll(512);
+      line[j] = product(line[j], kernel[j]);
+      line[j].im = -line[j].im;
+    }
+    fft_line(line, size, 1, roots, size, fuel);
+    const auto scale = 1.0 / static_cast<double>(size);
+    for (std::uint64_t j = 0; j < n; ++j) {
+      fuel.poll(512);
+      input[j * stride] = product(
+          {line[j].re.times(scale), (-line[j].im).times(scale)}, chirp[j]);
+    }
+  }
 }
 }  // namespace
 
@@ -363,83 +260,98 @@ OperationDefinition transform_tasks(OperationDefinition def) {
           check(builder.write_output(task, std::get<0>(a), std::get<1>(a),
                                      std::get<2>(a)));
       }
-      return builder.finish();
+      auto result = builder.finish();
+      if (!result.ok())
+        return result;
+      auto program = result.take_value();
+      for (auto& kernel : program.program.kernels)
+        kernel.abi_version = 9;
+      check(physical::finalize_program(&program.program, q.limits));
+      return Result<OperationProgram>(std::move(program));
     } catch (const Status& s) {
       return Result<OperationProgram>(s);
     }
   };
-  struct Owner {
+  struct BudgetOwner {
     std::shared_ptr<Frequency> state;
-    ps_prepared_kernel_v8 inner{};
-    ~Owner() {
+    ps_prepared_kernel_v9 inner{};
+    ~BudgetOwner() {
       if (inner.release)
         inner.release(inner.context);
     }
   };
-  const auto prepare = def.prepare_kernel;
-  def.prepare_kernel =
-      [prepare](const auto& desc, const auto& placement,
-                const KernelPreparation& q, const auto& resources,
-                const auto* native) -> Result<ps_prepared_kernel_v8> {
+  const auto prepare_budgeted = def.prepare_kernel_v9;
+  def.prepare_kernel_v9 =
+      [prepare_budgeted](const auto& desc, const auto& placement,
+                         const KernelPreparation& q, const auto& resources,
+                         const auto* native) -> Result<ps_prepared_kernel_v9> {
     try {
-      require(!q.writes.empty(), "empty transform invocation");
-      auto state = std::make_shared<Frequency>(
+      require(!q.writes.empty(), "empty budgeted transform invocation");
+      auto owner = std::make_unique<BudgetOwner>();
+      owner->state = std::make_shared<Frequency>(
           *static_cast<const Frequency*>(q.static_state));
-      state->selected =
-          state->plane_region(fixed_tensor::view_region(q.writes[0].layout));
+      owner->state->selected = owner->state->plane_region(
+          fixed_tensor::view_region(q.writes[0].layout));
       for (const auto& w : q.writes)
-        require(key_of(state->selected) ==
-                    key_of(state->plane_region(
+        require(key_of(owner->state->selected) ==
+                    key_of(owner->state->plane_region(
                         fixed_tensor::view_region(w.layout))),
-                "transform batch group");
+                "budgeted transform batch group");
       auto mapped = q;
-      mapped.static_state = state.get();
-      auto owner = std::make_unique<Owner>();
-      owner->state = std::move(state);
-      owner->inner = take(prepare(desc, placement, mapped, resources, native));
+      mapped.static_state = owner->state.get();
+      owner->inner =
+          take(prepare_budgeted(desc, placement, mapped, resources, native));
       auto kernel = owner->inner;
       kernel.context = owner.release();
-      kernel.invoke_cpu = [](const ps_kernel_invocation_v8* inv,
+      kernel.invoke_cpu = [](const ps_kernel_invocation_v9* inv,
                              ps_kernel_status_v8* out) {
-        const auto& owner = *static_cast<const Owner*>(inv->prepared_context);
+        const auto& owner =
+            *static_cast<const BudgetOwner*>(inv->views.prepared_context);
         auto mapped = *inv;
-        mapped.prepared_context = owner.inner.context;
+        mapped.views.prepared_context = owner.inner.context;
         owner.inner.invoke_cpu(&mapped, out);
       };
       kernel.release = [](const void* p) {
-        delete static_cast<const Owner*>(p);
+        delete static_cast<const BudgetOwner*>(p);
       };
-      return Result<ps_prepared_kernel_v8>(kernel);
-    } catch (const Status& s) {
-      return Result<ps_prepared_kernel_v8>(s);
+      return Result<ps_prepared_kernel_v9>(kernel);
+    } catch (const Status& failure) {
+      return Result<ps_prepared_kernel_v9>(failure);
     }
   };
   return def;
 }
 void Frequency::run_transform(const Kernel& k,
-                              const ps_kernel_invocation_v8& inv) const {
-  const Work work{inv, work_limit};
+                              const ps_kernel_invocation_v8& inv,
+                              ps_kernel_work_v9 service) const {
+  const Work work{inv, work_limit, 0, service};
   const Fuel fuel{work};
   generation::MathArena arena(inv.scratch[0].allocation, work);
   auto& m = *arena;
   m.exact.bind(fuel);
   m.d.consume = core_internal::WorkConsumer(fuel);
   const Reader reader{k, inv};
-  const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa], n = root_order,
+  const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa],
              root_size = std::max(h, w);
   auto* data = reinterpret_cast<Complex*>(arena.value + 1);
   auto* roots = data + h * w;
-  auto* poly = reinterpret_cast<Rational*>(roots + root_size);
-  auto* phi = poly + n;
-  auto* normalized = phi + n + 1;
-  bool phi_ready = false;
-  const bool fft = power2(h) && power2(w);
-  if (fft) {
-    for (std::uint64_t j = 0; j < root_size / 2; ++j) {
-      fuel.poll();
-      new (roots + j) Complex{root_component(m, j, root_size, false, inverse()),
-                              root_component(m, j, root_size, true, inverse())};
-    }
+  auto* axis_roots = roots + root_size;
+  auto* temporary = axis_roots + h + w;
+  for (std::uint64_t j = 0; j < root_size; ++j) {
+    fuel.poll();
+    new (temporary + j) Complex{};
+  }
+  auto* blue = temporary + root_size;
+  const bool radix2 = power2(h) && power2(w);
+  const bool fft = true;
+  if (radix2) {
+    root_table(m, roots, root_size, root_size / 2, inverse(), fuel);
+  }
+  if (!radix2) {
+    for (auto axis :
+         {std::make_pair(h, axis_roots), std::make_pair(w, axis_roots + h)})
+      if (!bluestein_size(axis.first))
+        root_table(m, axis.second, axis.first, axis.first, inverse(), fuel);
   }
   Ball scale{1, 0, 0};
   if (grid.norm == "ortho") {
@@ -456,7 +368,7 @@ void Frequency::run_transform(const Kernel& k,
     scale = {hi, lo,
              numeric_ops::numeric_up(std::abs(lo) * 0x1p-52 + 0x1p-1074)};
   } else if (inverse()) {
-    scale = {1.0 / static_cast<double>(h * w), 0, 0};
+    scale = dd_divide({1, 0, 0}, {static_cast<double>(h * w), 0, 0});
   }
   Coordinate batch{};
   std::uint64_t batches = 1;
@@ -466,7 +378,103 @@ void Frequency::run_transform(const Kernel& k,
       batches *= selected.dimensions()[a].extent;
   }
   for (std::uint64_t b = 0; b < batches; ++b) {
+    bool positive_zero_witness[2] = {false, false};
+    bool positive_sine_witness = false;
+    const auto period_y = h > 1 && h % 2 == 0 ? 2U : 1U;
+    const auto period_x = w > 1 && w % 2 == 0 ? 2U : 1U;
+    std::array<double, 8> periodic_seed{};
+    bool periodic = kind != Kind::Irfft;
+    bool packed_y_periodic = kind == Kind::Irfft;
+    bool boundary_equal = true, boundary_opposite = true;
+    bool boundary_antiperiodic = h % 2 == 0;
+    bool real_periodic = kind == Kind::Irfft;
+    bool imaginary_x_antiperiodic = kind == Kind::Irfft && w % 2 == 0;
+    std::array<Ball, 4> real_template{};
+    bool imaginary_y_zero[2] = {false, false};
+    bool residual_period_checked = false;
+    std::uint64_t residual_py = h, residual_px = w;
+    const auto logical_value = [&](std::uint64_t y, std::uint64_t x) {
+      fuel.poll(4);
+      auto at = batch;
+      bool conjugate = false;
+      if (kind == Kind::Irfft && x > w / 2) {
+        y = (h - y) % h;
+        x = w - x;
+        conjugate = true;
+      }
+      at[grid.ya] = y;
+      at[grid.xa] = x;
+      const auto re = reader.value(0, 0, at);
+      const auto im = real_input() ? 0 : reader.value(1, 0, at);
+      return std::make_pair(re, conjugate ? -im : im);
+    };
+    const auto find_residual_period = [&] {
+      if (residual_period_checked)
+        return;
+      residual_period_checked = true;
+      for (unsigned axis = 0; axis < 2; ++axis) {
+        const auto extent = axis == 0 ? h : w;
+        for (auto candidate : {3U, 5U, 7U}) {
+          fuel.poll();
+          if (candidate >= extent || extent % candidate)
+            continue;
+          bool equal = true;
+          for (std::uint64_t y = 0; y < h && equal; ++y)
+            for (std::uint64_t x = 0; x < w && equal; ++x) {
+              const auto a = logical_value(y, x);
+              const auto b = logical_value(axis == 0 ? y % candidate : y,
+                                           axis == 1 ? x % candidate : x);
+              equal = std::isfinite(a.first) && std::isfinite(a.second) &&
+                      std::isfinite(b.first) && std::isfinite(b.second) &&
+                      a == b;
+            }
+          if (equal) {
+            (axis == 0 ? residual_py : residual_px) = candidate;
+            break;
+          }
+        }
+      }
+    };
+    if (periodic) {
+      for (unsigned y = 0; y < period_y; ++y)
+        for (unsigned x = 0; x < period_x; ++x) {
+          fuel.poll(4);
+          auto at = batch;
+          at[grid.ya] = y;
+          at[grid.xa] = x;
+          periodic_seed[2 * (y * 2 + x)] = reader.value(0, 0, at);
+          periodic_seed[2 * (y * 2 + x) + 1] =
+              real_input() ? 0 : reader.value(1, 0, at);
+        }
+    }
     if (fft) {
+      auto origin = batch;
+      origin[grid.ya] = origin[grid.xa] = 0;
+      for (unsigned component = 0; component < (real_input() ? 1U : 2U);
+           ++component) {
+        const Atom value{reader.raw(component, 0, origin),
+                         type == ElementType::Float32};
+        // The origin coefficient for this component is exactly +1. A finite
+        // source other than -0 excludes an all-negative-zero reduction.
+        positive_zero_witness[component] =
+            std::isfinite(value.value()) &&
+            value.raw != (type == ElementType::Float32
+                              ? UINT64_C(0x80000000)
+                              : UINT64_C(0x8000000000000000));
+      }
+      if (kind == Kind::Rfft && w > 2) {
+        auto witness = origin;
+        witness[grid.xa] = w - 1;
+        const Atom value{reader.raw(0, 0, witness),
+                         type == ElementType::Float32};
+        // sin(2*pi*kx/W) is strictly positive for every nonboundary packed
+        // column. At y=0 this witness is independent of ky.
+        positive_sine_witness =
+            std::isfinite(value.value()) &&
+            value.raw != (type == ElementType::Float32
+                              ? UINT64_C(0x80000000)
+                              : UINT64_C(0x8000000000000000));
+      }
       for (std::uint64_t y = 0; y < h; ++y)
         for (std::uint64_t x = 0; x < w; ++x) {
           fuel.poll(2);
@@ -481,13 +489,125 @@ void Frequency::run_transform(const Kernel& k,
           }
           const auto re = reader.value(0, 0, at),
                      im = real_input() ? 0 : reader.value(1, 0, at);
+          fuel.poll(4);
+          const auto seed = 2 * ((y % period_y) * 2 + x % period_x);
+          periodic &= std::isfinite(re) && std::isfinite(im) &&
+                      re == periodic_seed[seed] &&
+                      im == periodic_seed[seed + 1];
+          const auto imaginary = conjugate ? -im : im;
+          if (kind == Kind::Irfft) {
+            packed_y_periodic &= std::isfinite(re) && std::isfinite(imaginary);
+            if (packed_y_periodic && y >= period_y) {
+              const auto& seed_value = data[(y % period_y) * w + x];
+              packed_y_periodic &= seed_value.re.point() &&
+                                   seed_value.re.finite() &&
+                                   re == seed_value.re.hi;
+              if (x != 0 && !(w % 2 == 0 && x == w / 2))
+                packed_y_periodic &= seed_value.im.point() &&
+                                     seed_value.im.finite() &&
+                                     imaginary == seed_value.im.hi;
+            }
+          }
+          if (kind == Kind::Irfft) {
+            if (y < period_y && x < period_x)
+              real_template[y * 2 + x] = Ball::point(re);
+            const auto& original =
+                real_template[(y % period_y) * 2 + x % period_x];
+            real_periodic &= original.finite() && original.point() &&
+                             std::isfinite(re) && re == original.hi;
+          }
           new (data + y * w + x)
-              Complex{Ball::point(re), Ball::point(conjugate ? -im : im)};
+              Complex{Ball::point(re), Ball::point(imaginary)};
         }
-      for (std::uint64_t y = 0; y < h; ++y)
-        fft_line(data + y * w, w, 1, roots, root_size, fuel);
-      for (std::uint64_t x = 0; x < w; ++x)
-        fft_line(data + x, h, w, roots, root_size, fuel);
+      if (kind == Kind::Irfft && packed_y_periodic) {
+        for (std::uint64_t y = 0; y < h; ++y) {
+          fuel.poll(4);
+          const auto& a = data[y * w].im;
+          const auto b = w % 2 == 0 ? data[y * w + w / 2].im : Ball{0, 0, 0};
+          boundary_equal &= a.point() && a.finite() && b.point() &&
+                            b.finite() && a.hi == b.hi;
+          boundary_opposite &= a.point() && a.finite() && b.point() &&
+                               b.finite() && a.hi == -b.hi;
+          if (boundary_antiperiodic) {
+            const auto& partner_a = data[((y + h / 2) % h) * w].im;
+            const auto partner_b = w % 2 == 0
+                                       ? data[((y + h / 2) % h) * w + w / 2].im
+                                       : Ball{0, 0, 0};
+            boundary_antiperiodic &=
+                a.point() && a.finite() && b.point() && b.finite() &&
+                partner_a.point() && partner_a.finite() && partner_b.point() &&
+                partner_b.finite() && partner_a.hi == -a.hi &&
+                partner_b.hi == -b.hi;
+          }
+        }
+      }
+      if (packed_y_periodic) {
+        for (unsigned frequency = 0; frequency < period_y; ++frequency) {
+          imaginary_y_zero[frequency] = true;
+          for (std::uint64_t x = 1; x < w; ++x) {
+            if (w % 2 == 0 && x == w / 2)
+              continue;
+            Ball total{};
+            for (unsigned y = 0; y < period_y; ++y) {
+              fuel.poll(4);
+              total = total +
+                      data[y * w + x].im.times((y * frequency) & 1 ? -1 : 1);
+            }
+            imaginary_y_zero[frequency] &=
+                total.finite() && total.point() && total.hi == 0;
+          }
+        }
+      }
+      if (imaginary_x_antiperiodic) {
+        for (std::uint64_t y = 0; y < h && imaginary_x_antiperiodic; ++y)
+          for (std::uint64_t x = 1; x < w / 2; ++x) {
+            fuel.poll(4);
+            const auto& a = data[y * w + x].im;
+            const auto& b = data[y * w + x + w / 2].im;
+            imaginary_x_antiperiodic &= a.finite() && a.point() && b.finite() &&
+                                        b.point() && a.hi == -b.hi;
+          }
+      }
+      if (bluestein_size(w)) {
+        bluestein_axis(m, data, w, 1, h, w, inverse(), blue, fuel);
+      } else if (w > 1) {
+        for (std::uint64_t y = 0; y < h; ++y)
+          if (power2(w))
+            fft_line(data + y * w, w, 1, radix2 ? roots : axis_roots + h,
+                     radix2 ? root_size : w, fuel);
+          else
+            mixed_line(data + y * w, w, 1, axis_roots + h, w, temporary, fuel);
+      }
+      if (bluestein_size(h)) {
+        bluestein_axis(m, data, h, w, w, 1, inverse(), blue, fuel);
+      } else if (h > 1) {
+        if (root_size < 1024) {
+          for (std::uint64_t x = 0; x < w; ++x) {
+            if (power2(h))
+              fft_line(data + x, h, w, radix2 ? roots : axis_roots,
+                       radix2 ? root_size : h, fuel);
+            else
+              mixed_line(data + x, h, w, axis_roots, h, temporary, fuel);
+          }
+        } else {
+          auto* column = radix2 ? axis_roots : roots;
+          for (std::uint64_t x = 0; x < w; ++x) {
+            for (std::uint64_t y = 0; y < h; ++y) {
+              fuel.poll(2);
+              new (column + y) Complex{data[y * w + x]};
+            }
+            if (power2(h))
+              fft_line(column, h, 1, radix2 ? roots : axis_roots,
+                       radix2 ? root_size : h, fuel);
+            else
+              mixed_line(column, h, 1, axis_roots, h, temporary, fuel);
+            for (std::uint64_t y = 0; y < h; ++y) {
+              fuel.poll(2);
+              data[y * w + x] = column[y];
+            }
+          }
+        }
+      }
     }
     for (unsigned i = 0; i < inv.output_count; ++i) {
       const auto component = k.writes[i].first;
@@ -519,38 +639,100 @@ void Frequency::run_transform(const Kernel& k,
           }
         }
         std::optional<std::uint64_t> result;
+        bool exact_zero = false;
         if (fft) {
-          const auto value = data[source[grid.ya] * w + source[grid.xa]];
+          // Outside the y-periodic support, packed interior columns vanish.
+          // The only remaining imaginary boundary columns cancel pointwise
+          // when their coefficients 1 and (-1)^kx have opposite amplitudes.
+          const bool packed_excluded =
+              packed_y_periodic && source[grid.ya] % (h / period_y) != 0 &&
+              ((boundary_antiperiodic && source[grid.ya] % 2 == 0) ||
+               (source[grid.xa] % 2 == 0 && boundary_opposite) ||
+               (source[grid.xa] % 2 != 0 && boundary_equal));
+          bool real_zero = real_periodic;
+          if (real_zero && source[grid.ya] % (h / period_y) == 0 &&
+              source[grid.xa] % (w / period_x) == 0) {
+            Ball total{};
+            for (unsigned y = 0; y < period_y; ++y)
+              for (unsigned x = 0; x < period_x; ++x) {
+                fuel.poll(4);
+                const auto sign = (y * (source[grid.ya] / (h / period_y)) +
+                                   x * (source[grid.xa] / (w / period_x))) &
+                                  1;
+                total = total + real_template[y * 2 + x].times(sign ? -1 : 1);
+              }
+            real_zero = total.finite() && total.point() && total.hi == 0;
+          }
+          const bool y_self =
+              source[grid.ya] == 0 || (h % 2 == 0 && source[grid.ya] == h / 2);
+          const bool x_self =
+              source[grid.xa] == 0 || (w % 2 == 0 && source[grid.xa] == w / 2);
+          const bool packed_real_zero =
+              real_zero && y_self &&
+              (x_self ||
+               (packed_y_periodic &&
+                imaginary_y_zero[source[grid.ya] == 0 ? 0 : 1]) ||
+               (imaginary_x_antiperiodic && source[grid.xa] % 2 == 0));
+          const bool excluded =
+              packed_real_zero || packed_excluded ||
+              (periodic && (source[grid.ya] % (h / period_y) != 0 ||
+                            source[grid.xa] % (w / period_x) != 0));
+          const auto value = excluded
+                                 ? Complex{{0, 0, 0}, {0, 0, 0}}
+                                 : data[source[grid.ya] * w + source[grid.xa]];
           const auto v = dd_product(component ? value.im : value.re, scale);
           result = profile == Profile::Strict
                        ? dd_round(v, type == ElementType::Float32)
                        : FastArithmetic{type == ElementType::Float32, profile}
                              .finish(v.bounds());
-          if (v.point() && v.hi == 0)
-            result.reset();
+          if (v.point() && v.hi == 0) {
+            const bool boundary_imag =
+                kind == Kind::Rfft && component &&
+                (source[grid.xa] == 0 ||
+                 (w % 2 == 0 && source[grid.xa] == w / 2));
+            exact_zero =
+                boundary_imag || (kind == Kind::Rfft && component
+                                      ? positive_sine_witness
+                                      : positive_zero_witness[component]);
+            if (exact_zero)
+              result = 0;
+            else
+              result.reset();
+          }
         }
         if (!result) {
-          if (!phi_ready) {
-            cyclotomic(m, phi, n, fuel);
-            phi_ready = true;
+          const auto value = data[source[grid.ya] * w + source[grid.xa]];
+          const auto enclosure = (component ? value.im : value.re).bounds();
+          if (!std::isfinite(enclosure.low) || !std::isfinite(enclosure.high) ||
+              (enclosure.low <= 0 && enclosure.high >= 0)) {
+            find_residual_period();
+            const bool outside = source[grid.ya] % (h / residual_py) != 0 ||
+                                 source[grid.xa] % (w / residual_px) != 0;
+            const bool boundary_imag =
+                kind == Kind::Rfft && component &&
+                (source[grid.xa] == 0 ||
+                 (w % 2 == 0 && source[grid.xa] == w / 2));
+            const bool positive =
+                boundary_imag || (kind == Kind::Rfft && component
+                                      ? positive_sine_witness
+                                      : positive_zero_witness[component]);
+            if (outside && positive) {
+              result = 0;
+              exact_zero = true;
+            }
           }
-          result = direct(*this, m, reader, source, component, poly, phi,
-                          normalized, fuel);
+          if (!result)
+            result = trace::direct(*this, m, reader, source, component, fuel);
         }
         if (conjugate) {
           const auto magnitude = *result & (type == ElementType::Float32
                                                 ? UINT64_C(0x7fffffff)
                                                 : UINT64_C(0x7fffffffffffffff));
-          if (magnitude == 0) {
-            if (!phi_ready) {
-              cyclotomic(m, phi, n, fuel);
-              phi_ready = true;
-            }
+          if (magnitude == 0 && !exact_zero) {
             // Exact zero must stay +0, but underflowed nonzero keeps its sign.
             // Evaluate this coordinate directly when rounded bits cannot tell.
-            result = direct(*this, m, reader, at, component, poly, phi,
-                            normalized, fuel);
-          } else {
+            result = trace::direct(*this, m, reader, at, component, fuel);
+          } else if (!exact_zero) {
             *result ^= type == ElementType::Float32
                            ? UINT64_C(0x80000000)
                            : UINT64_C(0x8000000000000000);
@@ -578,6 +760,7 @@ void Frequency::run_transform(const Kernel& k,
       batch[a] = selected.dimensions()[a].offset;
     }
   }
+  check(m.exact.status());
   fuel.flush();
 }
 }  // namespace ps::plugin_internal::frequency

@@ -50,6 +50,8 @@ struct Fuel {
   const Work& work;
   mutable std::uint64_t pending = 0;
   Status operator()(std::uint64_t count) const {
+    if (work.budgeted())
+      return work(count);
     while (count >= 512 - pending) {
       count -= 512 - pending;
       pending = 0;
@@ -62,6 +64,10 @@ struct Fuel {
     return Status::success();
   }
   void poll(std::uint64_t count = 1) const {
+    if (work.budgeted()) {
+      check(work(count));
+      return;
+    }
     // Avoid constructing a Status for the common, already-admitted batch.
     if (count < 512 - pending) {
       pending += count;
@@ -70,7 +76,7 @@ struct Fuel {
     check((*this)(count));
   }
   void flush() const {
-    check(work(pending));
+    check(work(work.budgeted() ? 0 : pending));
     pending = 0;
   }
 };

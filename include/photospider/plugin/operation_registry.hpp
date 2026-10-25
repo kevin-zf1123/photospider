@@ -348,13 +348,24 @@ struct PHOTOSPIDER_API OperationDefinition final {
   /** @brief Kernel preparation with borrowed native services for GPU placement.
    * Success transfers one context owner to the registry for adoption.
    * Optional for a lowering that emits only COPY tasks or elided calls.
-   * A kernel descriptor without this callback fails linking at prepare.
+   * A version-8 kernel descriptor without this callback fails linking at
+   * prepare.
    */
   std::function<Result<ps_prepared_kernel_v8>(
       const physical::KernelDesc&, const physical::Placement&,
       const KernelPreparation&, const ResourceSet&,
       const ps_native_gpu_service_v2*)>
       prepare_kernel;
+  /** @brief Explicit CPU preparation selected by KernelDesc abi_version=9.
+   * Version 8 continues to select prepare_kernel. The module ABI8 export
+   * remains v8-only; this capability is negotiated by trusted C++ registration.
+   * Lifetime, ownership and exception rules match prepare_kernel.
+   */
+  std::function<Result<ps_prepared_kernel_v9>(
+      const physical::KernelDesc&, const physical::Placement&,
+      const KernelPreparation&, const ResourceSet&,
+      const ps_native_gpu_service_v2*)>
+      prepare_kernel_v9;
   /** @brief Required exactly for a metadata-specialized traits template. */
   OperationMetadataSpecializer specialize_metadata = {};
   /** @brief Pure static metadata preparation for this operation definition.
@@ -440,7 +451,9 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @return Success or validation/duplicate/frozen failure.
    * @throws std::bad_alloc If registry allocation fails without mutation.
    * @note At least one backend and a fixed lowering callback are mandatory.
-   * Kernel tasks also require prepare_kernel; COPY-only definitions do not.
+   * Kernel tasks require the factory matching their descriptor ABI:
+   * prepare_kernel for v8 or CPU prepare_kernel_v9 for v9. COPY-only
+   * definitions do not require either factory.
    * Traits constrain static schemas. Prepared kernels validate their fixed
    * signatures before execution; samples remain unchecked. Passing an rvalue
    * transfers the callables into immutable registry ownership before locking.

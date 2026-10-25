@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: partially_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - FRQ-01A
@@ -35,8 +35,12 @@ Suffix letters identify distinct mathematical or interface objects, not quality 
 
 The two members are registered by `register_frequency` in
 `plugins/ops/05-filter/frequency_operations.cpp`, reached from the maintained
-built-in registry. `frequency_transform.cpp` implements certified radix-2 FFT
-and exact cyclotomic/direct refinement. The SDK helper is declared in
+built-in registry. `frequency_transform.cpp` implements certified radix-2 and
+mixed-radix FFT, Bluestein for large residual factors, and bounded block
+recurrences for enclosed roots/chirps. `frequency_direct.hpp` streams directed
+refinement and exact trace-square zero/midpoint decisions, including algebraically
+correlated ortho normalization. Scratch has a full-plane and linear-axis bound;
+it allocates no polynomial arrays proportional to the primitive root order. The SDK helper is declared in
 `photospider/ops/frequency.hpp`. CPU strict and target-gated Apple Silicon and
 x86-64 keys exist; only the local Apple CPU has runtime evidence in this task.
 There is no GPU backend.
@@ -49,12 +53,28 @@ Strings, and `spacing_y/x`, `origin_y/x` Float64. Origins/spacings use y,x order
 the inverse checks its stored coefficient shape against this configuration.
 A different normalization override is not introduced by the helper.
 
-Functional execution is implemented; overall acceptance remains partial because
-H08 root cumulative arithmetic/limb work and refinement-stage charging cannot
-be supplied by frozen invocation ABI 8. The optional Int64 `max_work` limits
-each invocation independently; it is not a node-across-tiles or Run total.
-Output/scratch capacity, task/stage admission and ownership use the existing
-executor. This limitation does not revise the inherited target contract.
+FRQ-01..06 execute exclusively through typed CPU invocation/preparation ABI 9.
+The borrowed work/stage service charges arithmetic and integer-limb segments
+before execution, and charges each explicit refinement attempt. One Run ledger
+covers all nodes, tiles and activations; repeated/concurrent Runs have independent
+limits under their shared Context root. A host budget refusal is `ResourceExhausted`
+with `WorkLimit` or `StageLimit`, `Resource`/`Run` attribution and known node/task;
+accepted work drains and no final Result is published. Cancellation retains
+priority and does not refund admitted work. The optional Int64 node `max_work`
+continues to limit each invocation independently; it is not the Run total.
+`ExecutionOptions::maximum_work` defaults to 268435456; callers must explicitly
+budget large transforms. `maximum_refinement_stages` defaults to UINT64_MAX and
+allows zero. `psx --max-work N --max-stages N` configures these Run limits.
+`ExecutionDiagnostics::issued_work` reports successful admission units, excluding
+legacy ABI8 internal arithmetic, allocator overhead and CPU instructions.
+
+The H08 cumulative-budget implementation gap is closed. Invocation-8 FRQ Plans
+must be recompiled; there is no silent ABI downgrade. Module ABI8, native service
+ABI2, traits30 and psir/psxp5 layouts remain unchanged, and other ABI8 operations
+remain supported. CPU x86 execution, GPU support and unmeasured platforms are not
+implied by the local Apple evidence. Exact fallback is finite-budget computation;
+its constant-storage trace test can require quadratic work in input terms and
+does not promise FFT-time completion for adversarial unresolved outputs.
 
 ## Shared Mathematics, Units, and Profiles
 

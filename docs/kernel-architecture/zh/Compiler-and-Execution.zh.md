@@ -122,7 +122,7 @@ Planner 为每个使用到的 `(block, input)` 建立一个 `Imported` value，�
 
 `OperationDefinition::validate_resources(state, resources)` 在静态特化和资源选择后，对每个 `PreparedOperation` 校验一次所选不可变资源。它在 preparation 发布前运行，覆盖 Empty call 和 artifact 重新绑定。回调借用不可变静态 state 及已声明的冻结资源，不读取 sample payload 或执行 I/O。失败会拒绝 preparation 并释放临时 owner。Lowering 和逐 task preparation 保留已接受的资源 owner，不重复该检查。
 
-`prepare_kernel` 接收 symbol、静态算子 metadata、完整 task view、task 参数字节、scratch 上界、资源和设备。它检查 symbol 的调用契约，并生成包含直接入口、资源 owner 和 pipeline 的不可变 `PreparedKernel`。PreparedPlan 保留这些 context 和模块；invocation 借用其 context 直到完成。所有引用 Run 排空后才能销毁 context。
+`prepare_kernel` 接收 symbol、静态算子 metadata、完整 task view、task 参数字节、scratch 上界、资源和设备。它检查 symbol 的调用契约，并生成包含直接入口、资源 owner 和 pipeline 的不可变 `PreparedKernel`。PreparedPlan 保留这些 context 和模块；invocation 借用其 context 直到完成。所有引用 Run 排空后才能销毁 context。链接按已保存的 `KernelDesc::abi_version` 选择 factory：版本 8 使用 `prepare_kernel`，可信 C++ CPU 版本 9 使用 `prepare_kernel_v9`。没有对应 factory 时拒绝，不降级 ABI，也不重跑 lowering。FRQ-01..06 要求 typed CPU 9，旧 FRQ 8 Plan 需要重新编译。Module ABI 8、native service ABI 2 及 Plan v5 序列化布局保持不变。
 
 `Placement` 固定 backend 类别、数值 profile、内存域和 queue 能力。`prepare` 将其绑定到具体设备对象和 kernel，可以拒绝不可用 backend，但不得改变 task 拓扑、实现 profile 或 COPY 边。`CpuExact` 要求所有 task 为 CPU。静态 planner 的 `NativeGpu` 对支持 GPU 的 operation 请求 GPU lowering，对 CPU-only operation 请求 CPU lowering。当 operation 同时声明两种能力时，其 GPU lowering 可在同一 call 内显式组合 CPU/GPU task；每个非 COPY task 都按 traits 检查。COPY placement 遵循声明的 domain。一个 Plan 因而可以包含两种 backend，不需要运行时选择。同一 operation 的 CPU/GPU 替代方案需要分别编译 Plan；preparation 与执行期间没有隐式重试或 placement fallback。
 
@@ -184,6 +184,8 @@ Callback 抛异常时立即关闭该 Run 的 delivery lane：不再启动后续 
 
 循环每轮创建新的物化 tile identity。传入值保留旧 allocation，直到最后一次读取结束。每次 block entry 都消耗有界 work，包括空循环；activation/sequence 溢出时拒绝继续。Device 中的分支标量需要显式 host COPY。Coordinator 在安全点检查取消与当前性。
 
+Typed invocation 9 数值 checkpoint 通过借用的 Run 服务预付 work/stage。Coordinator 与 kernel 共用先 Run 后 Context root 的两维原子准入；`issued_work` 记录成功准入量，不表示 CPU 指令或 legacy v8 内部算术。真实 host 预算拒绝保存 `ResourceExhausted`、`WorkLimit`/`StageLimit`、`Resource`/`Run` 及已知 node/task。Coordinator 观察该状态后中止调度并排空已接受工作，即使拒绝的 kernel 随后报告 OK 也不能成功。逐 lane 安全点限制后续 issue；竞争时已经接受的 invocation 保留 owner 至返回。取消保持终态优先级，已准入费用不退还。算子每 invocation 的 `max_work` 失败保持普通 kernel failure，不作为 host Run 预算拒绝。
+
 每个动态产生的 Result 在 block admission 时、kernel 发射前预约一个进程内唯一的 ObjectId。只能移动的预约 token 与 `ResultBuilder` 使用相同分配器，且只能构造一个规范 Result 对象。该 value 的所有 tile 和 member 通过 `ps_kernel_invocation_v8::input_object_ids` 暴露相同 ID，数组顺序与 input view 一致。新的循环 activation 与独立 Run 预约新 ID；CFG 参数和跨 block 存活别名保留来源关联。ID 属于运行期 metadata，不进入 Plan 序列化或内容 digest。
 
 规范 Result 包含原始动态 value 的完整已编译 tile 集合。完整退休导出、完整 RET 选择和完整 CFG 别名在物化时共享该对象。部分选择创建新的 Result 对象；即使 block 参数包含下游请求的全部 tile，只要少于原 producer 的集合，也适用此规则。外部直接绑定只有在选定 tile 覆盖整个 captured footprint 时才复用捕获的 Result。身份状态只保留 Result 弱引用；仅在后继需要原始完整集合时，边界才保留规范对象的强引用，因此部分别名中不再使用的 tile 能够释放。
@@ -202,7 +204,7 @@ Import 执行有界解析、结构校验、symbol/resource 链接并发布不可
 | --- | --- | --- |
 | IR 顺序 | 有序退休、依赖驱动发射 | IR 语义、optimizer 合法性和 identity |
 | PlanStep/PlanTileInstruction | Task/Tile/Call/Block 表 | Builder、校验、选择和 codec |
-| Continuation ABI 7 | 固定 invocation、异步 backend completion | 当前 ABI 8 和 traits 30，重建插件，无 continuation shim |
+| Continuation ABI 7 | 固定 invocation、异步 backend completion | ABI 8 和 traits 30，重建插件，无 continuation shim |
 | Need/Publication/certification | 静态读取与预分配写入 | 删除 polling、grant assertion 和自动数值认证 |
 | Shared stage/checkpoint/block | SSA 中间 task 和 scratch | 删除 executor checkpoint/block/result 复用 |
 | Residency/fallback | 每 tile 一个 domain，显式 COPY | 删除隐式镜像缓存与自动重试 |
@@ -213,7 +215,7 @@ Import 执行有界解析、结构校验、symbol/resource 链接并发布不可
 
 ## 原型与实现验收
 
-C++ 物理数据层定义于 [`physical_program.hpp`](../../../include/photospider/compiler/physical_program.hpp)。`physical::finalize_program` 推导邻接表、跨块存活值和分配上界；`physical::validate_program` 独立检查完整表，包括块参数的物理兼容性。内部 `TaskSchedule` 拥有 block 内的就绪状态、submission identity、failure cut 和 retirement。`CpuWorkers` 在有界 worker pool 上执行固定的调用/完成回调，并在关闭时排空已接受工作。`BlockMemory` 在分配 payload 前预留Host、Shared 与 Device 各域的完整输出上界、每个 lane 的 scratch 和存储 metadata。物理存储在最后一次使用后释放，block 保留预约容量直至边界；跨越边界的 export 此后只保留自身 allocation 的计费。`test_physical_cpu_schedule` 将这些组件组合起来，使用独立 payload allocation 验证真实 CPU 重叠执行。公共 compiler 通过 `OperationProgram` lowering 生成物理表。`CompilerArtifact` 编码 v5 表，并在导入时校验邻接表、存活值、资源预留和 IR 绑定，不重新执行 lowering。固定调用 ABI 8 提供直接 CPU 入口和异步 GPU 提交契约。`KernelPreparation` 携带实际 task 的读写 layout、port、参数字节和 scratch 上界；每个 kernel 在返回 unchecked 入口前检查调用契约。只包含 COPY 的定义无需 kernel preparation callback。公共 `ExecutionContext::prepare` 链接固定 CPU kernel、Host 域异步 GPU 入口和使用 Shared 与 Device 存储的原生 Metal/Vulkan kernel；`submit` 捕获绑定并启动 coordinator；`RunHandle::join` 等待已接受任务及 observer 交付完成。`test_fixed_execution` 验证并发发射、有序退休、observer 失败、取消排空和独立于 context 存活的 Result。`test_fixed_cfg` 验证循环、同时传递边参数和不可变输入绑定。直接绑定要求独立且兼容的 tile allocation。DenseHost 输入 lowering 生成显式 CPU COPY，包含零 call 边界。内置算子使用固定 CPU lowering/preparation/invocation；identity 使用显式 COPY。注册不保证每种 profile 或 layout 模式均可用：依赖 ISA 的 profile 可以不可用，需要独立物化时会拒绝 format 的非空 `layout=view` 请求。Metal adapter 准备固定 MSL pipeline，通过 command-buffer completion 结算已接受工作。Vulkan 准备固定 SPIR-V pipeline 和不可变 uniform buffer；设备完成线程排空 submission fence 后通知 coordinator。
+C++ 物理数据层定义于 [`physical_program.hpp`](../../../include/photospider/compiler/physical_program.hpp)。`physical::finalize_program` 推导邻接表、跨块存活值和分配上界；`physical::validate_program` 独立检查完整表，包括块参数的物理兼容性。内部 `TaskSchedule` 拥有 block 内的就绪状态、submission identity、failure cut 和 retirement。`CpuWorkers` 在有界 worker pool 上执行固定的调用/完成回调，并在关闭时排空已接受工作。`BlockMemory` 在分配 payload 前预留Host、Shared 与 Device 各域的完整输出上界、每个 lane 的 scratch 和存储 metadata。物理存储在最后一次使用后释放，block 保留预约容量直至边界；跨越边界的 export 此后只保留自身 allocation 的计费。`test_physical_cpu_schedule` 将这些组件组合起来，使用独立 payload allocation 验证真实 CPU 重叠执行。公共 compiler 通过 `OperationProgram` lowering 生成物理表。`CompilerArtifact` 编码 v5 表，并在导入时校验邻接表、存活值、资源预留和 IR 绑定，不重新执行 lowering。固定调用 ABI 8 提供直接 CPU 入口和异步 GPU 提交契约。可信 C++ CPU 算子可显式采用独立 typed invocation/preparation ABI 9 及 Run work/stage 服务，v8 记录和 module 8 transport 保持不变。`KernelPreparation` 携带实际 task 的读写 layout、port、参数字节和 scratch 上界；每个 kernel 在返回 unchecked 入口前检查调用契约。只包含 COPY 的定义无需 kernel preparation callback。公共 `ExecutionContext::prepare` 链接固定 CPU kernel、Host 域异步 GPU 入口和使用 Shared 与 Device 存储的原生 Metal/Vulkan kernel；`submit` 捕获绑定并启动 coordinator；`RunHandle::join` 等待已接受任务及 observer 交付完成。`test_fixed_execution` 验证并发发射、有序退休、observer 失败、取消排空和独立于 context 存活的 Result。`test_fixed_cfg` 验证循环、同时传递边参数和不可变输入绑定。直接绑定要求独立且兼容的 tile allocation。DenseHost 输入 lowering 生成显式 CPU COPY，包含零 call 边界。内置算子使用固定 CPU lowering/preparation/invocation；identity 使用显式 COPY。注册不保证每种 profile 或 layout 模式均可用：依赖 ISA 的 profile 可以不可用，需要独立物化时会拒绝 format 的非空 `layout=view` 请求。Metal adapter 准备固定 MSL pipeline，通过 command-buffer completion 结算已接受工作。Vulkan 准备固定 SPIR-V pipeline 和不可变 uniform buffer；设备完成线程排空 submission fence 后通知 coordinator。
 
 运行 `python3 docs/kernel-architecture/prototypes/ooo_executor.py` 执行语义模型，添加 `--test` 运行行为检查。逻辑时间事件和独立 byte buffer 验证显式/读取依赖、failure cut 与 task 错误归属、独立退休/RET hold 和 retirement。它只模拟一个 block，并独立提供同时传递边参数的 helper；不执行完整 CFG，不实现交付 callback 或资源向量/metadata 容量，也不提供 native backend、公共产物 parser 或性能测量。
 

@@ -177,10 +177,10 @@ class Checker {
           placement.queue.size() > 1024)
         return invalid("invalid physical placement");
     for (const auto& kernel : p_.kernels)
-      if (kernel.abi_version != 8 || kernel.operation.empty() ||
-          kernel.symbol.empty() || kernel.contract.empty() ||
-          kernel.operation.size() > 1024 || kernel.symbol.size() > 1024 ||
-          kernel.contract.size() > 1024)
+      if ((kernel.abi_version != 8 && kernel.abi_version != 9) ||
+          kernel.operation.empty() || kernel.symbol.empty() ||
+          kernel.contract.empty() || kernel.operation.size() > 1024 ||
+          kernel.symbol.size() > 1024 || kernel.contract.size() > 1024)
         return invalid("invalid physical kernel identity");
     std::vector<bool> calls(p_.calls.size()), tasks(p_.tasks.size());
     std::vector<bool> block_tasks(p_.tasks.size());

@@ -259,6 +259,7 @@ struct RunState : std::enable_shared_from_this<RunState> {
     std::uint32_t lane = 0;
     Submission submission;
     ps_kernel_invocation_v8 invocation{};
+    ps_kernel_invocation_v9 invocation_v9{};
     ps_kernel_status_v8 status{};
     ps_kernel_completion_v8 gpu_completion{};
     ExecutionTaskTiming timing;
@@ -267,6 +268,7 @@ struct RunState : std::enable_shared_from_this<RunState> {
     std::vector<std::uint64_t> input_objects;
     std::vector<ps_kernel_mutable_view_v8> outputs;
     std::array<ps_kernel_scratch_v8, 3> scratch{};
+    bool root_rejected = false;
     bool busy = false, done = false, completion_fault = false,
          timing_reported = false;
   };
@@ -305,7 +307,12 @@ struct RunState : std::enable_shared_from_this<RunState> {
   Incoming initial;
   std::vector<std::shared_ptr<ValueIdentity>> input_identities;
   std::uint64_t id = 0, activation = 0, submission = 0, sequence = 0;
-  std::uint64_t remaining_work = 0;
+  std::uint64_t remaining_work = 0, remaining_stages = 0;
+  std::mutex work_mutex;
+  ResourceWork issued_work;
+  ps_kernel_status_v8 work_failure{};
+  Status admission_failure, root_work_failure;
+  std::atomic<bool> work_rejected{false};
   const std::chrono::steady_clock::time_point epoch =
       std::chrono::steady_clock::now();
   std::uint32_t lanes = 1, gpu_lanes = 0;
@@ -359,25 +366,69 @@ struct RunState : std::enable_shared_from_this<RunState> {
       delivery_error = false;
       --delivery_pending;
     }
+    {
+      std::lock_guard<std::mutex> work_lock(work_mutex);
+      if (!root_work_failure.ok())
+        observe(root_work_failure);
+    }
     if (cancelled)
       observe({ErrorCode::Cancelled, {}});
     else if (!current)
       observe({ErrorCode::Stale, {}});
     return abort_status.code;
   }
-  bool charge(std::uint64_t amount) {
-    if (amount > remaining_work) {
-      observe(failure(ErrorCode::ResourceExhausted, "Run work limit"));
-      return false;
+  ps_kernel_status_v8 admit(std::uint64_t amount, std::uint64_t stages,
+                            Work* source = nullptr) noexcept {
+    std::lock_guard<std::mutex> lock(work_mutex);
+    if (work_failure.code) {
+      if (source)
+        source->root_rejected = true;
+      return work_failure;
     }
+    const auto reject = [&](FailureReason reason) {
+      work_failure =
+          kernel_failure(ErrorCode::ResourceExhausted, nullptr, reason);
+      root_work_failure.code = ErrorCode::ResourceExhausted;
+      root_work_failure.reason = reason;
+      root_work_failure.detail.origin = FailureOrigin::Resource;
+      root_work_failure.detail.scope = FailureScope::Run;
+      if (source) {
+        source->root_rejected = true;
+        root_work_failure.detail.task_id = source->submission.task;
+        const auto call = program().tasks[source->submission.task].call;
+        root_work_failure.detail.node_id =
+            call == physical::none ? 0 : program().calls[call].source_call;
+      }
+      work_rejected.store(true, std::memory_order_release);
+      return work_failure;
+    };
+    if (amount > remaining_work || stages > remaining_stages) {
+      return reject(amount > remaining_work ? FailureReason::WorkLimit
+                                            : FailureReason::StageLimit);
+    }
+    if (!prepared->context->budget.try_consume({amount, stages},
+                                               admission_failure))
+      return reject(admission_failure.reason);
     remaining_work -= amount;
-    auto status = prepared->context->budget.consume({amount});
-    if (!status.ok())
-      observe(status);
-    return status.ok();
+    remaining_stages -= stages;
+    issued_work.work += amount;
+    issued_work.stages += stages;
+    return {};
+  }
+  bool charge(std::uint64_t amount) {
+    const auto status = admit(amount, 0);
+    if (!status.code)
+      return true;
+    std::lock_guard<std::mutex> lock(work_mutex);
+    observe(root_work_failure);
+    return false;
   }
   void publish_diagnostics() noexcept {
     std::lock_guard<std::mutex> lock(diagnostics->mutex);
+    {
+      std::lock_guard<std::mutex> work_lock(work_mutex);
+      result.diagnostics.issued_work = issued_work;
+    }
     result.diagnostics.memory = diagnostics->memory.snapshot();
     result.diagnostics.metadata = diagnostics->metadata_observation->snapshot();
     result.diagnostics.observer_queue_wait_ns = observer_queue_wait.load();
@@ -746,6 +797,25 @@ void RunState::bind(Work* pointer, Submission submission) noexcept {
   if (task.kind != physical::TaskKind::Copy ||
       p.placements[task.placement].backend == physical::Backend::Gpu)
     self.prepared->kernels[submission.task].bind(&item.invocation);
+  item.invocation_v9 = {};
+  item.invocation_v9.views = item.invocation;
+  item.root_rejected = false;
+  item.invocation_v9.work = {
+      &item,
+      [](void* context, std::uint64_t work,
+         std::uint64_t stages) -> ps_kernel_status_v8 {
+        auto& item = *static_cast<Work*>(context);
+        auto& run = *item.run;
+        if (run.cancellation.cancelled() || run.stop.token().cancelled())
+          return kernel_failure(ErrorCode::Cancelled, "Run cancelled",
+                                FailureReason::Cancelled);
+        auto status = run.admit(work, stages, &item);
+        if (status.code)
+          run.changed.notify_all();
+        return status;
+      }};
+  if (task.kind != physical::TaskKind::Copy)
+    self.prepared->kernels[submission.task].bind(&item.invocation_v9);
   item.status = {};
   item.done = false;
   item.busy = true;
@@ -851,7 +921,7 @@ void RunState::invoke(void* pointer) noexcept {
   const auto& task = p.tasks[item.submission.task];
   if (task.kind != physical::TaskKind::Copy) {
     item.status = item.run->prepared->kernels[item.submission.task].invoke(
-        item.invocation);
+        item.invocation_v9);
     return;
   }
   const auto& input = item.inputs[0];
@@ -1115,7 +1185,13 @@ const Status& RunState::execute_block(Frame* frame) {
       assign_kernel_status(&item.completion, item.status);
       auto& status = item.completion;
       const auto task = item.submission.task;
-      if (!status.ok()) {
+      if (item.root_rejected) {
+        {
+          std::lock_guard<std::mutex> work_lock(work_mutex);
+          copy_status(&status, root_work_failure);
+        }
+        frame->abort(status);
+      } else if (!status.ok()) {
         status.detail.origin = FailureOrigin::Backend;
         status.detail.scope = FailureScope::Run;
         auto ci = p.tasks[task].call;
@@ -1195,6 +1271,10 @@ const Status& RunState::execute_block(Frame* frame) {
     if (poll() != ErrorCode::Ok)
       frame->abort(abort_status);
     for (auto& item : frame->work) {
+      // Match cancellation's bounded safe-point admission: a rejection racing
+      // issue may leave already-accepted work, but the next lane is gated.
+      if (work_rejected.load(std::memory_order_acquire))
+        break;
       if (item.busy)
         continue;
       if (item.lane >= lanes) {
@@ -1244,7 +1324,8 @@ const Status& RunState::execute_block(Frame* frame) {
     const auto event = [&] {
       if (!frame->schedule.aborted() &&
           (delivery_error || cancellation.cancelled() ||
-           stop.token().cancelled()))
+           stop.token().cancelled() ||
+           work_rejected.load(std::memory_order_acquire)))
         return true;
       return std::any_of(
           frame->work.begin(), frame->work.end(), [&](const auto& item) {
@@ -1891,7 +1972,8 @@ Result<RunHandle> ExecutionContext::submit(
     run->metadata = reserved.take_value();
     core_internal::ResourceMetadataAccess::commit(run->metadata,
                                                   sizeof(RunState));
-    for (auto* status : {&run->abort_status, &run->block_status}) {
+    for (auto* status :
+         {&run->abort_status, &run->block_status, &run->admission_failure}) {
       status->message.reserve(PS_KERNEL_MESSAGE_CAPACITY_V8);
       core_internal::ResourceMetadataAccess::commit(
           run->metadata, status->message.capacity() + 1);
@@ -1919,6 +2001,7 @@ Result<RunHandle> ExecutionContext::submit(
     run->gpu_lanes = gpu_lanes;
     run->options = std::move(options);
     run->remaining_work = run->options.maximum_work;
+    run->remaining_stages = run->options.maximum_refinement_stages;
     run->cancellation = cancellation;
     run->initial = bound.take_value();
     run->input_identities = run->initial.identities;

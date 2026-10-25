@@ -79,6 +79,65 @@ struct ExactRatioWorkspace final {
     return true;
   }
 
+  static bool shift_bounded(const Integer& source, unsigned bits,
+                            Integer* output,
+                            const core_internal::WorkConsumer& consume) {
+    consume.check(Words);
+    output->words.fill(0);
+    consume.check(Words);
+    const auto highest = top(source);
+    if (highest < 0)
+      return true;
+    if (bits >= Words * 64 ||
+        static_cast<unsigned>(highest) >= Words * 64 - bits)
+      return false;
+    const auto whole = bits / 64, tail = bits % 64;
+    const auto count = static_cast<unsigned>(highest / 64 + 1);
+    consume.check(count + 1);
+    if (!tail) {
+      std::copy_n(source.words.begin(), count, output->words.begin() + whole);
+      return true;
+    }
+    output->words[whole] = source.words[0] << tail;
+    for (unsigned i = 1; i < count; ++i)
+      output->words[whole + i] =
+          (source.words[i] << tail) | (source.words[i - 1] >> (64 - tail));
+    if (whole + count < Words)
+      output->words[whole + count] = source.words[count - 1] >> (64 - tail);
+    return true;
+  }
+  // Opt-in fine-grained access for large FRQ exact arenas. Legacy callers
+  // retain their existing prepaid cost model and static pure helpers.
+  struct BoundedAccess {
+    ExactRatioWorkspace& workspace;
+    const core_internal::WorkConsumer& consume;
+    bool enabled;
+    void charge(std::uint64_t amount) const {
+      if (enabled)
+        consume.check(amount);
+    }
+    int top(const Integer& value) const {
+      charge(Words);
+      return ExactRatioWorkspace::top(value);
+    }
+    int compare(const Integer& a, const Integer& b) const {
+      charge(Words);
+      return workspace.compare(a, b);
+    }
+    void copy(Integer* output, const Integer& source) const {
+      charge(Words);
+      *output = source;
+    }
+    void subtract(Integer* output, const Integer& source) const {
+      charge(Words);
+      output->subtract(source);
+    }
+    bool shift(const Integer& source, unsigned bits, Integer* output) const {
+      if (!enabled)
+        return ExactRatioWorkspace::shift(source, bits, output);
+      return ExactRatioWorkspace::shift_bounded(source, bits, output, consume);
+    }
+  };
   void add_term(bool sign) {
     if (sign == negative) {
       numerator.add(term);
@@ -102,22 +161,27 @@ struct ExactRatioWorkspace final {
   }
   Result<std::uint64_t> round(bool narrow,
                               const core_internal::WorkConsumer& consume,
-                              int scale = -1074, bool approximate = false) {
+                              int scale = -1074, bool approximate = false,
+                              bool bounded_work = false) {
     using Answer = Result<std::uint64_t>;
     const auto capacity = [] {
       return Answer(Status{ErrorCode::ResourceExhausted,
                            {},
                            FailureReason::CapacityLimit});
     };
-    const auto& work = consume(512);
-    if (!work.ok())
-      return Answer(work);
-    const auto n_top = top(numerator), d_top = top(denominator);
+    BoundedAccess access{*this, consume, bounded_work};
+    if (!bounded_work) {
+      const auto& work = consume(512);
+      if (!work.ok())
+        return Answer(work);
+    }
+    const auto n_top = access.top(numerator), d_top = access.top(denominator);
     if (n_top < 0)
       return Answer(UINT64_C(0));
     // A power-of-two denominator needs only bit extraction and ties-to-even.
     // This is also the common finish path for exact sums, dots and prefixes.
     bool dyadic = true;
+    access.charge(Words);
     for (std::size_t i = 0; i < Words; ++i)
       if (denominator.words[i] != (i == static_cast<unsigned>(d_top) / 64
                                        ? UINT64_C(1) << (d_top % 64)
@@ -137,6 +201,7 @@ struct ExactRatioWorkspace final {
                ((numerator.words[index / 64] >> (index % 64)) & 1);
       };
       std::uint64_t significand = 0;
+      access.charge(fraction + 1);
       for (unsigned i = 0; i <= fraction; ++i)
         if (bit(shift_bits + static_cast<int>(i)))
           significand |= UINT64_C(1) << i;
@@ -144,6 +209,7 @@ struct ExactRatioWorkspace final {
       if (shift_bits > 1) {
         const auto bits = static_cast<unsigned>(shift_bits - 1);
         const auto whole = std::min<std::size_t>(bits / 64, Words);
+        access.charge(whole + 1);
         for (std::size_t i = 0; i < whole; ++i)
           sticky |= numerator.words[i] != 0;
         if (whole < Words && bits % 64)
@@ -203,43 +269,49 @@ struct ExactRatioWorkspace final {
     const int minimum = narrow ? -149 : -1074;
     int ratio_top = n_top - d_top;
     if (ratio_top >= 0) {
-      if (!shift(denominator, static_cast<unsigned>(ratio_top), &candidate))
+      if (!access.shift(denominator, static_cast<unsigned>(ratio_top),
+                        &candidate))
         return capacity();
-      if (compare(numerator, candidate) < 0)
+      if (access.compare(numerator, candidate) < 0)
         --ratio_top;
     } else {
-      if (!shift(numerator, static_cast<unsigned>(-ratio_top), &candidate))
+      if (!access.shift(numerator, static_cast<unsigned>(-ratio_top),
+                        &candidate))
         return capacity();
-      if (compare(candidate, denominator) < 0)
+      if (access.compare(candidate, denominator) < 0)
         --ratio_top;
     }
     int quantum =
         std::max(minimum, ratio_top + scale - static_cast<int>(fraction));
     const auto alignment = quantum - scale;
     if (alignment >= 0) {
-      if (!shift(denominator, static_cast<unsigned>(alignment), &shifted))
+      if (!access.shift(denominator, static_cast<unsigned>(alignment),
+                        &shifted))
         return capacity();
     } else {
-      if (!shift(numerator, static_cast<unsigned>(-alignment), &candidate))
+      if (!access.shift(numerator, static_cast<unsigned>(-alignment),
+                        &candidate))
         return capacity();
-      numerator = candidate;
-      shifted = denominator;
+      access.copy(&numerator, candidate);
+      access.copy(&shifted, denominator);
     }
     std::uint64_t significand = 0;
     for (unsigned i = fraction + 1; i; --i) {
-      const auto& work = consume(256);
-      if (!work.ok())
-        return Answer(work);
-      if (!shift(shifted, i - 1, &candidate))
+      if (!bounded_work) {
+        const auto& work = consume(256);
+        if (!work.ok())
+          return Answer(work);
+      }
+      if (!access.shift(shifted, i - 1, &candidate))
         return capacity();
-      if (compare(numerator, candidate) >= 0) {
-        numerator.subtract(candidate);
+      if (access.compare(numerator, candidate) >= 0) {
+        access.subtract(&numerator, candidate);
         significand |= UINT64_C(1) << (i - 1);
       }
     }
-    if (!shift(numerator, 1, &candidate))
+    if (!access.shift(numerator, 1, &candidate))
       return capacity();
-    const auto remainder_order = compare(candidate, shifted);
+    const auto remainder_order = access.compare(candidate, shifted);
     if (remainder_order > 0 || (!remainder_order && (significand & 1)))
       ++significand;
     if (significand == (UINT64_C(1) << (fraction + 1))) {

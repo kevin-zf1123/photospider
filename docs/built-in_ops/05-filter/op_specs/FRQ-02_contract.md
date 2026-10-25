@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: partially_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - FRQ-02A
@@ -37,14 +37,14 @@ All three members are registered by `register_frequency` in
 `plugins/ops/05-filter/frequency_operations.cpp`; transform execution is in
 `frequency_transform.cpp` and projection is in `frequency_local.cpp`.
 The public SDK is `photospider/ops/frequency.hpp`. The explicit grid parameter
-encoding and frozen-ABI H08 limitation are documented in
+encoding and typed CPU9 cumulative-budget contract are documented in
 [FRQ-01 runtime integration](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
 This family has CPU strict and target-gated Apple Silicon/x86-64 keys, no GPU.
 Runtime evidence is limited to the locally executed Apple CPU configurations;
-x86-64 execution has not been measured. Overall acceptance remains partial,
-including the known H08 root-work/refinement-stage implementation limitation.
-This does not weaken the mathematical, resource or ownership target or imply
-that unmeasured configurations have passed acceptance.
+x86-64 execution has not been measured. H08 arithmetic/limb and refinement-stage
+admission is implemented through explicit CPU ABI9 across tiles and nodes, with
+independent Run limits and shared Context-root accumulation. Old FRQ ABI8 Plans
+require recompilation. This does not imply acceptance of unmeasured platforms.
 
 `rfft2` and `irfft2` require `packing=r2c_x`, `index_order=unshifted`;
 `original_shape` contains the original spatial width. `project_hermitian`

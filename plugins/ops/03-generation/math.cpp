@@ -42,11 +42,9 @@ bool integer_sqrt_exact(const Exact::Integer& source, Exact::Integer* output,
   Exact::Integer root, remainder, trial;
   const unsigned pairs = static_cast<unsigned>(highest / 2 + 1);
   const unsigned words = (pairs + 65) / 64;
+  const auto checkpoint = [&](unsigned amount) { work.poll(amount); };
   for (int pair = static_cast<int>(pairs) - 1; pair >= 0; --pair) {
-    if ((pairs - static_cast<unsigned>(pair) - 1) % 32 == 0) {
-      work.poll(std::min(32U, static_cast<unsigned>(pair) + 1) *
-                (7 * words + 4));
-    }
+    checkpoint(4 * words + 4);
     shift_small(&remainder, 2, words);
     const auto bit = static_cast<unsigned>(2 * pair);
     remainder.words[0] |= (source.words[bit / 64] >> (bit % 64)) & 3;
@@ -54,6 +52,7 @@ bool integer_sqrt_exact(const Exact::Integer& source, Exact::Integer* output,
     std::copy_n(root.words.begin(), words, trial.words.begin());
     shift_small(&trial, 1, words);
     trial.words[0] |= 1;
+    checkpoint(words);
     int order = 0;
     for (unsigned j = words; j; --j) {
       if (remainder.words[j - 1] != trial.words[j - 1]) {
@@ -61,6 +60,7 @@ bool integer_sqrt_exact(const Exact::Integer& source, Exact::Integer* output,
         break;
       }
     }
+    checkpoint(2 * words);
     if (order >= 0) {
       std::uint64_t borrow = 0;
       for (unsigned j = 0; j < words; ++j) {
@@ -97,13 +97,12 @@ void root_endpoint(Directed& math, Directed::Number& output,
   // After j pairs, root needs j bits; the unreduced remainder needs j+2.
   // Keep the full source, but never scan the unused high half for each bit.
   const unsigned words = (pairs + 65) / 64;
+  const auto checkpoint = [&](unsigned amount) {
+    if (!math.work(amount))
+      check(math.status());
+  };
   for (int pair = static_cast<int>(pairs) - 1; pair >= 0; --pair) {
-    if ((pairs - static_cast<unsigned>(pair) - 1) % 32 == 0) {
-      const auto batch = std::min(32U, static_cast<unsigned>(pair) + 1);
-      if (!math.work(batch * (7 * words + 4))) {
-        return;
-      }
-    }
+    checkpoint(4 * words + 4);
     shift_small(&remainder, 2, words);
     const auto bit = static_cast<unsigned>(2 * pair);
     remainder.words[0] |= (source.words[bit / 64] >> (bit % 64)) & 3;
@@ -111,6 +110,7 @@ void root_endpoint(Directed& math, Directed::Number& output,
     std::copy_n(root.words.begin(), words, trial.words.begin());
     shift_small(&trial, 1, words);
     trial.words[0] |= 1;
+    checkpoint(words);
     int order = 0;
     for (unsigned j = words; j; --j) {
       if (remainder.words[j - 1] != trial.words[j - 1]) {
@@ -118,6 +118,7 @@ void root_endpoint(Directed& math, Directed::Number& output,
         break;
       }
     }
+    checkpoint(2 * words);
     if (order >= 0) {
       std::uint64_t borrow = 0;
       for (unsigned j = 0; j < words; ++j) {
@@ -143,14 +144,20 @@ void root_endpoint(Directed& math, Directed::Number& output,
 }
 }  // namespace
 void Math::enclose(Interval output, const Rational& value) {
-  if (!exact.active() || !d.active())
+  check(exact.status());
+  if (!d.active())
     return;
-  if (!Exact::finite(value) || Exact::zero(value)) {
-    exact.enclose(d, output, value);
+  const auto kind = classify(value);
+  if (kind == Exact::Classification::Zero) {
+    d.integer(output, 0);
     return;
   }
-  const int numerator_top = Exact::Workspace::top(value.n);
-  const int denominator_top = Exact::Workspace::top(value.d);
+  if (kind != Exact::Classification::FiniteNonzero) {
+    d.retry();
+    return;
+  }
+  const int numerator_top = kind.numerator_top;
+  const int denominator_top = kind.denominator_top;
   // Common path coefficients are integers or small rational ratios. Import
   // their signed numerator directly in Q_precision units, then use one-limb
   // directed division. This avoids normalized full-width long division while
@@ -192,7 +199,11 @@ void Math::enclose(Interval output, const Rational& value) {
     d.shift(output.high, source, shift, false);
     return;
   }
-  exact.enclose(d, output, value);
+  const int exponent = exact.normalized(d, output, value, &kind);
+  check(exact.status());
+  d.scale(output, output, exponent);
+  if (value.negative)
+    d.negate(output, output);
 }
 void Math::sqrt(Interval output, Interval input) {
   if (!d.active()) {
@@ -290,7 +301,7 @@ void Math::atan2(Interval output, const Rational& y, const Rational& x) {
     return;
   }
   Directed::Frame frame(d);
-  const bool yz = Exact::zero(y), xz = Exact::zero(x);
+  const bool yz = is_zero(y), xz = is_zero(x);
   if (yz && !x.negative) {
     d.integer(output, 0);
     return;
@@ -328,9 +339,9 @@ void Math::asin(Interval output, const Rational& input) {
   enclose(xx, x);
   enclose(yy, rest);
   sqrt(root, yy);
-  if (Exact::zero(x)) {
+  if (is_zero(x)) {
     d.integer(output, 0);
-  } else if (Exact::zero(rest)) {
+  } else if (is_zero(rest)) {
     d.constant(output, true);
     d.scale(output, output, -1);
   } else {
@@ -343,7 +354,10 @@ void Math::asin(Interval output, const Rational& input) {
 bool Math::rational_sqrt(const Rational& value, Rational* root) {
   check(exact.status());
   work.poll(Exact::kWords);
-  if (!Exact::finite(value) || (value.negative && !Exact::zero(value))) {
+  const auto kind = classify(value);
+  if (kind == Exact::Classification::Infinity ||
+      kind == Exact::Classification::NaN ||
+      (value.negative && kind != Exact::Classification::Zero)) {
     return false;
   }
   Rational result;
@@ -356,10 +370,10 @@ bool Math::rational_sqrt(const Rational& value, Rational* root) {
 }
 std::uint64_t Math::affine_sqrt(const Rational& bias, const Rational& factor,
                                 const Rational& radicand, bool narrow) {
-  if (Exact::zero(factor) || Exact::zero(radicand)) {
+  if (is_zero(factor) || is_zero(radicand)) {
     return rounded(bias, narrow);
   }
-  if (Exact::zero(bias)) {
+  if (is_zero(bias)) {
     const auto result = rounded_sqrt(mul(sq(factor), radicand), narrow);
     return result | (factor.negative ? UINT64_C(1) << (narrow ? 31 : 63) : 0);
   }
@@ -382,7 +396,7 @@ std::uint64_t Math::affine_sqrt(const Rational& bias, const Rational& factor,
 }
 std::uint64_t Math::tangent(const Rational& component,
                             const Rational& squared_norm, bool narrow) {
-  if (Exact::zero(component) || Exact::zero(squared_norm)) {
+  if (is_zero(component) || is_zero(squared_norm)) {
     return 0;
   }
   auto value = rounded_sqrt(div(sq(component), squared_norm), narrow);

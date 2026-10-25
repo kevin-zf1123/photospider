@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: partially_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - FRQ-05A
@@ -51,9 +51,10 @@ numerical distinctness/conjugacy-validation pass. `sigma_y/x` and `depth` retain
 the member's Float64 numerical premises. Int64 `order` is present only for
 Butterworth; `alpha` is not a response parameter.
 
-Overall acceptance retains the frozen-ABI H08 root-work/refinement-stage
-limitation documented by FRQ-01. Optional `max_work` is per invocation, not a
-node-across-tiles or Run accumulator. Mathematical targets remain unchanged.
+Typed CPU9 implements the [FRQ-01 cumulative-budget contract](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance),
+including actual limb work and refinement attempts across tiles and nodes.
+Optional `max_work` remains per invocation; it is separate from the Run ledger.
+Old FRQ ABI8 Plans require recompilation. Mathematical targets remain unchanged.
 
 ### Grid and Parameters
 This family produces only real-valued, even, full and unshifted responses, with Float64 real values, +0 imaginary values, and a FrequencyGrid/v1 response descriptor. Require positive H/W and explicit spacing_y/x. Define signed index n(k)=k for k≤floor(N/2), otherwise k−N; positive and negative Nyquist indices are equivalent. Compute fy=n(ky)/(H*dy), fx=n(kx)/(W*dx), and exact frequency radius r=sqrt(fx²+fy²). Do not silently reinterpret pixel units when applying cutoffs. Require cutoff>0; values above the maximum frequency are allowed and are not clipped.

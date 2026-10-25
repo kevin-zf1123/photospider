@@ -444,11 +444,13 @@ Status ResourceBudget::consume(ResourceWork work) const {
 bool ResourceBudget::try_consume(ResourceWork work, Status& failure) const {
   auto failed = [&](bool work_limit) {
     resource_internal::metadata_failure(*this, ErrorCode::ResourceExhausted);
-    failure = Status{
-        ErrorCode::ResourceExhausted,
-        work_limit ? "managed resource work exhausted"
-                   : "managed resource stages exhausted",
-        work_limit ? FailureReason::WorkLimit : FailureReason::StageLimit};
+    // Reuse caller-reserved message storage for allocation-free Run services.
+    failure.code = ErrorCode::ResourceExhausted;
+    failure.reason =
+        work_limit ? FailureReason::WorkLimit : FailureReason::StageLimit;
+    failure.detail = {};
+    failure.message.assign(work_limit ? "managed resource work exhausted"
+                                      : "managed resource stages exhausted");
     return false;
   };
   if (!work.stages)

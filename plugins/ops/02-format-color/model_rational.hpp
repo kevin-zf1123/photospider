@@ -26,6 +26,13 @@ class RationalMathStorage final {
   using Integer = numeric_ops::FixedInteger<kWords>;
   using Workspace = numeric_ops::ExactRatioWorkspace<kWords>;
   using Work = core_internal::WorkConsumer;
+  struct Classification final {
+    enum Kind { FiniteNonzero, Zero, Infinity, NaN };
+    Kind kind;
+    int numerator_top, denominator_top;
+    bool operator==(Kind other) const { return kind == other; }
+    bool operator!=(Kind other) const { return kind != other; }
+  };
   struct Rational final {
     Integer n, d;
     bool negative = false;
@@ -35,6 +42,19 @@ class RationalMathStorage final {
  private:
   Workspace rounding_;
   Work consume_;
+  bool meter_classification_ = false;
+  std::optional<Classification> operand_class(const Rational& value) const {
+    if (!active())
+      return {};
+    if (meter_classification_)
+      return classify(value);
+    const int dt = top(value.d), nt = top(value.n);
+    return Classification{
+        dt >= 0
+            ? (nt >= 0 ? Classification::FiniteNonzero : Classification::Zero)
+            : (nt >= 0 ? Classification::Infinity : Classification::NaN),
+        nt, dt};
+  }
   mutable ErrorCode failure_code_ = ErrorCode::Ok;
   mutable FailureReason failure_reason_ = FailureReason::None;
   static int top(const Integer& v) { return Workspace::top(v); }
@@ -49,8 +69,24 @@ class RationalMathStorage final {
     const int highest = top(v);
     return highest >= 0 && static_cast<unsigned>(highest) == trailing(v);
   }
+  std::optional<int> scan_top(const Integer& value) const {
+    if (!active() || (meter_classification_ && !work(kWords)))
+      return {};
+    return top(value);
+  }
+  std::optional<unsigned> scan_trailing(const Integer& value) const {
+    if (!active() || (meter_classification_ && !work(kWords)))
+      return {};
+    return trailing(value);
+  }
   int compare(const Integer& a, const Integer& b) const {
-    const int highest = std::max(top(a), top(b));
+    const auto at = scan_top(a);
+    if (!at)
+      return 0;
+    const auto bt = scan_top(b);
+    if (!bt)
+      return 0;
+    const int highest = std::max(*at, *bt);
     const unsigned count = static_cast<unsigned>((highest + 64) / 64);
     if (!work(count + 1))
       return 0;
@@ -74,25 +110,43 @@ class RationalMathStorage final {
   }
   Integer left(const Integer& v, unsigned bits) const {
     Integer result;
-    if (!work(kWords))
+    if (!active())
       return result;
-    if (!Workspace::shift(v, bits, &result))
-      capacity();
+    if (meter_classification_) {
+      try {
+        if (!Workspace::shift_bounded(v, bits, &result, consume_))
+          capacity();
+      } catch (const Status& failure) {
+        fail(failure.code, failure.reason);
+      }
+    } else {
+      if (!work(kWords))
+        return result;
+      if (!Workspace::shift(v, bits, &result))
+        capacity();
+    }
     return result;
   }
   Integer product(const Integer& a, const Integer& b) const {
     Integer result;
     if (!active())
       return result;
-    const auto status = numeric_ops::multiply_fixed(a, b, &result, consume_);
+    const auto status = numeric_ops::multiply_fixed(a, b, &result, consume_, 0,
+                                                    meter_classification_);
     if (!status.ok())
       fail(status.code, status.reason);
     return result;
   }
   Integer sum(Integer a, const Integer& b) const {
+    const auto at = scan_top(a);
+    if (!at)
+      return {};
+    const auto bt = scan_top(b);
+    if (!bt)
+      return {};
     if (!work(kWords))
       return {};
-    if (std::max(top(a), top(b)) + 1 >= static_cast<int>(kWords * 64)) {
+    if (std::max(*at, *bt) + 1 >= static_cast<int>(kWords * 64)) {
       capacity();
       return {};
     }
@@ -106,22 +160,26 @@ class RationalMathStorage final {
     return a;
   }
   std::pair<Integer, Integer> divmod(const Integer& a, const Integer& b) const {
-    if (!active())
+    const auto bt = scan_top(b);
+    if (!bt)
       return {};
-    if (top(b) < 0) {
+    if (*bt < 0) {
       capacity();
       return {};
     }
     Integer quotient, remainder = a;
-    if (one(b))
+    if (b.words[0] == 1 && *bt == 0)
       return {a, quotient};
-    const int bits = top(a) - top(b);
+    const auto at = scan_top(a);
+    if (!at)
+      return {};
+    const int bits = *at - *bt;
     if (bits < 0)
       return {quotient, remainder};
     auto shifted = left(b, static_cast<unsigned>(bits));
-    const auto words = static_cast<unsigned>((top(a) + 64) / 64);
+    const auto words = static_cast<unsigned>((*at + 64) / 64);
     for (int bit = bits; bit >= 0; --bit) {
-      if (!work(3 * words + 1))
+      if (!work((meter_classification_ ? words : 3 * words) + 1))
         return {};
       int order = 0;
       for (unsigned j = words; j; --j)
@@ -130,6 +188,8 @@ class RationalMathStorage final {
           break;
         }
       if (order >= 0) {
+        if (meter_classification_ && !work(words))
+          return {};
         std::uint64_t borrow = 0;
         for (unsigned j = 0; j < words; ++j) {
           const auto subtract =
@@ -142,6 +202,8 @@ class RationalMathStorage final {
         quotient.words[static_cast<unsigned>(bit) / 64] |= UINT64_C(1)
                                                            << (bit % 64);
       }
+      if (meter_classification_ && !work(words))
+        return {};
       for (unsigned j = 0; j < words; ++j)
         shifted.words[j] = (shifted.words[j] >> 1) |
                            (j + 1 < words ? shifted.words[j + 1] << 63 : 0);
@@ -189,20 +251,29 @@ class RationalMathStorage final {
       --*count;
   }
   Integer gcd(Integer a, Integer b) const {
-    if (!active())
+    const auto at = scan_top(a);
+    if (!at)
       return {};
-    unsigned a_count = static_cast<unsigned>((top(a) + 64) / 64);
-    unsigned b_count = static_cast<unsigned>((top(b) + 64) / 64);
+    const auto bt = scan_top(b);
+    if (!bt)
+      return {};
+    unsigned a_count = static_cast<unsigned>((*at + 64) / 64);
+    unsigned b_count = static_cast<unsigned>((*bt + 64) / 64);
     if (!a_count)
       return b;
     if (!b_count)
       return a;
-    const unsigned a_zeros = trailing(a), b_zeros = trailing(b);
+    const auto az = scan_trailing(a);
+    if (!az)
+      return {};
+    const auto bz = scan_trailing(b);
+    if (!bz)
+      return {};
+    const unsigned a_zeros = *az, b_zeros = *bz;
     const unsigned common = std::min(a_zeros, b_zeros);
     // A power-of-two operand makes the GCD a power of two immediately.
     // Dyadic arithmetic must not walk every bit of an odd numerator.
-    if (top(a) == static_cast<int>(a_zeros) ||
-        top(b) == static_cast<int>(b_zeros)) {
+    if (*at == static_cast<int>(a_zeros) || *bt == static_cast<int>(b_zeros)) {
       Integer result;
       result.words[common / 64] = UINT64_C(1) << (common % 64);
       if (!work(1))
@@ -241,40 +312,62 @@ class RationalMathStorage final {
         return left(a, common);
       if (order > 0) {
         subtract_active(&a, b, &a_count);
-        right_active(&a, trailing(a), &a_count);
+        const auto zeros = scan_trailing(a);
+        if (!zeros)
+          return {};
+        right_active(&a, *zeros, &a_count);
       } else {
         subtract_active(&b, a, &b_count);
-        right_active(&b, trailing(b), &b_count);
+        const auto zeros = scan_trailing(b);
+        if (!zeros)
+          return {};
+        right_active(&b, *zeros, &b_count);
       }
     }
   }
   Integer quotient(const Integer& a, const Integer& b) const {
-    if (!active())
+    const auto bt = scan_top(b);
+    if (!bt)
       return {};
-    if (one(b))
+    if (b.words[0] == 1 && *bt == 0)
       return a;
-    if (power_two(b)) {
+    const auto zeros = scan_trailing(b);
+    if (!zeros)
+      return {};
+    if (*bt >= 0 && static_cast<unsigned>(*bt) == *zeros) {
       auto result = a;
-      right(&result, trailing(b));
+      right(&result, *zeros);
       return result;
     }
     auto result = divmod(a, b);
-    if (top(result.second) >= 0)
+    const auto remainder_top = scan_top(result.second);
+    if (!remainder_top)
+      return {};
+    if (*remainder_top >= 0)
       fail(ErrorCode::Internal);
     return std::move(result.first);
   }
   void reduce(Rational* v) const {
-    if (!active() || !finite(*v))
+    const auto kind = operand_class(*v);
+    if (!kind || *kind == Classification::Infinity ||
+        *kind == Classification::NaN)
       return;
-    if (zero(*v)) {
+    if (*kind == Classification::Zero) {
+      if (meter_classification_ && !work(kWords))
+        return;
       v->d.words.fill(0);
       v->d.words[0] = 1;
       return;
     }
-    if (one(v->d))
+    if (v->d.words[0] == 1 && kind->denominator_top == 0)
       return;
-    if (power_two(v->d)) {
-      const unsigned bits = std::min(trailing(v->n), trailing(v->d));
+    if (meter_classification_ && !work(kWords))
+      return;
+    const unsigned denominator_zeros = trailing(v->d);
+    if (static_cast<unsigned>(kind->denominator_top) == denominator_zeros) {
+      if (meter_classification_ && !work(kWords))
+        return;
+      const unsigned bits = std::min(trailing(v->n), denominator_zeros);
       right(&v->n, bits);
       right(&v->d, bits);
       return;
@@ -323,6 +416,27 @@ class RationalMathStorage final {
   explicit RationalMathStorage(numeric_ops::SequenceProfile profile)
       : rounding_(profile) {}
   void bind(Work work) { consume_ = std::move(work); }
+  // Explicit instance opt-in leaves legacy consumers' work units unchanged.
+  void meter_classification(bool enabled) { meter_classification_ = enabled; }
+  // Each classification scan is precharged separately. A denied scan is not a
+  // numerical classification and must not be used as a Boolean predicate.
+  std::optional<Classification> classify(const Rational& value) const {
+    if (!work(kWords))
+      return {};
+    const int dt = top(value.d);
+    if (!work(kWords))
+      return {};
+    const int nt = top(value.n);
+    return Classification{
+        dt >= 0
+            ? (nt >= 0 ? Classification::FiniteNonzero : Classification::Zero)
+            : (nt >= 0 ? Classification::Infinity : Classification::NaN),
+        nt, dt};
+  }
+  // Uses this instance's explicit metering mode and returns reusable tops.
+  std::optional<Classification> classification(const Rational& value) const {
+    return operand_class(value);
+  }
   void reset() {
     failure_code_ = ErrorCode::Ok;
     failure_reason_ = FailureReason::None;
@@ -427,23 +541,28 @@ class RationalMathStorage final {
     return a;
   }
   Rational add(const Rational& a, const Rational& b) const {
-    if (!active())
+    const auto ak = operand_class(a);
+    if (!ak)
       return {};
-    if (nan(a) || nan(b))
+    const auto bk = operand_class(b);
+    if (!bk)
+      return {};
+    if (*ak == Classification::NaN || *bk == Classification::NaN)
       return invalid();
-    if (infinity(a) || infinity(b)) {
-      if (infinity(a) && infinity(b) && a.negative != b.negative)
+    if (*ak == Classification::Infinity || *bk == Classification::Infinity) {
+      if (*ak == Classification::Infinity && *bk == Classification::Infinity &&
+          a.negative != b.negative)
         return invalid();
-      return infinity(a) ? a : b;
+      return *ak == Classification::Infinity ? a : b;
     }
-    if (zero(a) && zero(b)) {
+    if (*ak == Classification::Zero && *bk == Classification::Zero) {
       auto result = integer(0);
       result.negative = a.negative && b.negative;
       return result;
     }
-    if (zero(a))
+    if (*ak == Classification::Zero)
       return b;
-    if (zero(b))
+    if (*bk == Classification::Zero)
       return a;
     const auto common = gcd(a.d, b.d);
     const auto ad = quotient(a.d, common), bd = quotient(b.d, common);
@@ -465,16 +584,21 @@ class RationalMathStorage final {
     return add(a, negate(b));
   }
   Rational multiply(const Rational& a, const Rational& b) const {
-    if (!active())
+    const auto ak = operand_class(a);
+    if (!ak)
       return {};
-    if (nan(a) || nan(b) || (zero(a) && infinity(b)) ||
-        (zero(b) && infinity(a)))
+    const auto bk = operand_class(b);
+    if (!bk)
+      return {};
+    if (*ak == Classification::NaN || *bk == Classification::NaN ||
+        (*ak == Classification::Zero && *bk == Classification::Infinity) ||
+        (*bk == Classification::Zero && *ak == Classification::Infinity))
       return invalid();
-    if (infinity(a) || infinity(b))
+    if (*ak == Classification::Infinity || *bk == Classification::Infinity)
       return inf(a.negative != b.negative);
     Rational result;
     result.negative = a.negative != b.negative;
-    if (zero(a) || zero(b))
+    if (*ak == Classification::Zero || *bk == Classification::Zero)
       return result;
     const auto g1 = gcd(a.n, b.d), g2 = gcd(b.n, a.d);
     result.n = product(quotient(a.n, g1), quotient(b.n, g2));
@@ -482,14 +606,19 @@ class RationalMathStorage final {
     return result;
   }
   Rational divide(const Rational& a, const Rational& b) const {
-    if (!active())
+    const auto ak = operand_class(a);
+    if (!ak)
       return {};
-    if (nan(a) || nan(b) || (zero(a) && zero(b)) ||
-        (infinity(a) && infinity(b)))
+    const auto bk = operand_class(b);
+    if (!bk)
+      return {};
+    if (*ak == Classification::NaN || *bk == Classification::NaN ||
+        (*ak == Classification::Zero && *bk == Classification::Zero) ||
+        (*ak == Classification::Infinity && *bk == Classification::Infinity))
       return invalid();
-    if (zero(b) || infinity(a))
+    if (*bk == Classification::Zero || *ak == Classification::Infinity)
       return inf(a.negative != b.negative);
-    if (infinity(b)) {
+    if (*bk == Classification::Infinity) {
       auto result = integer(0);
       result.negative = a.negative != b.negative;
       return result;
@@ -503,12 +632,21 @@ class RationalMathStorage final {
   Rational cube(const Rational& a) const { return multiply(multiply(a, a), a); }
   // NaNs are unordered. Every caller handles them before asking for ordering.
   int order(const Rational& a, const Rational& b) const {
-    if (!active())
+    const auto ak = operand_class(a);
+    if (!ak)
       return 0;
-    if (a.negative != b.negative && !(zero(a) && zero(b)))
+    const auto bk = operand_class(b);
+    if (!bk)
+      return 0;
+    if (a.negative != b.negative &&
+        !(*ak == Classification::Zero && *bk == Classification::Zero))
       return a.negative ? -1 : 1;
-    if (infinity(a) || infinity(b)) {
-      const int result = infinity(a) == infinity(b) ? 0 : infinity(a) ? 1 : -1;
+    if (*ak == Classification::Infinity || *bk == Classification::Infinity) {
+      const int result =
+          (*ak == Classification::Infinity) == (*bk == Classification::Infinity)
+              ? 0
+          : *ak == Classification::Infinity ? 1
+                                            : -1;
       return a.negative ? -result : result;
     }
     const auto common = gcd(a.d, b.d);
@@ -517,14 +655,20 @@ class RationalMathStorage final {
     return a.negative ? -result : result;
   }
   Rational modulo(const Rational& a, unsigned period) const {
-    if (!active())
+    const auto kind = operand_class(a);
+    if (!kind)
       return {};
-    if (!finite(a))
+    if (*kind == Classification::Infinity || *kind == Classification::NaN)
       return invalid();
     const auto divisor = product(a.d, integer(period).n);
     auto remainder = divmod(a.n, divisor).second;
-    if (a.negative && top(remainder) >= 0)
-      remainder = difference(divisor, remainder);
+    if (a.negative) {
+      const auto highest = scan_top(remainder);
+      if (!highest)
+        return {};
+      if (*highest >= 0)
+        remainder = difference(divisor, remainder);
+    }
     Rational result;
     result.n = std::move(remainder);
     result.d = a.d;
@@ -532,14 +676,19 @@ class RationalMathStorage final {
     return result;
   }
   unsigned small_floor(const Rational& a) const {
-    if (!active())
+    const auto kind = operand_class(a);
+    if (!kind)
       return 0;
-    if (!finite(a) || a.negative) {
+    if (*kind == Classification::Infinity || *kind == Classification::NaN ||
+        a.negative) {
       capacity();
       return 0;
     }
     const auto result = divmod(a.n, a.d).first;
-    if (top(result) > 31) {
+    const auto highest = scan_top(result);
+    if (!highest)
+      return 0;
+    if (*highest > 31) {
       capacity();
       return 0;
     }
@@ -560,21 +709,35 @@ class RationalMathStorage final {
     result.negative = a.negative;
     return result;
   }
-  std::uint64_t rounded(const Rational& a, bool narrow) {
-    if (!active())
+  std::uint64_t rounded(const Rational& a, bool narrow,
+                        bool preserve_zero = true) {
+    const auto kind = operand_class(a);
+    if (!kind)
       return 0;
     const auto sign = UINT64_C(1) << (narrow ? 31 : 63);
-    if (nan(a))
+    if (*kind == Classification::NaN)
       return narrow ? UINT64_C(0x7fc00000) : UINT64_C(0x7ff8000000000000);
-    if (infinity(a))
+    if (*kind == Classification::Infinity)
       return (narrow ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000)) |
              (a.negative ? sign : 0);
-    if (zero(a))
-      return a.negative ? sign : 0;
+    if (*kind == Classification::Zero)
+      return preserve_zero && a.negative ? sign : 0;
+    if (meter_classification_ && !work(kWords))
+      return 0;
     rounding_.numerator = a.n;
+    if (meter_classification_ && !work(kWords))
+      return 0;
     rounding_.denominator = a.d;
     rounding_.negative = a.negative;
-    auto result = rounding_.round(narrow, consume_, 0);
+    auto result = [&]() -> Result<std::uint64_t> {
+      if (!meter_classification_)
+        return rounding_.round(narrow, consume_, 0);
+      try {
+        return rounding_.round(narrow, consume_, 0, false, true);
+      } catch (const Status& failure) {
+        return Result<std::uint64_t>(failure);
+      }
+    }();
     if (!result.ok()) {
       fail(result.status().code, result.status().reason);
       return 0;
@@ -582,17 +745,33 @@ class RationalMathStorage final {
     return result.value();
   }
   std::uint64_t rounded_sqrt(const Rational& a, bool narrow) {
-    if (!active())
+    const auto kind = operand_class(a);
+    if (!kind)
       return 0;
-    if (nan(a) || (a.negative && !zero(a)))
-      return rounded(invalid(), narrow);
-    if (infinity(a) || zero(a))
-      return rounded(absolute(a), narrow);
+    if (*kind == Classification::NaN ||
+        (a.negative && *kind != Classification::Zero))
+      return narrow ? UINT64_C(0x7fc00000) : UINT64_C(0x7ff8000000000000);
+    if (*kind == Classification::Infinity)
+      return narrow ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+    if (*kind == Classification::Zero)
+      return 0;
+    if (meter_classification_ && !work(kWords))
+      return 0;
     rounding_.numerator = a.n;
+    if (meter_classification_ && !work(kWords))
+      return 0;
     rounding_.denominator = a.d;
     rounding_.negative = false;
-    auto result =
-        numeric_ops::round_sqrt_ratio(&rounding_, narrow, 0, consume_);
+    auto result = [&]() -> Result<std::uint64_t> {
+      if (!meter_classification_)
+        return numeric_ops::round_sqrt_ratio(&rounding_, narrow, 0, consume_);
+      try {
+        return numeric_ops::round_sqrt_ratio(&rounding_, narrow, 0, consume_,
+                                             true);
+      } catch (const Status& failure) {
+        return Result<std::uint64_t>(failure);
+      }
+    }();
     if (!result.ok()) {
       fail(result.status().code, result.status().reason);
       return 0;
@@ -604,7 +783,8 @@ class RationalMathStorage final {
   // precision and prevents large rational limbs from overflowing interval math.
   int normalized(numeric_ops::CheckedDirectedInterval& math,
                  numeric_ops::CheckedDirectedInterval::Interval out,
-                 const Rational& a) const {
+                 const Rational& a,
+                 const Classification* known = nullptr) const {
     if (!active())
       return 0;
     static_assert(kWords >= numeric_ops::CheckedDirectedInterval::kWords);
@@ -612,11 +792,16 @@ class RationalMathStorage final {
     Frame frame(math);
     auto n = math.interval(), d = math.interval();
     const auto import = [&](auto output, const Integer& value, int highest) {
+      if (meter_classification_ && !work(kWords))
+        return;
       auto shifted = value;
       const int bits = static_cast<int>(math.precision) - highest;
       bool discarded = false;
       if (bits < 0) {
-        discarded = trailing(value) < static_cast<unsigned>(-bits);
+        const auto zeros = scan_trailing(value);
+        if (!zeros)
+          return;
+        discarded = *zeros < static_cast<unsigned>(-bits);
         right(&shifted, static_cast<unsigned>(-bits));
       } else {
         shifted = left(value, static_cast<unsigned>(bits));
@@ -624,12 +809,18 @@ class RationalMathStorage final {
       if (!active())
         return;
       math.clear(output.low);
+      if (meter_classification_ &&
+          !work(kWords - numeric_ops::CheckedDirectedInterval::kWords))
+        return;
       for (unsigned j = numeric_ops::CheckedDirectedInterval::kWords;
            j < kWords; ++j)
         if (shifted.words[j]) {
           capacity();
           return;
         }
+      if (meter_classification_ &&
+          !work(numeric_ops::CheckedDirectedInterval::kWords))
+        return;
       std::copy_n(shifted.words.begin(),
                   numeric_ops::CheckedDirectedInterval::kWords,
                   output.low.magnitude.words.begin());
@@ -637,7 +828,11 @@ class RationalMathStorage final {
       if (discarded)
         math.increment(output.high.magnitude);
     };
-    const int nt = top(a.n), dt = top(a.d);
+    const auto kind =
+        known ? std::optional<Classification>(*known) : operand_class(a);
+    if (!kind)
+      return 0;
+    const int nt = kind->numerator_top, dt = kind->denominator_top;
     if (nt < 0 || dt < 0) {
       capacity();
       return 0;
@@ -654,17 +849,18 @@ class RationalMathStorage final {
   void enclose(numeric_ops::CheckedDirectedInterval& math,
                numeric_ops::CheckedDirectedInterval::Interval out,
                const Rational& a) const {
-    if (!active())
+    const auto kind = operand_class(a);
+    if (!kind)
       return;
-    if (!finite(a)) {
+    if (*kind == Classification::Infinity || *kind == Classification::NaN) {
       math.retry();
       return;
     }
-    if (zero(a)) {
+    if (*kind == Classification::Zero) {
       math.integer(out, 0);
       return;
     }
-    const int exponent = normalized(math, out, a);
+    const int exponent = normalized(math, out, a, &*kind);
     if (!active())
       return;
     math.scale(out, out, exponent);

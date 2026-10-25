@@ -70,7 +70,14 @@ struct ExecutionOptions final {
   /** @brief Every block entry consumes one activation, including empty loops.
    */
   std::uint64_t maximum_block_activations = 1048576;
+  /** @brief Run-local coordinator plus opted-in v9 arithmetic/limb work.
+   * Shared Context ResourceLimits also bound cumulative work across Runs.
+   */
   std::uint64_t maximum_work = 268435456;
+  /** @brief Run-local v9 refinement attempts. Zero permits no refinements.
+   * Legacy v8 kernels do not expose arithmetic/refinement admission.
+   */
+  std::uint64_t maximum_refinement_stages = UINT64_MAX;
   /** @brief Maximum retained task records and call records, separately.
    * Zero disables detailed tracing and native timestamp queries. Both arrays
    * are admitted and allocated before starting the Run. Excess records are
@@ -184,6 +191,10 @@ struct ExecutionDiagnostics final {
   std::optional<ExecutionDrainTiming> abort_drain;
   std::uint64_t activations = 0, submitted_tasks = 0, completed_tasks = 0;
   std::uint64_t retired_calls = 0;
+  /** @brief Admitted coordinator/v9 work and v9 refinement stages in this Run.
+   * Legacy v8 numerical work is not observable. Failed admissions add nothing.
+   */
+  ResourceWork issued_work;
   std::uint32_t peak_active_tasks = 0;
   /** @brief Successful output-tile allocations, including later rollback.
    * Excludes scratch, commands, borrowed inputs and Result envelope aliases.

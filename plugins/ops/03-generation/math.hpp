@@ -29,7 +29,10 @@ class Math final {
   explicit Math(const Work& consumer, std::uint64_t refinements = 4096)
       : work(consumer), max_refinements(refinements) {
     exact.bind(consumer);
+    exact.meter_classification(consumer.budgeted());
     d.consume = core_internal::WorkConsumer(consumer);
+    // Directed products retain row admission but poll within long limb rows.
+    d.product_checkpoint_words = consumer.budgeted() ? 63 : 0;
   }
   Rational value(double v) const { return exact.binary(bits(v)); }
   Rational input(const Reader& reader, unsigned port, unsigned field,
@@ -78,13 +81,18 @@ class Math final {
     return mul(mul(sq(x), x), add(mul(x, sub(scale(x, 6), exact.integer(15))),
                                   exact.integer(10)));
   }
+  Exact::Classification classify(const Rational& value) const {
+    const auto kind = exact.classification(value);
+    check(exact.status());
+    require(kind.has_value(), "missing arithmetic classification");
+    return *kind;
+  }
+  bool is_zero(const Rational& value) const {
+    return classify(value) == Exact::Classification::Zero;
+  }
   std::uint64_t rounded(const Rational& value, bool narrow,
                         bool preserve_zero = false) {
-    auto v = value;
-    if (!preserve_zero && Exact::zero(v)) {
-      v.negative = false;
-    }
-    const auto result = exact.rounded(v, narrow);
+    const auto result = exact.rounded(value, narrow, preserve_zero);
     check(exact.status());
     return result;
   }
@@ -109,7 +117,7 @@ class Math final {
     for (unsigned precision = 128, attempt = 0;
          precision <= 4096 && attempt < max_refinements;
          precision *= 2, ++attempt) {
-      work.poll();
+      check(work.stage());
       d.reset();
       d.precision = precision;
       auto result = d.interval();

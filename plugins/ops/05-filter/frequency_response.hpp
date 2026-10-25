@@ -40,7 +40,7 @@ struct ResponseAxes final {
             m.scale(m.mul(m.value(center.first), m.value(s.grid.dy)), 2);
         const auto cx =
             m.scale(m.mul(m.value(center.second), m.value(s.grid.dx)), 2);
-        if (Exact::zero(e.modulo(cy, 1)) && Exact::zero(e.modulo(cx, 1)))
+        if (m.is_zero(e.modulo(cy, 1)) && m.is_zero(e.modulo(cx, 1)))
           active[term] = 0;
         check(e.status());
       }

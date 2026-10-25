@@ -7,9 +7,10 @@
 
 namespace ps::tools::psx {
 Invocation parse_options(int argc, char** argv, bool* json_diagnostics) {
-  auto parsed = parse_arguments(
-      argc, argv, json_diagnostics, {},
-      {"--bindings", "--threads", "--parallelism", "--max-live-bytes"});
+  auto parsed =
+      parse_arguments(argc, argv, json_diagnostics, {},
+                      {"--bindings", "--threads", "--parallelism",
+                       "--max-live-bytes", "--max-work", "--max-stages"});
   Invocation o;
   static_cast<CommonOptions&>(o) = std::move(parsed.common);
   require_input(
@@ -27,6 +28,15 @@ Invocation parse_options(int argc, char** argv, bool* json_diagnostics) {
         unsigned_number(o.get("--max-live-bytes"), "--max-live-bytes");
   if (!o.context.maximum_live_bytes)
     throw ToolError("--max-live-bytes must be positive", 2);
+  if (o.has("--max-work")) {
+    o.execution.maximum_work =
+        unsigned_number(o.get("--max-work"), "--max-work");
+    if (!o.execution.maximum_work)
+      throw ToolError("--max-work must be positive", 2);
+  }
+  if (o.has("--max-stages"))
+    o.execution.maximum_refinement_stages =
+        unsigned_number(o.get("--max-stages"), "--max-stages");
   if (o.has("--outputs"))
     output_names(o.get("--outputs"));
   return o;

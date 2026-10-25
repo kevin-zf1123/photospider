@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: partially_implemented
+implementation_status: implemented
 parent_id: FRQ-05
 function: band_frequency_response
 proposed_operation_keys:
@@ -71,7 +71,7 @@ Reproduction steps and proof levels are in [oracle README](../../../../oracle/op
 
 ## Backend and Registration Status
 
-The listed keys are registered by `register_frequency` in `plugins/ops/05-filter/frequency_operations.cpp`. `frequency_local.cpp` and `frequency_fast.hpp` certify the complete difference/complement before RN64, retaining exact ideal cutoff decisions. CPU strict and target-gated Apple Silicon/x86-64 profiles exist; local evidence covers Apple CPU only, with no GPU backend. Overall acceptance retains the family's frozen-ABI H08 root-work/refinement-stage limitation. Accelerated variants must satisfy NUM’s final FP32-scaled four-ULP bound and fallback rules. Do not accumulate the error budget across taps, axes, stages, or iterations. Approximation may not change exact decisions, thresholds, ordering, boundaries, copy behavior, or output support.
+The listed keys are registered by `register_frequency` in `plugins/ops/05-filter/frequency_operations.cpp`. `frequency_local.cpp` and `frequency_fast.hpp` certify the complete difference/complement before RN64, retaining exact ideal cutoff decisions. CPU strict and target-gated Apple Silicon/x86-64 profiles exist; local evidence covers Apple CPU only, with no GPU backend. Typed CPU9 supplies the family's H08 cumulative arithmetic/limb and refinement-stage admission; old FRQ ABI8 Plans require recompilation. Accelerated variants must satisfy NUM’s final FP32-scaled four-ULP bound and fallback rules. Do not accumulate the error budget across taps, axes, stages, or iterations. Approximation may not change exact decisions, thresholds, ordering, boundaries, copy behavior, or output support.
 
 Float64 accelerated variants retain Float64 inputs, outputs, and exponent range; they do not convert through Float32. Float32 inputs outside the supported scale range use the NUM strict fallback.
 

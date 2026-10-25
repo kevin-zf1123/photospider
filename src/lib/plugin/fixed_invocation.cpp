@@ -132,8 +132,13 @@ struct PreparedKernel::State final {
   // the operation-defined release function has finished.
   std::shared_ptr<const void> owners;
   ps_prepared_kernel_v8 kernel{};
+  ps_prepared_kernel_v9 work_kernel{};
   bool adopted = false;
   ~State() noexcept {
+    if (adopted && work_kernel.release) {
+      core_internal::CallbackEnvironment environment;
+      work_kernel.release(work_kernel.context);
+    }
     if (adopted && kernel.release) {
       core_internal::CallbackEnvironment environment;
       kernel.release(kernel.context);
@@ -167,13 +172,86 @@ Result<PreparedKernel> PreparedKernel::adopt(ps_prepared_kernel_v8 kernel,
     return Result<PreparedKernel>(Status{ErrorCode::ResourceExhausted, {}});
   }
 }
+Result<PreparedKernel> PreparedKernel::adopt(ps_prepared_kernel_v9 kernel,
+                                             std::shared_ptr<const void> owners,
+                                             const ResourceBudget& budget) {
+  if (kernel.struct_size != sizeof(kernel) ||
+      kernel.abi_version != PS_FIXED_INVOCATION_ABI_VERSION_9 ||
+      !kernel.invoke_cpu || (kernel.context && !kernel.release))
+    return Result<PreparedKernel>(
+        Status{ErrorCode::InvalidArgument, "invalid prepared kernel v9 ABI"});
+  try {
+    auto metadata = budget.reserve(
+        ResourceCapacity::host(sizeof(State) + 64, sizeof(State) + 64));
+    if (!metadata.ok())
+      return Result<PreparedKernel>(metadata.status());
+    auto state = std::make_shared<State>();
+    state->metadata = metadata.take_value();
+    core_internal::ResourceMetadataAccess::commit(state->metadata,
+                                                  sizeof(State));
+    state->owners = std::move(owners);
+    state->work_kernel = kernel;
+    state->adopted = true;
+    return Result<PreparedKernel>(PreparedKernel(std::move(state)));
+  } catch (const std::bad_alloc&) {
+    return Result<PreparedKernel>(Status{ErrorCode::ResourceExhausted, {}});
+  }
+}
+bool PreparedKernel::uses_work_v9() const noexcept {
+  return state_ && state_->work_kernel.invoke_cpu;
+}
+void PreparedKernel::bind(ps_kernel_invocation_v9* invocation) const noexcept {
+  invocation->struct_size = sizeof(*invocation);
+  invocation->abi_version = PS_FIXED_INVOCATION_ABI_VERSION_9;
+  bind(&invocation->views);
+  if (uses_work_v9())
+    invocation->views.prepared_context = state_->work_kernel.context;
+}
+ps_kernel_status_v8 PreparedKernel::invoke(
+    const ps_kernel_invocation_v9& invocation) const noexcept {
+  if (invocation.struct_size != sizeof(invocation) ||
+      invocation.abi_version != PS_FIXED_INVOCATION_ABI_VERSION_9 ||
+      invocation.views.struct_size != sizeof(invocation.views) ||
+      invocation.views.abi_version != PS_FIXED_INVOCATION_ABI_VERSION_8)
+    return kernel_failure(ErrorCode::InvalidArgument,
+                          "invalid invocation v9 ABI",
+                          FailureReason::MalformedEnvelope);
+  if (!uses_work_v9())
+    return invoke(invocation.views);
+  if (!invocation.work.consume)
+    return kernel_failure(ErrorCode::InvalidArgument,
+                          "missing Run work service");
+  core_internal::CallbackEnvironment environment;
+  if (!environment.active())
+    return kernel_failure(ErrorCode::OperationFailed,
+                          "cannot save floating environment");
+  auto status = kernel_failure(ErrorCode::OperationFailed,
+                               "kernel did not report status");
+  try {
+    state_->work_kernel.invoke_cpu(&invocation, &status);
+  } catch (const std::bad_alloc&) {
+    return kernel_failure(ErrorCode::ResourceExhausted,
+                          "kernel allocation failed");
+  } catch (const std::exception& error) {
+    return kernel_failure(ErrorCode::OperationFailed, error.what(),
+                          FailureReason::HostException);
+  } catch (...) {
+    return kernel_failure(ErrorCode::OperationFailed,
+                          "v9 kernel threw an exception",
+                          FailureReason::HostException);
+  }
+  return status;
+}
 bool PreparedKernel::supports(physical::Backend backend) const noexcept {
   return state_ &&
-         ((backend == physical::Backend::Cpu && state_->kernel.invoke_cpu) ||
+         ((backend == physical::Backend::Cpu &&
+           (state_->kernel.invoke_cpu || state_->work_kernel.invoke_cpu)) ||
           (backend == physical::Backend::Gpu && state_->kernel.submit_gpu));
 }
 const void* PreparedKernel::context() const noexcept {
-  return state_ ? state_->kernel.context : nullptr;
+  return !state_          ? nullptr
+         : uses_work_v9() ? state_->work_kernel.context
+                          : state_->kernel.context;
 }
 void PreparedKernel::bind(ps_kernel_invocation_v8* invocation) const noexcept {
   invocation->struct_size = sizeof(*invocation);
@@ -182,7 +260,11 @@ void PreparedKernel::bind(ps_kernel_invocation_v8* invocation) const noexcept {
 }
 ps_kernel_status_v8 PreparedKernel::invoke(
     const ps_kernel_invocation_v8& invocation) const noexcept {
-  if (!supports(physical::Backend::Cpu))
+  if (uses_work_v9())
+    return kernel_failure(ErrorCode::InvalidArgument,
+                          "v9 preparation requires a v9 invocation",
+                          FailureReason::MalformedEnvelope);
+  if (!state_ || !state_->kernel.invoke_cpu)
     return kernel_failure(ErrorCode::BackendUnavailable,
                           "CPU kernel unavailable");
   core_internal::CallbackEnvironment environment;
