@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -51,6 +53,7 @@ struct Grid {
   explicit Grid(const Parameters&);
   std::vector<std::uint64_t> stored_shape() const;
 };
+struct TransformTables;
 struct Frequency final : Program {
   Kind kind;
   Profile profile;
@@ -67,6 +70,10 @@ struct Frequency final : Program {
   std::int64_t order = 1;
   std::vector<std::pair<double, double>> centers;
   Region selected;
+  // Created only for the prepared-kernel copy, never static operation state.
+  std::shared_ptr<TransformTables> tables;
+  // Private staged finalization consumes a prefilled certified Ball plane.
+  bool staged_input = false;
   Frequency(Kind, Profile, const std::vector<OperationMetadata>&,
             const Parameters&);
   bool transform() const { return kind <= Kind::Irfft; }
@@ -76,6 +83,12 @@ struct Frequency final : Program {
     const auto w = grid.shape[grid.xa];
     return (kind == Kind::Rfft || kind == Kind::Irfft) && w % 2 == 0 ? w / 2
                                                                      : w;
+  }
+  std::uint64_t column_count() const {
+    const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa];
+    return h > 1 && std::max(h, w) >= 1024 && !bluestein_size(h)
+               ? std::min(UINT64_C(8), transform_width())
+               : 0;
   }
   Region plane_region(const Region&) const;
   std::vector<ReadRegion> support(unsigned, const Region&) const override;

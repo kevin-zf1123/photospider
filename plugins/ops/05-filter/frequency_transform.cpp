@@ -1,16 +1,43 @@
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <numeric>
+#include <set>
 #include <tuple>
 #include <utility>
 #include <vector>
 
 #include "05-filter/frequency.hpp"
+#include "05-filter/frequency_dd.hpp"
 #include "05-filter/frequency_direct.hpp"
+#include "05-filter/frequency_work.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps::plugin_internal::frequency {
+struct TransformComplex {
+  Ball re, im;
+};
+// Allocators are captured under preparation's Context ResourceAllocationScope.
+// Entries own only dimension-derived constants. Published vectors never change
+// or disappear until the last prepared-kernel owner releases this object.
+struct TransformTables {
+  using Roots =
+      std::vector<TransformComplex, ResourceAllocator<TransformComplex>>;
+  using Indices = std::vector<std::uint64_t, ResourceAllocator<std::uint64_t>>;
+  using RootKey = std::tuple<std::uint64_t, std::uint64_t, bool>;
+  template <class Key, class Value>
+  using Map = std::map<Key, Value, std::less<Key>,
+                       ResourceAllocator<std::pair<const Key, Value>>>;
+  std::mutex mutex;
+  ResourceAllocator<TransformComplex> root_allocator;
+  ResourceAllocator<std::uint64_t> index_allocator;
+  Map<RootKey, Roots> roots;
+  Map<std::uint64_t, Indices> indices;
+};
 namespace {
+using Complex = TransformComplex;
 using Address = std::tuple<unsigned, unsigned, TileIndex>;
 std::vector<std::uint64_t> key_of(const Region& r) {
   std::vector<std::uint64_t> key;
@@ -23,9 +50,6 @@ std::vector<std::uint64_t> key_of(const Region& r) {
 bool power2(std::uint64_t n) {
   return (n & (n - 1)) == 0;
 }
-struct Complex {
-  Ball re, im;
-};
 Complex add(Complex a, Complex b) {
   return {a.re + b.re, a.im + b.im};
 }
@@ -35,6 +59,30 @@ Complex minus(Complex a, Complex b) {
 Complex product(Complex a, Complex b) {
   return {dd_product(a.re, b.re) + (-dd_product(a.im, b.im)),
           dd_product(a.re, b.im) + dd_product(a.im, b.re)};
+}
+struct BallPair {
+  Ball sum, difference;
+};
+BallPair paired_ball(Ball a, Ball b) {
+  if (!a.finite() || !b.finite())
+    return {Ball::bad(), Ball::bad()};
+  const auto incoming = Ball::up(a.error + b.error);
+  const auto combine = [&](double hi, double lo) {
+    const auto s = Ball::two_sum(a.hi, hi);
+    const auto t = Ball::two_sum(a.lo, lo);
+    const auto v = Ball::two_sum(s.second, t.first);
+    const auto r = Ball::two_sum(s.first, v.first);
+    const auto local = Ball::up(std::abs(t.second) + std::abs(v.second));
+    return Ball{r.first, r.second, Ball::up(incoming + local)};
+  };
+  return {combine(b.hi, b.lo), combine(-b.hi, -b.lo)};
+}
+struct ComplexPair {
+  Complex sum, difference;
+};
+ComplexPair paired_complex(Complex a, Complex b) {
+  const auto re = paired_ball(a.re, b.re), im = paired_ball(a.im, b.im);
+  return {{re.sum, im.sum}, {re.difference, im.difference}};
 }
 Ball root_component(Math& m, std::uint64_t k, std::uint64_t n, bool imaginary,
                     bool inverse) {
@@ -70,8 +118,8 @@ Ball root_component(Math& m, std::uint64_t k, std::uint64_t n, bool imaginary,
       number(m.certify(false, [&](Interval out) { expression(out, hi); }));
   return {hi, lo, numeric_ops::numeric_up(std::abs(lo) * 0x1p-52 + 0x1p-1074)};
 }
-void root_table(Math& math, Complex* output, std::uint64_t n,
-                std::uint64_t count, bool inverse, const Fuel& fuel) {
+void root_table_uncached(Math& math, Complex* output, std::uint64_t n,
+                         std::uint64_t count, bool inverse, const Fuel& fuel) {
   if (!count)
     return;
   if (n <= 4 || 12 % n == 0) {
@@ -95,20 +143,91 @@ void root_table(Math& math, Complex* output, std::uint64_t n,
     new (output + j) Complex{current};
   }
 }
-void fft_line(Complex* data, std::uint64_t n, std::uint64_t stride,
-              const Complex* roots, std::uint64_t root_size, const Fuel& fuel) {
+void root_table(Math& math, Complex* output, std::uint64_t n,
+                std::uint64_t count, bool inverse, const Fuel& fuel,
+                TransformTables* tables) {
+  const auto key = std::make_tuple(n, count, inverse);
+  const TransformTables::Roots* cached = nullptr;
+  if (tables) {
+    std::lock_guard<std::mutex> lock(tables->mutex);
+    const auto found = tables->roots.find(key);
+    if (found != tables->roots.end())
+      cached = &found->second;
+  }
+  if (cached) {
+    const TransformBlock copy{fuel.work, count};
+    for (std::uint64_t j = 0; j < count; ++j) {
+      copy.poll();
+      new (output + j) Complex{(*cached)[j]};
+    }
+    return;
+  }
+  root_table_uncached(math, output, n, count, inverse, fuel);
+  check(math.exact.status());
+  if (tables) {
+    TransformTables::Roots values(tables->root_allocator);
+    values.reserve(count);
+    const TransformBlock copy{fuel.work, count};
+    for (std::uint64_t j = 0; j < count; ++j) {
+      copy.poll();
+      values.push_back(output[j]);
+    }
+    check(fuel.work(0));
+    // Concurrent misses may build private complete tables; only one is
+    // published. Duplicate leases retire without changing the winning entry.
+    std::lock_guard<std::mutex> lock(tables->mutex);
+    tables->roots.try_emplace(key, std::move(values));
+  }
+}
+const std::uint64_t* permutation(std::uint64_t n, const Fuel& fuel,
+                                 TransformTables* tables) {
+  if (!tables)
+    return nullptr;
+  {
+    std::lock_guard<std::mutex> lock(tables->mutex);
+    const auto found = tables->indices.find(n);
+    if (found != tables->indices.end())
+      return found->second.data();
+  }
+  TransformTables::Indices values(tables->index_allocator);
+  values.reserve(n);
+  const TransformBlock init{fuel.work, n};
+  init.poll();
+  values.push_back(0);
   for (std::uint64_t i = 1, j = 0; i < n; ++i) {
-    fuel.poll();
+    init.poll();
     auto bit = n >> 1;
     for (; j & bit; bit >>= 1)
       j ^= bit;
     j ^= bit;
+    values.push_back(j);
+  }
+  check(fuel.work(0));
+  std::lock_guard<std::mutex> lock(tables->mutex);
+  return tables->indices.try_emplace(n, std::move(values)).first->second.data();
+}
+void fft_line(Complex* data, std::uint64_t n, std::uint64_t stride,
+              const Complex* roots, std::uint64_t root_size, const Fuel& input,
+              TransformTables* tables,
+              const std::uint64_t* supplied = nullptr) {
+  const auto* indices = supplied ? supplied : permutation(n, input, tables);
+  const TransformBlock fuel{input.work, fft_work(n)};
+  for (std::uint64_t i = 1, j = 0; i < n; ++i) {
+    fuel.poll();
+    if (indices) {
+      j = indices[i];
+    } else {
+      auto bit = n >> 1;
+      for (; j & bit; bit >>= 1)
+        j ^= bit;
+      j ^= bit;
+    }
     if (i < j)
       std::swap(data[i * stride], data[j * stride]);
   }
   // Binary-reversed input puts radix-four children in order 0,2,1,3.
   // Three enclosed twiddle products replace four binary butterflies. Each
-  // product and the final add/rotate segment is admitted separately.
+  // product and add/rotate segments retain independent cancellation points.
   std::uint64_t length = 2;
   unsigned levels = 0;
   for (auto size = n; size > 1; size >>= 1)
@@ -117,8 +236,9 @@ void fft_line(Complex* data, std::uint64_t n, std::uint64_t stride,
     for (std::uint64_t i = 0; i < n; i += 2) {
       fuel.poll(512);
       const auto a = data[i * stride], b = data[(i + 1) * stride];
-      data[i * stride] = add(a, b);
-      data[(i + 1) * stride] = minus(a, b);
+      const auto pair = paired_complex(a, b);
+      data[i * stride] = pair.sum;
+      data[(i + 1) * stride] = pair.difference;
     }
     length = 4;
   }
@@ -145,24 +265,198 @@ void fft_line(Complex* data, std::uint64_t n, std::uint64_t stride,
         // Eight Complex additions/subtractions at 64 scalar-work units each
         // cover two Ball sums (four six-operation two_sum calls plus radius
         // arithmetic per Ball), sign changes, and the quarter-turn rotation.
-        // This segment is prepaid independently of the three 512-unit products.
+        // The exact line admission includes this and all three products.
         fuel.poll(512);
-        const auto ac = add(a, c), bd = add(b, d), amc = minus(a, c);
-        const auto bmd = minus(b, d);
+        const auto p = paired_complex(a, c), q = paired_complex(b, d);
+        const auto bmd = q.difference;
         const Complex rotated =
             inverse ? Complex{-bmd.im, bmd.re} : Complex{bmd.im, -bmd.re};
-        data[(i + j) * stride] = add(ac, bd);
-        data[(i + j + quarter) * stride] = add(amc, rotated);
-        data[(i + j + 2 * quarter) * stride] = minus(ac, bd);
-        data[(i + j + 3 * quarter) * stride] = minus(amc, rotated);
+        const auto r = paired_complex(p.sum, q.sum);
+        const auto s = paired_complex(p.difference, rotated);
+        data[(i + j) * stride] = r.sum;
+        data[(i + j + quarter) * stride] = s.sum;
+        data[(i + j + 2 * quarter) * stride] = r.difference;
+        data[(i + j + 3 * quarter) * stride] = s.difference;
       }
   }
 }
+void fft_dd_line(TransformDDComplex* data, std::uint64_t n,
+                 std::uint64_t stride, const Complex* roots,
+                 std::uint64_t root_size, bool inverse, const Fuel& input,
+                 TransformTables* tables) {
+  const auto* indices = permutation(n, input, tables);
+  const TransformBlock fuel{input.work, fft_work(n)};
+  for (std::uint64_t i = 1, j = 0; i < n; ++i) {
+    fuel.poll();
+    if (indices) {
+      j = indices[i];
+    } else {
+      auto bit = n >> 1;
+      for (; j & bit; bit >>= 1)
+        j ^= bit;
+      j ^= bit;
+    }
+    if (i < j)
+      std::swap(data[i * stride], data[j * stride]);
+  }
+  unsigned levels = 0;
+  for (auto size = n; size > 1; size >>= 1)
+    ++levels;
+  std::uint64_t length = 2;
+  if (levels & 1) {
+    for (std::uint64_t i = 0; i < n; i += 2) {
+      fuel.poll(512);
+      const auto a = data[i * stride], b = data[(i + 1) * stride];
+      data[i * stride] = dd_center_add(a, b);
+      data[(i + 1) * stride] = dd_center_minus(a, b);
+    }
+    length = 4;
+  }
+  for (; length <= n / 2; length *= 4) {
+    const auto quarter = length / 2, step = root_size / (2 * length);
+    for (std::uint64_t i = 0; i < n; i += 2 * length)
+      for (std::uint64_t j = 0; j < quarter; ++j) {
+        const auto phase = j * step;
+        const auto twiddle = [&](TransformDDComplex value,
+                                 std::uint64_t index) {
+          fuel.poll(512);
+          if (index == 0)
+            return value;
+          if (root_size >= 4 && index == root_size / 4)
+            return inverse ? TransformDDComplex{dd_center_negate(value.im),
+                                                value.re}
+                           : TransformDDComplex{value.im,
+                                                dd_center_negate(value.re)};
+          const auto root =
+              roots[index < root_size / 2 ? index : index - root_size / 2];
+          const auto re = Ball::two_sum(root.re.hi, root.re.lo);
+          const auto im = Ball::two_sum(root.im.hi, root.im.lo);
+          TransformDDComplex center{{re.first, re.second},
+                                    {im.first, im.second}};
+          if (index >= root_size / 2) {
+            center.re = dd_center_negate(center.re);
+            center.im = dd_center_negate(center.im);
+          }
+          return dd_center_product(value, center);
+        };
+        const auto a = data[(i + j) * stride];
+        const auto b = twiddle(data[(i + j + 2 * quarter) * stride], phase);
+        const auto c = twiddle(data[(i + j + quarter) * stride], 2 * phase);
+        const auto d = twiddle(data[(i + j + 3 * quarter) * stride], 3 * phase);
+        fuel.poll(512);
+        const auto ac = dd_center_add(a, c), bd = dd_center_add(b, d);
+        const auto amc = dd_center_minus(a, c), bmd = dd_center_minus(b, d);
+        const TransformDDComplex rotated =
+            inverse ? TransformDDComplex{dd_center_negate(bmd.im), bmd.re}
+                    : TransformDDComplex{bmd.im, dd_center_negate(bmd.re)};
+        data[(i + j) * stride] = dd_center_add(ac, bd);
+        data[(i + j + quarter) * stride] = dd_center_add(amc, rotated);
+        data[(i + j + 2 * quarter) * stride] = dd_center_minus(ac, bd);
+        data[(i + j + 3 * quarter) * stride] = dd_center_minus(amc, rotated);
+      }
+  }
+}
+bool fft_dd_plane(Complex* data, const Complex* roots, Complex* column_storage,
+                  std::uint64_t h, std::uint64_t w, std::uint64_t lanes,
+                  double maximum, double root_error, bool inverse, Ball scale,
+                  ElementType type, Profile profile, const Fuel& fuel,
+                  TransformTables* tables) {
+  fuel.poll(64);
+  TransformDDCertificate certificate{dd_bound_product(2, maximum), 0};
+  // The common envelope is advanced once per axis, never once per line.
+  // Safe input magnitudes and HW<=2^40 give A<=2^241; the explicit bound
+  // leaves ample exponent headroom for every constituent TwoSum/product.
+  certificate.axis(w, root_error, fuel);
+  certificate.axis(h, root_error, fuel);
+  if (!std::isfinite(certificate.error) ||
+      dd_bound_add(certificate.amplitude, certificate.error) > 0x1p250)
+    return false;
+  auto* centers = reinterpret_cast<TransformDDComplex*>(data);
+  auto* columns = reinterpret_cast<TransformDDComplex*>(column_storage);
+  const TransformBlock conversion{fuel.work, 64 * h * w};
+  // Shrink forward, expand backward. Both types are trivially destructible;
+  // placement construction starts a new lifetime at each overlapping slot.
+  for (std::uint64_t i = 0; i < h * w; ++i) {
+    conversion.poll(32);
+    const auto value = data[i];
+    new (centers + i) TransformDDComplex{{value.re.hi, 0}, {value.im.hi, 0}};
+  }
+  for (std::uint64_t y = 0; y < h; ++y)
+    fft_dd_line(centers + y * w, w, 1, roots, std::max(h, w), inverse, fuel,
+                tables);
+  if (h == 1) {
+    // No column transform or column allocation for a single-row plane.
+  } else if (std::max(h, w) < 1024) {
+    for (std::uint64_t x = 0; x < w; ++x)
+      fft_dd_line(centers + x, h, w, roots, std::max(h, w), inverse, fuel,
+                  tables);
+  } else {
+    for (std::uint64_t x0 = 0; x0 < w; x0 += lanes) {
+      const auto count = std::min(lanes, w - x0);
+      const TransformBlock gather{fuel.work, 2 * h * count};
+      for (std::uint64_t y = 0; y < h; ++y)
+        for (std::uint64_t x = 0; x < count; ++x) {
+          gather.poll(2);
+          new (columns + x * h + y) TransformDDComplex{centers[y * w + x0 + x]};
+        }
+      for (std::uint64_t x = 0; x < count; ++x)
+        fft_dd_line(columns + x * h, h, 1, roots, std::max(h, w), inverse, fuel,
+                    tables);
+      const TransformBlock scatter{fuel.work, 2 * h * count};
+      for (std::uint64_t y = 0; y < h; ++y)
+        for (std::uint64_t x = 0; x < count; ++x) {
+          scatter.poll(2);
+          centers[y * w + x0 + x] = columns[x * h + y];
+        }
+    }
+  }
+  std::uint64_t near_zero = 0;
+  const auto threshold = dd_bound_product(2, certificate.error);
+  for (std::uint64_t i = h * w; i-- > 0;) {
+    conversion.poll(32);
+    const auto value = centers[i];
+    near_zero += std::abs(value.re.hi) <= threshold;
+    near_zero += std::abs(value.im.hi) <= threshold;
+    new (data + i) Complex{{value.re.hi, value.re.lo, certificate.error},
+                           {value.im.hi, value.im.lo, certificate.error}};
+  }
+  // A uniform radius cannot certify exact zeros. A bounded number may enter
+  // the original finisher; dense cancellation triggers one fully charged
+  // Ball replay from Reader, never a per-output plane of direct evaluations.
+  if (near_zero > 8)
+    return false;
+  // Nonzero exact RN midpoints also lose point certificates under a uniform
+  // radius. Preflight the complete final gate before selecting this plane.
+  // Quarter-root outputs have their independent signed residue reduction.
+  const TransformBlock finish_check{fuel.work, 1024 * h * w};
+  bool finished = true;
+  for (std::uint64_t y = 0; y < h; ++y)
+    for (std::uint64_t x = 0; x < w; ++x) {
+      if ((4 * y) % h == 0 && (4 * x) % w == 0) {
+        finish_check.poll(1024);
+        continue;
+      }
+      for (const auto value : {data[y * w + x].re, data[y * w + x].im}) {
+        finish_check.poll(512);
+        const auto scaled = dd_product(value, scale);
+        auto result = type == ElementType::Float64
+                          ? dd_cell_round(scaled)
+                          : std::optional<std::uint64_t>{};
+        if (!result)
+          result = profile == Profile::Strict
+                       ? dd_round(scaled, type == ElementType::Float32)
+                       : FastArithmetic{type == ElementType::Float32, profile}
+                             .finish(scaled.bounds());
+        finished &= result.has_value();
+      }
+    }
+  return finished;
+}
 // Child transforms occupy j+r*k. One admitted line buffer combines them
 // into natural order, without any rounded intermediate transform outputs.
-void mixed_line(Complex* data, std::uint64_t n, std::uint64_t stride,
-                const Complex* roots, std::uint64_t order, Complex* temporary,
-                const Fuel& fuel) {
+void mixed_line_body(Complex* data, std::uint64_t n, std::uint64_t stride,
+                     const Complex* roots, std::uint64_t order,
+                     Complex* temporary, const TransformBlock& fuel) {
   if (n == 1)
     return;
   std::uint64_t radix = n;
@@ -174,8 +468,8 @@ void mixed_line(Complex* data, std::uint64_t n, std::uint64_t stride,
   const auto m = n / radix;
   for (std::uint64_t j = 0; j < radix; ++j) {
     fuel.poll();
-    mixed_line(data + j * stride, m, stride * radix, roots, order, temporary,
-               fuel);
+    mixed_line_body(data + j * stride, m, stride * radix, roots, order,
+                    temporary, fuel);
   }
   for (std::uint64_t k = 0; k < m; ++k) {
     if (radix == 2 || radix == 3 || radix == 5) {
@@ -231,6 +525,48 @@ void mixed_line(Complex* data, std::uint64_t n, std::uint64_t stride,
       }
       continue;
     }
+    if (radix <= 31 && (radix & 1)) {
+      // With z_j = child_j * exp(sign*2*pi*i*j*k/n), pair j with r-j.
+      // S=z_j+z_(r-j), D=z_j-z_(r-j) gives C=S*cos(theta),
+      // T=i*D*sin(theta). The two outputs accumulate C+T and C-T.
+      // Reuse the certified cosine enclosure; the signed sine enclosures
+      // cover opposite phases. Ball operations preserve inclusion without
+      // intermediate RN output.
+      Complex v[31], sums[15], differences[15];
+      for (std::uint64_t j = 0; j < radix; ++j) {
+        fuel.poll(512);
+        const auto phase = j * k * (order / n);
+        v[j] = phase ? product(data[(j + radix * k) * stride], roots[phase])
+                     : data[(j + radix * k) * stride];
+      }
+      auto dc = v[0];
+      for (std::uint64_t j = 1; j <= radix / 2; ++j) {
+        fuel.poll(192);  // three Complex sums/differences at 64 each
+        sums[j - 1] = add(v[j], v[radix - j]);
+        differences[j - 1] = minus(v[j], v[radix - j]);
+        dc = add(dc, sums[j - 1]);
+      }
+      temporary[k] = dc;
+      for (std::uint64_t l = 1; l <= radix / 2; ++l) {
+        auto positive = v[0], negative = v[0];
+        for (std::uint64_t j = 1; j <= radix / 2; ++j) {
+          // Four real products at 128 each; phase, loads and rotation fit 128.
+          fuel.poll(640);
+          const auto root = roots[((j * l) % radix) * (order / radix)];
+          const auto sum = sums[j - 1], diff = differences[j - 1];
+          const Complex c{dd_product(sum.re, root.re),
+                          dd_product(sum.im, root.re)};
+          const Complex t{-dd_product(diff.im, root.im),
+                          dd_product(diff.re, root.im)};
+          fuel.poll(256);  // four Complex sums, with signs
+          positive = add(positive, add(c, t));
+          negative = add(negative, minus(c, t));
+        }
+        temporary[k + m * l] = positive;
+        temporary[k + m * (radix - l)] = negative;
+      }
+      continue;
+    }
     for (std::uint64_t l = 0; l < radix; ++l) {
       Complex sum{{0, 0, 0}, {0, 0, 0}};
       for (std::uint64_t j = 0; j < radix; ++j) {
@@ -248,17 +584,23 @@ void mixed_line(Complex* data, std::uint64_t n, std::uint64_t stride,
     data[i * stride] = temporary[i];
   }
 }
+void mixed_line(Complex* data, std::uint64_t n, std::uint64_t stride,
+                const Complex* roots, std::uint64_t order, Complex* temporary,
+                const Fuel& input) {
+  const TransformBlock fuel{input.work, mixed_work(n)};
+  mixed_line_body(data, n, stride, roots, order, temporary, fuel);
+}
 // Both transform axes reuse this admitted workspace, never root_order.
 void bluestein_axis(Math& math, Complex* data, std::uint64_t n,
                     std::uint64_t stride, std::uint64_t lines,
                     std::uint64_t line_step, bool inverse, Complex* workspace,
-                    const Fuel& fuel) {
+                    const Fuel& fuel, TransformTables* tables) {
   const auto size = bluestein_size(n);
   auto* roots = workspace;
   auto* chirp = roots + size;
   auto* kernel = chirp + n;
   auto* line = kernel + size;
-  root_table(math, roots, size, size / 2, false, fuel);
+  root_table(math, roots, size, size / 2, false, fuel, tables);
   for (std::uint64_t j = 0; j < size; ++j) {
     fuel.poll();
     new (kernel + j) Complex{{0, 0, 0}, {0, 0, 0}};
@@ -288,7 +630,7 @@ void bluestein_axis(Math& math, Complex* data, std::uint64_t n,
     current = product(current, ratio);
     ratio = product(ratio, delta);
   }
-  fft_line(kernel, size, 1, roots, size, fuel);
+  fft_line(kernel, size, 1, roots, size, fuel, tables);
   for (std::uint64_t l = 0; l < lines; ++l) {
     auto* input = data + l * line_step;
     for (std::uint64_t j = 0; j < size; ++j) {
@@ -296,13 +638,13 @@ void bluestein_axis(Math& math, Complex* data, std::uint64_t n,
       line[j] = j < n ? product(input[j * stride], chirp[j])
                       : Complex{{0, 0, 0}, {0, 0, 0}};
     }
-    fft_line(line, size, 1, roots, size, fuel);
+    fft_line(line, size, 1, roots, size, fuel, tables);
     for (std::uint64_t j = 0; j < size; ++j) {
       fuel.poll(512);
       line[j] = product(line[j], kernel[j]);
       line[j].im = -line[j].im;
     }
-    fft_line(line, size, 1, roots, size, fuel);
+    fft_line(line, size, 1, roots, size, fuel, tables);
     const auto scale = 1.0 / static_cast<double>(size);
     for (std::uint64_t j = 0; j < n; ++j) {
       fuel.poll(512);
@@ -381,10 +723,15 @@ OperationDefinition transform_tasks(OperationDefinition def) {
                          const KernelPreparation& q, const auto& resources,
                          const auto* native) -> Result<ps_prepared_kernel_v9> {
     try {
+      require(desc.symbol == "generation" &&
+                  desc.contract == "generation-unchecked-v1",
+              "unsupported frequency transform kernel");
       require(!q.writes.empty(), "empty budgeted transform invocation");
       auto owner = std::make_unique<BudgetOwner>();
       owner->state = std::make_shared<Frequency>(
           *static_cast<const Frequency*>(q.static_state));
+      owner->state->tables = std::allocate_shared<TransformTables>(
+          ResourceAllocator<TransformTables>{});
       owner->state->selected = owner->state->plane_region(
           fixed_tensor::view_region(q.writes[0].layout));
       for (const auto& w : q.writes)
@@ -440,22 +787,30 @@ void Frequency::run_transform(const Kernel& k,
   }
   auto* real_roots = temporary + root_size;
   auto* blue = real_roots + (compact ? width + 1 : 0);
+  const auto blue_size = std::max(bluestein_size(h), bluestein_size(width));
+  auto* columns = blue + (blue_size ? 3 * blue_size + root_size : 0);
+  const auto lanes = column_count();
+  require(reinterpret_cast<unsigned char*>(columns + lanes * h) -
+                  static_cast<unsigned char*>(inv.scratch[0].allocation) <=
+              static_cast<std::ptrdiff_t>(inv.scratch[0].bytes),
+          "transform scratch capacity");
   const bool radix2 = power2(h) && power2(width);
   const bool fft = true;
-  if (radix2) {
-    root_table(m, roots, root_size, root_size / 2, inverse(), fuel);
+  if (radix2 && !staged_input) {
+    root_table(m, roots, root_size, root_size / 2, inverse(), fuel,
+               tables.get());
   }
   if (compact) {
     if (radix2) {
-      // Both axes divide root_size. Preserve a dedicated recombination table:
-      // the column gather below is permitted to overwrite other root storage.
+      // Both axes divide root_size. Keep dedicated recombination roots,
+      // independent of the compact working plane and dedicated column buffer.
       for (std::uint64_t k = 0; k <= width; ++k) {
         fuel.poll(4);
         new (real_roots + k) Complex{k == width ? Complex{{-1, 0, 0}, {0, 0, 0}}
                                                 : roots[k * (root_size / w)]};
       }
     } else {
-      root_table(m, real_roots, w, width + 1, inverse(), fuel);
+      root_table(m, real_roots, w, width + 1, inverse(), fuel, tables.get());
     }
   }
   if (!radix2) {
@@ -473,9 +828,23 @@ void Frequency::run_transform(const Kernel& k,
                 Complex{phase < width ? root : Complex{-root.re, -root.im}};
           }
         } else {
-          root_table(m, axis.second, axis.first, axis.first, inverse(), fuel);
+          root_table(m, axis.second, axis.first, axis.first, inverse(), fuel,
+                     tables.get());
         }
       }
+  }
+  const bool dd_shape =
+      !staged_input && radix2 && (kind == Kind::Fft || kind == Kind::Ifft);
+  double dd_root_error = 0;
+  if (dd_shape) {
+    for (std::uint64_t j = 0; j < root_size / 2; ++j) {
+      fuel.poll(16);
+      const auto& root = roots[j];
+      if (!root.re.finite() || !root.im.finite())
+        dd_root_error = INFINITY;
+      dd_root_error =
+          std::max(dd_root_error, dd_bound_add(root.re.error, root.im.error));
+    }
   }
   Ball scale{1, 0, 0};
   if (grid.norm == "ortho") {
@@ -503,6 +872,9 @@ void Frequency::run_transform(const Kernel& k,
   }
   for (std::uint64_t b = 0; b < batches; ++b) {
     bool finite_input = true;
+    bool dd_input = dd_shape && dd_root_error <= 0x1p-80;
+    double dd_maximum = 0;
+    std::uint64_t zero_components = 0;
     bool positive_zero_witness[2] = {false, false};
     bool positive_sine_witness = false;
     const auto period_y = h > 1 && h % 2 == 0 ? 2U : 1U;
@@ -576,6 +948,8 @@ void Frequency::run_transform(const Kernel& k,
               real_input() ? 0 : reader.value(1, 0, at);
         }
     }
+    bool dd_complete = false;
+    std::array<Complex, 16> quarter_sums{};
     if (fft) {
       auto origin = batch;
       origin[grid.ya] = origin[grid.xa] = 0;
@@ -625,6 +999,17 @@ void Frequency::run_transform(const Kernel& k,
                       im == periodic_seed[seed + 1];
           finite_input &= std::isfinite(re) && std::isfinite(im);
           const auto imaginary = conjugate ? -im : im;
+          if (dd_shape) {
+            fuel.poll(16);
+            for (const auto value : {re, im}) {
+              const auto magnitude = std::abs(value);
+              dd_input &= std::isfinite(value) &&
+                          (value == 0 ||
+                           (magnitude >= 0x1p-200 && magnitude <= 0x1p200));
+              dd_maximum = std::max(dd_maximum, magnitude);
+              zero_components += value == 0;
+            }
+          }
           if (kind == Kind::Irfft) {
             packed_y_periodic &= std::isfinite(re) && std::isfinite(imaginary);
             if (packed_y_periodic && y >= period_y) {
@@ -646,7 +1031,7 @@ void Frequency::run_transform(const Kernel& k,
             real_periodic &= original.finite() && original.point() &&
                              std::isfinite(re) && re == original.hi;
           }
-          if (!compact)
+          if (!compact && !staged_input)
             new (data + y * w + x)
                 Complex{Ball::point(re), Ball::point(imaginary)};
         }
@@ -726,44 +1111,85 @@ void Frequency::run_transform(const Kernel& k,
             }
           }
       }
-      if (bluestein_size(width)) {
-        bluestein_axis(m, data, width, 1, h, width, inverse(), blue, fuel);
-      } else if (width > 1) {
+      if (dd_input && !periodic && zero_components < h * w / 2) {
+        // These residue classes contain precisely the terms of all roots
+        // dividing four. Preserve Ball enclosures while sharing the scan;
+        // no intermediate rounding or original-input reread is introduced.
+        const TransformBlock quarter_work{work, 128 * h * w};
         for (std::uint64_t y = 0; y < h; ++y)
-          if (power2(width))
-            fft_line(data + y * width, width, 1,
-                     radix2 ? roots : axis_roots + h,
-                     radix2 ? root_size : width, fuel);
-          else
-            mixed_line(data + y * width, width, 1, axis_roots + h, width,
-                       temporary, fuel);
-      }
-      if (bluestein_size(h)) {
-        bluestein_axis(m, data, h, width, width, 1, inverse(), blue, fuel);
-      } else if (h > 1) {
-        if (root_size < 1024) {
-          for (std::uint64_t x = 0; x < width; ++x) {
-            if (power2(h))
-              fft_line(data + x, h, width, radix2 ? roots : axis_roots,
-                       radix2 ? root_size : h, fuel);
-            else
-              mixed_line(data + x, h, width, axis_roots, h, temporary, fuel);
+          for (std::uint64_t x = 0; x < w; ++x) {
+            quarter_work.poll(128);
+            auto& sum = quarter_sums[(y & 3) * 4 + (x & 3)];
+            sum = add(sum, data[y * w + x]);
           }
-        } else {
-          auto* column = radix2 ? axis_roots : roots;
-          for (std::uint64_t x = 0; x < width; ++x) {
-            for (std::uint64_t y = 0; y < h; ++y) {
-              fuel.poll(2);
-              new (column + y) Complex{data[y * width + x]};
+        dd_complete = fft_dd_plane(data, roots, columns, h, w, lanes,
+                                   dd_maximum, dd_root_error, inverse(), scale,
+                                   type, profile, fuel, tables.get());
+        if (!dd_complete) {
+          // Reload original coordinates after the DD storage lifetime ended.
+          // Every failed candidate and every reload/replay stays charged.
+          const TransformBlock reload{work, 16 * h * w};
+          for (std::uint64_t y = 0; y < h; ++y)
+            for (std::uint64_t x = 0; x < w; ++x) {
+              reload.poll(16);
+              auto at = batch;
+              at[grid.ya] = y;
+              at[grid.xa] = x;
+              new (data + y * w + x)
+                  Complex{Ball::point(reader.value(0, 0, at)),
+                          Ball::point(reader.value(1, 0, at))};
             }
-            if (power2(h))
-              fft_line(column, h, 1, radix2 ? roots : axis_roots,
-                       radix2 ? root_size : h, fuel);
+        }
+      }
+      if (!dd_complete && !staged_input) {
+        if (bluestein_size(width)) {
+          bluestein_axis(m, data, width, 1, h, width, inverse(), blue, fuel,
+                         tables.get());
+        } else if (width > 1) {
+          for (std::uint64_t y = 0; y < h; ++y)
+            if (power2(width))
+              fft_line(data + y * width, width, 1,
+                       radix2 ? roots : axis_roots + h,
+                       radix2 ? root_size : width, fuel, tables.get());
             else
-              mixed_line(column, h, 1, axis_roots, h, temporary, fuel);
-            for (std::uint64_t y = 0; y < h; ++y) {
-              fuel.poll(2);
-              data[y * width + x] = column[y];
+              mixed_line(data + y * width, width, 1, axis_roots + h, width,
+                         temporary, fuel);
+        }
+        if (bluestein_size(h)) {
+          bluestein_axis(m, data, h, width, width, 1, inverse(), blue, fuel,
+                         tables.get());
+        } else if (h > 1) {
+          if (root_size < 1024) {
+            for (std::uint64_t x = 0; x < width; ++x) {
+              if (power2(h))
+                fft_line(data + x, h, width, radix2 ? roots : axis_roots,
+                         radix2 ? root_size : h, fuel, tables.get());
+              else
+                mixed_line(data + x, h, width, axis_roots, h, temporary, fuel);
+            }
+          } else {
+            for (std::uint64_t x0 = 0; x0 < width; x0 += lanes) {
+              const auto count = std::min(lanes, width - x0);
+              const TransformBlock gather{work, 2 * h * count};
+              for (std::uint64_t y = 0; y < h; ++y)
+                for (std::uint64_t x = 0; x < count; ++x) {
+                  gather.poll(2);
+                  new (columns + x * h + y) Complex{data[y * width + x0 + x]};
+                }
+              for (std::uint64_t x = 0; x < count; ++x) {
+                auto* column = columns + x * h;
+                if (power2(h))
+                  fft_line(column, h, 1, radix2 ? roots : axis_roots,
+                           radix2 ? root_size : h, fuel, tables.get());
+                else
+                  mixed_line(column, h, 1, axis_roots, h, temporary, fuel);
+              }
+              const TransformBlock scatter{work, 2 * h * count};
+              for (std::uint64_t y = 0; y < h; ++y)
+                for (std::uint64_t x = 0; x < count; ++x) {
+                  scatter.poll(2);
+                  data[y * width + x0 + x] = columns[x * h + y];
+                }
             }
           }
         }
@@ -772,6 +1198,31 @@ void Frequency::run_transform(const Kernel& k,
     const auto candidate_value = [&](std::uint64_t y, std::uint64_t x,
                                      unsigned component) {
       if (!compact) {
+        // Frequencies whose primitive roots divide four use only exact
+        // +/-1 and +/-i coefficients. A global nonzero radius loses their
+        // midpoint certificate even for ordinary random inputs. Preserve a
+        // certified residue-class reduction for these at most 16 outputs.
+        if (dd_complete && (4 * y) % h == 0 && (4 * x) % w == 0) {
+          const TransformBlock reduction{work, 64 * 16};
+          Ball total{};
+          for (std::uint64_t iy = 0; iy < 4; ++iy)
+            for (std::uint64_t ix = 0; ix < 4; ++ix) {
+              reduction.poll(64);
+              const auto phase = ((4 * y / h) * iy + (4 * x / w) * ix) & 3;
+              const auto q = inverse() ? phase : ((4 - phase) & 3);
+              const auto input_component = component ^ (q & 1);
+              const auto& sum = quarter_sums[iy * 4 + ix];
+              auto value = input_component ? sum.im : sum.re;
+              const bool negative = component ? q >= 2 : (q == 1 || q == 2);
+              if (negative)
+                value = -value;
+              total = total + value;
+            }
+          // The reduction fills a complete polling interval. Resume the
+          // already-admitted output finisher from a fresh checkpoint.
+          fuel.poll(0);
+          return total;
+        }
         const auto value = data[y * w + x];
         return component ? value.im : value.re;
       }
@@ -876,10 +1327,13 @@ void Frequency::run_transform(const Kernel& k,
                             source[grid.xa] % (w / period_x) != 0));
           const auto value = excluded ? Ball{0, 0, 0} : candidate_at();
           const auto v = dd_product(value, scale);
-          result = profile == Profile::Strict
-                       ? dd_round(v, type == ElementType::Float32)
-                       : FastArithmetic{type == ElementType::Float32, profile}
-                             .finish(v.bounds());
+          if (dd_complete && type == ElementType::Float64)
+            result = dd_cell_round(v);
+          if (!result)
+            result = profile == Profile::Strict
+                         ? dd_round(v, type == ElementType::Float32)
+                         : FastArithmetic{type == ElementType::Float32, profile}
+                               .finish(v.bounds());
           if (v.point() && v.hi == 0) {
             const bool boundary_imag =
                 kind == Kind::Rfft && component &&

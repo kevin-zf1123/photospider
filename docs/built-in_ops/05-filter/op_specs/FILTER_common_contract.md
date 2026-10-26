@@ -93,6 +93,7 @@ retained ancestors, collection owners and comparison-resource snapshots to root
 capacity/work/stage budgets. Mathematical operation counts exclude neither limb
 cost nor refinement work from actual accounting. CPU callbacks poll cancellation
 every 1024 scalar work units or sooner, including refinement and long solves.
+FRQ-01/02 may prepay deterministic transform lines, table copies, permutation construction and column gather/scatter blocks as defined in [FRQ-01](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance); independent cancellation checks inside each block retain this interval.
 A GPU profile must declare a finite work bound per nonpreemptive native submission,
 check cancellation before submission and after completion, and drain submitted
 work before releasing any referenced owner. It must report measured cancellation

@@ -368,9 +368,10 @@ std::uint64_t Frequency::task_scratch(unsigned port,
   if (transform()) {
     const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa];
     const auto width = transform_width();
-    // Match run_transform: plane, roots, axis roots, line, real roots, blue.
-    n += (static_cast<unsigned __int128>(h) * width + 2 * std::max(h, w) + h +
-          width + (width != w ? width + 1 : 0)) *
+    // Match run_transform: plane, roots, axis roots, line, real roots,
+    // Bluestein workspace and dedicated Ball columns (no layout spare).
+    n += (static_cast<unsigned __int128>(h) * (width + column_count()) +
+          2 * std::max(h, w) + h + width + (width != w ? width + 1 : 0)) *
          2 * sizeof(Ball);
     const auto blue_size = std::max(bluestein_size(h), bluestein_size(width));
     if (blue_size)
@@ -474,7 +475,9 @@ OperationDefinition make_frequency(const std::string& key, Kind k,
         return std::make_shared<Frequency>(k, profile, in, args);
       });
   def = generation::budgeted_operation(std::move(def));
-  return k <= Kind::Irfft ? transform_tasks(std::move(def)) : def;
+  if (k <= Kind::Irfft)
+    def = transform_tasks(std::move(def));
+  return def;
 }
 }  // namespace ps::plugin_internal::frequency
 
