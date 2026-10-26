@@ -35,7 +35,8 @@ Suffix letters identify distinct mathematical or interface objects, not quality 
 
 `frequency.fft2` and `frequency.ifft2` are portable CPU operations registered by
 `register_frequency`; `frequency.rfft2` and `frequency.irfft2` share their
-implementation in `frequency_transform.cpp`. They have no strict/accelerated
+implementation in `frequency_transform.cpp` and the typed internal engine
+`frequency_fft.hpp`. They have no strict/accelerated
 profile selector. The SDK `photospider/ops/frequency.hpp` exposes
 `transform(document, member, inputs, grid)`. No GPU backend is provided.
 
@@ -45,23 +46,53 @@ comma-separated String, `y_axis` and `x_axis` Int64, and `packing`, `index_order
 The original shape includes batch axes. Transform input is unshifted, with full
 packing for complex transforms and r2c_x packing for real transforms.
 
-Power-of-two axes use radix-2/radix-4 butterflies. Other axes use radix-2/3/5
-factorization with residual codelets through length 31; larger residual factors
-use Bluestein power-of-two convolution. Twiddles are ordinary libm sine/cosine
-values with exact quarter-turn constants. There is no Ball/DD enclosure, final
-rounding-cell check, exact refinement or data-dependent certified replay.
+Power-of-two axes use radix-2/radix-4 butterflies. Contiguous axes of length
+at least 32 use runtime-gated AVX on GNU/Clang x86-64 or NEON on AArch64.
+Other targets and unsuitable layouts use the scalar implementation. The packet
+kernels preserve scalar work accounting and do not require FMA or relaxed
+floating-point compiler flags. Their prepared power plans contain binary
+bit-reversal indices and three contiguous twiddle segments per radix-4 stage.
+AVX Float32 also groups four initial radix-4 butterflies through a register
+transpose. The AVX paths and NEON Float32 process the unit-phase prefix in a
+packet and restore its first complex value; NEON Float64 retains a scalar prefix.
+Other direct axes use radix-2/3/5 factorization with residual codelets through length 31. Odd codelets
+pair j with r-j and compute q and r-q together, sharing sums, differences and DC
+reduction. Axes of length 257 or 65537 use Rader cyclic convolution of length
+n-1 with primitive root 3; other large residuals use Bluestein power-of-two
+convolution. Dispatch depends on dimensions and available CPU instructions.
+Twiddles are ordinary libm sine/cosine values with exact quarter-turn constants. There is no Ball/DD
+enclosure, final rounding-cell check, exact refinement or data-dependent
+certified replay.
 
-The working plane contains H*W binary64 complex values (16 bytes each), even for
-real transforms. Scratch also holds max(H,W) complex line values, up to eight
-contiguous columns when h>1, max(h,w)>=1024 and the vertical axis does not use
-Bluestein, and max(H,W)+2*B complex values when Bluestein convolution length B is
-needed. Every buffer is included in the fixed preparation signature.
+Complex working values occupy S=8 bytes for Float32 and S=16 bytes for
+Float64. Let P be the working plane width and R the row FFT length:
+P=W/2+1 and R=W/2 for even-width real transforms; otherwise P=R=W.
+Let C(n) be n-1 for the two Rader lengths, n+2*B(n) for a Bluestein axis
+with convolution length B(n), and zero for a direct axis. Column buffers are
+used when H>1, max(H,W)>=1024 and C(H)=0. Their count L is min(64,P) on
+x86-64 with H>=1024, and min(8,P) otherwise; L is zero outside that condition.
+For L>8 each buffered column has pitch H+1. Narrow power-of-two column batches
+use interleaved lanes and fuse bit reversal into gather when the packet width
+fits; remaining columns use the scalar-compatible path. Define
+Q=L*(H+(L>8 ? 1 : 0)). Fixed scratch is exactly
+`S * (H*P + Q + max(H,R) + max(C(H),C(R)))` bytes. The two axes reuse the
+convolution workspace. Scratch depends on dtype and the compilation target's
+column strategy and is included in the preparation signature. Regenerate
+compiled Plans when changing that implementation or target.
 
-Prepared kernels own immutable dimension/direction root tables through managed
-Context allocators. Construction occurs outside the publication mutex and only
-complete entries are published. Concurrent misses may perform separately charged
-constructions; losing copies are released. Cache entries contain no payloads or
-Run ledgers. Cache hits skip table generation, not transform work.
+Input traversal resolves a tile and affine row base when crossing its x extent;
+output traversal resolves the base once per output row. Loads and stores remain
+alignment-safe and honor signed byte strides, selected axes, batch coordinates
+and independently allocated tiles. Selecting output tiles retains the specified
+whole-plane input dependency.
+
+Prepared kernels own separate Float32/Float64 caches of immutable
+dimension/direction root tables, power plans and Rader plans through managed
+Context allocators. A Rader plan contains its permutation and transformed
+convolution kernel. Construction occurs outside the publication mutex
+and only complete entries are published. Concurrent misses may perform separately
+charged constructions; losing copies are released. Cache entries contain no
+payloads or Run ledgers. Cache hits skip plan generation, not transform work.
 
 FRQ-01..06 use typed CPU invocation ABI9. One Run ledger covers all its nodes,
 tasks and activations under the Context root. Node `max_work` limits each
@@ -84,9 +115,13 @@ select an unmetered fallback.
 Each combination of untransformed axes forms an independent transform group. Spacing and origin annotate coordinates but do not change the DFT phase formula; physical-origin phase compensation requires an explicit multiplication. Under `backward` normalization, the forward scale is 1 and inverse scale is 1/(HW); under `ortho`, both scales are 1/sqrt(HW). Full-complex real and imaginary components have identical shapes. Coefficient outputs use FrequencyGrid/v1.
 
 
-The four transforms use the **F** ordinary floating-point contract. Both dtypes
-use binary64 working arithmetic; output converts to the input dtype. Ordinary
-rounding occurs at machine operations, twiddle generation and normalization.
+The four transforms use the **F** ordinary floating-point contract. Float32
+inputs use native binary32 working values, butterflies, accumulation, real
+recombination and output scaling; Float64 uses binary64. Dimension-derived
+angles, trigonometric coefficients and normalization constants are computed
+in binary64 and converted to the working dtype before data arithmetic.
+Ordinary rounding occurs at machine operations, coefficient conversion and
+normalization.
 Correctly rounded mathematical outputs, per-component ULP bounds and cross-library,
 cross-algorithm or cross-platform bit identity are not required. Near-zero
 coefficients may contain roundoff residuals. Tests compare numerical errors against
@@ -99,9 +134,12 @@ follow the executed FFT, without NUM exact-expression ordering or recovery.
 No finite-only validation scan is introduced. Explicit RFFT structural imaginary
 zeros and boundary conjugate construction remain specified in FRQ-02.
 
-This is the usual approximate-FFT model, not a promise to duplicate OpenCV or
-MATLAB internals. In particular, this implementation's binary64 workspace differs
-from MATLAB's native single-precision computation for single input.
+Float32 has the intermediate range and rounding of native single-precision
+arithmetic. It can overflow or underflow sooner than an implementation that
+promotes Float32 data to binary64; no value-dependent precision retry occurs.
+The acceptance tolerances are unchanged. Native dtype computation follows the
+usual approximate-FFT model without promising OpenCV/MATLAB algorithm or bit
+identity.
 
 ## FrequencyGrid/v1 logical schema
 

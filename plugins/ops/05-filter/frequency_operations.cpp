@@ -348,15 +348,12 @@ std::uint64_t Frequency::task_scratch(unsigned port,
   if (kind == Kind::Window)
     n += (static_cast<unsigned __int128>(dims[0]) + dims[1]) * 8;
   if (transform()) {
-    const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa];
-    const auto blue_size = std::max(bluestein_size(h), bluestein_size(w));
-    // Binary64 complex plane, one mixed-radix line and contiguous columns.
-    n = (static_cast<unsigned __int128>(h) * (w + column_count()) +
-         std::max(h, w)) *
-        2 * sizeof(double);
-    if (blue_size)
-      n += (static_cast<unsigned __int128>(blue_size) * 2 + std::max(h, w)) *
-           2 * sizeof(double);
+    const auto h = grid.shape[grid.ya], row = row_length();
+    // Even-width real transforms keep only W/2+1 complex columns.
+    n = (static_cast<unsigned __int128>(h) * working_width() +
+         column_scratch() + std::max(h, row) +
+         std::max(convolution_scratch(h), convolution_scratch(row))) *
+        2 * (type == ElementType::Float32 ? sizeof(float) : sizeof(double));
   }
 
   if (port == 0 &&

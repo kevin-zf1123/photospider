@@ -35,25 +35,36 @@ Suffix letters identify distinct mathematical or interface objects, not quality 
 
 `frequency.rfft2` and `frequency.irfft2` use the ordinary floating-point CPU
 transform in `frequency_transform.cpp`. They inherit the F-profile arithmetic,
-full-plane scratch, prepared root cache and ABI9 resource accounting in
+dimension-derived scratch, prepared plan cache and ABI9 resource accounting in
 [FRQ-01](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
 `project_hermitian` remains an E-profile operation in `frequency_local.cpp`, with
 its strict and target-gated accelerated keys and exact conjugate construction.
 The SDK is `photospider/ops/frequency.hpp`.
 
 The real transforms require `packing=r2c_x`, `index_order=unshifted`, and explicit
-original spatial width. Forward computation loads real values into a full complex
-plane with zero imaginary input, computes the floating FFT and emits columns
-0 through floor(W/2). DC and even-width Nyquist boundary columns use the smaller
-y index of each conjugate pair as their common representative. The opposite
-imaginary value is its negation, and self-conjugate imaginary intersections are
-structural +0. No enclosure or numerical validation is needed for this packing.
+original spatial width. For even W, forward computation packs adjacent real
+samples as even+i*odd, performs length-W/2 row FFTs, and recombines their paired
+coefficients using length-W roots. It then transforms H-element columns of the
+compact H*(W/2+1) plane. For odd W, forward computation uses a full complex plane
+with zero imaginary input. Both paths emit columns 0 through floor(W/2).
 
-Inverse computation uses the caller's boundary conjugacy premise and completes
-missing columns by `F[y,x]=conj(F[(-y)%H,W-x])`. It computes the floating inverse
-FFT and emits its real component. Independently edited interior coefficients are
-supported. It does not validate or repair boundary pairs. Both odd and even
-original widths use this completion and the explicit original H*W normalization.
+DC and even-width Nyquist boundary columns use the smaller y index of each
+conjugate pair as their common representative. The opposite imaginary value is
+its negation, and self-conjugate imaginary intersections are structural +0.
+No enclosure or numerical validation is needed for this packing.
+
+For even W, inverse computation transforms the compact columns first, recombines
+the half spectrum into doubled packed row coefficients, performs length-W/2
+inverse row FFTs, and unpacks real and imaginary components into adjacent samples.
+The factor of two preserves normalization by the original H*W. For odd W, it
+loads the half spectrum once, completes missing columns in scratch using
+`F[y,x]=conj(F[(-y)%H,W-x])`, and emits the real component of the full inverse FFT.
+Both paths support independently edited interior coefficients under the caller's
+boundary conjugacy premise. Neither path validates or repairs boundary pairs.
+`backward` and `ortho` scaling always use the explicit original H and W.
+Packing, recombination and data scaling use native Float32 for Float32 inputs
+and Float64 for Float64 inputs. Compact pitches such as 513 and 2049 retain
+their extra boundary column; column batches handle that remainder explicitly.
 
 ## Shared Mathematics, Units, and Profiles
 

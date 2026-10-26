@@ -6,9 +6,9 @@
 
 FRQ-01～06 的 14 个成员已提供 CPU 实现与显式 FrequencyGrid SDK helper，共 30 个注册键。FRQ-07～10 的 12 个成员仍未实现；规格状态继续为 Proposed。
 
-FFT/IFFT/RFFT/IRFFT 使用普通浮点算法，注册名为 `frequency.fft2`、`frequency.ifft2`、`frequency.rfft2`、`frequency.irfft2`。四个变换不提供 strict/accelerated 选择；SDK `transform(document, member, inputs, grid)` 使用同一契约。内部采用 binary64 计算，输出转换为输入 dtype。蝶形、根表与归一化都会发生普通浮点舍入，但不要求最终正确舍入，不进行区间认证或精确重算。小残差、不同算法及平台间的结果差异按数值误差验收；NaN payload、零符号和中间溢出遵循实际浮点计算。此模式不承诺与 OpenCV/MATLAB 逐位相同，Float32 输入的内部精度也不同于 MATLAB 的原生 single 运算。
+FFT/IFFT/RFFT/IRFFT 使用普通浮点算法，注册名为 `frequency.fft2`、`frequency.ifft2`、`frequency.rfft2`、`frequency.irfft2`。四个变换不提供 strict/accelerated 选择；SDK `transform(document, member, inputs, grid)` 使用同一契约。Float32 输入使用原生 binary32 工作值、蝶形、累加、实数重组与输出缩放，Float64 使用 binary64。尺寸决定的三角系数与归一化常数先以 binary64 生成，再转换为工作 dtype。普通浮点舍入、NaN payload、零符号和中间溢出遵循实际计算；Float32 的中间动态范围也属于单精度，不会按输入值自动提升精度重算。小残差与不同算法、平台间的差异继续按原有误差阈值验收，不承诺与 OpenCV/MATLAB 逐位相同。
 
-变换使用 radix-2/radix-4、有限小基数混合 FFT 和 Bluestein。scratch 包含每个复数 16 字节的完整平面、线缓冲、适用的多列缓冲与卷积工作区；prepared kernel 的不可变根表计入 Context 资源。RFFT 通过共用边界代表值构造共轭对，自共轭虚部为 +0；IRFFT 按调用方的边界共轭前提补全半谱，支持独立编辑的内部系数，不扫描校验。
+变换使用 radix-2/radix-4、按和差配对的有限奇数基数 codelet，以及 Bluestein；257 和 65537 点轴使用 n−1 点 Rader 循环卷积。适用的连续二次幂轴使用运行时检测的 x86 AVX 或 AArch64 NEON，其他情况使用标量路径。Intel 大尺寸列缓冲最多保存 64 列并采用 H+1 间距；其他列缓冲最多保存 8 列，适用的向量路径将位反转合入 gather。偶数宽度的 RFFT/IRFFT 使用 W/2 点复数行变换与 H×(W/2+1) 紧凑平面，奇数宽度保留完整复数平面。scratch 还包含线缓冲、适用的多列缓冲与可复用的卷积工作区，复数工作值按 Float32 的 8 字节或 Float64 的 16 字节计量。prepared kernel 分别缓存两种精度的不可变根表、位反转与分级系数表、Rader 排列和卷积核频谱，并计入 Context 资源。scratch 与 dtype、目标架构的列策略有关，切换实现或编译目标时须重新生成 Plan。输入按 tile 缓存行基址，输出按行计算仿射地址，保留负步长、非对齐地址、选轴与批次支持。RFFT 通过共用边界代表值构造共轭对，自共轭虚部为 +0；IRFFT 按调用方的边界共轭前提进行紧凑重构或补全半谱，支持独立编辑的内部系数，不扫描校验。两种实数路径均按原始 H×W 归一化。
 
 typed CPU invocation ABI9 继续对同一 Run 累计工作量。确定成本的块在执行前准入，块内及块间每不超过 1024 个标量单位检查取消；1024 不是单次准入请求的上限。节点 `max_work` 分别限制每次 invocation。四个变换不消耗精化阶段，冷启动也可使用 `psx --max-stages 0`；其他 FRQ 成员保留各自的严格或加速数值契约。参数、内存与执行边界见 [FRQ-01](op_specs/FRQ-01_contract.md#runtime-integration-and-remaining-acceptance)。
 

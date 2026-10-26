@@ -26,6 +26,18 @@ inline std::uint64_t bluestein_size(std::uint64_t n) {
     size *= 2;
   return size;
 }
+// These Fermat primes have primitive root 3 and a radix-two Rader convolution.
+// Other large residuals keep Bluestein; no unbounded primality search is
+// needed.
+inline std::uint64_t rader_generator(std::uint64_t n) {
+  return n == 257 || n == 65537 ? 3 : 0;
+}
+inline std::uint64_t convolution_scratch(std::uint64_t n) {
+  if (rader_generator(n))
+    return n - 1;
+  const auto size = bluestein_size(n);
+  return size ? n + 2 * size : 0;
+}
 enum class Kind {
   Fft,
   Ifft,
@@ -73,11 +85,32 @@ struct Frequency final : Program {
   bool transform() const { return kind <= Kind::Irfft; }
   bool inverse() const { return kind == Kind::Ifft || kind == Kind::Irfft; }
   bool real_input() const { return kind == Kind::Rfft; }
+  bool compact_real() const {
+    return (kind == Kind::Rfft || kind == Kind::Irfft) &&
+           grid.shape[grid.xa] % 2 == 0;
+  }
+  std::uint64_t working_width() const {
+    const auto w = grid.shape[grid.xa];
+    return compact_real() ? w / 2 + 1 : w;
+  }
+  std::uint64_t row_length() const {
+    const auto w = grid.shape[grid.xa];
+    return compact_real() ? w / 2 : w;
+  }
   std::uint64_t column_count() const {
     const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa];
-    return h > 1 && std::max(h, w) >= 1024 && !bluestein_size(h)
-               ? std::min(UINT64_C(8), w)
+#if defined(__x86_64__)
+    const auto maximum = h >= 1024 ? UINT64_C(64) : UINT64_C(8);
+#else
+    const auto maximum = UINT64_C(8);
+#endif
+    return h > 1 && std::max(h, w) >= 1024 && !convolution_scratch(h)
+               ? std::min(maximum, working_width())
                : 0;
+  }
+  std::uint64_t column_scratch() const {
+    const auto count = column_count();
+    return count * (grid.shape[grid.ya] + (count > 8 ? 1 : 0));
   }
   Region plane_region(const Region&) const;
   std::vector<ReadRegion> support(unsigned, const Region&) const override;

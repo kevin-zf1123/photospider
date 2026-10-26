@@ -9,27 +9,15 @@
 #include <vector>
 
 #include "05-filter/frequency.hpp"
-#include "05-filter/frequency_work.hpp"
+#include "05-filter/frequency_fft.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
 namespace ps::plugin_internal::frequency {
-struct TransformComplex {
-  double re = 0, im = 0;
-};
-static_assert(sizeof(TransformComplex) == 2 * sizeof(double));
-// Prepared owners capture the Context allocator. Published dimension-derived
-// tables are immutable; neither payloads nor execution ledgers are retained.
 struct TransformTables {
-  using Roots =
-      std::vector<TransformComplex, ResourceAllocator<TransformComplex>>;
-  using Key = std::pair<std::uint64_t, bool>;
-  using Entry = std::pair<const Key, Roots>;
-  std::mutex mutex;
-  ResourceAllocator<TransformComplex> allocator;
-  std::map<Key, Roots, std::less<Key>, ResourceAllocator<Entry>> roots;
+  TransformCache<float> single;
+  TransformCache<double> double_precision;
 };
 namespace {
-using Complex = TransformComplex;
 using Address = std::tuple<unsigned, unsigned, TileIndex>;
 std::vector<std::uint64_t> key_of(const Region& r) {
   std::vector<std::uint64_t> key;
@@ -39,250 +27,197 @@ std::vector<std::uint64_t> key_of(const Region& r) {
   }
   return key;
 }
-bool power2(std::uint64_t n) {
-  return (n & (n - 1)) == 0;
-}
-Complex add(Complex a, Complex b) {
-  return {a.re + b.re, a.im + b.im};
-}
-Complex minus(Complex a, Complex b) {
-  return {a.re - b.re, a.im - b.im};
-}
-Complex product(Complex a, Complex b) {
-  return {a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re};
-}
-Complex conjugate(Complex a) {
-  return {a.re, -a.im};
-}
-Complex root(std::uint64_t k, std::uint64_t n, bool inverse) {
-  k %= n;
-  if ((4 * k) % n == 0) {
-    const int c[4] = {1, 0, -1, 0}, s[4] = {0, 1, 0, -1};
-    const auto q = 4 * k / n;
-    return {static_cast<double>(c[q]),
-            static_cast<double>(inverse ? s[q] : -s[q])};
-  }
-  // Reduce to the nearest quarter turn before calling the native libm.
-  const auto q = (4 * k + n / 2) / n;
-  const auto numerator =
-      static_cast<std::int64_t>(4 * k) - static_cast<std::int64_t>(q * n);
-  constexpr double half_pi = 0x1.921fb54442d18p+0;
-  const auto angle = half_pi * (static_cast<double>(numerator) / n);
-  const auto c = std::cos(angle), s = std::sin(angle);
-  Complex value;
-  switch (q & 3) {
-    case 0:
-      value = {c, s};
-      break;
-    case 1:
-      value = {-s, c};
-      break;
-    case 2:
-      value = {-c, -s};
-      break;
-    default:
-      value = {s, -c};
-      break;
-  }
-  return inverse ? value : conjugate(value);
-}
-const TransformTables::Roots& root_table(TransformTables& tables,
-                                         std::uint64_t n, bool inverse,
-                                         const Work& work) {
-  check(work(1));
-  const auto key = std::make_pair(n, inverse);
-  {
-    std::lock_guard<std::mutex> lock(tables.mutex);
-    const auto found = tables.roots.find(key);
-    if (found != tables.roots.end())
-      return found->second;
-  }
-  TransformTables::Roots values(tables.allocator);
-  const TransformBlock build{work, 128 * n};
-  values.reserve(n);
-  for (std::uint64_t i = 0; i < n; ++i) {
-    build.poll(128);
-    values.push_back(root(i, n, inverse));
-  }
-  check(work(0));
-  std::lock_guard<std::mutex> lock(tables.mutex);
-  return tables.roots.emplace(key, std::move(values)).first->second;
-}
-void fft_line(Complex* data, std::uint64_t n, std::uint64_t stride,
-              const TransformTables::Roots& roots, bool inverse,
-              const Work& work) {
-  unsigned levels = 0;
-  for (auto v = n; v > 1; v >>= 1)
-    ++levels;
-  // Bit reversal costs at most 2*levels+8 per visit. Radix-two and radix-four
-  // costs include all scalar arithmetic, addressing and loop control.
-  const TransformBlock fuel{work, n * (2 * levels + 8) +
-                                      (levels & 1 ? n / 2 * 32 : 0) +
-                                      (levels / 2) * (n / 4) * 128};
-  for (std::uint64_t i = 0, j = 0; i < n; ++i) {
-    fuel.poll(2 * levels + 8);
-    if (i < j)
-      std::swap(data[i * stride], data[j * stride]);
-    if (i + 1 != n) {
-      auto bit = n / 2;
-      while (j & bit) {
-        j ^= bit;
-        bit >>= 1;
-      }
-      j ^= bit;
+// A row cursor resolves a fixed input tile and affine base only when crossing
+// its x extent. Scalar loads remain alignment-safe and honor signed strides.
+template <class Scalar>
+struct TransformRow {
+  const Reader& reader;
+  Coordinate at;
+  unsigned port, axis;
+  std::uint64_t begin = 0, end = 0;
+  const unsigned char* base = nullptr;
+  std::ptrdiff_t stride = 0;
+  Scalar value(std::uint64_t x) {
+    if (x < begin || x >= end) {
+      at[axis] = x;
+      const auto& view = reader.view(port, 0, at);
+      base = static_cast<const unsigned char*>(view.allocation) +
+             generation::offset(*view.layout, view.byte_offset, at);
+      begin = x;
+      end = view.layout->origin[axis] + view.layout->shape[axis];
+      stride = view.layout->strides[axis];
     }
+    return mask::load<Scalar>(base, stride, x - begin);
   }
-  std::uint64_t length = 1;
-  if (levels & 1) {
-    for (std::uint64_t i = 0; i < n; i += 2) {
-      fuel.poll(32);
-      const auto a = data[i * stride], b = data[(i + 1) * stride];
-      data[i * stride] = add(a, b);
-      data[(i + 1) * stride] = minus(a, b);
-    }
-    length = 2;
-  }
-  for (; length < n; length *= 4) {
-    const auto size = 4 * length;
-    for (std::uint64_t i = 0; i < n; i += size)
-      for (std::uint64_t j = 0; j < length; ++j) {
-        fuel.poll(128);
-        const auto phase = j * (n / size);
-        const auto twiddle = [&](Complex v, std::uint64_t p) {
-          return p ? product(v, roots[p]) : v;
-        };
-        const auto a = data[(i + j) * stride];
-        // Binary bit reversal orders the two middle radix-four inputs 2,1.
-        const auto c = twiddle(data[(i + j + length) * stride], 2 * phase);
-        const auto b = twiddle(data[(i + j + 2 * length) * stride], phase);
-        const auto d = twiddle(data[(i + j + 3 * length) * stride], 3 * phase);
-        const auto ac = add(a, c), bd = add(b, d);
-        const auto amc = minus(a, c), bmd = minus(b, d);
-        const Complex rotated =
-            inverse ? Complex{-bmd.im, bmd.re} : Complex{bmd.im, -bmd.re};
-        data[(i + j) * stride] = add(ac, bd);
-        data[(i + j + length) * stride] = add(amc, rotated);
-        data[(i + j + 2 * length) * stride] = minus(ac, bd);
-        data[(i + j + 3 * length) * stride] = minus(amc, rotated);
-      }
-  }
-  check(work(0));
-}
-std::uint64_t radix_of(std::uint64_t n) {
-  for (auto r : {2U, 3U, 5U})
-    if (n % r == 0)
-      return r;
-  return n;
-}
-std::uint64_t mixed_cost(std::uint64_t n) {
-  if (n == 1)
-    return 0;
-  const auto r = radix_of(n), m = n / r;
-  return r * mixed_cost(m) + m * r * (32 + 32 * r) + 4 * n;
-}
-void mixed_body(Complex* data, std::uint64_t n, std::uint64_t stride,
-                const TransformTables::Roots& roots, Complex* temporary,
-                const TransformBlock& fuel) {
-  if (n == 1)
-    return;
-  const auto r = radix_of(n), m = n / r;
-  for (std::uint64_t j = 0; j < r; ++j)
-    mixed_body(data + j * stride, m, stride * r, roots, temporary, fuel);
-  const auto order = roots.size();
-  for (std::uint64_t k = 0; k < m; ++k) {
-    Complex v[31];
-    for (std::uint64_t j = 0; j < r; ++j) {
-      fuel.poll(32);
-      const auto phase = j * k * (order / n);
-      v[j] = phase ? product(data[(j + r * k) * stride], roots[phase])
-                   : data[(j + r * k) * stride];
-    }
-    for (std::uint64_t q = 0; q < r; ++q) {
-      Complex sum{};
-      for (std::uint64_t j = 0; j < r; ++j) {
-        fuel.poll(32);
-        const auto phase = (q * j * (order / r)) % order;
-        sum = add(sum, phase ? product(v[j], roots[phase]) : v[j]);
-      }
-      temporary[k + q * m] = sum;
-    }
-  }
-  for (std::uint64_t i = 0; i < n; ++i) {
-    fuel.poll(4);
-    data[i * stride] = temporary[i];
-  }
-}
-void transform_axis(Complex* data, std::uint64_t n, std::uint64_t stride,
-                    std::uint64_t lines, std::uint64_t step, bool inverse,
-                    Complex* temporary, Complex* blue, TransformTables& tables,
+};
+template <class Scalar>
+void load_transform(const Frequency& state, const Reader& reader,
+                    const Coordinate& batch, TransformComplex<Scalar>* data,
                     const Work& work) {
-  const auto size = bluestein_size(n);
-  if (!size) {
-    const auto& roots = root_table(tables, n, inverse, work);
-    for (std::uint64_t l = 0; l < lines; ++l) {
-      if (power2(n)) {
-        fft_line(data + l * step, n, stride, roots, inverse, work);
-      } else {
-        const TransformBlock fuel{work, mixed_cost(n)};
-        mixed_body(data + l * step, n, stride, roots, temporary, fuel);
-        check(work(0));
+  using Complex = TransformComplex<Scalar>;
+  const auto h = state.grid.shape[state.grid.ya];
+  const auto w = state.grid.shape[state.grid.xa];
+  const auto width = state.kind == Kind::Irfft ? w / 2 + 1 : w;
+  const auto pitch = state.working_width();
+  if (state.compact_real() && state.real_input()) {
+    const TransformBlock load{work, 32 * h * w + 4 * h};
+    for (std::uint64_t y = 0; y < h; ++y) {
+      auto at = batch;
+      at[state.grid.ya] = y;
+      TransformRow<Scalar> re{reader, at, 0, state.grid.xa};
+      for (std::uint64_t x = 0; x < w / 2; ++x) {
+        load.poll(64);
+        new (data + y * pitch + x)
+            Complex{re.value(2 * x), re.value(2 * x + 1)};
       }
+      load.poll(4);
+      new (data + y * pitch + w / 2) Complex{};
     }
     return;
   }
-  // Arbitrary lengths use a power-of-two convolution; no direct quadratic
-  // transform or value-dependent numerical fallback is used.
-  const auto& roots = root_table(tables, size, false, work);
-  auto* chirp = blue;
-  auto* kernel = chirp + n;
-  auto* line = kernel + size;
   {
-    const TransformBlock fill{work, 4 * size + 160 * n};
-    for (std::uint64_t i = 0; i < size; ++i) {
-      fill.poll(4);
-      new (kernel + i) Complex{};
-    }
-    for (std::uint64_t i = 0; i < n; ++i) {
-      fill.poll(160);
-      const auto phase = static_cast<std::uint64_t>(
-          static_cast<unsigned __int128>(i) * i % (2 * n));
-      new (chirp + i) Complex{root(phase, 2 * n, inverse)};
-      kernel[i] = conjugate(chirp[i]);
-      if (i)
-        kernel[size - i] = kernel[i];
-    }
-  }
-  fft_line(kernel, size, 1, roots, false, work);
-  for (std::uint64_t l = 0; l < lines; ++l) {
-    auto* input = data + l * step;
-    {
-      const TransformBlock fill{work, 32 * size};
-      for (std::uint64_t i = 0; i < size; ++i) {
-        fill.poll(32);
-        new (line + i)
-            Complex{i < n ? product(input[i * stride], chirp[i]) : Complex{}};
-      }
-    }
-    fft_line(line, size, 1, roots, false, work);
-    {
-      const TransformBlock multiply{work, 32 * size};
-      for (std::uint64_t i = 0; i < size; ++i) {
-        multiply.poll(32);
-        line[i] = conjugate(product(line[i], kernel[i]));
-      }
-    }
-    fft_line(line, size, 1, roots, false, work);
-    {
-      const TransformBlock scatter{work, 32 * n};
-      const auto scale = 1.0 / size;
-      for (std::uint64_t i = 0; i < n; ++i) {
-        scatter.poll(32);
-        input[i * stride] =
-            product({line[i].re * scale, -line[i].im * scale}, chirp[i]);
+    const TransformBlock load{work, 32 * h * width};
+    for (std::uint64_t y = 0; y < h; ++y) {
+      auto at = batch;
+      at[state.grid.ya] = y;
+      TransformRow<Scalar> re{reader, at, 0, state.grid.xa};
+      TransformRow<Scalar> im{reader, at, 1, state.grid.xa};
+      for (std::uint64_t x = 0; x < width; ++x) {
+        load.poll(32);
+        new (data + y * pitch + x)
+            Complex{re.value(x), state.real_input() ? 0 : im.value(x)};
       }
     }
   }
-  check(work(0));
+  if (state.kind == Kind::Irfft && !state.compact_real()) {
+    // Complete from the loaded half plane, without repeating input traversal.
+    const TransformBlock reflect{work, 8 * h * (w - width)};
+    for (std::uint64_t y = 0; y < h; ++y)
+      for (std::uint64_t x = width; x < w; ++x) {
+        reflect.poll(8);
+        new (data + y * w + x) Complex{TransformEngine<Scalar>::conjugate(
+            data[((h - y) % h) * w + w - x])};
+      }
+  }
+}
+template <class Scalar>
+void store_transform(const Frequency& state,
+                     const ps_kernel_mutable_view_v8& view, unsigned component,
+                     const Coordinate& batch,
+                     const TransformComplex<Scalar>* data, Scalar scale,
+                     const Work& work) {
+  const auto h = state.grid.shape[state.grid.ya];
+  const auto w = state.grid.shape[state.grid.xa];
+  const auto pitch = state.working_width();
+  const bool unpack = state.kind == Kind::Irfft && state.compact_real();
+  const auto y0 = view.layout->origin[state.grid.ya];
+  const auto x0 = view.layout->origin[state.grid.xa];
+  const auto height = view.layout->shape[state.grid.ya];
+  const auto width = view.layout->shape[state.grid.xa];
+  const TransformBlock output{work, 64 * height * width};
+  for (std::uint64_t y = y0; y < y0 + height; ++y) {
+    auto at = batch;
+    at[state.grid.ya] = y;
+    at[state.grid.xa] = x0;
+    auto* base = static_cast<unsigned char*>(view.allocation) +
+                 generation::offset(*view.layout, view.byte_offset, at);
+    for (std::uint64_t x = x0; x < x0 + width; ++x) {
+      output.poll(64);
+      auto value = data[y * pitch + (unpack ? x / 2 : x)];
+      if (unpack)
+        value.re = x % 2 ? value.im : value.re;
+      if (state.kind == Kind::Rfft && (x == 0 || (w % 2 == 0 && x == w / 2))) {
+        const auto partner = (h - y) % h;
+        if (partner < y)
+          value = TransformEngine<Scalar>::conjugate(data[partner * pitch + x]);
+        if (partner == y)
+          value.im = 0;
+      }
+      mask::save(
+          base, view.layout->strides[state.grid.xa], x - x0,
+          static_cast<Scalar>((component ? value.im : value.re) * scale));
+    }
+  }
+}
+template <class Scalar>
+void run_transform(const Frequency& state, const Kernel& k,
+                   const ps_kernel_invocation_v8& inv,
+                   ps_kernel_work_v9 service, TransformCache<Scalar>& tables) {
+  using Engine = TransformEngine<Scalar>;
+  using Complex = TransformComplex<Scalar>;
+  const Work work{inv, state.work_limit, 0, service};
+  const Reader reader{k, inv};
+  const auto h = state.grid.shape[state.grid.ya],
+             w = state.grid.shape[state.grid.xa];
+  const auto pitch = state.working_width(), row = state.row_length();
+  const auto maximum = std::max(h, row), lanes = state.column_count();
+  const auto blue_count =
+      std::max(convolution_scratch(h), convolution_scratch(row));
+  auto* data = static_cast<Complex*>(inv.scratch[0].allocation);
+  auto* temporary = data + h * pitch;
+  auto* columns = temporary + maximum;
+  auto* blue = columns + state.column_scratch();
+  require(reinterpret_cast<unsigned char*>(blue + blue_count) -
+                  static_cast<unsigned char*>(inv.scratch[0].allocation) <=
+              static_cast<std::ptrdiff_t>(inv.scratch[0].bytes),
+          "floating transform scratch capacity");
+  {
+    const TransformBlock initialize{work, 4 * maximum};
+    for (std::uint64_t i = 0; i < maximum; ++i) {
+      initialize.poll(4);
+      new (temporary + i) Complex{};
+    }
+  }
+  check(work(16));
+  const Scalar scale = static_cast<Scalar>(
+      state.grid.norm == "ortho" ? 1.0 / std::sqrt(static_cast<double>(h * w))
+      : state.inverse()          ? 1.0 / static_cast<double>(h * w)
+                                 : 1.0);
+  Coordinate batch{};
+  std::uint64_t batches = 1;
+  for (unsigned a = 0; a < state.dims.size(); ++a) {
+    batch[a] = state.selected.dimensions()[a].offset;
+    if (a != state.grid.ya && a != state.grid.xa)
+      batches *= state.selected.dimensions()[a].extent;
+  }
+  for (std::uint64_t b = 0; b < batches; ++b) {
+    load_transform<Scalar>(state, reader, batch, data, work);
+    if (state.compact_real() && state.kind == Kind::Irfft) {
+      Engine::columns(data, h, pitch, lanes, true, temporary, columns, blue,
+                      tables, work);
+      Engine::real(data, h, w, true, tables, work);
+      Engine::axis(data, row, 1, h, pitch, true, temporary, blue, tables, work);
+    } else {
+      Engine::axis(data, row, 1, h, pitch, state.inverse(), temporary, blue,
+                   tables, work);
+      if (state.compact_real())
+        Engine::real(data, h, w, false, tables, work);
+      Engine::columns(data, h, pitch, lanes, state.inverse(), temporary,
+                      columns, blue, tables, work);
+    }
+    check(work(0));
+    for (unsigned i = 0; i < inv.output_count; ++i) {
+      const auto& view = inv.outputs[i];
+      bool contains = true;
+      for (unsigned a = 0; a < state.dims.size(); ++a)
+        if (a != state.grid.ya && a != state.grid.xa)
+          contains &= batch[a] >= view.layout->origin[a] &&
+                      batch[a] - view.layout->origin[a] < view.layout->shape[a];
+      if (!contains)
+        continue;
+      store_transform<Scalar>(state, view, k.writes[i].first, batch, data,
+                              scale, work);
+    }
+    check(work(0));
+    for (unsigned a = static_cast<unsigned>(state.dims.size()); a-- > 0;) {
+      if (a == state.grid.ya || a == state.grid.xa)
+        continue;
+      if (++batch[a] < state.selected.dimensions()[a].offset +
+                           state.selected.dimensions()[a].extent)
+        break;
+      batch[a] = state.selected.dimensions()[a].offset;
+    }
+  }
 }
 }  // namespace
 OperationDefinition transform_tasks(OperationDefinition def) {
@@ -396,126 +331,10 @@ OperationDefinition transform_tasks(OperationDefinition def) {
 void Frequency::run_transform(const Kernel& k,
                               const ps_kernel_invocation_v8& inv,
                               ps_kernel_work_v9 service) const {
-  const Work work{inv, work_limit, 0, service};
-  const Reader reader{k, inv};
-  const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa];
-  const auto maximum = std::max(h, w), lanes = column_count();
-  const auto blue_size = std::max(bluestein_size(h), bluestein_size(w));
-  auto* data = static_cast<Complex*>(inv.scratch[0].allocation);
-  auto* temporary = data + h * w;
-  auto* columns = temporary + maximum;
-  auto* blue = columns + h * lanes;
-  const auto blue_count = blue_size ? maximum + 2 * blue_size : 0;
-  require(reinterpret_cast<unsigned char*>(blue + blue_count) -
-                  static_cast<unsigned char*>(inv.scratch[0].allocation) <=
-              static_cast<std::ptrdiff_t>(inv.scratch[0].bytes),
-          "floating transform scratch capacity");
-  {
-    const TransformBlock initialize{work, 4 * maximum};
-    for (std::uint64_t i = 0; i < maximum; ++i) {
-      initialize.poll(4);
-      new (temporary + i) Complex{};
-    }
-  }
-  check(work(16));
-  const auto scale = grid.norm == "ortho"
-                         ? 1.0 / std::sqrt(static_cast<double>(h * w))
-                     : inverse() ? 1.0 / static_cast<double>(h * w)
-                                 : 1.0;
-  Coordinate batch{};
-  std::uint64_t batches = 1;
-  for (unsigned a = 0; a < dims.size(); ++a) {
-    batch[a] = selected.dimensions()[a].offset;
-    if (a != grid.ya && a != grid.xa)
-      batches *= selected.dimensions()[a].extent;
-  }
-  for (std::uint64_t b = 0; b < batches; ++b) {
-    {
-      const TransformBlock load{work, 32 * h * w};
-      for (std::uint64_t y = 0; y < h; ++y)
-        for (std::uint64_t x = 0; x < w; ++x) {
-          load.poll(32);
-          auto at = batch;
-          const bool reflected = kind == Kind::Irfft && x > w / 2;
-          at[grid.ya] = reflected ? (h - y) % h : y;
-          at[grid.xa] = reflected ? w - x : x;
-          const auto re = reader.value(0, 0, at);
-          const auto im = real_input() ? 0 : reader.value(1, 0, at);
-          new (data + y * w + x) Complex{re, reflected ? -im : im};
-        }
-    }
-    transform_axis(data, w, 1, h, w, inverse(), temporary, blue, *tables, work);
-    if (lanes) {
-      for (std::uint64_t x0 = 0; x0 < w; x0 += lanes) {
-        const auto count = std::min(lanes, w - x0);
-        {
-          const TransformBlock gather{work, 4 * h * count};
-          for (std::uint64_t y = 0; y < h; ++y)
-            for (std::uint64_t x = 0; x < count; ++x) {
-              gather.poll(4);
-              new (columns + x * h + y) Complex{data[y * w + x0 + x]};
-            }
-        }
-        transform_axis(columns, h, 1, count, h, inverse(), temporary, blue,
-                       *tables, work);
-        const TransformBlock scatter{work, 4 * h * count};
-        for (std::uint64_t y = 0; y < h; ++y)
-          for (std::uint64_t x = 0; x < count; ++x) {
-            scatter.poll(4);
-            data[y * w + x0 + x] = columns[x * h + y];
-          }
-      }
-    } else {
-      transform_axis(data, h, w, w, 1, inverse(), temporary, blue, *tables,
-                     work);
-    }
-    check(work(0));
-    for (unsigned i = 0; i < inv.output_count; ++i) {
-      const auto& view = inv.outputs[i];
-      bool contains = true;
-      for (unsigned a = 0; a < dims.size(); ++a)
-        if (a != grid.ya && a != grid.xa)
-          contains &= batch[a] >= view.layout->origin[a] &&
-                      batch[a] - view.layout->origin[a] < view.layout->shape[a];
-      if (!contains)
-        continue;
-      const auto count =
-          view.layout->shape[grid.ya] * view.layout->shape[grid.xa];
-      const TransformBlock output{work, 64 * count};
-      const auto component = k.writes[i].first;
-      for (std::uint64_t y = view.layout->origin[grid.ya];
-           y < view.layout->origin[grid.ya] + view.layout->shape[grid.ya]; ++y)
-        for (std::uint64_t x = view.layout->origin[grid.xa];
-             x < view.layout->origin[grid.xa] + view.layout->shape[grid.xa];
-             ++x) {
-          output.poll(64);
-          auto value = data[y * w + x];
-          if (kind == Kind::Rfft && (x == 0 || (w % 2 == 0 && x == w / 2))) {
-            const auto partner = (h - y) % h;
-            // Construct a conjugate boundary pair from one representative;
-            // this is output packing, not a numerical validation pass.
-            if (partner < y)
-              value = conjugate(data[partner * w + x]);
-            if (partner == y)
-              value.im = 0;
-          }
-          auto at = batch;
-          at[grid.ya] = y;
-          at[grid.xa] = x;
-          store(view, at,
-                generation::convert((component ? value.im : value.re) * scale,
-                                    type == ElementType::Float32));
-        }
-    }
-    check(work(0));
-    for (unsigned a = static_cast<unsigned>(dims.size()); a-- > 0;) {
-      if (a == grid.ya || a == grid.xa)
-        continue;
-      if (++batch[a] <
-          selected.dimensions()[a].offset + selected.dimensions()[a].extent)
-        break;
-      batch[a] = selected.dimensions()[a].offset;
-    }
-  }
+  if (type == ElementType::Float32)
+    frequency::run_transform<float>(*this, k, inv, service, tables->single);
+  else
+    frequency::run_transform<double>(*this, k, inv, service,
+                                     tables->double_precision);
 }
 }  // namespace ps::plugin_internal::frequency
