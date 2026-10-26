@@ -194,24 +194,6 @@ Frequency::Frequency(Kind k, Profile prof,
       if (kind == Kind::Irfft)
         dims = grid.shape;
       collective = true;
-      const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa];
-      if (grid.norm == "ortho") {
-        auto remaining = h * w;
-        for (std::uint64_t prime = 2; prime <= remaining / prime; ++prime) {
-          unsigned exponent = 0;
-          while (remaining % prime == 0) {
-            remaining /= prime;
-            ++exponent;
-          }
-          for (unsigned j = 0; j < exponent / 2; ++j)
-            norm_squarefactor *= prime;
-          if (exponent & 1)
-            norm_squarefree *= prime;
-        }
-        norm_squarefree *= remaining;
-        norm_discriminant =
-            norm_squarefree % 4 == 1 ? norm_squarefree : 4 * norm_squarefree;
-      }
     } else {
       require(s.sample_shape() == dims, "frequency stored shape");
       if (kind == Kind::Shift || kind == Kind::Unshift) {
@@ -367,17 +349,16 @@ std::uint64_t Frequency::task_scratch(unsigned port,
     n += (static_cast<unsigned __int128>(dims[0]) + dims[1]) * 8;
   if (transform()) {
     const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa];
-    const auto width = transform_width();
-    // Match run_transform: plane, roots, axis roots, line, real roots,
-    // Bluestein workspace and dedicated Ball columns (no layout spare).
-    n += (static_cast<unsigned __int128>(h) * (width + column_count()) +
-          2 * std::max(h, w) + h + width + (width != w ? width + 1 : 0)) *
-         2 * sizeof(Ball);
-    const auto blue_size = std::max(bluestein_size(h), bluestein_size(width));
+    const auto blue_size = std::max(bluestein_size(h), bluestein_size(w));
+    // Binary64 complex plane, one mixed-radix line and contiguous columns.
+    n = (static_cast<unsigned __int128>(h) * (w + column_count()) +
+         std::max(h, w)) *
+        2 * sizeof(double);
     if (blue_size)
-      n += (static_cast<unsigned __int128>(blue_size) * 3 + std::max(h, w)) *
-           2 * sizeof(Ball);
+      n += (static_cast<unsigned __int128>(blue_size) * 2 + std::max(h, w)) *
+           2 * sizeof(double);
   }
+
   if (port == 0 &&
       (((kind == Kind::Radial || kind == Kind::Band) && mode == "gaussian") ||
        (kind == Kind::Notch && depth != 0))) {
@@ -509,9 +490,16 @@ Status register_frequency(OperationRegistry* registry) {
         if ((entry.second == Kind::Shift || entry.second == Kind::Unshift) &&
             profile != Profile::Strict)
           continue;
-        check(registry->register_operation(
-            make_frequency("frequency." + std::string(entry.first) + suffix,
-                           entry.second, profile)));
+        if (entry.second <= Kind::Irfft) {
+          if (profile == Profile::Strict)
+            check(registry->register_operation(
+                make_frequency("frequency." + std::string(entry.first),
+                               entry.second, profile)));
+        } else {
+          check(registry->register_operation(
+              make_frequency("frequency." + std::string(entry.first) + suffix,
+                             entry.second, profile)));
+        }
       }
     }
     return Status::success();

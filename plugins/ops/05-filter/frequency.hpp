@@ -58,10 +58,6 @@ struct Frequency final : Program {
   Kind kind;
   Profile profile;
   Grid grid;
-  // sqrt(HW)=norm_squarefactor*sqrt(norm_squarefree). Exact refinement uses
-  // a frequency-specific primitive order including the Gauss discriminant.
-  std::uint64_t norm_squarefactor = 1;
-  std::uint64_t norm_squarefree = 1, norm_discriminant = 1;
   std::vector<unsigned> axes, broadcast;
   std::vector<std::uint64_t> dims;
   ElementType type = ElementType::Float64;
@@ -72,22 +68,15 @@ struct Frequency final : Program {
   Region selected;
   // Created only for the prepared-kernel copy, never static operation state.
   std::shared_ptr<TransformTables> tables;
-  // Private staged finalization consumes a prefilled certified Ball plane.
-  bool staged_input = false;
   Frequency(Kind, Profile, const std::vector<OperationMetadata>&,
             const Parameters&);
   bool transform() const { return kind <= Kind::Irfft; }
   bool inverse() const { return kind == Kind::Ifft || kind == Kind::Irfft; }
   bool real_input() const { return kind == Kind::Rfft; }
-  std::uint64_t transform_width() const {
-    const auto w = grid.shape[grid.xa];
-    return (kind == Kind::Rfft || kind == Kind::Irfft) && w % 2 == 0 ? w / 2
-                                                                     : w;
-  }
   std::uint64_t column_count() const {
     const auto h = grid.shape[grid.ya], w = grid.shape[grid.xa];
     return h > 1 && std::max(h, w) >= 1024 && !bluestein_size(h)
-               ? std::min(UINT64_C(8), transform_width())
+               ? std::min(UINT64_C(8), w)
                : 0;
   }
   Region plane_region(const Region&) const;

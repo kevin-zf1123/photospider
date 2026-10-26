@@ -43,6 +43,32 @@ origins and identity branches. Deterministic fixtures record input/expected bits
 Partial finite-domain references explicitly report unsupported cases as Inconclusive,
 not as evidence that legal NUM inputs are invalid.
 
+## Ordinary floating-point transform acceptance
+
+FRQ-01A/B and FRQ-02A/B use F arithmetic. Their independent DFT oracles retain
+exact/directed mathematical references, but runtime outputs are compared by error,
+not mandatory bit equality. For finite fixtures without intermediate or output
+overflow, let epsilon be the output dtype's machine epsilon and
+K=1+ceil(log2(H*W)). Require relative plane L2 error at most 64*epsilon*K and
+maximum absolute component error at most
+64*epsilon*K*abs(scale)*sum(abs(complex_input)). Test an all-zero input separately
+without dividing by a zero reference norm. These are fixture acceptance limits,
+not an all-input error theorem or an OpenCV/MATLAB guarantee. For an RFFT energy
+comparison, weight interior stored x frequencies twice and DC/Nyquist once.
+
+Include both dtypes and normalization modes, singleton/non-power-of-two/prime
+axes, independent batches, nonadjacent/reversed axes, selected outputs and
+independently edited valid inverse spectra. Verify RFFT boundary conjugate pairs
+and structural imaginary zeros. Nonfinite/range fixtures check safe ordinary
+floating-point completion and specified structural behavior, without exact NaN
+payload, written-order propagation or zero-sign goldens. No runtime numerical
+validation is introduced.
+
+For these four members H06 uses the F error criteria and floating environment;
+H07 is inapplicable because there is no named accelerated profile. All resource,
+shape, publication and fixed-read requirements still apply. Cold and warm runs
+must work with zero refinement stages.
+
 ## Native algorithms and third-party comparison
 
 BM3D, CBM3D and SMAA 1x are native algorithms with independently pinned third-party

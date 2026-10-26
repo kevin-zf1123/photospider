@@ -20,7 +20,9 @@ specification acceptance and maturity separately from runtime availability.
 
 ## Inheritance and representation
 
-Member rules refine family rules and this category contract. They do not override
+Member rules refine family rules and this category contract. FRQ-01A/B and
+FRQ-02A/B use the explicit ordinary floating-point F exception in
+[FRQ-01](FRQ-01_contract.md#shared-mathematics-units-and-profiles). Other members do not override
 the rounding/accuracy baseline in [NUM](../../01-numeric/op_specs/NUM_common_contract.md)
 and [NUM acceleration](../../01-numeric/op_specs/NUM_accelerated_contract.md), or
 straight color and storage in [FMT](../../02-format-color/op_specs/FMT_common_contract.md),
@@ -61,9 +63,10 @@ are Int64; real static parameters are finite Float64 stored values unless the
 member explicitly specifies a different parameter domain.
 
 [Numeric reference](FILTER_numeric_reference.md) defines exact expressions, baked
-constants and staged state. NaN/Inf, payload, signed zero, floating overflow and
+constants, staged state and the F transform exception. Outside that exception,
+NaN/Inf, payload, signed zero, floating overflow and
 underflow follow corresponding NUM operations. There is no category-wide finite
-sample requirement and no category-wide floating-overflow failure. Parameter, mask, PSF, geometry and model domains are member-defined caller premises. Nonfinite arithmetic retains the formula's defined NUM behavior and does not suppress required upstream failures.
+sample requirement and no category-wide floating-overflow failure. Parameter, mask, PSF, geometry and model domains are member-defined caller premises. Nonfinite arithmetic follows the member's F or NUM behavior and does not suppress required upstream failures.
 
 Physical units are mathematical units: spatial lengths, guide distances, noise
 standard deviations, squared-unit variances/epsilon and model-specific solver
@@ -84,7 +87,7 @@ Requests normalize to complete retained tiles on each Result's own grid. Every m
 Mathematically valid sizes, radii, levels and iteration counts are governed by
 inherited representability limits, necessary profile constraints and execution
 budgets. Do not impose arbitrary fixed capability caps. An oracle's tiny-image
-work cap is not a runtime input limit. CPU strict reference is the baseline;
+work cap is not a runtime input limit. Except for the four F-profile transforms, CPU strict reference is the baseline;
 Apple Silicon and x86_64 acceleration require named capabilities, actual ISA checks,
 final-value NUM error bounds and strict fallback. GPU support is not implicit.
 
@@ -93,7 +96,7 @@ retained ancestors, collection owners and comparison-resource snapshots to root
 capacity/work/stage budgets. Mathematical operation counts exclude neither limb
 cost nor refinement work from actual accounting. CPU callbacks poll cancellation
 every 1024 scalar work units or sooner, including refinement and long solves.
-FRQ-01/02 may prepay deterministic transform lines, table copies, permutation construction and column gather/scatter blocks as defined in [FRQ-01](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance); independent cancellation checks inside each block retain this interval.
+FRQ-01/02 may prepay deterministic transform lines, root construction, input/output blocks and column gather/scatter blocks as defined in [FRQ-01](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance); independent cancellation checks inside each block retain this interval.
 A GPU profile must declare a finite work bound per nonpreemptive native submission,
 check cancellation before submission and after completion, and drain submitted
 work before releasing any referenced owner. It must report measured cancellation
@@ -113,7 +116,7 @@ asynchronous early-stop invocations may select different returned rounds; the fr
 | Missing/mistyped parameter, invalid syntax/enum or structural anchor/shape constraint | Compile/preparation | InvalidArgument / InvalidDomain |
 | Unsupported dtype/rank/shape/semantic structure | Compile/preflight | TypeMismatch / None |
 | Violated dynamic control, model, association or numerical/geometric premise | Outside the contract | No validation, repair or diagnostic guarantee |
-| Floating invalid arithmetic, division by zero, overflow | Evaluation | Successful NUM NaN/Inf result unless a corresponding explicit NUM domain exception applies |
+| Floating invalid arithmetic, division by zero, overflow | Evaluation | Successful F-profile or NUM NaN/Inf result according to the member |
 | Static shape/capacity arithmetic overflow | Compile/preparation/admission | Explicit failure |
 | Unavailable backend | Capability | BackendUnavailable / None |
 | Resource, cancellation, upstream failure | Original phase | Preserve original failure |

@@ -40,6 +40,8 @@ python3 -m oracle.ops.filter.run_oracles --self-test --no-diagnostics --report b
 这些是 oracle 的工作量限制。MPFR 区间未在预算内闭合时报告 Inconclusive；
 RES-07C/F 的均值域逆只提供诊断参考，不能当 strict golden。
 
+FRQ-01A/B、FRQ-02A/B 的数学参考仍保留精确/定向舍入求值；生产普通浮点 FFT 以这些结果测量误差，不再要求逐位一致。实际验收采用 [F 变换误差条件](../../../docs/built-in_ops/05-filter/op_specs/FILTER_oracle_protocol.md#ordinary-floating-point-transform-acceptance)。FRQ-02C 的严格投影参考不变。
+
 ## 覆盖边界
 
 内部 Python 数学函数的便捷默认参数不代表公开 authoring 构造器默认值；规格要求的

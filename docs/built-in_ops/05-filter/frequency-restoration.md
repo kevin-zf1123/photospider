@@ -4,10 +4,13 @@
 
 本页列出频域与恢复族；[空间滤波、边缘与细节](spatial.md)列出其余 20 族。
 
-FRQ-01～06 的 14 个成员已提供 CPU 实现与显式 FrequencyGrid SDK helper，通过 typed CPU invocation ABI 9 对同一 Run 内的算术、整数 limb 工作量和精化阶段累计计费。调用方通过 `psx --max-work N --max-stages N` 设置执行预算；`--max-stages 0` 禁止精化阶段。DFT 实现使用带误差包围的 radix-2/radix-4、mixed-radix 和 Bluestein。确定成本的一维变换、表复制、置换构造和列搬运在执行前准入其保守分段费用之和，尾块按实际列数计费；块内每不超过 1024 个标量工作单位独立检查取消，根认证与精确精化保留逐段计费。prepared kernel 持有完整认证的不可变根表和置换表，容量计入所属 Context 的 Host/Metadata；失败构造不发布部分表，已经完整发布的表可跨 Run 复用。大尺寸的适用纵轴采用显式计入 scratch 的多列连续 Ball 缓冲；31 点以内的残余奇数核使用带包围的成对合并。scratch 合约已变化，使用旧变换 scratch 签名的 Plan 需要重新编译。候选值不能确定所选 profile 的最终舍入或误差界时，执行原始坐标上的精确精化。FRQ-07～10 的 12 个成员仍未实现；各成员的规格状态继续为 Proposed。参数编码、预算与平台边界见 [FRQ-01 契约](op_specs/FRQ-01_contract.md#runtime-integration-and-remaining-acceptance)。
+FRQ-01～06 的 14 个成员已提供 CPU 实现与显式 FrequencyGrid SDK helper，共 30 个注册键。FRQ-07～10 的 12 个成员仍未实现；规格状态继续为 Proposed。
 
+FFT/IFFT/RFFT/IRFFT 使用普通浮点算法，注册名为 `frequency.fft2`、`frequency.ifft2`、`frequency.rfft2`、`frequency.irfft2`。四个变换不提供 strict/accelerated 选择；SDK `transform(document, member, inputs, grid)` 使用同一契约。内部采用 binary64 计算，输出转换为输入 dtype。蝶形、根表与归一化都会发生普通浮点舍入，但不要求最终正确舍入，不进行区间认证或精确重算。小残差、不同算法及平台间的结果差异按数值误差验收；NaN payload、零符号和中间溢出遵循实际浮点计算。此模式不承诺与 OpenCV/MATLAB 逐位相同，Float32 输入的内部精度也不同于 MATLAB 的原生 single 运算。
 
-复数 FFT/IFFT 的适用 2 的幂尺寸可使用每个复数 32 字节的 double-double 中心值，并以统一误差界包围整个平面。非零输入幅值须位于 [2^-200, 2^200]，根误差及中间幅值须满足认证条件；周期性或足够稀疏的输入使用 Ball 路径。ARM64 双通道运算保留标量顺序与显式 FMA。根的阶数整除 4 的输出共用按 `(y mod 4, x mod 4)` 聚合的 16 个 Ball 和，只扫描一次输入，不引入中间结果舍入。最终舍入仍须通过区间认证；DD 候选不能认证时重新读取输入并执行 Ball FFT，候选、重读和重放全部计费，scratch 仍保留完整 Ball 回退容量。节点 `max_work` 分别限制每次 invocation，Run 预算另行累计。
+变换使用 radix-2/radix-4、有限小基数混合 FFT 和 Bluestein。scratch 包含每个复数 16 字节的完整平面、线缓冲、适用的多列缓冲与卷积工作区；prepared kernel 的不可变根表计入 Context 资源。RFFT 通过共用边界代表值构造共轭对，自共轭虚部为 +0；IRFFT 按调用方的边界共轭前提补全半谱，支持独立编辑的内部系数，不扫描校验。
+
+typed CPU invocation ABI9 继续对同一 Run 累计工作量。确定成本的块在执行前准入，块内及块间每不超过 1024 个标量单位检查取消；1024 不是单次准入请求的上限。节点 `max_work` 分别限制每次 invocation。四个变换不消耗精化阶段，冷启动也可使用 `psx --max-stages 0`；其他 FRQ 成员保留各自的严格或加速数值契约。参数、内存与执行边界见 [FRQ-01](op_specs/FRQ-01_contract.md#runtime-integration-and-remaining-acceptance)。
 
 ## 10 个频域族 / 26 个成员
 

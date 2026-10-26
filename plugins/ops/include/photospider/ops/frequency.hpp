@@ -34,19 +34,21 @@ struct Spectrum final {
 /** @brief Append FRQ-01A/B or FRQ-02A/B transactionally.
  * member is fft2/ifft2/rfft2/irfft2; input arity is two except rfft2 (one).
  * grid describes the frequency side, including the explicit original odd/even
- * width for irfft2. Outputs use that member's registered port names. profile is
- * strict/accelerated_apple_silicon/accelerated_x86_64. No defaults or
- * dispatcher. Static syntax/shape errors return InvalidArgument or compile-time
- * TypeMismatch; numerical domains are unchecked. bad_alloc may escape.
- * Serialize edits to one document; independent documents are safe. References
- * borrow no payload/cache. Execution propagates admission, cancellation and
- * upstream failures; successful Result/read-window owners may outlive their
- * ExecutionContext.
+ * width for irfft2. Keys are frequency.fft2/ifft2/rfft2/irfft2. Outputs use
+ * that member's registered port names. Ordinary floating-point FFTs use
+ * binary64 working arithmetic and convert to the input dtype at output.
+ * Correct rounding, per-component ULP bounds and bitwise reproducibility
+ * across algorithms/platforms are not promised. No numerical refinement or
+ * implicit precision dispatcher is performed. Static syntax/shape errors return
+ * InvalidArgument or compile-time TypeMismatch; numerical domains are
+ * unchecked. bad_alloc may escape. Serialize edits to one document; independent
+ * documents are safe. References borrow no payload/cache. Execution propagates
+ * admission, cancellation and upstream failures; successful Result/read-window
+ * owners may outlive their ExecutionContext.
  */
 PHOTOSPIDER_OPS_API Result<std::vector<WorkflowNodeOutput>> transform(
     WorkflowDocument& document, const std::string& member,
-    const std::vector<WorkflowInput>& inputs, const Grid& grid,
-    const std::string& profile);
+    const std::vector<WorkflowInput>& inputs, const Grid& grid);
 /** @brief Append an explicit bit-preserving full-grid permutation.
  * inverse=false requires unshifted input; inverse=true requires shifted input.
  * axes is a nonempty unique axis set; the returned grid changes index_order.
@@ -57,7 +59,8 @@ PHOTOSPIDER_OPS_API Result<Spectrum> shift(
     WorkflowDocument& document, const Spectrum& input,
     const std::vector<std::int64_t>& axes, bool inverse);
 /** @brief Append explicit full unshifted Hermitian projection, without
- * validation. profile and error/owner/thread rules match transform.
+ * validation. profile is strict/accelerated_apple_silicon/accelerated_x86_64.
+ * Error/owner/thread rules match transform.
  * Self-conjugate real samples are bit copies, imaginary samples are structural
  * +0. Other pairs use exact RN component averages; numerical conjugacy is not
  * checked or certified.
@@ -69,7 +72,8 @@ PHOTOSPIDER_OPS_API Result<Spectrum> project_hermitian(
  * Grid shape, packing, axes and index_order must match; response norm does not
  * multiply spectrum amplitude. broadcast_axes may contain only non-frequency
  * singleton response axes. Units/spacing association and samples are unchecked.
- * The output grid is input.grid. Other rules match transform.
+ * The output grid is input.grid. profile follows project_hermitian; lifetime
+ * and failure rules match transform.
  */
 PHOTOSPIDER_OPS_API Result<Spectrum> multiply(
     WorkflowDocument& document, const Spectrum& input, const Spectrum& response,

@@ -9,10 +9,8 @@ implementation_status: implemented
 parent_id: FRQ-01
 function: ifft2
 proposed_operation_keys:
-- frequency.ifft2_strict
-- frequency.ifft2_accelerated_apple_silicon
-- frequency.ifft2_accelerated_x86_64
-numeric_reference: E
+- frequency.ifft2
+numeric_reference: F
 oracle_scope: mathematical_reference
 research_sources:
 - S09
@@ -24,7 +22,7 @@ research_sources:
 
 Two-dimensional complex inverse transform.Status: **Proposed**.
 
-Inherits [FRQ-01 family contract](FRQ-01_contract.md), [FILTER shared contract](FILTER_common_contract.md), [NUM numeric semantics and precision](../../01-numeric/op_specs/NUM_common_contract.md) and [FMT metadata and straight-color semantics](../../02-format-color/op_specs/FMT_common_contract.md). This member and its family contract define the complete target behavior. RN stages, gradual underflow, and accelerated error limits are inherited and may not be weakened.
+Inherits [FRQ-01 family contract](FRQ-01_contract.md), [FILTER shared contract](FILTER_common_contract.md), [NUM numeric semantics and precision](../../01-numeric/op_specs/NUM_common_contract.md) and [FMT metadata and straight-color semantics](../../02-format-color/op_specs/FMT_common_contract.md). This member and its family contract define the complete target behavior. The ordinary floating-point F contract in FRQ-01 governs this transform; it explicitly replaces NUM correct-rounding, exact exceptional-value ordering and accelerated-ULP requirements for this member.
 
 ## Ports, Shape, and Semantics
 
@@ -36,33 +34,33 @@ Ports carry Results with fixed Tensor member schemas. Unless the member defines 
 
 Required parameters: transformed axes; `norm` (`backward` or `ortho`); positive `spacing_y/x`; explicit `origin_y/x`; and a unit (`pixel` or a caller-defined unit). The inverse consumes `norm` from the compatible grid descriptor and rejects a conflicting override.
 
-Floating-point values, including NaN and infinities, and floating-point overflow follow the corresponding NUM operation. This specification does not impose a category-wide finite-only input rule or turn floating-point overflow into an operation failure. Copy/bypass and unconsumed samples follow this member’s stated demand semantics. All applicable constructor parameters must be supplied explicitly. Parameters that do not apply to the selected profile must be omitted. Constructor defaults are not provided; supplied arguments are stored in the direct node. Real parameters denote their stored Float64 values; decimal text is not treated as an exact real parameter.
+Inputs and outputs have matching Float32 or Float64 dtype. All static configuration is explicit. Arithmetic uses the ordinary floating-point rules in [FRQ-01](FRQ-01_contract.md#shared-mathematics-units-and-profiles), including intermediate overflow and implementation-dependent NaN payloads and zero signs. Floating invalid arithmetic does not itself cause an operation failure. Resource and upstream failures remain operational.
 
 ## Mathematical Reference and Rounding
 
-Numeric reference: **E** ; E/B/S definitions are in [FILTER_numeric_reference](FILTER_numeric_reference.md).
+Numeric reference: **F**, ordinary floating-point approximation; see [numeric reference](FILTER_numeric_reference.md).
 
-`z[y,x]=RN_t_components(s * Σ_{ky,kx}F[ky,kx]*exp(+2πi*(ky*y/H+kx*x/W)))`. The complex products, trigonometric values, and scale inside the summation are exact real expressions. Each output component is rounded only once, at the end; this is not a DFT using RN64 twiddle factors. π is the mathematical constant.
+The target is `z[y,x] = s * sum(F[ky,kx] * exp(+2*pi*i*(ky*y/H+kx*x/W)))`. The implementation approximates this mathematical inverse DFT with a floating-point FFT.
 
-When this formula invokes another member, its RN stages must be retained as stated here or in the family contract; internal temporary operations may not introduce undeclared rounding. Signed zero, numerical-domain premises and explicit valid-input no-solution outcomes, gradual underflow, and output range follow the shared contract and NUM.
+Twiddle generation, butterfly operations and normalization incur ordinary floating-point rounding. There is no final correct-rounding proof, interval validation or exact recomputation. Small residuals at mathematical zeros are allowed. Float32 outputs are converted from binary64 working values. The mathematical reference supplies error measurements, not mandatory output bits.
 
 ## Fixed reads, algorithmic control and schemas
 
-complete-input demand applies to each transform group. Even a single requested coefficient q reads all real and imaginary samples in that group, except terms proved exactly zero may be removed in the exact plan. Distinct batches do not read one another.
+complete-input demand applies to each transform group. Even a single requested coefficient q reads all real and imaginary samples in that group. Distinct batches do not read one another.
 
 Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Lowering closes mathematical sample support on fixed input member-tile grids. Data-dependent selection uses a finite static superset of every address the task may consume; runtime selection does not expand the Plan. Data and control are algorithmic inputs, with no separate Validation read set. Empty retained selections introduce no payload tasks. Output schemas derive only from static parameters and input schemas. Numerical, encoding and association premises remain unchecked under the common contract.
 
 ## Algorithm, Resources, and Execution
 
-Use a direct O(P²C) certified reference. A native O(PC logP) FFT is permitted only with a final rounding enclosure or fallback. Round-trip error is not a proof that each DFT output is correctly rounded. Global scratch and plan lifetime are budgeted.
+The CPU implementation uses radix-2/radix-4, bounded mixed-radix codelets and Bluestein convolution. It uses one full complex working plane, a linear line buffer and bounded column/convolution workspace. Native binary64 arithmetic is used for both input dtypes. The mathematical direct oracle is O(P²); the production transform has O(P log P) scaling with bounded small-radix constants, where P=HW.
 
-In complexity notation, P=HW, C is the number of independent planes, A is the tap count, and T is the iteration count. Arbitrary-precision limb complexity is additional and is not a measured benchmark. The shared contract defines work, memory, and stage admission, cancellation, failure status, and owner lifetime. A failed call publishes no successful Result export; previously retired call exports remain valid, and final RET results require successful Run completion. Execution does not spill automatically, lower precision silently, or invoke a retired implementation as fallback.
+Work blocks are admitted before computation and check cancellation independently at intervals of at most 1024 declared scalar units. No refinement stages are requested. Scratch, root tables and outputs are resource-accounted. A failed Run publishes no final Result; existing exports from retired calls retain their owners. See [FRQ-01 runtime integration](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
 
 ## Oracle, Fixtures, and Acceptance
 
 Acceptance fixtures include an impulse at (0,0), whose forward transform under backward normalization is all real 1 and imaginary 0 (under ortho: real 1/sqrt(H*W)); a constant single plane with DC=H*W*c under backward or sqrt(H*W)*c under ortho and all other coefficients zero; 1×1; odd/even 2×3 single-frequency inputs; round trips that are numerically close without general bit identity; and Parseval checks that distinguish normalization modes.
 
-The reference function evaluates the mathematical formula on small inputs. It is neither a production kernel nor a complete port-schema or preflight simulator. ExactRational rounds exact rational expressions directly to IEEE format. For transcendental functions, only results from a DirectedMPFR interval that determines the final rounding are strict goldens. Return Inconclusive when the interval cannot determine rounding; do not substitute an approximation.
+Production results are compared with the F-profile error criteria in [the acceptance protocol](FILTER_oracle_protocol.md#ordinary-floating-point-transform-acceptance), rather than bitwise equality. The reference function evaluates the mathematical formula on small inputs. It is neither a production kernel nor a complete port-schema or preflight simulator. ExactRational rounds exact rational expressions directly to IEEE format. For transcendental functions, only results from a DirectedMPFR interval that determines the final rounding are strict goldens. Return Inconclusive when the interval cannot determine rounding; do not substitute an approximation.
 
 `frq01.spectral.dft2(real, imag, *, inverse, norm, dtype)` → [source file](../../../../oracle/ops/filter/frq01/spectral.py).
 
@@ -72,13 +70,11 @@ Reproduction steps and proof levels are in [oracle README](../../../../oracle/op
 
 ## Backend and Registration Status
 
-The listed keys are registered by `register_frequency` in `plugins/ops/05-filter/frequency_operations.cpp`; execution is in `frequency_transform.cpp`. The functional CPU implementation includes certified radix-2/radix-4 FFT, common-twiddle radix-2/3/5 codelets, paired residual odd-radix combinations through radix 31, Bluestein, and streaming directed/exact trace refinement with algebraically correlated ortho normalization. Eligible full-complex power-of-two planes use certified double-double centers with a plane-wide error bound, ARM64 two-lane arithmetic and shared quarter-frequency residue sums; unresolved candidates replay the fully charged Ball path. See the [family contract](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance) for the domain and final rounding gate. Prepared kernels own certified immutable root/permutation tables, and applicable large transforms use explicitly budgeted multi-column Ball scratch. Deterministic FFT and mixed-radix lines, table copies, permutation construction and column gather/scatter prepay the exact sum of their conservative segment costs. Independent cancellation checkpoints remain at most 1024 scalar work units apart, including within a larger admitted block, as specified in FRQ-01. Nonfinite inputs retain the original Reader-based exceptional-value path; final rounding enclosures and exact-zero sign witnesses govern candidate acceptance. CPU strict and named target-gated Apple Silicon/x86-64 profiles exist; local runtime evidence covers Apple CPU only, with no GPU backend. Typed CPU9 supplies the family's H08 cumulative arithmetic/limb and refinement-stage admission; old FRQ ABI8 Plans and Plans with the previous transform scratch signature require recompilation. Accelerated variants must satisfy NUM’s final FP32-scaled four-ULP bound and fallback rules. Do not accumulate the error budget across taps, axes, stages, or iterations. Approximation may not change exact decisions, thresholds, ordering, boundaries, copy behavior, or output support.
-
-Float64 accelerated variants retain Float64 inputs, outputs, and exponent range; they do not convert through Float32. Float32 inputs outside the supported scale range use the NUM strict fallback.
+`frequency.ifft2` is registered by `register_frequency` in `frequency_operations.cpp` and executed by `frequency_transform.cpp`. The portable CPU implementation has no strict/accelerated profile selector. Target-platform performance and bit patterns are not implied by registration. No GPU backend is provided. The SDK `frequency::transform` takes the member, inputs and explicit grid configuration.
 
 ## Conceptual DAG (Not an Existing API)
 
-`static parameters + schemas → compile fixed reads/tasks → prepare → unchecked arithmetic with declared RN stages → complete tiles → ordered call retirement`
+`static parameters + schemas → compile fixed reads/tasks → prepare → ordinary floating-point FFT → complete tiles → ordered call retirement`
 
 This diagram adds no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-fill for missing data. complete-input demand and multistage buffering are defined by this member and its family contract.
 
@@ -88,4 +84,4 @@ This diagram adds no implicit color conversion, hidden alpha premultiplication, 
 
 External sources support the algorithmic definition. The finite support, rounding, tie-breaking, units, parameters, and execution profile specified here are project choices and do not claim bitwise equivalence with any library or commercial product.
 
-NUM special-value and overflow semantics apply. Resource admission and failure follow the shared FILTER contract.
+The F-profile special-value and overflow rules apply. Resource admission and failure follow the shared FILTER contract.

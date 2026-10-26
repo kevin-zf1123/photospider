@@ -25,40 +25,35 @@ Inherits [FILTER shared contract](FILTER_common_contract.md), [NUM](../../01-num
 
 | ID | Specification | kind | Numeric reference |
 | --- | --- | --- | --- |
-| FRQ-02A | [Real-input half spectrum](FRQ-02A_rfft2.md) | primitive | E |
-| FRQ-02B | [Hermitian half-spectrum to real field](FRQ-02B_irfft2.md) | primitive | E |
+| FRQ-02A | [Real-input half spectrum](FRQ-02A_rfft2.md) | primitive | F |
+| FRQ-02B | [Hermitian half-spectrum to real field](FRQ-02B_irfft2.md) | primitive | F |
 | FRQ-02C | [Explicit Hermitian-symmetry projection](FRQ-02C_project_hermitian.md) | primitive | E |
 
 Suffix letters identify distinct mathematical or interface objects, not quality tiers that a backend may select freely. A primitive may propose separately named strict and accelerated variants. A helper only orchestrates explicit stages. An external engine requires fixed resources and an approved executable configuration.
 
 ## Runtime integration and remaining acceptance
 
-All three members are registered by `register_frequency` in
-`plugins/ops/05-filter/frequency_operations.cpp`; transform execution is in
-`frequency_transform.cpp` and projection is in `frequency_local.cpp`.
-The public SDK is `photospider/ops/frequency.hpp`. The explicit grid parameter
-encoding and typed CPU9 cumulative-budget contract are documented in
-[FRQ-01 runtime integration](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
-This family has CPU strict and target-gated Apple Silicon/x86-64 keys, no GPU.
-Runtime evidence is limited to the locally executed Apple CPU configurations;
-x86-64 execution has not been measured. H08 arithmetic/limb and refinement-stage
-admission is implemented through explicit CPU ABI9 across tiles and nodes, with
-independent Run limits and shared Context-root accumulation. Old FRQ ABI8 Plans
-require recompilation. This does not imply acceptance of unmeasured platforms.
+`frequency.rfft2` and `frequency.irfft2` use the ordinary floating-point CPU
+transform in `frequency_transform.cpp`. They inherit the F-profile arithmetic,
+full-plane scratch, prepared root cache and ABI9 resource accounting in
+[FRQ-01](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
+`project_hermitian` remains an E-profile operation in `frequency_local.cpp`, with
+its strict and target-gated accelerated keys and exact conjugate construction.
+The SDK is `photospider/ops/frequency.hpp`.
 
-`rfft2` and `irfft2` require `packing=r2c_x`, `index_order=unshifted`;
-`original_shape` contains the original spatial width. `project_hermitian`
-requires full unshifted storage. No numerical conjugacy scan is added.
+The real transforms require `packing=r2c_x`, `index_order=unshifted`, and explicit
+original spatial width. Forward computation loads real values into a full complex
+plane with zero imaginary input, computes the floating FFT and emits columns
+0 through floor(W/2). DC and even-width Nyquist boundary columns use the smaller
+y index of each conjugate pair as their common representative. The opposite
+imaginary value is its negation, and self-conjugate imaginary intersections are
+structural +0. No enclosure or numerical validation is needed for this packing.
 
-For even original width `W=2M`, both real transforms use an admitted `H*M` Complex working plane, plus linear-axis root/line storage and any Bluestein workspace. The same `transform_width()` calculation determines static scratch capacity and runtime pointer advancement. Odd widths retain the full-width transform. A width-one compact axis (`M=1`) requires no x transform. Dedicated recombination roots remain valid when column gathering reuses other axis storage. When the transformed axes are not both powers of two and the compact x-axis does not use Bluestein, the compact x-axis roots reuse even phases of the certified original-width real table, using exact half-turn negation for phases beyond the stored half. This preserves enclosure radii and avoids duplicate root certification; each copied root is independently prepaid.
-
-The forward path packs `z[y,j]=a[y,2j]+i*a[y,2j+1]` and computes the unnormalized two-dimensional `Z=DFT(H,M)(z)`. For `0<=k<=M`, let `P=Z[ky,k%M]`, `Q=conj(Z[(-ky)%H,(-k)%M])` and `u=exp(-2*pi*i*k/W)`. It reconstructs `(P+Q-i*u*(P-Q))/2`, then applies the original `H*W` normalization. Reconstruction reads both partners from the compact plane and computes only the requested real or imaginary component. Existing zero-support certificates can exclude a component before reconstruction. Boundary conjugates still share a representative, and self-conjugate imaginary intersections are structural +0.
-
-The inverse path uses the caller-owned exact boundary conjugacy premise. For `0<=k<M`, it reads `P=F[ky,k]`, `Q=conj(F[(-ky)%H,M-k])` and forms `T=P+Q+i*conj(u)*(P-Q)`. At `k=0`, `Q` therefore reads the Nyquist column `M`. An unnormalized `IDFT(H,M)(T)` produces even/odd spatial samples in its real/imaginary components. `T` deliberately omits division by two so the original inverse `1/(H*W)` or `1/sqrt(H*W)` scale remains applicable. Independently edited interior coefficients remain supported.
-
-After an uncertified IRFFT result enters the existing directed/exact cold path, an output with primitive root order four can be recertified by an original-coordinate signed Ball sum. The path retains the original exceptional-value and all-zero signed-reduction handling. Backward uses the exact integer denominator `H*W`; ortho uses the existing integer square-factor decomposition only when an unsigned128 square proves a perfect-square area. An explicit area bound of `2^53` certifies denominator conversion to Float64. The existing bounded rational finisher certifies the final rounding, including exact midpoint ties. Unresolved sums and non-square normalization continue directed/exact refinement. This adds no unconditional scan for quarter-frequency outputs and no scratch allocation; the guard, attempt, retained terms and final certificate are independently prepaid.
-
-These formulas rearrange exact real expressions inside certified Ball arithmetic. They introduce no intermediate RN stage and do not expand the NUM accelerated error allowance. Root components and irrational codelet coefficients retain certified enclosures. Finite-input classification occurs during the algorithm's existing input load; nonfinite or uncertified results retain the original-coordinate Reader fallback, including written-order NaN payload and signed-zero behavior. Period, zero and boundary certificates also use logical Reader coordinates, independently of compact storage. Packing, reconstruction and dynamic refinement retain individual CPU9 work/stage admission. Deterministic butterfly lines, immutable-table copies, permutation construction and column gather/scatter blocks prepay the exact sum of their conservative segment costs, with independent cancellation checkpoints at intervals of at most 1024 scalar work units and first-failure preservation as described in FRQ-01. Prepared-kernel root/permutation ownership and bounded multi-column scratch follow the same contract. Root caches retain the full certified Ball values, and column blocks use the compact transform width when packing applies; reconstruction roots remain separate from the column workspace.
+Inverse computation uses the caller's boundary conjugacy premise and completes
+missing columns by `F[y,x]=conj(F[(-y)%H,W-x])`. It computes the floating inverse
+FFT and emits its real component. Independently edited interior coefficients are
+supported. It does not validate or repair boundary pairs. Both odd and even
+original widths use this completion and the explicit original H*W normalization.
 
 ## Shared Mathematics, Units, and Profiles
 
@@ -71,7 +66,7 @@ The proposed FrequencyGrid/v1 SDK/workflow representation pairs real and imagina
 
 ## Shared Execution and Numeric Requirements
 
-E denotes an exact expression rounded once to RN_t; B denotes explicitly generated and fixed coefficients; S denotes explicit staged rounding. See [numeric reference](FILTER_numeric_reference.md). NUM defines NaN/Inf and floating-point overflow behavior; this family adds no category-wide finite-only rule. Strict bits, final FP32-scaled four-ULP bounds, gradual underflow, copy behavior, and exact discrete branches inherit NUM.
+FRQ-02A/B use ordinary floating-point F semantics, including intermediate rounding and overflow as specified by FRQ-01. FRQ-02C retains E semantics: exact-expression output rounding, NUM exceptional-value rules and its named accelerated bounds. Resource, shape, fixed-read and publication obligations apply to all three members.
 
 Positive-weight normalized filters, signed kernels, local regression, and global inverse problems have different alpha semantics and must not share one generic blur rule. See [color composition](FILTER_color_composition.md). Spatial extension, anchors, and origins follow the [boundary contract](FILTER_boundary_contract.md). Structured outputs follow the [collection contract](FILTER_collections_contract.md). Shapes depend only on descriptors; each member defines mathematical support and fixed compiled reads.
 

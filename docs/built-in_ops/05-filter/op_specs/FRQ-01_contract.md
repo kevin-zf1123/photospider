@@ -18,7 +18,7 @@ research_sources:
 
 # FRQ-01: Two-dimensional complex DFT
 
-The mathematical DFT is separate from its FFT implementation. The strict result is not defined by the operation order of any particular FFT library.
+The mathematical DFT is separate from its FFT implementation. The implementation returns an ordinary floating-point approximation, without a correctly rounded final-output requirement.
 
 Inherits [FILTER shared contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md) and [FMT](../../02-format-color/op_specs/FMT_common_contract.md).
 
@@ -26,98 +26,82 @@ Inherits [FILTER shared contract](FILTER_common_contract.md), [NUM](../../01-num
 
 | ID | Specification | kind | Numeric reference |
 | --- | --- | --- | --- |
-| FRQ-01A | [Two-dimensional complex forward transform](FRQ-01A_fft2.md) | primitive | E |
-| FRQ-01B | [Two-dimensional complex inverse transform](FRQ-01B_ifft2.md) | primitive | E |
+| FRQ-01A | [Two-dimensional complex forward transform](FRQ-01A_fft2.md) | primitive | F |
+| FRQ-01B | [Two-dimensional complex inverse transform](FRQ-01B_ifft2.md) | primitive | F |
 
 Suffix letters identify distinct mathematical or interface objects, not quality tiers that a backend may select freely. A primitive may propose separately named strict and accelerated variants. A helper only orchestrates explicit stages. An external engine requires fixed resources and an approved executable configuration.
 
 ## Runtime integration and remaining acceptance
 
-The two members are registered by `register_frequency` in
-`plugins/ops/05-filter/frequency_operations.cpp`, reached from the maintained
-built-in registry. `frequency_transform.cpp` implements certified radix-2/radix-4
-FFT, common-twiddle radix-2/3/5 codelets, paired residual odd-radix combinations through radix 31,
-Bluestein for large residual factors, and bounded block recurrences for enclosed
-roots/chirps. `frequency_direct.hpp` streams directed
-refinement and exact trace-square zero/midpoint decisions, including algebraically
-correlated ortho normalization. Scratch has a full-plane and linear-axis bound;
-it allocates no polynomial arrays proportional to the primitive root order. The SDK helper is declared in
-`photospider/ops/frequency.hpp`. CPU strict and target-gated Apple Silicon and
-x86-64 keys exist; only the local Apple CPU has runtime evidence in this task.
-There is no GPU backend.
+`frequency.fft2` and `frequency.ifft2` are portable CPU operations registered by
+`register_frequency`; `frequency.rfft2` and `frequency.irfft2` share their
+implementation in `frequency_transform.cpp`. They have no strict/accelerated
+profile selector. The SDK `photospider/ops/frequency.hpp` exposes
+`transform(document, member, inputs, grid)`. No GPU backend is provided.
 
-Direct nodes supply the FrequencyGrid/v1 configuration explicitly:
-`schema_revision` Int64 1, `original_shape` canonical comma-separated String,
-`y_axis`, `x_axis` Int64, `packing`, `index_order`, `norm`, `unit`, `grid_id`
-Strings, and `spacing_y/x`, `origin_y/x` Float64. Origins/spacings use y,x order.
-`original_shape` includes batch prefixes. Forward inputs have original shape;
-the inverse checks its stored coefficient shape against this configuration.
-A different normalization override is not introduced by the helper.
+Direct nodes supply `schema_revision` Int64 1, `original_shape` as a canonical
+comma-separated String, `y_axis` and `x_axis` Int64, and `packing`, `index_order`,
+`norm`, `unit`, `grid_id` Strings. `spacing_y/x` and `origin_y/x` are Float64.
+The original shape includes batch axes. Transform input is unshifted, with full
+packing for complex transforms and r2c_x packing for real transforms.
 
-FRQ-01..06 execute exclusively through typed CPU invocation/preparation ABI 9.
-The borrowed work/stage service charges arithmetic and integer-limb segments
-before execution, and charges each explicit refinement attempt. One Run ledger
-covers all nodes, tiles and activations; repeated/concurrent Runs have independent
-limits under their shared Context root. A host budget refusal is `ResourceExhausted`
-with `WorkLimit` or `StageLimit`, `Resource`/`Run` attribution and known node/task;
-accepted work drains and no final Result is published. The operator's
-invocation-local work consumer locks its first failure, including a node-local
-limit refusal, service refusal or cancellation; subsequent helper calls preserve
-that reason and issue no further admission. Run cancellation retains terminal
-priority and does not refund admitted work. The optional Int64 node `max_work`
-continues to limit each invocation independently; it is not the Run total.
-`ExecutionOptions::maximum_work` defaults to 268435456; callers must explicitly
-budget large transforms. `maximum_refinement_stages` defaults to UINT64_MAX and
-allows zero. `psx --max-work N --max-stages N` configures these Run limits.
-`ExecutionDiagnostics::issued_work` reports successful admission units, excluding
-legacy ABI8 internal arithmetic, allocator overhead and CPU instructions.
+Power-of-two axes use radix-2/radix-4 butterflies. Other axes use radix-2/3/5
+factorization with residual codelets through length 31; larger residual factors
+use Bluestein power-of-two convolution. Twiddles are ordinary libm sine/cosine
+values with exact quarter-turn constants. There is no Ball/DD enclosure, final
+rounding-cell check, exact refinement or data-dependent certified replay.
 
-The H08 cumulative-budget implementation gap is closed. Invocation-8 FRQ Plans
-must be recompiled; there is no silent ABI downgrade. Module ABI8, native service
-ABI2, traits30 and psir/psxp5 layouts remain unchanged, and other ABI8 operations
-remain supported. CPU x86 execution, GPU support and unmeasured platforms are not
-implied by the local Apple evidence. Exact fallback is finite-budget computation;
-its constant-storage trace test can require quadratic work in input terms and
-does not promise FFT-time completion for adversarial unresolved outputs.
+The working plane contains H*W binary64 complex values (16 bytes each), even for
+real transforms. Scratch also holds max(H,W) complex line values, up to eight
+contiguous columns when h>1, max(h,w)>=1024 and the vertical axis does not use
+Bluestein, and max(H,W)+2*B complex values when Bluestein convolution length B is
+needed. Every buffer is included in the fixed preparation signature.
 
-Power-of-two lines use binary bit reversal followed by an initial radix-2 stage when needed and radix-4 stages. Each radix-4 group contributes three 512-unit Complex products and a 512-unit add/rotate segment to its line's conservative work bound. Mixed-radix codelets apply one common twiddle per child before combining radix-2, radix-3 or radix-5 outputs. Residual odd codelets through radix 31 pair child indices j and r-j: their sum multiplies a certified cosine, and their difference multiplies a certified sine with an exact quarter-turn rotation. The two output frequencies use opposite signs for the rotated term. The declared combination cost is 512*r + 192*p + 896*p*p, where p=(r-1)/2; recursive visits and output copies are charged separately. Irrational coefficients retain certified Ball enclosures. Work units cover internal certified scalar arithmetic and integer-limb work; CPU instruction counts are a separate measurement.
+Prepared kernels own immutable dimension/direction root tables through managed
+Context allocators. Construction occurs outside the publication mutex and only
+complete entries are published. Concurrent misses may perform separately charged
+constructions; losing copies are released. Cache entries contain no payloads or
+Run ledgers. Cache hits skip table generation, not transform work.
 
-A deterministic FFT or mixed-radix line admits the exact sum of its declared segment costs before payload computation. This admission includes the line's permutation, recursive child visits, combination and final copies. Deterministic table copies, permutation construction and column gather/scatter use the same pre-admission rule; a partial final column block charges its actual column count. The payload checks cancellation independently, at intervals of at most 1024 scalar work units. An admission request may therefore exceed 1024 units while retaining the shared cancellation interval. Dynamic root certification and directed/exact refinement retain their individual work/stage admission. A refused block performs no payload work, and the first failure remains terminal. Cancellation after a successful admission retains the admitted charge, following the ABI9 rule that work is not refunded.
+FRQ-01..06 use typed CPU invocation ABI9. One Run ledger covers all its nodes,
+tasks and activations under the Context root. Node `max_work` limits each
+invocation independently. Deterministic blocks admit their conservative declared
+cost before payload computation; cancellation checkpoints inside and between
+blocks are at most 1024 scalar work units apart. Admission requests may exceed
+1024. The first failure stays terminal and admitted work is not refunded.
+Transforms request zero refinement stages, including cold table construction;
+`psx --max-stages 0` therefore permits them. Other FRQ members may refine.
 
-Prepared kernels own immutable certified root tables keyed by length, requested count and direction, and immutable binary-permutation tables keyed by length. Their managed allocators capture the preparing Context resource root; table objects, map nodes and vector capacities count toward Host and Metadata while their owners remain alive. Table construction occurs privately outside the publication mutex. Only a complete, successfully checked entry is published; concurrent misses may perform separate charged constructions, and a losing private copy is released. A later Run failure does not roll back earlier complete entries. Cache hits pay for the actual copies/visits, while root refinement is charged only when performed. Warm cache use does not waive normalization, exceptional-value or final-certificate work.
-
-For h>1, max(h,w)>=1024 and a non-Bluestein vertical axis, the transform gathers up to eight columns into contiguous certified Complex buffers, transforms them sequentially and scatters them back. The declared scratch explicitly adds h*min(8, transform_width) Complex values, each containing two full Balls; it does not depend on unused space in another numerical layout. The last block uses the remaining columns. Compact real transforms use their compact width for this allocation and retain separate reconstruction roots. Scratch is part of the fixed preparation signature, so Plans compiled with the previous scratch contract must be recompiled.
-
-Full-complex power-of-two transforms can use a 32-byte complex double-double
-center with one certified error bound for the plane. Each component stores a
-normalized binary64 hi/lo pair. The candidate requires nonzero input magnitudes
-in [2^-200, 2^200], certified complex root errors at most 2^-80 and finite
-intermediate amplitude bounds; periodic or sufficiently sparse inputs use the
-Ball path. The amplitude bound A encloses the Euclidean norm of every exact
-complex intermediate, and E encloses the Euclidean error of its stored center.
-Outward-rounded stage recurrences include root uncertainty, omitted low-low
-products and gradual underflow. ARM64 two-lane arithmetic preserves the scalar
-operation order and explicit FMA points. The full Ball scratch capacity remains
-reserved for fallback.
-
-The DD candidate checks final normalized rounding enclosures. A Float64 RN-cell
-shortcut accepts only an enclosure strictly inside the hi component's rounding
-cell; other cases use the general profile gate. Quarter-frequency outputs whose
-roots divide four share sixteen certified input sums indexed by (y mod 4,
-x mod 4). One input scan constructs these sums, and signed component reductions
-recover each requested quarter-frequency coefficient without intermediate output
-rounding. This work is admitted and cancellation-polled like other deterministic
-blocks. An unresolved DD plane reloads the original inputs and replays the Ball
-FFT; the failed candidate, reload and replay all remain charged. Unresolved final
-Ball outputs retain directed/exact refinement. The choice of internal candidate
-does not introduce a public RN stage or change per-invocation max_work semantics.
-
-The FFT candidate accepts only finite-input expressions whose final enclosure meets the selected profile. Nonfinite inputs and unresolved zero, midpoint or range cases use the original Reader-based directed/exact path, retaining structural-zero exclusions and written-order exceptional-value semantics. Real-input compact storage is described in [FRQ-02](FRQ-02_contract.md#runtime-integration-and-remaining-acceptance).
+`psx --max-work N` sets the Run limit; the default is 268435456. Work accounting
+measures declared scalar/control costs, not CPU instruction counts. Resource
+refusal or cancellation prevents successful final Result publication and retains
+its existing status/attribution. Root storage, scratch and outputs remain subject
+to managed capacity limits. Resource exhaustion does not change precision or
+select an unmetered fallback.
 
 ## Shared Mathematics, Units, and Profiles
 
 Each combination of untransformed axes forms an independent transform group. Spacing and origin annotate coordinates but do not change the DFT phase formula; physical-origin phase compensation requires an explicit multiplication. Under `backward` normalization, the forward scale is 1 and inverse scale is 1/(HW); under `ortho`, both scales are 1/sqrt(HW). Full-complex real and imaginary components have identical shapes. Coefficient outputs use FrequencyGrid/v1.
 
+
+The four transforms use the **F** ordinary floating-point contract. Both dtypes
+use binary64 working arithmetic; output converts to the input dtype. Ordinary
+rounding occurs at machine operations, twiddle generation and normalization.
+Correctly rounded mathematical outputs, per-component ULP bounds and cross-library,
+cross-algorithm or cross-platform bit identity are not required. Near-zero
+coefficients may contain roundoff residuals. Tests compare numerical errors against
+an independent reference as defined by the [acceptance protocol](FILTER_oracle_protocol.md#ordinary-floating-point-transform-acceptance).
+
+Gradual underflow follows the CPU floating environment. Intermediate overflow and
+invalid arithmetic may produce Inf or NaN even if an exact expression would be
+finite. NaN payload/priority, exceptional-value propagation and signed-zero bits
+follow the executed FFT, without NUM exact-expression ordering or recovery.
+No finite-only validation scan is introduced. Explicit RFFT structural imaginary
+zeros and boundary conjugate construction remain specified in FRQ-02.
+
+This is the usual approximate-FFT model, not a promise to duplicate OpenCV or
+MATLAB internals. In particular, this implementation's binary64 workspace differs
+from MATLAB's native single-precision computation for single input.
 
 ## FrequencyGrid/v1 logical schema
 
@@ -125,7 +109,7 @@ The proposed FrequencyGrid/v1 SDK/workflow representation pairs real and imagina
 
 ## Shared Execution and Numeric Requirements
 
-E denotes an exact expression rounded once to RN_t; B denotes explicitly generated and fixed coefficients; S denotes explicit staged rounding. See [numeric reference](FILTER_numeric_reference.md). NUM defines NaN/Inf and floating-point overflow behavior; this family adds no category-wide finite-only rule. Strict bits, final FP32-scaled four-ULP bounds, gradual underflow, copy behavior, and exact discrete branches inherit NUM.
+F denotes the ordinary floating-point transform rules above. The E/B/S rules and NUM strict/accelerated bounds continue to apply to other members according to their individual specifications. Shape, fixed-read, resource and publication contracts are unchanged by the numeric category.
 
 Positive-weight normalized filters, signed kernels, local regression, and global inverse problems have different alpha semantics and must not share one generic blur rule. See [color composition](FILTER_color_composition.md). Spatial extension, anchors, and origins follow the [boundary contract](FILTER_boundary_contract.md). Structured outputs follow the [collection contract](FILTER_collections_contract.md). Shapes depend only on descriptors; each member defines mathematical support and fixed compiled reads.
 

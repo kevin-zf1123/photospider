@@ -76,8 +76,7 @@ std::vector<WorkflowNodeOutput> append(
 }  // namespace
 Result<std::vector<WorkflowNodeOutput>> transform(
     WorkflowDocument& document, const std::string& member,
-    const std::vector<WorkflowInput>& inputs, const Grid& grid,
-    const std::string& profile) {
+    const std::vector<WorkflowInput>& inputs, const Grid& grid) {
   try {
     parameter(member == "fft2" || member == "ifft2" || member == "rfft2" ||
                   member == "irfft2",
@@ -93,8 +92,17 @@ Result<std::vector<WorkflowNodeOutput>> transform(
         member == "rfft2"    ? std::vector<std::string>{"real", "imag"}
         : member == "irfft2" ? std::vector<std::string>{"output"}
                              : std::vector<std::string>{"out_real", "out_imag"};
-    return Result<std::vector<WorkflowNodeOutput>>(
-        append(document, member, profile, inputs, parameters(grid), out));
+    auto p = parameters(grid);
+    const auto ids =
+        take(numeric::available_workflow_node_ids(document, 1, inputs));
+    auto staged = document;
+    staged.nodes.push_back(
+        {ids[0], "frequency." + member, inputs, std::move(p)});
+    std::vector<WorkflowNodeOutput> result;
+    for (const auto& name : out)
+      result.push_back({ids[0], name});
+    document = std::move(staged);
+    return Result<std::vector<WorkflowNodeOutput>>(std::move(result));
   } catch (const Status& s) {
     return Result<std::vector<WorkflowNodeOutput>>(s);
   }

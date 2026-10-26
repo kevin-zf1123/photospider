@@ -29,12 +29,26 @@ rationals. Unmarked arithmetic denotes mathematical evaluation, not host instruc
   t. Blind PSF simplex state is exact rational. Explicit baked64 coefficients retain
   RN64. Iteration order/ROI/thread count cannot move these rounding boundaries.
 
+* **F:** FRQ-01A/B and FRQ-02A/B approximate their mathematical DFT using
+  ordinary floating-point FFT arithmetic. Twiddles, intermediate operations and
+  normalization round at machine precision. The implementation uses binary64
+  working values and converts to the input dtype at output. No correctly rounded
+  final output, certified per-component error bound, cross-platform bit identity
+  or exact fallback is required. The [F acceptance criteria](FILTER_oracle_protocol.md#ordinary-floating-point-transform-acceptance)
+  compare measured error against mathematical references.
+
 Finite E intermediates cannot fail or become infinity merely because host arithmetic
 overflows. A finite exact value rounded beyond the destination range produces signed
 infinity under NUM. That infinity is an observable input to the next S stage.
 Convex-combination bounds do not justify clipping signed kernels or restoration.
 
 ## Exceptional values and operand order
+
+For F transforms, ordinary executed arithmetic determines exceptional propagation,
+NaN payloads and zero signs. Intermediate overflow may produce Inf/NaN despite a
+finite exact DFT. RFFT retains its explicitly constructed boundary conjugates
+and structural imaginary zeros. The following exact-expression ordering and
+special-value rules apply to E/B/S members, not the four F transforms.
 
 Inherit [NUM binary](../../01-numeric/op_specs/NUM-05_binary_contract.md),
 [NUM reductions](../../01-numeric/op_specs/NUM-11_reduction_contract.md),
@@ -74,6 +88,9 @@ require an actual mathematical model or corresponding NUM rule. No runtime scan
 is added to enforce those premises.
 
 ## Accelerated acceptance
+
+The four F transforms have one ordinary CPU mode and use their own numerical
+acceptance criteria. This section governs named accelerated E/B/S profiles.
 
 Apply [NUM acceleration](../../01-numeric/op_specs/NUM_accelerated_contract.md) to
 final outputs. Float32 uses at most four ordered finite IEEE steps. For Float64
