@@ -6,6 +6,8 @@
 
 每个 Run 的 coordinator 是状态、依赖计数、ready queue、call record 与 hold 的唯一修改者。Context 提供 Run 共享的有界 CPU pool 和 GPU submission queue。Worker 与设备 callback 写入预留完成记录，不修改依赖或退休状态。
 
+每个 Context 预先分配两个独立计费的 coordinator slot。Slot 在首次使用时启动线程，仅在空闲时接受 Run；并发提交没有空闲 slot 时继续使用独立 coordinator 线程，保留每个已接受 Run 的推进能力。Slot 在 Run 最后一个 owner 释放完成前保持 busy；该释放发生在 slot 锁和 CPU pool 之外。线程仅持有 slot 自身，Context 停止时先排空已接受工作，再唤醒空闲 slot，由其退出后归还自己的 metadata lease。
+
 ```mermaid
 flowchart TD
   C["Run coordinator"] --> CPU["CPU workers"]
@@ -58,6 +60,10 @@ struct CompletionKey {
 ## 准入与推进
 
 第一版在 block 第一个 task 之前预留全部输出、持久 frame 状态、有界交付存储、可用 scratch lane 和完成容量，计算公式见 [tile 存储](Cache-Model.zh.md)。失败时返回 `ResourceExhausted`，本 block 没有 task 开始；先前 block 的结果和 effect 仍可观察。
+
+Preparation 记录单个 block 中 CPU task 数量的最大值。Run 的 CPU lane 数同时受此结构上界、worker 数与并行配置限制，并保留至少一个记账 lane。Scratch 预留、完成存储与 GPU scratch 偏移一致使用实际 lane 数。
+
+未提供 observer 的 Run 省去交付记录和逐 call 导出 Result 的物化。Call 退休、trace、依赖 hold、失败传播及最终 RET Result 准入仍正常执行。
 
 Task 必须处于活动、未提交、依赖就绪、failure cut 之前的状态，并取得全部额度。Effect 还要求其 call 等于退休头。Scratch lane 忙时可暂时绕过，通过公平选择重新访问。Task 原子获取完整的跨内存域资源向量。
 

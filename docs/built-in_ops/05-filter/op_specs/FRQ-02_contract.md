@@ -53,6 +53,15 @@ conjugate pair as their common representative. The opposite imaginary value is
 its negation, and self-conjugate imaginary intersections are structural +0.
 No enclosure or numerical validation is needed for this packing.
 
+For a single-column working plane with a contiguous scalar output row stride,
+output materialization canonicalizes native packets using each row's global
+index, including independently requested tiles. It reads the smaller conjugate
+row, negates the opposite imaginary component and sets self-conjugate imaginary
+components to +0 before scaling. This path retains the individual-component
+bound of 64 declared units per sample. Other layouts retain the row path.
+
+The long contiguous x86 input-packing path is shared with the complex family. Compact forward input packs W/2 real pairs in disjoint sample chunks and constructs its extra zero after joining; compact inverse input loads all W/2+1 supplied complex samples. A noncompact odd-width inverse retains the conjugate-completion traversal. Width one needs no completion samples. The exact admission, participant limits and layout fallback are specified in the [complex transform contract](FRQ-01_contract.md).
+
 For even W, inverse computation transforms the compact columns first, recombines
 the half spectrum into doubled packed row coefficients, performs length-W/2
 inverse row FFTs, and unpacks real and imaginary components into adjacent samples.
@@ -65,6 +74,8 @@ boundary conjugacy premise. Neither path validates or repairs boundary pairs.
 Packing, recombination and data scaling use native Float32 for Float32 inputs
 and Float64 for Float64 inputs. Compact pitches such as 513 and 2049 retain
 their extra boundary column; column batches handle that remainder explicitly.
+
+Packing, recombination and output materialization use the automatic or explicitly capped FRQ thread policy. Eligible contiguous x86 input is partitioned into sample chunks; the other traversals partition independent rows. Each phase completes before a dependent phase begins. The cancellation, work admission, scratch ownership and automatic thread selection are shared with FRQ-01.
 
 ## Shared Mathematics, Units, and Profiles
 

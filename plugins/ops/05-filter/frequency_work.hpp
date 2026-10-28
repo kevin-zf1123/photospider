@@ -11,6 +11,9 @@ class TransformBlock final {
   TransformBlock(const Work& work, std::uint64_t cost) : work_(work) {
     check(work_(cost));
   }
+#if defined(__clang__) || defined(__GNUC__)
+  __attribute__((always_inline))
+#endif
   void poll(std::uint64_t count = 1) const {
     // Every caller's indivisible arithmetic segment is at most 1024 units.
     // Poll before crossing the bound; the admission itself polls initially.

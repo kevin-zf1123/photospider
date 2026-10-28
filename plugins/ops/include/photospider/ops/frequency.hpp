@@ -36,7 +36,9 @@ struct Spectrum final {
  * grid describes the frequency side, including the explicit original odd/even
  * width for irfft2. Keys are frequency.fft2/ifft2/rfft2/irfft2. Outputs use
  * that member's registered port names. Ordinary floating-point FFTs use
- * binary64 working arithmetic and convert to the input dtype at output.
+ * native binary32 arithmetic for Float32 data and binary64 for Float64.
+ * Dimension-derived coefficients are generated in binary64 and converted to
+ * the working dtype. Explicit FMA is permitted by this ordinary FFT contract.
  * Correct rounding, per-component ULP bounds and bitwise reproducibility
  * across algorithms/platforms are not promised. No numerical refinement or
  * implicit precision dispatcher is performed. Static syntax/shape errors return

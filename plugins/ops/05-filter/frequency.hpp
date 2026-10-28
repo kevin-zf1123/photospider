@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "05-filter/certified.hpp"
+#include "05-filter/frequency_fft_layout.hpp"
 
 namespace ps::plugin_internal::frequency {
 using namespace filter;  // NOLINT(build/namespaces)

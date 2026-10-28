@@ -4,18 +4,28 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <tuple>
 #include <utility>
 #include <vector>
 
 #include "05-filter/frequency.hpp"
-#include "05-filter/frequency_fft.hpp"
+#include "05-filter/frequency_fft_execution.hpp"
+#include "05-filter/frequency_fft_io.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
 namespace ps::plugin_internal::frequency {
+template <class Scalar>
+struct TypedTransformTables {
+  TransformCache<Scalar> base;
+#if PS_FRQ_PACKETS
+  typename PlannedTransform<Scalar>::Cache plans;
+  FixedTransform::Cache fixed;
+#endif
+};
 struct TransformTables {
-  TransformCache<float> single;
-  TransformCache<double> double_precision;
+  TypedTransformTables<float> single;
+  TypedTransformTables<double> double_precision;
 };
 namespace {
 using Address = std::tuple<unsigned, unsigned, TileIndex>;
@@ -50,6 +60,30 @@ struct TransformRow {
     return mask::load<Scalar>(base, stride, x - begin);
   }
 };
+#if PS_FRQ_PACKETS
+struct TransformSource {
+  const unsigned char* base = nullptr;
+  std::ptrdiff_t row_stride = 0;
+};
+template <class Scalar>
+TransformSource transform_source(const Frequency& state, const Reader& reader,
+                                 unsigned port, const Coordinate& batch,
+                                 std::uint64_t height, std::uint64_t width) {
+  auto at = batch;
+  at[state.grid.ya] = 0;
+  at[state.grid.xa] = 0;
+  const auto& view = reader.view(port, 0, at);
+  const auto& layout = *view.layout;
+  if (layout.origin[state.grid.ya] != 0 || layout.origin[state.grid.xa] != 0 ||
+      layout.shape[state.grid.ya] < height ||
+      layout.shape[state.grid.xa] < width ||
+      layout.strides[state.grid.xa] != sizeof(Scalar))
+    return {};
+  return {static_cast<const unsigned char*>(view.allocation) +
+              generation::offset(layout, view.byte_offset, at),
+          layout.strides[state.grid.ya]};
+}
+#endif
 template <class Scalar>
 void load_transform(const Frequency& state, const Reader& reader,
                     const Coordinate& batch, TransformComplex<Scalar>* data,
@@ -60,44 +94,145 @@ void load_transform(const Frequency& state, const Reader& reader,
   const auto width = state.kind == Kind::Irfft ? w / 2 + 1 : w;
   const auto pitch = state.working_width();
   if (state.compact_real() && state.real_input()) {
-    const TransformBlock load{work, 32 * h * w + 4 * h};
-    for (std::uint64_t y = 0; y < h; ++y) {
-      auto at = batch;
-      at[state.grid.ya] = y;
-      TransformRow<Scalar> re{reader, at, 0, state.grid.xa};
-      for (std::uint64_t x = 0; x < w / 2; ++x) {
-        load.poll(64);
-        new (data + y * pitch + x)
-            Complex{re.value(2 * x), re.value(2 * x + 1)};
-      }
-      load.poll(4);
-      new (data + y * pitch + w / 2) Complex{};
+#if PS_FRQ_PACKETS
+    const auto direct =
+        transform_packets_available()
+            ? transform_source<Scalar>(state, reader, 0, batch, h, w)
+            : TransformSource{};
+#if defined(__x86_64__)
+    if (direct.base && h == 1 && w / 2 >= 32768) {
+      transform_linear(
+          w / 2, 64, work,
+          [&](std::uint64_t begin, std::uint64_t count, const Work& local) {
+            const TransformBlock load{local, 64 * count};
+            TransformIO<Scalar>::pack_real(
+                data + begin, direct.base + begin * sizeof(Complex), count,
+                load);
+          });
+      const TransformBlock last{work, 4};
+      last.poll(4);
+      new (data + w / 2) Complex{};
+      return;
     }
+#endif
+#endif
+    transform_rows(
+        h, 32 * w + 4, work,
+        [&](std::uint64_t begin, std::uint64_t count, const Work& local) {
+          const TransformBlock load{local, count * (32 * w + 4)};
+#if PS_FRQ_PACKETS
+          if (direct.base) {
+            for (auto y = begin; y < begin + count; ++y) {
+              TransformIO<Scalar>::pack_real(
+                  data + y * pitch,
+                  direct.base +
+                      static_cast<std::ptrdiff_t>(y) * direct.row_stride,
+                  w / 2, load);
+              load.poll(4);
+              new (data + y * pitch + w / 2) Complex{};
+            }
+            return;
+          }
+#endif
+          // Reader caches tile lookups; each task owns its mutable cache.
+          const Reader source{reader.kernel, reader.invocation};
+          for (auto y = begin; y < begin + count; ++y) {
+            auto at = batch;
+            at[state.grid.ya] = y;
+            TransformRow<Scalar> re{source, at, 0, state.grid.xa};
+            for (std::uint64_t x = 0; x < w / 2; ++x) {
+              load.poll(64);
+              new (data + y * pitch + x)
+                  Complex{re.value(2 * x), re.value(2 * x + 1)};
+            }
+            load.poll(4);
+            new (data + y * pitch + w / 2) Complex{};
+          }
+        });
     return;
   }
-  {
-    const TransformBlock load{work, 32 * h * width};
-    for (std::uint64_t y = 0; y < h; ++y) {
-      auto at = batch;
-      at[state.grid.ya] = y;
-      TransformRow<Scalar> re{reader, at, 0, state.grid.xa};
-      TransformRow<Scalar> im{reader, at, 1, state.grid.xa};
-      for (std::uint64_t x = 0; x < width; ++x) {
-        load.poll(32);
-        new (data + y * pitch + x)
-            Complex{re.value(x), state.real_input() ? 0 : im.value(x)};
-      }
-    }
+#if PS_FRQ_PACKETS
+  TransformSource real, imag;
+  if (transform_packets_available()) {
+    real = transform_source<Scalar>(state, reader, 0, batch, h, width);
+    if (!state.real_input())
+      imag = transform_source<Scalar>(state, reader, 1, batch, h, width);
   }
+  const bool direct = real.base && (state.real_input() || imag.base);
+#if defined(__x86_64__)
+  if (direct && pitch == width && h * width >= 32768 &&
+      (h == 1 ||
+       (width == 1 &&
+        real.row_stride == static_cast<std::ptrdiff_t>(sizeof(Scalar)) &&
+        (!imag.base ||
+         imag.row_stride == static_cast<std::ptrdiff_t>(sizeof(Scalar)))))) {
+    transform_linear(
+        h * width, 32, work,
+        [&](std::uint64_t begin, std::uint64_t count, const Work& local) {
+          const TransformBlock load{local, 32 * count};
+          TransformIO<Scalar>::pack(
+              data + begin, real.base + begin * sizeof(Scalar),
+              imag.base ? imag.base + begin * sizeof(Scalar) : nullptr, count,
+              load);
+        });
+    return;
+  }
+#endif
+#endif
+  transform_rows(
+      h, 32 * width, work,
+      [&](std::uint64_t begin, std::uint64_t count, const Work& local) {
+        const TransformBlock load{local, 32 * count * width};
+#if PS_FRQ_PACKETS
+        if (direct) {
+          if (width == 1 && pitch == 1 &&
+              real.row_stride == static_cast<std::ptrdiff_t>(sizeof(Scalar)) &&
+              (!imag.base || imag.row_stride ==
+                                 static_cast<std::ptrdiff_t>(sizeof(Scalar)))) {
+            TransformIO<Scalar>::pack(
+                data + begin, real.base + begin * sizeof(Scalar),
+                imag.base ? imag.base + begin * sizeof(Scalar) : nullptr, count,
+                load);
+            return;
+          }
+          for (auto y = begin; y < begin + count; ++y)
+            TransformIO<Scalar>::pack(
+                data + y * pitch,
+                real.base + static_cast<std::ptrdiff_t>(y) * real.row_stride,
+                imag.base ? imag.base +
+                                static_cast<std::ptrdiff_t>(y) * imag.row_stride
+                          : nullptr,
+                width, load);
+          return;
+        }
+#endif
+        const Reader source{reader.kernel, reader.invocation};
+        for (auto y = begin; y < begin + count; ++y) {
+          auto at = batch;
+          at[state.grid.ya] = y;
+          TransformRow<Scalar> re{source, at, 0, state.grid.xa};
+          TransformRow<Scalar> im{source, at, 1, state.grid.xa};
+          for (std::uint64_t x = 0; x < width; ++x) {
+            load.poll(32);
+            new (data + y * pitch + x)
+                Complex{re.value(x), state.real_input() ? 0 : im.value(x)};
+          }
+        }
+      });
   if (state.kind == Kind::Irfft && !state.compact_real()) {
-    // Complete from the loaded half plane, without repeating input traversal.
-    const TransformBlock reflect{work, 8 * h * (w - width)};
-    for (std::uint64_t y = 0; y < h; ++y)
-      for (std::uint64_t x = width; x < w; ++x) {
-        reflect.poll(8);
-        new (data + y * w + x) Complex{TransformEngine<Scalar>::conjugate(
-            data[((h - y) % h) * w + w - x])};
-      }
+    // The first phase has joined: mirrored reads only address its half plane.
+    transform_rows(
+        h, 8 * (w - width), work,
+        [&](std::uint64_t begin, std::uint64_t count, const Work& local) {
+          const TransformBlock reflect{local, 8 * count * (w - width)};
+          for (auto y = begin; y < begin + count; ++y)
+            for (std::uint64_t x = width; x < w; ++x) {
+              reflect.poll(8);
+              new (data + y * pitch + x)
+                  Complex{TransformEngine<Scalar>::conjugate(
+                      data[((h - y) % h) * pitch + w - x])};
+            }
+        });
   }
 }
 template <class Scalar>
@@ -114,37 +249,184 @@ void store_transform(const Frequency& state,
   const auto x0 = view.layout->origin[state.grid.xa];
   const auto height = view.layout->shape[state.grid.ya];
   const auto width = view.layout->shape[state.grid.xa];
-  const TransformBlock output{work, 64 * height * width};
-  for (std::uint64_t y = y0; y < y0 + height; ++y) {
-    auto at = batch;
-    at[state.grid.ya] = y;
-    at[state.grid.xa] = x0;
-    auto* base = static_cast<unsigned char*>(view.allocation) +
-                 generation::offset(*view.layout, view.byte_offset, at);
-    for (std::uint64_t x = x0; x < x0 + width; ++x) {
-      output.poll(64);
-      auto value = data[y * pitch + (unpack ? x / 2 : x)];
-      if (unpack)
-        value.re = x % 2 ? value.im : value.re;
-      if (state.kind == Kind::Rfft && (x == 0 || (w % 2 == 0 && x == w / 2))) {
-        const auto partner = (h - y) % h;
-        if (partner < y)
-          value = TransformEngine<Scalar>::conjugate(data[partner * pitch + x]);
-        if (partner == y)
-          value.im = 0;
-      }
-      mask::save(
-          base, view.layout->strides[state.grid.xa], x - x0,
-          static_cast<Scalar>((component ? value.im : value.re) * scale));
-    }
-  }
+  auto at = batch;
+  at[state.grid.ya] = y0;
+  at[state.grid.xa] = x0;
+  auto* first = static_cast<unsigned char*>(view.allocation) +
+                generation::offset(*view.layout, view.byte_offset, at);
+  const auto row_stride = view.layout->strides[state.grid.ya];
+#if PS_FRQ_PACKETS
+  const bool direct = transform_packets_available() &&
+                      view.layout->strides[state.grid.xa] == sizeof(Scalar);
+#endif
+  transform_rows(
+      height, 64 * width, work,
+      [&](std::uint64_t begin, std::uint64_t count, const Work& local) {
+        const TransformBlock output{local, 64 * count * width};
+#if PS_FRQ_PACKETS
+        if (direct && width == 1 && pitch == 1 && !unpack &&
+            row_stride == static_cast<std::ptrdiff_t>(sizeof(Scalar))) {
+          auto* destination = first + begin * sizeof(Scalar);
+          if (state.kind == Kind::Rfft) {
+            if (component)
+              TransformIO<Scalar>::template real_column_component<true>(
+                  destination, data, h, y0 + begin, count, scale, output);
+            else
+              TransformIO<Scalar>::template real_column_component<false>(
+                  destination, data, h, y0 + begin, count, scale, output);
+            return;
+          }
+          const auto* source = data + y0 + begin;
+          if (component)
+            TransformIO<Scalar>::template component<true>(destination, source,
+                                                          count, scale, output);
+          else
+            TransformIO<Scalar>::template component<false>(
+                destination, source, count, scale, output);
+          return;
+        }
+#endif
+        for (auto y = y0 + begin; y < y0 + begin + count; ++y) {
+          auto* base = first + static_cast<std::ptrdiff_t>(y - y0) * row_stride;
+          const auto scalar = [&](std::uint64_t x) {
+            output.poll(64);
+            auto value = data[y * pitch + (unpack ? x / 2 : x)];
+            if (unpack)
+              value.re = x % 2 ? value.im : value.re;
+            if (state.kind == Kind::Rfft &&
+                (x == 0 || (w % 2 == 0 && x == w / 2))) {
+              const auto partner = (h - y) % h;
+              if (partner < y)
+                value = TransformEngine<Scalar>::conjugate(
+                    data[partner * pitch + x]);
+              if (partner == y)
+                value.im = 0;
+            }
+            mask::save(
+                base, view.layout->strides[state.grid.xa], x - x0,
+                static_cast<Scalar>((component ? value.im : value.re) * scale));
+          };
+#if PS_FRQ_PACKETS
+          if (direct) {
+            if (unpack) {
+              const auto* source = reinterpret_cast<const unsigned char*>(
+                                       data + y * pitch + x0 / 2) +
+                                   (x0 % 2) * sizeof(Scalar);
+              TransformIO<Scalar>::unpack_real(base, source, width, scale,
+                                               output);
+            } else {
+              auto begin_x = x0, end_x = x0 + width;
+              if (state.kind == Kind::Rfft) {
+                if (begin_x == 0) {
+                  scalar(0);
+                  ++begin_x;
+                }
+                if (w % 2 == 0 && end_x > w / 2)
+                  end_x = w / 2;
+              }
+              if (begin_x < end_x) {
+                auto* target = base + (begin_x - x0) * sizeof(Scalar);
+                const auto* source = data + y * pitch + begin_x;
+                if (component)
+                  TransformIO<Scalar>::template component<true>(
+                      target, source, end_x - begin_x, scale, output);
+                else
+                  TransformIO<Scalar>::template component<false>(
+                      target, source, end_x - begin_x, scale, output);
+              }
+              if (state.kind == Kind::Rfft && w % 2 == 0 && x0 <= w / 2 &&
+                  x0 + width > w / 2)
+                scalar(w / 2);
+            }
+            continue;
+          }
+#endif
+          for (std::uint64_t x = x0; x < x0 + width; ++x)
+            scalar(x);
+        }
+      });
 }
+#if PS_FRQ_PACKETS
+template <class Scalar>
+bool store_transform_pair(const Frequency& state, const Kernel& kernel,
+                          const ps_kernel_invocation_v8& inv,
+                          const Coordinate& batch,
+                          const TransformComplex<Scalar>* data, Scalar scale,
+                          const Work& work) {
+  if ((state.kind != Kind::Fft && state.kind != Kind::Ifft) ||
+      inv.output_count != 2 || !transform_packets_available())
+    return false;
+  unsigned real_index = 0;
+  if (kernel.writes[0].first == 1 && kernel.writes[1].first == 0)
+    real_index = 1;
+  else if (kernel.writes[0].first != 0 || kernel.writes[1].first != 1)
+    return false;
+  const auto& re = inv.outputs[real_index];
+  const auto& im = inv.outputs[1 - real_index];
+  const auto ya = state.grid.ya, xa = state.grid.xa;
+  if (re.layout->strides[xa] != sizeof(Scalar) ||
+      im.layout->strides[xa] != sizeof(Scalar))
+    return false;
+  for (unsigned a = 0; a < state.dims.size(); ++a) {
+    if (re.layout->origin[a] != im.layout->origin[a] ||
+        re.layout->shape[a] != im.layout->shape[a])
+      return false;
+    if (a != ya && a != xa &&
+        (batch[a] < re.layout->origin[a] ||
+         batch[a] - re.layout->origin[a] >= re.layout->shape[a]))
+      return true;
+  }
+  const auto y0 = re.layout->origin[ya], x0 = re.layout->origin[xa];
+  const auto height = re.layout->shape[ya], width = re.layout->shape[xa];
+  auto at = batch;
+  at[ya] = y0;
+  at[xa] = x0;
+  auto* real = static_cast<unsigned char*>(re.allocation) +
+               generation::offset(*re.layout, re.byte_offset, at);
+  auto* imag = static_cast<unsigned char*>(im.allocation) +
+               generation::offset(*im.layout, im.byte_offset, at);
+  const auto pitch = state.working_width();
+  constexpr auto sample_cost = TransformIO<Scalar>::paired_sample_cost;
+  constexpr auto row_cost = TransformIO<Scalar>::paired_row_cost;
+  const auto cost_per_row = sample_cost * width + row_cost;
+  transform_rows(
+      height, cost_per_row, work,
+      [&](std::uint64_t begin, std::uint64_t count, const Work& local) {
+        const TransformBlock output{local, count * cost_per_row};
+        if (width == 1 && pitch == 1 &&
+            re.layout->strides[ya] ==
+                static_cast<std::ptrdiff_t>(sizeof(Scalar)) &&
+            im.layout->strides[ya] ==
+                static_cast<std::ptrdiff_t>(sizeof(Scalar))) {
+          for (std::uint64_t j = 0; j < count; j += 32) {
+            const auto lanes = std::min<std::uint64_t>(32, count - j);
+            output.poll(row_cost * lanes);
+            TransformIO<Scalar>::components(real + (begin + j) * sizeof(Scalar),
+                                            imag + (begin + j) * sizeof(Scalar),
+                                            data + y0 + begin + j, lanes, scale,
+                                            output);
+          }
+          return;
+        }
+        for (auto y = begin; y < begin + count; ++y) {
+          output.poll(row_cost);
+          TransformIO<Scalar>::components(
+              real + static_cast<std::ptrdiff_t>(y) * re.layout->strides[ya],
+              imag + static_cast<std::ptrdiff_t>(y) * im.layout->strides[ya],
+              data + (y0 + y) * pitch + x0, width, scale, output);
+        }
+      });
+  return true;
+}
+#endif
 template <class Scalar>
 void run_transform(const Frequency& state, const Kernel& k,
                    const ps_kernel_invocation_v8& inv,
-                   ps_kernel_work_v9 service, TransformCache<Scalar>& tables) {
+                   ps_kernel_work_v9 service,
+                   TypedTransformTables<Scalar>& prepared) {
   using Engine = TransformEngine<Scalar>;
   using Complex = TransformComplex<Scalar>;
+  auto& tables = prepared.base;
   const Work work{inv, state.work_limit, 0, service};
   const Reader reader{k, inv};
   const auto h = state.grid.shape[state.grid.ya],
@@ -161,7 +443,23 @@ void run_transform(const Frequency& state, const Kernel& k,
                   static_cast<unsigned char*>(inv.scratch[0].allocation) <=
               static_cast<std::ptrdiff_t>(inv.scratch[0].bytes),
           "floating transform scratch capacity");
-  {
+#if PS_FRQ_PACKETS
+  std::optional<TransformExecution<Scalar>> execution;
+  if (transform_packets_available()) {
+    execution.emplace(h, pitch, row, state.inverse(), prepared.plans, tables,
+                      prepared.fixed, work);
+    const auto needed =
+        h * pitch +
+        transform_worker_stride(h, pitch, row, std::is_same_v<Scalar, double>) *
+            transform_worker_capacity(h, pitch, row);
+    require(needed <= inv.scratch[0].bytes / sizeof(Complex),
+            "parallel transform scratch capacity");
+  }
+  const bool planned = execution.has_value();
+#else
+  constexpr bool planned = false;
+#endif
+  if (!planned) {
     const TransformBlock initialize{work, 4 * maximum};
     for (std::uint64_t i = 0; i < maximum; ++i) {
       initialize.poll(4);
@@ -182,21 +480,43 @@ void run_transform(const Frequency& state, const Kernel& k,
   }
   for (std::uint64_t b = 0; b < batches; ++b) {
     load_transform<Scalar>(state, reader, batch, data, work);
-    if (state.compact_real() && state.kind == Kind::Irfft) {
-      Engine::columns(data, h, pitch, lanes, true, temporary, columns, blue,
-                      tables, work);
-      Engine::real(data, h, w, true, tables, work);
-      Engine::axis(data, row, 1, h, pitch, true, temporary, blue, tables, work);
+#if PS_FRQ_PACKETS
+    if (execution) {
+      if (state.compact_real() && state.kind == Kind::Irfft) {
+        execution->columns(data, temporary, work);
+        execution->real(data, w, tables, work);
+        execution->rows(data, temporary, work);
+      } else {
+        execution->rows(data, temporary, work);
+        if (state.compact_real())
+          execution->real(data, w, tables, work);
+        execution->columns(data, temporary, work);
+      }
     } else {
-      Engine::axis(data, row, 1, h, pitch, state.inverse(), temporary, blue,
-                   tables, work);
-      if (state.compact_real())
-        Engine::real(data, h, w, false, tables, work);
-      Engine::columns(data, h, pitch, lanes, state.inverse(), temporary,
-                      columns, blue, tables, work);
+#endif
+      if (state.compact_real() && state.kind == Kind::Irfft) {
+        Engine::columns(data, h, pitch, lanes, true, temporary, columns, blue,
+                        tables, work);
+        Engine::real(data, h, w, true, tables, work);
+        Engine::axis(data, row, 1, h, pitch, true, temporary, blue, tables,
+                     work);
+      } else {
+        Engine::axis(data, row, 1, h, pitch, state.inverse(), temporary, blue,
+                     tables, work);
+        if (state.compact_real())
+          Engine::real(data, h, w, false, tables, work);
+        Engine::columns(data, h, pitch, lanes, state.inverse(), temporary,
+                        columns, blue, tables, work);
+      }
+#if PS_FRQ_PACKETS
     }
+#endif
     check(work(0));
-    for (unsigned i = 0; i < inv.output_count; ++i) {
+    bool paired = false;
+#if PS_FRQ_PACKETS
+    paired = store_transform_pair(state, k, inv, batch, data, scale, work);
+#endif
+    for (unsigned i = 0; !paired && i < inv.output_count; ++i) {
       const auto& view = inv.outputs[i];
       bool contains = true;
       for (unsigned a = 0; a < state.dims.size(); ++a)

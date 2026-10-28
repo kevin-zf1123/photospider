@@ -42,7 +42,7 @@ Numeric reference: **F**, ordinary floating-point approximation; see [numeric re
 
 The target is `F[ky,kx] = s * sum(z[y,x] * exp(-2*pi*i*(ky*y/H+kx*x/W)))`. The implementation approximates this mathematical DFT with a floating-point FFT.
 
-Twiddle generation, butterfly operations and normalization incur ordinary floating-point rounding. There is no final correct-rounding proof, interval validation or exact recomputation. Small residuals at mathematical zeros are allowed. Float32 outputs are converted from binary64 working values. The mathematical reference supplies error measurements, not mandatory output bits.
+Twiddle generation, butterfly operations and normalization incur ordinary floating-point rounding. There is no final correct-rounding proof, interval validation or exact recomputation. Small residuals at mathematical zeros are allowed. Float32 data arithmetic uses native binary32; Float64 uses binary64. Dimension-derived coefficients are generated in binary64 and converted to the working dtype. The mathematical reference supplies error measurements, not mandatory output bits.
 
 ## Fixed reads, algorithmic control and schemas
 
@@ -52,7 +52,7 @@ Boundary coordinates use the complete logical image; ROI and tile edges are not 
 
 ## Algorithm, Resources, and Execution
 
-The CPU implementation uses radix-2/radix-4, bounded mixed-radix codelets and Bluestein convolution. It uses one full complex working plane, a linear line buffer and bounded column/convolution workspace. Native binary64 arithmetic is used for both input dtypes. The mathematical direct oracle is O(P²); the production transform has O(P log P) scaling with bounded small-radix constants, where P=HW.
+The CPU implementation uses prepared radix-2/radix-4 and mixed-radix plans, bounded odd codelets, and Rader or Bluestein convolution. It uses a complex working plane, with independent line and transpose/convolution workspace for each admitted participant. Float32 data arithmetic is binary32 and Float64 is binary64. The mathematical direct oracle is O(P²); the production transform has O(P log P) scaling with bounded small-radix constants, where P=HW. Algorithm selection, fixed scratch sizing, cache ownership and automatic or explicitly capped thread selection follow [FRQ-01 runtime integration](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
 
 Work blocks are admitted before computation and check cancellation independently at intervals of at most 1024 declared scalar units. No refinement stages are requested. Scratch, root tables and outputs are resource-accounted. A failed Run publishes no final Result; existing exports from retired calls retain their owners. See [FRQ-01 runtime integration](FRQ-01_contract.md#runtime-integration-and-remaining-acceptance).
 

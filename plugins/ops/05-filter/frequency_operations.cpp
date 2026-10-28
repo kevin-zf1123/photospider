@@ -349,10 +349,18 @@ std::uint64_t Frequency::task_scratch(unsigned port,
     n += (static_cast<unsigned __int128>(dims[0]) + dims[1]) * 8;
   if (transform()) {
     const auto h = grid.shape[grid.ya], row = row_length();
-    // Even-width real transforms keep only W/2+1 complex columns.
+    // Scratch capacity is derived from shape and precision. Runtime thread
+    // selection never changes a serialized Plan's requirement. Portable scalar
+    // targets retain enough space for their existing arbitrary-length fallback.
+    const auto fallback =
+        column_scratch() + std::max(h, row) +
+        std::max(convolution_scratch(h), convolution_scratch(row));
+    const auto parallel =
+        transform_worker_stride(h, working_width(), row,
+                                type == ElementType::Float64) *
+        transform_worker_capacity(h, working_width(), row);
     n = (static_cast<unsigned __int128>(h) * working_width() +
-         column_scratch() + std::max(h, row) +
-         std::max(convolution_scratch(h), convolution_scratch(row))) *
+         std::max(fallback, parallel)) *
         2 * (type == ElementType::Float32 ? sizeof(float) : sizeof(double));
   }
 

@@ -94,7 +94,10 @@ class PHOTOSPIDER_API CpuStorage final
   bool native_writable_ = false;
   std::shared_ptr<const std::vector<std::uint8_t>> adopted_;
   struct AlignedDelete {
-    std::size_t alignment = alignof(std::max_align_t);
+    static_assert(alignof(std::max_align_t) % 2 == 0);
+    // Even: aligned-new alignment. Odd: page-rounded mapping length plus one.
+    // Both lengths and normalized alignments are even; keep the owner layout.
+    std::size_t alignment_or_mapping = alignof(std::max_align_t);
     void operator()(std::uint8_t* pointer) const noexcept;
   };
   std::unique_ptr<std::uint8_t, AlignedDelete> allocated_{nullptr,
@@ -209,8 +212,12 @@ class PHOTOSPIDER_API BufferAllocator final {
   friend class gpu_internal::Device;
   friend class ResourceBudget;
   friend class execution_internal::BlockMemory;
+  Result<MutableBuffer> allocate_aligned_impl(std::uint64_t size,
+                                              std::uint64_t alignment,
+                                              bool dense_host) const;
   Result<MutableBuffer> allocate_impl(std::uint64_t size,
-                                      std::uint64_t alignment) const;
+                                      std::uint64_t alignment,
+                                      bool dense_host = false) const;
   BufferAllocator limited_impl(std::uint64_t maximum_bytes,
                                FailureObserver failure, bool requested) const;
   // Successful allocation increments: payload bytes, then host-owner metadata

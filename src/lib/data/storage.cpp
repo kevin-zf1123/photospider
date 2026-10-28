@@ -6,6 +6,10 @@
 #include <mutex>
 #include <new>
 #include <utility>
+#if defined(__linux__) || defined(__APPLE__)
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 #include "photospider/core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
@@ -21,6 +25,69 @@ struct AllocationScope final {
 };
 }  // namespace data_internal
 namespace {
+struct CpuMapping {
+  std::uint8_t* data = nullptr;
+  std::size_t bytes = 0;
+};
+CpuMapping map_zeroed_cpu_pages(std::uint64_t size, std::uint64_t alignment,
+                                bool dense_host) {
+#if defined(__linux__) || defined(__APPLE__)
+#if defined(__APPLE__)
+  static_cast<void>(dense_host);
+  constexpr std::uint64_t minimum_mapping = UINT64_C(32) * 1024 * 1024;
+#else
+  const std::uint64_t minimum_mapping =
+      (dense_host ? UINT64_C(4) : UINT64_C(1)) * 1024 * 1024;
+#endif
+  if (size >= minimum_mapping) {
+    static const auto page_size = sysconf(_SC_PAGESIZE);
+    if (page_size > 0 && page_size % 2 == 0 &&
+        static_cast<std::uint64_t>(page_size) % alignment == 0) {
+      const auto page = static_cast<std::size_t>(page_size);
+      if (size <= SIZE_MAX - (page - 1)) {
+        const auto bytes =
+            (static_cast<std::size_t>(size) + page - 1) / page * page;
+        auto* mapped = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (mapped == MAP_FAILED)
+          throw std::bad_alloc();
+        if (!mapped) {
+          static_cast<void>(munmap(mapped, bytes));
+          throw std::bad_alloc();
+        }
+        // Anonymous mappings preserve the public zero-initialization contract
+        // without touching unused scratch or serializing its first writes.
+        return {static_cast<std::uint8_t*>(mapped), bytes};
+      }
+    }
+  }
+#else
+  static_cast<void>(size);
+  static_cast<void>(alignment);
+  static_cast<void>(dense_host);
+#endif
+  return {};
+}
+// Advise complete aligned interior ranges before the first touch. This is a
+// hint: allocation, zero initialization and ownership do not depend on THP.
+void advise_large_cpu_pages(std::uint8_t* base, std::uint64_t size) noexcept {
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+  constexpr std::uint64_t granularity = UINT64_C(2) * 1024 * 1024;
+  if (size >= UINT64_C(32) * 1024 * 1024) {
+    const auto address = reinterpret_cast<std::uintptr_t>(base);
+    const auto offset = (granularity - address % granularity) % granularity;
+    if (offset < size) {
+      const auto length = (size - offset) / granularity * granularity;
+      if (length)
+        static_cast<void>(madvise(
+            base + offset, static_cast<std::size_t>(length), MADV_HUGEPAGE));
+    }
+  }
+#else
+  static_cast<void>(base);
+  static_cast<void>(size);
+#endif
+}
 void notify_failure(const BufferAllocator::FailureObserver& observer,
                     const Status& status) noexcept {
   if (observer) {
@@ -40,7 +107,13 @@ ByteView CpuStorage::bytes() const noexcept {
 }
 void CpuStorage::AlignedDelete::operator()(
     std::uint8_t* pointer) const noexcept {
-  ::operator delete(pointer, std::align_val_t(alignment));
+#if defined(__linux__) || defined(__APPLE__)
+  if (alignment_or_mapping & 1) {
+    static_cast<void>(munmap(pointer, alignment_or_mapping & ~std::size_t{1}));
+    return;
+  }
+#endif
+  ::operator delete(pointer, std::align_val_t(alignment_or_mapping));
 }
 CpuStorage::~CpuStorage() noexcept = default;
 std::uint8_t* MutableBuffer::data() noexcept {
@@ -196,6 +269,10 @@ Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
 }
 Result<MutableBuffer> BufferAllocator::allocate_aligned(
     std::uint64_t size, std::uint64_t alignment) const {
+  return allocate_aligned_impl(size, alignment, false);
+}
+Result<MutableBuffer> BufferAllocator::allocate_aligned_impl(
+    std::uint64_t size, std::uint64_t alignment, bool dense_host) const {
   if (!alignment || (alignment & (alignment - 1)) || alignment > SIZE_MAX)
     return Result<MutableBuffer>(
         {ErrorCode::InvalidArgument, "invalid host allocation alignment"});
@@ -203,10 +280,12 @@ Result<MutableBuffer> BufferAllocator::allocate_aligned(
     return Result<MutableBuffer>({ErrorCode::BackendUnavailable,
                                   "native alignment requires preparation"});
   return allocate_impl(
-      size, std::max<std::uint64_t>(alignment, alignof(std::max_align_t)));
+      size, std::max<std::uint64_t>(alignment, alignof(std::max_align_t)),
+      dense_host);
 }
-Result<MutableBuffer> BufferAllocator::allocate_impl(
-    std::uint64_t size, std::uint64_t alignment) const {
+Result<MutableBuffer> BufferAllocator::allocate_impl(std::uint64_t size,
+                                                     std::uint64_t alignment,
+                                                     bool dense_host) const {
   const auto reject = [&](Status status) {
     if (failure_) {
       try {
@@ -255,13 +334,21 @@ Result<MutableBuffer> BufferAllocator::allocate_impl(
     result.storage_->domain_ = domain_;
     result.storage_->allocation_scope_ = allocation_scope_;
     result.storage_->requested_lease_ = std::move(requested_lease);
-    result.storage_->allocated_ = {
-        static_cast<std::uint8_t*>(::operator new(
-            static_cast<std::size_t>(size),
-            std::align_val_t(static_cast<std::size_t>(alignment)))),
-        CpuStorage::AlignedDelete{static_cast<std::size_t>(alignment)}};
-    std::fill_n(result.storage_->allocated_.get(),
-                static_cast<std::size_t>(size), std::uint8_t{0});
+    const auto mapping = map_zeroed_cpu_pages(size, alignment, dense_host);
+    if (mapping.data) {
+      result.storage_->allocated_ = {
+          mapping.data, CpuStorage::AlignedDelete{mapping.bytes | 1}};
+    } else {
+      result.storage_->allocated_ = {
+          static_cast<std::uint8_t*>(::operator new(
+              static_cast<std::size_t>(size),
+              std::align_val_t(static_cast<std::size_t>(alignment)))),
+          CpuStorage::AlignedDelete{static_cast<std::size_t>(alignment)}};
+    }
+    advise_large_cpu_pages(result.storage_->allocated_.get(), size);
+    if (!mapping.data)
+      std::fill_n(result.storage_->allocated_.get(),
+                  static_cast<std::size_t>(size), std::uint8_t{0});
     result.storage_->capacity_ = size;
     if (allocation_committed_)
       allocation_committed_(result.storage_->lease_, size, 0);

@@ -32,6 +32,10 @@ struct ExecutionContextConfig final {
    */
   std::uint32_t maximum_gpu_submissions = 4;
   std::uint32_t maximum_runs = 1024;
+  /** @brief Context Payload cap, intersected with managed_resources capacity.
+   * Values above the default 1 GiB Result growth guard also raise that guard
+   * for executor-created Results. Root backing and metadata limits still apply.
+   */
   std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
   std::optional<ResourceLimits> managed_resources;
 };

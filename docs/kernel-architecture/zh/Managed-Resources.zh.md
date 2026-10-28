@@ -56,6 +56,10 @@ Task 状态、completion slot、有界失败消息与 retirement 投递记录在
 
 ## 存储与 Result
 
+CPU `BufferAllocator` 继续保证新分配字节为零。Linux 的普通分配从 1 MiB、macOS 从 32 MiB 起，对请求对齐能够整除系统页大小的分配使用私有匿名映射；其他请求保留对齐分配及清零。映射按页取整的长度仅用于释放，逻辑容量仍按请求字节数计量。所有权、失败观察、预算准入及释放计量保持原有规则。零页按需提供，因此分配成功不表示所有页面已驻留或已承担首次写入缺页成本。Linux 对至少 32 MiB 分配内部完整的 2 MiB 对齐范围额外请求 `MADV_HUGEPAGE`；提示失败不影响正确性，不修改系统设置，也不保证驻留或性能。原生 Shared/Device 分配路径保留各自策略。 当块恰有一个 CPU/Host 任务和一个已授予 CPU 执行通道，声明的 Host scratch 在 [1 MiB,32 MiB) 内，且 Host 输出字节数至少为 scratch 的四分之一时，Linux 通常将该块 Host 输出与 scratch 的匿名映射门槛设为 4 MiB。如果 Host scratch 大小为 2 MiB 的整数倍，且块的 Host 输出至少达到该 scratch 的一半，则该 scratch 保留普通映射门槛和既有的整页工作区路径；在 4 MiB 以下，该例外只涉及恰好 2 MiB 的 scratch。低于门槛的请求采用对齐堆分配并完整清零，宿主分配器可能复用已释放的空间；本策略不保证物理地址或页面复用。公开 allocator 调用、输出比例较低的块及其他 placement 保留普通门槛。门控只使用声明容量，不检查 payload 实际使用量。堆分配仍在准入后完整清零，生命周期和计量不变；该有界策略不新增保留缓存，也不改变 macOS 门槛。 对恰有一个 CPU/Host 任务、一个已授予 CPU 执行通道的块，当声明的 Host 输出字节数至少为 scratch 容量的一半时，Linux 还可对 [2 MiB,32 MiB) 的 Host scratch 内部完整对齐范围提示大页。提示成功后，在缓冲区交给 worker 前通过 volatile 指针进行至多十五次一字节零值写，避免多个 worker 并发承担同一大页的首次写入。稀疏预留、多任务或多执行通道块、GPU scratch 及 Shared/Device 存储保留原路径。该有界提示只作用于已经准入且保证为零的缓冲区，不改变逻辑容量、生命周期、失败处理和资源计量。
+
+执行器创建 Result 时使用 `max(ResultGrowthLimits{}.maximum_bytes, maximum_live_bytes)` 增长上限。默认配置仍为 1 GiB，显式提高 Context 容量可允许更大的单个 Result。保留的 backing 与发布元数据计入该上限，Root 的全部限制仍独立执行。
+
 `ResourceAllocator` 在分配前准入元素容量与对齐头，直到物理释放之后才释放 lease。Metadata 容器计入 Host/Metadata；payload 容器的元素还计入 Payload。`BufferAllocator::limited()` 限制 backing capacity，`limited_requested()` 限制存活请求字节。Native 转换保留 allocation provenance，并按实际容量计费。绑定资源根的 quota/provenance state 与 reservation owner 使用托管分配；parent scope 链避免未计费的可增长 provenance 目录。Allocator 副本共享这些 owner；payload 释放后，其 metadata 保持到最后一个 allocator 或 buffer owner 退休。调用方 unmanaged allocator 不自动纳入执行资源根计费。
 
 Host 与 native Shared 分配先预留容量，再创建 `CpuStorage`。Owner 构造与 payload 分配分别 commit，因此后续 payload 或 native bind/map 失败时，已观察的 metadata 峰值会保留，live 字节随后回滚。容量 sublimit wrapper 将两种增量都转发到原资源根。已经通过 `NativeAllocator` 分配的 native wrapper 对象不会在此路径重复 commit。

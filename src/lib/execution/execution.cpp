@@ -185,6 +185,58 @@ bool complete_identity(const physical::Program& program,
   return true;
 }
 }  // namespace
+// Reuse idle coordinators without queuing one Run behind another. The
+// detached thread owns only this independent slot between Runs; final Run and
+// provider releases remain outside the CPU worker pool and every slot lock.
+struct CoordinatorSlot final {
+  static std::shared_ptr<CoordinatorSlot> create(const ResourceBudget& budget) {
+    constexpr auto bytes = sizeof(CoordinatorSlot) + 64;
+    auto lease = budget.reserve(ResourceCapacity::host(bytes, bytes));
+    if (!lease.ok())
+      throw std::invalid_argument("context coordinator resources exhausted");
+    auto slot = std::make_shared<CoordinatorSlot>();
+    slot->metadata = lease.take_value();
+    core_internal::ResourceMetadataAccess::commit(slot->metadata,
+                                                  sizeof(CoordinatorSlot));
+    return slot;
+  }
+  bool submit(const std::shared_ptr<CoordinatorSlot>& self,
+              const std::shared_ptr<RunState>& run) {
+    std::unique_lock<std::mutex> lock(mutex);
+    if (busy || stopping)
+      return false;
+    if (!started) {
+      // No job has been accepted if thread creation fails.
+      std::thread worker([self] { self->serve(); });
+      try {
+        worker.detach();
+      } catch (...) {
+        stopping = true;
+        changed.notify_one();
+        lock.unlock();
+        if (worker.joinable())
+          worker.join();
+        throw;
+      }
+      started = true;
+    }
+    busy = true;
+    job = run;
+    changed.notify_one();
+    return true;
+  }
+  void stop() noexcept {
+    std::lock_guard<std::mutex> lock(mutex);
+    stopping = true;
+    changed.notify_one();
+  }
+  void serve() noexcept;
+  ResourceLease metadata;
+  std::mutex mutex;
+  std::condition_variable changed;
+  std::shared_ptr<RunState> job;
+  bool busy = false, stopping = false, started = false;
+};
 struct ContextState {
   static ResourceLease reserve(const ResourceBudget& budget,
                                std::uint32_t count,
@@ -213,6 +265,8 @@ struct ContextState {
                ResourceLimits limits)
       : registry(std::move(operations)),
         budget(std::move(limits)),
+        result_growth{std::max(ResultGrowthLimits{}.maximum_bytes,
+                               config.maximum_live_bytes)},
         metadata(reserve(budget, count, config)),
         workers(count, config.maximum_queued_tasks, metadata),
         cpu_count(count),
@@ -222,9 +276,20 @@ struct ContextState {
     runs.reserve(maximum_runs);
     core_internal::ResourceMetadataAccess::commit(
         metadata, runs.capacity() * sizeof(runs[0]));
+    // Preallocate a stable Context baseline, but start each detached thread
+    // only when its first Run arrives. Constructor failure leaves no waiters.
+    for (auto& slot : coordinators)
+      slot = CoordinatorSlot::create(budget);
+  }
+  ~ContextState() noexcept {
+    for (const auto& slot : coordinators)
+      if (slot)
+        slot->stop();
   }
   std::shared_ptr<OperationRegistry> registry;
   ResourceBudget budget;
+  std::array<std::shared_ptr<CoordinatorSlot>, 2> coordinators;
+  const ResultGrowthLimits result_growth;
   std::shared_ptr<gpu_internal::Device> device;
   ResourceLease metadata;
   CpuWorkers workers;
@@ -248,6 +313,7 @@ struct PreparedState {
   std::vector<std::vector<std::uint32_t>> output_ports;
   std::vector<std::uint64_t> block_work;
   std::size_t maximum_reads = 0, maximum_writes = 0, maximum_calls = 0;
+  std::uint32_t maximum_cpu_tasks = 1;
   bool has_gpu = false;
 };
 
@@ -302,6 +368,7 @@ struct RunState : std::enable_shared_from_this<RunState> {
   ExecutionOptions options;
   CancellationToken cancellation;
   CancellationSource stop;
+  const CancellationToken stop_token = stop.token();
   ResourceLease metadata;
   std::uint64_t frame_metadata = 0;
   Incoming initial;
@@ -351,7 +418,7 @@ struct RunState : std::enable_shared_from_this<RunState> {
       copy_status(&abort_status, status);
   }
   ErrorCode poll() {
-    const bool cancelled = cancellation.cancelled() || stop.token().cancelled();
+    const bool cancelled = cancellation.cancelled() || stop_token.cancelled();
     const bool current = prepared->plan.current();
     std::lock_guard<std::mutex> lock(mutex);
     if (delivery_error) {
@@ -438,7 +505,7 @@ struct RunState : std::enable_shared_from_this<RunState> {
   }
   void record_task(Work* item) noexcept;
   void record_issue(physical::Backend backend, bool rejected = false) noexcept;
-  void record_call(const CallRecord& record) noexcept;
+  void record_call(const CallRetirement& record) noexcept;
   void deliver();
   void enqueue(DeliveryRecord record);
   void settle_delivery();
@@ -587,12 +654,12 @@ RunState::Frame::Frame(RunState& owner, Id block_id, Incoming incoming)
   // every directory and ownership wrapper here makes retirement
   // allocation-free.
   ResourceAllocationScope scope(run.prepared->context->budget);
-  exports = ResourceVector<DeliveryRecord>(
-      ResourceAllocator<DeliveryRecord>(run.prepared->context->budget));
-  exports.resize(b.calls.size());
-  for (auto& record : exports)
-    record = DeliveryRecord(run.metadata);
   if (run.options.on_call_retired) {
+    exports = ResourceVector<DeliveryRecord>(
+        ResourceAllocator<DeliveryRecord>(run.prepared->context->budget));
+    exports.resize(b.calls.size());
+    for (auto& record : exports)
+      record = DeliveryRecord(run.metadata);
     for (std::size_t ordinal = 0; ordinal < b.calls.size(); ++ordinal)
       for (auto vi : p.calls[b.calls[ordinal]].returns) {
         auto exported = run.value(*this, vi);
@@ -792,7 +859,7 @@ void RunState::bind(Work* pointer, Submission submission) noexcept {
   item.invocation.cancellation = {
       &self, [](const void* context) -> std::uint32_t {
         const auto& run = *static_cast<const RunState*>(context);
-        return run.cancellation.cancelled() || run.stop.token().cancelled();
+        return run.cancellation.cancelled() || run.stop_token.cancelled();
       }};
   if (task.kind != physical::TaskKind::Copy ||
       p.placements[task.placement].backend == physical::Backend::Gpu)
@@ -806,7 +873,7 @@ void RunState::bind(Work* pointer, Submission submission) noexcept {
          std::uint64_t stages) -> ps_kernel_status_v8 {
         auto& item = *static_cast<Work*>(context);
         auto& run = *item.run;
-        if (run.cancellation.cancelled() || run.stop.token().cancelled())
+        if (run.cancellation.cancelled() || run.stop_token.cancelled())
           return kernel_failure(ErrorCode::Cancelled, "Run cancelled",
                                 FailureReason::Cancelled);
         auto status = run.admit(work, stages, &item);
@@ -1008,12 +1075,16 @@ void RunState::record_task(Work* item) noexcept {
     ++d.dropped_task_timings;
   }
 }
-void RunState::record_call(const CallRecord& record) noexcept {
+void RunState::record_call(const CallRetirement& record) noexcept {
   if (!options.trace_capacity)
     return;
+  const auto outcome =
+      record.state == CallState::Succeeded ? CallOutcome::Succeeded
+      : record.state == CallState::Failed  ? CallOutcome::Failed
+                                           : CallOutcome::Elided;
   const ExecutionCallTiming timing{record.activation,  record.sequence,
                                    record.source_call, elapsed(),
-                                   record.call,        record.outcome};
+                                   record.call,        outcome};
   std::lock_guard<std::mutex> lock(diagnostics->mutex);
   if (diagnostics->call_count < diagnostics->calls.size()) {
     diagnostics->calls[diagnostics->call_count++] = timing;
@@ -1118,13 +1189,15 @@ Result<ResultRef> RunState::value(const Frame& frame, Id vi,
       return Result<ResultRef>(
           failure(ErrorCode::Internal, "expired canonical Result identity"));
   }
-  auto made = canonical ? std::move(identity->reservation)
-                              .materialize(prepared->context->budget,
-                                           *p.schemas[v.schema], "physical-run",
-                                           {}, p.tile_extent)
-                        : ResultBuilder::start(
-                              prepared->context->budget, *p.schemas[v.schema],
-                              "physical-run", {}, p.tile_extent);
+  auto made =
+      canonical
+          ? std::move(identity->reservation)
+                .materialize(prepared->context->budget, *p.schemas[v.schema],
+                             "physical-run", prepared->context->result_growth,
+                             p.tile_extent)
+          : ResultBuilder::start(
+                prepared->context->budget, *p.schemas[v.schema], "physical-run",
+                prepared->context->result_growth, p.tile_extent);
   if (!made.ok())
     return Result<ResultRef>(made.status());
   auto builder = made.take_value();
@@ -1234,28 +1307,30 @@ const Status& RunState::execute_block(Frame* frame) {
     frame->update_head_wait();
     while (auto retired = frame->schedule.retire_next()) {
       frame->update_head_wait();
-      DeliveryRecord owned =
-          std::move(frame->exports[p.calls[retired->call].ordinal]);
-      auto& record = owned.record;
-      record.sequence = retired->sequence;
-      record.activation = retired->activation;
-      record.source_call = retired->source_call;
-      record.call = retired->call;
-      record.failed_task = retired->failed_task;
-      record.outcome =
-          retired->state == CallState::Succeeded ? CallOutcome::Succeeded
-          : retired->state == CallState::Failed  ? CallOutcome::Failed
-                                                 : CallOutcome::Elided;
-      if (record.outcome == CallOutcome::Failed)
-        copy_status(&record.status,
-                    frame->schedule.failure(record.failed_task));
-      if (record.outcome != CallOutcome::Succeeded)
-        record.values.clear();
-      for (auto vi : p.calls[record.call].returns)
+      for (auto vi : p.calls[retired->call].returns)
         for (auto id : p.values[vi].tiles)
           frame->release_tile(id);
-      record_call(record);
-      enqueue(std::move(owned));
+      record_call(*retired);
+      if (options.on_call_retired) {
+        DeliveryRecord owned =
+            std::move(frame->exports[p.calls[retired->call].ordinal]);
+        auto& record = owned.record;
+        record.sequence = retired->sequence;
+        record.activation = retired->activation;
+        record.source_call = retired->source_call;
+        record.call = retired->call;
+        record.failed_task = retired->failed_task;
+        record.outcome =
+            retired->state == CallState::Succeeded ? CallOutcome::Succeeded
+            : retired->state == CallState::Failed  ? CallOutcome::Failed
+                                                   : CallOutcome::Elided;
+        if (record.outcome == CallOutcome::Failed)
+          copy_status(&record.status,
+                      frame->schedule.failure(record.failed_task));
+        if (record.outcome != CallOutcome::Succeeded)
+          record.values.clear();
+        enqueue(std::move(owned));
+      }
       ++result.diagnostics.retired_calls;
     }
     if (frame->schedule.drained()) {
@@ -1324,7 +1399,7 @@ const Status& RunState::execute_block(Frame* frame) {
     const auto event = [&] {
       if (!frame->schedule.aborted() &&
           (delivery_error || cancellation.cancelled() ||
-           stop.token().cancelled() ||
+           stop_token.cancelled() ||
            work_rejected.load(std::memory_order_acquire)))
         return true;
       return std::any_of(
@@ -1473,7 +1548,7 @@ void RunState::run() noexcept {
   poll();
   {
     std::lock_guard<std::mutex> lock(mutex);
-    if (cancellation.cancelled() || stop.token().cancelled())
+    if (cancellation.cancelled() || stop_token.cancelled())
       observe({ErrorCode::Cancelled, {}});
     else if (!prepared->plan.current())
       observe({ErrorCode::Stale, {}});
@@ -1483,6 +1558,26 @@ void RunState::run() noexcept {
     terminal = true;
   }
   changed.notify_all();
+}
+void CoordinatorSlot::serve() noexcept {
+  for (;;) {
+    std::shared_ptr<RunState> current;
+    {
+      std::unique_lock<std::mutex> lock(mutex);
+      changed.wait(lock, [&] { return job || stopping; });
+      if (!job)
+        return;
+      current = std::move(job);
+    }
+    current->run();
+    // Provider destruction may release the public Context. Its shutdown can
+    // stop this slot safely: this detached thread still owns the slot itself.
+    current.reset();
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      busy = false;
+    }
+  }
 }
 }  // namespace ps::execution_internal
 
@@ -1686,6 +1781,8 @@ ExecutionContext::~ExecutionContext() noexcept {
       run->changed.wait(lock, [&] { return run->terminal; });
     }
   state_->workers.shutdown();
+  for (const auto& slot : state_->coordinators)
+    slot->stop();
   const auto directory_bytes = runs.capacity() * sizeof(runs[0]);
   std::vector<std::weak_ptr<RunState>>().swap(runs);
   core_internal::ResourceMetadataAccess::withdraw(state_->metadata,
@@ -1829,6 +1926,7 @@ Result<PreparedPlan> ExecutionContext::prepare(
     for (const auto& block : p.blocks) {
       prepared->maximum_calls =
           std::max(prepared->maximum_calls, block.calls.size());
+      std::uint32_t cpu_tasks = 0;
       std::uint64_t work =
           1 + p.tasks.size() + p.calls.size() + 3 * p.tiles.size();
       auto add = [&](std::uint64_t value) {
@@ -1837,6 +1935,8 @@ Result<PreparedPlan> ExecutionContext::prepare(
       };
       for (auto ti : block.tasks) {
         const auto& task = p.tasks[ti];
+        if (p.placements[task.placement].backend == physical::Backend::Cpu)
+          ++cpu_tasks;
         add(5 + 2 * task.reads.size() + 2 * task.writes.size() +
             task.successors.size());
         if (task.kind == physical::TaskKind::Copy) {
@@ -1863,6 +1963,10 @@ Result<PreparedPlan> ExecutionContext::prepare(
       for (auto vi : block.return_values)
         add(2 * p.values[vi].tiles.size());
       prepared->block_work.push_back(work);
+      // Activations never overlap within one Run. More lanes than tasks
+      // cannot expose parallel work, but would reserve scratch and metadata.
+      prepared->maximum_cpu_tasks =
+          std::max(prepared->maximum_cpu_tasks, cpu_tasks);
     }
     if (!plan.current())
       return Answer(stale());
@@ -1886,9 +1990,10 @@ Result<RunHandle> ExecutionContext::submit(
     return Answer({ErrorCode::InvalidArgument, "invalid Run limits"});
   try {
     const auto lanes =
-        options.maximum_parallelism
-            ? std::min(options.maximum_parallelism, state_->cpu_count)
-            : state_->cpu_count;
+        std::min(plan.state_->maximum_cpu_tasks,
+                 options.maximum_parallelism
+                     ? std::min(options.maximum_parallelism, state_->cpu_count)
+                     : state_->cpu_count);
     const auto gpu_lanes =
         plan.state_->has_gpu
             ? (options.maximum_parallelism
@@ -1926,9 +2031,12 @@ Result<RunHandle> ExecutionContext::submit(
         p.values.size() *
             (2 * sizeof(std::shared_ptr<execution_internal::ValueIdentity>) +
              sizeof(ResultRef)) +
-        std::max<std::size_t>(1, plan.state_->maximum_calls) *
-            sizeof(std::optional<execution_internal::DeliveryRecord>);
-    if (!core_internal::checked_multiply_add(plan.state_->maximum_calls, 512,
+        (options.on_call_retired
+             ? std::max<std::size_t>(1, plan.state_->maximum_calls) *
+                   sizeof(std::optional<execution_internal::DeliveryRecord>)
+             : 0);
+    if (options.on_call_retired &&
+        !core_internal::checked_multiply_add(plan.state_->maximum_calls, 512,
                                              frame_bytes, &frame_bytes))
       return Answer({ErrorCode::ResourceExhausted, "Run metadata overflow"});
     std::uint64_t total;
@@ -1995,9 +2103,7 @@ Result<RunHandle> ExecutionContext::submit(
         run->diagnostics->calls.capacity() * sizeof(ExecutionCallTiming));
     run->frame_metadata = frame_bytes;
     run->prepared = plan.state_;
-    run->lanes = options.maximum_parallelism
-                     ? std::min(options.maximum_parallelism, state_->cpu_count)
-                     : state_->cpu_count;
+    run->lanes = lanes;
     run->gpu_lanes = gpu_lanes;
     run->options = std::move(options);
     run->remaining_work = run->options.maximum_work;
@@ -2008,9 +2114,12 @@ Result<RunHandle> ExecutionContext::submit(
     core_internal::ResourceMetadataAccess::commit(
         run->metadata,
         run->input_identities.capacity() * sizeof(run->input_identities[0]));
-    run->records.resize(std::max<std::size_t>(1, run->prepared->maximum_calls));
-    core_internal::ResourceMetadataAccess::commit(
-        run->metadata, run->records.capacity() * sizeof(run->records[0]));
+    if (run->options.on_call_retired) {
+      run->records.resize(
+          std::max<std::size_t>(1, run->prepared->maximum_calls));
+      core_internal::ResourceMetadataAccess::commit(
+          run->metadata, run->records.capacity() * sizeof(run->records[0]));
+    }
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (state_->closed)
       return Answer({ErrorCode::Cancelled, "context stopped"});
@@ -2030,7 +2139,15 @@ Result<RunHandle> ExecutionContext::submit(
     run->id = state_->next_run++;
     state_->runs.push_back(run);
     try {
-      std::thread([run] { run->run(); }).detach();
+      bool reused = false;
+      for (const auto& slot : state_->coordinators)
+        if (slot->submit(slot, run)) {
+          reused = true;
+          break;
+        }
+      if (!reused) {
+        std::thread([run] { run->run(); }).detach();
+      }
     } catch (...) {
       state_->runs.pop_back();
       throw;

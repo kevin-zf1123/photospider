@@ -7,6 +7,9 @@
 #include <memory>
 #include <mutex>
 #include <utility>
+#if defined(__linux__)
+#include <sys/mman.h>
+#endif
 
 #include "core/resource_observation.hpp"
 #include "execution/diagnostics.hpp"
@@ -15,6 +18,34 @@
 
 namespace ps::execution_internal {
 namespace {
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+constexpr std::uint64_t kScratchPageLimit = UINT64_C(32) * 1024 * 1024;
+// Dense host scratch below the general large-page threshold can otherwise
+// fault one small page at a time. Establish each advised interior page before
+// workers share its first writes. Sparse reservations retain lazy backing.
+void prepare_dense_scratch(MutableBuffer& buffer,
+                           std::uint64_t host_output_bytes) noexcept {
+  constexpr std::uint64_t page = UINT64_C(2) * 1024 * 1024;
+  const auto size = buffer.size();
+  if (size < page || size >= kScratchPageLimit ||
+      host_output_bytes < size / 2 + size % 2)
+    return;
+  auto* data = buffer.data();
+  const auto address = reinterpret_cast<std::uintptr_t>(data);
+  const auto offset = (page - address % page) % page;
+  if (offset >= size)
+    return;
+  const auto length = (size - offset) / page * page;
+  if (length && madvise(data + offset, length, MADV_HUGEPAGE) == 0) {
+    // The allocator has already reserved and zero-initialized this exclusive
+    // buffer. At most fifteen one-byte zero stores precede task publication.
+    volatile std::uint8_t* pages = data;
+    for (std::uint64_t i = offset; i < offset + length; i += page)
+      pages[i] = 0;
+  }
+}
+#endif
+
 Status exhausted() {
   return {ErrorCode::ResourceExhausted, "block memory admission overflow"};
 }
@@ -375,11 +406,26 @@ Result<BlockMemory> BlockMemory::allocate(
       core_internal::ResourceMetadataAccess::commit(slice->admission->lease,
                                                     metadata);
     };
-    const auto allocate =
-        [&](std::uint64_t bytes, std::uint64_t alignment, bool shared,
-            std::uint64_t prepared_capacity) -> Result<MutableBuffer> {
+    bool dense_host = false;
+#if defined(__linux__)
+    // Reuse modest dense CPU allocations through the host heap. Ordinary
+    // allocators and sparse blocks keep their lazy mapping policy.
+    const auto host_scratch = reservation.scratch[0][0];
+    if (lanes == 1 && block.tasks.size() == 1 &&
+        host_scratch >= (UINT64_C(1) << 20) &&
+        host_scratch < (UINT64_C(32) << 20) &&
+        reservation.outputs[0] >= host_scratch / 4 + (host_scratch % 4 != 0)) {
+      const auto& placement =
+          program.placements[program.tasks[block.tasks[0]].placement];
+      dense_host = placement.backend == physical::Backend::Cpu &&
+                   placement.domain == physical::Domain::Host;
+    }
+#endif
+    const auto allocate = [&](std::uint64_t bytes, std::uint64_t alignment,
+                              bool shared, std::uint64_t prepared_capacity,
+                              bool dense) -> Result<MutableBuffer> {
       if (!shared)
-        return allocator.allocate_aligned(bytes, alignment);
+        return allocator.allocate_aligned_impl(bytes, alignment, dense);
       auto native_allocator = native->device->allocator(allocator);
       const auto reserve = native_allocator.reserve_;
       // A changed device requirement cannot consume another allocation's
@@ -438,7 +484,7 @@ Result<BlockMemory> BlockMemory::allocate(
         }
         auto storage = allocate(tile.bytes, tile.alignment,
                                 tile.domain == physical::Domain::Shared,
-                                native ? native->tiles[id] : 0);
+                                native ? native->tiles[id] : 0, dense_host);
         if (!storage.ok())
           return Answer(storage.status());
         result.tiles_[id] = storage.take_value();
@@ -459,12 +505,33 @@ Result<BlockMemory> BlockMemory::allocate(
           result.device_scratch_[i] = storage.take_value();
           continue;
         }
+        // Preserve the existing lazy large-page path for whole-page scratch.
+        // A heap block of exactly one large page need not have an aligned
+        // interior, while requesting extra heap alignment adds allocation cost.
+        constexpr std::uint64_t large_page = UINT64_C(2) << 20;
+        const bool page_scratch =
+            scratch_bytes % large_page == 0 &&
+            reservation.outputs[0] >= scratch_bytes / 2 + scratch_bytes % 2;
         auto storage =
             allocate(scratch_bytes, 1, domain == 2,
-                     native ? native->scratch[block_id][backend][domain] : 0);
+                     native ? native->scratch[block_id][backend][domain] : 0,
+                     dense_host && !page_scratch);
         if (!storage.ok())
           return Answer(storage.status());
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+        auto buffer = storage.take_value();
+        if (backend == 0 && domain == 0 && lanes == 1 &&
+            block.tasks.size() == 1) {
+          const auto& placement =
+              program.placements[program.tasks[block.tasks[0]].placement];
+          if (placement.backend == physical::Backend::Cpu &&
+              placement.domain == physical::Domain::Host)
+            prepare_dense_scratch(buffer, reservation.outputs[0]);
+        }
+        result.scratch_[i][domain] = std::move(buffer);
+#else
         result.scratch_[i][domain] = storage.take_value();
+#endif
       }
     }
     return Answer(std::move(result));

@@ -48,6 +48,8 @@ struct TransformCache {
   ResourceAllocator<Complex> allocator;
   std::map<Key, PowerPlan, std::less<Key>, ResourceAllocator<PowerEntry>> power;
   std::map<Key, Roots, std::less<Key>, ResourceAllocator<Entry>> roots;
+  std::map<Key, Roots, std::less<Key>, ResourceAllocator<Entry>>
+      single_twiddles;
   std::map<Key, RaderPlan, std::less<Key>, ResourceAllocator<RaderEntry>> rader;
 };
 
@@ -254,6 +256,47 @@ struct TransformEngine {
     }
     const auto* twiddle = plan.twiddle.data();
     for (; length < n; length *= 4) {
+      if constexpr (std::is_same_v<Scalar, double>) {
+        if (length == 1 && n >= 8) {
+          const auto transpose =
+              [](typename Packet::Register& a, typename Packet::Register& b)
+                  PS_FRQ_VECTOR_TARGET {
+#if defined(__x86_64__)
+                    const auto first = _mm256_permute2f128_pd(a, b, 0x20);
+                    b = _mm256_permute2f128_pd(a, b, 0x31);
+                    a = first;
+#else
+                    const typename Packet::Register first{
+                        vzip1q_f64(a.re, b.re), vzip1q_f64(a.im, b.im)};
+                    b = {vzip2q_f64(a.re, b.re), vzip2q_f64(a.im, b.im)};
+                    a = first;
+#endif
+                  };
+          for (std::uint64_t i = 0; i < n; i += 8) {
+            fuel.poll(256);
+            auto a = Packet::load(data + i), b = Packet::load(data + i + 2);
+            auto c = Packet::load(data + i + 4), d = Packet::load(data + i + 6);
+            transpose(a, c);
+            transpose(b, d);
+            const auto ac = Packet::add(a, c), bd = Packet::add(b, d);
+            const auto amc = Packet::minus(a, c);
+            const auto rotated =
+                Packet::template rotate<Inverse>(Packet::minus(b, d));
+            a = Packet::add(ac, bd);
+            b = Packet::add(amc, rotated);
+            c = Packet::minus(ac, bd);
+            d = Packet::minus(amc, rotated);
+            transpose(a, b);
+            transpose(c, d);
+            Packet::store(data + i, a);
+            Packet::store(data + i + 2, c);
+            Packet::store(data + i + 4, b);
+            Packet::store(data + i + 6, d);
+          }
+          twiddle += 3;
+          continue;
+        }
+      }
       if constexpr (Packet::initial_radix4) {
         if (length == 1) {
           for (std::uint64_t i = 0; i < n; i += 16) {
@@ -678,8 +721,12 @@ struct TransformEngine {
   // edited spectra.
   static void real(Complex* data, std::uint64_t h, std::uint64_t w,
                    bool inverse, Cache& tables, const Work& work) {
-    const auto half = w / 2, pitch = half + 1;
     const auto& roots = root_table(tables, w, inverse, work);
+    real_rows(data, h, w, inverse, roots, work);
+  }
+  static void real_rows(Complex* data, std::uint64_t h, std::uint64_t w,
+                        bool inverse, const Roots& roots, const Work& work) {
+    const auto half = w / 2, pitch = half + 1;
     const TransformBlock combine{work, h * (32 + 64 * (half / 2))};
     for (std::uint64_t y = 0; y < h; ++y) {
       auto* row = data + y * pitch;

@@ -6,6 +6,8 @@ Status: Proposed breaking design; see the [Plan contract](Compiler-and-Execution
 
 One coordinator owns each Run's states, dependency counters, ready queues, call records and holds. A context supplies a bounded CPU pool and GPU submission queues shared by Runs. Workers and device callbacks write reserved completion records; they never mutate dependency or retirement state.
 
+Each Context preallocates two independently charged coordinator slots. A slot starts its thread lazily and accepts a Run only while idle. Concurrent submissions with no idle slot retain an independent coordinator thread, preserving each accepted Run's progress. A slot stays busy through final Run-owner release, which occurs outside both the slot lock and the CPU pool. Its thread retains the slot alone; stopping a Context lets accepted work drain, then wakes idle slots so their own metadata leases can be released.
+
 ```mermaid
 flowchart TD
   C["Run coordinator"] --> CPU["CPU workers"]
@@ -58,6 +60,10 @@ On success, the coordinator marks outputs available, visits each successor once,
 ## Admission and progress
 
 The baseline reserves the block's full output set, persistent frame state, bounded delivery storage, usable scratch lanes and completion capacity before its first task. [Tile storage](Cache-Model.md) defines the bound. Failure returns `ResourceExhausted` before any task in that block starts; earlier blocks' results/effects remain observable.
+
+Preparation records the maximum number of CPU tasks in any block. A Run's CPU lane count is capped by that structural upper bound as well as its configured worker/parallelism limits, with at least one bookkeeping lane. Scratch reservation, completion storage and GPU scratch offsets use the resulting count consistently.
+
+Runs without an observer omit delivery records and per-call exported Result materialization. Call retirement, trace records, dependency holds, failure propagation and final RET Result admission still execute.
 
 A task is eligible when active, unsubmitted, dependency-ready, before the failure cut and able to acquire all credits. An effect additionally requires its call to equal retirement head. A busy scratch lane can be bypassed temporarily; fair selection revisits it. Tasks acquire their complete multi-domain resource vector atomically.
 

@@ -54,6 +54,37 @@ Scheduler failure buffers and the Run's block/terminal diagnostic buffers commit
 
 ## Storage and Results
 
+CPU `BufferAllocator` storage remains zero-initialized. On Linux, ordinary eligible allocations from
+1 MiB use private anonymous mappings; on macOS the threshold is 32 MiB. The requested alignment must
+divide the OS page size. Other requests retain aligned allocation followed by zero initialization.
+The mapping owns a page-rounded release length while logical capacity remains the requested byte
+count. Ownership, failure observers, budget admission and release accounting are unchanged. Zero
+pages are supplied on demand, so successful allocation does not mean that every page is resident or
+has already incurred its first-write fault. Linux allocations from 32 MiB also request
+`MADV_HUGEPAGE` for complete 2 MiB-aligned interior ranges. Failure to accept this hint is harmless;
+it changes no system setting and provides no residency or performance guarantee. Native
+Shared/Device allocator paths retain their own policy. A single-task CPU/Host block with one granted
+CPU lane can request heap reuse for modest dense Host storage: its declared Host scratch must be in
+[1 MiB, 32 MiB), and its Host outputs must occupy at least one quarter of that scratch capacity. For
+that block's Host outputs and scratch, the Linux mapping threshold is normally 4 MiB. Host scratch
+whose size is a whole multiple of 2 MiB and whose block outputs occupy at least half that size keeps
+the ordinary mapping threshold, preserving the existing whole-page scratch path. This exception only
+changes the 2 MiB case below the dense mapping threshold. Public allocator calls, lower-density
+blocks and other placements keep the ordinary threshold. The gate uses declared capacities and does
+not inspect payload usage. Heap-backed allocations still receive complete zero initialization after
+admission; their lifetime and accounting remain unchanged. This bounded policy does not retain a new
+cache or alter the macOS threshold. For a block with exactly one CPU/Host task and one granted CPU
+lane, Linux can also advise Host scratch in [2 MiB, 32 MiB) when the block's declared Host outputs
+occupy at least half the scratch capacity. Only complete aligned interior ranges are advised. On
+success, allocation performs at most fifteen one-byte zero stores through a volatile pointer before
+publishing the buffer to workers, avoiding concurrent first writes to the same large page. Blocks
+below the declared density gate, multiple-task/lane blocks, GPU scratch and Shared/Device storage
+retain their existing path. This is a bounded placement hint within the already admitted
+zero-initialized buffer; logical capacity, lifetime, failure handling and resource accounting do not
+change.
+
+Executor-created Results use a growth guard of `max(ResultGrowthLimits{}.maximum_bytes, maximum_live_bytes)`. With the default configuration this is 1 GiB; an explicitly larger context allowance permits larger individual Results. Retained backing and publication metadata count toward this guard, and all root limits remain independently enforced.
+
 `ResourceAllocator` admits element capacity and its alignment header before allocation. The allocation retains its lease until after physical deallocation. Metadata containers charge Host/Metadata; payload containers additionally charge Payload for their elements. `BufferAllocator::limited()` bounds backing capacity, while `limited_requested()` bounds live requested bytes. Native conversion preserves allocation provenance and charges actual capacity. Root-bound quota/provenance states and reservation owners use managed allocation; parent scope links avoid an unaccounted growable provenance directory. Allocator copies share these owners. Their metadata stays live after payload release until the last allocator or buffer owner retires. An unmanaged caller allocator remains outside execution-root accounting.
 
 Host and native Shared allocation reserve capacity before creating `CpuStorage`. Owner construction and payload allocation commit separately, so a later payload or native bind/map failure preserves the observed metadata peak and then rolls back its live bytes. Capacity sublimit wrappers forward both increments to the original root. Native wrapper objects already allocated through `NativeAllocator` are not committed again by this path.
