@@ -110,6 +110,21 @@ On x86 each pool worker has its own condition variable, and a phase notifies onl
 
 The pool owns worker threads and scheduling state. An invocation borrows the pool until all participants finish; a concurrent invocation uses its caller if the pool is busy. The pool cap is not a global cap on all concurrent callers in the process. Input packing, independent FFT lines, real-spectrum recombination and output rows can run in separate tasks. Plans and input views are read-only; participants use disjoint output regions and scratch slices. Each phase admits its complete deterministic cost once through the caller's Work service. Participants receive independent local counters with finite shares and retain the original cancellation callback. After joining, the caller checks the host's sticky failure on both normal and exception paths. Every participant restores its floating environment before releasing the job. No Run data remains in the pool after return.
 
+The FRQ pool and the Context's execution coordinators have different owners.
+Destroying a Context does not destroy the process-local pool. Its phase barrier
+must release every borrow of invocation views, scratch, cancellation state and
+Run services before the prepared callback returns, on success, failure,
+cancellation and partial startup failure. PreparedPlan owners can continue to
+retain their immutable tables after Context destruction. The shared executor's
+shutdown synchronization does not change transform mathematics, normalization,
+output selection or the workspace of one invocation.
+
+Performance measurements distinguish the transform body, the complete
+`invoke_cpu` callback, submit-to-join execution and Context teardown.
+`on_call_retired` delivery is a separate observer boundary. Pool setup, prepared
+table construction and first-touch costs must be identified when they enter a
+measurement.
+
 The mixed-plan double radix-four bound is 160 units per independent complex lane for scalar and native/wide packet paths. The fused eight-point discount is derived from the current radix-two/four costs. Adjacent double axis phases combine redundant completion probes; every payload segment still retains its pre-poll, and the axis retains a final completion probe.
 
 For the short double codelets, row cost is 40N for N<=16 and 72N+4R(N/4) otherwise; column cost is 32N for N<=8 and 48N+4C(N/4) otherwise. Row gather/combine segments declare 256/320 units, and a two-column radix-four segment declares 384. The largest indivisible leaf segment declares 640 units. These bounds include construction, scalar/control work and both AVX/NEON layouts. A paired-column phase and its optional scalar tail receive exact disjoint shares of their combined declared cost. Native Float64 column participation is selected from the paired work alone; paired work of at most 2^20 units remains serial. The scalar tail does not force a marginal parallel phase.

@@ -108,6 +108,13 @@ global optimality or perceptual quality.
 
 Fixed-step recurrences can use existing CFG loops, explicit edge arguments and declared intermediate tasks. The asynchronous profiles below retain their distinct timing semantics and remain unimplemented. Their concurrent solver/checker must be owned by one bounded operation invocation (or a separately specified host workflow); it cannot append tasks, rediscover dependencies or expose mutable state through a published Result. All worker state and scratch must fit declared bounds, and accepted work must be joined or drained before reporting completion. A serial CFG loop does not establish the asynchronous profile's acceptance.
 
+Solver/checker borrows of invocation views, scratch, cancellation state and Run
+services must be released on every exit, including partial startup failure,
+before reporting invocation completion. Closing a Context does not extend those
+borrows. An independently retained immutable Result may survive the Context
+under the shared owner contract; mutable checker state must still settle within
+its owning invocation.
+
 ## Trigger and ownership protocol
 
 Each algorithm uses a fixed positive interval K chosen through implementation

@@ -305,7 +305,15 @@ class PHOTOSPIDER_API RunHandle final {
 /** @brief Owner of bounded worker resources and the frozen operation registry.
  * Direct methods must not race destruction. Destruction rejects submissions,
  * requests cancellation and waits for every accepted Run and observer to drain.
- * Returned Result owners retain their storage and accounting independently.
+ * From an external thread it also joins all coordinators, including temporary
+ * coordinators for overlapping Runs, after they release their execution owners.
+ * A provider releasing the last Context owner during coordinator cleanup may
+ * trigger destruction on a coordinator thread. That path stops and detaches
+ * coordinators to avoid self/cross-Context joins; their remaining owners retire
+ * as cleanup returns. Observer callbacks must still not destroy their Context.
+ * Caller-retained Run handles, PreparedPlans, Results and observations retain
+ * their documented resources independently; destroying the Context does not
+ * revoke these owners or promise an immediate decrease in process RSS.
  */
 class PHOTOSPIDER_API ExecutionContext final {
  public:

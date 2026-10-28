@@ -218,6 +218,7 @@ photospider_add_kernel_test(test_result_exceptions Photospider::kernel tests/int
 target_compile_definitions(test_multi_output_execution PRIVATE PS_MULTI_OUTPUT_FIXTURE="$<TARGET_FILE:multi_output_fixture>")
 add_dependencies(test_multi_output_execution multi_output_fixture)
 photospider_add_kernel_test(test_prepared_workspace Photospider::kernel tests/integration/kernel/test_prepared_workspace.cpp)
+photospider_add_kernel_test(test_execution_lifecycle Photospider::kernel tests/integration/kernel/test_execution_lifecycle.cpp)
 photospider_add_kernel_test(test_backend_admission Photospider::kernel tests/integration/kernel/test_backend_admission.cpp)
 
 

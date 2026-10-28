@@ -39,6 +39,22 @@ E denotes an exact expression rounded once to RN_t; B denotes explicitly generat
 
 Positive-weight normalized filters, signed kernels, local regression, and global inverse problems have different semantics; do not apply one alpha-blurring rule to all of them. See [color composition](FILTER_color_composition.md). Spatial extension, anchor, and origin follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collection contract](FILTER_collections_contract.md). Shapes depend only on descriptors; each member defines mathematical support and fixed compiled reads.
 
+### Use of ordinary FFT primitives
+
+OLA/OLS may use F-profile FFTs to produce candidates, but rounded block transforms
+and overlap accumulation do not alone implement the E-strict convolution.
+Certification must cover the complete output expression, including every
+overlapping contribution and the final RN_t. Block size, padding and scheduling
+cannot introduce extra rounding freedom. Accelerated profiles retain the
+inherited NUM final-value requirements rather than the transforms' F exception.
+
+Reserve the block, overlap, plan and certification/fallback state covered by the
+resource model. Candidate transform complexity does not bound the complete
+strict implementation. If admitted resources cannot establish a conforming
+result, preserve the required failure instead of returning an uncertified
+candidate. Every accepted internal worker must drain on success, failure and
+cancellation before invocation completion.
+
 ## Dependencies and Acceptance
 
 The member support set is normative. Having a halo does not mean that an arbitrarily cropped ROI can run independently; paged access does not remove a whole-image dependency. Follow each member definition for staged rounding, global connectivity, transforms, and iterative state. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.

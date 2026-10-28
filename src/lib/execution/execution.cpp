@@ -36,6 +36,9 @@
 namespace ps::execution_internal {
 namespace {
 using Id = physical::Id;
+// A provider can release another Context's final owner during coordinator
+// cleanup. Waiting for coordinators from here could create cross-Context joins.
+thread_local bool coordinator_thread = false;
 Status failure(ErrorCode code, const char* text) {
   return {code, text};
 }
@@ -185,41 +188,35 @@ bool complete_identity(const physical::Program& program,
   return true;
 }
 }  // namespace
-// Reuse idle coordinators without queuing one Run behind another. The
-// detached thread owns only this independent slot between Runs; final Run and
-// provider releases remain outside the CPU worker pool and every slot lock.
+// Reuse idle coordinators without queuing one Run behind another. The thread
+// retains its independent slot, including when provider destruction releases
+// the public Context on that thread. Final Run/provider releases hold no lock.
 struct CoordinatorSlot final {
-  static std::shared_ptr<CoordinatorSlot> create(const ResourceBudget& budget) {
+  static Result<std::shared_ptr<CoordinatorSlot>> create(
+      const ResourceBudget& budget) {
     constexpr auto bytes = sizeof(CoordinatorSlot) + 64;
     auto lease = budget.reserve(ResourceCapacity::host(bytes, bytes));
     if (!lease.ok())
-      throw std::invalid_argument("context coordinator resources exhausted");
+      return Result<std::shared_ptr<CoordinatorSlot>>(lease.status());
     auto slot = std::make_shared<CoordinatorSlot>();
     slot->metadata = lease.take_value();
     core_internal::ResourceMetadataAccess::commit(slot->metadata,
                                                   sizeof(CoordinatorSlot));
-    return slot;
+    return Result<std::shared_ptr<CoordinatorSlot>>(std::move(slot));
+  }
+  ~CoordinatorSlot() noexcept {
+    stop();
+    join();
   }
   bool submit(const std::shared_ptr<CoordinatorSlot>& self,
-              const std::shared_ptr<RunState>& run) {
+              const std::shared_ptr<RunState>& run, bool once = false) {
     std::unique_lock<std::mutex> lock(mutex);
     if (busy || stopping)
       return false;
-    if (!started) {
-      // No job has been accepted if thread creation fails.
-      std::thread worker([self] { self->serve(); });
-      try {
-        worker.detach();
-      } catch (...) {
-        stopping = true;
-        changed.notify_one();
-        lock.unlock();
-        if (worker.joinable())
-          worker.join();
-        throw;
-      }
-      started = true;
-    }
+    // No job has been accepted if thread creation fails. Context admission
+    // serializes thread creation with shutdown and joining.
+    if (!worker.joinable())
+      worker = std::thread([self, once] { self->serve(once); });
     busy = true;
     job = run;
     changed.notify_one();
@@ -230,12 +227,37 @@ struct CoordinatorSlot final {
     stopping = true;
     changed.notify_one();
   }
-  void serve() noexcept;
+  bool idle() noexcept {
+    std::lock_guard<std::mutex> lock(mutex);
+    return !busy;
+  }
+  // Only the Context's serialized owner joins. The slot destructor is the
+  // final fallback after that owner has released it. Never hold a slot lock
+  // while waiting: serve() must release its Run before it becomes idle.
+  void join(bool wait = true) noexcept {
+    if (!worker.joinable())
+      return;
+    if (!wait || worker.get_id() == std::this_thread::get_id())
+      worker.detach();
+    else
+      worker.join();
+  }
+  static void join_all(std::shared_ptr<CoordinatorSlot> slots,
+                       bool wait = true) noexcept {
+    while (slots) {
+      auto slot = std::move(slots);
+      slots = std::move(slot->next);
+      slot->join(wait);
+    }
+  }
+  void serve(bool once) noexcept;
   ResourceLease metadata;
   std::mutex mutex;
   std::condition_variable changed;
   std::shared_ptr<RunState> job;
-  bool busy = false, stopping = false, started = false;
+  std::thread worker;
+  std::shared_ptr<CoordinatorSlot> next;
+  bool busy = false, stopping = false;
 };
 struct ContextState {
   static ResourceLease reserve(const ResourceBudget& budget,
@@ -276,19 +298,59 @@ struct ContextState {
     runs.reserve(maximum_runs);
     core_internal::ResourceMetadataAccess::commit(
         metadata, runs.capacity() * sizeof(runs[0]));
-    // Preallocate a stable Context baseline, but start each detached thread
-    // only when its first Run arrives. Constructor failure leaves no waiters.
-    for (auto& slot : coordinators)
-      slot = CoordinatorSlot::create(budget);
+    // Preallocate a stable Context baseline, but start each thread only when
+    // its first Run arrives. Constructor failure leaves no waiters.
+    for (auto& slot : coordinators) {
+      auto created = CoordinatorSlot::create(budget);
+      if (!created.ok())
+        throw std::invalid_argument("context coordinator resources exhausted");
+      slot = created.take_value();
+    }
   }
-  ~ContextState() noexcept {
+  ~ContextState() noexcept { shutdown_coordinators(); }
+  std::shared_ptr<CoordinatorSlot> take_idle_coordinators() noexcept {
+    // Called with mutex held. Keep handles tracked during coordinator reentry:
+    // joining another coordinator's thread-local cleanup could form a cycle,
+    // and detaching here would lose the next external shutdown's join boundary.
+    std::shared_ptr<CoordinatorSlot> retired;
+    if (coordinator_thread)
+      return retired;
+    for (auto* link = &temporary_coordinators; *link;) {
+      if (!(*link)->idle()) {
+        link = &(*link)->next;
+        continue;
+      }
+      auto slot = std::move(*link);
+      *link = std::move(slot->next);
+      slot->next = std::move(retired);
+      retired = std::move(slot);
+    }
+    // Run/provider release has finished, but thread-local destructors can
+    // still re-enter the Context. The caller joins only after unlocking.
+    return retired;
+  }
+  void shutdown_coordinators() noexcept {
+    // Closed admission gives this caller exclusive ownership of the handles.
+    // Stop every waiter before joining. Coordinator-originated destruction
+    // detaches all of them to avoid both self-join and cross-Context join
+    // cycles.
     for (const auto& slot : coordinators)
       if (slot)
         slot->stop();
+    for (auto slot = temporary_coordinators; slot; slot = slot->next)
+      slot->stop();
+    for (const auto& slot : coordinators)
+      if (slot)
+        slot->join(!coordinator_thread);
+    // Unlink iteratively, including the self slot, to avoid recursive teardown
+    // and to release each completed coordinator's metadata before returning.
+    CoordinatorSlot::join_all(std::move(temporary_coordinators),
+                              !coordinator_thread);
   }
   std::shared_ptr<OperationRegistry> registry;
   ResourceBudget budget;
   std::array<std::shared_ptr<CoordinatorSlot>, 2> coordinators;
+  std::shared_ptr<CoordinatorSlot> temporary_coordinators;
   const ResultGrowthLimits result_growth;
   std::shared_ptr<gpu_internal::Device> device;
   ResourceLease metadata;
@@ -1559,7 +1621,8 @@ void RunState::run() noexcept {
   }
   changed.notify_all();
 }
-void CoordinatorSlot::serve() noexcept {
+void CoordinatorSlot::serve(bool once) noexcept {
+  coordinator_thread = true;
   for (;;) {
     std::shared_ptr<RunState> current;
     {
@@ -1570,13 +1633,16 @@ void CoordinatorSlot::serve() noexcept {
       current = std::move(job);
     }
     current->run();
-    // Provider destruction may release the public Context. Its shutdown can
-    // stop this slot safely: this detached thread still owns the slot itself.
+    // Provider destruction may release this or another public Context. Such
+    // shutdown stops and detaches coordinators; each thread still owns its
+    // slot.
     current.reset();
     {
       std::lock_guard<std::mutex> lock(mutex);
       busy = false;
     }
+    if (once)
+      return;
   }
 }
 }  // namespace ps::execution_internal
@@ -1584,6 +1650,7 @@ void CoordinatorSlot::serve() noexcept {
 namespace ps {
 namespace {
 using execution_internal::ContextState;
+using execution_internal::CoordinatorSlot;
 using execution_internal::PreparedState;
 using execution_internal::RunState;
 Status stale() {
@@ -1781,8 +1848,7 @@ ExecutionContext::~ExecutionContext() noexcept {
       run->changed.wait(lock, [&] { return run->terminal; });
     }
   state_->workers.shutdown();
-  for (const auto& slot : state_->coordinators)
-    slot->stop();
+  state_->shutdown_coordinators();
   const auto directory_bytes = runs.capacity() * sizeof(runs[0]);
   std::vector<std::weak_ptr<RunState>>().swap(runs);
   core_internal::ResourceMetadataAccess::withdraw(state_->metadata,
@@ -1794,11 +1860,14 @@ Result<PreparedPlan> ExecutionContext::prepare(
   if (!plan.current() ||
       plan.data().operation_registry_.lock() != state_->registry)
     return Answer(stale());
+  std::shared_ptr<CoordinatorSlot> retired;
   {
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (state_->closed)
       return Answer({ErrorCode::Cancelled, "context stopped"});
+    retired = state_->take_idle_coordinators();
   }
+  CoordinatorSlot::join_all(std::move(retired));
   try {
     const auto& p = plan.program();
     std::uint64_t bytes = sizeof(PreparedState) + 64;
@@ -1989,6 +2058,16 @@ Result<RunHandle> ExecutionContext::submit(
       options.maximum_parallelism > 4096)
     return Answer({ErrorCode::InvalidArgument, "invalid Run limits"});
   try {
+    std::shared_ptr<CoordinatorSlot> retired;
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (state_->closed)
+        return Answer({ErrorCode::Cancelled, "context stopped"});
+      retired = state_->take_idle_coordinators();
+    }
+    // Return completed overflow capacity before the next Run's admission,
+    // without holding the Context mutex across thread-local cleanup.
+    CoordinatorSlot::join_all(std::move(retired));
     const auto lanes =
         std::min(plan.state_->maximum_cpu_tasks,
                  options.maximum_parallelism
@@ -2146,7 +2225,17 @@ Result<RunHandle> ExecutionContext::submit(
           break;
         }
       if (!reused) {
-        std::thread([run] { run->run(); }).detach();
+        // Track the whole coordinator lifetime, not just Run::terminal or a
+        // weak Run owner: provider destruction can still be in progress after
+        // both have disappeared. Only the two permanent slots stay reusable.
+        auto created =
+            execution_internal::CoordinatorSlot::create(state_->budget);
+        if (!created.ok())
+          throw created.status();
+        auto slot = created.take_value();
+        slot->submit(slot, run, true);
+        slot->next = std::move(state_->temporary_coordinators);
+        state_->temporary_coordinators = std::move(slot);
       }
     } catch (...) {
       state_->runs.pop_back();
@@ -2155,6 +2244,8 @@ Result<RunHandle> ExecutionContext::submit(
     RunHandle result;
     result.state_ = std::move(run);
     return Answer(std::move(result));
+  } catch (const Status& status) {
+    return Answer(status);
   } catch (const std::bad_alloc&) {
     return Answer({ErrorCode::ResourceExhausted, {}});
   } catch (...) {

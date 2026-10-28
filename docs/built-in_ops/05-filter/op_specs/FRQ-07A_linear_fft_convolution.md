@@ -41,7 +41,7 @@ Floating-point values, including NaN and infinities, and floating-point overflow
 
 Numeric reference: **E**; E/B/S definitions are in [FILTER_numeric_reference](FILTER_numeric_reference.md).
 
-The result exactly matches the FIL01A zero-extension direct E formula, including its origin. Padding shape affects execution only and does not change the strict mathematical value. Do not present the ordinary output of the `RN FFT -> RN multiply -> RN inverse` chain as exact direct strict output; that chain may be specified explicitly as a separate S workflow.
+The result exactly matches the FIL01A zero-extension direct E formula, including its origin. Padding shape affects execution only and does not change the strict mathematical value. An ordinary F-profile FFT followed by rounded products and an ordinary inverse transform does not establish the exact direct strict output. Such a chain is a separate workflow with its explicitly declared numerical stages.
 
 When this formula invokes another member, its RN stages must be retained as stated here or in the family contract; internal temporary operations may not introduce undeclared rounding. Signed zero, numerical-domain premises and explicit valid-input no-solution outcomes, gradual underflow, and output range follow the shared contract and NUM.
 
@@ -53,7 +53,14 @@ Boundary coordinates use the complete logical image; ROI and tile edges are not 
 
 ## Algorithm, Resources, and Execution
 
-O(Ppad logPpad C)candidate, exact direct/certifiedfallback O(PCA) ; completepads, complexscratch, planbudget .
+The FFT candidate stage costs O(Ppad log(Ppad) C), where Ppad is the padded
+plane size. A direct fallback requires O(PCA) arithmetic operations; arbitrary
+precision adds its own limb and refinement costs. Certification and a conforming
+fallback can require additional work and storage, so the candidate stage alone
+does not establish an overall worst-case bound. Reserve complete padded planes,
+complex scratch, immutable plans and certification/fallback storage covered by
+the resource model. Follow the [family's strict evaluation requirements](FRQ-07_contract.md#use-of-ordinary-fft-primitives)
+and the shared executor ownership boundary.
 
 In the complexity notation, P=HW, C=independent planes, A=taps, and T=steps. Arbitrary-precision limb bit complexity is accounted for separately and is not a measured benchmark. The shared protocol defines work, memory, and stage admission; cancellation; failure Status; and owner lifetime. A failed call publishes no successful Result export; previously retired call exports remain valid, and final RET results require successful Run completion. Do not spill automatically, silently lower precision, or call retired implementations as fallback.
 

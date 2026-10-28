@@ -109,6 +109,33 @@ Fixed-step strict profiles preserve reproducible state trajectories. Accelerated
 profiles retain exact discrete decisions and NUM final-value bounds. Independent
 asynchronous early-stop invocations may select different returned rounds; the frozen executor retains no cross-Run result cache. Operator-defined stopping and explicit state follow the iteration contract.
 
+### Shared executor ownership
+
+Implemented and proposed members inherit [Context shutdown and coordinator
+ownership](../../../kernel-architecture/Compiler-and-Execution.md#context-shutdown-and-coordinator-ownership)
+and [managed allocation](../../../kernel-architecture/Managed-Resources.md).
+External Context destruction waits for accepted execution and delivery to settle
+and for coordinator-owned execution references to be released. Provider cleanup
+on a coordinator can release the final Context owner; that shutdown stops the
+coordinators and lets their ownership unwind without self or cross-Context joins.
+Caller-retained Runs, PreparedPlans, Results, read windows and observations remain
+valid and charged according to their owners. Observer callbacks retain their
+existing restrictions.
+
+Every accepted internal task must finish or be stopped and drained before
+invocation completion, including failure, cancellation and partial startup
+failure. A process-local scheduling pool may outlive a Context while retaining
+no invocation views, scratch, cancellation state or Run services after return.
+The resource model's exclusions remain in force; managed capacity is not RSS.
+
+Host mapping and first-touch policy, effective CPU lane counts and omitted
+intermediate exports without an observer are shared executor behavior. They do
+not change the member's mathematics, complete-write obligation or scratch size
+for one invocation. The four currently implemented F-profile transforms have
+their explicit exception; other strict members retain their own whole-expression
+rounding obligation. A composition of ordinary FFT outputs does not establish
+an E-strict result.
+
 ## Errors and acceptance
 
 | Condition | Phase | Status obligation |

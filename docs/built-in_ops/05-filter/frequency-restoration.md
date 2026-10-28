@@ -36,6 +36,10 @@ typed CPU invocation ABI9 继续对同一 Run 累计工作量。确定成本的�
 
 执行器构造 Result 时使用 `max(1 GiB, ExecutionContextConfig::maximum_live_bytes)` 聚合增长上限，计入保留的 backing 容量及发布元数据。默认值仍为 1 GiB；提高 Context 的 Payload 配置也会提高执行器 Result 的增长上限，Host、Payload 和 Metadata 各自的资源限制继续生效。配置能够同时容纳两份输出、scratch 和元数据时，可发布完整 16384×16384 Float32 输出。显式选择较小输出区域仍保留完整变换依赖。
 
+FRQ 的进程级工作池与 Context 的执行 coordinator 分别持有线程。每个阶段在 callback 返回前排空所有参与者和借用数据；销毁 Context 不负责销毁进程级工作池。外部线程销毁 Context 时会等待常驻及临时 coordinator 释放执行引用并退出；provider 在 coordinator 清理期间释放最后 Context owner 时，按停止及线程退出路径回收，避免自身和跨 Context 的循环等待。调用方保留的 PreparedPlan、Run、Result 与 observation 仍按实际 owner 计费，详见[公共执行器契约](../../kernel-architecture/Compiler-and-Execution.md#context-shutdown-and-coordinator-ownership)。
+
+性能检查分别记录纯变换计算、完整 `invoke_cpu` callback、submit-to-join 和 Context 销毁时间；`on_call_retired` 是另一个 observer 交付边界。准备表构造、首次触页和工作池初始化若进入测量，须单独说明。
+
 ## 10 个频域族 / 26 个成员
 
 | 族 ID | 族契约 | 成员 |
@@ -71,6 +75,8 @@ typed CPU invocation ABI9 继续对同一 Run 累计工作量。确定成本的�
 | RES-14 | [暗通道去雾](op_specs/RES-14_contract.md) | [RES-14A](op_specs/RES-14A_dark_channel_airlight.md)、[RES-14B](op_specs/RES-14B_dark_channel_transmission.md)、[RES-14C](op_specs/RES-14C_apply_dehaze.md)、[RES-14D](op_specs/RES-14D_dark_channel_dehaze.md) |
 
 RES-11A 现命名为低对比区域平滑，RES-11B 为成对块边界平滑；两者保留原窗口、阈值、mask、strength 混合/配对校正公式。它们不自动识别色带、块网格或真实边缘。RES-12B 命名为 Gaussian low-pass workflow helper，去网屏是用途示例，频率尺度由调用者指定。恢复用途的数学公式合规与逐用途质量评分分开验收；评分指标和阈值在实现时确定。
+
+FRQ-07/08/09 与 RES-08 仍未实现，其 E-strict 目标没有继承四个普通变换的 F 例外。直接复合普通 FFT、逐点运算和 IFFT 只能作为候选或另行定义的 workflow；严格实现必须对整个数学表达式及最终舍入建立认证，并在需要时采用符合契约的回退。认证、精化与回退的工作和受控存储均须预算，资源不足保留原失败行为。
 
 ## 关键选择
 

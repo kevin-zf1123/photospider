@@ -44,6 +44,21 @@ E denotes an exact expression rounded once to RN_t; B denotes explicitly generat
 
 Positive-weight normalized filters, signed kernels, local regression, and global inverse problems have different semantics; do not apply one alpha-blurring rule to all of them. See [color composition](FILTER_color_composition.md). Spatial extension, anchor, and origin follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collection contract](FILTER_collections_contract.md). Shapes depend only on descriptors; each member defines mathematical support and fixed compiled reads.
 
+### FFT-based implementation constraints
+
+The strict target remains the complete DCT matrix expression with one final RN_t.
+An F-profile FFT reduction using dtype-rounded trigonometric tables is a candidate
+algorithm, not a proof of that result. Any certification and fallback must cover
+the complete expression, including normalization; a rounded intermediate row
+transform cannot silently become an additional strict stage. Accelerated
+profiles retain their own NUM final-value bounds and exact discrete decisions.
+
+Charge the tables, workspace and certification/fallback state covered by the
+resource model, including any extra precision. Resource or work exhaustion and
+cancellation retain their specified failure behavior. Finish or drain all
+accepted internal work before returning from the invocation; Context lifetime
+does not extend a borrowed callback view.
+
 ## Dependencies and Acceptance
 
 The member support set is normative. Having a halo does not mean that an arbitrarily cropped ROI can run independently; paged access does not remove a whole-image dependency. Follow each member definition for staged rounding, global connectivity, transforms, and iterative state. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.

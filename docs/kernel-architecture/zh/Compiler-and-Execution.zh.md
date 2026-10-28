@@ -172,7 +172,7 @@ Planner 从选定 return、条件、边参数、跨 block 存活值和 mandatory
 
 逻辑 API 为 `prepare(plan, device_context)`、`submit(prepared, bindings, options)`、`request_cancel(run)` 和 `join(run)`。可能失败的操作返回类型化 status。`join` 等待全部已接受提交停止访问资源，返回完整具名 Result 集合或一个终态错误。复制终态错误文本时若内存耗尽，`join` 保留错误码、reason 和结构化 detail，并返回空 message。Result 通过保留 allocation release context，可以比 Run 和 context 活得更久。
 
-可选 `on_call_retired(CallRecord)` 接收 sequence、activation、来源 call、status 和选定导出值。健康 observer 为每个退休 call 接收一条记录，包括 elided call。不导出的中间值没有交付 hold。Block admission 为有界 delivery queue 预留存储；用户 callback 在 coordinator 外执行，与完成事件处理相互独立。
+可选 `on_call_retired(CallRecord)` 接收 sequence、activation、来源 call、status 和选定导出值。健康 observer 为每个退休 call 接收一条记录，包括 elided call。不导出的中间值没有交付 hold。未设置 observer 时，执行器省略中间导出 envelope 和 delivery record，仍保留 call 退休与 diagnostics，并物化最终 RET 选择。Block admission 为有界 delivery queue 预留存储；用户 callback 在 coordinator 外执行，与完成事件处理相互独立。
 
 每个 Run 有一条不可重入的串行 delivery lane。Callback n 正常返回后才启动 n+1，因此调用开始与正常返回的顺序都遵循退休顺序。不同 Run 可以并发交付。`join` 等待 task drain 和交付结算；callback 不得同步 join 自身 Run。慢 callback 可以延迟 join，或占用下一 block 所需容量，但不能阻止 CPU/GPU 完成事件处理。
 
@@ -193,6 +193,16 @@ Typed invocation 9 数值 checkpoint 通过借用的 Run 服务预付 work/stage
 DenseHost import 明确具有两种身份。Kernel input view 保留外部来源 ObjectId，供关联检查使用。复制后的存储在导出为 Result 时使用新预约的 ObjectId，其完整别名共享该 COPY 对象。将导出的副本传入后续 Run 时，使用副本的 ObjectId。通过显式算子产生的复制值也取得新身份。字节相同本身不能建立 ObjectId 相等关系。
 
 具名 RET 仅在执行成功、交付结算结束并通过最终 stop/currentness 检查后发布。较晚 call 失败不会使已经退休的结果失效。绑定源图的 Plan 保持 graph-currentness 语义，独立导入 Plan 不依赖源图。Host/Demand facade 管理 binding replacement：使旧 Run generation 失效并请求 abort，再启动新 Run。活动 task 保持不可变 binding snapshot 与 owner 直到 drain。
+
+### Context 关闭与 coordinator 所有权
+
+Run 进入终态时，已接受的 invocation 已排空，observer 交付已结算。终态通知之后，coordinator 仍可能正在释放 Run、PreparedPlan 和 provider owner，因此 Run 弱引用目录不能证明清理已经结束。
+
+Context 保留两个延迟启动的可复用 coordinator，并追踪并发 Run 所需的一次性 coordinator。由外部线程执行的普通析构关闭准入、请求取消、等待 Run 和交付结算、关闭 CPU worker，然后停止并 join 全部 coordinator。等待 coordinator 和 coordinator 最终释放 Run/provider 时均不持有 Context 或 slot 锁。外部线程调用 prepare/submit 时，在 Context 锁内摘除已完成的临时 coordinator，再在锁外 join，随后进行资源准入。Coordinator 线程重入时保留这些句柄，留给后续外部回收，避免经过线程局部析构的循环等待。
+
+Provider 在 coordinator 清理期间可能释放本 Context 或另一个 Context 的最后 owner。由任意 coordinator 触发的 Context 析构会停止并 detach 相关 coordinator，避免自线程 join 及两个 Context 之间的循环 join。每个线程继续持有自己的 slot，在清理调用栈退出时归还剩余执行 owner。这一内部清理例外不允许 `on_call_retired` callback 销毁其 Context 或 join 自身 Run。
+
+调用方保留的 RunHandle、PreparedPlan、Result、read window 和 observation 继续保有各自契约规定的资源。不存在这些保留 owner 时，外部线程析构返回前已归还执行器持有的 lease；coordinator 触发的析构按上述调用栈退出边界完成回收。这些条件不测量进程 RSS，也不负责关闭算子独立的进程级调度池。算子必须在报告 invocation 完成前结束或排空全部借用 invocation 存储的工作，成功、失败及取消路径均遵守此规则。
 
 ## Compiler 产物
 

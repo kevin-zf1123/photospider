@@ -92,6 +92,18 @@ Response 只保存 Q=P+E、T=1−A，不能恢复原 P/A/E；两种代数的数�
 
 IR identity 包含静态 operation contract、参数、schema、输入关系和控制流；Plan identity 还包含固定 reads/writes、placement、layout、依赖、selection 和资源界。运行期 completion 使用 Run、activation、submission 键。外部 LUT/profile/model 由宿主载入不可变快照，路径字符串不能代表内容身份；payload owner 和地址不写入 artifact。
 
+### 公共执行器的回收与分配边界
+
+所有使用公共执行器的已实现算子与待实现规格都继承 [Context 关闭契约](../../kernel-architecture/Compiler-and-Execution.md#context-shutdown-and-coordinator-ownership)。Run 终态表示已接受计算和 observer 交付已经结算，coordinator 随后仍需释放自己的执行引用。外部线程销毁 Context 时会同步等待这些引用及常驻、临时 coordinator 退出；provider 在 coordinator 清理期间释放 Context 最后 owner 时，采用停止并随线程调用栈退出归还资源的路径，避免自身及跨 Context 的循环等待。Observer callback 仍不得销毁自己的 Context。调用方保留的 Run、PreparedPlan、Result、read window 和 observation 继续持有各自资源，Context 析构不撤销这些 owner，也不承诺进程 RSS 立即下降。
+
+算子内部接受的任务必须在报告 invocation 完成前停止访问借用的输入、输出、scratch、取消状态和 Run 服务。成功、失败、取消及部分启动成功后的异常都必须排空已接受工作。独立的进程级调度池可以保留线程与调度设施，但不能在调用返回后保留这些借用。取消请求不代表已接受工作可以提前释放。
+
+Host 分配器的堆分配、匿名映射及首次触页策略由 [Managed Resources](../../kernel-architecture/Managed-Resources.md) 定义。Linux dense scratch 的选择取决于最终 block 的 CPU task 数、有效 lane 数以及输出与 scratch 比例；dtype、输出选择和 workflow 组合都可能改变路径。MASK 工作区、滤波金字塔与 Local Laplacian、路径 arena 和 ICC/OCIO 的 Host 资源均可能使用这些公共路径。零初始化和对齐保证保持原契约，实际任务仍须完整写出声明的输出。
+
+有效 CPU lane 上限同时受 Context worker 数、Run 并行上限和编译后各 block 的 CPU task 数约束，使用内核规定的默认值及最小 bookkeeping lane；每份 invocation scratch 的大小不变。无 observer 时可省略中间导出 envelope 和交付记录，最终 RET 仍物化，选定输出内容、不可变性和调用方保留 owner 的寿命保持不变。执行器 Result 的聚合增长上限为 `max(1 GiB, maximum_live_bytes)`，独立的 root 资源限额继续生效。
+
+性能验收须区分纯计算、完整 kernel callback、observer delivery、submit-to-join、首次触页和 Context 销毁；记录实际 dtype、最终 Plan、observer 设置与并发量。某类算子能够进入公共分配路径，不代表它的数值或性能运行矩阵已经通过。
+
 ## 错误与数值质量
 
 规格分别记录 `Status.code`、`reason` 和 `detail`；诊断字符串不作为分支条件。Task 操作失败形成 call failure cut：更早 call 继续完成并有序退休，cut 及之后未提交的工作被跳过，已接受工作排空。同一 call 从实际失败 task 中选择最小 TaskId。用户取消、Stale、device/context/observer 失败按 Run abort 契约处理。`join()` 等待 task quiescence 与 observer settlement；失败不返回最终成功结果。此前已退休的 call Result 保持有效。各算子的固定 kernel 契约定义数学前提、算法精度细化和合法输入下的实际失败；unchecked 前提不增加数值域或 payload 违约诊断。
