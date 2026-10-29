@@ -7,13 +7,15 @@
 #include <vector>
 
 #include "05-filter/frequency.hpp"
+#include "05-filter/frequency_native.hpp"
 #include "common/registry.hpp"
 
 namespace ps::plugin_internal::frequency {
 namespace {
 std::vector<std::uint64_t> list(const std::string& s, bool empty = false) {
-  if (s.empty() && empty)
+  if (s.empty() && empty) {
     return {};
+  }
   std::vector<std::uint64_t> result;
   std::size_t pos = 0;
   do {
@@ -26,8 +28,9 @@ std::vector<std::uint64_t> list(const std::string& s, bool empty = false) {
                   parsed.ptr == s.data() + stop,
               "frequency canonical list");
     result.push_back(value);
-    if (end == std::string::npos)
+    if (end == std::string::npos) {
       break;
+    }
     pos = end + 1;
   } while (true);
   return result;
@@ -60,10 +63,11 @@ SchemaTemplate like(const OperationMetadata& in,
   t.key = "samples";
   t.descriptor.element_type = type;
   for (unsigned a = 0; a < shape.size(); ++a) {
-    if (a < t.batch_axes.size())
+    if (a < t.batch_axes.size()) {
       t.batch_axes[a] = shape[a];
-    else
+    } else {
       t.descriptor.shape[a - t.batch_axes.size()] = shape[a];
+    }
   }
   check(s.validate());
   return s;
@@ -92,8 +96,9 @@ Grid::Grid(const Parameters& p)
 }
 std::vector<std::uint64_t> Grid::stored_shape() const {
   auto result = shape;
-  if (packing == "r2c_x")
+  if (packing == "r2c_x") {
     result[xa] = result[xa] / 2 + 1;
+  }
   return result;
 }
 Frequency::Frequency(Kind k, Profile prof,
@@ -124,8 +129,9 @@ Frequency::Frequency(Kind k, Profile prof,
     require(s.sample_shape().size() == 2 && s.descriptor.element_type == type,
             "window statistics rank-2 Float64");
     dims = s.sample_shape();
-    for (unsigned i = 0; i < 3; ++i)
+    for (unsigned i = 0; i < 3; ++i) {
       add_output(this, tensor_schema(type, {1}));
+    }
     collective = true;
     return;
   }
@@ -171,8 +177,9 @@ Frequency::Frequency(Kind k, Profile prof,
         const auto ys = list(text(p, "centers_y_bits"));
         const auto xs = list(text(p, "centers_x_bits"));
         parameter(ys.size() == xs.size(), "notch center list lengths");
-        for (unsigned i = 0; i < ys.size(); ++i)
+        for (unsigned i = 0; i < ys.size(); ++i) {
           centers.emplace_back(number(ys[i]), number(xs[i]));
+        }
         std::sort(centers.begin(), centers.end());
       }
       add_output(this, tensor_schema(type, dims));
@@ -191,8 +198,9 @@ Frequency::Frequency(Kind k, Profile prof,
               "transform grid structure");
       require(s.sample_shape() == (kind == Kind::Irfft ? dims : grid.shape),
               "transform original shape");
-      if (kind == Kind::Irfft)
+      if (kind == Kind::Irfft) {
         dims = grid.shape;
+      }
       collective = true;
     } else {
       require(s.sample_shape() == dims, "frequency stored shape");
@@ -204,9 +212,10 @@ Frequency::Frequency(Kind k, Profile prof,
         axes = axis_list(p, "axes", static_cast<unsigned>(dims.size()));
         parameter(!axes.empty(), "shift axes required");
       }
-      if (kind == Kind::Project)
+      if (kind == Kind::Project) {
         require(grid.packing == "full" && grid.order == "unshifted",
                 "projection grid structure");
+      }
       if (kind == Kind::Multiply) {
         broadcast =
             axis_list(p, "broadcast_axes", static_cast<unsigned>(dims.size()));
@@ -225,10 +234,11 @@ Frequency::Frequency(Kind k, Profile prof,
                 (kind == Kind::Apply ? ElementType::Float64 : type) ||
             (coefficient && s.descriptor.element_type == ElementType::Float64),
         "frequency component dtype");
-    if (kind == Kind::Multiply && i == 3)
+    if (kind == Kind::Multiply && i == 3) {
       require(s.descriptor.element_type ==
                   tensor(in[2], true).descriptor.element_type,
               "response component dtype mismatch");
+    }
     require(shape.size() == dims.size(), "frequency component rank");
     for (auto a : broadcast) {
       parameter(a != grid.ya && a != grid.xa,
@@ -244,8 +254,9 @@ Frequency::Frequency(Kind k, Profile prof,
   }
   const auto s = like(in[0], dims, type);
   add_output(this, s);
-  if (kind != Kind::Apply && kind != Kind::Irfft)
+  if (kind != Kind::Apply && kind != Kind::Irfft) {
     add_output(this, s);
+  }
 }
 Region Frequency::plane_region(const Region& q) const {
   auto d = q.dimensions();
@@ -256,18 +267,21 @@ Region Frequency::plane_region(const Region& q) const {
 std::vector<ReadRegion> Frequency::support(unsigned port,
                                            const Region& q) const {
   if (kind == Kind::Window || kind == Kind::Radial || kind == Kind::Band ||
-      kind == Kind::Notch)
+      kind == Kind::Notch) {
     return {};
-  if (kind == Kind::Statistics)
+  }
+  if (kind == Kind::Statistics) {
     return {{0, 0, Region::whole(dims)}};
+  }
   if (transform()) {
     auto d = selected.dimensions();
     const auto inshape = tensor(inputs[0], true).sample_shape();
     d[grid.ya] = {0, inshape[grid.ya]};
     d[grid.xa] = {0, inshape[grid.xa]};
     std::vector<ReadRegion> result{{0, 0, Region(d)}};
-    if (!real_input())
+    if (!real_input()) {
       result.push_back({1, 0, Region(d)});
+    }
     return result;
   }
   if (kind == Kind::Shift || kind == Kind::Unshift) {
@@ -288,8 +302,9 @@ std::vector<ReadRegion> Frequency::support(unsigned port,
       boxes = std::move(next);
     }
     std::vector<ReadRegion> result;
-    for (auto& b : boxes)
+    for (auto& b : boxes) {
       result.push_back({port, 0, Region(std::move(b))});
+    }
     return result;
   }
   if (kind == Kind::Project) {
@@ -306,8 +321,9 @@ std::vector<ReadRegion> Frequency::support(unsigned port,
           structural_zero &= k == 0 || (dims[a] % 2 == 0 && k == dims[a] / 2);
         }
       }
-      if (structural_zero)
+      if (structural_zero) {
         return {};
+      }
     }
     auto result = std::vector<ReadRegion>{{port, 0, q}};
     // Negation on the two frequency axes splits only at the zero index.
@@ -328,16 +344,19 @@ std::vector<ReadRegion> Frequency::support(unsigned port,
       }
       boxes = std::move(next);
     }
-    for (auto& b : boxes)
+    for (auto& b : boxes) {
       result.push_back({port, 0, Region(std::move(b))});
+    }
     return result;
   }
   std::vector<ReadRegion> result;
   for (unsigned i = 0; i < inputs.size(); ++i) {
     auto b = q.dimensions();
-    if ((kind == Kind::Apply && i == 1) || (kind == Kind::Multiply && i >= 2))
-      for (auto a : broadcast)
+    if ((kind == Kind::Apply && i == 1) || (kind == Kind::Multiply && i >= 2)) {
+      for (auto a : broadcast) {
         b[a] = {0, 1};
+      }
+    }
     result.push_back({i, 0, Region(std::move(b))});
   }
   return result;
@@ -345,8 +364,9 @@ std::vector<ReadRegion> Frequency::support(unsigned port,
 std::uint64_t Frequency::task_scratch(unsigned port,
                                       const Region& region) const {
   unsigned __int128 n = sizeof(Math) + 128;
-  if (kind == Kind::Window)
+  if (kind == Kind::Window) {
     n += (static_cast<unsigned __int128>(dims[0]) + dims[1]) * 8;
+  }
   if (transform()) {
     const auto h = grid.shape[grid.ya], row = row_length();
     // Scratch capacity is derived from shape and precision. Runtime thread
@@ -379,17 +399,19 @@ std::uint64_t Frequency::task_scratch(unsigned port,
   return bytes(n);
 }
 void Frequency::run(const Kernel& k, const ps_kernel_invocation_v8& inv) const {
-  if (transform())
+  if (transform()) {
     run_transform(k, inv);
-  else
+  } else {
     run_local(k, inv);
+  }
 }
 void Frequency::run_v9(const Kernel& k,
                        const ps_kernel_invocation_v9& inv) const {
-  if (transform())
+  if (transform()) {
     run_transform(k, inv.views, inv.work);
-  else
+  } else {
     run_local(k, inv.views, inv.work);
+  }
 }
 OperationDefinition make_frequency(const std::string& key, Kind k,
                                    Profile profile) {
@@ -402,7 +424,7 @@ OperationDefinition make_frequency(const std::string& key, Kind k,
                                                               : 2;
   if (k != Kind::Window && k != Kind::Statistics) {
     generation::append(&p, {{"y_axis", Type::Int64}, {"x_axis", Type::Int64}});
-    if (k != Kind::Apply)
+    if (k != Kind::Apply) {
       generation::append(&p, {{"schema_revision", Type::Int64},
                               {"original_shape", Type::String},
                               {"packing", Type::String},
@@ -414,55 +436,64 @@ OperationDefinition make_frequency(const std::string& key, Kind k,
                               {"spacing_x", Type::Float64},
                               {"origin_y", Type::Float64},
                               {"origin_x", Type::Float64}});
+    }
   }
-  if (k == Kind::Shift || k == Kind::Unshift)
+  if (k == Kind::Shift || k == Kind::Unshift) {
     p.push_back({"axes", Type::String});
-  if (k == Kind::Apply || k == Kind::Multiply)
+  }
+  if (k == Kind::Apply || k == Kind::Multiply) {
     p.push_back({"broadcast_axes", Type::String});
-  if (k == Kind::Multiply)
+  }
+  if (k == Kind::Multiply) {
     p.push_back({"response_unit", Type::String});
-  if (k == Kind::Window)
+  }
+  if (k == Kind::Window) {
     generation::append(&p, {{"height", Type::Int64},
                             {"width", Type::Int64},
                             {"kind", Type::String},
                             {"sampling", Type::String},
                             {"alpha", Type::Float64, false}});
+  }
   if (k == Kind::Radial || k == Kind::Band) {
     generation::append(&p, {{"kind", Type::String},
                             {"pass", Type::String},
                             {"order", Type::Int64, false}});
-    if (k == Kind::Radial)
+    if (k == Kind::Radial) {
       p.push_back({"cutoff", Type::Float64});
-    else
+    } else {
       generation::append(
           &p, {{"cutoff_low", Type::Float64}, {"cutoff_high", Type::Float64}});
+    }
   }
-  if (k == Kind::Notch)
+  if (k == Kind::Notch) {
     generation::append(&p, {{"centers_y_bits", Type::String},
                             {"centers_x_bits", Type::String},
                             {"sigma_y", Type::Float64},
                             {"sigma_x", Type::Float64},
                             {"depth", Type::Float64}});
+  }
   const auto s = tensor_schema(ElementType::Float64, {1});
   std::vector<std::pair<std::string, SchemaTemplate>> out;
-  if (k == Kind::Statistics)
+  if (k == Kind::Statistics) {
     out = {{"coherent_gain", s}, {"mean_square", s}, {"enbw_bins", s}};
-  else if (k == Kind::Window)
+  } else if (k == Kind::Window) {
     out = {{"window", s}};
-  else if (k == Kind::Apply || k == Kind::Irfft)
+  } else if (k == Kind::Apply || k == Kind::Irfft) {
     out = {{"output", s}};
-  else if (k == Kind::Rfft || k == Kind::Radial || k == Kind::Band ||
-           k == Kind::Notch)
+  } else if (k == Kind::Rfft || k == Kind::Radial || k == Kind::Band ||
+             k == Kind::Notch) {
     out = {{"real", s}, {"imag", s}};
-  else
+  } else {
     out = {{"out_real", s}, {"out_imag", s}};
+  }
   auto def = generation::operation(
       key, count, p, out, [=](const auto& in, const auto& args) {
         return std::make_shared<Frequency>(k, profile, in, args);
       });
   def = generation::budgeted_operation(std::move(def));
-  if (k <= Kind::Irfft)
+  if (k <= Kind::Irfft) {
     def = transform_tasks(std::move(def));
+  }
   return def;
 }
 }  // namespace ps::plugin_internal::frequency
@@ -493,19 +524,42 @@ Status register_frequency(OperationRegistry* registry) {
                          {"paired_notch_response", Kind::Notch},
                          {"frequency_multiply", Kind::Multiply}}) {
         if ((entry.second == Kind::Shift || entry.second == Kind::Unshift) &&
-            profile != Profile::Strict)
+            profile != Profile::Strict) {
           continue;
+        }
         if (entry.second <= Kind::Irfft) {
-          if (profile == Profile::Strict)
+          if (profile == Profile::Strict) {
             check(registry->register_operation(
                 make_frequency("frequency." + std::string(entry.first),
                                entry.second, profile)));
+          }
         } else {
           check(registry->register_operation(
               make_frequency("frequency." + std::string(entry.first) + suffix,
                              entry.second, profile)));
         }
       }
+    }
+    for (unsigned i = 0; i < 4; ++i) {
+      const char* names[] = {"linear_fft_convolution",
+                             "circular_fft_convolution", "overlap_add",
+                             "overlap_save"};
+      check(registry->register_operation(
+          make_convolution(std::string("frequency.") + names[i], i)));
+    }
+    check(registry->register_operation(make_dct("frequency.dct2", false)));
+    check(registry->register_operation(make_dct("frequency.idct2", true)));
+    const char* profiles[] = {"haar_mean_lifting_v1", "cdf53_float_lifting_v1",
+                              "stationary_haar_mean_v1"};
+    for (unsigned i = 0; i < 3; ++i) {
+      check(registry->register_operation(
+          make_wavelet_directory(profiles[i], false)));
+      check(registry->register_operation(
+          make_wavelet_directory(profiles[i], true)));
+      check(registry->register_operation(make_wavelet(
+          std::string("frequency.decompose_") + profiles[i], i, false)));
+      check(registry->register_operation(make_wavelet(
+          std::string("frequency.inverse_") + profiles[i], i, true)));
     }
     return Status::success();
   } catch (const Status& s) {

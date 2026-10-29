@@ -84,28 +84,32 @@ struct PlannedTransform {
     static PS_FRQ_PACKET_INLINE Register multiply_add(Register sum, Register a,
                                                       Scalar b) {
 #if defined(__x86_64__)
-      if constexpr (std::is_same_v<Scalar, float>)
+      if constexpr (std::is_same_v<Scalar, float>) {
         return _mm256_fmadd_ps(a, _mm256_set1_ps(b), sum);
-      else
+      } else {
         return _mm256_fmadd_pd(a, _mm256_set1_pd(b), sum);
+      }
 #else
-      if constexpr (std::is_same_v<Scalar, float>)
+      if constexpr (std::is_same_v<Scalar, float>) {
         return {vfmaq_n_f32(sum.re, a.re, b), vfmaq_n_f32(sum.im, a.im, b)};
-      else
+      } else {
         return {vfmaq_n_f64(sum.re, a.re, b), vfmaq_n_f64(sum.im, a.im, b)};
+      }
 #endif
     }
     static PS_FRQ_PACKET_INLINE Register scale(Register a, Scalar x) {
 #if defined(__x86_64__)
-      if constexpr (std::is_same_v<Scalar, float>)
+      if constexpr (std::is_same_v<Scalar, float>) {
         return _mm256_mul_ps(a, _mm256_set1_ps(x));
-      else
+      } else {
         return _mm256_mul_pd(a, _mm256_set1_pd(x));
+      }
 #else
-      if constexpr (std::is_same_v<Scalar, float>)
+      if constexpr (std::is_same_v<Scalar, float>) {
         return {vmulq_n_f32(a.re, x), vmulq_n_f32(a.im, x)};
-      else
+      } else {
         return {vmulq_n_f64(a.re, x), vmulq_n_f64(a.im, x)};
+      }
 #endif
     }
   };
@@ -255,14 +259,18 @@ struct PlannedTransform {
     }
   }
   static std::uint64_t butterfly_cost(std::uint64_t r) {
-    if (r == 2)
+    if (r == 2) {
       return 16;
-    if (r == 3)
+    }
+    if (r == 3) {
       return 48;
-    if (r == 4)
+    }
+    if (r == 4) {
       return 64;
-    if (r == 5)
+    }
+    if (r == 5) {
       return 128;
+    }
     return 16 * (r / 2) + (r / 2) * (32 * (r / 2) + 8);
   }
   static bool fuse_eight(const Plan& plan) {
@@ -273,8 +281,9 @@ struct PlannedTransform {
   static std::uint64_t stage_cost(std::uint64_t radix, unsigned lanes) {
     if constexpr (std::is_same_v<Scalar, double>) {
       // Includes the scalar path's 156-unit bound and both SIMD layouts.
-      if (radix == 4)
+      if (radix == 4) {
         return 160;
+      }
     }
     // The explicitly unrolled five-point packet, including twiddles and
     // addressing, fits in 256 scalar work units per complex lane.
@@ -284,64 +293,93 @@ struct PlannedTransform {
   static PS_FRQ_PACKET_INLINE void small_each(Function&& function) {
     function(0);
     function(1);
-    if constexpr (Radix > 2)
+    if constexpr (Radix > 2) {
       function(2);
-    if constexpr (Radix > 3)
+    }
+    if constexpr (Radix > 3) {
       function(3);
-    if constexpr (Radix > 4)
+    }
+    if constexpr (Radix > 4) {
       function(4);
-    if constexpr (Radix > 5)
+    }
+    if constexpr (Radix > 5) {
       function(5);
-    if constexpr (Radix > 6)
+    }
+    if constexpr (Radix > 6) {
       function(6);
-    if constexpr (Radix > 7)
+    }
+    if constexpr (Radix > 7) {
       function(7);
-    if constexpr (Radix > 8)
+    }
+    if constexpr (Radix > 8) {
       function(8);
-    if constexpr (Radix > 9)
+    }
+    if constexpr (Radix > 9) {
       function(9);
-    if constexpr (Radix > 10)
+    }
+    if constexpr (Radix > 10) {
       function(10);
-    if constexpr (Radix > 11)
+    }
+    if constexpr (Radix > 11) {
       function(11);
-    if constexpr (Radix > 12)
+    }
+    if constexpr (Radix > 12) {
       function(12);
-    if constexpr (Radix > 13)
+    }
+    if constexpr (Radix > 13) {
       function(13);
-    if constexpr (Radix > 14)
+    }
+    if constexpr (Radix > 14) {
       function(14);
-    if constexpr (Radix > 15)
+    }
+    if constexpr (Radix > 15) {
       function(15);
-    if constexpr (Radix > 16)
+    }
+    if constexpr (Radix > 16) {
       function(16);
-    if constexpr (Radix > 17)
+    }
+    if constexpr (Radix > 17) {
       function(17);
-    if constexpr (Radix > 18)
+    }
+    if constexpr (Radix > 18) {
       function(18);
-    if constexpr (Radix > 19)
+    }
+    if constexpr (Radix > 19) {
       function(19);
-    if constexpr (Radix > 20)
+    }
+    if constexpr (Radix > 20) {
       function(20);
-    if constexpr (Radix > 21)
+    }
+    if constexpr (Radix > 21) {
       function(21);
-    if constexpr (Radix > 22)
+    }
+    if constexpr (Radix > 22) {
       function(22);
-    if constexpr (Radix > 23)
+    }
+    if constexpr (Radix > 23) {
       function(23);
-    if constexpr (Radix > 24)
+    }
+    if constexpr (Radix > 24) {
       function(24);
-    if constexpr (Radix > 25)
+    }
+    if constexpr (Radix > 25) {
       function(25);
-    if constexpr (Radix > 26)
+    }
+    if constexpr (Radix > 26) {
       function(26);
-    if constexpr (Radix > 27)
+    }
+    if constexpr (Radix > 27) {
       function(27);
-    if constexpr (Radix > 28)
+    }
+    if constexpr (Radix > 28) {
       function(28);
-    if constexpr (Radix > 29)
+    }
+    if constexpr (Radix > 29) {
       function(29);
-    if constexpr (Radix > 30)
+    }
+    if constexpr (Radix > 30) {
       function(30);
+    }
   }
   template <class Ops, bool Inverse, unsigned Radix>
   static PS_FRQ_PACKET_INLINE void odd_butterfly(typename Ops::Register* v,
@@ -385,8 +423,9 @@ struct PlannedTransform {
 #if defined(__clang__)
 #pragma clang loop unroll(disable)
 #endif
-      for (unsigned q = 0; q < pairs; ++q)
+      for (unsigned q = 0; q < pairs; ++q) {
         output(q);
+      }
     } else {
       small_each<pairs>(output);
     }
@@ -433,8 +472,9 @@ struct PlannedTransform {
         auto even0 = first, even1 = first;
         auto odd0 = Ops::broadcast(0, 0), odd1 = Ops::broadcast(0, 0);
         small_each<pairs>([&](unsigned j) PS_FRQ_VECTOR_TARGET {
-          if (j % 7 == 0)
+          if (j % 7 == 0) {
             fuel.poll(32 * std::min<unsigned>(7, pairs - j) * lanes * 2);
+          }
           const auto z0 = coefficients[index * pairs + j];
           const auto z1 = coefficients[(index + 1) * pairs + j];
           const auto sum = sums[j], difference = differences[j];
@@ -472,11 +512,12 @@ struct PlannedTransform {
   }
   static std::uint64_t stages_cost(const Plan& plan, unsigned lanes) {
     std::uint64_t cost = 0;
-    for (const auto& stage : plan.stages)
+    for (const auto& stage : plan.stages) {
       cost += (plan.n / stage.radix) *
               (stage.child ? convolution_cost(*stage.child) + 40 * stage.radix
                            : stage_cost(stage.radix, lanes)) *
               lanes;
+    }
     // The expanded eight-point codelet replaces both generic stage costs.
     if (fuse_eight(plan)) {
       const auto separate = (plan.n / 2) * stage_cost(2, lanes) +
@@ -507,36 +548,42 @@ struct PlannedTransform {
         constexpr unsigned kValues = Radix ? Radix : 31;
         typename Ops::Register v[kValues];
         if constexpr (Radix && Radix <= 5) {
-          if constexpr (lanes <= 4)
+          if constexpr (lanes <= 4) {
             fuel.poll(stage_cost(Radix, lanes) * lanes);
-          else
+          } else {
             fuel.poll(16 * Radix * lanes);
+          }
         }
-        if constexpr (grouped_odd)
+        if constexpr (grouped_odd) {
           fuel.poll(16 * Radix * lanes);
+        }
         const auto load = [&](std::uint64_t j) PS_FRQ_VECTOR_TARGET {
-          if constexpr ((!Radix || Radix > 5) && !grouped_odd)
+          if constexpr ((!Radix || Radix > 5) && !grouped_odd) {
             fuel.poll(16 * lanes);
+          }
           v[j] = Ops::load(data + (base + k + j * m) * lanes);
           if constexpr (!Dif) {
             if (((std::is_same_v<Scalar, double> &&
                   (Radix == 2 || Radix == 4)) ||
                  !stage.coprime) &&
-                j && k)
+                j && k) {
               v[j] = Ops::product(
                   v[j], coefficient<Ops, Inverse>(
                             plan.twiddle[stage.twiddle + (j - 1) * m + k]));
+            }
           }
         };
         if constexpr ((Radix && Radix <= 5) || grouped_odd) {
           small_each<Radix>(load);
         } else {
-          for (std::uint64_t j = 0; j < r; ++j)
+          for (std::uint64_t j = 0; j < r; ++j) {
             load(j);
+          }
         }
         if constexpr (Radix && Radix <= 5) {
-          if constexpr (lanes > 4)
+          if constexpr (lanes > 4) {
             fuel.poll(butterfly_cost(Radix) * lanes);
+          }
           butterfly<Ops, Inverse>(v, r,
                                   plan.coefficients.data() + stage.coefficients,
                                   AdmittedArithmetic{});
@@ -547,31 +594,36 @@ struct PlannedTransform {
           butterfly<Ops, Inverse>(
               v, r, plan.coefficients.data() + stage.coefficients, fuel);
         }
-        if constexpr (Radix && Radix <= 5 && lanes > 4)
+        if constexpr (Radix && Radix <= 5 && lanes > 4) {
           fuel.poll(24 * Radix * lanes);
+        }
         const auto store = [&](std::uint64_t j) PS_FRQ_VECTOR_TARGET {
           if constexpr (grouped_odd) {
-            if (j % 8 == 0)
+            if (j % 8 == 0) {
               fuel.poll(24 * std::min<std::uint64_t>(8, Radix - j) * lanes);
+            }
           }
-          if constexpr ((!Radix || Radix > 5) && !grouped_odd)
+          if constexpr ((!Radix || Radix > 5) && !grouped_odd) {
             fuel.poll(24 * lanes);
+          }
           if constexpr (Dif) {
             if (((std::is_same_v<Scalar, double> &&
                   (Radix == 2 || Radix == 4)) ||
                  !stage.coprime) &&
-                j && k)
+                j && k) {
               v[j] = Ops::product(
                   v[j], coefficient<Ops, Inverse>(
                             plan.twiddle[stage.twiddle + (j - 1) * m + k]));
+            }
           }
           Ops::store(data + (base + k + j * m) * lanes, v[j]);
         };
         if constexpr ((Radix && Radix <= 5) || grouped_odd) {
           small_each<Radix>(store);
         } else {
-          for (std::uint64_t j = 0; j < r; ++j)
+          for (std::uint64_t j = 0; j < r; ++j) {
             store(j);
+          }
         }
       }
     }
@@ -584,16 +636,17 @@ struct PlannedTransform {
     constexpr auto lanes = Ops::width;
     const auto r = stage.radix, m = stage.span;
     const TransformBlock fuel{work, 40 * plan.n * lanes};
-    for (std::uint64_t base = 0; base < plan.n; base += r * m)
+    for (std::uint64_t base = 0; base < plan.n; base += r * m) {
       for (std::uint64_t k = 0; k < m; ++k) {
         for (std::uint64_t j = 0; j < r; ++j) {
           fuel.poll(16 * lanes);
           auto v = Ops::load(data + (base + k + j * m) * lanes);
           if constexpr (!Dif) {
-            if (j && k)
+            if (j && k) {
               v = Ops::product(
                   v, coefficient<Ops, Inverse>(
                          plan.twiddle[stage.twiddle + (j - 1) * m + k]));
+            }
           }
           construct<Ops>(scratch + j * lanes, v);
         }
@@ -602,14 +655,16 @@ struct PlannedTransform {
           fuel.poll(24 * lanes);
           auto v = Ops::load(scratch + j * lanes);
           if constexpr (Dif) {
-            if (j && k)
+            if (j && k) {
               v = Ops::product(
                   v, coefficient<Ops, Inverse>(
                          plan.twiddle[stage.twiddle + (j - 1) * m + k]));
+            }
           }
           Ops::store(data + (base + k + j * m) * lanes, v);
         }
       }
+    }
   }
   // Fuse the initial radix-2 and radix-4 stages without changing the plan's
   // mixed-digit permutation or the internal DIF convolution ordering.
@@ -725,45 +780,52 @@ struct PlannedTransform {
           break;
       }
     }
-    if constexpr (ProbeAfter)
+    if constexpr (ProbeAfter) {
       check(work(0));
+    }
   }
   static std::uint64_t modular_power(std::uint64_t a, std::uint64_t e,
                                      std::uint64_t n, const Work& work) {
     std::uint64_t value = 1;
     while (e) {
       check(work(32));
-      if (e & 1)
+      if (e & 1) {
         value = static_cast<unsigned __int128>(value) * a % n;
+      }
       a = static_cast<unsigned __int128>(a) * a % n;
       e >>= 1;
     }
     return value;
   }
   static std::uint64_t generator(std::uint64_t n, const Work& work) {
-    if (!transform_smooth(n - 1))
+    if (!transform_smooth(n - 1)) {
       return 0;
+    }
     std::array<std::uint64_t, 16> factors{};
     std::size_t count = 0;
     auto remaining = n - 1;
-    for (auto r : {2U, 3U, 5U, 7U, 11U, 13U, 17U, 19U, 23U, 29U, 31U})
+    for (auto r : {2U, 3U, 5U, 7U, 11U, 13U, 17U, 19U, 23U, 29U, 31U}) {
       if (remaining % r == 0) {
         factors[count++] = r;
         do {
           remaining /= r;
         } while (remaining % r == 0);
       }
+    }
     // The complete factorization and order tests certify an element of order
     // n-1. Composite n cannot pass, and the search is dimension-bounded.
     for (std::uint64_t candidate = 2; candidate <= 32 && candidate < n;
          ++candidate) {
-      if (modular_power(candidate, n - 1, n, work) != 1)
+      if (modular_power(candidate, n - 1, n, work) != 1) {
         continue;
+      }
       bool valid = true;
-      for (std::size_t i = 0; i < count; ++i)
+      for (std::size_t i = 0; i < count; ++i) {
         valid &= modular_power(candidate, (n - 1) / factors[i], n, work) != 1;
-      if (valid)
+      }
+      if (valid) {
         return candidate;
+      }
     }
     return 0;
   }
@@ -780,24 +842,28 @@ struct PlannedTransform {
     auto residual = n;
     while (residual > 1) {
       const auto radix = transform_factor(residual);
-      if (radix > 31 && radix == residual)
+      if (radix > 31 && radix == residual) {
         break;
-      if (radix == 2 || radix == 4)
+      }
+      if (radix == 2 || radix == 4) {
         powers[power_count++] = radix;
-      else
+      } else {
         factors[depth++] = radix;
+      }
       residual /= radix;
     }
     // DIT stages traverse factors in reverse. Put the binary part first in
     // execution order so its contiguous 2+4 stages can use the FFT8 codelet.
-    for (std::size_t i = 0; i < power_count; ++i)
+    for (std::size_t i = 0; i < power_count; ++i) {
       factors[depth++] = powers[i];
+    }
     plan->leaf = residual;
     // Only external, smooth axis plans use this ordering. Convolution plans
     // retain their matching forward-DIF / inverse-DIT frequency layout.
     bool coprime_layout = axis && residual == 1;
-    for (std::size_t level = 0; level < depth; ++level)
+    for (std::size_t level = 0; level < depth; ++level) {
       coprime_layout &= factors[level] <= 31;
+    }
     std::array<std::uint64_t, 64> inverses{};
     if (coprime_layout) {
       bool has_coprime = false;
@@ -807,12 +873,13 @@ struct PlannedTransform {
         const TransformBlock choose{work, 32 * radix};
         choose.poll(32 * radix);
         if (length > 1) {
-          for (std::uint64_t a = 1; a < radix; ++a)
+          for (std::uint64_t a = 1; a < radix; ++a) {
             if ((length % radix) * a % radix == 1) {
               inverses[level] = a;
               has_coprime = true;
               break;
             }
+          }
         }
         length *= radix;
       }
@@ -847,25 +914,28 @@ struct PlannedTransform {
                   plan->twiddle.size(),
                   plan->coefficients.size(),
                   {}};
-      if (radix > 31)
+      if (radix > 31) {
         stage.child = build(radix, inverse, allocator, work);
+      }
       stage.coprime = coprime_layout && inverses[level] != 0;
       const auto pairs = radix <= 31 ? radix / 2 : 0;
       {
         const auto twiddles = stage.coprime ? 0 : (radix - 1) * span;
         const TransformBlock fill{work, 128 * (twiddles + pairs * pairs)};
-        for (std::uint64_t j = 1; !stage.coprime && j < radix; ++j)
+        for (std::uint64_t j = 1; !stage.coprime && j < radix; ++j) {
           for (std::uint64_t k = 0; k < span; ++k) {
             fill.poll(128);
             const auto frequency = coprime_layout ? frequencies[k] : k;
             plan->twiddle.push_back(
                 Base::root(j * frequency, radix * span, false));
           }
-        for (std::uint64_t q = 1; q <= pairs; ++q)
+        }
+        for (std::uint64_t q = 1; q <= pairs; ++q) {
           for (std::uint64_t j = 1; j <= pairs; ++j) {
             fill.poll(128);
             plan->coefficients.push_back(Base::root(q * j, radix, false));
           }
+        }
       }
       if (coprime_layout) {
         const auto size = radix * span;
@@ -874,7 +944,7 @@ struct PlannedTransform {
         output.reserve(size);
         const auto alpha = inverses[level];
         const TransformBlock fill{work, 128 * size};
-        for (std::uint64_t j = 0; j < radix; ++j)
+        for (std::uint64_t j = 0; j < radix; ++j) {
           for (std::uint64_t k = 0; k < span; ++k) {
             fill.poll(128);
             const auto p = frequencies[k];
@@ -889,6 +959,7 @@ struct PlannedTransform {
               output.push_back(j * span + p);
             }
           }
+        }
         plan->permutation = std::move(input);
         frequencies = std::move(output);
       }
@@ -952,8 +1023,9 @@ struct PlannedTransform {
           const auto z = Base::root(phase, 2 * residual, inverse);
           plan->chirp.push_back(z);
           plan->spectrum[j] = Base::conjugate(z);
-          if (j)
+          if (j) {
             plan->spectrum[length - j] = Base::conjugate(z);
+          }
         }
       }
       stages<ScalarOps, false, true>(plan->spectrum.data(), *plan->convolution,
@@ -969,8 +1041,9 @@ struct PlannedTransform {
     {
       std::lock_guard<std::mutex> lock(cache.mutex);
       const auto found = cache.plans.find(key);
-      if (found != cache.plans.end())
+      if (found != cache.plans.end()) {
         return *found->second;
+      }
     }
     auto plan = build(n, inverse, cache.allocator, work, true);
     std::lock_guard<std::mutex> lock(cache.mutex);
@@ -981,8 +1054,9 @@ struct PlannedTransform {
                                              typename Ops::Register value) {
     Complex values[Ops::width];
     Ops::store(values, value);
-    for (unsigned lane = 0; lane < Ops::width; ++lane)
+    for (unsigned lane = 0; lane < Ops::width; ++lane) {
       new (destination + lane) Complex{values[lane]};
+    }
   }
   template <class Ops>
   static PS_FRQ_VECTOR_TARGET void convolve(Complex* data, Complex* buffer,
@@ -1067,10 +1141,11 @@ struct PlannedTransform {
       typename Ops::Register v[Radix];
       small_each<Radix>([&](std::uint64_t j) PS_FRQ_VECTOR_TARGET {
         v[j] = Ops::load(buffer + (k + j * m) * lanes);
-        if (j && k)
+        if (j && k) {
           v[j] = Ops::product(
               v[j], coefficient<Ops, Inverse>(
                         plan.twiddle[stage.twiddle + (j - 1) * m + k]));
+        }
       });
       butterfly<Ops, Inverse>(v, Radix, nullptr, AdmittedArithmetic{});
       small_each<Radix>([&](std::uint64_t j) PS_FRQ_VECTOR_TARGET {
@@ -1078,7 +1153,53 @@ struct PlannedTransform {
       });
     }
   }
-  template <class Ops, bool ProbeBoundaries = true>
+  // The final coprime radix-three layer uses three fixed output rotations.
+  // Keep each rotation static so no packet spills through a runtime v[index].
+  template <class Ops, bool Inverse, unsigned Phase, unsigned Shift>
+  static PS_FRQ_PACKET_INLINE void coprime_three_output(
+      Complex* data, std::uint64_t stride, const Complex* buffer,
+      std::uint64_t m, std::uint64_t p, std::uint64_t k,
+      const TransformBlock& fuel) {
+    constexpr auto lanes = Ops::width;
+    fuel.poll(stage_cost(3, lanes) * lanes);
+    typename Ops::Register v[3] = {Ops::load(buffer + k * lanes),
+                                   Ops::load(buffer + (k + m) * lanes),
+                                   Ops::load(buffer + (k + 2 * m) * lanes)};
+    butterfly<Ops, Inverse>(v, 3, nullptr, AdmittedArithmetic{});
+    Ops::store(data + p * stride, v[Phase]);
+    Ops::store(data + (p + m) * stride, v[(Phase + Shift) % 3]);
+    Ops::store(data + (p + 2 * m) * stride, v[(Phase + 2 * Shift) % 3]);
+  }
+  template <class Ops, bool Inverse, unsigned Shift>
+  static PS_FRQ_VECTOR_TARGET void final_coprime_columns(Complex* data,
+                                                         std::uint64_t stride,
+                                                         const Complex* buffer,
+                                                         const Plan& plan,
+                                                         const Work& work) {
+    constexpr auto lanes = Ops::width;
+    const auto m = plan.stages.back().span;
+    const TransformBlock fuel{work,
+                              lanes * (m * stage_cost(3, lanes) + 12 * plan.n)};
+    std::uint64_t p = 0;
+    for (; p + 3 <= m; p += 3) {
+      coprime_three_output<Ops, Inverse, 0, Shift>(
+          data, stride, buffer, m, p, plan.output_inverse[p], fuel);
+      coprime_three_output<Ops, Inverse, 1, Shift>(
+          data, stride, buffer, m, p + 1, plan.output_inverse[p + 1] - m, fuel);
+      coprime_three_output<Ops, Inverse, 2, Shift>(
+          data, stride, buffer, m, p + 2, plan.output_inverse[p + 2] - 2 * m,
+          fuel);
+    }
+    if (p < m) {
+      coprime_three_output<Ops, Inverse, 0, Shift>(
+          data, stride, buffer, m, p, plan.output_inverse[p], fuel);
+    }
+    if (p + 1 < m) {
+      coprime_three_output<Ops, Inverse, 1, Shift>(
+          data, stride, buffer, m, p + 1, plan.output_inverse[p + 1] - m, fuel);
+    }
+  }
+  template <class Ops, bool ProbeBoundaries = true, bool CoprimeColumns = false>
   static PS_FRQ_VECTOR_TARGET void batch(Complex* data, std::uint64_t stride,
                                          std::uint64_t step, Complex* buffer,
                                          const Plan& plan, const Work& work) {
@@ -1091,45 +1212,76 @@ struct PlannedTransform {
         gather.poll(8 * lanes * (end - begin));
         for (auto i = begin; i < end; ++i) {
           const auto index = plan.permutation[i] * stride;
-          for (unsigned lane = 0; lane < lanes; ++lane)
+          for (unsigned lane = 0; lane < lanes; ++lane) {
             new (buffer + i * lanes + lane) Complex{data[index + lane * step]};
+          }
         }
       }
     }
     if (plan.leaf > 1) {
-      for (std::uint64_t i = 0; i < plan.n; i += plan.leaf)
+      for (std::uint64_t i = 0; i < plan.n; i += plan.leaf) {
         convolve<Ops>(buffer + i * lanes, buffer + plan.n * lanes, plan, work);
+      }
     }
     bool final = false;
     if constexpr (lanes <= 4) {
       if (step == 1 && !plan.output_inverse.empty()) {
         const auto& last = plan.stages.back();
-        final = !last.coprime && !last.child &&
-                (last.radix == 3 || last.radix == 5) &&
+        final = (!last.coprime || (CoprimeColumns && last.radix == 3)) &&
+                !last.child && (last.radix == 3 || last.radix == 5) &&
                 last.radix * last.span == plan.n;
       }
     }
-    if (plan.inverse)
+    if (plan.inverse) {
       stages<Ops, true, false, ProbeBoundaries>(buffer, plan, work,
                                                 buffer + plan.n * lanes, final);
-    else
+    } else {
       stages<Ops, false, false, ProbeBoundaries>(
           buffer, plan, work, buffer + plan.n * lanes, final);
+    }
+    if constexpr (lanes <= 4 && CoprimeColumns) {
+      if (final && plan.stages.back().coprime) {
+        if (plan.stages.back().span % 3 == 1) {
+          if (plan.inverse) {
+            final_coprime_columns<Ops, true, 1>(data, stride, buffer, plan,
+                                                work);
+          } else {
+            final_coprime_columns<Ops, false, 1>(data, stride, buffer, plan,
+                                                 work);
+          }
+        } else {
+          if (plan.inverse) {
+            final_coprime_columns<Ops, true, 2>(data, stride, buffer, plan,
+                                                work);
+          } else {
+            final_coprime_columns<Ops, false, 2>(data, stride, buffer, plan,
+                                                 work);
+          }
+        }
+        if constexpr (ProbeBoundaries) {
+          check(work(0));
+        }
+        return;
+      }
+    }
     if constexpr (lanes <= 4) {
       if (final) {
         if (plan.stages.back().radix == 3) {
-          if (plan.inverse)
+          if (plan.inverse) {
             final_columns<Ops, true, 3>(data, stride, buffer, plan, work);
-          else
+          } else {
             final_columns<Ops, false, 3>(data, stride, buffer, plan, work);
+          }
         } else {
-          if (plan.inverse)
+          if (plan.inverse) {
             final_columns<Ops, true, 5>(data, stride, buffer, plan, work);
-          else
+          } else {
             final_columns<Ops, false, 5>(data, stride, buffer, plan, work);
+          }
         }
-        if constexpr (ProbeBoundaries)
+        if constexpr (ProbeBoundaries) {
           check(work(0));
+        }
         return;
       }
     }
@@ -1142,20 +1294,23 @@ struct PlannedTransform {
       for (auto i = begin; i < end; ++i) {
         const auto raw =
             plan.output_inverse.empty() ? i : plan.output_inverse[i];
-        for (unsigned lane = 0; lane < lanes; ++lane)
+        for (unsigned lane = 0; lane < lanes; ++lane) {
           data[i * stride + lane * step] = buffer[raw * lanes + lane];
+        }
       }
     }
-    if constexpr (ProbeBoundaries)
+    if constexpr (ProbeBoundaries) {
       check(work(0));
+    }
   }
   static std::uint64_t convolution_cost(const Plan& plan) {
     const auto& inner = *plan.convolution;
     return 80 * inner.n + 2 * stages_cost(inner, 1) + 48 * plan.leaf;
   }
   static std::uint64_t line_cost(const Plan& plan) {
-    if (plan.n == 1)
+    if (plan.n == 1) {
       return 0;
+    }
     auto cost =
         (plan.output_inverse.empty() ? 16 : 20) * plan.n + stages_cost(plan, 1);
     if (plan.convolution) {
@@ -1163,12 +1318,14 @@ struct PlannedTransform {
     }
     return cost;
   }
+  template <bool CoprimeColumns = false>
   static PS_FRQ_VECTOR_TARGET void axis(Complex* data, std::uint64_t stride,
                                         std::uint64_t lines, std::uint64_t step,
                                         Complex* buffer, const Plan& plan,
                                         const Work& work) {
-    if (plan.n == 1)
+    if (plan.n == 1) {
       return;
+    }
     constexpr auto lanes = PacketOps::width;
     constexpr bool probe_each_batch = !std::is_same_v<Scalar, double>;
     std::uint64_t line = 0;
@@ -1177,28 +1334,32 @@ struct PlannedTransform {
       if (plan.n >= 256 && stride > 1 && step == 1 && plan.small_radices &&
           (stride % 4 == 0 || plan.convolution)) {
         for (; line + 4 <= lines; line += 4) {
-          batch<WideOps, false>(data + line * step, stride, step, buffer, plan,
-                                work);
+          batch<WideOps, false, CoprimeColumns>(data + line * step, stride,
+                                                step, buffer, plan, work);
         }
       }
     }
 #endif
     if (plan.n >= 1024 && stride > 1 && step == 1 && plan.wide) {
-      for (; line + WideOps::width <= lines; line += WideOps::width)
-        batch<WideOps, probe_each_batch>(data + line * step, stride, step,
-                                         buffer, plan, work);
+      for (; line + WideOps::width <= lines; line += WideOps::width) {
+        batch<WideOps, probe_each_batch, CoprimeColumns>(
+            data + line * step, stride, step, buffer, plan, work);
+      }
     }
-    for (; line + lanes <= lines; line += lanes)
-      batch<PacketOps, probe_each_batch>(data + line * step, stride, step,
-                                         buffer, plan, work);
-    for (; line < lines; ++line)
-      batch<ScalarOps, probe_each_batch>(data + line * step, stride, step,
-                                         buffer, plan, work);
+    for (; line + lanes <= lines; line += lanes) {
+      batch<PacketOps, probe_each_batch, CoprimeColumns>(
+          data + line * step, stride, step, buffer, plan, work);
+    }
+    for (; line < lines; ++line) {
+      batch<ScalarOps, probe_each_batch, CoprimeColumns>(
+          data + line * step, stride, step, buffer, plan, work);
+    }
 
     // Adjacent phase admissions cover double batch boundaries. Retain one
     // explicit completion probe after the last batch.
-    if constexpr (!probe_each_batch)
+    if constexpr (!probe_each_batch) {
       check(work(0));
+    }
   }
 };
 #endif

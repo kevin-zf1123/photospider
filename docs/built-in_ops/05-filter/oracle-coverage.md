@@ -11,8 +11,8 @@ ExactRational/DirectedMPFR apply only to the expression and finite input subset 
 exercised. ExactSpecial covers targeted IEEE classification, payload and signed-zero
 branches. A ContractFixture may be just a manifest/schema assertion. No member has
 production runtime, asynchronous stopping, owner, demand, named-backend or quality-score
-acceptance from this oracle. Compiled band selection through the proposed SDK/workflow representation and
-complete nonfinite restoration trajectories are not implemented. Oracle work caps are not spec size limits. Malformed reference-input fixtures
+acceptance from this oracle. This oracle does not exercise compiled band selection through the
+SDK/workflow representation or complete nonfinite restoration trajectories. Oracle work caps are not spec size limits. Malformed reference-input fixtures
 exercise oracle diagnostics only and do not impose runtime payload validation.
 
 Native BM3D/CBM3D comparisons still need pinned implementations and actual runs.

@@ -30,9 +30,10 @@ class TransformPool final {
 #if defined(__linux__) && defined(CPU_COUNT)
     cpu_set_t allowed;
     CPU_ZERO(&allowed);
-    if (sched_getaffinity(0, sizeof(allowed), &allowed) == 0)
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) == 0) {
       count = std::max(
           1U, std::min(count, static_cast<unsigned>(CPU_COUNT(&allowed))));
+    }
 #endif
     // Respect the calling thread's CPU allowance; P/E-core placement
     // remain with the OS. Small phases never construct this pool.
@@ -40,9 +41,10 @@ class TransformPool final {
       char* end = nullptr;
       const auto requested = std::strtoul(value, &end, 10);
       if (*value >= '0' && *value <= '9' && end != value && *end == '\0' &&
-          requested > 0)
+          requested > 0) {
         count = static_cast<unsigned>(
             std::min<std::uint64_t>(requested, kTransformWorkers));
+      }
     }
     count = std::min(count, kTransformWorkers);
     for (unsigned id = 1; id < count; ++id) {
@@ -61,14 +63,17 @@ class TransformPool final {
       ++generation_;
     }
 #if defined(__x86_64__)
-    for (auto& signal : ready_)
+    for (auto& signal : ready_) {
       signal.notify_one();
+    }
 #else
     ready_.notify_all();
 #endif
-    for (auto& thread : threads_)
-      if (thread.joinable())
+    for (auto& thread : threads_) {
+      if (thread.joinable()) {
         thread.join();
+      }
+    }
   }
   TransformPool(const TransformPool&) = delete;
   TransformPool& operator=(const TransformPool&) = delete;
@@ -78,10 +83,21 @@ class TransformPool final {
   void run(std::uint64_t tasks, unsigned requested, Function&& function) {
     const auto participants = static_cast<unsigned>(
         std::min<std::uint64_t>({tasks, requested, count_}));
+    // A numerical task may expose another independent phase. Its worker
+    // already belongs to the outer job, so execute the inner phase locally
+    // without trying to lock the same non-recursive mutex again.
+    if (in_job()) {
+      for (std::uint64_t i = 0; i < tasks; ++i) {
+        function(i, 0);
+      }
+      return;
+    }
     std::unique_lock<std::mutex> lease(lease_, std::try_to_lock);
     if (participants <= 1 || !lease.owns_lock()) {
-      for (std::uint64_t i = 0; i < tasks; ++i)
+      const ActiveScope scope;
+      for (std::uint64_t i = 0; i < tasks; ++i) {
         function(i, 0);
+      }
       return;
     }
     Job job;
@@ -101,19 +117,22 @@ class TransformPool final {
       // Keep the notifications under the lock. A quick worker must not
       // finish, wait again, and consume a second notification for this job.
       if (participants < count_) {
-        for (unsigned i = 1; i < participants; ++i)
+        for (unsigned i = 1; i < participants; ++i) {
           ready_.notify_one();
+        }
       }
 #endif
     }
 #if defined(__x86_64__)
     // Each participant has its own wait queue. Waking only selected workers
     // avoids scheduling inactive FFT workers during shorter memory phases.
-    for (unsigned id = 1; id < participants; ++id)
+    for (unsigned id = 1; id < participants; ++id) {
       ready_[id - 1].notify_one();
+    }
 #else
-    if (participants == count_)
+    if (participants == count_) {
       ready_.notify_all();
+    }
 #endif
     execute(job, 0);
     {
@@ -123,8 +142,9 @@ class TransformPool final {
       });
       job_ = nullptr;
     }
-    if (job.failure)
+    if (job.failure) {
       std::rethrow_exception(job.failure);
+    }
   }
 
  private:
@@ -138,20 +158,35 @@ class TransformPool final {
     std::mutex failure_mutex;
     std::exception_ptr failure;
   };
+  static bool& in_job() {
+    static thread_local bool active = false;
+    return active;
+  }
+  class ActiveScope final {
+   public:
+    ActiveScope() : previous_(in_job()) { in_job() = true; }
+    ~ActiveScope() { in_job() = previous_; }
+
+   private:
+    bool previous_;
+  };
   static void execute(Job& job, unsigned id) noexcept {
+    const ActiveScope scope;
     try {
       FloatingEnvironment environment;
       require(environment.active(), "transform floating environment");
       while (!job.failed.load(std::memory_order_relaxed)) {
         const auto i = job.next.fetch_add(1, std::memory_order_relaxed);
-        if (i >= job.tasks)
+        if (i >= job.tasks) {
           break;
+        }
         job.invoke(job.context, i, id);
       }
     } catch (...) {
       std::lock_guard<std::mutex> lock(job.failure_mutex);
-      if (!job.failure)
+      if (!job.failure) {
         job.failure = std::current_exception();
+      }
       job.failed.store(true, std::memory_order_relaxed);
     }
   }
@@ -168,18 +203,22 @@ class TransformPool final {
         auto& ready = ready_;
 #endif
         ready.wait(lock, [&] { return stopping_ || generation_ != observed; });
-        if (stopping_)
+        if (stopping_) {
           return;
+        }
         observed = generation_;
-        if (!job_)
+        if (!job_) {
           continue;
+        }
 #if defined(__x86_64__)
-        if (id >= participants_)
+        if (id >= participants_) {
           continue;
+        }
 #else
         if (participants_ < count_) {
-          if (claimed_ >= participants_ - 1)
+          if (claimed_ >= participants_ - 1) {
             continue;
+          }
           slot = ++claimed_;
         }
 #endif
@@ -262,8 +301,9 @@ void transform_rows(std::uint64_t rows, std::uint64_t cost_per_row,
 #if defined(__x86_64__)
   // Large packing/recombination/output streams saturate memory bandwidth
   // before the arithmetic pool. Avoid excess first-touch and store traffic.
-  if (cost >= (UINT64_C(1) << 28))
+  if (cost >= (UINT64_C(1) << 28)) {
     workers = std::min(workers, 8U);
+  }
 #endif
   const TransformAdmission admission(work);
   transform_phase(work, [&] {

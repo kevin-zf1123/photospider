@@ -5,14 +5,12 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D2
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FRQ-10
 function: inverse_stationary_haar_mean_v1
 proposed_operation_keys:
-- frequency.inverse_stationary_haar_mean_v1_strict
-- frequency.inverse_stationary_haar_mean_v1_accelerated_apple_silicon
-- frequency.inverse_stationary_haar_mean_v1_accelerated_x86_64
-numeric_reference: S
+- frequency.inverse_stationary_haar_mean_v1
+numeric_reference: F
 oracle_scope: mathematical_reference
 research_sources:
 - S16
@@ -21,29 +19,29 @@ research_sources:
 
 # FRQ-10F: inverse_stationary_haar_mean_v1
 
-stationary_haar_mean_v1 reconstruction .Status: **Proposed**.
+stationary_haar_mean_v1 reconstruction. Specification status: **Proposed**. Implementation: **implemented**.
 
-Inherits the [FRQ-10 family contract](FRQ-10_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numerical and accuracy contract](../../01-numeric/op_specs/NUM_common_contract.md) and [FMT metadata and straight-color semantics](../../02-format-color/op_specs/FMT_common_contract.md); this member and its family contract define the complete target behavior. RN stages, gradual underflow, and accelerated error limits are inherited and may not be weakened.
+Inherits [FRQ-10](FRQ-10_contract.md), [FILTER](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md) and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). The family-local F profile defines arithmetic accuracy. Shape/support, boundaries, bit-preserving COPY, resources, cancellation and ownership remain normative.
 
 ## Ports, Shape, and Semantics
 
-`bands` FilterBands/v1 → `output` with the original shape.
+`bands` profile-specific Result → numerical `output` for one 0..5-level direct node. SDK inverse consumes the complete FilterBands/v1 directory, including independently edited references, and reconstructs the explicitly saved original shape.
 
-Ports carry Results with fixed Tensor member schemas. Unless the member defines an explicit color interpretation, samples are raw numerical values; channel count does not imply RGB or alpha. Color interpretation is explicit configuration. Positive extents, axes and explicit broadcasting are checked during static construction. Materialized output tiles have independent allocations. FilterBands and FrequencyGrid are proposed SDK/workflow representations under the collection contract; lowering records each selected output's fixed reads and writes.
+Ports carry Results with fixed Tensor member schemas. Samples are ordinary numerical values, with no implicit RGB or alpha interpretation. Positive extents and axes are checked statically. Each materialized tile has independent allocation. FilterBands/v1 is static SDK/workflow metadata; helpers compose deeper transforms through the fixed per-Result member limit. Lowering fixes reads and writes for each selected output.
 
 ## Static Parameters and Valid Domain
 
-Obtain axes, levels, and profile from the bands descriptor. Reject conflicting parameters; do not infer the input shape.
+The SDK uses explicit WaveletBands.options and validates the complete directory, including saved original shape, dtype, global levels, identities, roles, orientations, phase and profile. It does not infer odd original extents from coefficient shapes or producer identity. Direct nodes require y_axis, x_axis, levels, first_level, original_height and original_width. Levels range from 0..5. first_level is the zero-based global offset for stationary groups and zero for decimated profiles. Optional expected_shape and expected_dtype provide additional static consistency checks.
 
-Floating-point values, including NaN and infinities, and floating-point overflow follow the corresponding NUM operation. This specification does not impose a category-wide finite-only input rule or turn floating-point overflow into an operation failure. Copy/bypass and unconsumed samples follow this member’s stated demand semantics. All parameters listed here are mandatory constructor arguments; constants fixed by a named mathematical profile are not configurable parameters. Every argument is stored in the direct node. Real parameters denote their stored Float64 values; decimal text is not treated as an exact real parameter.
+The input descriptor determines Float32 or Float64 working arithmetic. Special values, underflow and overflow follow the family F profile; no finite-only payload scan or numerical-overflow failure is introduced. Static execution parameters are stored in direct nodes. Source-grid identity, unit, spacing, origin and runtime association remain caller-owned interpretation. Copy and unconsumed inputs retain stated demand semantics.
 
 ## Mathematical Reference and Rounding
 
-Numeric reference: **S**; E/B/S definitions are in [FILTER_numeric_reference](FILTER_numeric_reference.md).
+Numeric reference: **F**, defined locally in [FRQ-10](FRQ-10_contract.md). The directory records rounding_profile=native_float_v1.
 
-Inverse uses the reverse-order synthesis and crop defined by **stationary_haar_mean_v1** in the family contract, including every RN_t stage in that profile. At levels=0, preserve exact input bits. A materialized output uses explicit COPY into independent tile allocations; an authoring workflow may explicitly reuse an existing Result without materializing another value. Unrequested bands introduce no arithmetic payload reads.
+Inverse uses the reverse-order synthesis and crop defined by **stationary_haar_mean_v1** in the family contract, using ordinary native arithmetic under the family F profile. At levels=0, preserve exact input bits. A materialized output uses explicit COPY into independent tile allocations; an authoring workflow may explicitly reuse an existing Result without materializing another value. Unrequested bands introduce no arithmetic payload reads.
 
-When this formula invokes another member, its RN stages must be retained as stated here or in the family contract; internal temporary operations may not introduce undeclared rounding. Signed zero, numerical-domain premises and explicit valid-input no-solution outcomes, gradual underflow, and output range follow the shared contract and NUM.
+The named lifting formulas, analysis_x_y_synthesis_y_x order, scales, boundaries and shape rules remain fixed. SIMD fusion and explicit FMA do not require separately certified rounding stages. Correct rounding, per-component ULP bounds and cross-platform bit identity are not promised. Internal details required by a low-band update or deeper LL level may be computed without exporting unrelated siblings.
 
 ## Fixed reads, algorithmic control and schemas
 
@@ -55,13 +53,13 @@ Boundary coordinates use the complete logical image; ROI and tile edges are not 
 
 O(PC * levels). Account for intermediate planes and all published band owners in the budget.
 
-In the complexity notation, P=HW, C=independent planes, A=taps, and T=steps. Arbitrary-precision limb bit complexity is accounted for separately and is not a measured benchmark. The shared protocol defines work, memory, and stage admission; cancellation; failure Status; and owner lifetime. A failed call publishes no successful Result export; previously retired call exports remain valid, and final RET results require successful Run completion. Do not spill automatically, silently lower precision, or call retired implementations as fallback.
+P=HW and C is the number of independent planes. Charge intermediate storage, arithmetic work and every published band owner under shared admission and cancellation rules. A failed call publishes no successful Result export; previously retired exports remain valid and final RET results require successful Run completion. Working dtype is fixed; no silent narrowing, automatic spill or precision-refinement fallback is permitted.
 
 ## Oracle, Fixtures, and Acceptance
 
-Acceptance fixtures: constant input yields zero detail bands; analytical 2x2 basis; odd 3x5 shape; levels=0 bit-copy; analysis/reconstruction agrees with an independent lifting reference. Require bit identity for an unmodified round trip only on exactly representable fixtures.
+Acceptance fixtures cover constant inputs, analytical 2x2 bases, odd 3x5 shapes, zero-level bit-preserving COPY and comparison with an independent lifting reference. Inverse fixtures include independently edited bands, particularly odd-boundary Haar detail and stationary coefficients that do not come from a forward transform. State dtype, input range, error norm and tolerance for nonzero-level comparisons. Exactly representable fixtures may additionally check exact results; general round trips are not a bit-identity contract.
 
-The reference function evaluates the numerical formula on small inputs; it is not a production kernel or a complete Ports-schema/preflight simulator. ExactRational evaluates rational expressions and rounds directly to IEEE format. For transcendental functions, use a DirectedMPFR result as a strict golden only when the interval is closed. If the interval does not determine rounding, report Inconclusive rather than substituting an approximation.
+The preserved oracle is a mathematical reference for formulas, band orientation, boundaries and small-input fixtures. It is not a production kernel or complete schema/admission simulator. Its exact or staged evaluation does not impose strict golden bits or a fixed ULP bound on this F profile. Numerical differential checks and runtime-contract checks have separate evidence scopes.
 
 `frq10.multiscale.wavelet(image, levels, profile, inverse, bands, dtype)` → [source](../../../../oracle/ops/filter/frq10/multiscale.py).
 
@@ -71,15 +69,15 @@ Reproduction steps and proof levels are in [oracle README](../../../../oracle/op
 
 ## Backend and Registration Status
 
-The keys above are naming proposals only; strict and both CPU-accelerated variants are not registered or implemented. Accelerated implementations must satisfy the NUM final-value Float32-scaled four-ULP bound and fallback rules. Error budgets may not be accumulated per tap, axis, stage, or iteration. Approximation may not change exact decisions such as thresholds, ordering, boundaries, copies, or output support.
+`frequency.inverse_stationary_haar_mean_v1` is implemented and registered with native Float32/Float64 arithmetic and native_float_v1 metadata. Scalar, SIMD and threaded execution share this unsuffixed key. Float64 input, output and arithmetic remain Float64. Levels=0 preserves exact input bits through explicit COPY.
 
-Float64 accelerated execution retains Float64 inputs, outputs, and exponent range; it does not convert to Float32 first. Values outside the Float32-scaled range use the strict NUM fallback. No kernel, CPU, or ISA performance or differential acceptance runs were performed for this package.
+Implementation and registration are complete; this does not establish complete numerical, runtime or performance acceptance.
 
-## Conceptual DAG (Not an Existing API)
+## Execution Outline
 
-`static parameters + schemas → compile fixed reads/tasks → prepare → unchecked arithmetic with declared RN stages → complete tiles → ordered call retirement`
+`static parameters + schemas → compile fixed reads/tasks → prepare → ordinary native floating-point arithmetic → complete tiles → ordered call retirement`
 
-This diagram adds no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-fill for missing data. complete-input demand and multistage buffering are defined by this member and its family contract.
+This diagram adds no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-fill for missing data. Complete-input demand and multistage buffering are defined by this member and its family contract.
 
 ## Sources and Open Items
 

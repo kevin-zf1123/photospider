@@ -5,7 +5,7 @@ kind: family_contract
 category: 05-filter
 status: Proposed
 document_maturity: D1
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - FRQ-08A
@@ -24,45 +24,43 @@ Inherits [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-num
 
 | ID | member specification | kind | numeric reference |
 | --- | --- | --- | --- |
-| FRQ-08A | [Overlap-add convolution](FRQ-08A_overlap_add.md) | primitive | E |
-| FRQ-08B | [Overlap-save convolution](FRQ-08B_overlap_save.md) | primitive | E |
+| FRQ-08A | [Overlap-add convolution](FRQ-08A_overlap_add.md) | primitive | F |
+| FRQ-08B | [Overlap-save convolution](FRQ-08B_overlap_save.md) | primitive | F |
 
-Letter suffixes identify distinct mathematical or interface objects, not quality tiers that a backend may choose arbitrarily. Primitives may propose separately named strict and accelerated variants. Helpers only orchestrate explicit stages. An external engine requires fixed resources and approval before it can have an executable configuration.
+Letter suffixes identify distinct mathematical or interface objects. Each member is registered under one unsuffixed native key with internal CPU strategy selection under the F profile. Helpers orchestrate explicit stages.
 
 ## Shared Mathematics, Units, and Profiles
 
-Each member formula is defined in its linked specification. Members do not share undeclared implicit preprocessing. Parameters with the same name are reusable only when their units, boundary behavior, normalization, and RN stages match.
+Each member formula is defined in its linked specification. Members do not share undeclared implicit preprocessing. Parameters with the same name are reusable only when their units, boundary behavior, normalization and declared native numerical profile match.
 
 ## Shared Execution and Numeric Requirements
 
-E denotes an exact expression rounded once to RN_t; B denotes explicitly generated and fixed coefficients; S denotes explicit staged rounding. See [numeric reference](FILTER_numeric_reference.md). NUM defines NaN/Inf and floating-point overflow behavior; this family adds no category-wide finite-only rule. Strict bits, final FP32-scaled four-ULP bounds, gradual underflow, copy behavior, and exact discrete branches inherit NUM.
+Numeric reference: **F**, ordinary native floating-point computation consistent with FFT/IFFT. Float32 input and output normally use binary32 working arithmetic. Float64 input, output and working arithmetic remain binary64 and are never silently narrowed to Float32. Kernel coefficients and none|sum|l1 normalization use binary64 before conversion to the working dtype. The Float32-input path may use binary64 working arithmetic when needed to retain the Float64 kernel's range, then convert the final output to Float32. Explicit FMA is permitted.
+
+NaN, infinities, signed zero, underflow and overflow follow the selected native execution path and established floating-point environment. No finite-only payload scan or numerical-domain operation failure is introduced. Correct rounding, a fixed ULP bound and bitwise reproducibility across algorithms, block sizes, padding or platforms are not promised. There is no exact-result certification, precision refinement or strict numerical fallback.
+
+This local F profile takes precedence over inherited E/S-strict accuracy provisions of NUM/FILTER. The mathematical convolution, axes, normalization, anchor, output origin, shapes, boundary indexing, ROI/global-block rules, exact discrete choices and metadata remain unchanged. Resource admission, cancellation, copy/bypass, publication and owner-lifetime requirements still apply.
 
 Positive-weight normalized filters, signed kernels, local regression, and global inverse problems have different semantics; do not apply one alpha-blurring rule to all of them. See [color composition](FILTER_color_composition.md). Spatial extension, anchor, and origin follow the [boundary contract](FILTER_boundary_contract.md); structured outputs follow the [collection contract](FILTER_collections_contract.md). Shapes depend only on descriptors; each member defines mathematical support and fixed compiled reads.
 
 ### Use of ordinary FFT primitives
 
-OLA/OLS may use F-profile FFTs to produce candidates, but rounded block transforms
-and overlap accumulation do not alone implement the E-strict convolution.
-Certification must cover the complete output expression, including every
-overlapping contribution and the final RN_t. Block size, padding and scheduling
-cannot introduce extra rounding freedom. Accelerated profiles retain the
-inherited NUM final-value requirements rather than the transforms' F exception.
+The current native implementation uses direct convolution when Kh<=15, Kw<=15 and Kh*Kw<=81; otherwise it uses the configured FFT strategy. Both strategies implement the same declared convolution under the F profile and the same unsuffixed operation key. Static shape, anchor, normalization, padding and block constraints remain mandatory, including for the direct strategy. The kernel is dynamic: every invocation consumes and normalizes its supplied coefficients and performs direct preparation or the kernel FFT. Shape-dependent plans and coefficient tables may be reused; kernel spectra are not reused across invocations.
 
-Reserve the block, overlap, plan and certification/fallback state covered by the
-resource model. Candidate transform complexity does not bound the complete
-strict implementation. If admitted resources cannot establish a conforming
-result, preserve the required failure instead of returning an uncertified
-candidate. Every accepted internal worker must drain on success, failure and
-cancellation before invocation completion.
+The FFT path uses the fixed global block grid. Overlap-add accumulates every contributing block in the working dtype; overlap-save discards contaminated edges and selects outputs relative to the global convolution origin. Block sizes, padding and work order may affect rounding. Reserve block buffers, overlap accumulators, transform workspace, immutable plans and unpublished outputs.
+
+Capacity, work and cancellation retain their existing failure semantics. Every internal worker must drain on success, failure or cancellation before invocation completion. Fewer executor lanes do not reduce declared per-invocation scratch.
 
 ## Dependencies and Acceptance
 
-The member support set is normative. Having a halo does not mean that an arbitrarily cropped ROI can run independently; paged access does not remove a whole-image dependency. Follow each member definition for staged rounding, global connectivity, transforms, and iterative state. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
+The member support set is normative. Having a halo does not mean that an arbitrarily cropped ROI can run independently; paged access does not remove a whole-image dependency. Follow each member's mathematical support, native numerical profile, transforms and execution dependencies. Only selected computation and required algorithmic control contribute payload reads; no payload-validation phase is introduced.
 
-All members must follow the [common acceptance protocol](FILTER_oracle_protocol.md). See the [oracle usage guide](../../../../oracle/ops/filter/README.md) for mathematical references and associated self-tests. D1/D2 indicate draft maturity, not acceptance rates.
+All members follow the structural, resource and lifecycle requirements of the [common acceptance protocol](FILTER_oracle_protocol.md). Numerical comparisons use the family F profile with stated absolute/relative error criteria, rather than strict bit patterns or fixed ULP limits. Preserve the mathematical references and self-tests in the [oracle usage guide](../../../../oracle/ops/filter/README.md). D1/D2 describe draft maturity, not acceptance rates.
+
+Implementation and registration are complete; this does not establish complete numerical, runtime or performance acceptance.
 
 ## Sources and Review
 
 [S12 · SciPy oaconvolve](../research-sources.md#s12)
 
-Project boundary behavior, tie-breaking, numeric domains, parameters, public schemas, and proposed operation keys are defined by these specifications. Algorithm sources do not determine parameter defaults or grant rights to third-party software.
+Project boundary behavior, tie-breaking, numeric domains, parameters, public schemas, and registered operation keys are defined by these specifications. Algorithm sources do not determine parameter defaults or grant rights to third-party software.

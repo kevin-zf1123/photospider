@@ -46,6 +46,11 @@ if(NOT PHOTOSPIDER_FMT10_SIMD)
 endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
+  plugins/ops/05-filter/frequency_convolution.cpp
+  plugins/ops/05-filter/frequency_dct.cpp
+  plugins/ops/05-filter/frequency_wavelet.cpp
+  plugins/ops/05-filter/frequency_wavelet_directory.cpp
+  plugins/ops/05-filter/frequency_native_authoring.cpp
   plugins/ops/05-filter/frequency_operations.cpp
   plugins/ops/05-filter/frequency_authoring.cpp
   plugins/ops/05-filter/frequency_local.cpp
@@ -242,6 +247,38 @@ int main() { return 0; }" PHOTOSPIDER_COMPILER_HAS_CONVERSION_SME_ACLE)
     message(STATUS "Compiler lacks SME support; numeric conversion retains NEON")
   endif()
 endif()
+set(_frq_sme_default OFF)
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+  set(_frq_sme_default ON)
+endif()
+option(PHOTOSPIDER_ENABLE_FRQ_SME "Enable runtime-dispatched SME frequency wavelets" ${_frq_sme_default})
+if(PHOTOSPIDER_ENABLE_FRQ_SME)
+  if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    message(FATAL_ERROR "Frequency SME requires Apple arm64")
+  endif()
+  include(CheckCXXSourceCompiles)
+  set(_frq_required_flags "${CMAKE_REQUIRED_FLAGS}")
+  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -march=armv8-a+sme+sme-f64f64")
+  check_cxx_source_compiles("#include <arm_sme.h>
+__arm_locally_streaming unsigned probe(double* p) {
+  const auto pg = svptrue_b64();
+  const auto v = svld1_f64(pg, p);
+  svst1_f64(pg, p, svadd_f64_x(pg, v, v));
+  return svcntb();
+}
+int main() { return 0; }" PHOTOSPIDER_COMPILER_HAS_FRQ_SME_ACLE)
+  set(CMAKE_REQUIRED_FLAGS "${_frq_required_flags}")
+  if(PHOTOSPIDER_COMPILER_HAS_FRQ_SME_ACLE)
+    list(APPEND PHOTOSPIDER_OPERATION_SOURCES plugins/ops/05-filter/frequency_wavelet_sme.cpp)
+    set_source_files_properties(plugins/ops/05-filter/frequency_wavelet_sme.cpp PROPERTIES
+      COMPILE_OPTIONS "-march=armv8-a+sme+sme-f64f64;-fno-fast-math;-frounding-math;-ffp-contract=off")
+    set_property(SOURCE plugins/ops/05-filter/frequency_wavelet.cpp APPEND PROPERTY
+      COMPILE_DEFINITIONS PHOTOSPIDER_HAS_FRQ_SME=1)
+  else()
+    message(STATUS "Compiler lacks SME support; frequency wavelets retain NEON")
+  endif()
+endif()
+
 set_property(SOURCE ${PHOTOSPIDER_OPERATION_SOURCES} APPEND PROPERTY
   COMPILE_OPTIONS "-fno-fast-math" "-frounding-math" "-ffp-contract=off")
 include(${CMAKE_CURRENT_LIST_DIR}/NumericMath.cmake)

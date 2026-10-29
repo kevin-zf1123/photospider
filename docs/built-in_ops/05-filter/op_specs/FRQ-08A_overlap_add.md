@@ -5,14 +5,12 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D2
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: FRQ-08
 function: overlap_add
 proposed_operation_keys:
-- frequency.overlap_add_strict
-- frequency.overlap_add_accelerated_apple_silicon
-- frequency.overlap_add_accelerated_x86_64
-numeric_reference: E
+- frequency.overlap_add
+numeric_reference: F
 oracle_scope: mathematical_reference
 research_sources:
 - S12
@@ -22,7 +20,7 @@ research_sources:
 
 Overlap-add convolution .Status: **Proposed**.
 
-Inherits the [FRQ-08 family contract](FRQ-08_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numerical and accuracy contract](../../01-numeric/op_specs/NUM_common_contract.md) and [FMT metadata and straight-color semantics](../../02-format-color/op_specs/FMT_common_contract.md); this member and its family contract define the complete target behavior. RN stages, gradual underflow, and accelerated error limits are inherited and may not be weakened.
+Inherits the [FRQ-08 family contract](FRQ-08_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numerical and accuracy contract](../../01-numeric/op_specs/NUM_common_contract.md) and [FMT metadata and straight-color semantics](../../02-format-color/op_specs/FMT_common_contract.md); this member and its family contract define the complete target behavior. The family's local F profile takes precedence over inherited strict rounding and accelerated-error limits; structural, resource and lifecycle requirements remain applicable.
 
 ## Ports, Shape, and Semantics
 
@@ -34,15 +32,15 @@ Ports carry Results with fixed Tensor member schemas. Unless the member defines 
 
 Axes, anchor, output shape, and normalization none|sum|l1 are explicit. block_payload_height and block_payload_width are positive. fft_shape is at least payload+kernel-1. The block grid is anchored at the global input origin and does not restart at an ROI. A fixed kernel has no radius field.
 
-Floating-point values, including NaN and infinities, and floating-point overflow follow the corresponding NUM operation. This specification does not impose a category-wide finite-only input rule or turn floating-point overflow into an operation failure. Copy/bypass and unconsumed samples follow this member’s stated demand semantics. All parameters listed here are mandatory constructor arguments; constants fixed by a named mathematical profile are not configurable parameters. Every argument is stored in the direct node. Real parameters denote their stored Float64 values; decimal text is not treated as an exact real parameter.
+NaN, infinities, signed zero, underflow and overflow follow the selected native execution path and established floating-point environment. No finite-only payload scan or numerical-domain operation failure is introduced. Copy/bypass and unconsumed samples follow this member’s stated demand semantics. All parameters listed here are mandatory constructor arguments; constants fixed by a named mathematical profile are not configurable parameters. Every argument is stored in the direct node. Real parameters denote their stored Float64 values; decimal text is not treated as an exact real parameter.
 
 ## Mathematical Reference and Rounding
 
-Numeric reference: **E**; E/B/S definitions are in [FILTER_numeric_reference](FILTER_numeric_reference.md).
+Numeric reference: **F**, as defined by the [FRQ-08 family contract](FRQ-08_contract.md). The mathematical reference remains direct convolution.
 
-Strict results exactly match FIL01A direct E. Each non-overlapping input payload contributes to the full linear convolution. At each output point, exactly sum contributions from all covering blocks and apply RN once; do not first round each block result to the input dtype and then add normally.
+The mathematical target is FIL01A zero-extension linear convolution. Each non-overlapping input payload contributes its full convolution; every covering block contributes to each retained output point. Transform outputs and overlap accumulation use the native working dtype. Exact accumulation with one final rounding is not required.
 
-When this formula invokes another member, its RN stages must be retained as stated here or in the family contract; internal temporary operations may not introduce undeclared rounding. Signed zero, numerical-domain premises and explicit valid-input no-solution outcomes, gradual underflow, and output range follow the shared contract and NUM.
+Kernel normalization is evaluated in binary64 before conversion to the native working dtype. Float64 execution is never narrowed to Float32. Float32-input execution may use binary64 arithmetic to retain the Float64 kernel's range, with final conversion to Float32. Explicit FMA is permitted. Correct rounding, fixed ULP bounds and cross-platform bit patterns are not promised. Document absolute/relative error criteria; validate shapes, anchors, boundaries and support independently.
 
 ## Fixed reads, algorithmic control and schemas
 
@@ -52,15 +50,17 @@ Boundary coordinates use the complete logical image; ROI and tile edges are not 
 
 ## Algorithm, Resources, and Execution
 
-Candidate complexity: O(blocks * Pfft log Pfft * C). Block scheduling and work order do not change strict bits. Account for overlapping output accumulators and unpublished tiles in the budget.
+The FFT path costs O(blocks * Pfft log Pfft * C); direct evaluation costs O(P C A). Reserve the selected strategy's transform workspace, immutable plans, accumulation buffers and unpublished outputs. P denotes plane pixels, C independent planes and A kernel taps.
 
-In the complexity notation, P=HW, C=independent planes, A=taps, and T=steps. Arbitrary-precision limb bit complexity is accounted for separately and is not a measured benchmark. The shared protocol defines work, memory, and stage admission; cancellation; failure Status; and owner lifetime. A failed call publishes no successful Result export; previously retired call exports remain valid, and final RET results require successful Run completion. Do not spill automatically, silently lower precision, or call retired implementations as fallback.
+The current native implementation uses direct convolution when Kh<=15, Kw<=15 and Kh*Kw<=81; otherwise it uses the configured FFT strategy. Both strategies implement the same declared convolution under the F profile and the same unsuffixed operation key. Static shape, anchor, normalization, padding and block constraints remain mandatory, including for the direct strategy. The kernel is dynamic: every invocation consumes and normalizes its supplied coefficients and performs direct preparation or the kernel FFT. Shape-dependent plans and coefficient tables may be reused; kernel spectra are not reused across invocations.
+
+The shared protocol defines work, memory and stage admission, cancellation, failure Status and owner lifetime. A failed call publishes no successful Result export; previously retired call exports remain valid, and final RET results require successful Run completion. Do not spill automatically, silently lower precision or call retired implementations as fallback.
 
 ## Oracle, Fixtures, and Acceptance
 
-Verify agreement with direct convolution for at least three block shapes, impulses crossing block boundaries, whole-image versus ROI-tile requests, and kernels larger than the payload. A low budget must not silently switch to a non-equivalent approximation.
+Verify F-profile numerical agreement with direct convolution for at least three block shapes, impulses crossing block boundaries, whole-image versus ROI-tile requests and kernels larger than the payload. Check output shapes, anchors and the fixed global block origin exactly. A low budget must not silently change the mathematical operation or lower precision.
 
-The reference function evaluates the numerical formula on small inputs; it is not a production kernel or a complete Ports-schema/preflight simulator. ExactRational evaluates rational expressions and rounds directly to IEEE format. For transcendental functions, use a DirectedMPFR result as a strict golden only when the interval is closed. If the interval does not determine rounding, report Inconclusive rather than substituting an approximation.
+The reference evaluates the mathematical formula on small inputs; it is not a production kernel or complete schema/preflight simulator. Exact rational or directed high-precision references diagnose numerical error; their rounded bits do not impose bitwise acceptance on this F profile. Compare outputs with documented absolute/relative error criteria, and verify discrete shapes, anchors, boundaries and support independently.
 
 `fil01.spatial.convolve2d(image, kernel, anchor=(0, 0), *, direction='convolve', normalization='none', bias=0, boundary='reflect_half', cval=0, output_shape='same', dtype)` → [source](../../../../oracle/ops/filter/fil01/spatial.py).
 `frq08.spectral.block_partition(height, width, payload_height, payload_width, kernel_height, kernel_width, *, save=False)` → [source](../../../../oracle/ops/filter/frq08/spectral.py).
@@ -71,13 +71,13 @@ Reproduction steps and proof levels are in [oracle README](../../../../oracle/op
 
 ## Backend and Registration Status
 
-The keys above are naming proposals only; strict and both CPU-accelerated variants are not registered or implemented. Accelerated implementations must satisfy the NUM final-value Float32-scaled four-ULP bound and fallback rules. Error budgets may not be accumulated per tap, axis, stage, or iteration. Approximation may not change exact decisions such as thresholds, ordering, boundaries, copies, or output support.
+The native operation is implemented and registered as `frequency.overlap_add`. CPU implementations share this unsuffixed key and the family F profile. Separate strict or accelerated suffixes are not registered.
 
-Float64 accelerated execution retains Float64 inputs, outputs, and exponent range; it does not convert to Float32 first. Values outside the Float32-scaled range use the strict NUM fallback. No kernel, CPU, or ISA performance or differential acceptance runs were performed for this package.
+Implementation and registration are complete; this does not establish complete numerical, runtime or performance acceptance.
 
-## Conceptual DAG (Not an Existing API)
+## Execution Outline
 
-`static parameters + schemas → compile fixed reads/tasks → prepare → unchecked arithmetic with declared RN stages → complete tiles → ordered call retirement`
+`static parameters + schemas → compile fixed reads/tasks → prepare → ordinary native floating-point computation → complete tiles → ordered call retirement`
 
 This diagram adds no implicit color conversion, hidden alpha premultiplication, automatic spectral correction, or zero-fill for missing data. complete-input demand and multistage buffering are defined by this member and its family contract.
 

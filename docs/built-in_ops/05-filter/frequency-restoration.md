@@ -4,7 +4,7 @@
 
 本页列出频域与恢复族；[空间滤波、边缘与细节](spatial.md)列出其余 20 族。
 
-FRQ-01～06 的 14 个成员已提供 CPU 实现与显式 FrequencyGrid SDK helper，共 30 个注册键。FRQ-07～10 的 12 个成员仍未实现；规格状态继续为 Proposed。
+FRQ-01～06 的 14 个成员已提供 CPU 实现与显式 FrequencyGrid SDK helper，共 30 个注册键。FRQ-07～10 的 12 个成员已提供原生 Float32/Float64 CPU 实现和显式 SDK helper；规格成熟度继续为 Proposed，性能验收与实现状态分别记录。
 
 FFT/IFFT/RFFT/IRFFT 使用普通浮点算法，注册名为 `frequency.fft2`、`frequency.ifft2`、`frequency.rfft2`、`frequency.irfft2`。四个变换不提供 strict/accelerated 选择；SDK `transform(document, member, inputs, grid)` 使用同一契约。Float32 输入使用原生 binary32 工作值、蝶形、累加、实数重组与输出缩放，Float64 使用 binary64。尺寸决定的三角系数与归一化常数先以 binary64 生成，再转换为工作 dtype。普通浮点舍入、NaN payload、零符号和中间溢出遵循实际计算；Float32 的中间动态范围也属于单精度，不会按输入值自动提升精度重算。小残差与不同算法、平台间的差异继续按原有误差阈值验收，不承诺与 OpenCV/MATLAB 逐位相同。
 
@@ -32,7 +32,7 @@ mixed plan 的 double radix-4 对标量和不同包宽统一采用每个独立�
 
 短 double 行内核的费用为 N≤16 时 40N，其余为 72N+4R(N/4)；列内核为 N≤8 时 32N，其余为 48N+4C(N/4)。行 gather/combine 段分别声明 256/320 单位，两列 radix-4 段声明 384，最大不可分叶子段为 640，计入构造、标量控制及 AVX/NEON 布局操作。原生偶数列与可选标量尾列按各自成本分配精确且互不重叠的份额。Float64 原生列仅按偶数列的工作量选择参与数，该部分不超过 2^20 单位时保持串行，标量尾列不会单独触发临界规模的并行阶段。
 
-typed CPU invocation ABI9 继续对同一 Run 累计工作量。确定成本的块在执行前准入，块内及块间每不超过 1024 个标量单位检查取消；1024 不是单次准入请求的上限。节点 `max_work` 分别限制每次 invocation。四个变换不消耗精化阶段，冷启动也可使用 `psx --max-stages 0`；其他 FRQ 成员保留各自的严格或加速数值契约。参数、内存与执行边界见 [FRQ-01](op_specs/FRQ-01_contract.md#runtime-integration-and-remaining-acceptance)。
+typed CPU invocation ABI9 继续对同一 Run 累计工作量。确定成本的块在执行前准入，块内及块间每不超过 1024 个标量单位检查取消；1024 不是单次准入请求的上限。节点 `max_work` 分别限制每次 invocation。四个变换不消耗精化阶段，冷启动也可使用 `psx --max-stages 0`；FRQ-07～10 使用各族原生 F 契约，其他成员保留各自的数值契约。参数、内存与执行边界见 [FRQ-01](op_specs/FRQ-01_contract.md#runtime-integration-and-remaining-acceptance)。
 
 执行器构造 Result 时使用 `max(1 GiB, ExecutionContextConfig::maximum_live_bytes)` 聚合增长上限，计入保留的 backing 容量及发布元数据。默认值仍为 1 GiB；提高 Context 的 Payload 配置也会提高执行器 Result 的增长上限，Host、Payload 和 Metadata 各自的资源限制继续生效。配置能够同时容纳两份输出、scratch 和元数据时，可发布完整 16384×16384 Float32 输出。显式选择较小输出区域仍保留完整变换依赖。
 
@@ -76,11 +76,11 @@ FRQ 的进程级工作池与 Context 的执行 coordinator 分别持有线程。
 
 RES-11A 现命名为低对比区域平滑，RES-11B 为成对块边界平滑；两者保留原窗口、阈值、mask、strength 混合/配对校正公式。它们不自动识别色带、块网格或真实边缘。RES-12B 命名为 Gaussian low-pass workflow helper，去网屏是用途示例，频率尺度由调用者指定。恢复用途的数学公式合规与逐用途质量评分分开验收；评分指标和阈值在实现时确定。
 
-FRQ-07/08/09 与 RES-08 仍未实现，其 E-strict 目标没有继承四个普通变换的 F 例外。直接复合普通 FFT、逐点运算和 IFFT 只能作为候选或另行定义的 workflow；严格实现必须对整个数学表达式及最终舍入建立认证，并在需要时采用符合契约的回退。认证、精化与回退的工作和受控存储均须预算，资源不足保留原失败行为。
+FRQ-07～10 使用各族规格明确规定的 F / `native_float_v1` 契约：普通浮点单遍计算，不要求正确舍入、固定 ULP 上界或跨算法逐位一致；Float64 始终保持 binary64。数学公式、边界、anchor、输出原点、全局分块网格、独立编辑的小波系数及资源与取消语义继续有效。RES-08 尚未实现，其 E-strict 目标未因此改变；直接复合普通 FFT、逐点运算和 IFFT 不建立 RES-08 的严格认证。
 
 ## 关键选择
 
-DFT backward 正向不缩放、逆向除 HW，ortho 独立；半谱只压缩 x 轴并保存原始奇偶宽。Hermitian 共轭关系由调用方保证；显式投影是独立算子，逆变换不扫描校验或静默丢弃虚部来修复输入。FFT/OLA/OLS 卷积的 strict 数学与直接卷积一致，执行 strategy 不产生新的舍入自由度。DCT I–IV 的矩阵和 inverse/ortho 权重明确；首版小波是三个具名 profile，不接受任意 basis 字符串。
+DFT backward 正向不缩放、逆向除 HW，ortho 独立；半谱只压缩 x 轴并保存原始奇偶宽。Hermitian 共轭关系由调用方保证；显式投影是独立算子，逆变换不扫描校验或静默丢弃虚部来修复输入。FFT/OLA/OLS 卷积的数学结果与相应直接卷积一致，执行 strategy 可在 F 契约内产生普通浮点舍入差异。DCT I–IV 的矩阵和 inverse/ortho 权重明确；首版小波是三个具名 profile，不接受任意 basis 字符串。
 
 恢复中 Wiener NSR 与 Tikhonov 正则不同；RL 必须使用有限 A 的真实 Aᵀ 和 sensitivity，并明确每步 RN。每种迭代算法同时提供固定 `max_iterations` profile 与独立早停 profile；固定 profile 不暗中早停。Anscombe 代数逆和均值域逆分版；后者两项 oracle 仅诊断级。BM3D/CBM3D 定义为自行原生实现，并须与固定版本的第三方实现对照；当前尚未指定对照实现或版本，不据此宣称已完成对照。
 

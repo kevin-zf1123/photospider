@@ -71,7 +71,6 @@ function(ps_configure_ocio)
   set_source_files_properties("${_ps_color}/ocio_engine.cpp" PROPERTIES
     COMPILE_OPTIONS "-include;${_ps_color}/engine_cpp_redirect.hpp")
   target_link_options(photospider_color_engine PRIVATE -nostdlib++)
-  target_link_libraries(photospider_color_engine PRIVATE "${_private_runtime}" "${_private_abi}")
   if(APPLE)
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/color-engines/exports.txt" "_ps_color_*\n")
     target_link_options(photospider_color_engine PRIVATE
@@ -108,6 +107,11 @@ function(ps_configure_ocio)
   ps_color_fetch(ps_color_pystring https://github.com/imageworks/pystring/archive/refs/tags/v1.1.4.tar.gz
     49da0fe2a049340d3c45cce530df63a2278af936003642330287b68cefd788fb)
   add_library(pystring STATIC "${ps_color_pystring_SOURCE_DIR}/pystring.cpp")
+  # This target belongs to the parent directory, so function-local CXX_FLAGS
+  # are not retained at generation. Match the isolated runtime of its caller.
+  target_compile_options(pystring PRIVATE -nostdinc++
+    "SHELL:-isystem ${PS_COLOR_LIBCXX_HEADERS}"
+    "-include" "${_ps_color}/engine_cpp_redirect.hpp")
   target_include_directories(pystring PUBLIC "${ps_color_pystring_SOURCE_DIR}")
   add_library(pystring::pystring ALIAS pystring)
   ps_color_fetch(ps_color_imath https://github.com/AcademySoftwareFoundation/Imath/archive/refs/tags/v3.2.1.tar.gz
@@ -158,7 +162,10 @@ function(ps_configure_ocio)
   target_compile_definitions(photospider_color_engine PRIVATE
     PS_COLOR_BUILD_HASH="${_build_short}")
   target_include_directories(OpenColorIO PRIVATE "${ps_color_imath_SOURCE_DIR}/src")
-  target_link_libraries(photospider_color_engine PRIVATE OpenColorIO yaml-cpp pystring)
+  # ELF linkers resolve static runtime members after their consumers. In
+  # particular yaml-cpp's regex exception symbols are not used by the adapter.
+  target_link_libraries(photospider_color_engine PRIVATE OpenColorIO yaml-cpp
+    pystring "${_private_runtime}" "${_private_abi}")
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${_ps_color}/prepare_ocio.py" "${_ps_color}/prepare_runtime.py")
   install(FILES "${ps_color_ocio_SOURCE_DIR}/LICENSE"
