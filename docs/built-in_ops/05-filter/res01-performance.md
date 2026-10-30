@@ -32,7 +32,7 @@ RES13/14 and frozen kernel files are outside this change. Existing mathematical 
 
 ## Benchmark scope and complete matrix
 
-The reproducible driver is [tools/res_performance](../../../tools/res_performance/README.md). It includes the production numerical header, with no substituted algorithm. Each invocation recomputes the result. Both candidates use the same empty compiler barrier with escaped buffer pointers after every call, preventing dead-store elimination and loop hoisting; actual timed-loop callsites are also inspected. Input/output buffers are reused; allocation, fixture initialization, scratch first touch and first numerical call are reported separately. The executor is measured separately below. MATLAB measurements are public expressions including temporary arrays; they are not isolated measurements of MATLAB's internal kernels.
+The numerical benchmark uses the production numerical header, with no substituted algorithm. Each invocation recomputes the result. Both candidates use the same empty compiler barrier with escaped buffer pointers after every call, preventing dead-store elimination and loop hoisting; actual timed-loop callsites are also inspected. Input/output buffers are reused; allocation, fixture initialization, scratch first touch and first numerical call are reported separately. The executor is measured separately below. MATLAB measurements are public expressions including temporary arrays; they are not isolated measurements of MATLAB's internal kernels.
 
 Each binary covers fp32 and fp64 at square sides `2^p + d`, for `p={4,5,8,10,12,14}` and `d={-1,0,1}`, plus `1x65536` and portrait A4 at 150/300/350/600 dpi. A4 shapes, as height × width, are 1754×1240, 3508×2480, 4093×2894 and 7016×4961. There are 23 shapes per dtype.
 
@@ -268,9 +268,9 @@ The A spec's final Float64 scaling tolerance applies to a given native MAD. A se
 
 The source audit checks 34 member specs and 12 family contracts for the native contract, and confirms no RES13/14 or frozen kernel changes. Linux operation integration links cached core/SDK archives whose 174 kernel/header source files match the current checkout; filesystem metadata files are excluded from that statement. The numerical build hash audit verifies all six final binaries against their metadata and the current numerical source files. The final runtime-only store-threshold edit does not change those numerical sources or the six timed binaries. Final runtime metadata records the separately rebuilt integration source hashes.
 
-Temporary numerical/runtime acceptance sources and executables are removed after validation as required by AGENTS.md. The independent oracle and reusable performance driver remain. ClangFormat 21, cpplint on changed C++, the bundled-operation build and `git diff --check` are the final source gates. No frozen kernel file or existing ABI layout is modified.
+Temporary numerical/runtime acceptance sources and executables are removed after validation as required by AGENTS.md. The independent oracle remains. ClangFormat 21, cpplint on changed C++, the bundled-operation build and `git diff --check` are the final source gates. No frozen kernel file or existing ABI layout is modified.
 
-Raw measurements and profiles are retained under `out/res01-performance/`: full JSONL matrices, build metadata/hashes, `summary/summary.json`, `summary/cases.csv`, M5 `sample` reports, Linux `perf stat/report` output, disassemblies and runtime/oracle result logs. The generated summary checks the complete expected case set and rejects missing/duplicate entries. Reproduction commands are in the driver README.
+Raw measurements and profiles are retained under `out/res01-performance/`: full JSONL matrices, build metadata/hashes, `summary/summary.json`, `summary/cases.csv`, M5 `sample` reports, Linux `perf stat/report` output, disassemblies and runtime/oracle result logs. The generated summary checks the complete expected case set and rejects missing/duplicate entries.
 
 ## Primary sources consulted
 

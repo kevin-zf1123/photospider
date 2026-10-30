@@ -139,10 +139,6 @@ __pycache__/
 /third_party/sleef/
 /third_party/yyjson/
 
-!tools/
-!tools/compile_native_vulkan_fixtures.py
-!tools/compile_builtin_vulkan.py
-
 !tests/package/
 !tests/package/test_package_version.cmake
 

@@ -1,7 +1,6 @@
 #pragma once
 #include <cstdint>
 // Generated from Vulkan Slang fixtures with Slang 2026.18.2.
-// Regenerate: python3 tools/compile_native_vulkan_fixtures.py --slangc <slangc>
 inline constexpr std::uint32_t kNativeVulkanSpirv[] = {
     0x07230203U, 0x00010300U, 0x00280000U, 0x00000066U, 0x00000000U, 0x00020011U,
     0x0000000bU, 0x00020011U, 0x00000001U, 0x0003000eU, 0x00000000U, 0x00000001U,
