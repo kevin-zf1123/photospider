@@ -4,7 +4,7 @@ id: RES-05
 kind: family_contract
 category: 05-filter
 status: Proposed
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: 05-filter
 members:
 - RES-05A

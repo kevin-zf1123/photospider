@@ -112,4 +112,77 @@ PHOTOSPIDER_OPS_API Result<WorkflowInput> cbm3d_native(
     const Bm3dOptions& options, const TensorDescription& input_description,
     const std::string& group);
 
+/** @brief Explicit native Chambolle-Pock parameters for RES-05.
+ * All fields are required. y_axis and x_axis are distinct sample-shape axes
+ * in a rank 2..8 Float32/Float64 tensor; other axes are independent planes.
+ * max_iterations is nonnegative. Finite representable lambda>=0, tau>0,
+ * sigma>0, theta in [0,1], dx>0, dy>0 and
+ * tau*sigma*4*(1/(dx*dx)+1/(dy*dy))<1 are unchecked numerical premises.
+ * The objective is 0.5*sum((u-input)^2)+lambda*sum(phi(Ku)), with no-flux
+ * forward differences and their algebraic transpose. State is native input
+ * precision. Every complete step stores dual, primal and extrapolated state.
+ */
+struct TvRofOptions {
+  std::int64_t y_axis, x_axis;
+  double lambda;
+  std::int64_t max_iterations;
+  double tau, sigma, theta, dx, dy;
+};
+
+/** @brief Explicit controls for the independent RES-05 early-stop members.
+ * check_interval is a positive Int64 completed-round count. Finite nonnegative
+ * atol is in average-objective units; rtol is dimensionless. The coherent
+ * per-plane primal-dual gap must pass in every plane. Nonfinite checks cannot
+ * pass. There is at most one asynchronous check; busy triggers are discarded.
+ * A winning check returns its checked state; reaching max_iterations commits
+ * the final state without waiting for a pending reduction to finish. Worker
+ * cleanup is bounded by cancellation checkpoints before scratch is released.
+ * Returned rounds may vary between executions. There are no diagnostic ports.
+ */
+struct TvStoppingOptions {
+  std::int64_t check_interval;
+  double atol, rtol;
+};
+
+/** @brief Append RES-05A, key restoration.tv_rof_isotropic.
+ * phi(gx,gy)=hypot(gx,gy); the anisotropic member uses abs(gx)+abs(gy).
+ * The output retains the input shape/dtype. No color/alpha interpretation,
+ * clipping or implicit normalization occurs. lambda=0 or max_iterations=0
+ * copies input bits and reads only requested samples. Other calls solve whole
+ * logical planes once and publish requested tiles/ROI from the global result.
+ * Fixed-step members run exactly max_iterations, without data-dependent exit.
+ *
+ * These helpers append one ordinary node transactionally; they own no payload.
+ * Static parameter/schema/axis errors are checked during compilation and
+ * preparation. Resource, upstream and cancellation failures propagate.
+ * bad_alloc may escape the helper. Serialize mutation of one document;
+ * independent documents and executions are safe. Prepared state is immutable;
+ * all input-dependent state uses invocation-owned scratch, with no global
+ * payload cache. Results retain standard kernel ownership/lifetime.
+ */
+PHOTOSPIDER_OPS_API Result<WorkflowInput> tv_rof_isotropic(
+    WorkflowDocument&, WorkflowInput input, const TvRofOptions& options);
+
+/** @brief Append RES-05B, key restoration.tv_rof_anisotropic.
+ * Interface, ownership and errors match tv_rof_isotropic; phi is anisotropic.
+ */
+PHOTOSPIDER_OPS_API Result<WorkflowInput> tv_rof_anisotropic(
+    WorkflowDocument&, WorkflowInput input, const TvRofOptions& options);
+
+/** @brief Append RES-05C, key restoration.tv_rof_isotropic_early_stop.
+ * Uses TvStoppingOptions and the isotropic fixed-step recurrence. Identity
+ * branches do not check convergence. No round-zero or forced final check.
+ * All failures retain failure status after normal-termination races.
+ */
+PHOTOSPIDER_OPS_API Result<WorkflowInput> tv_rof_isotropic_early_stop(
+    WorkflowDocument&, WorkflowInput input, const TvRofOptions& options,
+    const TvStoppingOptions& stopping);
+
+/** @brief Append RES-05D, key restoration.tv_rof_anisotropic_early_stop.
+ * Uses the anisotropic recurrence and the same stopping/lifecycle contract.
+ */
+PHOTOSPIDER_OPS_API Result<WorkflowInput> tv_rof_anisotropic_early_stop(
+    WorkflowDocument&, WorkflowInput input, const TvRofOptions& options,
+    const TvStoppingOptions& stopping);
+
 }  // namespace ps::restoration

@@ -105,10 +105,10 @@ FRQ-07～10 和 RES-01～12 使用原生 fp32/fp64 浮点契约（数值类别 F
 | [RES-03B — cycle_spin_wavelet_denoise](op_specs/RES-03B_cycle_spin_wavelet_denoise.md) | authoring_helper / D2_draft | — | 已实现 |
 | [RES-04A — bm3d_native](op_specs/RES-04A_bm3d_native.md) | primitive / D2_draft | `restoration.bm3d_native` | 已实现 |
 | [RES-04B — cbm3d_native](op_specs/RES-04B_cbm3d_native.md) | primitive / D2_draft | `restoration.cbm3d_native` | 已实现 |
-| [RES-05A — Isotropic ROF denoising, fixed steps](op_specs/RES-05A_tv_rof_isotropic.md) | primitive | `restoration.tv_rof_isotropic` | 未实现 |
-| [RES-05B — Anisotropic ROF denoising, fixed steps](op_specs/RES-05B_tv_rof_anisotropic.md) | primitive | `restoration.tv_rof_anisotropic` | 未实现 |
-| [RES-05C — Isotropic ROF total-variation denoising with asynchronous early stopping](op_specs/RES-05C_tv_rof_isotropic_early_stop.md) | primitive | `restoration.tv_rof_isotropic_early_stop` | 未实现 |
-| [RES-05D — Anisotropic ROF total-variation denoising with asynchronous early stopping](op_specs/RES-05D_tv_rof_anisotropic_early_stop.md) | primitive | `restoration.tv_rof_anisotropic_early_stop` | 未实现 |
+| [RES-05A — Isotropic ROF denoising, fixed steps](op_specs/RES-05A_tv_rof_isotropic.md) | primitive | `restoration.tv_rof_isotropic` | 已实现 |
+| [RES-05B — Anisotropic ROF denoising, fixed steps](op_specs/RES-05B_tv_rof_anisotropic.md) | primitive | `restoration.tv_rof_anisotropic` | 已实现 |
+| [RES-05C — Isotropic ROF total-variation denoising with asynchronous early stopping](op_specs/RES-05C_tv_rof_isotropic_early_stop.md) | primitive | `restoration.tv_rof_isotropic_early_stop` | 已实现 |
+| [RES-05D — Anisotropic ROF total-variation denoising with asynchronous early stopping](op_specs/RES-05D_tv_rof_anisotropic_early_stop.md) | primitive | `restoration.tv_rof_anisotropic_early_stop` | 已实现 |
 | [RES-06A — Exponential conductance diffusion, fixed steps](op_specs/RES-06A_diffusion_exponential.md) | primitive | `restoration.diffusion_exponential` | 未实现 |
 | [RES-06B — Reciprocal conductance diffusion, fixed steps](op_specs/RES-06B_diffusion_reciprocal.md) | primitive | `restoration.diffusion_reciprocal` | 未实现 |
 | [RES-06C — Exponential edge-preserving diffusion with asynchronous early stopping](op_specs/RES-06C_diffusion_exponential_early_stop.md) | primitive | `restoration.diffusion_exponential_early_stop` | 未实现 |

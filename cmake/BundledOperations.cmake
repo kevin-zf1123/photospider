@@ -50,6 +50,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/05-filter/restoration_nlm.cpp
   plugins/ops/05-filter/restoration_wavelet.cpp
   plugins/ops/05-filter/restoration_bm3d.cpp
+  plugins/ops/05-filter/restoration_tv.cpp
   plugins/ops/05-filter/frequency_convolution.cpp
   plugins/ops/05-filter/frequency_dct.cpp
   plugins/ops/05-filter/frequency_wavelet.cpp

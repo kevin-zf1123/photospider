@@ -4,7 +4,7 @@ id: RES-05C
 kind: primitive
 category: 05-filter
 status: Proposed
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: RES-05
 function: tv_rof_isotropic_early_stop
 proposed_operation_keys:
@@ -21,7 +21,7 @@ This is an independent early-stopping profile, not a stop-mode switch on the fix
 
 Operation key: `restoration.tv_rof_isotropic_early_stop`.
 
-All parameters, including `y_axis`, `x_axis`, `max_iterations`, check interval, `atol`, `rtol` and algorithm controls, are explicit required inputs; factories supply no defaults.
+All parameters, including `y_axis`, `x_axis`, `max_iterations`, `check_interval`, `atol`, `rtol` and algorithm controls, are explicit required inputs; factories supply no defaults. In addition to the fixed-step parameter types, `check_interval` is a positive static Int64, and `atol` and `rtol` are Float64 values converted to the main input's native working dtype for the predicate. The common optional Int64 `max_work` parameter bounds charged work and does not change the recurrence.
 
 ## Mathematics
 

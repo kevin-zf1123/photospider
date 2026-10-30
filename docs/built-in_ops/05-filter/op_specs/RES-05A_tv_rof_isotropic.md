@@ -4,7 +4,7 @@ id: RES-05A
 kind: primitive
 category: 05-filter
 status: Proposed
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: RES-05
 function: tv_rof_isotropic
 proposed_operation_keys:
@@ -26,6 +26,8 @@ Operation key: `restoration.tv_rof_isotropic`.
 `input` and `output` are Results with matching fixed Tensor schemas and one independent solve per plane. The operation does not implement vector/color TV. Color interpretation, if needed by a surrounding workflow, is explicit configuration rather than attached Result metadata.
 
 ### Parameters
+
+Static `y_axis`, `x_axis`, and `max_iterations` have type Int64. `lambda`, `tau`, `sigma`, `theta`, `dx`, and `dy` have type Float64; each is converted to the main input's native working dtype for arithmetic. The common optional Int64 `max_work` parameter bounds charged work and does not change the recurrence.
 
 `lambda>=0`, `max_iterations>=0`, `tau>0`, `sigma>0`, `theta∈[0,1]`, `dx>0`, `dy>0`, and explicit `y_axis` and `x_axis` are required. Also require `tau*sigma*4*(1/dx^2+1/dy^2)<1`. There are no constructor defaults. `lambda` is in the units of the stated ROF objective; `dx,dy` are sample spacings. Real values mean their stored Float64 values, not exact decimal rationals. Fixed mathematical choices are the no-flux boundary and this member’s named `phi`; configurable parameters may not be omitted.
 
