@@ -16,6 +16,7 @@ Each area groups existing references by specification family (`num01/`, `crv01/`
 | Mask and morphology | [`mask_morphology/`](mask_morphology/) | [Mask oracle README](mask_morphology/README.md) |
 | Filter and restoration | [`filter/`](filter/) | [Filter oracle README](filter/README.md) |
 | Grading, dither and halftone | [`07-grade/`](07-grade/) | [Strict GRD oracle README](07-grade/README.md) |
+| Basic compositing and keying | [`09-composite/`](09-composite/) | [Strict CMP/BLN/NBL/KEY oracle README](09-composite/README.md) |
 
 An oracle checks mathematical references within its documented scope; it does not
 establish that an operation is registered or accepted by the runtime.

@@ -30,8 +30,9 @@
 | [调色](07-grade/adjustments.md) | 100 个 tile 成员：基础调色、四条亮度路径、局部细节、加权统计、调色板抖动与半色调 |
 | [几何变换](08-transform/geometry.md) | 重采样、仿射、STMap、置换、液化 |
 | [鱼眼与投影](08-transform/projections.md) | 投影模型、畸变校正及 3D 光栅化边界 |
-| [混合与合成](09-composite/blending.md) | Porter-Duff、逐通道与非可分离混合 |
-| [抠像、绘制与修补](09-composite/keying-paint.md) | Matte、despill、clone、heal、roto |
+| [混合与合成](09-composite/blending.md) | 线性／编码域覆盖合成、逐通道及原生模型颜色混合 |
+| [抠像与 matte](09-composite/keying.md) | 色键、背景估计、matting、去溢色与边缘延色 |
+| [绘制与修补研究](09-composite/keying-paint.md) | 笔刷、clone、heal 等独立研究入口 |
 | [分析与示波器](10-analysis/scopes.md) | 直方图、波形、矢量、频谱、PSD、统计 |
 | [RAW 与摄影流程](11-raw-photo/pipeline.md) | 传感器校正、去马赛克、HDR/堆栈/全景 |
 | [时域、模型与特殊数据](12-temporal-ml/requirements.md) | 帧序列、光流、跟踪、推理、deep/AOV |
