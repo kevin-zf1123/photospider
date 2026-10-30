@@ -76,6 +76,7 @@
 !oracle/ops/**/*.json
 !oracle/ops/**/*.jsonl
 !oracle/ops/**/*.txt
+!oracle/ops/07-grade/data/CIE_xyz_1931_2deg.csv
 
 # Maintained kernel unit/integration, package, fixture, and support sources.
 !tests/

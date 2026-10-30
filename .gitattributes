@@ -6,3 +6,6 @@ plugins/ops/05-filter/smaa_resources/*.h -text -whitespace
 plugins/ops/05-filter/smaa_resources/LICENSE.txt -text -whitespace
 oracle/ops/filter/fil19/pinned/SMAA.hlsl -text -whitespace
 oracle/ops/filter/fil19/pinned/LICENSE.txt -text -whitespace
+
+# Preserve the published CIE observer dataset bytes.
+oracle/ops/07-grade/data/CIE_xyz_1931_2deg.csv -text -whitespace

@@ -1,0 +1,41 @@
+---
+spec_schema_version: 1
+id: GRD-05F
+parent_id: GRD-05
+function: curves_oklab_l
+kind: primitive
+category: 07-grade
+status: Proposed
+document_maturity: D1_draft
+implementation_status: not_implemented
+clarification_status: complete
+execution: tile
+proposed_operation_keys:
+  - grade.curves_oklab_l
+---
+
+# GRD-05F: OKLab lightness curve
+
+Inherits the [family contract](GRD-05_curves_contract.md) and [GRD common contract](GRD_common_contract.md). The proposed tile operation `grade.curves_oklab_l` performs the transformation below.
+
+## Interface
+
+`input: T[S,C]`, `knots: Float64[K]`, `ordinates: Float64[K,1]` -> `values: T[S,C]`.
+
+Select relative linear RGB. Required method=linear|pchip; edge=reject|clamp|linear_extrapolate defaults reject; 2<=K<=65536. Curve coordinates use the `oklab_l` feature unit in the common brightness routes.
+
+Port ordering, tensor members, calculation dtype, channel selection, static parameter types and unchecked premises follow the common contract. Output shape and dtype are those in the signature.
+
+## Mathematics
+
+Extract the `oklab_l` feature in Float64. Evaluate the GRD-05A/B curve with Float64 output, and replace the target coordinate using [GRD-20J](GRD-20J_set_oklab_lightness.md). Each named feature/curve stage has a Float64 publication boundary. An unchanged mapped coordinate copies original RGB.
+
+## Behavior
+
+Each output uses the source query at that coordinate and the contributing control-table entries. The complete auxiliary table is an admitted static support superset. A source edit is local; table edits affect observations whose declared support includes the table. Empty and bypass-only requests have no table payload dependency.
+
+## Acceptance
+
+An identity curve preserves RGB when the published mapped coordinate equals the extracted coordinate. Test a nonidentity curve and retention of the route-specific color coordinates before inverse conversion.
+
+Apply the common native-versus-strict comparison rules and compare ROI/tile observations at identical global coordinates. Reference equations and source attribution are in the family contract and [research sources](../research-sources.md).
