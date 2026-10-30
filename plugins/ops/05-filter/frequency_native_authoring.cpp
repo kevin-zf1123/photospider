@@ -9,6 +9,7 @@
 #include "05-filter/frequency_native.hpp"
 #include "photospider/ops/frequency.hpp"
 #include "photospider/ops/numeric/workflow_authoring.hpp"
+#include "photospider/ops/restoration.hpp"
 
 namespace ps::frequency {
 namespace {
@@ -139,6 +140,31 @@ Parameters wave_parameters(const WaveletOptions& p, unsigned first,
       {"expected_dtype",
        std::string(p.dtype == ElementType::Float32 ? "float32" : "float64")}};
 }
+std::map<std::string, const WaveletBand*> directory(
+    const WaveletBands& collection) {
+  const auto& p = collection.options;
+  validate(p);
+  parameter(
+      collection.schema == "FilterBands/v1" &&
+          collection.bands.size() == static_cast<std::size_t>(3 * p.levels + 1),
+      "wavelet complete directory");
+  std::map<std::string, const WaveletBand*> result;
+  for (const auto& b : collection.bands) {
+    parameter(b.level <= static_cast<std::uint64_t>(p.levels) &&
+                  (b.orientation == "LL"
+                       ? b.level == static_cast<std::uint64_t>(p.levels)
+                       : b.level >= 1),
+              "wavelet band level");
+    parameter(b.orientation == "LL" || b.orientation == "LH_y" ||
+                  b.orientation == "HL_x" || b.orientation == "HH",
+              "wavelet orientation");
+    require(matches(b, metadata(p, b.level, b.orientation, b.value)),
+            "wavelet static metadata mismatch");
+    parameter(result.emplace(b.band_id, &b).second,
+              "wavelet duplicate band ID");
+  }
+  return result;
+}
 }  // namespace
 Result<WorkflowNodeOutput> convolve(WorkflowDocument& document,
                                     const std::string& member,
@@ -232,28 +258,10 @@ Result<WorkflowNodeOutput> inverse_wavelet(WorkflowDocument& document,
                                            const WaveletBands& collection) {
   try {
     const auto& p = collection.options;
-    validate(p);
-    parameter(collection.schema == "FilterBands/v1" &&
-                  collection.bands.size() ==
-                      static_cast<std::size_t>(3 * p.levels + 1),
-              "wavelet complete directory");
-    std::map<std::string, const WaveletBand*> directory;
+    const auto directory = ps::frequency::directory(collection);
     std::vector<WorkflowInput> references;
-    for (const auto& b : collection.bands) {
-      parameter(b.level <= static_cast<std::uint64_t>(p.levels) &&
-                    (b.orientation == "LL"
-                         ? b.level == static_cast<std::uint64_t>(p.levels)
-                         : b.level >= 1),
-                "wavelet band level");
-      parameter(b.orientation == "LL" || b.orientation == "LH_y" ||
-                    b.orientation == "HL_x" || b.orientation == "HH",
-                "wavelet orientation");
-      require(matches(b, metadata(p, b.level, b.orientation, b.value)),
-              "wavelet static metadata mismatch");
-      parameter(directory.emplace(b.band_id, &b).second,
-                "wavelet duplicate band ID");
+    for (const auto& b : collection.bands)
       references.push_back(b.value);
-    }
     auto staged = document;
     // Reserve all producer IDs even when edited bands originate outside nodes
     // already present in this document.
@@ -298,3 +306,164 @@ Result<WorkflowNodeOutput> inverse_wavelet(WorkflowDocument& document,
   }
 }
 }  // namespace ps::frequency
+
+namespace ps::restoration {
+namespace {
+using plugin_internal::frequency::parameter;
+using plugin_internal::frequency::take;
+WorkflowNodeOutput append(WorkflowDocument& d, const std::string& op,
+                          std::vector<WorkflowInput> in,
+                          std::map<std::string, ParameterValue> p,
+                          const std::string& port = "output") {
+  const auto ids = take(numeric::available_workflow_node_ids(d, 1, in));
+  d.nodes.push_back({ids[0], op, std::move(in), std::move(p)});
+  return {ids[0], port};
+}
+// Reserve producers that may not yet be part of the document. A temporary
+// unconnected guard node participates only in ID allocation during authoring.
+std::uint64_t reserve(WorkflowDocument& d,
+                      const std::vector<WorkflowInput>& refs) {
+  const auto id = take(numeric::available_workflow_node_ids(d, 1, refs))[0];
+  d.nodes.push_back({id, "", refs, {}});
+  return id;
+}
+}  // namespace
+Result<frequency::WaveletBands> threshold_wavelet_details(
+    WorkflowDocument& document, const frequency::WaveletBands& bands,
+    WorkflowInput thresholds, const std::string& mode) {
+  try {
+    const auto dir = frequency::directory(bands);
+    const auto& p = bands.options;
+    parameter(p.levels > 0, "threshold requires positive levels");
+    parameter(mode == "hard" || mode == "soft", "threshold mode");
+    auto staged = document;
+    std::vector<WorkflowInput> refs{thresholds};
+    for (const auto& b : bands.bands)
+      refs.push_back(b.value);
+    const auto guard = reserve(staged, refs);
+    auto result = bands;
+    for (unsigned first = 0; first < static_cast<unsigned>(p.levels);
+         first += 5) {
+      const unsigned end = std::min<unsigned>(first + 5, p.levels);
+      std::vector<WorkflowInput> inputs;
+      for (unsigned l = first + 1; l <= end; ++l)
+        for (const auto* role : {"LH_y", "HL_x", "HH"})
+          inputs.push_back(
+              dir.at(std::string(role) + "_" + std::to_string(l))->value);
+      WorkflowInput residual = dir.at("LL_" + std::to_string(p.levels))->value;
+      if (end != static_cast<unsigned>(p.levels)) {
+        // Reconstruct a structurally complete local directory. This residual
+        // is not selected by threshold tasks, so its producer is demand-pruned.
+        frequency::WaveletBands tail{"FilterBands/v1", p, {}};
+        tail.options.original_shape = frequency::shape(p, end);
+        tail.options.levels -= end;
+        for (unsigned l = end + 1; l <= static_cast<unsigned>(p.levels); ++l)
+          for (const auto* role : {"LH_y", "HL_x", "HH"})
+            tail.bands.push_back(frequency::metadata(
+                tail.options, l - end, role,
+                dir.at(std::string(role) + "_" + std::to_string(l))->value));
+        tail.bands.push_back(frequency::metadata(
+            tail.options, tail.options.levels, "LL", residual));
+        residual = take(frequency::inverse_wavelet(staged, tail));
+      }
+      inputs.push_back(residual);
+      const auto packed = append(staged, "frequency.assemble_" + p.profile,
+                                 std::move(inputs), {}, "bands");
+      const auto edited = append(
+          staged, "restoration.threshold_wavelet_details", {packed, thresholds},
+          {{"mode", mode},
+           {"first_level", static_cast<std::int64_t>(first)},
+           {"total_levels", p.levels},
+           {"y_axis", p.y_axis},
+           {"x_axis", p.x_axis},
+           {"original_height",
+            static_cast<std::int64_t>(frequency::shape(p, first)[p.y_axis])},
+           {"original_width",
+            static_cast<std::int64_t>(frequency::shape(p, first)[p.x_axis])}},
+          "bands");
+      for (auto& b : result.bands) {
+        if (b.orientation == "LL" || b.level <= first || b.level > end)
+          continue;
+        b.value = append(
+            staged, "frequency.select_" + p.profile, {edited},
+            {{"band", b.orientation + "_" + std::to_string(b.level - first)}});
+      }
+    }
+    staged.nodes.erase(
+        std::find_if(staged.nodes.begin(), staged.nodes.end(),
+                     [guard](const auto& n) { return n.id == guard; }));
+    document = std::move(staged);
+    return Result<frequency::WaveletBands>(std::move(result));
+  } catch (const Status& s) {
+    return Result<frequency::WaveletBands>(s);
+  }
+}
+Result<WorkflowInput> cycle_spin_wavelet_denoise(
+    WorkflowDocument& document, WorkflowInput input, WorkflowInput thresholds,
+    const frequency::WaveletOptions& p,
+    const std::vector<std::array<std::int64_t, 2>>& shifts,
+    const std::string& mode) {
+  try {
+    frequency::validate(p);
+    parameter(p.profile == "haar_mean_lifting_v1" ||
+                  p.profile == "cdf53_float_lifting_v1",
+              "cycle spin decimated profile");
+    parameter(!shifts.empty() && shifts.size() <= 32768,
+              "cycle spin shift graph capacity");
+    parameter(mode == "hard" || mode == "soft", "cycle spin threshold mode");
+    if (!p.levels)
+      return Result<WorkflowInput>(input);
+    auto staged = document;
+    const auto guard = reserve(staged, {input, thresholds});
+    std::string shape;
+    for (auto n : p.original_shape) {
+      if (!shape.empty())
+        shape += ',';
+      shape += std::to_string(n);
+    }
+    const auto permute = [&](WorkflowInput value, std::array<std::int64_t, 2> s,
+                             bool inverse) {
+      // Reduction before negation also handles INT64_MIN without overflow.
+      for (unsigned a = 0; a < 2; ++a) {
+        const auto extent = p.original_shape[a == 0 ? p.y_axis : p.x_axis];
+        auto v = static_cast<__int128>(s[a]) % extent;
+        if (inverse)
+          v = -v;
+        s[a] = static_cast<std::int64_t>(v);
+      }
+      return append(
+          staged, "restoration.wrap_shift", {value},
+          {{"y_axis", p.y_axis},
+           {"x_axis", p.x_axis},
+           {"shift_y", s[0]},
+           {"shift_x", s[1]},
+           {"expected_shape", shape},
+           {"expected_dtype",
+            std::string(p.dtype == ElementType::Float32 ? "float32"
+                                                        : "float64")}});
+    };
+    WorkflowInput state = input;
+    for (std::size_t i = 0; i < shifts.size(); ++i) {
+      auto bands = take(frequency::decompose_wavelet(
+          staged, permute(input, shifts[i], false), p));
+      bands = take(threshold_wavelet_details(staged, bands, thresholds, mode));
+      const auto branch = permute(
+          take(frequency::inverse_wavelet(staged, bands)), shifts[i], true);
+      state =
+          i == 0 ? WorkflowInput(branch)
+                 : WorkflowInput(append(
+                       staged, "restoration.accumulate_native", {state, branch},
+                       {{"divisor", i + 1 == shifts.size()
+                                        ? static_cast<double>(shifts.size())
+                                        : 1.0}}));
+    }
+    staged.nodes.erase(
+        std::find_if(staged.nodes.begin(), staged.nodes.end(),
+                     [guard](const auto& n) { return n.id == guard; }));
+    document = std::move(staged);
+    return Result<WorkflowInput>(std::move(state));
+  } catch (const Status& s) {
+    return Result<WorkflowInput>(s);
+  }
+}
+}  // namespace ps::restoration

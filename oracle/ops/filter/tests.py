@@ -49,6 +49,7 @@ from oracle.ops.filter.frq10.multiscale import PROFILES as M_PROFILES
 from oracle.ops.filter.fil17.multiscale import local_laplacian as M_local_laplacian
 from oracle.ops.filter.fil15.multiscale import pyramid as M_pyramid
 from oracle.ops.filter.frq10.multiscale import threshold_bands as M_threshold_bands
+from oracle.ops.filter.frq10.multiscale import threshold_bands_native as M_threshold_bands_native
 from oracle.ops.filter.frq10.multiscale import wavelet as M_wavelet
 from oracle.ops.filter.res14.restoration import airlight as R_airlight
 from oracle.ops.filter.res14.restoration import apply_dehaze as R_apply_dehaze
@@ -455,6 +456,41 @@ def run_all(include_diagnostics=True,members=None):
     bands=M_wavelet([[1,2],[3,4]],1)
     suite.case('wavelet_threshold_soft',['RES-03A'],'ExactRationalStaged',lambda:{b['role']:b['values'] for b in M_threshold_bands(bands,[[1,1,1]])['bands']},expected={'LL':[[2.5]],'LH_y':[[1.0]],'HL_x':[[0.0]],'HH':[[0.0]]})
     v('cycle_spin_constant',['RES-03B'],'multiscale.cycle_spin',[[[2]*2]*2,[[1,1,1]]],{'levels':1,'shifts':[(0,0),(0,1)]},[[2]*2]*2,level='ExactRationalStaged')
+    suite.case('wavelet_threshold_hard_equality',['RES-03A'],'ExactRationalStaged',lambda:{b['role']:b['values'] for b in M_threshold_bands(bands,[[2,1,0]],mode='hard')['bands']},expected={'LL':[[2.5]],'LH_y':[[2.0]],'HL_x':[[1.0]],'HH':[[0.0]]})
+    for dtype in ('float32','float64'):
+        def native_threshold_cases(dtype=dtype):
+            source=M_wavelet([[1,2],[3,4]],1,dtype=dtype)
+            source['bands'][0]['values']=[[-1.0]]
+            source['bands'][1]['values']=[[1.0]]
+            source['bands'][2]['values']=[[-0.0]]
+            source['bands'][3]['values']=[[-0.0]]
+            hard=M_threshold_bands_native(source,[[1,1,1]],mode='hard',dtype=dtype)
+            soft=M_threshold_bands_native(source,[[1,1,1]],mode='soft',dtype=dtype)
+            equal([b['values'][0][0] for b in hard['bands']],[-1.,1.,0.,-0.],dtype)
+            equal([b['values'][0][0] for b in soft['bands']],[0.,0.,0.,-0.],dtype)
+            source['bands'][0]['values']=[[C_from_bits(0xffc00123 if dtype=='float32' else 0xfff8000000000123,dtype)]]
+            source['bands'][1]['values']=[[-0.0]]
+            zero=M_threshold_bands_native(source,[[0,0,0]],dtype=dtype)
+            require(C_bits(zero['bands'][0]['values'][0][0],dtype)==C_bits(source['bands'][0]['values'][0][0],dtype),'zero threshold NaN bits')
+            require(C_bits(zero['bands'][1]['values'][0][0])==C_bits(-0.0),'zero threshold signed zero')
+            source['bands'][0]['values']=[[float('inf')]]
+            source['bands'][1]['values']=[[-float('inf')]]
+            source['bands'][2]['values']=[[float('nan')]]
+            special=M_threshold_bands_native(source,[[1,1,1]],dtype=dtype)
+            equal([special['bands'][i]['values'][0][0] for i in (0,1)],[float('inf'),-float('inf')],dtype)
+            require(math.isnan(special['bands'][2]['values'][0][0]),'native NaN class')
+            return {'boundaries':True,'copy_bits':True,'nonfinite_classes':True}
+        suite.case('wavelet_threshold_native_'+dtype,['RES-03A'],'NativeStaged+BitwiseCopy',native_threshold_cases,dtype=dtype)
+    def native_threshold_conversion():
+        source=M_wavelet([[1,2],[3,4]],1,dtype='float32')
+        source['bands'][1]['values']=[[1.0]]
+        result=M_threshold_bands_native(source,[[1,1+2**-25,1]],mode='hard',dtype='float32')
+        return result['bands'][1]['values']
+    suite.case('wavelet_threshold_native_control_rounding',['RES-03A'],'NativeStaged',native_threshold_conversion,expected=[[1.0]],dtype='float32')
+    for profile in M_PROFILES[:2]:
+        odd=[[float(y*7+x-13) for x in range(7)] for y in range(5)]
+        v('cycle_spin_odd_zero_'+profile,['RES-03B'],'multiscale.cycle_spin',[odd,[[0,0,0],[0,0,0]]],{'levels':2,'profile':profile,'shifts':[(-5,7),(0,-1)]},odd,level='ExactRationalStaged')
+    v('cycle_spin_level_zero_bitcopy',['RES-03B'],'multiscale.cycle_spin',[[[-0.0,float('inf')]],[]],{'levels':0,'shifts':[(0,0)]},[[-0.0,float('inf')]],level='BitwiseCopy')
     for iso,id_ in [(True,'RES-05A'),(False,'RES-05B')]:
         v('tv_one_step_'+str(iso),[id_],'restoration.tv_cp',[[[0,1]]],{'lam':1,'iterations':1,'tau':.25,'sigma':.25,'isotropic':iso},[[q(1,20),q(19,20)]],level='ExactRationalStaged')
     v('diffusion_reciprocal_one_step',['RES-06B'],'restoration.diffusion',[[[0,1]]],{'kappa':1,'dt':.25,'steps':1},[[.125,.875]],level='ExactRationalStaged')

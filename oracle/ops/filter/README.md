@@ -50,7 +50,9 @@ RES02 的 `res02/restoration.py` 保留三种独立参考：`nlm_native` 按直�
 
 RES02 通用 runner 保留两个解析 constant-guide 用例。生产实现的数值、SIMD/标量极值及公开运行时检查遵循 [RES 验收要求](../../../docs/built-in_ops/05-filter/op_specs/FILTER_oracle_protocol.md#native-res-acceptance)。临时生产适配器不保存在 oracle 中，Python 参考本身不模拟 Plan、Region、资源、取消或 owner。
 
-RES03～12 的旧 oracle 仍用于数学/算法不变量比较；它们不是新 native 状态轨迹的逐位实现，尤其是 diffusion baked64、RL sensitivity 和 blind PSF rational state。后续实现须增加独立的 dtype-aware 验证。均值域 Anscombe 逆仍有正读噪声根求解覆盖缺口；取消正确舍入认证门槛，不代表已补齐该缺口。
+RES03 的 `frq10/multiscale.py` 保留 `threshold_bands` 和 `cycle_spin` 的有理数分阶段数学参考，并增加 `threshold_bands_native`：Float64 阈值先转换为工作 dtype，有限减法从精确有理数直接舍入；非有限算术按分类比较，零阈值和 LL 保留复制位模式。自测覆盖 hard/soft 等号、原生阈值转换、负零、NaN、无穷、两个 decimated profile 的奇数尺寸及 levels=0。cycle-spin 的完整数学参考不固定生产累加分组；对照时显式传入已转换的阈值并按 dtype 评估数值误差。Python 参考不替代支持范围、预算、取消和所有权的运行时验收。
+
+RES04～12 的旧 oracle 仍用于数学/算法不变量比较；它们不是新 native 状态轨迹的逐位实现，尤其是 diffusion baked64、RL sensitivity 和 blind PSF rational state。后续实现须增加独立的 dtype-aware 验证。均值域 Anscombe 逆仍有正读噪声根求解覆盖缺口；取消正确舍入认证门槛，不代表已补齐该缺口。
 
 ## 覆盖边界
 

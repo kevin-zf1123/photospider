@@ -124,6 +124,51 @@ def threshold_bands(bands,thresholds,*,mode='soft',dtype='float64'):
                 else:values[y][x]=0.0 if abs(v)<=t else rn((1 if v>0 else -1)*(abs(v)-t),dtype)
     return out
 
+def threshold_bands_native(bands, thresholds, *, mode='soft', dtype='float64'):
+    """Independent scalar RES-03A reference with native control conversion.
+
+    The original threshold_bands remains the rational mathematical reference.
+    Finite differences here round directly from Fraction to the working dtype;
+    each Float64 control converts once before its band is processed. Inputs are
+    already working-dtype coefficients. Arithmetic NaNs are compared by class,
+    while LL and native-zero thresholds retain the original Python float bits.
+    This reference does not model runtime layouts, demand closure or budgets.
+    """
+    import math
+
+    if bands.get('profile') not in PROFILES or mode not in ('soft', 'hard'):
+        raise DomainError('threshold profile')
+    if dtype not in ('float32', 'float64'):
+        raise DomainError('threshold dtype')
+    levels = bands['levels']
+    if levels <= 0 or shape(thresholds) != (levels, 3):
+        raise DomainError('positive threshold table shape')
+    controls = [[frac(value) for value in row] for row in thresholds]
+    if any(value < 0 for row in controls for value in row):
+        raise DomainError('negative threshold')
+    native = [[rn(value, dtype) for value in row] for row in controls]
+    out = copy.deepcopy(bands)
+    for band in out['bands']:
+        if band['role'] == 'LL':
+            continue
+        threshold = native[band['level'] - 1][ROLES.index(band['role'])]
+        if threshold == 0:
+            continue
+        for row in band['values']:
+            for x, value in enumerate(row):
+                magnitude = abs(value)
+                if mode == 'hard':
+                    row[x] = 0.0 if magnitude < threshold else value
+                elif magnitude <= threshold:
+                    row[x] = 0.0
+                elif math.isfinite(value):
+                    difference = rn(frac(magnitude) - frac(threshold), dtype)
+                    row[x] = math.copysign(difference, value)
+                else:
+                    row[x] = math.copysign(magnitude - threshold, value)
+    return out
+
+
 def _shift(image,dy,dx):
     h,w=shape(image)
     return [[image[(y+dy)%h][(x+dx)%w] for x in range(w)] for y in range(h)]

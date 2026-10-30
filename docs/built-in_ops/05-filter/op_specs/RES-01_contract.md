@@ -16,7 +16,7 @@ members:
 
 MAD estimation is distinct from explicitly calibrated camera variance; neither guarantees that texture and noise can be identified separately.
 
-This specification defines the mathematics and interface contract. Both RES-01 members have native bundled implementations; runtime and performance evidence is recorded separately. It inherits the [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). Implementation does not change the Proposed acceptance status.
+This specification defines the mathematics and interface contract. Both RES-01 members have native bundled implementations. It inherits the [FILTER common contract](FILTER_common_contract.md), [RES native floating-point contract](RES_native_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). Implementation does not change the Proposed acceptance status.
 
 ## Members
 

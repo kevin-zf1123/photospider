@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D2_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: RES-03
 function: threshold_wavelet_details
 proposed_operation_keys:
@@ -42,7 +42,7 @@ Preserve the declared algorithmic stages, masks, support, copy branches and iter
 
 ## Fixed reads, algorithmic control and schemas
 
-Compilation checks the complete static band directory and selected output schemas. Lowering includes only each selected band, its threshold control and required upstream tasks. Runtime associations are caller premises, and unrelated sibling payloads are not numerical-validation inputs. An unchanged LL output preserves its bits using explicit COPY when materialized; an authoring workflow may explicitly reuse its existing Result. Whole-band mathematical dependencies remain unless locality is separately specified.
+Compilation checks the complete static band directory and selected output schemas. Lowering includes only each selected band, its threshold control and required upstream tasks. Runtime associations are caller premises, and unrelated sibling payloads are not numerical-validation inputs. An unchanged LL output preserves its bits using explicit COPY when materialized; an authoring workflow may explicitly reuse its existing Result. Thresholding is pointwise: a requested detail tile reads only its matching coefficient tile and the threshold cell for its level and orientation. It does not require the rest of that band. The complete static directory is still checked.
 
 Boundary coordinates use the complete logical image; ROI and tile edges are not new image boundaries. Lowering closes mathematical sample support on fixed input member-tile grids. Data-dependent selection uses a finite static superset of every address the task may consume; runtime selection does not expand the Plan. Data and control are algorithmic inputs, with no separate Validation read set. Empty retained selections introduce no payload tasks. Output schemas derive only from static parameters and input schemas. Numerical, encoding and association premises remain unchecked under the common contract.
 
@@ -58,7 +58,9 @@ At d=T, hard mode retains the coefficient and soft mode clears it to zero. Prese
 
 The reference evaluates the mathematical formula on small inputs. Existing ExactRational/DirectedMPFR fixtures remain ideal mathematical references, not bitwise goldens for native execution. Acceptance compares native results using dtype-aware absolute/relative error and algorithm invariants under [RES native floating-point contract](RES_native_contract.md); it separately verifies runtime schemas, support and ownership.
 
-`frq10.multiscale.threshold_bands(bands, thresholds, *, mode='soft', dtype='float64')` → [Source file](../../../../oracle/ops/filter/frq10/multiscale.py).
+`frq10.multiscale.threshold_bands(bands, thresholds, *, mode='soft', dtype='float64')` retains the rational mathematical reference. `threshold_bands_native` has the same signature and independently models native threshold conversion, finite subtraction, nonfinite classifications and explicit copy branches. [Source file](../../../../oracle/ops/filter/frq10/multiscale.py).
+
+Oracle self-tests additionally cover hard equality, native fp32/fp64 clear/copy boundaries and native control rounding. Arithmetic NaN payload bits are not prescribed; zero-threshold and LL copies retain input bits.
 
 
 These are standalone oracle helper signatures, not operator constructors; their Python convenience defaults do not define operation parameter defaults.
@@ -67,11 +69,11 @@ The oracle README (../../../../oracle/ops/filter/README.md) documents reference 
 
 ## Backend and Registration Gates
 
-The proposed native keys remain unregistered until implementation and runtime acceptance are complete. Native numerical validation follows [RES native floating-point contract](RES_native_contract.md); no NUM four-ULP fallback is required.
+`restoration.threshold_wavelet_details` is registered for CPU native fp32/fp64. The public C++ helper, packed directory parameters and resource behavior are specified in [CPU implementation and public API](RES-03_contract.md#cpu-implementation-and-public-api). Native numerical validation follows [RES native floating-point contract](RES_native_contract.md).
 
 Float64 paths retain native Float64 inputs, arithmetic, outputs and exponent range; no Float32 conversion or NUM strict fallback is introduced.
 
-## Conceptual DAG (Not an Existing API)
+## Execution Stages
 
 `static parameters + schemas → compile fixed reads/tasks → prepare → native arithmetic with declared algorithmic stages → complete tiles → ordered call retirement`
 

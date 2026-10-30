@@ -55,30 +55,6 @@ FRQ 的进程级工作池与 Context 的执行 coordinator 分别持有线程。
 | FRQ-09 | [DCT I–IV](op_specs/FRQ-09_contract.md) | [FRQ-09A](op_specs/FRQ-09A_dct2.md)、[FRQ-09B](op_specs/FRQ-09B_idct2.md) |
 | FRQ-10 | [具名小波分析/重建](op_specs/FRQ-10_contract.md) | [FRQ-10A](op_specs/FRQ-10A_decompose_haar_mean_lifting_v1.md)、[FRQ-10B](op_specs/FRQ-10B_inverse_haar_mean_lifting_v1.md)、[FRQ-10C](op_specs/FRQ-10C_decompose_cdf53_float_lifting_v1.md)、[FRQ-10D](op_specs/FRQ-10D_inverse_cdf53_float_lifting_v1.md)、[FRQ-10E](op_specs/FRQ-10E_decompose_stationary_haar_mean_v1.md)、[FRQ-10F](op_specs/FRQ-10F_inverse_stationary_haar_mean_v1.md) |
 
-## RES01 原生实现
-
-RES-01～14 的 CPU 执行采用[按算法块检查取消的共有约定](op_specs/FILTER_common_contract.md#res-work-admission-and-cancellation)。确定成本的计算可事前准入完整的块、阶段或 invocation 工作量；数据相关的选择、精化和迭代采用增量准入或覆盖全部执行工作的保守上界。取消检查按有界样本段、tap 段、候选段或固定 codelet 设置，具体块大小由实现说明，替代 RES 统一的 1024 标量单位间隔。通用长循环保留内部检查点，验收核对块上界、取消排空行为，并分别记录实测取消延迟。节点与 Run 预算、阶段计费、失败状态和所有权规则继续生效；helper 调用已有 FIL/FRQ 时保留被调用成员的契约。
-
-已注册 `restoration.noise_mad_highpass` 和 `restoration.calibrated_noise_variance`，规格仍为 Proposed。MAD 在输入 dtype 中生成有效 2×2 高通残差、计算中位数和绝对偏差，再将尺度输出为 Float64；非空间维按原顺序保留，末尾增加长度 1。四个 mask 值全部为 1 的 patch 才读取图像值，1×N/N×1 没有有效 patch，按样本不足返回 InvalidDomain。
-
-校准方差采用原生 `fma(gain,max(mean-offset,0),read_sigma²)`，sigma 对该原生方差开方。variance-only、sigma-only、联合输出分别分派，联合路径复用同一个寄存器结果。`below_offset=error` 表示调用方保证输入不低于 offset，不增加 payload 扫描。
-
-MAD 的采样区间只缩小精确秩查询：计数验证两侧秩，失败时回退完整选择。AVX2/NEON 向量化残差、偏差及候选压缩；候选缓冲交替复用，残差在偏差阶段原地覆盖。排序/选择内部和每个有界扫描段均检查取消及节点工作量。使用现有 generation ABI8，不修改冻结内核或新增跨调用数据缓存。
-
-M5 Clang O2/O3、Intel Clang 与 icpx 的 O2/O3 六组完整数值矩阵均通过：每组 182 个有效项对 OpenCV/MATLAB 全部达到 1.5×，超过 2× 的覆盖率分别为 96.7%–99.5% 和 96.2%–100%。MAD 的 1×65536 两个 dtype 按有效 patch 不足验证，不列加速比。Intel 复用缓冲采用经实测的非临时存储；公开调用考虑新结果页首次写入，将启用门槛提高至每输出 32 MiB。小尺寸 Workflow 的 submit/join 开销仍单独披露，不将数值矩阵宣称为端到端加速保证。
-
-编译器、基线、热点、精度边界及完整性能矩阵见 [RES01 性能记录](res01-performance.md)。数值内核、MATLAB 公共 API 及 Photospider 公开调用开销分别记录。
-
-## RES02 原生实现
-
-已注册 `restoration.nlm_plain` 与 `restoration.nlm_noise_corrected`，规格状态仍为 Proposed。输入和 guide 使用相同 fp32/fp64；显式指定两个空间轴、guide 的分量轴、G=1～4、patch/search 半径、h 与每分量 metric_scale。输入分量数可与 guide 分量数不同，其他逻辑 sample extent 匹配。B 另接收 sample shape 为 `{1}` 的 Float64 noise_sigma，在 invocation 内转为输入精度，所有空间点和独立 plane 共享该 sigma。输出保留输入形状、布局及 batch metadata，具体参数类型与支持规则见 [RES-02 族契约](op_specs/RES-02_contract.md#cpu-implementation-and-public-api)。
-
-候选中心裁剪到完整图像内，两个 patch 各自使用完整图像的 reflect_half。对称位移共享距离；G 分派、非负可分离 patch 求和、AVX2/FMA 或 NEON、原生指数范围缩减减少重复计算。Float64 全程保持原生精度；小权重不截断，极端 h² 与指数参数走原生标量路径。search_radius=0 逐位复制，仅需求 input；guide 与 noise_sigma 无 payload 读取，patch 工作区为零。局部 ROI 不形成新边界，工作量事前准入、取消分块轮询，任务不创建私有线程池。
-
-RES-02 的 gather、初始化和输出按最多 256 个样本分块，s=0 copy 每 128 个样本检查。SIMD SSD、patch、权重生成及应用在每 256 个位置的边界检查，尾部保留有界 packet 或标量处理。固定 patch codelet 支持 1/3/5/7/11 个 tap，通用 patch codelet 还在每 256 个 tap 的边界检查；位移、行遍历和标量回退保留各自检查点。块内算术量随 tap 数、guide 分量数和 SIMD 宽度变化，例如 256 个输出的 11-tap SIMD 块可在相邻检查之间完成 2560 次加法。具体分块及验收要求见 [RES-02 资源与执行契约](op_specs/RES-02_contract.md#resources-and-runtime)。
-
-独立 oracle 提供直接 patch 的 staged-native 参考与 MPFR 完整数学表达式区间。数值误差、SIMD/标量极值及公开运行时的支持范围、资源、取消和所有权分别按 [RES 验收要求](op_specs/FILTER_oracle_protocol.md#native-res-acceptance)检查。
-
 ## 14 个恢复族 / 41 个成员
 
 | 族 ID | 族契约 | 成员 |

@@ -5,7 +5,7 @@ kind: authoring_helper
 category: 05-filter
 status: Proposed
 document_maturity: D2_draft
-implementation_status: not_implemented
+implementation_status: implemented
 parent_id: RES-03
 function: cycle_spin_wavelet_denoise
 proposed_operation_keys: []
@@ -66,11 +66,11 @@ The oracle README (../../../../oracle/ops/filter/README.md) documents reference 
 
 ## Backend and Registration Gates
 
-This file proposes no native arithmetic key ready for registration. An authoring helper must explicitly connect finalized members. An external engine must first pass resource, licensing, real-golden, and numeric-configuration gates.
+`ps::restoration::cycle_spin_wavelet_denoise` is available in `photospider/ops/restoration.hpp`. It connects the registered FRQ10 and RES-03A operations with explicit `restoration.wrap_shift` and `restoration.accumulate_native` stages; it does not register a monolithic cycle-spin key. Parameters and ownership follow [CPU implementation and public API](RES-03_contract.md#cpu-implementation-and-public-api).
 
 Float64 paths retain native Float64 inputs, arithmetic, outputs and exponent range; no Float32 conversion or NUM strict fallback is introduced.
 
-## Conceptual DAG (Not an Existing API)
+## Execution Stages
 
 `static parameters + schemas → compile fixed reads/tasks → prepare → native arithmetic with declared algorithmic stages → complete tiles → ordered call retirement`
 
